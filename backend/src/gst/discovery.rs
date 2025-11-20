@@ -57,7 +57,7 @@ impl ElementDiscovery {
             let name = factory.name().to_string();
 
             // Skip elements that corrupt state during discovery
-            if skip_list.contains(&name.as_str()) {
+            if skip_list.contains(&name) {
                 debug!(
                     "Skipping discovery introspection for element: {} (still usable)",
                     name
@@ -112,15 +112,15 @@ impl ElementDiscovery {
 
     /// Get list of elements to skip during discovery introspection.
     /// These elements can still be used, but we don't create temporary instances during discovery.
-    fn get_discovery_skip_list() -> Vec<&'static str> {
-        vec![
+    fn get_discovery_skip_list() -> Vec<String> {
+        // Base skip list (all platforms)
+        let base_list = [
             // GES (GStreamer Editing Services) elements that trigger GES initialization
             // GES init can crash with NULL pointer in gst_element_class_get_pad_template()
             "gesdemux", // GES demuxer - triggers GES init which crashes in strcmp
             "gessrc",   // GES source - triggers GES init
             // HLS elements - crash with NULL pointer in gst_element_class_get_pad_template()
             "hlssink2", // Crashes in strcmp during element creation
-            "hlssink3", // HLS sink variants - same crash pattern
             "hlssink",
             "hlsdemux", // HLS demuxer - crashes in strcmp
             "hlsdemux2",
@@ -128,26 +128,89 @@ impl ElementDiscovery {
             "glvideomixer", // Crashes in strcmp when request_pad_simple() is called during linking
             // Aggregator elements - creating temporary instances during discovery corrupts state
             "mpegtsmux", // Creating this during discovery causes lockups when adding to pipeline later
-        ]
+        ];
+
+        let mut skip_list: Vec<String> = base_list.iter().map(|s| s.to_string()).collect();
+
+        // Windows-specific elements to skip
+        #[cfg(target_os = "windows")]
+        {
+            skip_list.extend(
+                vec![
+                    "hlssink3", // Panics on Windows when mpegtsmux dependency is missing
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+        }
+
+        // Add elements from environment variable if set
+        if let Ok(env_skip) = std::env::var("STROM_SKIP_PLUGINS") {
+            let additional: Vec<String> = env_skip
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !additional.is_empty() {
+                debug!(
+                    "Adding {} additional elements to skip list from STROM_SKIP_PLUGINS: {:?}",
+                    additional.len(),
+                    additional
+                );
+                skip_list.extend(additional);
+            }
+        }
+
+        skip_list
     }
 
     /// Get list of elements known to cause crashes during introspection or use.
     /// This list is shared with pipeline creation to prevent creating these elements.
-    pub fn get_element_blacklist() -> Vec<&'static str> {
-        vec![
+    pub fn get_element_blacklist() -> Vec<String> {
+        // Base blacklist (all platforms)
+        let base_list = [
             // GES (GStreamer Editing Services) elements that trigger GES initialization
             // GES init can crash with NULL pointer in gst_element_class_get_pad_template()
             "gesdemux", // GES demuxer - triggers GES init which crashes in strcmp
             "gessrc",   // GES source - triggers GES init
             // HLS elements - crash with NULL pointer in gst_element_class_get_pad_template()
             "hlssink2", // Crashes in strcmp during element creation
-            "hlssink3", // HLS sink variants - same crash pattern
             "hlssink",
             "hlsdemux", // HLS demuxer - crashes in strcmp
             "hlsdemux2",
             // Video mixer elements - crash with NULL pointer when requesting pads
             "glvideomixer", // Crashes in strcmp when request_pad_simple() is called during linking
-        ]
+        ];
+
+        let mut blacklist: Vec<String> = base_list.iter().map(|s| s.to_string()).collect();
+
+        // Windows-specific elements to blacklist
+        #[cfg(target_os = "windows")]
+        {
+            blacklist.extend(
+                vec![
+                    "hlssink3", // HLS sink variant - panics when mpegtsmux dependency is missing
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
+        }
+
+        // Add elements from environment variable if set
+        if let Ok(env_skip) = std::env::var("STROM_SKIP_PLUGINS") {
+            let additional: Vec<String> = env_skip
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            if !additional.is_empty() {
+                blacklist.extend(additional);
+            }
+        }
+
+        blacklist
     }
 
     /// Get information about a specific element by name.

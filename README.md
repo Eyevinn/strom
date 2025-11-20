@@ -113,6 +113,9 @@ STROM_HOST=0.0.0.0
 STROM_FLOWS_PATH=./flows.json
 STROM_BLOCKS_PATH=./blocks.json
 
+# GStreamer
+STROM_SKIP_PLUGINS=element1,element2  # Skip specific plugins during discovery
+
 # Logging
 RUST_LOG=info
 ```
@@ -182,8 +185,14 @@ Some GStreamer elements cause segfaults during introspection and are automatical
 - GES elements (gesdemux, gessrc)
 - HLS elements (hlssink*, hlsdemux*)
 - Certain aggregator elements require special handling
+- Windows: hlssink3 (requires mpegtsmux dependency)
 
-**Windows users:** If you experience panics on startup related to plugin loading (hlssink3, mpegtsmux, etc.), see `docs/WINDOWS_TROUBLESHOOTING.md` for solutions.
+**Troubleshooting:** If you encounter crashes during startup, you can skip additional problematic plugins:
+```bash
+STROM_SKIP_PLUGINS=hlssink3,otherelement cargo run
+```
+
+**Windows users:** If you experience panics on startup related to plugin loading, the `STROM_SKIP_PLUGINS` environment variable can help. See `docs/WINDOWS_TROUBLESHOOTING.md` for more solutions.
 
 See `docs/PAD_TEMPLATE_CRASH_FIX.md` and `docs/MPEGTSMUX_DEADLOCK_FIX.md` for technical details.
 
