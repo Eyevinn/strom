@@ -58,7 +58,10 @@ fn main() -> anyhow::Result<()> {
     gstreamer::init()?;
     info!("GStreamer initialized");
 
-    gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
+    // Register WebRTC plugin statically only if not already loaded
+    // On Windows, GStreamer often loads gstrswebrtc.dll dynamically, which would
+    // cause a type registration collision if we try to register statically
+    register_webrtc_plugin();
 
     // Start GLib main loop in background thread for bus watch callbacks
     start_glib_main_loop();
@@ -214,6 +217,29 @@ async fn restart_flows(state: &AppState) {
                 Ok(_) => info!("Successfully restarted flow: {}", flow.name),
                 Err(e) => error!("Failed to restart flow {}: {}", flow.name, e),
             }
+        }
+    }
+}
+
+/// Register WebRTC plugin, checking first if it's already loaded.
+/// On Windows, GStreamer installations often include gstrswebrtc.dll which is
+/// loaded dynamically. Attempting to register the same types statically causes
+/// a type registration collision panic.
+fn register_webrtc_plugin() {
+    let registry = gstreamer::Registry::get();
+
+    // Check if rswebrtc plugin is already registered
+    if registry.find_plugin("rswebrtc").is_some() {
+        info!("WebRTC plugin already loaded dynamically, skipping static registration");
+        return;
+    }
+
+    // Plugin not found, register it statically
+    match gstrswebrtc::plugin_register_static() {
+        Ok(_) => info!("WebRTC plugin registered statically"),
+        Err(e) => {
+            // Log warning but don't fail - WebRTC is optional
+            tracing::warn!("Failed to register WebRTC plugin: {:?}", e);
         }
     }
 }

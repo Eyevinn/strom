@@ -76,7 +76,61 @@ As a workaround, you can temporarily rename problematic plugin DLLs to prevent t
 - `awstranscriber` - May have dependency issues
 - `gesdemux`, `gessrc` - GES initialization issues
 
-### Verifying Your Fix
+---
+
+## WebRTC Plugin Type Registration Collision
+
+### Problem
+
+You may encounter a panic after GStreamer initializes successfully:
+
+```
+INFO GStreamer initialized
+thread 'main' panicked at glib\src\subclass\types.rs:1030:13:
+assertion `left == right` failed: Type GstWebRTCSinkPad has already been registered
+  left: 2573685070512
+  right: 0
+thread 'main' panicked at backend\src\main.rs:68:43:
+Could not register webrtc plugins: BoolError
+```
+
+### Cause
+
+Windows GStreamer installations often include `gstrswebrtc.dll` in the plugin directory. When GStreamer initializes, it dynamically loads this DLL and registers the WebRTC types. If the backend then tries to register the same types statically, it causes a type collision panic.
+
+This is a classic static vs. dynamic linking conflict.
+
+### Solution
+
+**This issue is now fixed** in Strom v0.1.0+. The backend automatically detects if the WebRTC plugin is already loaded dynamically and skips static registration to avoid the collision.
+
+If you still encounter this issue:
+
+1. **Update to the latest version** of Strom
+2. **Or temporarily remove the DLL**: Rename `gstrswebrtc.dll` in your GStreamer plugin directory:
+   ```powershell
+   cd "D:\gstreamer\1.0\msvc_x86_64\lib\gstreamer-1.0\"
+   ren gstrswebrtc.dll gstrswebrtc.dll.disabled
+   ```
+   The backend will then register the plugin statically instead.
+
+### Technical Details
+
+The fix checks the GStreamer registry before attempting static registration:
+
+```rust
+// Check if rswebrtc plugin is already registered
+if registry.find_plugin("rswebrtc").is_some() {
+    // Already loaded dynamically, skip static registration
+    return;
+}
+// Not found, register it statically
+gstrswebrtc::plugin_register_static()?;
+```
+
+---
+
+## Verifying Your Fix
 
 After applying a solution, verify Strom starts correctly:
 
