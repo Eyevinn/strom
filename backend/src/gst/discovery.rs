@@ -31,7 +31,23 @@ impl ElementDiscovery {
         // Elements to skip during discovery (but still available for use)
         let skip_list = Self::get_discovery_skip_list();
 
-        let features = registry.features(gst::ElementFactory::static_type());
+        // Get all element factories from the registry
+        // Wrap in catch_unwind because some plugins (like hlssink3 on Windows) panic
+        // during plugin initialization if their dependencies aren't available
+        let features = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.features(gst::ElementFactory::static_type())
+        })) {
+            Ok(features) => features,
+            Err(_) => {
+                warn!(
+                    "GStreamer plugin loading caused a panic - some plugins may be unavailable. \
+                     This can happen when plugins have missing dependencies (e.g., hlssink3 requires mpegtsmux). \
+                     Continuing with partial element discovery..."
+                );
+                // Return early with partial or empty element list
+                return elements;
+            }
+        };
 
         for feature in features {
             let Some(factory) = feature.downcast_ref::<gst::ElementFactory>() else {

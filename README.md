@@ -183,6 +183,8 @@ Some GStreamer elements cause segfaults during introspection and are automatical
 - HLS elements (hlssink*, hlsdemux*)
 - Certain aggregator elements require special handling
 
+**Windows users:** If you experience panics on startup related to plugin loading (hlssink3, mpegtsmux, etc.), see `docs/WINDOWS_TROUBLESHOOTING.md` for solutions.
+
 See `docs/PAD_TEMPLATE_CRASH_FIX.md` and `docs/MPEGTSMUX_DEADLOCK_FIX.md` for technical details.
 
 ## Contributing

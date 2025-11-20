@@ -44,7 +44,17 @@ fn main() -> anyhow::Result<()> {
         info!("Starting Strom backend server (headless mode)...");
     }
 
+    // On Windows, prevent GStreamer registry from forking during plugin scan
+    // This helps isolate panics from problematic plugins
+    #[cfg(target_os = "windows")]
+    {
+        std::env::set_var("GST_REGISTRY_FORK", "no");
+        info!("Set GST_REGISTRY_FORK=no for Windows compatibility");
+    }
+
     // Initialize GStreamer
+    // Some plugins (like hlssink3) may panic during registration if dependencies are missing
+    // Our element discovery code wraps registry access in panic handlers to catch this
     gstreamer::init()?;
     info!("GStreamer initialized");
 
