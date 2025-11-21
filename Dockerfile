@@ -38,6 +38,10 @@ RUN curl -L https://github.com/trunk-rs/trunk/releases/download/v0.21.5/trunk-x8
 # Add WASM target for frontend compilation
 RUN rustup target add wasm32-unknown-unknown
 
+# Limit parallelism to avoid OOM during gst-plugin-webrtc compilation in CI
+# Set before chef cook so build environment matches
+ENV CARGO_BUILD_JOBS=2
+
 # Copy recipe and build dependencies (this layer is cached)
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
