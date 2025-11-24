@@ -29,13 +29,16 @@ RUN rustup target add wasm32-unknown-unknown
 COPY . .
 
 # Build the frontend
-RUN mkdir -p backend/dist && cd frontend && trunk build --release
+RUN cd frontend && trunk build --release
 
-# Build strom-backend with reduced parallelism to avoid linker hang
-# Set build jobs to 1 and disable incremental compilation
-ENV CARGO_BUILD_JOBS=1
-ENV CARGO_INCREMENTAL=0
-RUN cargo build --release --package strom-backend
+# Debug: Verify dist files exist
+RUN echo "=== Checking backend/dist contents ===" && \
+    ls -lah backend/dist/ && \
+    echo "=== Files in backend/dist ===" && \
+    find backend/dist -type f
+
+# Build strom-backend with embedded frontend (no native GUI)
+RUN cargo build --release --package strom-backend --no-default-features
 
 # Build strom-mcp-server
 RUN cargo build --release --package strom-mcp-server
@@ -58,9 +61,9 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy compiled binaries from builder
-COPY --from=builder /app/target/release/strom-backend /usr/local/bin/strom-backend
-COPY --from=builder /app/target/release/strom-mcp-server /usr/local/bin/strom-mcp-server
+# Copy compiled binaries from builder to /app
+COPY --from=builder /app/target/release/strom-backend /app/strom-backend
+COPY --from=builder /app/target/release/strom-mcp-server /app/strom-mcp-server
 
 # Set environment variables
 ENV RUST_LOG=info
@@ -74,4 +77,4 @@ RUN mkdir -p /data
 EXPOSE 8080
 
 # Run the server
-CMD ["strom-backend --headless"]
+CMD ["/app/strom-backend"]
