@@ -71,4 +71,4 @@ RUN mkdir -p /data
 EXPOSE 8080
 
 # Run the server
-CMD ["strom-backend"]
+CMD ["strom-backend --headless"]
