@@ -1,6 +1,6 @@
 # Dockerfile for Strom - Simplified Ubuntu-based multi-stage build
 
-# Stage 1: Builder - Compile strom-backend with minimal dependencies
+# Stage 1: Builder - Compile strom-backend with embedded frontend
 FROM ubuntu:latest AS builder
 WORKDIR /app
 
@@ -19,11 +19,20 @@ RUN apt-get update && apt-get install -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
+# Install trunk for building WASM frontend (match CI version)
+RUN curl -L https://github.com/trunk-rs/trunk/releases/download/v0.21.5/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin
+
+# Add WASM target for frontend compilation
+RUN rustup target add wasm32-unknown-unknown
+
 # Copy source code
 COPY . .
 
-# Build strom-backend only (headless - no frontend)
-RUN cargo build --release --package strom-backend --no-default-features
+# Build the frontend
+RUN mkdir -p backend/dist && cd frontend && trunk build --release
+
+# Build strom-backend with embedded frontend (default features)
+RUN cargo build --release --package strom-backend
 
 # Build strom-mcp-server
 RUN cargo build --release --package strom-mcp-server
