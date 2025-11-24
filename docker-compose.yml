@@ -3,8 +3,10 @@ version: '3.8'
 services:
   # Strom backend server
   strom-backend:
-    build: .
-    image: strom:latest
+    # Pull from Docker Hub (default)
+    image: eyevinntechnology/strom:latest
+    # Uncomment to build locally instead:
+    # build: .
     container_name: strom-backend
     ports:
       - "8080:8080"
@@ -25,7 +27,7 @@ services:
 
   # Strom MCP server for AI integration
   strom-mcp:
-    image: strom:latest
+    image: eyevinntechnology/strom:latest
     container_name: strom-mcp
     depends_on:
       - strom-backend

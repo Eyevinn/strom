@@ -4,12 +4,12 @@ This guide covers deploying Strom using Docker and Docker Compose, including bot
 
 ## Quick Start
 
-### Using Docker Compose (Recommended)
+### Using Pre-built Docker Images (Recommended)
 
-The easiest way to run Strom with both backend and MCP server:
+The easiest way to run Strom is using our pre-built images from Docker Hub:
 
 ```bash
-# Build and start all services
+# Pull and start all services
 docker-compose up -d
 
 # View logs
@@ -19,17 +19,33 @@ docker-compose logs -f
 docker-compose down
 ```
 
-This starts:
+This automatically pulls the latest `eyevinntechnology/strom` image from Docker Hub and starts:
 - **strom-backend**: Web server on port 8080
 - **strom-mcp**: MCP server for AI integration
 
-### Using Docker Only
+### Using Docker Compose (Building Locally)
 
-If you prefer to run services individually:
+If you want to build from source instead of using pre-built images:
 
 ```bash
-# Build the image
-docker build -t strom:latest .
+# Edit docker-compose.yml and uncomment the "build: ." line
+# Then build and start
+docker-compose up -d --build
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+```
+
+### Using Docker Only
+
+If you prefer to run services individually using pre-built images:
+
+```bash
+# Pull the image from Docker Hub
+docker pull eyevinntechnology/strom:latest
 
 # Run backend only
 docker run -d \
@@ -37,7 +53,7 @@ docker run -d \
   -v $(pwd)/data:/data \
   -e RUST_LOG=info \
   --name strom-backend \
-  strom:latest
+  eyevinntechnology/strom:latest
 
 # Run MCP server (requires backend running)
 docker run -d \
@@ -45,8 +61,17 @@ docker run -d \
   -e STROM_API_URL=http://strom-backend:8080 \
   -e RUST_LOG=info \
   --name strom-mcp \
-  strom:latest \
+  eyevinntechnology/strom:latest \
   strom-mcp-server
+```
+
+Or build locally:
+
+```bash
+# Build the image
+docker build -t strom:latest .
+
+# Then run as above, replacing eyevinntechnology/strom:latest with strom:latest
 ```
 
 ## Architecture
@@ -203,6 +228,39 @@ docker-compose build --no-cache
 docker-compose up -d
 ```
 
+## Publishing to Docker Hub (Maintainers)
+
+Docker images are automatically published to [eyevinntechnology/strom](https://hub.docker.com/r/eyevinntechnology/strom) on Docker Hub.
+
+### Automatic Publishing
+
+Images are automatically built and pushed when:
+- A new release is published on GitHub
+- Tags follow semver format (e.g., `v0.1.0`, `v1.2.3`)
+
+### Manual Publishing
+
+To manually trigger a Docker Hub publish:
+
+1. Go to the [Actions tab](../../actions/workflows/docker-publish.yml)
+2. Click "Run workflow"
+3. Enter the tag to build (e.g., `v0.1.5`)
+4. Click "Run workflow"
+
+The workflow will:
+- Build the Docker image for the specified tag
+- Push to Docker Hub with multiple tags:
+  - `eyevinntechnology/strom:0.1.5` (full version)
+  - `eyevinntechnology/strom:0.1` (major.minor)
+  - `eyevinntechnology/strom:0` (major)
+  - `eyevinntechnology/strom:latest`
+
+### Required Secrets
+
+The workflow requires these GitHub secrets to be configured:
+- `HUB_DOCKER_USERNAME` - Docker Hub username
+- `HUB_DOCKER_PASSWORD` - Docker Hub access token
+
 ## Production Deployment
 
 ### Reverse Proxy
@@ -227,7 +285,7 @@ server {
 ```yaml
 services:
   strom-backend:
-    image: strom:latest
+    image: eyevinntechnology/strom:latest  # Or pin to specific version like eyevinntechnology/strom:0.1
     restart: always
     environment:
       - RUST_LOG=warn  # Less verbose

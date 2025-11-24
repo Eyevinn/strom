@@ -37,16 +37,38 @@ jobs:
           username: ${{ secrets.HUB_DOCKER_USERNAME }}
           password: ${{ secrets.HUB_DOCKER_PASSWORD }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          # Remove 'v' prefix if present
+          VERSION=${TAG#v}
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION from tag: $TAG"
+
+      - name: Generate Docker tags
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+        run: |
+          IMAGE="${{ env.IMAGE_NAME }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Extract major, minor versions
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+
+          # Build tag list
+          TAGS="${IMAGE}:${VERSION}"
+          TAGS="${TAGS},${IMAGE}:${MAJOR}.${MINOR}"
+          TAGS="${TAGS},${IMAGE}:${MAJOR}"
+          TAGS="${TAGS},${IMAGE}:latest"
+
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "Docker tags: $TAGS"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -57,7 +79,11 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            org.opencontainers.image.title=Strom
+            org.opencontainers.image.description=GStreamer Flow Engine
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           # Use GitHub Actions cache (much faster than registry cache)
           cache-from: type=gha
           cache-to: type=gha,mode=max
