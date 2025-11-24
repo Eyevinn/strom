@@ -31,8 +31,8 @@ COPY . .
 # Build the frontend
 RUN mkdir -p backend/dist && cd frontend && trunk build --release
 
-# Build strom-backend with embedded frontend (default features)
-RUN cargo build --release --package strom-backend
+# Build strom-backend without embedded frontend (no-default-features)
+RUN cargo build --release --package strom-backend --no-default-features
 
 # Build strom-mcp-server
 RUN cargo build --release --package strom-mcp-server
