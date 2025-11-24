@@ -31,8 +31,11 @@ COPY . .
 # Build the frontend
 RUN mkdir -p backend/dist && cd frontend && trunk build --release
 
-# Build strom-backend without embedded frontend (no-default-features)
-RUN cargo build --release --package strom-backend --no-default-features
+# Build strom-backend with reduced parallelism to avoid linker hang
+# Set build jobs to 1 and disable incremental compilation
+ENV CARGO_BUILD_JOBS=1
+ENV CARGO_INCREMENTAL=0
+RUN cargo build --release --package strom-backend
 
 # Build strom-mcp-server
 RUN cargo build --release --package strom-mcp-server
