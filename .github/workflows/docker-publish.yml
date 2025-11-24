@@ -25,8 +25,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+        # For workflow_dispatch, check out the branch (github.ref)
+        # For release events, check out the tag (github.ref)
+        # The tag input is only used for versioning, not checkout
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
