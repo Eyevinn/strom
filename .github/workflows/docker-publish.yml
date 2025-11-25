@@ -11,6 +11,7 @@ on:
         type: string
 
 env:
+  CARGO_INCREMENTAL: 0
   REGISTRY: docker.io
   IMAGE_NAME: eyevinntechnology/strom
 
