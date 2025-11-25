@@ -28,6 +28,12 @@ RUN rustup target add wasm32-unknown-unknown
 # Copy source code
 COPY . .
 
+# Debug: Print environment variables to verify they're set
+RUN echo "=== Build Environment ===" && \
+    echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-not set}" && \
+    echo "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-not set}" && \
+    printenv | grep CARGO || echo "No CARGO_* env vars found"
+
 # Build the frontend
 RUN cd frontend && trunk build --release
 
