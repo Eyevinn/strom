@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     time \
+    lld \
+    clang \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer-plugins-bad1.0-dev \
@@ -51,9 +53,9 @@ RUN echo "=== Checking backend/dist contents ===" && \
 RUN cargo clean
 
 # Build strom-backend with embedded frontend (no native GUI)
-# Enable verbose linker output to diagnose hangs
-ENV RUSTFLAGS="-C link-arg=-Wl,--verbose"
-RUN echo "=== Starting backend build with verbose linker output ===" && \
+# Use lld (LLVM linker) instead of GNU ld to avoid hanging issues
+ENV RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,--verbose"
+RUN echo "=== Starting backend build with lld linker and verbose output ===" && \
     time cargo build -vv --release --package strom-backend --no-default-features
 
 # Build strom-mcp-server
