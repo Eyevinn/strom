@@ -89,9 +89,9 @@ jobs:
           # Pass build arguments to Docker
           build-args: |
             CARGO_INCREMENTAL=0
-          # Use GitHub Actions cache (much faster than registry cache)
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Disable cache to prevent linking hangs
+          # cache-from: type=gha
+          # cache-to: type=gha,mode=max
           platforms: linux/amd64
           # Disable provenance and SBOM to prevent build hangs
           provenance: false
