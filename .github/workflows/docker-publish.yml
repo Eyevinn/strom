@@ -86,6 +86,9 @@ jobs:
             org.opencontainers.image.description=GStreamer Flow Engine
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          # Pass build arguments to Docker
+          build-args: |
+            CARGO_INCREMENTAL=0
           # Use GitHub Actions cache (much faster than registry cache)
           cache-from: type=gha
           cache-to: type=gha,mode=max

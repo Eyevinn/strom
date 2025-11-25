@@ -4,6 +4,10 @@
 FROM ubuntu:latest AS builder
 WORKDIR /app
 
+# Accept build arguments and set as environment variables
+ARG CARGO_INCREMENTAL=0
+ENV CARGO_INCREMENTAL=${CARGO_INCREMENTAL}
+
 # Install Rust and minimal GStreamer development packages
 RUN apt-get update && apt-get install -y \
     curl \
