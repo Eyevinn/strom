@@ -15,7 +15,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: ${{ secrets.HUB_DOCKER_USERNAME }}/strom
+  IMAGE_NAME: eyevinntechnology/strom
 
 jobs:
   docker-publish:
