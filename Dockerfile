@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
+    time \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer-plugins-bad1.0-dev \
@@ -50,10 +51,14 @@ RUN echo "=== Checking backend/dist contents ===" && \
 RUN cargo clean
 
 # Build strom-backend with embedded frontend (no native GUI)
-RUN cargo build --release --package strom-backend --no-default-features
+# Enable verbose linker output to diagnose hangs
+ENV RUSTFLAGS="-C link-arg=-Wl,--verbose"
+RUN echo "=== Starting backend build with verbose linker output ===" && \
+    time cargo build -vv --release --package strom-backend --no-default-features
 
 # Build strom-mcp-server
-RUN cargo build --release --package strom-mcp-server
+RUN echo "=== Starting MCP server build ===" && \
+    time cargo build -vv --release --package strom-mcp-server
 
 # Stage 2: Runtime - Fresh Ubuntu with full GStreamer runtime
 FROM ubuntu:latest AS runtime
