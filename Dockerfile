@@ -37,6 +37,8 @@ RUN echo "=== Checking backend/dist contents ===" && \
     echo "=== Files in backend/dist ===" && \
     find backend/dist -type f
 
+RUN cargo clean
+
 # Build strom-backend with embedded frontend (no native GUI)
 RUN cargo build --release --package strom-backend --no-default-features
 
