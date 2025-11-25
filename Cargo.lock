@@ -4817,7 +4817,7 @@ checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
 
 [[package]]
 name = "strom-backend"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4857,7 +4857,7 @@ dependencies = [
 
 [[package]]
 name = "strom-frontend"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "console_error_panic_hook",
  "eframe",
@@ -4883,7 +4883,7 @@ dependencies = [
 
 [[package]]
 name = "strom-mcp-server"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -4897,7 +4897,7 @@ dependencies = [
 
 [[package]]
 name = "strom-types"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
  "serde_json",
