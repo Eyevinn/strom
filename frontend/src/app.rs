@@ -996,7 +996,17 @@ impl StromApp {
     fn render_toolbar(&mut self, ctx: &Context) {
         TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("⚡ Strom");
+                // Strom heading as clickable link to GitHub
+                if ui
+                    .heading("⚡ Strom")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Visit Strom on GitHub")
+                    .clicked()
+                {
+                    ctx.open_url(egui::OpenUrl::new_tab(
+                        "https://github.com/Eyevinn/strom",
+                    ));
+                }
                 ui.separator();
 
                 if ui.button("New Flow").clicked() {
@@ -1108,10 +1118,12 @@ impl StromApp {
 
                     if ui
                         .button("ℹ Help")
-                        .on_hover_text("Show instructions")
+                        .on_hover_text("Visit Strom on GitHub")
                         .clicked()
                     {
-                        self.error = None; // Clear any errors to show help
+                        ctx.open_url(egui::OpenUrl::new_tab(
+                            "https://github.com/Eyevinn/strom",
+                        ));
                     }
                 }
 
