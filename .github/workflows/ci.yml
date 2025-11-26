@@ -60,7 +60,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run Clippy on backend
-        run: cargo clippy --package strom-backend --all-targets --all-features -- -D warnings
+        run: cargo clippy --package strom --all-targets --all-features -- -D warnings
 
       - name: Run Clippy on MCP server
         run: cargo clippy --package strom-mcp-server --all-targets --all-features -- -D warnings
@@ -109,7 +109,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run tests on backend
-        run: cargo test --package strom-backend --all-features
+        run: cargo test --package strom --all-features
 
       - name: Run tests on MCP server
         run: cargo test --package strom-mcp-server --all-features
@@ -226,7 +226,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build backend (with embedded frontend)
-        run: cargo build --release --package strom-backend
+        run: cargo build --release --package strom
 
       - name: Build MCP server
         run: cargo build --release --package strom-mcp-server
@@ -234,8 +234,8 @@ jobs:
       - name: Upload backend binary
         uses: actions/upload-artifact@v4
         with:
-          name: strom-backend-v${{ steps.version.outputs.version }}-${{ matrix.platform }}
-          path: target/release/strom-backend${{ matrix.binary_ext }}
+          name: strom-v${{ steps.version.outputs.version }}-${{ matrix.platform }}
+          path: target/release/strom${{ matrix.binary_ext }}
           retention-days: 7
 
       - name: Upload MCP server binary

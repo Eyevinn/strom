@@ -252,7 +252,7 @@ pub async fn auth_status_handler(
 }
 
 /// Helper function to generate password hash for setup
-/// Usage: echo "password" | strom-backend hash-password
+/// Usage: echo "password" | strom hash-password
 pub fn hash_password(password: &str) -> Result<String, bcrypt::BcryptError> {
     bcrypt::hash(password, bcrypt::DEFAULT_COST)
 }

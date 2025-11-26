@@ -368,13 +368,13 @@ Update:
 
 ```bash
 # Run backend tests
-cargo test --package strom-backend
+cargo test --package strom
 
 # Test block registry
-cargo test --package strom-backend --lib blocks::registry
+cargo test --package strom --lib blocks::registry
 
 # Test API
-cargo run -p strom-backend
+cargo run -p strom
 # Visit http://localhost:8080/swagger-ui
 ```
 

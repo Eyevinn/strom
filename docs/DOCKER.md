@@ -20,7 +20,7 @@ docker-compose down
 ```
 
 This starts:
-- **strom-backend**: Web server on port 8080
+- **strom**: Web server on port 8080
 - **strom-mcp**: MCP server for AI integration
 
 ### Using Docker Only
@@ -36,13 +36,13 @@ docker run -d \
   -p 8080:8080 \
   -v $(pwd)/data:/data \
   -e RUST_LOG=info \
-  --name strom-backend \
+  --name strom \
   strom:latest
 
 # Run MCP server (requires backend running)
 docker run -d \
-  --link strom-backend \
-  -e STROM_API_URL=http://strom-backend:8080 \
+  --link strom \
+  -e STROM_API_URL=http://strom:8080 \
   -e RUST_LOG=info \
   --name strom-mcp \
   strom:latest \
@@ -56,7 +56,7 @@ docker run -d \
 │        Docker Compose Network           │
 │                                          │
 │  ┌────────────────┐  ┌───────────────┐ │
-│  │ strom-backend  │  │  strom-mcp    │ │
+│  │ strom  │  │  strom-mcp    │ │
 │  │   Port: 8080   │◄─┤  (stdio MCP)  │ │
 │  │                │  │               │ │
 │  │  - Web UI      │  │  - AI Tools   │ │
@@ -74,7 +74,7 @@ docker run -d \
 
 ### Environment Variables
 
-#### Backend (strom-backend)
+#### Backend (strom)
 - `RUST_LOG` - Logging level (default: `info`)
 - `STROM_PORT` - HTTP server port (default: `8080`)
 - `STROM_DATA_DIR` - Data directory for storage files (default: `/data`)
@@ -83,7 +83,7 @@ docker run -d \
 
 #### MCP Server (strom-mcp)
 - `RUST_LOG` - Logging level (default: `info`)
-- `STROM_API_URL` - Backend URL (default: `http://strom-backend:8080`)
+- `STROM_API_URL` - Backend URL (default: `http://strom:8080`)
 
 ### Volumes
 
@@ -175,7 +175,7 @@ docker-compose logs -f
 
 View logs for specific service:
 ```bash
-docker-compose logs -f strom-backend
+docker-compose logs -f strom
 docker-compose logs -f strom-mcp
 ```
 
@@ -185,14 +185,14 @@ docker-compose logs -f strom-mcp
 
 Check GStreamer dependencies:
 ```bash
-docker-compose exec strom-backend gst-inspect-1.0 --version
+docker-compose exec strom gst-inspect-1.0 --version
 ```
 
 ### MCP server can't connect to backend
 
 Verify networking:
 ```bash
-docker-compose exec strom-mcp curl http://strom-backend:8080/health
+docker-compose exec strom-mcp curl http://strom:8080/health
 ```
 
 ### Rebuilding after code changes
@@ -226,7 +226,7 @@ server {
 
 ```yaml
 services:
-  strom-backend:
+  strom:
     image: strom:latest
     restart: always
     environment:
@@ -244,10 +244,10 @@ services:
 
 Backup data files:
 ```bash
-docker cp strom-backend:/data/flows.json ./backup/
-docker cp strom-backend:/data/blocks.json ./backup/
+docker cp strom:/data/flows.json ./backup/
+docker cp strom:/data/blocks.json ./backup/
 # Or backup entire data directory
-docker cp strom-backend:/data ./backup/
+docker cp strom:/data ./backup/
 ```
 
 ## Development
@@ -261,8 +261,8 @@ volumes:
 
 Hot reload not supported - rebuild after changes:
 ```bash
-docker-compose build strom-backend
-docker-compose restart strom-backend
+docker-compose build strom
+docker-compose restart strom
 ```
 
 ## Security

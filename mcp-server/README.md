@@ -257,7 +257,7 @@ cargo build --release -p strom-mcp-server
 **Problem**: MCP server can't connect to Strom backend
 
 **Solutions**:
-- Ensure Strom backend is running: `cargo run -p strom-backend`
+- Ensure Strom backend is running: `cargo run -p strom`
 - Check the `STROM_API_URL` environment variable
 - Verify the backend is accessible: `curl http://localhost:8080/health`
 
