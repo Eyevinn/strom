@@ -80,6 +80,10 @@ docker run -d \
 - `STROM_DATA_DIR` - Data directory for storage files (default: `/data`)
 - `STROM_FLOWS_PATH` - Override flows file path (optional)
 - `STROM_BLOCKS_PATH` - Override blocks file path (optional)
+- `STROM_DATABASE_URL` - Database URL for PostgreSQL storage (optional, e.g., `postgresql://user:pass@localhost/strom`)
+- `STROM_ADMIN_USER` - Admin username for authentication (optional)
+- `STROM_ADMIN_PASSWORD_HASH` - Admin password hash for authentication (optional)
+- `STROM_API_KEY` - API key for bearer token authentication (optional)
 
 #### MCP Server (strom-mcp)
 - `RUST_LOG` - Logging level (default: `info`)
