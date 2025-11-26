@@ -744,13 +744,13 @@ impl GraphEditor {
                 Color32::from_rgb(30, 40, 40)
             }
         } else {
-            // Light theme: light cyan-tinted backgrounds
+            // Light theme: light cyan-tinted backgrounds (slightly darker for better contrast)
             if is_selected {
-                Color32::from_rgb(200, 230, 230)
+                Color32::from_rgb(180, 220, 220)
             } else if is_hovered {
-                Color32::from_rgb(210, 235, 235)
+                Color32::from_rgb(190, 225, 225)
             } else {
-                Color32::from_rgb(220, 240, 240)
+                Color32::from_rgb(200, 230, 230)
             }
         };
 
@@ -1094,13 +1094,13 @@ impl GraphEditor {
                 Color32::from_rgb(40, 30, 50)
             }
         } else {
-            // Light theme: light purple backgrounds
+            // Light theme: light purple backgrounds (slightly darker for better contrast)
             if is_selected {
-                Color32::from_rgb(230, 210, 245)
+                Color32::from_rgb(220, 200, 240)
             } else if is_hovered {
-                Color32::from_rgb(235, 220, 248)
+                Color32::from_rgb(225, 210, 243)
             } else {
-                Color32::from_rgb(240, 230, 250)
+                Color32::from_rgb(230, 220, 245)
             }
         };
 
