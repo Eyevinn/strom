@@ -227,11 +227,11 @@ mod tests {
     use super::*;
 
     // Note: These tests require a PostgreSQL instance to be running.
-    // Set the DATABASE_URL environment variable to run them:
-    // DATABASE_URL=postgresql://user:pass@localhost/strom_test cargo test
+    // Set the STROM_DATABASE_URL environment variable to run them:
+    // STROM_DATABASE_URL=postgresql://user:pass@localhost/strom_test cargo test
 
     async fn create_test_storage() -> Option<PostgresStorage> {
-        let database_url = std::env::var("DATABASE_URL").ok()?;
+        let database_url = std::env::var("STROM_DATABASE_URL").ok()?;
         let storage = PostgresStorage::new(&database_url).await.ok()?;
         storage.run_migrations().await.ok()?;
 
@@ -247,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_and_load() {
         let Some(storage) = create_test_storage().await else {
-            eprintln!("Skipping test: DATABASE_URL not set");
+            eprintln!("Skipping test: STROM_DATABASE_URL not set");
             return;
         };
 
@@ -266,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_flow() {
         let Some(storage) = create_test_storage().await else {
-            eprintln!("Skipping test: DATABASE_URL not set");
+            eprintln!("Skipping test: STROM_DATABASE_URL not set");
             return;
         };
 
@@ -285,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_flow() {
         let Some(storage) = create_test_storage().await else {
-            eprintln!("Skipping test: DATABASE_URL not set");
+            eprintln!("Skipping test: STROM_DATABASE_URL not set");
             return;
         };
 

@@ -17,13 +17,13 @@ createdb strom_staging
 createdb strom_development
 ```
 
-### 2. Configure DATABASE_URL
+### 2. Configure STROM_DATABASE_URL
 
-Set the `DATABASE_URL` environment variable or use the `--database-url` flag:
+Set the `STROM_DATABASE_URL` environment variable or use the `--database-url` flag:
 
 ```bash
 # Using environment variable
-export DATABASE_URL="postgresql://user:password@localhost/strom_production"
+export STROM_DATABASE_URL="postgresql://user:password@localhost/strom_production"
 cargo run
 
 # Or using CLI flag
@@ -64,13 +64,13 @@ You can run multiple Strom instances sharing the same PostgreSQL server by givin
 
 ```bash
 # Instance 1 - Production
-DATABASE_URL=postgresql://user:pass@localhost/strom_production cargo run -- --port 3000
+STROM_DATABASE_URL=postgresql://user:pass@localhost/strom_production cargo run -- --port 3000
 
 # Instance 2 - Staging
-DATABASE_URL=postgresql://user:pass@localhost/strom_staging cargo run -- --port 3001
+STROM_DATABASE_URL=postgresql://user:pass@localhost/strom_staging cargo run -- --port 3001
 
 # Instance 3 - Development
-DATABASE_URL=postgresql://user:pass@localhost/strom_dev cargo run -- --port 3002
+STROM_DATABASE_URL=postgresql://user:pass@localhost/strom_dev cargo run -- --port 3002
 ```
 
 Each instance operates independently with complete isolation.
@@ -84,7 +84,7 @@ Strom uses sqlx with a connection pool (max 5 connections per instance). This pr
 ### JSON to PostgreSQL Migration
 
 1. Export your flows from JSON (they're already in JSON format)
-2. Start Strom with `DATABASE_URL` configured
+2. Start Strom with `STROM_DATABASE_URL` configured
 3. Import flows via the API or manually insert them
 
 ### PostgreSQL to JSON Migration
@@ -97,7 +97,7 @@ Strom uses sqlx with a connection pool (max 5 connections per instance). This pr
      "flows": [...]
    }
    ```
-3. Start Strom without `DATABASE_URL` and point to the JSON file
+3. Start Strom without `STROM_DATABASE_URL` and point to the JSON file
 
 ## Benefits of PostgreSQL Storage
 
@@ -110,4 +110,4 @@ Strom uses sqlx with a connection pool (max 5 connections per instance). This pr
 
 ## Fallback to JSON
 
-If `DATABASE_URL` is not set, Strom falls back to JSON file storage using the configured flows path (default: `~/.local/share/strom/flows.json`).
+If `STROM_DATABASE_URL` is not set, Strom falls back to JSON file storage using the configured flows path (default: `~/.local/share/strom/flows.json`).

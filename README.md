@@ -188,7 +188,7 @@ Configure via command-line arguments or environment variables:
 --port 8080                           # or STROM_PORT=8080
 
 # Storage - PostgreSQL (recommended for production)
---database-url postgresql://user:pass@localhost/strom  # or DATABASE_URL=...
+--database-url postgresql://user:pass@localhost/strom  # or STROM_DATABASE_URL=...
 
 # Storage - JSON files (default)
 --data-dir /path/to/data              # or STROM_DATA_DIR=/path/to/data
@@ -202,13 +202,13 @@ RUST_LOG=info
 ### Storage Options
 
 **PostgreSQL (Recommended for production):**
-- Set `DATABASE_URL` to use PostgreSQL for flow storage
+- Set `STROM_DATABASE_URL` to use PostgreSQL for flow storage
 - Supports multiple isolated instances sharing one PostgreSQL server
 - Automatic schema migrations on startup
 - See [docs/POSTGRESQL.md](docs/POSTGRESQL.md) for setup guide
 
 **JSON Files (Default):**
-- Used when `DATABASE_URL` is not set
+- Used when `STROM_DATABASE_URL` is not set
 - Simple file-based storage
 
 **Default storage locations:**

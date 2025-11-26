@@ -70,9 +70,10 @@ struct Args {
     #[arg(long, env = "STROM_BLOCKS_PATH")]
     blocks_path: Option<PathBuf>,
 
-    /// PostgreSQL database URL (e.g., postgresql://user:pass@localhost/strom)
-    /// If set, PostgreSQL is used for storage instead of JSON files
-    #[arg(long, env = "DATABASE_URL")]
+    /// Database URL (e.g., postgresql://user:pass@localhost/strom)
+    /// If set, database storage is used instead of JSON files
+    /// Supported schemes: postgresql://
+    #[arg(long, env = "STROM_DATABASE_URL")]
     database_url: Option<String>,
 
     /// Run in headless mode (no GUI) - only available when gui feature is enabled

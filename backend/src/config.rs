@@ -58,7 +58,7 @@ impl Config {
         let data_dir = env::var("STROM_DATA_DIR").ok().map(PathBuf::from);
         let flows_path = env::var("STROM_FLOWS_PATH").ok().map(PathBuf::from);
         let blocks_path = env::var("STROM_BLOCKS_PATH").ok().map(PathBuf::from);
-        let database_url = env::var("DATABASE_URL").ok();
+        let database_url = env::var("STROM_DATABASE_URL").ok();
 
         Self::new(port, data_dir, flows_path, blocks_path, database_url)
     }
