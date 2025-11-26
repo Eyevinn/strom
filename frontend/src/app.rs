@@ -1628,7 +1628,10 @@ impl StromApp {
                 }
 
                 // Handle delete key for elements and links
-                if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                // Only process delete if no text edit widget has focus
+                if ui.input(|i| i.key_pressed(egui::Key::Delete))
+                    && !ui.ctx().wants_keyboard_input()
+                {
                     self.graph.remove_selected(); // Remove selected element (if any)
                     self.graph.remove_selected_link(); // Remove selected link (if any)
                 }
