@@ -1,17 +1,15 @@
 name: Docker Publish
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       tag:
         description: 'Tag to build (e.g., v0.1.0) or leave empty for current branch'
         required: false
         type: string
-  push:
-    branches:
-      - 'fix/docker-publish'  # Temporary: trigger on this branch for testing
 
 env:
   REGISTRY: docker.io
