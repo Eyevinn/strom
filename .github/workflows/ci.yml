@@ -210,9 +210,13 @@ jobs:
         if: matrix.platform == 'linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo dpkg --add-architecture arm64
-          sudo sed -i 's/deb http/deb [arch=amd64] http/g' /etc/apt/sources.list
+          # Restrict existing sources to amd64 and add arm64 sources from ports
+          sudo sed -i 's/^deb \(http\|https\)/deb [arch=amd64] \1/g' /etc/apt/sources.list
+          sudo sed -i 's/^deb-src \(http\|https\)/deb-src [arch=amd64] \1/g' /etc/apt/sources.list
+          # Add ARM64 sources from Ubuntu ports
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc) main universe" | sudo tee /etc/apt/sources.list.d/arm64.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-security main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           sudo apt-get install -y libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64 libgstreamer-plugins-bad1.0-dev:arm64
