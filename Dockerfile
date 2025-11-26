@@ -13,8 +13,17 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS frontend-builder
 WORKDIR /app
 
+# Get the target architecture from BuildKit
+ARG TARGETARCH
+
 # Install trunk for building the WASM frontend from binary release (match CI version)
-RUN curl -L https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin
+# Map Docker arch to Rust target triple: amd64->x86_64, arm64->aarch64
+RUN TRUNK_ARCH=$(case ${TARGETARCH} in \
+      amd64) echo "x86_64-unknown-linux-gnu" ;; \
+      arm64) echo "aarch64-unknown-linux-gnu" ;; \
+      *) echo "x86_64-unknown-linux-gnu" ;; \
+    esac) && \
+    curl -L https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-${TRUNK_ARCH}.tar.gz | tar -xz -C /usr/local/bin
 
 # Add WASM target for frontend compilation
 RUN rustup target add wasm32-unknown-unknown

@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   # Trunk version for caching
-  TRUNK_VERSION: "0.21.5"
+  TRUNK_VERSION: "0.21.14"
   # Disable incremental compilation to avoid deadlocks
   CARGO_INCREMENTAL: 0
 
