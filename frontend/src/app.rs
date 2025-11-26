@@ -148,18 +148,18 @@ impl StromApp {
                         .protocol()
                         .unwrap_or_else(|_| "http:".to_string());
 
-                    // Exception: trunk serve runs on :8080, backend on :3000
-                    if host == "localhost:8080" || host == "127.0.0.1:8080" {
-                        "http://localhost:3000/api".to_string()
+                    // Exception: trunk serve runs on :8095, backend on :8080
+                    if host == "localhost:8095" || host == "127.0.0.1:8095" {
+                        "http://localhost:8080/api".to_string()
                     } else {
                         // Use current window location (works for Docker, production, etc.)
                         format!("{}//{}/api", protocol, host)
                     }
                 } else {
-                    "http://localhost:3000/api".to_string()
+                    "http://localhost:8080/api".to_string()
                 }
             } else {
-                "http://localhost:3000/api".to_string()
+                "http://localhost:8080/api".to_string()
             }
         };
 
@@ -376,9 +376,9 @@ impl StromApp {
         let ws_url = {
             if let Some(window) = web_sys::window() {
                 if let Ok(host) = window.location().host() {
-                    // Exception: trunk serve runs on :8080, backend on :3000
-                    if host == "localhost:8080" || host == "127.0.0.1:8080" {
-                        "ws://localhost:3000/api/ws".to_string()
+                    // Exception: trunk serve runs on :8095, backend on :8080
+                    if host == "localhost:8095" || host == "127.0.0.1:8095" {
+                        "ws://localhost:8080/api/ws".to_string()
                     } else {
                         // Use current window location - ws:// or wss:// based on protocol
                         let ws_protocol =

@@ -44,21 +44,21 @@ chmod +x strom-backend-v*-linux-x86_64
 # Download and run the .exe file
 ```
 
-Open your browser to `http://localhost:3000` to access the web UI.
+Open your browser to `http://localhost:8080` to access the web UI.
 
 ### Option 2: Using Docker (Recommended for Testing)
 
 ```bash
 # Pull and run the latest version
 docker pull eyevinntechnology/strom:latest
-docker run -p 3000:3000 -v $(pwd)/data:/data eyevinntechnology/strom:latest
+docker run -p 8080:8080 -v $(pwd)/data:/data eyevinntechnology/strom:latest
 
 # Or build locally
 docker build -t strom .
-docker run -p 3000:3000 -v $(pwd)/data:/data strom
+docker run -p 8080:8080 -v $(pwd)/data:/data strom
 ```
 
-Access the web UI at `http://localhost:3000`
+Access the web UI at `http://localhost:8080`
 
 ### Option 3: Building from Source
 
@@ -79,12 +79,12 @@ cargo install trunk
 #### Run
 
 ```bash
-# Production mode (web UI at http://localhost:3000)
+# Production mode (web UI at http://localhost:8080)
 cargo run --release
 
 # Development with hot reload
-cargo run                    # Backend (Terminal 1)
-cd frontend && trunk serve   # Frontend (Terminal 2)
+cargo run                    # Backend on :8080 (Terminal 1)
+cd frontend && trunk serve   # Frontend on :8095 (Terminal 2)
 
 # Headless mode (API only)
 cargo run --release -- --headless
@@ -94,14 +94,14 @@ cargo run --release -- --headless
 
 Once Strom is running:
 
-1. Open `http://localhost:3000` in your browser
+1. Open `http://localhost:8080` in your browser
 2. Browse available GStreamer elements in the palette
 3. Drag elements onto the canvas to create your pipeline
 4. Connect elements by dragging from output pads to input pads
 5. Configure element properties in the inspector panel
 6. Click "Start" to launch your pipeline
 
-For API usage, visit `http://localhost:3000/swagger-ui` for interactive documentation.
+For API usage, visit `http://localhost:8080/swagger-ui` for interactive documentation.
 
 ## CI/CD
 
@@ -185,7 +185,7 @@ Configure via command-line arguments or environment variables:
 
 ```bash
 # Server
---port 3000                           # or STROM_PORT=3000
+--port 8080                           # or STROM_PORT=8080
 
 # Storage paths (priority: CLI args > env vars > defaults)
 --data-dir /path/to/data              # or STROM_DATA_DIR=/path/to/data
@@ -235,7 +235,7 @@ cargo run --release
 ```
 
 **Usage:**
-- Navigate to `http://localhost:3000`
+- Navigate to `http://localhost:8080`
 - Login with your configured username and password
 - Session persists for 24 hours of inactivity
 - Click "Logout" button in the top-right to end session
@@ -258,7 +258,7 @@ cargo run --release
 ```bash
 # All API requests must include the Authorization header
 curl -H "Authorization: Bearer your-secret-api-key-here" \
-  http://localhost:3000/api/flows
+  http://localhost:8080/api/flows
 ```
 
 ### Using Both Methods
@@ -281,7 +281,7 @@ Users can then:
 ### Docker Authentication
 
 ```bash
-docker run -p 3000:3000 \
+docker run -p 8080:8080 \
   -e STROM_ADMIN_USER="admin" \
   -e STROM_ADMIN_PASSWORD_HASH='$2b$12$...' \
   -e STROM_API_KEY="your-api-key" \
@@ -432,7 +432,7 @@ To test Strom manually:
    ```
 
 2. **Access the UI:**
-   Open `http://localhost:3000` in your browser
+   Open `http://localhost:8080` in your browser
 
 3. **Test a simple pipeline:**
    - Add a `videotestsrc` element
@@ -443,13 +443,13 @@ To test Strom manually:
 4. **Test the API:**
    ```bash
    # List all flows
-   curl http://localhost:3000/api/flows
+   curl http://localhost:8080/api/flows
 
    # Get available elements
-   curl http://localhost:3000/api/elements
+   curl http://localhost:8080/api/elements
 
    # View API documentation
-   open http://localhost:3000/swagger-ui
+   open http://localhost:8080/swagger-ui
    ```
 
 #### Docker Testing
@@ -459,10 +459,10 @@ To test Strom manually:
 docker build -t strom:test .
 
 # Run and test
-docker run -p 3000:3000 strom:test
+docker run -p 8080:8080 strom:test
 
 # Test with custom data directory
-docker run -p 3000:3000 -v $(pwd)/test-data:/data strom:test
+docker run -p 8080:8080 -v $(pwd)/test-data:/data strom:test
 ```
 
 #### Pre-commit Checks
