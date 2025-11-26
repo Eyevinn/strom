@@ -210,9 +210,10 @@ jobs:
         if: matrix.platform == 'linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo dpkg --add-architecture arm64
-          # Restrict existing sources to amd64 and add arm64 sources from ports
-          sudo sed -i 's/^deb \(http\|https\)/deb [arch=amd64] \1/g' /etc/apt/sources.list
-          sudo sed -i 's/^deb-src \(http\|https\)/deb-src [arch=amd64] \1/g' /etc/apt/sources.list
+          # Backup original sources and create arch-specific sources
+          sudo mv /etc/apt/sources.list /etc/apt/sources.list.bak
+          # Create amd64-only sources.list
+          grep -v '^#' /etc/apt/sources.list.bak | sed 's/^deb /deb [arch=amd64] /' | sudo tee /etc/apt/sources.list
           # Add ARM64 sources from Ubuntu ports
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc) main universe" | sudo tee /etc/apt/sources.list.d/arm64.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
