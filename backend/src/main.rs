@@ -275,11 +275,21 @@ fn run_with_gui(
 
         // Start server - bind to 0.0.0.0 to be accessible from all interfaces
         let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-        info!("Server listening on {}", addr);
 
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .expect("Failed to bind");
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                info!("Server listening on {}", addr);
+                l
+            }
+            Err(e) => {
+                eprintln!("Error: Failed to bind to port {}: {}", config.port, e);
+                eprintln!("Port {} is already in use or unavailable.", config.port);
+                eprintln!("Please either:");
+                eprintln!("  - Stop the other process using this port");
+                eprintln!("  - Use a different port with --port <PORT> or STROM_PORT=<PORT>");
+                std::process::exit(1);
+            }
+        };
 
         // Notify main thread that server is ready
         server_started_tx.send(()).ok();
@@ -362,9 +372,21 @@ async fn run_headless(
 
     // Start server - bind to 0.0.0.0 to be accessible from all interfaces (Docker, network, etc.)
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    info!("Server listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => {
+            info!("Server listening on {}", addr);
+            l
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to bind to port {}: {}", config.port, e);
+            eprintln!("Port {} is already in use or unavailable.", config.port);
+            eprintln!("Please either:");
+            eprintln!("  - Stop the other process using this port");
+            eprintln!("  - Use a different port with --port <PORT> or STROM_PORT=<PORT>");
+            std::process::exit(1);
+        }
+    };
 
     // Set up graceful shutdown handler
     let shutdown_signal = async move {
