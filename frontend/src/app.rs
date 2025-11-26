@@ -992,6 +992,208 @@ impl StromApp {
         });
     }
 
+    /// Format keyboard shortcut for display (adapts to platform).
+    fn format_shortcut(shortcut: &str) -> String {
+        #[cfg(target_os = "macos")]
+        {
+            shortcut.replace("Ctrl", "⌘")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            shortcut.to_string()
+        }
+    }
+
+    /// Navigate to the previous flow in the sorted flow list.
+    fn navigate_flow_list_up(&mut self) {
+        if self.flows.is_empty() {
+            return;
+        }
+
+        // Create sorted list to match the display order
+        let mut sorted_flows: Vec<(usize, &Flow)> = self.flows.iter().enumerate().collect();
+        sorted_flows.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+
+        if let Some(current_idx) = self.selected_flow_idx {
+            // Find position of current selection in sorted list
+            if let Some(pos) = sorted_flows.iter().position(|(idx, _)| *idx == current_idx) {
+                if pos > 0 {
+                    // Move to previous flow
+                    let (new_idx, flow) = sorted_flows[pos - 1];
+                    self.selected_flow_idx = Some(new_idx);
+                    self.graph.load(flow.elements.clone(), flow.links.clone());
+                    self.graph.load_blocks(flow.blocks.clone());
+                }
+            }
+        } else if !sorted_flows.is_empty() {
+            // No selection, select first flow
+            let (idx, flow) = sorted_flows[0];
+            self.selected_flow_idx = Some(idx);
+            self.graph.load(flow.elements.clone(), flow.links.clone());
+            self.graph.load_blocks(flow.blocks.clone());
+        }
+    }
+
+    /// Navigate to the next flow in the sorted flow list.
+    fn navigate_flow_list_down(&mut self) {
+        if self.flows.is_empty() {
+            return;
+        }
+
+        // Create sorted list to match the display order
+        let mut sorted_flows: Vec<(usize, &Flow)> = self.flows.iter().enumerate().collect();
+        sorted_flows.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+
+        if let Some(current_idx) = self.selected_flow_idx {
+            // Find position of current selection in sorted list
+            if let Some(pos) = sorted_flows.iter().position(|(idx, _)| *idx == current_idx) {
+                if pos < sorted_flows.len() - 1 {
+                    // Move to next flow
+                    let (new_idx, flow) = sorted_flows[pos + 1];
+                    self.selected_flow_idx = Some(new_idx);
+                    self.graph.load(flow.elements.clone(), flow.links.clone());
+                    self.graph.load_blocks(flow.blocks.clone());
+                }
+            }
+        } else if !sorted_flows.is_empty() {
+            // No selection, select first flow
+            let (idx, flow) = sorted_flows[0];
+            self.selected_flow_idx = Some(idx);
+            self.graph.load(flow.elements.clone(), flow.links.clone());
+            self.graph.load_blocks(flow.blocks.clone());
+        }
+    }
+
+    /// Handle global keyboard shortcuts.
+    fn handle_keyboard_shortcuts(&mut self, ctx: &Context) {
+        // Don't process shortcuts if a text input has focus (except ESC)
+        let wants_keyboard = ctx.wants_keyboard_input();
+
+        // ESC key - highest priority, works even in text inputs
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Priority 1: Close dialogs and windows
+            if self.show_new_flow_dialog {
+                self.show_new_flow_dialog = false;
+            } else if self.show_import_dialog {
+                self.show_import_dialog = false;
+            } else if self.flow_pending_deletion.is_some() {
+                self.flow_pending_deletion = None;
+            } else if self.editing_properties_idx.is_some() {
+                self.editing_properties_idx = None;
+            } else if !wants_keyboard {
+                // Priority 2: Deselect in graph editor
+                self.graph.deselect_all();
+            }
+        }
+
+        // Don't process other shortcuts if text input has focus
+        if wants_keyboard {
+            return;
+        }
+
+        // Up/Down arrow keys - Navigate flow list
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            self.navigate_flow_list_up();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            self.navigate_flow_list_down();
+        }
+
+        // Delete key - Delete selected flow
+        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+            if let Some(flow) = self.current_flow() {
+                self.flow_pending_deletion = Some((flow.id, flow.name.clone()));
+            }
+        }
+
+        // Ctrl+N - New Flow
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+            self.show_new_flow_dialog = true;
+        }
+
+        // Ctrl+S - Save
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
+            self.save_current_flow(ctx);
+        }
+
+        // Ctrl+O - Import
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
+            self.show_import_dialog = true;
+            self.import_json_buffer.clear();
+            self.import_error = None;
+        }
+
+        // F5 or Ctrl+R - Refresh
+        if ctx.input(|i| {
+            i.key_pressed(egui::Key::F5) || (i.modifiers.command && i.key_pressed(egui::Key::R))
+        }) {
+            self.needs_refresh = true;
+        }
+
+        // Ctrl+D - Debug Graph
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
+            if let Some(flow) = self.current_flow() {
+                let url = self.api.get_debug_graph_url(flow.id);
+                ctx.open_url(egui::OpenUrl::new_tab(&url));
+            }
+        }
+
+        // F1 - Help (GitHub)
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
+        }
+
+        // Shift+F9 - Stop Flow (must be checked before plain F9)
+        if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::F9)) {
+            self.stop_flow(ctx);
+        }
+        // F9 - Start/Restart Flow (only if Shift is NOT pressed)
+        else if ctx.input(|i| !i.modifiers.shift && i.key_pressed(egui::Key::F9)) {
+            if let Some(flow) = self.current_flow() {
+                let state = flow.state.unwrap_or(PipelineState::Null);
+                let is_running = matches!(state, PipelineState::Playing);
+
+                if is_running {
+                    // Restart
+                    let api = self.api.clone();
+                    let tx = self.channels.sender();
+                    let ctx_clone = ctx.clone();
+                    let flow_id = flow.id;
+
+                    self.status = "Restarting flow...".to_string();
+
+                    spawn_task(async move {
+                        match api.stop_flow(flow_id).await {
+                            Ok(_) => match api.start_flow(flow_id).await {
+                                Ok(_) => {
+                                    let _ = tx.send(AppMessage::FlowOperationSuccess(
+                                        "Flow restarted".to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(AppMessage::FlowOperationError(format!(
+                                        "Failed to restart flow: {}",
+                                        e
+                                    )));
+                                }
+                            },
+                            Err(e) => {
+                                let _ = tx.send(AppMessage::FlowOperationError(format!(
+                                    "Failed to restart flow: {}",
+                                    e
+                                )));
+                            }
+                        }
+                        ctx_clone.request_repaint();
+                    });
+                } else {
+                    // Start
+                    self.start_flow(ctx);
+                }
+            }
+        }
+    }
+
     /// Render the top toolbar.
     fn render_toolbar(&mut self, ctx: &Context) {
         TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -1009,21 +1211,37 @@ impl StromApp {
                 }
                 ui.separator();
 
-                if ui.button("New Flow").clicked() {
+                if ui
+                    .button("New Flow")
+                    .on_hover_text(format!("Create a new flow ({})", Self::format_shortcut("Ctrl+N")))
+                    .clicked()
+                {
                     self.show_new_flow_dialog = true;
                 }
 
-                if ui.button("Import").clicked() {
+                if ui
+                    .button("Import")
+                    .on_hover_text(format!("Import flow from JSON ({})", Self::format_shortcut("Ctrl+O")))
+                    .clicked()
+                {
                     self.show_import_dialog = true;
                     self.import_json_buffer.clear();
                     self.import_error = None;
                 }
 
-                if ui.button("Refresh").clicked() {
+                if ui
+                    .button("Refresh")
+                    .on_hover_text("Reload flows from server (F5 or Ctrl+R)")
+                    .clicked()
+                {
                     self.needs_refresh = true;
                 }
 
-                if ui.button("Save").clicked() {
+                if ui
+                    .button("Save")
+                    .on_hover_text(format!("Save current flow ({})", Self::format_shortcut("Ctrl+S")))
+                    .clicked()
+                {
                     self.save_current_flow(ctx);
                 }
 
@@ -1061,7 +1279,15 @@ impl StromApp {
                         "▶ Start"
                     };
 
-                    if ui.button(button_text).clicked() {
+                    if ui
+                        .button(button_text)
+                        .on_hover_text(if is_running {
+                            "Restart pipeline (F9)"
+                        } else {
+                            "Start pipeline (F9)"
+                        })
+                        .clicked()
+                    {
                         if is_running {
                             // For restart: stop first, then start
                             let api = self.api.clone();
@@ -1102,13 +1328,24 @@ impl StromApp {
                         }
                     }
 
-                    if ui.button("⏸ Stop").clicked() {
+                    if ui
+                        .button("⏸ Stop")
+                        .on_hover_text("Stop pipeline (Shift+F9)")
+                        .clicked()
+                    {
                         self.stop_flow(ctx);
                     }
 
                     ui.separator();
 
-                    if ui.button("🔍 Debug Graph").clicked() {
+                    if ui
+                        .button("🔍 Debug Graph")
+                        .on_hover_text(format!(
+                            "View pipeline debug graph ({})",
+                            Self::format_shortcut("Ctrl+D")
+                        ))
+                        .clicked()
+                    {
                         // Open debug graph in new tab (works on both WASM and native)
                         let url = self.api.get_debug_graph_url(flow_id);
                         ctx.open_url(egui::OpenUrl::new_tab(&url));
@@ -1118,7 +1355,7 @@ impl StromApp {
 
                     if ui
                         .button("ℹ Help")
-                        .on_hover_text("Visit Strom on GitHub")
+                        .on_hover_text("Visit Strom on GitHub (F1)")
                         .clicked()
                     {
                         ctx.open_url(egui::OpenUrl::new_tab(
@@ -2783,6 +3020,9 @@ impl eframe::App for StromApp {
             self.last_stats_fetch = instant::Instant::now();
             self.fetch_stats_for_running_flows(ctx);
         }
+
+        // Handle keyboard shortcuts
+        self.handle_keyboard_shortcuts(ctx);
 
         self.render_toolbar(ctx);
         self.render_flow_list(ctx);

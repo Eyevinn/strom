@@ -209,6 +209,12 @@ impl GraphEditor {
         }
     }
 
+    /// Deselect all elements and links.
+    pub fn deselect_all(&mut self) {
+        self.selected = None;
+        self.selected_link = None;
+    }
+
     /// Set element metadata for rendering ports.
     pub fn set_element_info(&mut self, element_type: String, info: ElementInfo) {
         self.element_info_map.insert(element_type, info);
