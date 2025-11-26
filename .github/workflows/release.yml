@@ -109,14 +109,22 @@ jobs:
         if: matrix.platform == 'linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo dpkg --add-architecture arm64
-          # Backup original sources and create arch-specific sources
-          sudo mv /etc/apt/sources.list /etc/apt/sources.list.bak
-          # Create amd64-only sources.list
-          grep -v '^#' /etc/apt/sources.list.bak | sed 's/^deb /deb [arch=amd64] /' | sudo tee /etc/apt/sources.list
-          # Add ARM64 sources from Ubuntu ports
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc) main universe" | sudo tee /etc/apt/sources.list.d/arm64.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-security main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          # Backup and disable original sources
+          sudo mv /etc/apt/sources.list /etc/apt/sources.list.disabled
+          sudo mv /etc/apt/sources.list.d /etc/apt/sources.list.d.disabled || true
+          sudo mkdir -p /etc/apt/sources.list.d
+          # Create explicit amd64 sources
+          cat <<EOF | sudo tee /etc/apt/sources.list
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu $(lsb_release -sc) main universe
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu $(lsb_release -sc)-updates main universe
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu $(lsb_release -sc)-security main universe
+          EOF
+          # Create ARM64 sources from Ubuntu ports
+          cat <<EOF | sudo tee /etc/apt/sources.list.d/arm64.list
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc) main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-updates main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-security main universe
+          EOF
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           sudo apt-get install -y libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64 libgstreamer-plugins-bad1.0-dev:arm64
