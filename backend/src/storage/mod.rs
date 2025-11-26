@@ -1,8 +1,10 @@
 //! Storage layer for persisting flows.
 
 mod json_storage;
+mod postgres_storage;
 
 pub use json_storage::JsonFileStorage;
+pub use postgres_storage::PostgresStorage;
 
 use async_trait::async_trait;
 use std::collections::HashMap;

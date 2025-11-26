@@ -70,6 +70,12 @@ struct Args {
     #[arg(long, env = "STROM_BLOCKS_PATH")]
     blocks_path: Option<PathBuf>,
 
+    /// Database URL (e.g., postgresql://user:pass@localhost/strom)
+    /// If set, database storage is used instead of JSON files
+    /// Supported schemes: postgresql://
+    #[arg(long, env = "STROM_DATABASE_URL")]
+    database_url: Option<String>,
+
     /// Run in headless mode (no GUI) - only available when gui feature is enabled
     #[cfg(feature = "gui")]
     #[arg(long)]
@@ -176,17 +182,35 @@ fn main() -> anyhow::Result<()> {
     {
         if gui_enabled {
             // GUI mode: Run HTTP server in background, GUI on main thread
-            run_with_gui(args.port, args.data_dir, args.flows_path, args.blocks_path)
+            run_with_gui(
+                args.port,
+                args.data_dir,
+                args.flows_path,
+                args.blocks_path,
+                args.database_url,
+            )
         } else {
             // Headless mode: Run HTTP server on main thread
-            run_headless(args.port, args.data_dir, args.flows_path, args.blocks_path)
+            run_headless(
+                args.port,
+                args.data_dir,
+                args.flows_path,
+                args.blocks_path,
+                args.database_url,
+            )
         }
     }
 
     #[cfg(not(feature = "gui"))]
     {
         // Always headless when gui feature is disabled
-        run_headless(args.port, args.data_dir, args.flows_path, args.blocks_path)
+        run_headless(
+            args.port,
+            args.data_dir,
+            args.flows_path,
+            args.blocks_path,
+            args.database_url,
+        )
     }
 }
 
@@ -196,6 +220,7 @@ fn run_with_gui(
     data_dir: Option<PathBuf>,
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
+    database_url: Option<String>,
 ) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -222,12 +247,20 @@ fn run_with_gui(
 
     runtime.spawn(async move {
         // Load configuration from CLI args
-        let config = Config::new(port, data_dir, flows_path, blocks_path)
+        let config = Config::new(port, data_dir, flows_path, blocks_path, database_url)
             .expect("Failed to resolve configuration");
         info!("Configuration loaded");
 
         // Create application with persistent storage
-        let state = AppState::with_json_storage(&config.flows_path, &config.blocks_path);
+        let state = if let Some(ref db_url) = config.database_url {
+            info!("Using PostgreSQL storage");
+            AppState::with_postgres_storage(db_url, &config.blocks_path)
+                .await
+                .expect("Failed to initialize PostgreSQL storage")
+        } else {
+            info!("Using JSON file storage");
+            AppState::with_json_storage(&config.flows_path, &config.blocks_path)
+        };
         state
             .load_from_storage()
             .await
@@ -304,13 +337,20 @@ async fn run_headless(
     data_dir: Option<PathBuf>,
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
+    database_url: Option<String>,
 ) -> anyhow::Result<()> {
     // Load configuration from CLI args
-    let config = Config::new(port, data_dir, flows_path, blocks_path)?;
+    let config = Config::new(port, data_dir, flows_path, blocks_path, database_url)?;
     info!("Configuration loaded");
 
     // Create application with persistent storage
-    let state = AppState::with_json_storage(&config.flows_path, &config.blocks_path);
+    let state = if let Some(ref db_url) = config.database_url {
+        info!("Using PostgreSQL storage");
+        AppState::with_postgres_storage(db_url, &config.blocks_path).await?
+    } else {
+        info!("Using JSON file storage");
+        AppState::with_json_storage(&config.flows_path, &config.blocks_path)
+    };
     state.load_from_storage().await?;
 
     // GStreamer elements are discovered lazily on first /api/elements request
