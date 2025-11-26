@@ -718,12 +718,24 @@ impl GraphEditor {
         is_selected: bool,
         is_hovered: bool,
     ) -> Response {
-        let stroke_color = if is_selected {
-            Color32::from_rgb(100, 220, 220) // Cyan
-        } else if is_hovered {
-            Color32::from_rgb(120, 180, 180) // Lighter cyan
+        let stroke_color = if ui.visuals().dark_mode {
+            // Dark theme borders
+            if is_selected {
+                Color32::from_rgb(100, 220, 220) // Cyan
+            } else if is_hovered {
+                Color32::from_rgb(120, 180, 180) // Lighter cyan
+            } else {
+                Color32::from_rgb(80, 160, 160) // Dark cyan
+            }
         } else {
-            Color32::from_rgb(80, 160, 160) // Dark cyan
+            // Light theme borders - vibrant teal
+            if is_selected {
+                Color32::from_rgb(0, 160, 160) // Vibrant teal
+            } else if is_hovered {
+                Color32::from_rgb(20, 140, 140) // Medium teal
+            } else {
+                Color32::from_rgb(40, 120, 120) // Darker teal
+            }
         };
 
         let stroke_width = if is_selected {
@@ -744,13 +756,13 @@ impl GraphEditor {
                 Color32::from_rgb(30, 40, 40)
             }
         } else {
-            // Light theme: light cyan-tinted backgrounds (slightly darker for better contrast)
+            // Light theme: vibrant cyan/teal backgrounds
             if is_selected {
-                Color32::from_rgb(180, 220, 220)
+                Color32::from_rgb(140, 230, 230) // Bright cyan
             } else if is_hovered {
-                Color32::from_rgb(190, 225, 225)
+                Color32::from_rgb(160, 240, 240) // Lighter cyan
             } else {
-                Color32::from_rgb(200, 230, 230)
+                Color32::from_rgb(180, 245, 245) // Soft cyan
             }
         };
 
@@ -1068,12 +1080,24 @@ impl GraphEditor {
         is_selected: bool,
         is_hovered: bool,
     ) -> Response {
-        let stroke_color = if is_selected {
-            Color32::from_rgb(200, 100, 255) // Purple for blocks
-        } else if is_hovered {
-            Color32::from_gray(154)
+        let stroke_color = if ui.visuals().dark_mode {
+            // Dark theme borders
+            if is_selected {
+                Color32::from_rgb(200, 100, 255) // Purple for blocks
+            } else if is_hovered {
+                Color32::from_gray(154)
+            } else {
+                Color32::from_rgb(150, 80, 200) // Darker purple
+            }
         } else {
-            Color32::from_rgb(150, 80, 200) // Darker purple
+            // Light theme borders - vibrant purple/magenta
+            if is_selected {
+                Color32::from_rgb(160, 0, 200) // Vibrant magenta
+            } else if is_hovered {
+                Color32::from_rgb(140, 40, 180) // Medium purple
+            } else {
+                Color32::from_rgb(120, 60, 160) // Darker purple
+            }
         };
 
         let stroke_width = if is_selected {
@@ -1094,13 +1118,13 @@ impl GraphEditor {
                 Color32::from_rgb(40, 30, 50)
             }
         } else {
-            // Light theme: light purple backgrounds (slightly darker for better contrast)
+            // Light theme: vibrant purple/lavender backgrounds
             if is_selected {
-                Color32::from_rgb(220, 200, 240)
+                Color32::from_rgb(220, 180, 255) // Bright lavender
             } else if is_hovered {
-                Color32::from_rgb(225, 210, 243)
+                Color32::from_rgb(230, 200, 255) // Lighter lavender
             } else {
-                Color32::from_rgb(230, 220, 245)
+                Color32::from_rgb(235, 215, 255) // Soft lavender
             }
         };
 
