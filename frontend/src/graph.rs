@@ -389,7 +389,7 @@ impl GraphEditor {
             }
 
             // Draw grid
-            self.draw_grid(&painter, response.rect);
+            self.draw_grid(ui, &painter, response.rect);
 
             // Draw nodes and handle interaction (must happen before panning)
             let mut elements_to_update = Vec::new();
@@ -675,9 +675,13 @@ impl GraphEditor {
         .inner
     }
 
-    fn draw_grid(&self, painter: &egui::Painter, rect: Rect) {
+    fn draw_grid(&self, ui: &Ui, painter: &egui::Painter, rect: Rect) {
         let grid_spacing = 50.0 * self.zoom;
-        let color = Color32::from_gray(40);
+        let color = if ui.visuals().dark_mode {
+            Color32::from_gray(40) // Dark theme: darker grid lines
+        } else {
+            Color32::from_gray(200) // Light theme: lighter grid lines
+        };
 
         let start_x = (rect.min.x / grid_spacing).floor() * grid_spacing;
         let start_y = (rect.min.y / grid_spacing).floor() * grid_spacing;
