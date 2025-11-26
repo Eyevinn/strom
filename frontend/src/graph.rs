@@ -209,6 +209,12 @@ impl GraphEditor {
         }
     }
 
+    /// Deselect all elements and links.
+    pub fn deselect_all(&mut self) {
+        self.selected = None;
+        self.selected_link = None;
+    }
+
     /// Set element metadata for rendering ports.
     pub fn set_element_info(&mut self, element_type: String, info: ElementInfo) {
         self.element_info_map.insert(element_type, info);
@@ -389,7 +395,7 @@ impl GraphEditor {
             }
 
             // Draw grid
-            self.draw_grid(&painter, response.rect);
+            self.draw_grid(ui, &painter, response.rect);
 
             // Draw nodes and handle interaction (must happen before panning)
             let mut elements_to_update = Vec::new();
@@ -592,11 +598,28 @@ impl GraphEditor {
                 if let Some((from_id, from_pad)) = self.creating_link.take() {
                     if let Some((to_id, to_pad)) = &self.hovered_pad {
                         if from_id != *to_id {
-                            let link = Link {
-                                from: format!("{}:{}", from_id, from_pad),
-                                to: format!("{}:{}", to_id, to_pad),
-                            };
-                            self.links.push(link);
+                            // Determine which pad is output and which is input
+                            let from_is_output = self.is_output_pad(&from_id, &from_pad);
+                            let to_is_output = self.is_output_pad(to_id, to_pad);
+
+                            // Create link with correct direction (output -> input)
+                            // Only create link if one is output and one is input
+                            if from_is_output && !to_is_output {
+                                // Normal case: dragged from output to input
+                                let link = Link {
+                                    from: format!("{}:{}", from_id, from_pad),
+                                    to: format!("{}:{}", to_id, to_pad),
+                                };
+                                self.links.push(link);
+                            } else if !from_is_output && to_is_output {
+                                // Reversed: dragged from input to output, swap them
+                                let link = Link {
+                                    from: format!("{}:{}", to_id, to_pad),
+                                    to: format!("{}:{}", from_id, from_pad),
+                                };
+                                self.links.push(link);
+                            }
+                            // else: Invalid case (both are outputs or both are inputs), don't create link
                         }
                     }
                 }
@@ -628,9 +651,13 @@ impl GraphEditor {
 
             // Draw link being created (on top of everything)
             if let Some((from_id, from_pad)) = &self.creating_link {
+                // Determine if we're dragging from an input or output pad
+                let from_is_output = self.is_output_pad(from_id, from_pad);
+                let from_is_input = !from_is_output;
+
                 // Get the actual position of the source pad
                 let from_world_pos = self
-                    .get_pad_position(from_id, from_pad, false)
+                    .get_pad_position(from_id, from_pad, from_is_input)
                     .unwrap_or_else(|| pos2(100.0, 100.0));
                 let from_screen_pos = to_screen(from_world_pos);
 
@@ -654,9 +681,13 @@ impl GraphEditor {
         .inner
     }
 
-    fn draw_grid(&self, painter: &egui::Painter, rect: Rect) {
+    fn draw_grid(&self, ui: &Ui, painter: &egui::Painter, rect: Rect) {
         let grid_spacing = 50.0 * self.zoom;
-        let color = Color32::from_gray(40);
+        let color = if ui.visuals().dark_mode {
+            Color32::from_gray(40) // Dark theme: darker grid lines
+        } else {
+            Color32::from_gray(200) // Light theme: lighter grid lines
+        };
 
         let start_x = (rect.min.x / grid_spacing).floor() * grid_spacing;
         let start_y = (rect.min.y / grid_spacing).floor() * grid_spacing;
@@ -693,12 +724,24 @@ impl GraphEditor {
         is_selected: bool,
         is_hovered: bool,
     ) -> Response {
-        let stroke_color = if is_selected {
-            Color32::from_rgb(100, 220, 220) // Cyan
-        } else if is_hovered {
-            Color32::from_rgb(120, 180, 180) // Lighter cyan
+        let stroke_color = if ui.visuals().dark_mode {
+            // Dark theme borders
+            if is_selected {
+                Color32::from_rgb(100, 220, 220) // Cyan
+            } else if is_hovered {
+                Color32::from_rgb(120, 180, 180) // Lighter cyan
+            } else {
+                Color32::from_rgb(80, 160, 160) // Dark cyan
+            }
         } else {
-            Color32::from_rgb(80, 160, 160) // Dark cyan
+            // Light theme borders - vibrant teal
+            if is_selected {
+                Color32::from_rgb(0, 160, 160) // Vibrant teal
+            } else if is_hovered {
+                Color32::from_rgb(20, 140, 140) // Medium teal
+            } else {
+                Color32::from_rgb(40, 120, 120) // Darker teal
+            }
         };
 
         let stroke_width = if is_selected {
@@ -709,12 +752,24 @@ impl GraphEditor {
             1.0
         };
 
-        let fill_color = if is_selected {
-            Color32::from_rgb(40, 60, 60) // Dark cyan-tinted background
-        } else if is_hovered {
-            Color32::from_rgb(35, 50, 50) // Lighter cyan-tinted background on hover
+        let fill_color = if ui.visuals().dark_mode {
+            // Dark theme: dark cyan-tinted backgrounds
+            if is_selected {
+                Color32::from_rgb(40, 60, 60)
+            } else if is_hovered {
+                Color32::from_rgb(35, 50, 50)
+            } else {
+                Color32::from_rgb(30, 40, 40)
+            }
         } else {
-            Color32::from_rgb(30, 40, 40) // Very dark cyan-tinted background
+            // Light theme: vibrant cyan/teal backgrounds
+            if is_selected {
+                Color32::from_rgb(140, 230, 230) // Bright cyan
+            } else if is_hovered {
+                Color32::from_rgb(160, 240, 240) // Lighter cyan
+            } else {
+                Color32::from_rgb(180, 245, 245) // Soft cyan
+            }
         };
 
         // Draw node background
@@ -729,12 +784,17 @@ impl GraphEditor {
         // Draw element type
         // Note: multiply offsets by zoom since rect is in screen-space
         let text_pos = rect.min + vec2(10.0 * self.zoom, 10.0 * self.zoom);
+        let text_color = if ui.visuals().dark_mode {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(40) // Dark text for light backgrounds
+        };
         painter.text(
             text_pos,
             egui::Align2::LEFT_TOP,
             &element.element_type,
             FontId::proportional(14.0 * self.zoom),
-            Color32::WHITE,
+            text_color,
         );
 
         // Draw ports based on element metadata
@@ -1026,12 +1086,24 @@ impl GraphEditor {
         is_selected: bool,
         is_hovered: bool,
     ) -> Response {
-        let stroke_color = if is_selected {
-            Color32::from_rgb(200, 100, 255) // Purple for blocks
-        } else if is_hovered {
-            Color32::from_gray(154)
+        let stroke_color = if ui.visuals().dark_mode {
+            // Dark theme borders
+            if is_selected {
+                Color32::from_rgb(200, 100, 255) // Purple for blocks
+            } else if is_hovered {
+                Color32::from_gray(154)
+            } else {
+                Color32::from_rgb(150, 80, 200) // Darker purple
+            }
         } else {
-            Color32::from_rgb(150, 80, 200) // Darker purple
+            // Light theme borders - vibrant purple/magenta
+            if is_selected {
+                Color32::from_rgb(160, 0, 200) // Vibrant magenta
+            } else if is_hovered {
+                Color32::from_rgb(140, 40, 180) // Medium purple
+            } else {
+                Color32::from_rgb(120, 60, 160) // Darker purple
+            }
         };
 
         let stroke_width = if is_selected {
@@ -1042,12 +1114,24 @@ impl GraphEditor {
             1.0
         };
 
-        let fill_color = if is_selected {
-            Color32::from_rgb(60, 40, 80) // Dark purple background
-        } else if is_hovered {
-            Color32::from_rgb(50, 35, 65)
+        let fill_color = if ui.visuals().dark_mode {
+            // Dark theme: dark purple backgrounds
+            if is_selected {
+                Color32::from_rgb(60, 40, 80)
+            } else if is_hovered {
+                Color32::from_rgb(50, 35, 65)
+            } else {
+                Color32::from_rgb(40, 30, 50)
+            }
         } else {
-            Color32::from_rgb(40, 30, 50)
+            // Light theme: vibrant purple/lavender backgrounds
+            if is_selected {
+                Color32::from_rgb(220, 180, 255) // Bright lavender
+            } else if is_hovered {
+                Color32::from_rgb(230, 200, 255) // Lighter lavender
+            } else {
+                Color32::from_rgb(235, 215, 255) // Soft lavender
+            }
         };
 
         // Draw node background with rounded corners
@@ -1065,12 +1149,17 @@ impl GraphEditor {
         // Draw block icon
         // Note: multiply offsets by zoom since rect is in screen-space
         let icon_pos = rect.min + vec2(10.0 * self.zoom, 8.0 * self.zoom);
+        let icon_color = if ui.visuals().dark_mode {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(40) // Dark icon for light backgrounds
+        };
         painter.text(
             icon_pos,
             egui::Align2::LEFT_TOP,
             "📦",
             FontId::proportional(16.0 * self.zoom),
-            Color32::WHITE,
+            icon_color,
         );
 
         // Draw block name (use human-readable name from definition if available)
@@ -1083,12 +1172,17 @@ impl GraphEditor {
                     .unwrap_or(&block.block_definition_id)
             });
         let text_pos = rect.min + vec2(35.0 * self.zoom, 10.0 * self.zoom);
+        let text_color = if ui.visuals().dark_mode {
+            Color32::from_rgb(220, 180, 255) // Light purple for dark backgrounds
+        } else {
+            Color32::from_rgb(80, 40, 120) // Dark purple for light backgrounds
+        };
         painter.text(
             text_pos,
             egui::Align2::LEFT_TOP,
             block_name,
             FontId::proportional(14.0 * self.zoom),
-            Color32::from_rgb(220, 180, 255),
+            text_color,
         );
 
         // Render any dynamic content (e.g., meter visualization)
@@ -1525,13 +1619,20 @@ impl GraphEditor {
                 let pad_response = ui.interact(
                     pad_rect,
                     ui.id().with((&element.id, &pad_to_render.name)),
-                    Sense::click().union(Sense::hover()),
+                    Sense::click_and_drag(),
                 );
 
                 // Select element and switch to Input Pads tab when clicking input pad
                 // (skip empty pads for selection)
-                if pad_response.clicked() && !pad_to_render.is_empty {
+                if pad_response.clicked() && !pad_response.dragged() && !pad_to_render.is_empty {
                     self.select_element_and_focus_pad(&element.id, &pad_to_render.name, true);
+                }
+
+                // Start creating link when dragging from input port
+                if pad_response.drag_started()
+                    || (pad_response.dragged() && self.creating_link.is_none())
+                {
+                    self.creating_link = Some((element.id.clone(), pad_to_render.name.clone()));
                 }
 
                 if pad_response.hovered() {
@@ -1620,11 +1721,18 @@ impl GraphEditor {
                 let input_response = ui.interact(
                     input_rect,
                     ui.id().with((&element.id, "sink")),
-                    Sense::click().union(Sense::hover()),
+                    Sense::click_and_drag(),
                 );
 
-                if input_response.clicked() {
+                if input_response.clicked() && !input_response.dragged() {
                     self.select_element_and_focus_pad(&element.id, "sink", true);
+                }
+
+                // Start creating link when dragging from input port
+                if input_response.drag_started()
+                    || (input_response.dragged() && self.creating_link.is_none())
+                {
+                    self.creating_link = Some((element.id.clone(), "sink".to_string()));
                 }
 
                 if input_response.hovered() {
@@ -1708,6 +1816,67 @@ impl GraphEditor {
         };
     }
 
+    /// Check if a pad is an output pad (src) or input pad (sink).
+    /// Returns true if it's an output pad, false if it's an input pad.
+    fn is_output_pad(&self, element_id: &str, pad_name: &str) -> bool {
+        // Try to find as element first
+        if let Some(element) = self.elements.iter().find(|e| e.id == element_id) {
+            let element_info = self.element_info_map.get(&element.element_type);
+
+            if let Some(info) = element_info {
+                // Check if pad is in src_pads
+                let (sink_pads, src_pads) = self.get_pads_to_render(element, Some(info));
+
+                // Check if it's in src_pads_to_render
+                if src_pads.iter().any(|p| p.name == pad_name) {
+                    return true;
+                }
+
+                // Check if it's in sink_pads_to_render
+                if sink_pads.iter().any(|p| p.name == pad_name) {
+                    return false;
+                }
+            }
+
+            // Fallback: check by naming convention
+            if pad_name == "src" {
+                return true;
+            }
+            if pad_name == "sink" {
+                return false;
+            }
+
+            // For elements without metadata, assume based on element type
+            if element.element_type.ends_with("src") {
+                return true; // Source elements have output pads
+            }
+            if element.element_type.ends_with("sink") {
+                return false; // Sink elements have input pads
+            }
+
+            // Default: assume it's an output if we can't determine
+            return true;
+        }
+
+        // Try to find as block
+        if let Some(block) = self.blocks.iter().find(|b| b.id == element_id) {
+            if let Some(def) = self.block_definition_map.get(&block.block_definition_id) {
+                // Check if it's in outputs
+                if def.external_pads.outputs.iter().any(|p| p.name == pad_name) {
+                    return true;
+                }
+
+                // Check if it's in inputs
+                if def.external_pads.inputs.iter().any(|p| p.name == pad_name) {
+                    return false;
+                }
+            }
+        }
+
+        // Default: assume output if we can't determine
+        true
+    }
+
     /// Handle pad interactions for blocks.
     fn handle_block_pad_interaction(
         &mut self,
@@ -1734,8 +1903,15 @@ impl GraphEditor {
                 let pad_response = ui.interact(
                     pad_rect,
                     ui.id().with((&block.id, &external_pad.name)),
-                    Sense::hover(),
+                    Sense::click_and_drag(),
                 );
+
+                // Start creating link when dragging from input port
+                if pad_response.drag_started()
+                    || (pad_response.dragged() && self.creating_link.is_none())
+                {
+                    self.creating_link = Some((block.id.clone(), external_pad.name.clone()));
+                }
 
                 if pad_response.hovered() {
                     self.hovered_pad = Some((block.id.clone(), external_pad.name.clone()));
