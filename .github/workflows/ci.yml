@@ -259,7 +259,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-${{ matrix.platform }}
+          shared-key: build-${{ matrix.platform }}-${{ matrix.os }}
           cache-on-failure: true
 
       - name: Build backend (with embedded frontend)
