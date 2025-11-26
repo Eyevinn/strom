@@ -128,7 +128,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build backend (with embedded frontend)
-        run: cargo build --release --package strom-backend
+        run: cargo build --release --package strom
 
       - name: Build MCP server
         run: cargo build --release --package strom-mcp-server
@@ -136,8 +136,8 @@ jobs:
       - name: Upload backend binary
         uses: actions/upload-artifact@v4
         with:
-          name: strom-backend-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
-          path: target/release/strom-backend${{ matrix.binary_ext }}
+          name: strom-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
+          path: target/release/strom${{ matrix.binary_ext }}
           retention-days: 90
 
       - name: Upload MCP server binary
@@ -172,14 +172,14 @@ jobs:
           mkdir -p release-assets
 
           # Rename binaries with platform suffixes
-          mv artifacts/strom-backend-v${{ steps.version.outputs.version }}-linux-x86_64-unknown-linux-gnu/strom-backend \
-             release-assets/strom-backend-v${{ steps.version.outputs.version }}-linux-x86_64
+          mv artifacts/strom-v${{ steps.version.outputs.version }}-linux-x86_64-unknown-linux-gnu/strom \
+             release-assets/strom-v${{ steps.version.outputs.version }}-linux-x86_64
 
-          mv artifacts/strom-backend-v${{ steps.version.outputs.version }}-macos-x86_64-apple-darwin/strom-backend \
-             release-assets/strom-backend-v${{ steps.version.outputs.version }}-macos-x86_64
+          mv artifacts/strom-v${{ steps.version.outputs.version }}-macos-x86_64-apple-darwin/strom \
+             release-assets/strom-v${{ steps.version.outputs.version }}-macos-x86_64
 
-          mv artifacts/strom-backend-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc/strom-backend.exe \
-             release-assets/strom-backend-v${{ steps.version.outputs.version }}-windows-x86_64.exe
+          mv artifacts/strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc/strom.exe \
+             release-assets/strom-v${{ steps.version.outputs.version }}-windows-x86_64.exe
 
           mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64-unknown-linux-gnu/strom-mcp-server \
              release-assets/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64
@@ -207,7 +207,7 @@ jobs:
 
             ## Features
 
-            ### Backend (strom-backend)
+            ### Backend (strom)
             - **Axum-based REST API** for pipeline management
             - **GStreamer Integration** - Full pipeline lifecycle management
             - **Element Discovery** - Introspect all available GStreamer elements and their properties
@@ -262,7 +262,7 @@ jobs:
             ## Quick Start
             ```bash
             # Start the server
-            ./strom-backend-v${{ steps.version.outputs.version }}-<platform>
+            ./strom-v${{ steps.version.outputs.version }}-<platform>
 
             # Open browser
             http://localhost:3000

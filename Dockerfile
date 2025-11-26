@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y \
 COPY --from=planner /app/recipe.json recipe.json
 # Cook with the same feature flags we'll use for the actual build
 RUN cargo chef cook --release --recipe-path recipe.json \
-    --package strom-backend --no-default-features \
+    --package strom --no-default-features \
     --package strom-mcp-server
 
 # Copy entire project source
@@ -54,7 +54,7 @@ COPY --from=frontend-builder /app/backend/dist backend/dist
 
 # Build the backend (headless - no native GUI needed in Docker) and MCP server
 ENV RUST_BACKTRACE=1
-RUN cargo build --release --package strom-backend --no-default-features
+RUN cargo build --release --package strom --no-default-features
 RUN cargo build --release --package strom-mcp-server
 
 # Stage 5: Runtime - Minimal runtime image with trixie for newer GStreamer
@@ -77,7 +77,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binaries from backend-builder to /app
-COPY --from=backend-builder /app/target/release/strom-backend /app/strom-backend
+COPY --from=backend-builder /app/target/release/strom /app/strom
 COPY --from=backend-builder /app/target/release/strom-mcp-server /app/strom-mcp-server
 
 # Set environment variables
@@ -92,4 +92,4 @@ RUN mkdir -p /data
 EXPOSE 8080
 
 # Run the server from /app
-CMD ["/app/strom-backend"]
+CMD ["/app/strom"]

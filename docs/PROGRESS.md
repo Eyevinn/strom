@@ -23,7 +23,7 @@ The Strom GStreamer Flow Engine has reached a significant milestone with all cor
 
 ## Current Status by Component
 
-### Backend (`strom-backend`) - ✅ PRODUCTION READY
+### Backend (`strom`) - ✅ PRODUCTION READY
 
 **Features Implemented:**
 - Axum web server with CORS and static file serving
@@ -269,7 +269,7 @@ Generate visual representations of running GStreamer pipelines using Graphviz DO
 ## Deployment Status
 
 ### Development
-- ✅ Backend: `cargo run -p strom-backend`
+- ✅ Backend: `cargo run -p strom`
 - ✅ Frontend: `cd frontend && trunk serve`
 - ✅ Hot reload enabled for both
 

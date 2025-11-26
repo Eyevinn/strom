@@ -12,7 +12,7 @@ use tower::ServiceExt; // for `oneshot`
 /// Helper to create a test app instance.
 async fn create_test_app() -> Router {
     // Import from the backend crate
-    use strom_backend::create_app;
+    use strom::create_app;
 
     gstreamer::init().unwrap();
     create_app().await

@@ -6,7 +6,7 @@
 - [x] Initialize project architecture plan
 - [x] Create Cargo workspace with three packages (types, backend, frontend)
 - [x] Set up `strom-types` library crate
-- [x] Set up `strom-backend` binary crate
+- [x] Set up `strom` binary crate
 - [x] Set up `strom-frontend` crate with WASM support
 - [x] Configure workspace dependencies and shared versions
 - [x] Add .gitignore and basic git configuration

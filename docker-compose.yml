@@ -2,10 +2,10 @@ version: '3.8'
 
 services:
   # Strom backend server
-  strom-backend:
+  strom:
     build: .
     image: strom:latest
-    container_name: strom-backend
+    container_name: strom
     ports:
       - "8080:8080"
     volumes:
@@ -28,10 +28,10 @@ services:
     image: strom:latest
     container_name: strom-mcp
     depends_on:
-      - strom-backend
+      - strom
     environment:
       - RUST_LOG=info
-      - STROM_API_URL=http://strom-backend:8080
+      - STROM_API_URL=http://strom:8080
     stdin_open: true
     tty: true
     command: ["strom-mcp-server"]

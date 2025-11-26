@@ -8,8 +8,8 @@ use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[cfg(feature = "gui")]
-use strom_backend::create_app_with_state_and_auth;
-use strom_backend::{auth, config::Config, create_app_with_state, state::AppState};
+use strom::create_app_with_state_and_auth;
+use strom::{auth, config::Config, create_app_with_state, state::AppState};
 
 /// Handle the hash-password subcommand
 fn handle_hash_password(password: Option<&str>) -> anyhow::Result<()> {
@@ -286,9 +286,9 @@ fn run_with_gui(
     // Run GUI on main thread (blocks until window closes)
     // If auth is enabled, pass the native GUI token for auto-authentication
     let gui_result = if let Some(token) = native_gui_token {
-        strom_backend::gui::launch_gui_with_auth(port, shutdown_flag_gui, token)
+        strom::gui::launch_gui_with_auth(port, shutdown_flag_gui, token)
     } else {
-        strom_backend::gui::launch_gui_with_shutdown(port, shutdown_flag_gui)
+        strom::gui::launch_gui_with_shutdown(port, shutdown_flag_gui)
     };
 
     if let Err(e) = gui_result {
