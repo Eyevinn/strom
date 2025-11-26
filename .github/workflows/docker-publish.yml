@@ -63,7 +63,7 @@ jobs:
           # Use GitHub Actions cache (much faster than registry cache)
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           # Disable provenance and SBOM to prevent build hangs
           provenance: false
           sbom: false
