@@ -730,12 +730,24 @@ impl GraphEditor {
             1.0
         };
 
-        let fill_color = if is_selected {
-            Color32::from_rgb(40, 60, 60) // Dark cyan-tinted background
-        } else if is_hovered {
-            Color32::from_rgb(35, 50, 50) // Lighter cyan-tinted background on hover
+        let fill_color = if ui.visuals().dark_mode {
+            // Dark theme: dark cyan-tinted backgrounds
+            if is_selected {
+                Color32::from_rgb(40, 60, 60)
+            } else if is_hovered {
+                Color32::from_rgb(35, 50, 50)
+            } else {
+                Color32::from_rgb(30, 40, 40)
+            }
         } else {
-            Color32::from_rgb(30, 40, 40) // Very dark cyan-tinted background
+            // Light theme: light cyan-tinted backgrounds
+            if is_selected {
+                Color32::from_rgb(200, 230, 230)
+            } else if is_hovered {
+                Color32::from_rgb(210, 235, 235)
+            } else {
+                Color32::from_rgb(220, 240, 240)
+            }
         };
 
         // Draw node background
@@ -1063,12 +1075,24 @@ impl GraphEditor {
             1.0
         };
 
-        let fill_color = if is_selected {
-            Color32::from_rgb(60, 40, 80) // Dark purple background
-        } else if is_hovered {
-            Color32::from_rgb(50, 35, 65)
+        let fill_color = if ui.visuals().dark_mode {
+            // Dark theme: dark purple backgrounds
+            if is_selected {
+                Color32::from_rgb(60, 40, 80)
+            } else if is_hovered {
+                Color32::from_rgb(50, 35, 65)
+            } else {
+                Color32::from_rgb(40, 30, 50)
+            }
         } else {
-            Color32::from_rgb(40, 30, 50)
+            // Light theme: light purple backgrounds
+            if is_selected {
+                Color32::from_rgb(230, 210, 245)
+            } else if is_hovered {
+                Color32::from_rgb(235, 220, 248)
+            } else {
+                Color32::from_rgb(240, 230, 250)
+            }
         };
 
         // Draw node background with rounded corners

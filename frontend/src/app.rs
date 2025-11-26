@@ -1529,17 +1529,40 @@ impl StromApp {
         CentralPanel::default().show(ctx, |ui| {
             if self.current_flow().is_some() {
                 // Show compact instructions banner at the top
+                let legend_bg = if ui.visuals().dark_mode {
+                    Color32::from_rgb(40, 40, 50) // Dark theme: dark background
+                } else {
+                    Color32::from_rgb(230, 230, 240) // Light theme: light background
+                };
+
+                let legend_text_color = if ui.visuals().dark_mode {
+                    Color32::from_rgb(200, 200, 200) // Dark theme: lighter text
+                } else {
+                    Color32::from_rgb(60, 60, 70) // Light theme: dark text
+                };
+
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(40, 40, 50))
+                    .fill(legend_bg)
                     .inner_margin(4.0)
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.label("💡");
-                            ui.small("Search & click +Add to add elements/blocks");
+                            ui.small(
+                                egui::RichText::new("Search & click +Add to add elements/blocks")
+                                    .color(legend_text_color),
+                            );
                             ui.separator();
-                            ui.small("Drag output→input ports to link");
+                            ui.small(
+                                egui::RichText::new("Drag output→input ports to link")
+                                    .color(legend_text_color),
+                            );
                             ui.separator();
-                            ui.small("Drag nodes to move | Pan canvas | Scroll=zoom | Del=delete");
+                            ui.small(
+                                egui::RichText::new(
+                                    "Drag nodes to move | Pan canvas | Scroll=zoom | Del=delete",
+                                )
+                                .color(legend_text_color),
+                            );
                         });
                     });
 
