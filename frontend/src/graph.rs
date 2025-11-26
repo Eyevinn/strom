@@ -762,12 +762,17 @@ impl GraphEditor {
         // Draw element type
         // Note: multiply offsets by zoom since rect is in screen-space
         let text_pos = rect.min + vec2(10.0 * self.zoom, 10.0 * self.zoom);
+        let text_color = if ui.visuals().dark_mode {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(40) // Dark text for light backgrounds
+        };
         painter.text(
             text_pos,
             egui::Align2::LEFT_TOP,
             &element.element_type,
             FontId::proportional(14.0 * self.zoom),
-            Color32::WHITE,
+            text_color,
         );
 
         // Draw ports based on element metadata
@@ -1110,12 +1115,17 @@ impl GraphEditor {
         // Draw block icon
         // Note: multiply offsets by zoom since rect is in screen-space
         let icon_pos = rect.min + vec2(10.0 * self.zoom, 8.0 * self.zoom);
+        let icon_color = if ui.visuals().dark_mode {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(40) // Dark icon for light backgrounds
+        };
         painter.text(
             icon_pos,
             egui::Align2::LEFT_TOP,
             "📦",
             FontId::proportional(16.0 * self.zoom),
-            Color32::WHITE,
+            icon_color,
         );
 
         // Draw block name (use human-readable name from definition if available)
@@ -1128,12 +1138,17 @@ impl GraphEditor {
                     .unwrap_or(&block.block_definition_id)
             });
         let text_pos = rect.min + vec2(35.0 * self.zoom, 10.0 * self.zoom);
+        let text_color = if ui.visuals().dark_mode {
+            Color32::from_rgb(220, 180, 255) // Light purple for dark backgrounds
+        } else {
+            Color32::from_rgb(80, 40, 120) // Dark purple for light backgrounds
+        };
         painter.text(
             text_pos,
             egui::Align2::LEFT_TOP,
             block_name,
             FontId::proportional(14.0 * self.zoom),
-            Color32::from_rgb(220, 180, 255),
+            text_color,
         );
 
         // Render any dynamic content (e.g., meter visualization)
