@@ -38,7 +38,7 @@ Make sure you have the following installed:
 ```
 strom/
 ├── types/          # Shared types library (strom-types)
-├── backend/        # Backend server (strom-backend)
+├── backend/        # Backend server (strom)
 └── frontend/       # Frontend WASM app (strom-frontend)
 ```
 
@@ -52,7 +52,7 @@ cargo build
 ### Build specific crates
 ```bash
 cargo build -p strom-types
-cargo build -p strom-backend
+cargo build -p strom
 # Frontend builds with trunk (see below)
 ```
 
@@ -67,7 +67,7 @@ cargo check --workspace
 
 Start the backend server:
 ```bash
-cargo run -p strom-backend
+cargo run -p strom
 ```
 
 The server will start on `http://localhost:8080` by default.
@@ -75,10 +75,10 @@ The server will start on `http://localhost:8080` by default.
 **Configuration options:**
 ```bash
 # Via CLI arguments
-cargo run -p strom-backend -- --port 8080 --data-dir ./my-data
+cargo run -p strom -- --port 8080 --data-dir ./my-data
 
 # Via environment variables
-STROM_PORT=8080 STROM_DATA_DIR=./my-data cargo run -p strom-backend
+STROM_PORT=8080 STROM_DATA_DIR=./my-data cargo run -p strom
 ```
 
 **Available options:**
@@ -122,7 +122,7 @@ Run both backend and frontend simultaneously:
 
 **Terminal 1: Backend**
 ```bash
-cargo run -p strom-backend
+cargo run -p strom
 ```
 
 **Terminal 2: Frontend**
@@ -218,9 +218,9 @@ rustup target add wasm32-unknown-unknown
 ### Port already in use
 Change the backend port:
 ```bash
-cargo run -p strom-backend -- --port 8081
+cargo run -p strom -- --port 8081
 # or
-STROM_PORT=8081 cargo run -p strom-backend
+STROM_PORT=8081 cargo run -p strom
 ```
 
 Then update the frontend API URL if needed.
@@ -228,5 +228,5 @@ Then update the frontend API URL if needed.
 ### Storage files in unexpected location
 By default, storage files go to platform-specific directories. To use current directory:
 ```bash
-cargo run -p strom-backend -- --data-dir ./data
+cargo run -p strom -- --data-dir ./data
 ```

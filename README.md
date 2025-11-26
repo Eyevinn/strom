@@ -33,9 +33,9 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 ```bash
 # Linux
-wget https://github.com/Eyevinn/strom/releases/latest/download/strom-backend-v*-linux-x86_64
-chmod +x strom-backend-v*-linux-x86_64
-./strom-backend-v*-linux-x86_64
+wget https://github.com/Eyevinn/strom/releases/latest/download/strom-v*-linux-x86_64
+chmod +x strom-v*-linux-x86_64
+./strom-v*-linux-x86_64
 
 # macOS
 # Download and run the macOS binary
@@ -154,7 +154,7 @@ docker pull eyevinntechnology/strom:0.1.0  # Specific version
 
 **Workspace Members:**
 - `strom-types` - Shared domain models and API types
-- `strom-backend` - Server with GStreamer pipeline management
+- `strom` - Server with GStreamer pipeline management
 - `strom-frontend` - egui UI (compiles to WASM or native)
 - `strom-mcp-server` - Model Context Protocol server for AI integration
 
@@ -373,7 +373,7 @@ cargo test --workspace
 cargo test --workspace -- --nocapture
 
 # Run tests for specific package
-cargo test --package strom-backend
+cargo test --package strom
 cargo test --package strom-mcp-server
 cargo test --package strom-types
 ```
@@ -404,7 +404,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 
 # Lint specific packages
-cargo clippy --package strom-backend --all-targets --all-features -- -D warnings
+cargo clippy --package strom --all-targets --all-features -- -D warnings
 cargo clippy --package strom-frontend --target wasm32-unknown-unknown -- -D warnings
 ```
 
@@ -428,7 +428,7 @@ To test Strom manually:
 
 1. **Start the backend:**
    ```bash
-   cargo run --package strom-backend
+   cargo run --package strom
    ```
 
 2. **Access the UI:**
