@@ -375,7 +375,7 @@ cargo test --package strom-backend --lib blocks::registry
 
 # Test API
 cargo run -p strom-backend
-# Visit http://localhost:3000/swagger-ui
+# Visit http://localhost:8080/swagger-ui
 ```
 
 ## Example blocks.json

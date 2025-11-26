@@ -4,7 +4,7 @@
 //! the backend and frontend components.
 
 /// Default port for the Strom backend server.
-pub const DEFAULT_PORT: u16 = 3000;
+pub const DEFAULT_PORT: u16 = 8080;
 
 pub mod api;
 pub mod block;

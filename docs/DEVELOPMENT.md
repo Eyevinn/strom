@@ -70,19 +70,19 @@ Start the backend server:
 cargo run -p strom-backend
 ```
 
-The server will start on `http://localhost:3000` by default.
+The server will start on `http://localhost:8080` by default.
 
 **Configuration options:**
 ```bash
 # Via CLI arguments
-cargo run -p strom-backend -- --port 3000 --data-dir ./my-data
+cargo run -p strom-backend -- --port 8080 --data-dir ./my-data
 
 # Via environment variables
-STROM_PORT=3000 STROM_DATA_DIR=./my-data cargo run -p strom-backend
+STROM_PORT=8080 STROM_DATA_DIR=./my-data cargo run -p strom-backend
 ```
 
 **Available options:**
-- `--port` / `STROM_PORT` - Port to listen on (default: 3000)
+- `--port` / `STROM_PORT` - Port to listen on (default: 8080)
 - `--data-dir` / `STROM_DATA_DIR` - Data directory for storage files
 - `--flows-path` / `STROM_FLOWS_PATH` - Override flows file path
 - `--blocks-path` / `STROM_BLOCKS_PATH` - Override blocks file path
@@ -105,7 +105,7 @@ trunk serve
 
 This will:
 - Build the frontend for WASM
-- Start a dev server on `http://localhost:8080`
+- Start a dev server on `http://localhost:8095`
 - Auto-reload on file changes
 
 **Option 2: Build for production**
@@ -131,32 +131,32 @@ cd frontend
 trunk serve
 ```
 
-Then open `http://localhost:8080` in your browser. The frontend will connect to the backend API at `http://localhost:3000`.
+Then open `http://localhost:8095` in your browser. The frontend will connect to the backend API at `http://localhost:8080`.
 
 ## Testing the API
 
 ### Health check
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:8080/health
 # Expected: OK
 ```
 
 ### List flows
 ```bash
-curl http://localhost:3000/api/flows
+curl http://localhost:8080/api/flows
 # Expected: {"flows":[]}
 ```
 
 ### Create a flow
 ```bash
-curl -X POST http://localhost:3000/api/flows \
+curl -X POST http://localhost:8080/api/flows \
   -H "Content-Type: application/json" \
   -d '{"name":"Test Flow","auto_start":false}'
 ```
 
 ### Get a specific flow
 ```bash
-curl http://localhost:3000/api/flows/<flow-id>
+curl http://localhost:8080/api/flows/<flow-id>
 ```
 
 ## Common Tasks
@@ -218,9 +218,9 @@ rustup target add wasm32-unknown-unknown
 ### Port already in use
 Change the backend port:
 ```bash
-cargo run -p strom-backend -- --port 3001
+cargo run -p strom-backend -- --port 8081
 # or
-STROM_PORT=3001 cargo run -p strom-backend
+STROM_PORT=8081 cargo run -p strom-backend
 ```
 
 Then update the frontend API URL if needed.
