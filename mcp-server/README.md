@@ -38,7 +38,7 @@ The MCP server provides the following tools:
 ### Prerequisites
 
 1. **Rust 1.75+** with cargo
-2. **Strom backend server** running (default: http://localhost:3000)
+2. **Strom backend server** running (default: http://localhost:8080)
 3. **Claude Desktop** or another MCP-compatible client
 
 ### Build
@@ -54,7 +54,7 @@ cargo build --release -p strom-mcp-server
 
 The MCP server connects to the Strom API using the following environment variable:
 
-- `STROM_API_URL` - URL of the Strom backend (default: `http://localhost:3000`)
+- `STROM_API_URL` - URL of the Strom backend (default: `http://localhost:8080`)
 
 ## Usage
 
@@ -75,7 +75,7 @@ Add the following configuration:
     "strom": {
       "command": "/path/to/strom/target/release/strom-mcp-server",
       "env": {
-        "STROM_API_URL": "http://localhost:3000"
+        "STROM_API_URL": "http://localhost:8080"
       }
     }
   }
@@ -96,7 +96,7 @@ Or use cargo to run directly:
         "/path/to/strom/mcp-server/Cargo.toml"
       ],
       "env": {
-        "STROM_API_URL": "http://localhost:3000"
+        "STROM_API_URL": "http://localhost:8080"
       }
     }
   }
@@ -120,7 +120,7 @@ You can also run the MCP server directly for testing:
 
 ```bash
 # Start the MCP server
-STROM_API_URL=http://localhost:3000 cargo run -p strom-mcp-server
+STROM_API_URL=http://localhost:8080 cargo run -p strom-mcp-server
 
 # The server will communicate via stdin/stdout using the MCP protocol
 ```
@@ -168,7 +168,7 @@ STROM_API_URL=http://localhost:3000 cargo run -p strom-mcp-server
          │
 ┌────────▼────────┐
 │  Strom Backend  │
-│  (Port 3000)    │
+│  (Port 8080)    │
 └────────┬────────┘
          │
          │ GStreamer API
@@ -259,7 +259,7 @@ cargo build --release -p strom-mcp-server
 **Solutions**:
 - Ensure Strom backend is running: `cargo run -p strom-backend`
 - Check the `STROM_API_URL` environment variable
-- Verify the backend is accessible: `curl http://localhost:3000/health`
+- Verify the backend is accessible: `curl http://localhost:8080/health`
 
 ### Claude Desktop Not Detecting Server
 

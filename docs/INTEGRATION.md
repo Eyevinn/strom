@@ -49,8 +49,8 @@ async fn main() {
 }
 
 async fn list_flows_handler(_params: Value) -> Result<Value> {
-    // Call Strom API at http://localhost:3000/api/flows
-    let response = reqwest::get("http://localhost:3000/api/flows").await?;
+    // Call Strom API at http://localhost:8080/api/flows
+    let response = reqwest::get("http://localhost:8080/api/flows").await?;
     Ok(response.json().await?)
 }
 ```
@@ -237,8 +237,8 @@ pub struct Flow {
 ```
 
 **Access documentation:**
-- Swagger UI: `http://localhost:3000/swagger-ui`
-- OpenAPI JSON: `http://localhost:3000/api-docs/openapi.json`
+- Swagger UI: `http://localhost:8080/swagger-ui`
+- OpenAPI JSON: `http://localhost:8080/api-docs/openapi.json`
 
 #### Option 2: `aide`
 
@@ -280,8 +280,8 @@ Once OpenAPI is set up:
 
 **Current approach** (no tools needed):
 ```bash
-curl http://localhost:3000/api/flows
-curl -X POST http://localhost:3000/api/flows \
+curl http://localhost:8080/api/flows
+curl -X POST http://localhost:8080/api/flows \
   -H "Content-Type: application/json" \
   -d '{"name":"Test","auto_start":false}'
 ```
@@ -371,7 +371,7 @@ To implement OpenAPI right now:
 # Then update backend/Cargo.toml to include utoipa dependencies
 # Annotate handlers and types
 # Add SwaggerUi to router
-# Test at http://localhost:3000/swagger-ui
+# Test at http://localhost:8080/swagger-ui
 ```
 
 To implement MCP:

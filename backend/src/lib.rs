@@ -160,7 +160,7 @@ pub async fn create_app_with_state_and_auth(
         .layer(session_layer)
         .layer(
             CorsLayer::new()
-                .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
+                .allow_origin("http://localhost:8080".parse::<HeaderValue>().unwrap())
                 .allow_methods([
                     Method::GET,
                     Method::POST,
