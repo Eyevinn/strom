@@ -592,11 +592,28 @@ impl GraphEditor {
                 if let Some((from_id, from_pad)) = self.creating_link.take() {
                     if let Some((to_id, to_pad)) = &self.hovered_pad {
                         if from_id != *to_id {
-                            let link = Link {
-                                from: format!("{}:{}", from_id, from_pad),
-                                to: format!("{}:{}", to_id, to_pad),
-                            };
-                            self.links.push(link);
+                            // Determine which pad is output and which is input
+                            let from_is_output = self.is_output_pad(&from_id, &from_pad);
+                            let to_is_output = self.is_output_pad(to_id, to_pad);
+
+                            // Create link with correct direction (output -> input)
+                            // Only create link if one is output and one is input
+                            if from_is_output && !to_is_output {
+                                // Normal case: dragged from output to input
+                                let link = Link {
+                                    from: format!("{}:{}", from_id, from_pad),
+                                    to: format!("{}:{}", to_id, to_pad),
+                                };
+                                self.links.push(link);
+                            } else if !from_is_output && to_is_output {
+                                // Reversed: dragged from input to output, swap them
+                                let link = Link {
+                                    from: format!("{}:{}", to_id, to_pad),
+                                    to: format!("{}:{}", from_id, from_pad),
+                                };
+                                self.links.push(link);
+                            }
+                            // else: Invalid case (both are outputs or both are inputs), don't create link
                         }
                     }
                 }
@@ -628,9 +645,13 @@ impl GraphEditor {
 
             // Draw link being created (on top of everything)
             if let Some((from_id, from_pad)) = &self.creating_link {
+                // Determine if we're dragging from an input or output pad
+                let from_is_output = self.is_output_pad(from_id, from_pad);
+                let from_is_input = !from_is_output;
+
                 // Get the actual position of the source pad
                 let from_world_pos = self
-                    .get_pad_position(from_id, from_pad, false)
+                    .get_pad_position(from_id, from_pad, from_is_input)
                     .unwrap_or_else(|| pos2(100.0, 100.0));
                 let from_screen_pos = to_screen(from_world_pos);
 
@@ -1525,13 +1546,20 @@ impl GraphEditor {
                 let pad_response = ui.interact(
                     pad_rect,
                     ui.id().with((&element.id, &pad_to_render.name)),
-                    Sense::click().union(Sense::hover()),
+                    Sense::click_and_drag(),
                 );
 
                 // Select element and switch to Input Pads tab when clicking input pad
                 // (skip empty pads for selection)
-                if pad_response.clicked() && !pad_to_render.is_empty {
+                if pad_response.clicked() && !pad_response.dragged() && !pad_to_render.is_empty {
                     self.select_element_and_focus_pad(&element.id, &pad_to_render.name, true);
+                }
+
+                // Start creating link when dragging from input port
+                if pad_response.drag_started()
+                    || (pad_response.dragged() && self.creating_link.is_none())
+                {
+                    self.creating_link = Some((element.id.clone(), pad_to_render.name.clone()));
                 }
 
                 if pad_response.hovered() {
@@ -1620,11 +1648,18 @@ impl GraphEditor {
                 let input_response = ui.interact(
                     input_rect,
                     ui.id().with((&element.id, "sink")),
-                    Sense::click().union(Sense::hover()),
+                    Sense::click_and_drag(),
                 );
 
-                if input_response.clicked() {
+                if input_response.clicked() && !input_response.dragged() {
                     self.select_element_and_focus_pad(&element.id, "sink", true);
+                }
+
+                // Start creating link when dragging from input port
+                if input_response.drag_started()
+                    || (input_response.dragged() && self.creating_link.is_none())
+                {
+                    self.creating_link = Some((element.id.clone(), "sink".to_string()));
                 }
 
                 if input_response.hovered() {
@@ -1708,6 +1743,67 @@ impl GraphEditor {
         };
     }
 
+    /// Check if a pad is an output pad (src) or input pad (sink).
+    /// Returns true if it's an output pad, false if it's an input pad.
+    fn is_output_pad(&self, element_id: &str, pad_name: &str) -> bool {
+        // Try to find as element first
+        if let Some(element) = self.elements.iter().find(|e| e.id == element_id) {
+            let element_info = self.element_info_map.get(&element.element_type);
+
+            if let Some(info) = element_info {
+                // Check if pad is in src_pads
+                let (sink_pads, src_pads) = self.get_pads_to_render(element, Some(info));
+
+                // Check if it's in src_pads_to_render
+                if src_pads.iter().any(|p| p.name == pad_name) {
+                    return true;
+                }
+
+                // Check if it's in sink_pads_to_render
+                if sink_pads.iter().any(|p| p.name == pad_name) {
+                    return false;
+                }
+            }
+
+            // Fallback: check by naming convention
+            if pad_name == "src" {
+                return true;
+            }
+            if pad_name == "sink" {
+                return false;
+            }
+
+            // For elements without metadata, assume based on element type
+            if element.element_type.ends_with("src") {
+                return true; // Source elements have output pads
+            }
+            if element.element_type.ends_with("sink") {
+                return false; // Sink elements have input pads
+            }
+
+            // Default: assume it's an output if we can't determine
+            return true;
+        }
+
+        // Try to find as block
+        if let Some(block) = self.blocks.iter().find(|b| b.id == element_id) {
+            if let Some(def) = self.block_definition_map.get(&block.block_definition_id) {
+                // Check if it's in outputs
+                if def.external_pads.outputs.iter().any(|p| p.name == pad_name) {
+                    return true;
+                }
+
+                // Check if it's in inputs
+                if def.external_pads.inputs.iter().any(|p| p.name == pad_name) {
+                    return false;
+                }
+            }
+        }
+
+        // Default: assume output if we can't determine
+        true
+    }
+
     /// Handle pad interactions for blocks.
     fn handle_block_pad_interaction(
         &mut self,
@@ -1734,8 +1830,15 @@ impl GraphEditor {
                 let pad_response = ui.interact(
                     pad_rect,
                     ui.id().with((&block.id, &external_pad.name)),
-                    Sense::hover(),
+                    Sense::click_and_drag(),
                 );
+
+                // Start creating link when dragging from input port
+                if pad_response.drag_started()
+                    || (pad_response.dragged() && self.creating_link.is_none())
+                {
+                    self.creating_link = Some((block.id.clone(), external_pad.name.clone()));
+                }
 
                 if pad_response.hovered() {
                     self.hovered_pad = Some((block.id.clone(), external_pad.name.clone()));

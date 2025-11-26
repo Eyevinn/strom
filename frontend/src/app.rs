@@ -1535,11 +1535,11 @@ impl StromApp {
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.label("💡");
-                            ui.small("Click palette elements to add");
+                            ui.small("Search & click +Add to add elements/blocks");
                             ui.separator();
-                            ui.small("Drag orange→green to link");
+                            ui.small("Drag output→input ports to link");
                             ui.separator();
-                            ui.small("Drag to move | Pan background | Scroll=zoom | Del=delete");
+                            ui.small("Drag nodes to move | Pan canvas | Scroll=zoom | Del=delete");
                         });
                     });
 
