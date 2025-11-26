@@ -252,7 +252,7 @@ jobs:
             - **Docker Support** - Multi-platform container builds
 
             ### Frontend (strom-frontend)
-            - **WebAssembly UI** - Built with egui for web and native
+            - **WebAssembly UI** - Built with egui for the web
             - **Node-based Graph Editor** - Visual pipeline construction
             - **Element Palette** - Searchable catalog with filtering
             - **Property Inspector** - Configure element parameters
@@ -273,7 +273,7 @@ jobs:
             Available on Docker Hub: `eyevinntechnology/strom:${{ steps.version.outputs.version }}`
             - Multi-platform support (linux/amd64, linux/arm64)
             - Includes all GStreamer plugins
-            - Web UI accessible on port 3000
+            - Web UI accessible on port 8080
 
             ## Installation
 
@@ -282,7 +282,7 @@ jobs:
 
             ### Docker
             ```bash
-            docker run -p 3000:3000 eyevinntechnology/strom:${{ steps.version.outputs.version }}
+            docker run -p 8080:8080 eyevinntechnology/strom:${{ steps.version.outputs.version }}
             ```
 
             ### From Source
@@ -292,15 +292,15 @@ jobs:
 
             ## Quick Start
             ```bash
-            # Start the server
-            ./strom-v${{ steps.version.outputs.version }}-<platform>
+            # Start the server (headless mode)
+            ./strom-v${{ steps.version.outputs.version }}-<platform> --headless
 
             # Open browser
-            http://localhost:3000
+            http://localhost:8080
             ```
 
             ## Documentation
             - [README](https://github.com/Eyevinn/strom/blob/main/README.md)
             - [Development Guide](https://github.com/Eyevinn/strom/blob/main/docs/DEVELOPMENT.md)
             - [Docker Guide](https://github.com/Eyevinn/strom/blob/main/docs/DOCKER.md)
-            - API Documentation: http://localhost:3000/swagger-ui/
+            - API Documentation: http://localhost:8080/swagger-ui/
