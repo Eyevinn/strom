@@ -86,6 +86,7 @@ STROM_PORT=8080 STROM_DATA_DIR=./my-data cargo run -p strom
 - `--data-dir` / `STROM_DATA_DIR` - Data directory for storage files
 - `--flows-path` / `STROM_FLOWS_PATH` - Override flows file path
 - `--blocks-path` / `STROM_BLOCKS_PATH` - Override blocks file path
+- `--database-url` / `STROM_DATABASE_URL` - Database URL (e.g., postgresql://user:pass@localhost/strom)
 - `--headless` - Run without GUI (API only)
 
 **Default storage locations:**

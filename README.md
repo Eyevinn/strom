@@ -148,7 +148,7 @@ docker pull eyevinntechnology/strom:0.1.0  # Specific version
 │  - Flow manager                 │
 │  - GStreamer integration        │
 │  - Block registry (AES67, ...)  │
-│  - JSON persistence             │
+│  - Storage (JSON or PostgreSQL) │
 └─────────────────────────────────┘
 ```
 
@@ -187,7 +187,10 @@ Configure via command-line arguments or environment variables:
 # Server
 --port 8080                           # or STROM_PORT=8080
 
-# Storage paths (priority: CLI args > env vars > defaults)
+# Storage - PostgreSQL (recommended for production)
+--database-url postgresql://user:pass@localhost/strom  # or STROM_DATABASE_URL=...
+
+# Storage - JSON files (default)
 --data-dir /path/to/data              # or STROM_DATA_DIR=/path/to/data
 --flows-path /custom/flows.json       # or STROM_FLOWS_PATH=/custom/flows.json
 --blocks-path /custom/blocks.json     # or STROM_BLOCKS_PATH=/custom/blocks.json
@@ -195,6 +198,18 @@ Configure via command-line arguments or environment variables:
 # Logging
 RUST_LOG=info
 ```
+
+### Storage Options
+
+**PostgreSQL (Recommended for production):**
+- Set `STROM_DATABASE_URL` to use PostgreSQL for flow storage
+- Supports multiple isolated instances sharing one PostgreSQL server
+- Automatic schema migrations on startup
+- See [docs/POSTGRESQL.md](docs/POSTGRESQL.md) for setup guide
+
+**JSON Files (Default):**
+- Used when `STROM_DATABASE_URL` is not set
+- Simple file-based storage
 
 **Default storage locations:**
 - **Docker:** `./data/` (current directory)

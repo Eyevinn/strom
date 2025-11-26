@@ -69,6 +69,22 @@ impl AppState {
         Self::new(JsonFileStorage::new(flows_path), blocks_path)
     }
 
+    /// Create new application state with PostgreSQL storage.
+    ///
+    /// This is an async function that returns a Result because it needs to
+    /// connect to the database and run migrations.
+    pub async fn with_postgres_storage(
+        database_url: &str,
+        blocks_path: impl Into<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        use crate::storage::PostgresStorage;
+
+        let storage = PostgresStorage::new(database_url).await?;
+        storage.run_migrations().await?;
+
+        Ok(Self::new(storage, blocks_path))
+    }
+
     /// Load flows from storage into memory.
     pub async fn load_from_storage(&self) -> anyhow::Result<()> {
         info!("Loading flows from storage...");
