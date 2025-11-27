@@ -80,6 +80,7 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
+    gstreamer1.0-nice \
     gstreamer1.0-tools \
     graphviz \
     ca-certificates \
