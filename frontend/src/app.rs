@@ -70,6 +70,8 @@ pub struct StromApp {
     flow_pending_deletion: Option<(strom_types::FlowId, String)>,
     /// Flow pending copy (to be processed after render)
     flow_pending_copy: Option<Flow>,
+    /// Flow ID to navigate to after next refresh
+    pending_flow_navigation: Option<strom_types::FlowId>,
     /// WebSocket client for real-time updates
     ws_client: Option<WebSocketClient>,
     /// Connection state
@@ -199,6 +201,7 @@ impl StromApp {
             blocks_loaded: false,
             flow_pending_deletion: None,
             flow_pending_copy: None,
+            pending_flow_navigation: None,
             ws_client: None,
             connection_state: ConnectionState::Disconnected,
             channels,
@@ -265,6 +268,7 @@ impl StromApp {
             blocks_loaded: false,
             flow_pending_deletion: None,
             flow_pending_copy: None,
+            pending_flow_navigation: None,
             ws_client: None,
             connection_state: ConnectionState::Disconnected,
             channels,
@@ -883,10 +887,13 @@ impl StromApp {
                         "Flow created successfully: {} - WebSocket event will trigger refresh",
                         created_flow.name
                     );
+                    let flow_id = created_flow.id;
                     let _ = tx.send(AppMessage::FlowOperationSuccess(format!(
                         "Flow '{}' created",
                         created_flow.name
                     )));
+                    // Send flow ID so we can navigate to it after refresh
+                    let _ = tx.send(AppMessage::FlowCreated(flow_id));
                 }
                 Err(e) => {
                     tracing::error!("Failed to create flow: {}", e);
@@ -1021,6 +1028,8 @@ impl StromApp {
                     // Move to previous flow
                     let (new_idx, flow) = sorted_flows[pos - 1];
                     self.selected_flow_idx = Some(new_idx);
+                    // Clear graph selection when switching flows
+                    self.graph.deselect_all();
                     self.graph.load(flow.elements.clone(), flow.links.clone());
                     self.graph.load_blocks(flow.blocks.clone());
                 }
@@ -1029,6 +1038,8 @@ impl StromApp {
             // No selection, select first flow
             let (idx, flow) = sorted_flows[0];
             self.selected_flow_idx = Some(idx);
+            // Clear graph selection when switching flows
+            self.graph.deselect_all();
             self.graph.load(flow.elements.clone(), flow.links.clone());
             self.graph.load_blocks(flow.blocks.clone());
         }
@@ -1051,6 +1062,8 @@ impl StromApp {
                     // Move to next flow
                     let (new_idx, flow) = sorted_flows[pos + 1];
                     self.selected_flow_idx = Some(new_idx);
+                    // Clear graph selection when switching flows
+                    self.graph.deselect_all();
                     self.graph.load(flow.elements.clone(), flow.links.clone());
                     self.graph.load_blocks(flow.blocks.clone());
                 }
@@ -1059,6 +1072,8 @@ impl StromApp {
             // No selection, select first flow
             let (idx, flow) = sorted_flows[0];
             self.selected_flow_idx = Some(idx);
+            // Clear graph selection when switching flows
+            self.graph.deselect_all();
             self.graph.load(flow.elements.clone(), flow.links.clone());
             self.graph.load_blocks(flow.blocks.clone());
         }
@@ -1099,8 +1114,8 @@ impl StromApp {
             self.navigate_flow_list_down();
         }
 
-        // Delete key - Delete selected flow
-        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+        // Delete key - Delete selected flow (only if nothing is selected in graph editor)
+        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) && !self.graph.has_selection() {
             if let Some(flow) = self.current_flow() {
                 self.flow_pending_deletion = Some((flow.id, flow.name.clone()));
             }
@@ -1432,6 +1447,8 @@ impl StromApp {
                         if response.clicked() {
                             // Select the flow
                             self.selected_flow_idx = Some(idx);
+                            // Clear graph selection when switching flows
+                            self.graph.deselect_all();
                             // Load flow into graph editor
                             self.graph.load(flow.elements.clone(), flow.links.clone());
                             self.graph.load_blocks(flow.blocks.clone());
@@ -1487,6 +1504,8 @@ impl StromApp {
                         // Handle click on the text itself (in addition to the background)
                         if name_label.clicked() {
                             self.selected_flow_idx = Some(idx);
+                            // Clear graph selection when switching flows
+                            self.graph.deselect_all();
                             self.graph.load(flow.elements.clone(), flow.links.clone());
                             self.graph.load_blocks(flow.blocks.clone());
                         }
@@ -2357,6 +2376,7 @@ impl StromApp {
                             // Step 2: Update the created flow with the full content
                             let mut full_flow = flow.clone();
                             full_flow.id = created_flow.id;
+                            let flow_id = created_flow.id;
 
                             match api.update_flow(&full_flow).await {
                                 Ok(_) => {
@@ -2368,6 +2388,8 @@ impl StromApp {
                                         "Flow '{}' imported",
                                         flow_name
                                     )));
+                                    // Navigate to imported flow
+                                    let _ = tx.send(AppMessage::FlowCreated(flow_id));
                                 }
                                 Err(e) => {
                                     tracing::error!(
@@ -2491,6 +2513,7 @@ impl StromApp {
                     // Use the ID from the created flow
                     let mut full_flow = flow_copy.clone();
                     full_flow.id = created_flow.id;
+                    let flow_id = created_flow.id;
 
                     match api.update_flow(&full_flow).await {
                         Ok(_) => {
@@ -2502,6 +2525,8 @@ impl StromApp {
                                 "Flow '{}' created",
                                 flow_name
                             )));
+                            // Navigate to copied flow
+                            let _ = tx.send(AppMessage::FlowCreated(flow_id));
                         }
                         Err(e) => {
                             tracing::error!("Failed to update copied flow with content: {}", e);
@@ -2617,6 +2642,28 @@ impl eframe::App for StromApp {
                     self.flows = flows;
                     self.status = format!("Loaded {} flows", self.flows.len());
                     self.loading = false;
+
+                    // Check if there's a pending flow navigation
+                    if let Some(pending_flow_id) = self.pending_flow_navigation.take() {
+                        tracing::info!(
+                            "Processing pending navigation to flow ID: {}",
+                            pending_flow_id
+                        );
+                        if let Some(idx) = self.flows.iter().position(|f| f.id == pending_flow_id) {
+                            self.selected_flow_idx = Some(idx);
+                            let flow = &self.flows[idx];
+                            // Clear graph selection and load the new flow
+                            self.graph.deselect_all();
+                            self.graph.load(flow.elements.clone(), flow.links.clone());
+                            self.graph.load_blocks(flow.blocks.clone());
+                            tracing::info!("Navigated to flow: {}", flow.name);
+                        } else {
+                            tracing::warn!(
+                                "Pending flow ID {} not found in refreshed flow list",
+                                pending_flow_id
+                            );
+                        }
+                    }
                 }
                 AppMessage::FlowsError(error) => {
                     tracing::error!("Received FlowsError: {}", error);
@@ -2932,6 +2979,14 @@ impl eframe::App for StromApp {
                     tracing::error!("Flow operation failed: {}", message);
                     self.status = "Ready".to_string();
                     self.error = Some(message);
+                }
+                AppMessage::FlowCreated(flow_id) => {
+                    tracing::info!(
+                        "Flow created, will navigate to flow ID after next refresh: {}",
+                        flow_id
+                    );
+                    // Store the flow ID to navigate to after the next refresh
+                    self.pending_flow_navigation = Some(flow_id);
                 }
                 AppMessage::LatencyLoaded { flow_id, latency } => {
                     tracing::debug!(

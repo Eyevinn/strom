@@ -215,6 +215,11 @@ impl GraphEditor {
         self.selected_link = None;
     }
 
+    /// Check if anything is selected in the graph (element, block, or link).
+    pub fn has_selection(&self) -> bool {
+        self.selected.is_some() || self.selected_link.is_some()
+    }
+
     /// Set element metadata for rendering ports.
     pub fn set_element_info(&mut self, element_type: String, info: ElementInfo) {
         self.element_info_map.insert(element_type, info);

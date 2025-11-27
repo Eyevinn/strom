@@ -76,6 +76,9 @@ pub enum AppMessage {
     /// Flow operation failed
     FlowOperationError(String),
 
+    /// Flow created successfully (includes flow ID to navigate to)
+    FlowCreated(strom_types::FlowId),
+
     /// Latency loaded for a flow
     LatencyLoaded {
         flow_id: String,
