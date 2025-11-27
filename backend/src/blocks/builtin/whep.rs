@@ -168,16 +168,6 @@ impl BlockBuilder for WHEPInputBuilder {
         whepclientsrc.connect_pad_added(move |src, pad| {
             let pad_name = pad.name();
 
-            // Skip ghost pads - these are pads we created ourselves from unlinked webrtcbin pads
-            // We handle those via setup_stream_with_caps_detection_via_ghostpad
-            if pad_name.starts_with("ghost_") {
-                info!(
-                    "WHEP: Skipping ghost pad {} in whepclientsrc pad-added (handled separately)",
-                    pad_name
-                );
-                return;
-            }
-
             info!(
                 "WHEP: New pad added on whepclientsrc: {} - waiting for caps to determine media type",
                 pad_name
@@ -203,8 +193,6 @@ impl BlockBuilder for WHEPInputBuilder {
         // whepclientsrc is a GstBin - we need to find the webrtcbin inside and listen to its pad-added
         if let Ok(bin) = whepclientsrc.clone().downcast::<gst::Bin>() {
             let liveadder_weak2 = liveadder.downgrade();
-            let stream_counter_clone2 = Arc::clone(&stream_counter);
-            let instance_id_owned2 = instance_id.to_string();
             let whepclientsrc_weak = whepclientsrc.downgrade();
 
             // Use deep-element-added to catch webrtcbin when it's created
@@ -218,8 +206,6 @@ impl BlockBuilder for WHEPInputBuilder {
                     info!("WHEP: Found webrtcbin: {}", element_name);
 
                     let liveadder_weak3 = liveadder_weak2.clone();
-                    let stream_counter_clone3 = Arc::clone(&stream_counter_clone2);
-                    let instance_id_owned3 = instance_id_owned2.clone();
                     let whepclientsrc_weak2 = whepclientsrc_weak.clone();
 
                     // Connect to webrtcbin's pad-added signal
@@ -261,7 +247,9 @@ impl BlockBuilder for WHEPInputBuilder {
                             }
                         };
 
-                        let pipeline = match get_pipeline_from_element(&whepclientsrc) {
+                        // We don't need the pipeline here anymore since the whepclientsrc pad-added
+                        // callback will handle the stream setup, but keep the check to detect errors early
+                        let _pipeline = match get_pipeline_from_element(&whepclientsrc) {
                             Ok(p) => p,
                             Err(e) => {
                                 error!("WHEP: Failed to get pipeline: {}", e);
@@ -269,49 +257,90 @@ impl BlockBuilder for WHEPInputBuilder {
                             }
                         };
 
-                        if let Some(liveadder) = liveadder_weak3.upgrade() {
-                            let stream_num = stream_counter_clone3.fetch_add(1, Ordering::SeqCst);
+                        if let Some(_liveadder) = liveadder_weak3.upgrade() {
+                            // Don't increment stream counter here - the whepclientsrc pad-added callback will do it
                             info!(
-                                "WHEP: Setting up unlinked webrtcbin stream {} from pad {}",
-                                stream_num, pad_name
+                                "WHEP: Setting up unlinked webrtcbin pad {}",
+                                pad_name
                             );
 
-                            // Create a ghost pad on whepclientsrc to expose the webrtcbin pad
-                            // This is needed because we can't link across bin hierarchies
-                            let ghost_pad_name = format!("ghost_audio_{}", stream_num);
-                            let ghost_pad = gst::GhostPad::builder_with_target(pad)
-                                .expect("Failed to set ghost pad target")
-                                .name(&ghost_pad_name)
-                                .build();
+                            // We need to ghostpad through the bin hierarchy:
+                            // webrtcbin (pad) -> whep-client bin (ghost) -> whepclientsrc (ghost)
 
-                            // Get whepclientsrc as a bin and add the ghost pad
-                            if let Ok(whep_bin) = whepclientsrc.clone().downcast::<gst::Bin>() {
-                                // Add ghost pad to the bin - this exposes the internal pad to the outside
-                                whep_bin
-                                    .add_pad(&ghost_pad)
-                                    .expect("Failed to add ghost pad to bin");
-                                ghost_pad
-                                    .set_active(true)
-                                    .expect("Failed to activate ghost pad");
+                            // Step 1: Find the whep-client bin (parent of webrtcbin)
+                            let webrtcbin = match pad.parent_element() {
+                                Some(e) => e,
+                                None => {
+                                    error!("WHEP: Could not get parent element of pad {}", pad_name);
+                                    return;
+                                }
+                            };
+
+                            let whep_client_bin = match webrtcbin.parent() {
+                                Some(p) => p,
+                                None => {
+                                    error!("WHEP: Could not get parent of webrtcbin");
+                                    return;
+                                }
+                            };
+
+                            let whep_client_bin = match whep_client_bin.downcast::<gst::Bin>() {
+                                Ok(b) => b,
+                                Err(_) => {
+                                    error!("WHEP: Parent of webrtcbin is not a bin");
+                                    return;
+                                }
+                            };
+
+                            info!("WHEP: Found intermediate bin: {}", whep_client_bin.name());
+
+                            // Step 2: Create ghost pad on whep-client bin to expose webrtcbin pad
+                            let intermediate_ghost_name = format!("ghost_intermediate_{}", pad_name);
+                            let intermediate_ghost = match gst::GhostPad::builder_with_target(pad) {
+                                Ok(builder) => builder.name(&intermediate_ghost_name).build(),
+                                Err(e) => {
+                                    error!("WHEP: Failed to create intermediate ghost pad: {}", e);
+                                    return;
+                                }
+                            };
+
+                            if let Err(e) = whep_client_bin.add_pad(&intermediate_ghost) {
+                                error!("WHEP: Failed to add intermediate ghost pad to whep-client bin: {}", e);
+                                return;
+                            }
+
+                            if let Err(e) = intermediate_ghost.set_active(true) {
+                                error!("WHEP: Failed to activate intermediate ghost pad: {}", e);
+                                return;
+                            }
+
+                            info!("WHEP: Created intermediate ghost pad {} on whep-client bin", intermediate_ghost_name);
+
+                            // Step 3: Create ghost pad on whepclientsrc to expose the intermediate ghost pad
+                            let outer_ghost_name = format!("ghost_audio_{}", pad_name);
+                            let outer_ghost = match gst::GhostPad::builder_with_target(&intermediate_ghost) {
+                                Ok(builder) => builder.name(&outer_ghost_name).build(),
+                                Err(e) => {
+                                    error!("WHEP: Failed to create outer ghost pad: {}", e);
+                                    return;
+                                }
+                            };
+
+                            if let Ok(whepclientsrc_bin) = whepclientsrc.clone().downcast::<gst::Bin>() {
+                                if let Err(e) = whepclientsrc_bin.add_pad(&outer_ghost) {
+                                    error!("WHEP: Failed to add outer ghost pad to whepclientsrc: {}", e);
+                                    return;
+                                }
+
+                                if let Err(e) = outer_ghost.set_active(true) {
+                                    error!("WHEP: Failed to activate outer ghost pad: {}", e);
+                                    return;
+                                }
 
                                 info!(
-                                    "WHEP: Created ghost pad {} on whepclientsrc for stream {}",
-                                    ghost_pad_name, stream_num
+                                    "WHEP: Created outer ghost pad {} on whepclientsrc - will be handled by pad-added callback",
+                                    outer_ghost_name
                                 );
-
-                                // Now setup caps detection using the ghost pad (which is at pipeline level)
-                                if let Err(e) = setup_stream_with_caps_detection_via_ghostpad(
-                                    &ghost_pad.upcast(),
-                                    &pipeline,
-                                    &liveadder,
-                                    &instance_id_owned3,
-                                    stream_num,
-                                ) {
-                                    error!(
-                                        "Failed to setup stream from webrtcbin via ghost pad: {}",
-                                        e
-                                    );
-                                }
                             } else {
                                 error!("WHEP: whepclientsrc is not a bin, cannot add ghost pad");
                             }
@@ -484,134 +513,6 @@ fn setup_stream_with_caps_detection(
     });
 
     info!("WHEP: Caps probe installed on stream {}", stream_num);
-    Ok(())
-}
-
-/// Setup a stream via a ghost pad (for pads that don't get ghostpadded by whepclientsrc).
-/// The ghost pad has been created on whepclientsrc, so we can now link to elements
-/// in the main pipeline.
-fn setup_stream_with_caps_detection_via_ghostpad(
-    ghost_pad: &gst::Pad,
-    pipeline: &gst::Pipeline,
-    liveadder: &gst::Element,
-    instance_id: &str,
-    stream_num: usize,
-) -> Result<(), String> {
-    // Create weak references for the probe callback
-    let pipeline_weak = pipeline.downgrade();
-    let liveadder_weak = liveadder.downgrade();
-    let instance_id_owned = instance_id.to_string();
-
-    // Flag to ensure we only handle this once
-    let handled = Arc::new(AtomicBool::new(false));
-    let handled_clone = Arc::clone(&handled);
-
-    // Add a probe to detect caps events
-    ghost_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
-        // Only handle once
-        if handled_clone.load(Ordering::SeqCst) {
-            return gst::PadProbeReturn::Pass;
-        }
-
-        if let Some(gst::PadProbeData::Event(ref event)) = info.data {
-            if event.type_() == gst::EventType::Caps {
-                // Get the caps from the event by viewing it as a Caps event
-                if let gst::EventView::Caps(c) = event.view() {
-                    let caps = c.caps();
-                    if let Some(structure) = caps.structure(0) {
-                        let caps_name = structure.name();
-                        info!(
-                            "WHEP: Ghost pad stream {} detected caps: {}",
-                            stream_num, caps_name
-                        );
-
-                        // Determine media type - for RTP, look at the "media" field
-                        let is_audio = if caps_name == "application/x-rtp" {
-                            // RTP caps - check the "media" field
-                            let media_field = structure.get::<&str>("media").ok().unwrap_or("");
-                            let encoding = structure
-                                .get::<&str>("encoding-name")
-                                .ok()
-                                .unwrap_or("unknown");
-                            info!(
-                                "WHEP: Ghost pad stream {} RTP media={}, encoding={}",
-                                stream_num, media_field, encoding
-                            );
-                            media_field == "audio"
-                        } else {
-                            caps_name.starts_with("audio/")
-                        };
-
-                        let is_video = if caps_name == "application/x-rtp" {
-                            let media_field = structure.get::<&str>("media").ok().unwrap_or("");
-                            media_field == "video"
-                        } else {
-                            caps_name.starts_with("video/")
-                        };
-
-                        // Mark as handled
-                        handled_clone.store(true, Ordering::SeqCst);
-
-                        // Get pipeline and liveadder
-                        let pipeline = match pipeline_weak.upgrade() {
-                            Some(p) => p,
-                            None => {
-                                error!("WHEP: Pipeline no longer exists (ghost pad stream)");
-                                return gst::PadProbeReturn::Remove;
-                            }
-                        };
-
-                        if is_audio {
-                            // Audio stream - use decodebin to decode, then route to liveadder
-                            info!(
-                                "WHEP: Ghost pad stream {} is audio, setting up decode chain",
-                                stream_num
-                            );
-                            if let Some(liveadder) = liveadder_weak.upgrade() {
-                                if let Err(e) = setup_audio_decode_chain(
-                                    pad,
-                                    &pipeline,
-                                    &liveadder,
-                                    &instance_id_owned,
-                                    stream_num,
-                                ) {
-                                    error!(
-                                        "WHEP: Failed to setup audio decode chain (ghost pad): {}",
-                                        e
-                                    );
-                                }
-                            }
-                        } else if is_video {
-                            // Video stream - use fakesink to discard (no decode)
-                            info!(
-                                "WHEP: Ghost pad stream {} is video, discarding via fakesink",
-                                stream_num
-                            );
-                            if let Err(e) =
-                                setup_video_discard(pad, &pipeline, &instance_id_owned, stream_num)
-                            {
-                                error!("WHEP: Failed to setup video discard (ghost pad): {}", e);
-                            }
-                        } else {
-                            warn!(
-                                "WHEP: Ghost pad stream {} has unknown media type: {}",
-                                stream_num, caps_name
-                            );
-                        }
-
-                        return gst::PadProbeReturn::Remove;
-                    }
-                }
-            }
-        }
-
-        gst::PadProbeReturn::Pass
-    });
-
-    info!(
-        "WHEP: Caps probe installed on ghost pad for stream {}",
-        stream_num
-    );
     Ok(())
 }
 
