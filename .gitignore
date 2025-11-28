@@ -21,7 +21,9 @@ package-lock.json
 
 # Runtime files
 flows.json
+blocks.json
 config.toml
+.strom.toml
 *.log
 
 # OS

@@ -57,6 +57,9 @@ tower-sessions = "0.14"
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive", "env"] }
 
+# Configuration management
+figment = { version = "0.10", features = ["toml", "env"] }
+
 # Cross-platform directory paths
 directories = "6.0"
 
@@ -81,3 +84,4 @@ chrono = "0.4"
 tempfile = "3.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+serial_test = "3.0"

@@ -55,8 +55,8 @@ struct Args {
     command: Option<Commands>,
 
     /// Port to listen on
-    #[arg(short, long, env = "STROM_PORT", default_value_t = strom_types::DEFAULT_PORT)]
-    port: u16,
+    #[arg(short, long, env = "STROM_PORT")]
+    port: Option<u16>,
 
     /// Data directory (contains flows.json and blocks.json)
     #[arg(long, env = "STROM_DATA_DIR")]
@@ -216,7 +216,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(feature = "gui")]
 fn run_with_gui(
-    port: u16,
+    port: Option<u16>,
     data_dir: Option<PathBuf>,
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
@@ -243,13 +243,15 @@ fn run_with_gui(
     };
 
     // Initialize and start server in runtime
-    let (server_started_tx, server_started_rx) = std::sync::mpsc::channel();
+    let (server_started_tx, server_started_rx) = std::sync::mpsc::channel::<u16>();
 
     runtime.spawn(async move {
-        // Load configuration from CLI args
-        let config = Config::new(port, data_dir, flows_path, blocks_path, database_url)
+        // Load configuration from CLI args, env vars, and config files
+        let config = Config::from_figment(port, data_dir, flows_path, blocks_path, database_url)
             .expect("Failed to resolve configuration");
         info!("Configuration loaded");
+
+        let actual_port = config.port;
 
         // Create application with persistent storage
         let state = if let Some(ref db_url) = config.database_url {
@@ -291,8 +293,8 @@ fn run_with_gui(
             }
         };
 
-        // Notify main thread that server is ready
-        server_started_tx.send(()).ok();
+        // Notify main thread that server is ready and send the actual port
+        server_started_tx.send(actual_port).ok();
 
         // Run HTTP server with graceful shutdown
         let shutdown_signal = async move {
@@ -317,8 +319,10 @@ fn run_with_gui(
             .expect("Server error");
     });
 
-    // Wait for server to start
-    server_started_rx.recv().ok();
+    // Wait for server to start and get the actual port
+    let actual_port = server_started_rx
+        .recv()
+        .expect("Failed to receive port from server");
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     info!("Launching native GUI on main thread...");
@@ -329,9 +333,9 @@ fn run_with_gui(
     // Run GUI on main thread (blocks until window closes)
     // If auth is enabled, pass the native GUI token for auto-authentication
     let gui_result = if let Some(token) = native_gui_token {
-        strom::gui::launch_gui_with_auth(port, shutdown_flag_gui, token)
+        strom::gui::launch_gui_with_auth(actual_port, shutdown_flag_gui, token)
     } else {
-        strom::gui::launch_gui_with_shutdown(port, shutdown_flag_gui)
+        strom::gui::launch_gui_with_shutdown(actual_port, shutdown_flag_gui)
     };
 
     if let Err(e) = gui_result {
@@ -343,14 +347,14 @@ fn run_with_gui(
 
 #[tokio::main]
 async fn run_headless(
-    port: u16,
+    port: Option<u16>,
     data_dir: Option<PathBuf>,
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
     database_url: Option<String>,
 ) -> anyhow::Result<()> {
-    // Load configuration from CLI args
-    let config = Config::new(port, data_dir, flows_path, blocks_path, database_url)?;
+    // Load configuration from CLI args, env vars, and config files
+    let config = Config::from_figment(port, data_dir, flows_path, blocks_path, database_url)?;
     info!("Configuration loaded");
 
     // Create application with persistent storage
