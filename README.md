@@ -181,19 +181,44 @@ See OpenAPI docs at `/swagger-ui` when server is running.
 
 ## Configuration
 
-Configure via command-line arguments or environment variables:
+Configure Strom using config files, command-line arguments, or environment variables.
+
+### Configuration Priority
+
+Settings are applied in this order (highest to lowest priority):
+1. Command-line arguments
+2. Environment variables
+3. Local config file (`.strom.toml` in current directory)
+4. User config file (`~/.config/strom/config.toml` on Linux)
+5. Default values
+
+### Config File
+
+Create a `.strom.toml` file in your project directory:
+
+```bash
+# Copy the example config
+cp .strom.toml.example .strom.toml
+
+# Edit with your settings
+nano .strom.toml
+```
+
+See [.strom.toml.example](.strom.toml.example) for all available options and documentation.
+
+### Command-Line & Environment Variables
 
 ```bash
 # Server
---port 8080                           # or STROM_PORT=8080
+--port 8080                           # or STROM_SERVER_PORT=8080
 
 # Storage - PostgreSQL (recommended for production)
---database-url postgresql://user:pass@localhost/strom  # or STROM_DATABASE_URL=...
+--database-url postgresql://user:pass@localhost/strom  # or STROM_STORAGE_DATABASE_URL=...
 
 # Storage - JSON files (default)
---data-dir /path/to/data              # or STROM_DATA_DIR=/path/to/data
---flows-path /custom/flows.json       # or STROM_FLOWS_PATH=/custom/flows.json
---blocks-path /custom/blocks.json     # or STROM_BLOCKS_PATH=/custom/blocks.json
+--data-dir /path/to/data              # or STROM_STORAGE_DATA_DIR=/path/to/data
+--flows-path /custom/flows.json       # or STROM_STORAGE_FLOWS_PATH=/custom/flows.json
+--blocks-path /custom/blocks.json     # or STROM_STORAGE_BLOCKS_PATH=/custom/blocks.json
 
 # Logging
 RUST_LOG=info

@@ -1,0 +1,52 @@
+# Strom Configuration File Example
+#
+# Copy this file to `.strom.toml` in your project directory and modify as needed.
+# The `.strom.toml` file is gitignored, so your local settings won't be committed.
+#
+# Configuration priority (highest to lowest):
+# 1. Command-line arguments (--port, --data-dir, etc.)
+# 2. Environment variables (STROM_PORT, STROM_DATA_DIR, etc.)
+# 3. Local config file (.strom.toml in current directory)
+# 4. User config file (~/.config/strom/config.toml on Linux)
+# 5. Default values
+
+[server]
+# Port for the web server
+# Default: 8080
+# CLI: --port <PORT>
+# Env: STROM_SERVER_PORT
+port = 8080
+
+[storage]
+# PostgreSQL database URL (recommended for production)
+# If set, PostgreSQL is used instead of JSON files
+# Format: postgresql://user:password@host/database_name
+# CLI: --database-url <URL>
+# Env: STROM_STORAGE_DATABASE_URL
+# database_url = "postgresql://user:pass@localhost/strom"
+
+# Data directory for JSON storage
+# When using JSON storage (no database_url), this directory will contain
+# flows.json and blocks.json files.
+#
+# Default locations:
+#   Linux:   ~/.local/share/strom/
+#   Windows: %APPDATA%\strom\
+#   macOS:   ~/Library/Application Support/strom/
+#   Docker:  ./data/
+#
+# CLI: --data-dir <PATH>
+# Env: STROM_STORAGE_DATA_DIR
+# data_dir = "./data"
+
+# Individual file paths (override data_dir)
+# These allow you to specify custom locations for individual files
+# instead of using the data_dir. Useful for development or custom setups.
+#
+# CLI: --flows-path <PATH>
+# Env: STROM_STORAGE_FLOWS_PATH
+# flows_path = "./custom/flows.json"
+#
+# CLI: --blocks-path <PATH>
+# Env: STROM_STORAGE_BLOCKS_PATH
+# blocks_path = "./custom/blocks.json"
