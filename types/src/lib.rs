@@ -13,6 +13,7 @@ pub mod events;
 pub mod flow;
 pub mod state;
 pub mod stats;
+pub mod system_monitor;
 
 // Re-export commonly used types
 pub use block::{
@@ -27,3 +28,4 @@ pub use stats::{
     BlockStats, BlockStatsResponse, FlowStats, FlowStatsResponse, RtpJitterbufferStats,
     RtpSessionStats, StatMetadata, StatValue, Statistic,
 };
+pub use system_monitor::{GpuStats, SystemStats};

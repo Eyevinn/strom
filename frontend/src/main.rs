@@ -14,6 +14,7 @@ mod meter;
 mod palette;
 mod properties;
 mod state;
+mod system_monitor;
 mod webrtc_stats;
 mod ws;
 

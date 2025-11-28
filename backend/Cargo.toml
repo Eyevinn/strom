@@ -6,8 +6,9 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = ["gui"]
+default = ["gui", "nvidia"]
 gui = ["dep:strom-frontend", "dep:eframe"]
+nvidia = ["dep:nvml-wrapper"]
 
 [dependencies]
 # Internal
@@ -72,6 +73,10 @@ mime_guess = "2.0"
 
 # Embed static assets
 rust-embed = "8.0"
+
+# System monitoring
+sysinfo = "0.33"
+nvml-wrapper = { version = "0.10", optional = true }
 
 # Optional GUI (native frontend)
 strom-frontend = { path = "../frontend", optional = true }

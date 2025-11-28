@@ -1,6 +1,7 @@
 //! Events for real-time updates across clients.
 
 use crate::element::PropertyValue;
+use crate::system_monitor::SystemStats;
 use crate::FlowId;
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,8 @@ pub enum StromEvent {
         /// Decay values in dB for each channel
         decay: Vec<f64>,
     },
+    /// System monitoring statistics (CPU and GPU)
+    SystemStats(SystemStats),
 }
 
 impl StromEvent {
@@ -159,6 +162,14 @@ impl StromEvent {
                     element_id,
                     flow_id,
                     rms.len()
+                )
+            }
+            StromEvent::SystemStats(stats) => {
+                format!(
+                    "System stats: CPU {:.1}%, Memory {:.1}%, {} GPU(s)",
+                    stats.cpu_usage,
+                    (stats.used_memory as f64 / stats.total_memory as f64) * 100.0,
+                    stats.gpu_stats.len()
                 )
             }
         }

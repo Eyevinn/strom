@@ -10,6 +10,7 @@ use crate::meter::MeterDataStore;
 use crate::palette::ElementPalette;
 use crate::properties::PropertyInspector;
 use crate::state::{AppMessage, AppStateChannels, ConnectionState};
+use crate::system_monitor::SystemMonitorStore;
 use crate::webrtc_stats::WebRtcStatsStore;
 use crate::ws::WebSocketClient;
 
@@ -103,6 +104,10 @@ pub struct StromApp {
     meter_data: MeterDataStore,
     /// WebRTC stats storage for all WebRTC connections
     webrtc_stats: WebRtcStatsStore,
+    /// System monitoring statistics
+    system_monitor: SystemMonitorStore,
+    /// Whether to show the detailed system monitor window
+    show_system_monitor: bool,
     /// Last time WebRTC stats were polled
     #[cfg(not(target_arch = "wasm32"))]
     last_webrtc_poll: std::time::Instant,
@@ -213,6 +218,8 @@ impl StromApp {
             properties_thread_priority_buffer: strom_types::flow::ThreadPriority::High,
             meter_data: MeterDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
+            system_monitor: SystemMonitorStore::new(),
+            show_system_monitor: false,
             theme_preference: ThemePreference::System,
             version_info: None,
             login_screen: LoginScreen::default(),
@@ -283,6 +290,8 @@ impl StromApp {
             auth_token,
             meter_data: MeterDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
+            system_monitor: SystemMonitorStore::new(),
+            show_system_monitor: false,
             last_webrtc_poll: std::time::Instant::now(),
             theme_preference: ThemePreference::System,
             version_info: None,
@@ -1384,6 +1393,24 @@ impl StromApp {
 
                     ui.separator();
 
+                    // System monitoring widget (height adjusts based on GPU availability)
+                    let has_gpu = self.system_monitor.latest()
+                        .map(|s| !s.gpu_stats.is_empty())
+                        .unwrap_or(false);
+                    let monitor_height = if has_gpu { 30.0 } else { 24.0 };
+
+                    let monitor_response = ui.add(
+                        crate::system_monitor::CompactSystemMonitor::new(&self.system_monitor)
+                            .width(180.0)
+                            .height(monitor_height),
+                    );
+                    if monitor_response.clicked() {
+                        self.show_system_monitor = !self.show_system_monitor;
+                    }
+                    monitor_response.on_hover_text("Click to show detailed system monitoring");
+
+                    ui.separator();
+
                     // Logout button (only show if auth is enabled and user is authenticated)
                     if let Some(ref status) = self.auth_status {
                         if status.auth_required && status.authenticated {
@@ -2057,6 +2084,23 @@ impl StromApp {
                         self.flow_pending_deletion = None;
                     }
                 });
+            });
+    }
+
+    /// Render the system monitor window.
+    fn render_system_monitor_window(&mut self, ctx: &Context) {
+        if !self.show_system_monitor {
+            return;
+        }
+
+        egui::Window::new("System Monitoring")
+            .collapsible(true)
+            .resizable(true)
+            .default_width(700.0)
+            .default_height(500.0)
+            .open(&mut self.show_system_monitor)
+            .show(ctx, |ui| {
+                crate::system_monitor::DetailedSystemMonitor::new(&self.system_monitor).show(ui);
             });
     }
 
@@ -2786,6 +2830,9 @@ impl eframe::App for StromApp {
                             );
                             tracing::debug!("📊 Meter data stored for element {}", element_id);
                         }
+                        StromEvent::SystemStats(stats) => {
+                            self.system_monitor.update(stats);
+                        }
                         _ => {}
                     }
                 }
@@ -3101,6 +3148,7 @@ impl eframe::App for StromApp {
         self.render_status_bar(ctx);
         self.render_new_flow_dialog(ctx);
         self.render_delete_confirmation_dialog(ctx);
+        self.render_system_monitor_window(ctx);
         self.render_flow_properties_dialog(ctx);
         self.render_import_dialog(ctx);
 

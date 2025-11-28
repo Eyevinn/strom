@@ -4,6 +4,7 @@ use crate::blocks::BlockRegistry;
 use crate::events::EventBroadcaster;
 use crate::gst::{ElementDiscovery, PipelineError, PipelineManager};
 use crate::storage::{JsonFileStorage, Storage};
+use crate::system_monitor::SystemMonitor;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +34,8 @@ struct AppStateInner {
     events: EventBroadcaster,
     /// Block registry
     block_registry: BlockRegistry,
+    /// System monitor for CPU and GPU statistics
+    system_monitor: SystemMonitor,
 }
 
 impl AppState {
@@ -47,6 +50,7 @@ impl AppState {
                 pipelines: RwLock::new(HashMap::new()),
                 events: EventBroadcaster::default(),
                 block_registry: BlockRegistry::new(blocks_path),
+                system_monitor: SystemMonitor::new(),
             }),
         }
     }
@@ -685,6 +689,11 @@ impl AppState {
             pipeline.pipeline(),
             flow,
         ))
+    }
+
+    /// Get current system monitoring statistics (CPU and GPU).
+    pub async fn get_system_stats(&self) -> strom_types::SystemStats {
+        self.inner.system_monitor.collect_stats().await
     }
 }
 

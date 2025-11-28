@@ -10,7 +10,6 @@ use tokio::select;
 use tokio::time::interval;
 use tracing::{debug, error, info};
 
-use crate::events::EventBroadcaster;
 use crate::state::AppState;
 
 /// WebSocket endpoint for real-time bidirectional communication.
@@ -35,18 +34,21 @@ pub async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<AppStat
         "New WebSocket client connecting (total subscribers: {})",
         state.events().subscriber_count() + 1
     );
-    ws.on_upgrade(move |socket| handle_socket(socket, state.events().clone()))
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 /// Handle an individual WebSocket connection.
-async fn handle_socket(socket: WebSocket, broadcaster: EventBroadcaster) {
+async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
 
     // Subscribe to the event broadcaster
-    let mut rx = broadcaster.subscribe();
+    let mut rx = state.events().subscribe();
 
     // Ping interval for keep-alive
     let mut ping_interval = interval(Duration::from_secs(15));
+
+    // System stats interval (send every 1 second)
+    let mut stats_interval = interval(Duration::from_secs(1));
 
     info!("WebSocket client connected");
 
@@ -86,6 +88,16 @@ async fn handle_socket(socket: WebSocket, broadcaster: EventBroadcaster) {
                 debug!("Sending ping to client");
                 if let Err(e) = sender.send(Message::Ping(vec![].into())).await {
                     debug!("Failed to send ping, client likely disconnected: {}", e);
+                    break;
+                }
+            }
+
+            // System stats interval
+            _ = stats_interval.tick() => {
+                let stats = state.get_system_stats().await;
+                let event = StromEvent::SystemStats(stats);
+                if let Err(e) = send_event(&mut sender, event).await {
+                    debug!("Failed to send system stats, client likely disconnected: {}", e);
                     break;
                 }
             }

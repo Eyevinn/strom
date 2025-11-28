@@ -24,6 +24,7 @@ pub mod paths;
 pub mod state;
 pub mod stats;
 pub mod storage;
+pub mod system_monitor;
 pub mod version;
 
 use state::AppState;
