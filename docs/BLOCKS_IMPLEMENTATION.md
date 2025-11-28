@@ -348,12 +348,26 @@ pub async fn fetch_blocks() -> Result<Vec<BlockDefinition>, String> {
 
 ### Phase 7: Additional Built-in Blocks
 
-Add to `backend/src/blocks/builtin.rs`:
+Current built-in blocks in `backend/src/blocks/builtin/`:
 
+**Implemented:**
+- ✅ `aes67.rs` - AES67 Input/Output (RTP audio over IP)
+- ✅ `whip.rs` - WHIP Output (WebRTC ingestion)
+- ✅ `whep.rs` - WHEP Input (WebRTC playback)
+- ✅ `meter.rs` - Audio/Video Level Meter
+- ✅ `audioformat.rs` - Audio Format Conversion (sample rate, channels, format)
+- ✅ `videoformat.rs` - Video Format Conversion (resolution, framerate, pixel format)
+- ✅ `videoenc.rs` - **Video Encoder with Auto Hardware Selection** (H.264, H.265, AV1, VP9)
+  - See [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) for full documentation
+
+**Future blocks to implement:**
 ```rust
 fn rtmp_output_block() -> BlockDefinition { /* ... */ }
 fn hls_output_block() -> BlockDefinition { /* ... */ }
 fn ndi_input_block() -> BlockDefinition { /* ... */ }
+fn audioenc_block() -> BlockDefinition { /* ... */ }
+fn videodec_block() -> BlockDefinition { /* ... */ }
+fn audiodec_block() -> BlockDefinition { /* ... */ }
 // etc.
 ```
 

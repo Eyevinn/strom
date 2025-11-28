@@ -3,6 +3,7 @@
 pub mod aes67;
 pub mod audioformat;
 pub mod meter;
+pub mod videoenc;
 pub mod videoformat;
 pub mod whep;
 pub mod whip;
@@ -23,6 +24,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
 
     // Add Meter blocks
     blocks.extend(meter::get_blocks());
+
+    // Add VideoEncoder blocks
+    blocks.extend(videoenc::get_blocks());
 
     // Add VideoFormat blocks
     blocks.extend(videoformat::get_blocks());
@@ -48,6 +52,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.aes67_output" => Some(Arc::new(aes67::AES67OutputBuilder)),
         "builtin.audioformat" => Some(Arc::new(audioformat::AudioFormatBuilder)),
         "builtin.meter" => Some(Arc::new(meter::MeterBuilder)),
+        "builtin.videoenc" => Some(Arc::new(videoenc::VideoEncBuilder)),
         "builtin.videoformat" => Some(Arc::new(videoformat::VideoFormatBuilder)),
         "builtin.whip_output" => Some(Arc::new(whip::WHIPOutputBuilder)),
         "builtin.whep_input" => Some(Arc::new(whep::WHEPInputBuilder)),
