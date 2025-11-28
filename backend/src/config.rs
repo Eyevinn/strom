@@ -210,6 +210,8 @@ mod tests {
         // Clear any env vars that might have been set by other tests
         std::env::remove_var("STROM_SERVER_PORT");
         std::env::remove_var("STROM_PORT");
+        std::env::remove_var("STROM_STORAGE_DATABASE_URL");
+        std::env::remove_var("STROM_STORAGE_DATA_DIR");
 
         // Run in a temp directory to avoid picking up project .strom.toml
         let temp_dir = TempDir::new().unwrap();
@@ -218,7 +220,8 @@ mod tests {
 
         let config = Config::from_figment(None, None, None, None, None).unwrap();
 
-        std::env::set_current_dir(original_dir).unwrap();
+        // Restore (ignore errors)
+        let _ = std::env::set_current_dir(original_dir);
 
         assert_eq!(config.port, strom_types::DEFAULT_PORT);
         assert!(config.database_url.is_none());
@@ -248,6 +251,10 @@ mod tests {
     #[test]
     #[serial]
     fn test_from_figment_config_file() {
+        // Clear any env vars that might interfere
+        std::env::remove_var("STROM_SERVER_PORT");
+        std::env::remove_var("STROM_STORAGE_DATABASE_URL");
+
         let temp_dir = TempDir::new().unwrap();
         let config_file = temp_dir.path().join(".strom.toml");
 
@@ -267,8 +274,8 @@ database_url = "postgresql://localhost/test"
 
         let config = Config::from_figment(None, None, None, None, None).unwrap();
 
-        // Restore original directory
-        std::env::set_current_dir(original_dir).unwrap();
+        // Restore original directory (ignore errors if it fails)
+        let _ = std::env::set_current_dir(original_dir);
 
         assert_eq!(config.port, 7777);
         assert_eq!(
@@ -280,7 +287,8 @@ database_url = "postgresql://localhost/test"
     #[test]
     #[serial]
     fn test_from_figment_env_vars_override_config_file() {
-        // Save and clear any existing STROM_PORT env var
+        // Save and clear any existing env vars
+        let original_server_port = std::env::var("STROM_SERVER_PORT").ok();
         let original_port = std::env::var("STROM_PORT").ok();
 
         let temp_dir = TempDir::new().unwrap();
@@ -298,11 +306,19 @@ database_url = "postgresql://localhost/test"
 
         let config = Config::from_figment(None, None, None, None, None).unwrap();
 
-        // Restore (restore dir before temp_dir is dropped)
-        std::env::set_current_dir(&original_dir).unwrap();
-        std::env::remove_var("STROM_SERVER_PORT");
+        // Restore (restore dir before temp_dir is dropped, ignore errors)
+        let _ = std::env::set_current_dir(&original_dir);
+
+        // Restore env vars
+        if let Some(port) = original_server_port {
+            std::env::set_var("STROM_SERVER_PORT", port);
+        } else {
+            std::env::remove_var("STROM_SERVER_PORT");
+        }
         if let Some(port) = original_port {
             std::env::set_var("STROM_PORT", port);
+        } else {
+            std::env::remove_var("STROM_PORT");
         }
 
         // Env var should override config file
@@ -312,8 +328,9 @@ database_url = "postgresql://localhost/test"
     #[test]
     #[serial]
     fn test_from_figment_cli_overrides_env_and_config() {
-        // Save any existing env var
-        let original_port = std::env::var("STROM_SERVER_PORT").ok();
+        // Save any existing env vars
+        let original_server_port = std::env::var("STROM_SERVER_PORT").ok();
+        let original_port = std::env::var("STROM_PORT").ok();
 
         let temp_dir = TempDir::new().unwrap();
         let config_file = temp_dir.path().join(".strom.toml");
@@ -331,12 +348,19 @@ database_url = "postgresql://localhost/test"
         // Pass CLI arg 9999
         let config = Config::from_figment(Some(9999), None, None, None, None).unwrap();
 
-        // Restore (restore dir before temp_dir is dropped)
-        std::env::set_current_dir(&original_dir).unwrap();
-        if let Some(port) = original_port {
+        // Restore (restore dir before temp_dir is dropped, ignore errors)
+        let _ = std::env::set_current_dir(&original_dir);
+
+        // Restore env vars
+        if let Some(port) = original_server_port {
             std::env::set_var("STROM_SERVER_PORT", port);
         } else {
             std::env::remove_var("STROM_SERVER_PORT");
+        }
+        if let Some(port) = original_port {
+            std::env::set_var("STROM_PORT", port);
+        } else {
+            std::env::remove_var("STROM_PORT");
         }
 
         // CLI should have highest priority
@@ -344,7 +368,12 @@ database_url = "postgresql://localhost/test"
     }
 
     #[test]
+    #[serial]
     fn test_config_file_with_data_dir() {
+        // Clear any env vars that might interfere
+        std::env::remove_var("STROM_SERVER_PORT");
+        std::env::remove_var("STROM_STORAGE_DATA_DIR");
+
         let temp_dir = TempDir::new().unwrap();
         let config_file = temp_dir.path().join(".strom.toml");
         let data_dir = temp_dir.path().join("custom_data");
@@ -367,8 +396,8 @@ data_dir = "{}"
 
         let config = Config::from_figment(None, None, None, None, None).unwrap();
 
-        // Restore
-        std::env::set_current_dir(original_dir).unwrap();
+        // Restore (ignore errors)
+        let _ = std::env::set_current_dir(original_dir);
 
         assert!(config.flows_path.starts_with(&data_dir));
         assert!(config.blocks_path.starts_with(&data_dir));
