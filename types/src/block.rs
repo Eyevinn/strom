@@ -4,6 +4,18 @@ use crate::{MediaType, PropertyValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Enum value with optional label for display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct EnumValue {
+    /// The actual value stored/used
+    pub value: String,
+
+    /// Optional human-readable label for UI display
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
 /// Property type enumeration for exposed properties
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -15,7 +27,7 @@ pub enum PropertyType {
     UInt,
     Float,
     Bool,
-    Enum { values: Vec<String> },
+    Enum { values: Vec<EnumValue> },
 }
 
 /// Block definition - metadata for creating block instances.

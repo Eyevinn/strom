@@ -17,7 +17,7 @@ pub mod stats;
 // Re-export commonly used types
 pub use block::{
     BlockDefinition, BlockInstance, BlockListResponse, BlockResponse, CreateBlockRequest,
-    ExposedProperty, ExternalPad, ExternalPads, PropertyMapping, PropertyType,
+    EnumValue, ExposedProperty, ExternalPad, ExternalPads, PropertyMapping, PropertyType,
 };
 pub use element::{Element, ElementId, Link, MediaType, PropertyValue};
 pub use events::StromEvent;

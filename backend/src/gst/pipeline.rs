@@ -522,7 +522,7 @@ impl PipelineManager {
                 element.set_property_from_str(prop_name, v);
             }
             PropertyValue::Int(v) => {
-                // Check property type to determine if we need i32 or i64
+                // Check property type to determine if we need i32, i64, or unsigned types
                 if let Some(pspec) = element.find_property(prop_name) {
                     let type_name = pspec.value_type().name();
                     if type_name == "gint" || type_name == "glong" {
@@ -534,6 +534,43 @@ impl PipelineManager {
                                 element: element_id.to_string(),
                                 property: prop_name.to_string(),
                                 reason: format!("Value {} doesn't fit in i32", v),
+                            });
+                        }
+                    } else if type_name == "guint" || type_name == "gulong" {
+                        // Property expects u32, but we got a signed int
+                        // Convert if value is positive and fits in u32
+                        if *v >= 0 {
+                            if let Ok(v32) = u32::try_from(*v) {
+                                element.set_property(prop_name, v32);
+                            } else {
+                                return Err(PipelineError::InvalidProperty {
+                                    element: element_id.to_string(),
+                                    property: prop_name.to_string(),
+                                    reason: format!("Value {} doesn't fit in u32", v),
+                                });
+                            }
+                        } else {
+                            return Err(PipelineError::InvalidProperty {
+                                element: element_id.to_string(),
+                                property: prop_name.to_string(),
+                                reason: format!(
+                                    "Property expects unsigned integer, got negative value: {}",
+                                    v
+                                ),
+                            });
+                        }
+                    } else if type_name == "guint64" {
+                        // Property expects u64, convert if positive
+                        if *v >= 0 {
+                            element.set_property(prop_name, *v as u64);
+                        } else {
+                            return Err(PipelineError::InvalidProperty {
+                                element: element_id.to_string(),
+                                property: prop_name.to_string(),
+                                reason: format!(
+                                    "Property expects unsigned integer, got negative value: {}",
+                                    v
+                                ),
                             });
                         }
                     } else if type_name == "gint64" {

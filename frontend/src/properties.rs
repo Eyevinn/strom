@@ -3,7 +3,7 @@
 use crate::graph::PropertyTab;
 use egui::{Color32, ScrollArea, Ui};
 use strom_types::{
-    block::ExposedProperty,
+    block::{EnumValue, ExposedProperty},
     element::{ElementInfo, PropertyInfo, PropertyType},
     BlockDefinition, BlockInstance, Element, PropertyValue,
 };
@@ -593,15 +593,22 @@ impl PropertyInspector {
                 }
 
                 if let Some(mut value) = current_value {
-                    // Convert block::PropertyType to element::PropertyType
-                    let prop_type = Self::convert_block_prop_type(&exposed_prop.property_type);
-                    let changed = Self::show_property_editor(
-                        ui,
-                        &mut value,
-                        prop_type.as_ref(),
-                        default_value,
-                        false, // Block properties are always writable
-                    );
+                    // Check if this is an enum with labels
+                    let changed = if let strom_types::block::PropertyType::Enum { values } =
+                        &exposed_prop.property_type
+                    {
+                        Self::show_block_enum_editor(ui, &mut value, values)
+                    } else {
+                        // Convert block::PropertyType to element::PropertyType for other types
+                        let prop_type = Self::convert_block_prop_type(&exposed_prop.property_type);
+                        Self::show_property_editor(
+                            ui,
+                            &mut value,
+                            prop_type.as_ref(),
+                            default_value,
+                            false, // Block properties are always writable
+                        )
+                    };
 
                     if changed {
                         // Only save if different from default
@@ -875,10 +882,49 @@ impl PropertyInspector {
     ) -> Option<PropertyType> {
         match block_prop {
             strom_types::block::PropertyType::Enum { values } => Some(PropertyType::Enum {
-                values: values.clone(),
+                values: values.iter().map(|ev| ev.value.clone()).collect(),
             }),
             // Other types don't need conversion (no constraints)
             _ => None,
+        }
+    }
+
+    /// Show enum editor for block properties with labels.
+    fn show_block_enum_editor(
+        ui: &mut Ui,
+        value: &mut PropertyValue,
+        enum_values: &[EnumValue],
+    ) -> bool {
+        if let PropertyValue::String(s) = value {
+            let mut changed = false;
+
+            // Find the label for the current value
+            let current_label = enum_values
+                .iter()
+                .find(|ev| ev.value == *s)
+                .and_then(|ev| ev.label.as_ref())
+                .cloned()
+                .unwrap_or_else(|| s.clone());
+
+            egui::ComboBox::from_id_salt(ui.next_auto_id())
+                .selected_text(&current_label)
+                .show_ui(ui, |ui| {
+                    for enum_val in enum_values {
+                        // Display label if available, otherwise just the value
+                        let display_text = enum_val.label.as_deref().unwrap_or(&enum_val.value);
+
+                        if ui
+                            .selectable_label(*s == enum_val.value, display_text)
+                            .clicked()
+                        {
+                            *s = enum_val.value.clone();
+                            changed = true;
+                        }
+                    }
+                });
+            changed
+        } else {
+            false
         }
     }
 

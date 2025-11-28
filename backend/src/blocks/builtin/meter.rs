@@ -5,7 +5,7 @@ use crate::events::EventBroadcaster;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom_types::{block::*, PropertyValue, StromEvent, *};
+use strom_types::{block::*, EnumValue, PropertyValue, StromEvent, *};
 use tracing::{debug, warn};
 
 /// Audio Meter block builder.
@@ -178,11 +178,11 @@ fn meter_definition() -> BlockDefinition {
                 .to_string(),
             property_type: PropertyType::Enum {
                 values: vec![
-                    "10".to_string(),
-                    "20".to_string(),
-                    "50".to_string(),
-                    "100".to_string(),
-                    "200".to_string(),
+                    EnumValue { value: "10".to_string(), label: Some("10 ms".to_string()) },
+                    EnumValue { value: "20".to_string(), label: Some("20 ms".to_string()) },
+                    EnumValue { value: "50".to_string(), label: Some("50 ms".to_string()) },
+                    EnumValue { value: "100".to_string(), label: Some("100 ms".to_string()) },
+                    EnumValue { value: "200".to_string(), label: Some("200 ms".to_string()) },
                 ],
             },
             default_value: Some(PropertyValue::String("100".to_string())),
