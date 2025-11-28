@@ -17,7 +17,6 @@
 
 use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
-use gstreamer::glib;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{block::*, EnumValue, PropertyValue, *};
@@ -366,65 +365,6 @@ fn get_software_encoder_list(codec: Codec) -> Vec<&'static str> {
     }
 }
 
-/// Helper function to set enum property by name/nick.
-/// Returns true if successful, false otherwise.
-fn try_set_enum_property(element: &gst::Element, property_name: &str, value_nick: &str) -> bool {
-    if !element.has_property(property_name) {
-        return false;
-    }
-
-    // Try getting the property spec to find the enum class
-    let pspec = match element.find_property(property_name) {
-        Some(p) => p,
-        None => return false,
-    };
-
-    // Try to set the enum value using GLib's enum lookup
-    use glib::translate::*;
-    use glib::Value;
-
-    unsafe {
-        let value_type = pspec.value_type();
-
-        // Check if it's an enum type
-        if !value_type.is_a(glib::Type::ENUM) {
-            return false;
-        }
-
-        // Get the enum class
-        let enum_class = glib::gobject_ffi::g_type_class_ref(value_type.into_glib())
-            as *mut glib::gobject_ffi::GEnumClass;
-        if enum_class.is_null() {
-            return false;
-        }
-
-        // Look up the value by nick (string name)
-        let value_nick_c = match std::ffi::CString::new(value_nick) {
-            Ok(c) => c,
-            Err(_) => {
-                glib::gobject_ffi::g_type_class_unref(enum_class as *mut _);
-                return false;
-            }
-        };
-        let enum_value =
-            glib::gobject_ffi::g_enum_get_value_by_nick(enum_class, value_nick_c.as_ptr());
-
-        glib::gobject_ffi::g_type_class_unref(enum_class as *mut _);
-
-        if enum_value.is_null() {
-            return false;
-        }
-
-        // Create a GValue with the enum value
-        let mut gvalue = Value::from_type(value_type);
-        glib::gobject_ffi::g_value_set_enum(gvalue.to_glib_none_mut().0, (*enum_value).value);
-
-        // Set the property
-        element.set_property_from_value(property_name, &gvalue);
-        true
-    }
-}
-
 /// Set encoder properties based on the encoder type.
 fn set_encoder_properties(
     encoder: &gst::Element,
@@ -438,26 +378,21 @@ fn set_encoder_properties(
     if encoder_name.starts_with("x264") || encoder_name.starts_with("x265") {
         // x264/x265: bitrate in kbps
         encoder.set_property("bitrate", bitrate);
-        // x264/x265: speed-preset (enum property)
+        // x264/x265: speed-preset (enum property) - use set_property_from_str for enum
         let preset_nick = map_quality_preset_x264(quality_preset);
-        if !try_set_enum_property(encoder, "speed-preset", preset_nick) {
-            warn!(
-                "Could not set speed-preset to {} for {}",
-                preset_nick, encoder_name
-            );
-        }
+        encoder.set_property_from_str("speed-preset", preset_nick);
     } else if encoder_name.starts_with("nv") {
         // NVENC encoders: bitrate in kbps
         encoder.set_property("bitrate", bitrate);
 
-        // NVENC: preset (enum property)
-        let preset_nick = map_quality_preset_nvenc(quality_preset);
-        if !try_set_enum_property(encoder, "preset", preset_nick) {
-            warn!(
-                "Could not set preset to {} for {}",
-                preset_nick, encoder_name
-            );
-        }
+        // NVENC: preset (enum property) - different naming for nvautogpu* vs regular nv*
+        // nvautogpu* uses p1-p7 (newer), regular nv* uses default/hp/hq (older)
+        let preset_nick = if encoder_name.starts_with("nvautogpu") {
+            map_quality_preset_nvenc_new(quality_preset) // p1-p7 style
+        } else {
+            map_quality_preset_nvenc_old(quality_preset) // default/hp/hq style
+        };
+        encoder.set_property_from_str("preset", preset_nick);
 
         // Rate control property name differs between nvautogpu* and regular nv* encoders
         let rc_property = if encoder_name.starts_with("nvautogpu") {
@@ -472,12 +407,7 @@ fn set_encoder_properties(
             RateControl::VBR => "vbr",
             RateControl::CBR => "cbr",
         };
-        if !try_set_enum_property(encoder, rc_property, rc_nick) {
-            warn!(
-                "Could not set {} to {} for {}",
-                rc_property, rc_nick, encoder_name
-            );
-        }
+        encoder.set_property_from_str(rc_property, rc_nick);
     } else if encoder_name.starts_with("qsv") {
         // Intel QSV: bitrate in kbps
         encoder.set_property("bitrate", bitrate);
@@ -573,15 +503,25 @@ fn map_quality_preset_x264_enum(quality_preset: &str) -> i32 {
     }
 }
 
-/// Map quality preset to NVENC preset enum nick (string value for enum lookup).
-/// NVENC uses p1-p7 naming in newer versions.
-fn map_quality_preset_nvenc(quality_preset: &str) -> &str {
+/// Map quality preset to NVENC preset enum nick (p1-p7 style for nvautogpu* encoders).
+fn map_quality_preset_nvenc_new(quality_preset: &str) -> &str {
     match quality_preset {
         "ultrafast" => "p1", // fastest
         "fast" => "p3",      // fast
         "slow" => "p6",      // slower
         "veryslow" => "p7",  // slowest
         _ => "p4",           // medium (default)
+    }
+}
+
+/// Map quality preset to NVENC preset enum nick (old style for regular nv* encoders).
+fn map_quality_preset_nvenc_old(quality_preset: &str) -> &str {
+    match quality_preset {
+        "ultrafast" => "hp",            // high performance (fastest)
+        "fast" => "low-latency-hp",     // low latency high performance
+        "slow" => "hq",                 // high quality
+        "veryslow" => "low-latency-hq", // low latency high quality
+        _ => "default",                 // default (medium)
     }
 }
 
