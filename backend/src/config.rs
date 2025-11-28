@@ -6,8 +6,10 @@ use figment::{
     Figment,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use strom_types::element::PropertyValue;
 
 /// Configuration structure that matches the TOML file format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +18,10 @@ struct ConfigFile {
     server: ServerConfig,
     #[serde(default)]
     storage: StorageConfig,
+    /// Custom default property values for GStreamer elements.
+    /// Format: element_defaults.{element_type}.{property_name} = value
+    #[serde(default)]
+    element_defaults: HashMap<String, HashMap<String, PropertyValue>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -36,6 +42,28 @@ fn default_port() -> u16 {
     strom_types::DEFAULT_PORT
 }
 
+/// Get hardcoded default property values for GStreamer elements.
+///
+/// These are sensible defaults for Strom that override GStreamer's built-in defaults.
+/// Users can further override these via config files or per-flow properties.
+fn get_hardcoded_element_defaults() -> HashMap<String, HashMap<String, PropertyValue>> {
+    let mut defaults = HashMap::new();
+
+    // audiotestsrc: Set is-live=true for live streaming behavior
+    defaults.insert(
+        "audiotestsrc".to_string(),
+        HashMap::from([("is-live".to_string(), PropertyValue::Bool(true))]),
+    );
+
+    // videotestsrc: Set is-live=true for live streaming behavior
+    defaults.insert(
+        "videotestsrc".to_string(),
+        HashMap::from([("is-live".to_string(), PropertyValue::Bool(true))]),
+    );
+
+    defaults
+}
+
 /// Application configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -48,6 +76,9 @@ pub struct Config {
     /// PostgreSQL database URL (if set, PostgreSQL is used instead of JSON files)
     /// Format: postgresql://user:password@host/database_name
     pub database_url: Option<String>,
+    /// Default property values for GStreamer elements.
+    /// Combines hardcoded defaults with user config overrides.
+    pub element_defaults: HashMap<String, HashMap<String, PropertyValue>>,
 }
 
 impl Config {
@@ -78,6 +109,7 @@ impl Config {
                 port: strom_types::DEFAULT_PORT,
             },
             storage: StorageConfig::default(),
+            element_defaults: HashMap::new(),
         }));
 
         // 2. Merge user config file if it exists
@@ -129,11 +161,21 @@ impl Config {
         };
         let data_paths = DataPaths::resolve(path_config)?;
 
+        // Merge element defaults: hardcoded < config file
+        let mut element_defaults = get_hardcoded_element_defaults();
+        for (element_type, properties) in config_file.element_defaults {
+            element_defaults
+                .entry(element_type)
+                .or_default()
+                .extend(properties);
+        }
+
         Ok(Self {
             port: config_file.server.port,
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             database_url: config_file.storage.database_url,
+            element_defaults,
         })
     }
 
@@ -160,6 +202,7 @@ impl Config {
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             database_url,
+            element_defaults: get_hardcoded_element_defaults(),
         })
     }
 
@@ -192,6 +235,7 @@ impl Default for Config {
                 flows_path: PathBuf::from("flows.json"),
                 blocks_path: PathBuf::from("blocks.json"),
                 database_url: None,
+                element_defaults: get_hardcoded_element_defaults(),
             }
         })
     }

@@ -81,6 +81,8 @@ pub struct PipelineManager {
     block_message_connect_fns: Vec<crate::blocks::BusMessageConnectFn>,
     /// Thread priority state tracker (tracks whether priority was successfully set)
     thread_priority_state: Option<ThreadPriorityState>,
+    /// Default property values for GStreamer elements (element_type -> property -> value)
+    element_defaults: HashMap<String, HashMap<String, PropertyValue>>,
 }
 
 impl PipelineManager {
@@ -89,6 +91,7 @@ impl PipelineManager {
         flow: &Flow,
         events: EventBroadcaster,
         _block_registry: &BlockRegistry,
+        element_defaults: HashMap<String, HashMap<String, PropertyValue>>,
     ) -> Result<Self, PipelineError> {
         info!("Creating pipeline for flow: {} ({})", flow.name, flow.id);
         info!(
@@ -115,6 +118,7 @@ impl PipelineManager {
             block_message_handlers: Vec::new(),
             block_message_connect_fns: Vec::new(),
             thread_priority_state: None,
+            element_defaults,
         };
 
         // Expand blocks into GStreamer elements
@@ -438,9 +442,25 @@ impl PipelineManager {
             element_def.id
         );
 
-        // Set properties
+        // Apply element defaults first (if any)
+        if let Some(defaults) = self.element_defaults.get(&element_def.element_type) {
+            info!(
+                "add_element: Applying {} default properties for element type '{}'",
+                defaults.len(),
+                element_def.element_type
+            );
+            for (prop_name, prop_value) in defaults {
+                info!(
+                    "add_element: Setting default property {}.{} = {:?}",
+                    element_def.id, prop_name, prop_value
+                );
+                self.set_property(&element, &element_def.id, prop_name, prop_value)?;
+            }
+        }
+
+        // Set user-provided properties (these override defaults)
         info!(
-            "add_element: Setting {} properties for element {}",
+            "add_element: Setting {} user properties for element {}",
             element_def.properties.len(),
             element_def.id
         );
@@ -2838,7 +2858,7 @@ mod tests {
         let flow = create_test_flow();
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(&flow, events, &registry);
+        let manager = PipelineManager::new(&flow, events, &registry, HashMap::new());
         assert!(manager.is_ok());
     }
 
@@ -2848,7 +2868,7 @@ mod tests {
         let flow = create_test_flow();
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let mut manager = PipelineManager::new(&flow, events, &registry).unwrap();
+        let mut manager = PipelineManager::new(&flow, events, &registry, HashMap::new()).unwrap();
 
         // Start pipeline
         let state = manager.start();
@@ -2873,7 +2893,7 @@ mod tests {
 
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(&flow, events, &registry);
+        let manager = PipelineManager::new(&flow, events, &registry, HashMap::new());
         assert!(manager.is_err());
     }
 
@@ -2919,7 +2939,7 @@ mod tests {
 
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(&flow, events, &registry);
+        let manager = PipelineManager::new(&flow, events, &registry, HashMap::new());
         assert!(manager.is_ok());
 
         let manager = manager.unwrap();
@@ -2937,7 +2957,7 @@ mod tests {
 
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(&flow, events, &registry).unwrap();
+        let manager = PipelineManager::new(&flow, events, &registry, HashMap::new()).unwrap();
 
         // Should have only 2 original elements, no tee
         assert_eq!(manager.elements.len(), 2);

@@ -33,11 +33,17 @@ struct AppStateInner {
     events: EventBroadcaster,
     /// Block registry
     block_registry: BlockRegistry,
+    /// Default property values for GStreamer elements
+    element_defaults: HashMap<String, HashMap<String, PropertyValue>>,
 }
 
 impl AppState {
     /// Create new application state with the given storage backend.
-    pub fn new(storage: impl Storage + 'static, blocks_path: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        storage: impl Storage + 'static,
+        blocks_path: impl Into<PathBuf>,
+        element_defaults: HashMap<String, HashMap<String, PropertyValue>>,
+    ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
                 flows: RwLock::new(HashMap::new()),
@@ -47,6 +53,7 @@ impl AppState {
                 pipelines: RwLock::new(HashMap::new()),
                 events: EventBroadcaster::default(),
                 block_registry: BlockRegistry::new(blocks_path),
+                element_defaults,
             }),
         }
     }
@@ -65,8 +72,13 @@ impl AppState {
     pub fn with_json_storage(
         flows_path: impl AsRef<std::path::Path>,
         blocks_path: impl Into<PathBuf>,
+        element_defaults: HashMap<String, HashMap<String, PropertyValue>>,
     ) -> Self {
-        Self::new(JsonFileStorage::new(flows_path), blocks_path)
+        Self::new(
+            JsonFileStorage::new(flows_path),
+            blocks_path,
+            element_defaults,
+        )
     }
 
     /// Create new application state with PostgreSQL storage.
@@ -76,13 +88,14 @@ impl AppState {
     pub async fn with_postgres_storage(
         database_url: &str,
         blocks_path: impl Into<PathBuf>,
+        element_defaults: HashMap<String, HashMap<String, PropertyValue>>,
     ) -> anyhow::Result<Self> {
         use crate::storage::PostgresStorage;
 
         let storage = PostgresStorage::new(database_url).await?;
         storage.run_migrations().await?;
 
-        Ok(Self::new(storage, blocks_path))
+        Ok(Self::new(storage, blocks_path, element_defaults))
     }
 
     /// Load flows from storage into memory.
@@ -342,8 +355,12 @@ impl AppState {
 
         // Create pipeline with event broadcaster and block registry
         info!("Creating PipelineManager (this may block)...");
-        let mut manager =
-            PipelineManager::new(&flow, self.inner.events.clone(), &self.inner.block_registry)?;
+        let mut manager = PipelineManager::new(
+            &flow,
+            self.inner.events.clone(),
+            &self.inner.block_registry,
+            self.inner.element_defaults.clone(),
+        )?;
         info!("PipelineManager created successfully");
 
         // Start pipeline
@@ -690,6 +707,6 @@ impl AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::with_json_storage("flows.json", "blocks.json")
+        Self::with_json_storage("flows.json", "blocks.json", HashMap::new())
     }
 }

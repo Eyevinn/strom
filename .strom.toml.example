@@ -50,3 +50,25 @@ port = 8080
 # CLI: --blocks-path <PATH>
 # Env: STROM_STORAGE_BLOCKS_PATH
 # blocks_path = "./custom/blocks.json"
+
+# GStreamer Element Default Properties
+# Override default property values for specific GStreamer elements.
+# These defaults are applied to elements when they are created, but can be
+# overridden by per-flow properties.
+#
+# Strom has built-in defaults for common streaming elements:
+#   - audiotestsrc: is-live = true
+#   - videotestsrc: is-live = true
+#
+# You can add your own defaults or override the built-in ones:
+#
+# [element_defaults.rtpjitterbuffer]
+# latency = 200
+# do-lost = true
+#
+# [element_defaults.x264enc]
+# speed-preset = "ultrafast"
+# tune = "zerolatency"
+#
+# [element_defaults.compositor]
+# background = "black"
