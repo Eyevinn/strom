@@ -35,11 +35,10 @@ else
     echo ""
     echo "Error: ARM64 GStreamer libraries not found."
     echo ""
-    echo "To install minimal ARM64 GStreamer for pkg-config:"
-    echo "  ./scripts/cross-compile/setup-gstreamer-arm64.sh"
-    echo ""
-    echo "Or use the full traditional setup:"
+    echo "Run the ARM64 setup script first:"
     echo "  ./scripts/cross-compile/setup-arm64-cross.sh"
+    echo ""
+    echo "This installs ARM64 GStreamer libraries needed for pkg-config."
     echo ""
     exit 1
 fi

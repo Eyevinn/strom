@@ -4,11 +4,10 @@ This document describes the ARM64 cross-compilation setup for Strom, including l
 
 ## Overview
 
-Strom can be cross-compiled from x86_64 Linux to ARM64 targets (aarch64). Three build approaches are available:
+Strom can be cross-compiled from x86_64 Linux to ARM64 targets (aarch64). Two build approaches are available:
 
 1. **Zig-based build** (`cargo-zigbuild`) - **RECOMMENDED** - Uses Zig for cross-compilation with specific glibc version targeting
 2. **Traditional glibc build** (`aarch64-unknown-linux-gnu`) - Dynamic linking with glibc (requires complex multi-arch setup)
-3. **musl build** (`aarch64-unknown-linux-musl`) - Dynamic linking with musl libc (experimental)
 
 ## Quick Start
 
@@ -37,14 +36,11 @@ Strom can be cross-compiled from x86_64 Linux to ARM64 targets (aarch64). Three 
 
 # Build for ARM64 with glibc (uses build system's glibc version)
 ./scripts/cross-compile/build-arm64.sh
-
-# Build for ARM64 with musl (experimental)
-./scripts/cross-compile/build-arm64-musl.sh
 ```
 
-All approaches produce binaries in:
-- **glibc**: `target/aarch64-unknown-linux-gnu/release/strom`
-- **musl**: `target/aarch64-unknown-linux-musl/release/strom`
+Binaries are output to:
+- `target/aarch64-unknown-linux-gnu/release/strom`
+- `target/aarch64-unknown-linux-gnu/release/strom-mcp-server`
 
 ## Prerequisites
 
@@ -53,7 +49,7 @@ All approaches produce binaries in:
 - Trunk for frontend builds: `cargo install trunk`
 - sudo access for installing system packages
 
-## Architecture Decision: Zig vs Traditional vs musl
+## Architecture Decision: Zig vs Traditional
 
 ### Zig-based Build (Recommended)
 
@@ -89,30 +85,12 @@ All approaches produce binaries in:
 - Will fail with "version GLIBC_X.XX not found" on older systems (e.g., Raspberry Pi OS with 2.36)
 - **Complex setup** - requires multi-arch apt, potential Python conflicts
 
-### musl Build (Experimental)
-
-**Use when:**
-- Need maximum portability across different Linux distributions
-- Target has older glibc or uses musl (Alpine, embedded systems)
-- Willing to accept experimental/untested configuration
-
-**Technical approach:**
-- Uses `-C target-feature=-crt-static` to disable static linking
-- Links musl-based Rust binary against glibc GStreamer libraries
-- This is **unusual** but appears to work
-
-**Limitations:**
-- Non-standard configuration (musl binary + glibc libraries)
-- Less tested than standard glibc build
-- Still requires GStreamer runtime on target system
-
 ## When to Use Which Approach
 
 | Build Method | Best For | glibc Version Control | Setup Complexity |
 |--------------|----------|----------------------|------------------|
-| **Zig** | Most users, production builds | ✅ Full control | ⭐ Low |
+| **Zig** | Most users, production builds | ✅ Full control (target 2.17-2.39+) | ⭐ Low |
 | **Traditional glibc** | Already set up, matching glibc | ❌ Uses build system's version | ⭐⭐⭐ High |
-| **musl** | Maximum portability, Alpine | ⚠️ Bypasses glibc | ⭐⭐ Medium |
 
 ## Setup Process Explained
 
@@ -130,10 +108,9 @@ The Zig-based setup is much simpler than traditional cross-compilation:
    cargo install --locked cargo-zigbuild
    ```
 
-3. **Add Rust ARM64 targets**
+3. **Add Rust ARM64 target**
    ```bash
    rustup target add aarch64-unknown-linux-gnu
-   rustup target add aarch64-unknown-linux-musl
    ```
 
 4. **For GStreamer support (optional)**
@@ -248,11 +225,8 @@ WASM is architecture-independent, built once for all targets.
 ```bash
 export PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu
 export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
-export PKG_CONFIG_ALLOW_CROSS=1  # For musl builds
 
 cargo build --release --package strom --target aarch64-unknown-linux-gnu
-# or
-cargo build --release --package strom --target aarch64-unknown-linux-musl
 ```
 
 ## Lessons Learned
@@ -290,27 +264,7 @@ The following packages will be REMOVED:
 
 **Solution**: apt pinning to block ARM64 Python entirely. This forces apt to satisfy dependencies with existing amd64 Python.
 
-### 3. Musl Static Linking Limitations
-
-**Issue**: Musl targets default to `-static` linking, which tries to statically link everything:
-
-```
-cannot find -lgstreamer-1.0: No such file or directory
-```
-
-**Root cause**: GStreamer only provides `.so` (dynamic) libraries, not `.a` (static) libraries.
-
-**Solution**: Use `-C target-feature=-crt-static` to allow dynamic linking with musl.
-
-**Additional issue**: Missing math library symbols:
-
-```
-undefined reference to symbol 'log10@@GLIBC_2.17'
-```
-
-**Solution**: Add `-C link-arg=-lm` to explicitly link math library.
-
-### 4. glibc Version Compatibility
+### 3. glibc Version Compatibility
 
 **Issue**: Binaries compiled on Ubuntu 24.04 (glibc 2.39) won't run on older systems (e.g., Raspberry Pi OS 12 with glibc 2.36):
 
@@ -319,7 +273,7 @@ undefined reference to symbol 'log10@@GLIBC_2.17'
 ```
 
 **Solutions**:
-1. Use musl build (portable but experimental)
+1. **Use Zig** (recommended) - Target specific glibc version (e.g., 2.36 for Raspberry Pi)
 2. Use Docker with older base (Debian 12 Bookworm = glibc 2.36)
 3. Compile on system with matching glibc version
 
@@ -341,7 +295,10 @@ This will:
 
 ### "version GLIBC_X.XX not found" on target
 
-Your build system has newer glibc than target. Use musl build or Docker with older base.
+Your build system has newer glibc than target. Use Zig to target specific glibc version:
+```bash
+./scripts/cross-compile/build-zig-arm64.sh 2.36
+```
 
 ### "cannot find -lgstreamer-1.0"
 
@@ -369,7 +326,6 @@ This setup is designed for **Ubuntu 24.04**. For other distributions:
 - **Debian 12/13**: Use Debian repositories instead of Ubuntu
 - **Fedora/RHEL**: Use `dnf`, different package names, no multi-arch
 - **Arch Linux**: Use AUR for cross-compilers, different approach
-- **Alpine**: Already uses musl, simpler cross-compilation
 
 ## Alternative: Docker Cross-Compilation
 

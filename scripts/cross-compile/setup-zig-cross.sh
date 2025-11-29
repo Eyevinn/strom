@@ -60,8 +60,7 @@ fi
 # 3. Add Rust ARM64 target (still needed for rustc)
 echo "Adding Rust ARM64 target..."
 rustup target add aarch64-unknown-linux-gnu
-rustup target add aarch64-unknown-linux-musl
-echo "✓ Rust ARM64 targets added"
+echo "✓ Rust ARM64 target added"
 
 echo ""
 echo "✓ Zig and cargo-zigbuild installed!"

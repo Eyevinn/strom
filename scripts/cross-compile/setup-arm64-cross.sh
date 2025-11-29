@@ -71,21 +71,16 @@ sudo apt-get install -y --no-install-recommends \
     libgstreamer-plugins-base1.0-dev:arm64 \
     libgstreamer-plugins-bad1.0-dev:arm64
 
-# 8. Add ARM64 Rust targets (both glibc and musl)
-echo "Adding Rust ARM64 targets..."
+# 8. Add ARM64 Rust target
+echo "Adding Rust ARM64 target..."
 rustup target add aarch64-unknown-linux-gnu
-rustup target add aarch64-unknown-linux-musl
 
 # 9. Create .cargo/config.toml with linker configuration
 echo "Creating .cargo/config.toml..."
 mkdir -p .cargo
 cat > .cargo/config.toml << 'EOF'
-# ARM64 with glibc (dynamic linking)
+# ARM64 cross-compilation configuration
 [target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-
-# ARM64 with musl (static linking - portable)
-[target.aarch64-unknown-linux-musl]
 linker = "aarch64-linux-gnu-gcc"
 
 [env]
