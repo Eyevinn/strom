@@ -4,25 +4,45 @@ This document describes the ARM64 cross-compilation setup for Strom, including l
 
 ## Overview
 
-Strom can be cross-compiled from x86_64 Linux to ARM64 targets (aarch64). Two build approaches are available:
+Strom can be cross-compiled from x86_64 Linux to ARM64 targets (aarch64). Three build approaches are available:
 
-1. **glibc build** (`aarch64-unknown-linux-gnu`) - Dynamic linking with glibc
-2. **musl build** (`aarch64-unknown-linux-musl`) - Dynamic linking with musl libc (experimental)
+1. **Zig-based build** (`cargo-zigbuild`) - **RECOMMENDED** - Uses Zig for cross-compilation with specific glibc version targeting
+2. **Traditional glibc build** (`aarch64-unknown-linux-gnu`) - Dynamic linking with glibc (requires complex multi-arch setup)
+3. **musl build** (`aarch64-unknown-linux-musl`) - Dynamic linking with musl libc (experimental)
 
 ## Quick Start
+
+### Zig-based Cross-Compilation (Recommended)
+
+```bash
+# One-time setup (installs Zig and cargo-zigbuild)
+./scripts/cross-compile/setup-zig-cross.sh
+
+# If you need GStreamer support, also run:
+./scripts/cross-compile/setup-arm64-cross.sh
+
+# Build for ARM64 targeting specific glibc version
+./scripts/cross-compile/build-zig-arm64.sh 2.36  # For Raspberry Pi OS 12
+./scripts/cross-compile/build-zig-arm64.sh 2.31  # For older Debian/Ubuntu
+./scripts/cross-compile/build-zig-arm64.sh 2.17  # Maximum compatibility
+```
+
+**Key advantage**: You can target **any glibc version** without needing that version installed on your build system!
+
+### Traditional Cross-Compilation
 
 ```bash
 # One-time setup (installs cross-compiler and ARM64 libraries)
 ./scripts/cross-compile/setup-arm64-cross.sh
 
-# Build for ARM64 with glibc
+# Build for ARM64 with glibc (uses build system's glibc version)
 ./scripts/cross-compile/build-arm64.sh
 
 # Build for ARM64 with musl (experimental)
 ./scripts/cross-compile/build-arm64-musl.sh
 ```
 
-Binaries will be in:
+All approaches produce binaries in:
 - **glibc**: `target/aarch64-unknown-linux-gnu/release/strom`
 - **musl**: `target/aarch64-unknown-linux-musl/release/strom`
 
@@ -33,19 +53,41 @@ Binaries will be in:
 - Trunk for frontend builds: `cargo install trunk`
 - sudo access for installing system packages
 
-## Architecture Decision: glibc vs musl
+## Architecture Decision: Zig vs Traditional vs musl
 
-### glibc Build (Default)
+### Zig-based Build (Recommended)
 
 **Use when:**
-- Target system has matching or older glibc version
-- Need best compatibility with GStreamer ecosystem
-- Target is standard Linux distro (Debian, Ubuntu, Fedora, etc.)
+- You need to target a specific glibc version different from your build system
+- You want simpler setup without multi-arch apt complexity
+- You need maximum control over glibc compatibility
+
+**Advantages:**
+- **Target specific glibc versions** (e.g., build for glibc 2.36 on a system with 2.39)
+- **No complex multi-arch setup** - avoids Python package conflicts
+- **Simple installation** - just install Zig and cargo-zigbuild
+- **Better reproducibility** - explicit version targeting
+
+**How it works:**
+- Uses Zig's built-in cross-compilation toolchain
+- Specify glibc version via target suffix: `aarch64-unknown-linux-gnu.2.36`
+- Zig provides glibc headers/libs - no need to install them on build system
 
 **Limitations:**
-- Requires compatible glibc version on target
-- Ubuntu 24.04 has glibc 2.39, older systems may have 2.31-2.36
-- Will fail with "version GLIBC_X.XX not found" if mismatch
+- Still need ARM64 GStreamer libraries for pkg-config (can use multi-arch setup for this)
+- Slightly newer tool (but actively maintained and widely used)
+
+### Traditional glibc Build
+
+**Use when:**
+- You're already set up with multi-arch and it's working
+- Target system has matching or newer glibc version than build system
+- Need best compatibility with GStreamer ecosystem
+
+**Limitations:**
+- **Inherits build system's glibc version** - Ubuntu 24.04 uses glibc 2.39
+- Will fail with "version GLIBC_X.XX not found" on older systems (e.g., Raspberry Pi OS with 2.36)
+- **Complex setup** - requires multi-arch apt, potential Python conflicts
 
 ### musl Build (Experimental)
 
@@ -64,7 +106,43 @@ Binaries will be in:
 - Less tested than standard glibc build
 - Still requires GStreamer runtime on target system
 
+## When to Use Which Approach
+
+| Build Method | Best For | glibc Version Control | Setup Complexity |
+|--------------|----------|----------------------|------------------|
+| **Zig** | Most users, production builds | ✅ Full control | ⭐ Low |
+| **Traditional glibc** | Already set up, matching glibc | ❌ Uses build system's version | ⭐⭐⭐ High |
+| **musl** | Maximum portability, Alpine | ⚠️ Bypasses glibc | ⭐⭐ Medium |
+
 ## Setup Process Explained
+
+### Zig Setup (`setup-zig-cross.sh`)
+
+The Zig-based setup is much simpler than traditional cross-compilation:
+
+1. **Download and install Zig**
+   - Downloads Zig from ziglang.org
+   - Extracts to `~/.local/zig`
+   - Adds to PATH in `~/.bashrc`
+
+2. **Install cargo-zigbuild**
+   ```bash
+   cargo install --locked cargo-zigbuild
+   ```
+
+3. **Add Rust ARM64 targets**
+   ```bash
+   rustup target add aarch64-unknown-linux-gnu
+   rustup target add aarch64-unknown-linux-musl
+   ```
+
+4. **For GStreamer support (optional)**
+   - Run `setup-arm64-cross.sh` to get ARM64 GStreamer pkg-config files
+   - Or build in Docker with ARM64 GStreamer pre-installed
+
+That's it! No multi-arch apt configuration, no Python conflicts, no complex toolchain setup.
+
+### Traditional Setup (`setup-arm64-cross.sh`)
 
 The `setup-arm64-cross.sh` script performs the following:
 
