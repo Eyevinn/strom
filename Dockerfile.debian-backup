@@ -1,17 +1,23 @@
-# Dockerfile for Strom - Ubuntu-based multi-stage build with Zig cross-compilation
+# Dockerfile for Strom - Multi-stage build with separate frontend and backend builders
 
-# Stage 1: Frontend builder - Build WASM frontend on native platform
+# Stage 1: Chef base - Use lukemathwalker's cargo-chef image as base
+FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+WORKDIR /app
+
+# Stage 2: Planner - Analyze dependencies and create recipe
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 3: Frontend builder - Build WASM frontend separately
 # IMPORTANT: Always build on native platform - WASM output is platform-independent!
-FROM --platform=$BUILDPLATFORM rust:1-slim AS frontend-builder
+FROM --platform=$BUILDPLATFORM chef AS frontend-builder
 WORKDIR /app
 
 # Get native build platform architecture
 ARG BUILDARCH
 
-# Install curl for downloading trunk
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-
-# Install trunk for native platform and add WASM target
+# Install trunk for native platform and add WASM target (combined to avoid layer issues)
 RUN TRUNK_ARCH=$(case ${BUILDARCH} in \
       amd64) echo "x86_64-unknown-linux-gnu" ;; \
       arm64) echo "aarch64-unknown-linux-gnu" ;; \
@@ -27,8 +33,8 @@ COPY . .
 # Build frontend (WASM is platform-independent)
 RUN cd frontend && trunk build --release
 
-# Stage 2: Backend builder - Build backend with Zig cross-compilation support
-FROM rust:1-slim AS backend-builder
+# Stage 4: Backend builder - Build backend with embedded frontend
+FROM chef AS backend-builder
 WORKDIR /app
 
 # Get build and target platform info for cross-compilation detection
@@ -37,7 +43,7 @@ ARG TARGETPLATFORM
 ARG BUILDARCH
 ARG TARGETARCH
 
-# Install base dependencies
+# Install GStreamer development dependencies (NOT trunk/wasm - backend only)
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     pkg-config \
@@ -46,7 +52,6 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Cross-compilation setup: Install Zig and ARM64 libraries when cross-compiling
-# Uses Ubuntu ports.ubuntu.com for ARM64 packages (matching local setup)
 RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ]; then \
     echo "==> Cross-compiling from $BUILDPLATFORM to $TARGETPLATFORM - Setting up Zig"; \
     # Install Zig for cross-compilation
@@ -62,14 +67,14 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     cargo install --locked cargo-zigbuild && \
     # Add Rust ARM64 target
     rustup target add aarch64-unknown-linux-gnu && \
-    # Setup multi-arch for ARM64 (Ubuntu-style, matching setup-arm64-cross.sh)
+    # Setup multi-arch for ARM64 GStreamer libraries (needed for pkg-config)
     dpkg --add-architecture arm64 && \
-    # Add ARM64 package sources from Ubuntu ports
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
+    # Configure apt sources for multi-arch
+    cp /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.bak && \
+    sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/debian.sources && \
+    echo "Types: deb\nURIs: http://deb.debian.org/debian\nSuites: trixie trixie-updates\nComponents: main\nArchitectures: arm64" > /etc/apt/sources.list.d/arm64.sources && \
+    echo "Types: deb\nURIs: http://deb.debian.org/debian-security\nSuites: trixie-security\nComponents: main\nArchitectures: arm64" >> /etc/apt/sources.list.d/arm64.sources && \
     apt-get update && \
-    # Install ARM64 GStreamer development libraries
     apt-get install -y --no-install-recommends \
         libssl-dev:arm64 \
         libglib2.0-dev:arm64 \
@@ -85,6 +90,13 @@ else \
         libgstreamer-plugins-bad1.0-dev && \
     rm -rf /var/lib/apt/lists/*; \
 fi
+
+# Copy recipe and build dependencies (this layer is cached)
+COPY --from=planner /app/recipe.json recipe.json
+# Cook with the same feature flags we'll use for the actual build
+RUN cargo chef cook --release --recipe-path recipe.json \
+    --package strom --no-default-features \
+    --package strom-mcp-server
 
 # Copy entire project source
 COPY . .
@@ -117,8 +129,8 @@ else \
     cargo build --release --package strom-mcp-server; \
 fi
 
-# Stage 3: Runtime - Minimal runtime image with Ubuntu noble
-FROM ubuntu:noble-20241118.1 AS runtime
+# Stage 5: Runtime - Minimal runtime image with trixie for newer GStreamer
+FROM debian:trixie-slim AS runtime
 WORKDIR /app
 
 # Install only GStreamer runtime dependencies
