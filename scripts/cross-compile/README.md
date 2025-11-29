@@ -7,9 +7,9 @@ Scripts for cross-compiling Strom from x86_64 to ARM64 (aarch64) targets.
 **Why Zig?** Target specific glibc versions without complex multi-arch setup!
 
 ```bash
-# Setup (one-time)
-./setup-zig-cross.sh
-./setup-arm64-cross.sh  # Only for GStreamer libraries
+# Setup (one-time) - BOTH scripts required!
+./setup-zig-cross.sh         # Install Zig and cargo-zigbuild
+./setup-arm64-cross.sh       # Install ARM64 GStreamer libraries (required!)
 
 # Build for specific glibc version
 ./build-zig-arm64.sh 2.36  # Raspberry Pi OS 12
@@ -18,16 +18,18 @@ Scripts for cross-compiling Strom from x86_64 to ARM64 (aarch64) targets.
 ```
 
 **Advantages:**
-- ✅ Build on Ubuntu 24.04 (glibc 2.39) → target Raspberry Pi (glibc 2.36)
-- ✅ No Python package conflicts
-- ✅ Simpler setup
+- ✅ Target specific glibc versions (2.17 - 2.39+)
+- ✅ Build on Ubuntu 24.04 (glibc 2.39) → run on Raspberry Pi (glibc 2.36)
+- ✅ Simpler than traditional cross-compilation (Zig handles the toolchain)
+
+**Note:** While Zig handles cross-compilation, ARM64 GStreamer libraries are still needed for pkg-config during build.
 
 ## Scripts
 
 ### Zig-based Scripts
 
 #### `setup-zig-cross.sh`
-One-time setup for Zig-based cross-compilation.
+**Step 1 of 2** - Install Zig and cargo-zigbuild.
 
 **What it does:**
 - Downloads and installs Zig
@@ -37,7 +39,10 @@ One-time setup for Zig-based cross-compilation.
 **Usage:**
 ```bash
 ./setup-zig-cross.sh
+# Then run setup-arm64-cross.sh (required for GStreamer libraries)
 ```
+
+**Important:** This alone is not sufficient. You must also run `setup-arm64-cross.sh` to install ARM64 GStreamer libraries.
 
 #### `build-zig-arm64.sh [glibc_version]`
 Builds Strom for ARM64 targeting a specific glibc version.
@@ -116,10 +121,10 @@ For detailed information about the cross-compilation process, see:
 ### Zig-based (Recommended)
 
 ```bash
-# 1. Setup (one time)
+# 1. Setup (one time) - Run BOTH scripts!
 cd /path/to/strom
-./scripts/cross-compile/setup-zig-cross.sh
-./scripts/cross-compile/setup-arm64-cross.sh  # For GStreamer
+./scripts/cross-compile/setup-zig-cross.sh       # Install Zig
+./scripts/cross-compile/setup-arm64-cross.sh     # Install ARM64 libraries (required!)
 
 # 2. Build for specific glibc version
 ./scripts/cross-compile/build-zig-arm64.sh 2.36

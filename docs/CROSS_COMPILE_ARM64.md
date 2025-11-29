@@ -15,11 +15,9 @@ Strom can be cross-compiled from x86_64 Linux to ARM64 targets (aarch64). Three 
 ### Zig-based Cross-Compilation (Recommended)
 
 ```bash
-# One-time setup (installs Zig and cargo-zigbuild)
-./scripts/cross-compile/setup-zig-cross.sh
-
-# If you need GStreamer support, also run:
-./scripts/cross-compile/setup-arm64-cross.sh
+# One-time setup - Run BOTH scripts (in order):
+./scripts/cross-compile/setup-zig-cross.sh       # 1. Install Zig and cargo-zigbuild
+./scripts/cross-compile/setup-arm64-cross.sh     # 2. Install ARM64 GStreamer libraries (REQUIRED!)
 
 # Build for ARM64 targeting specific glibc version
 ./scripts/cross-compile/build-zig-arm64.sh 2.36  # For Raspberry Pi OS 12
@@ -28,6 +26,8 @@ Strom can be cross-compiled from x86_64 Linux to ARM64 targets (aarch64). Three 
 ```
 
 **Key advantage**: You can target **any glibc version** without needing that version installed on your build system!
+
+**Important:** Both setup scripts are required. Zig handles the cross-compilation toolchain, but ARM64 GStreamer libraries are still needed for pkg-config during the build process.
 
 ### Traditional Cross-Compilation
 

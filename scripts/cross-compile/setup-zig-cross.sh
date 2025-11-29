@@ -63,32 +63,21 @@ rustup target add aarch64-unknown-linux-gnu
 rustup target add aarch64-unknown-linux-musl
 echo "✓ Rust ARM64 targets added"
 
-# 4. Install minimal dependencies for GStreamer pkg-config
-# We only need pkg-config and the .pc files, not the full cross-compilation toolchain!
-echo "Installing pkg-config (for GStreamer detection)..."
-sudo apt-get update
-sudo apt-get install -y pkg-config
-
-# 5. For GStreamer: We need the ARM64 development packages for pkg-config
-#    BUT we use a simpler approach - just copy the .pc files we need
 echo ""
-echo "Note: For GStreamer cross-compilation, you have two options:"
+echo "✓ Zig and cargo-zigbuild installed!"
 echo ""
-echo "Option 1 (Simple): Build in Docker with ARM64 GStreamer installed"
-echo "  This is recommended for production builds"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "IMPORTANT: You must also install ARM64 GStreamer libraries!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "Option 2 (Local): Install ARM64 GStreamer packages via multi-arch"
-echo "  Run ./setup-arm64-cross.sh first to set up multi-arch apt"
-echo "  Then Zig will use the ARM64 libraries for linking"
+echo "Zig provides cross-compilation, but still needs ARM64 libraries"
+echo "for pkg-config to find GStreamer dependencies."
 echo ""
-
-echo "✓ Zig-based cross-compilation setup complete!"
+echo "Run this next:"
+echo "  ./scripts/cross-compile/setup-arm64-cross.sh"
 echo ""
-echo "To build for ARM64 with specific glibc version:"
-echo "  ./scripts/cross-compile/build-zig-arm64.sh [glibc_version]"
-echo ""
-echo "Examples:"
-echo "  ./scripts/cross-compile/build-zig-arm64.sh 2.36  # For Raspberry Pi OS 12"
-echo "  ./scripts/cross-compile/build-zig-arm64.sh 2.31  # For older Debian/Ubuntu"
+echo "Then you can build with:"
+echo "  ./scripts/cross-compile/build-zig-arm64.sh 2.36  # Raspberry Pi OS 12"
+echo "  ./scripts/cross-compile/build-zig-arm64.sh 2.31  # Older Debian/Ubuntu"
 echo "  ./scripts/cross-compile/build-zig-arm64.sh 2.17  # Maximum compatibility"
 echo ""

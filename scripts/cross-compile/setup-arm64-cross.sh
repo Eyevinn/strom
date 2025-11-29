@@ -94,9 +94,14 @@ PKG_CONFIG_PATH_aarch64_unknown_linux_gnu = "/usr/lib/aarch64-linux-gnu/pkgconfi
 EOF
 
 echo ""
-echo "✓ ARM64 cross-compilation setup complete!"
+echo "✓ ARM64 libraries and toolchain installed!"
 echo ""
-echo "To build for ARM64, run:"
-echo "  ./build-arm64.sh        (glibc - requires matching glibc version on target)"
-echo "  ./build-arm64-musl.sh   (musl - fully static, runs anywhere)"
+echo "You can now build for ARM64 using:"
+echo ""
+echo "Zig-based (Recommended - target specific glibc versions):"
+echo "  ./build-zig-arm64.sh 2.36   # For Raspberry Pi OS 12"
+echo "  ./build-zig-arm64.sh 2.17   # Maximum compatibility"
+echo ""
+echo "Traditional (uses build system's glibc version):"
+echo "  ./build-arm64.sh"
 echo ""
