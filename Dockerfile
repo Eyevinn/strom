@@ -80,6 +80,7 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
 else \
     echo "==> Native build for $TARGETPLATFORM - Installing native GStreamer libs"; \
     apt-get update && apt-get install -y \
+        libssl-dev \
         libgstreamer1.0-dev \
         libgstreamer-plugins-base1.0-dev \
         libgstreamer-plugins-bad1.0-dev && \
