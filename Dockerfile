@@ -34,7 +34,8 @@ COPY . .
 RUN cd frontend && trunk build --release
 
 # Stage 2: Backend builder - Build backend with Zig cross-compilation support
-FROM ubuntu:plucky AS backend-builder
+# IMPORTANT: Must run on BUILD platform for cross-compilation tools (Zig) to work
+FROM --platform=$BUILDPLATFORM ubuntu:plucky AS backend-builder
 WORKDIR /app
 
 # Get build and target platform info for cross-compilation detection
