@@ -11,11 +11,13 @@
 - **Real-time Control** - Start, stop, and monitor pipelines via REST API or WebSocket
 - **Element Discovery** - Browse and configure any installed GStreamer element
 - **Reusable Blocks** - Create custom components from element groups (e.g., AES67 receiver)
+- **gst-launch Import/Export** - Import existing `gst-launch-1.0` commands or export flows to gst-launch syntax
+- **System Monitoring** - Real-time CPU, memory, and GPU usage graphs in the topbar
 - **Authentication** - Secure with session login or API keys (optional)
 - **Auto-restart** - Pipelines survive server restarts
 - **Native or Web** - Run as desktop app or web service
 - **MCP Integration** - Control pipelines with AI assistants (Claude, etc.)
-- **CI/CD** - Automated testing, building, and releases for Linux, Windows, and macOS
+- **CI/CD** - Automated testing, building, and releases for Linux, Windows, macOS, and ARM64
 
 ### Advanced Capabilities
 
@@ -126,11 +128,11 @@ When a version tag is pushed (e.g., `v0.1.0`):
 
 ### Docker Hub
 
-Pre-built Docker images are available:
+Pre-built multi-architecture Docker images are available (amd64 and arm64):
 
 ```bash
 docker pull eyevinntechnology/strom:latest
-docker pull eyevinntechnology/strom:0.1.0  # Specific version
+docker pull eyevinntechnology/strom:0.2.5  # Specific version
 ```
 
 ## Architecture
@@ -178,6 +180,29 @@ docker pull eyevinntechnology/strom:0.1.0  # Specific version
 - `WS /api/ws` - WebSocket connection
 
 See OpenAPI docs at `/swagger-ui` when server is running.
+
+## gst-launch Import/Export
+
+Strom supports importing and exporting pipelines using standard `gst-launch-1.0` syntax, making it easy to convert existing command-line pipelines to visual flows.
+
+**Import:**
+- Paste any `gst-launch-1.0` command directly into the import dialog
+- Supports multiline pipelines with backslash continuations
+- Handles element references for complex pipelines (e.g., `name=mux ... mux.`)
+- Automatically strips command prefixes and flags (`-v`, `-e`, etc.)
+
+**Export:**
+- Convert visual flows back to `gst-launch-1.0` syntax
+- Useful for documentation, sharing, or running pipelines outside Strom
+
+**Example - Import a test pipeline:**
+```bash
+gst-launch-1.0 -v videotestsrc is-live=true ! x264enc ! mp4mux name=mux ! filesink location=test.mp4 audiotestsrc is-live=true ! lamemp3enc ! mux.
+```
+
+**API Endpoints:**
+- `POST /api/gst-launch/parse` - Parse gst-launch string to flow
+- `POST /api/gst-launch/export` - Export flow to gst-launch string
 
 ## Configuration
 
@@ -356,11 +381,15 @@ Create reusable components from element groups:
 
 **Built-in Blocks:**
 - **AES67 Receiver** - ST 2110-30 audio receiver with SDP generation
+- **Video Encoder** - H.264/H.265/AV1/VP9 encoding with automatic hardware acceleration (NVENC, VA-API, software fallback)
+- **Video Format** - Resolution, framerate, and pixel format conversion (8K to QVGA, cinema framerates, professional formats)
+- **Audio Format** - Sample rate, channel configuration, and PCM format conversion (supports multi-channel and surround sound with proper channel masks)
+- **Audio/Video Meter** - Level monitoring for audio and video streams
 - Custom blocks via JSON or API
 
 Example: Add AES67 block to receive network audio streams, automatically generates proper SDP with multicast addressing.
 
-See `docs/BLOCKS_IMPLEMENTATION.md` for details.
+See `docs/BLOCKS_IMPLEMENTATION.md` and `docs/VIDEO_ENCODER_BLOCK.md` for details.
 
 ## MCP Integration
 
