@@ -345,6 +345,47 @@ pub struct FlowStatsResponse {
 }
 
 // ============================================================================
+// gst-launch API Types
+// ============================================================================
+
+/// Request to parse a gst-launch-1.0 pipeline string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ParseGstLaunchRequest {
+    /// The gst-launch-1.0 pipeline string to parse
+    /// Example: "videotestsrc pattern=ball ! videoconvert ! autovideosink"
+    pub pipeline: String,
+}
+
+/// Response containing parsed pipeline elements and links.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ParseGstLaunchResponse {
+    /// Elements extracted from the parsed pipeline
+    pub elements: Vec<crate::element::Element>,
+    /// Links between elements
+    pub links: Vec<crate::element::Link>,
+}
+
+/// Request to convert flow elements/links to gst-launch-1.0 syntax.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ExportGstLaunchRequest {
+    /// Elements to export
+    pub elements: Vec<crate::element::Element>,
+    /// Links between elements
+    pub links: Vec<crate::element::Link>,
+}
+
+/// Response containing the gst-launch-1.0 pipeline string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ExportGstLaunchResponse {
+    /// The generated gst-launch-1.0 pipeline string
+    pub pipeline: String,
+}
+
+// ============================================================================
 // Error Response
 // ============================================================================
 

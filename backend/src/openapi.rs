@@ -3,7 +3,8 @@
 use crate::version::VersionInfo;
 use strom_types::api::{
     CreateFlowRequest, ElementInfoResponse, ElementListResponse, ElementPropertiesResponse,
-    ErrorResponse, FlowListResponse, FlowResponse, FlowStatsResponse, UpdateFlowPropertiesRequest,
+    ErrorResponse, ExportGstLaunchRequest, ExportGstLaunchResponse, FlowListResponse, FlowResponse,
+    FlowStatsResponse, ParseGstLaunchRequest, ParseGstLaunchResponse, UpdateFlowPropertiesRequest,
     UpdatePropertyRequest,
 };
 use strom_types::block::{
@@ -37,6 +38,8 @@ use utoipa::OpenApi;
         crate::api::blocks::update_block,
         crate::api::blocks::delete_block,
         crate::api::blocks::get_categories,
+        crate::api::gst_launch::parse_gst_launch,
+        crate::api::gst_launch::export_gst_launch,
         crate::api::version::get_version,
     ),
     components(
@@ -69,12 +72,17 @@ use utoipa::OpenApi;
             ExternalPads,
             ExternalPad,
             VersionInfo,
+            ParseGstLaunchRequest,
+            ParseGstLaunchResponse,
+            ExportGstLaunchRequest,
+            ExportGstLaunchResponse,
         )
     ),
     tags(
         (name = "flows", description = "GStreamer flow management endpoints"),
         (name = "elements", description = "GStreamer element discovery endpoints"),
         (name = "blocks", description = "Reusable block management endpoints"),
+        (name = "gst-launch", description = "gst-launch-1.0 import/export endpoints"),
         (name = "System", description = "System information endpoints")
     ),
     info(

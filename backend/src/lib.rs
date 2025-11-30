@@ -136,6 +136,12 @@ pub async fn create_app_with_state_and_auth(
         )
         .route("/version", get(api::version::get_version))
         .route("/ws", get(api::websocket::websocket_handler))
+        // gst-launch-1.0 import/export
+        .route("/gst-launch/parse", post(api::gst_launch::parse_gst_launch))
+        .route(
+            "/gst-launch/export",
+            post(api::gst_launch::export_gst_launch),
+        )
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 

@@ -94,6 +94,14 @@ pub enum AppMessage {
     },
     /// Statistics loading failed (flow not running)
     StatsNotAvailable(String),
+
+    /// gst-launch export completed successfully (pipeline string, flow_name)
+    GstLaunchExported {
+        pipeline: String,
+        flow_name: String,
+    },
+    /// gst-launch export failed
+    GstLaunchExportError(String),
 }
 
 /// WebSocket connection state.
