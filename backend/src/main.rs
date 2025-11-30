@@ -90,6 +90,10 @@ struct Args {
     #[cfg(feature = "gui")]
     #[arg(long)]
     wayland: bool,
+
+    /// Disable automatic restart of flows on startup (useful for development/testing)
+    #[arg(long)]
+    no_auto_restart: bool,
 }
 
 /// Detect if running under WSL (Windows Subsystem for Linux).
@@ -188,6 +192,7 @@ fn main() -> anyhow::Result<()> {
                 args.flows_path,
                 args.blocks_path,
                 args.database_url,
+                args.no_auto_restart,
             )
         } else {
             // Headless mode: Run HTTP server on main thread
@@ -197,6 +202,7 @@ fn main() -> anyhow::Result<()> {
                 args.flows_path,
                 args.blocks_path,
                 args.database_url,
+                args.no_auto_restart,
             )
         }
     }
@@ -210,6 +216,7 @@ fn main() -> anyhow::Result<()> {
             args.flows_path,
             args.blocks_path,
             args.database_url,
+            args.no_auto_restart,
         )
     }
 }
@@ -221,6 +228,7 @@ fn run_with_gui(
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
     database_url: Option<String>,
+    no_auto_restart: bool,
 ) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -270,8 +278,12 @@ fn run_with_gui(
 
         // GStreamer elements are discovered lazily on first /api/elements request
 
-        // Restart flows that were running before shutdown
-        restart_flows(&state).await;
+        // Restart flows that were running before shutdown (unless disabled)
+        if !no_auto_restart {
+            restart_flows(&state).await;
+        } else {
+            info!("Auto-restart disabled by --no-auto-restart flag");
+        }
 
         let app = create_app_with_state_and_auth(state.clone(), auth_config).await;
 
@@ -352,6 +364,7 @@ async fn run_headless(
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
     database_url: Option<String>,
+    no_auto_restart: bool,
 ) -> anyhow::Result<()> {
     // Load configuration from CLI args, env vars, and config files
     let config = Config::from_figment(port, data_dir, flows_path, blocks_path, database_url)?;
@@ -369,8 +382,12 @@ async fn run_headless(
 
     // GStreamer elements are discovered lazily on first /api/elements request
 
-    // Restart flows that were running before shutdown
-    restart_flows(&state).await;
+    // Restart flows that were running before shutdown (unless disabled)
+    if !no_auto_restart {
+        restart_flows(&state).await;
+    } else {
+        info!("Auto-restart disabled by --no-auto-restart flag");
+    }
 
     let app = create_app_with_state(state.clone()).await;
 
