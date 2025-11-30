@@ -93,7 +93,8 @@ pub async fn parse_gst_launch(
 
     // Extract links by iterating through pads
     let mut links = Vec::new();
-    let mut seen_links: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut seen_links: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
 
     // Re-iterate to find links (need to get elements from bin again)
     for gst_elem in bin.iterate_elements().into_iter().flatten() {
@@ -193,7 +194,10 @@ fn extract_non_default_properties(gst_elem: &gst::Element) -> HashMap<String, Pr
         let prop_name = pspec.name();
 
         // Skip read-only and construct-only properties
-        if !pspec.flags().contains(gstreamer::glib::ParamFlags::WRITABLE) {
+        if !pspec
+            .flags()
+            .contains(gstreamer::glib::ParamFlags::WRITABLE)
+        {
             continue;
         }
 
@@ -386,7 +390,8 @@ fn elements_to_gst_launch(elements: &[Element], links: &[Link]) -> String {
         .collect();
 
     // Build element lookup
-    let element_map: HashMap<&str, &Element> = elements.iter().map(|e| (e.id.as_str(), e)).collect();
+    let element_map: HashMap<&str, &Element> =
+        elements.iter().map(|e| (e.id.as_str(), e)).collect();
 
     // Track which elements we've already output
     let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -420,7 +425,10 @@ fn elements_to_gst_launch(elements: &[Element], links: &[Link]) -> String {
             visited.insert(current.id.as_str());
 
             // Output element
-            result.push_str(&format_element(current, needs_name.contains(current.id.as_str())));
+            result.push_str(&format_element(
+                current,
+                needs_name.contains(current.id.as_str()),
+            ));
 
             // Get outgoing connections
             let targets = outgoing.get(current.id.as_str());
@@ -603,7 +611,10 @@ mod tests {
     #[test]
     fn test_format_element_string_with_spaces() {
         let mut properties = HashMap::new();
-        properties.insert("location".to_string(), PropertyValue::String("my file.mp4".to_string()));
+        properties.insert(
+            "location".to_string(),
+            PropertyValue::String("my file.mp4".to_string()),
+        );
 
         let elem = Element {
             id: "sink".to_string(),
@@ -818,15 +829,23 @@ mod tests {
 
         // Integer
         let v = 42i32.to_value();
-        assert!(matches!(gvalue_to_property_value(&v), Some(PropertyValue::Int(42))));
+        assert!(matches!(
+            gvalue_to_property_value(&v),
+            Some(PropertyValue::Int(42))
+        ));
 
         // Boolean
         let v = true.to_value();
-        assert!(matches!(gvalue_to_property_value(&v), Some(PropertyValue::Bool(true))));
+        assert!(matches!(
+            gvalue_to_property_value(&v),
+            Some(PropertyValue::Bool(true))
+        ));
 
         // String
         let v = "test".to_string().to_value();
-        assert!(matches!(gvalue_to_property_value(&v), Some(PropertyValue::String(s)) if s == "test"));
+        assert!(
+            matches!(gvalue_to_property_value(&v), Some(PropertyValue::String(s)) if s == "test")
+        );
 
         // Float
         let v = 3.14f64.to_value();

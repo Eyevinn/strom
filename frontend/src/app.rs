@@ -140,7 +140,11 @@ pub struct StromApp {
     /// Error message for import dialog
     import_error: Option<String>,
     /// Pending gst-launch export (elements, links, flow_name) - for async processing
-    pending_gst_launch_export: Option<(Vec<strom_types::Element>, Vec<strom_types::element::Link>, String)>,
+    pending_gst_launch_export: Option<(
+        Vec<strom_types::Element>,
+        Vec<strom_types::element::Link>,
+        String,
+    )>,
     /// Cached latency info for flows (flow_id -> LatencyInfo)
     latency_cache: std::collections::HashMap<String, crate::api::LatencyInfo>,
     /// Last time latency was fetched (for periodic refresh)
@@ -2413,15 +2417,32 @@ impl StromApp {
                         ui.label("Paste flow JSON below:");
                     }
                     ImportFormat::GstLaunch => {
-                        ui.label("Paste gst-launch-1.0 pipeline below:");
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new(
-                                "Example: videotestsrc pattern=ball ! videoconvert ! autovideosink",
-                            )
-                            .small()
-                            .color(Color32::GRAY),
-                        );
+                        ui.label("Paste gst-launch-1.0 pipeline below, or click an example:");
+                        ui.add_space(5.0);
+
+                        // Example pipelines in a collapsible section
+                        egui::CollapsingHeader::new("Examples")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                let examples = [
+                                    ("Test Video", "videotestsrc pattern=ball ! videoconvert ! autovideosink"),
+                                    ("Test Audio", "audiotestsrc wave=sine freq=440 ! audioconvert ! autoaudiosink"),
+                                    ("Video + Overlay", "videotestsrc ! clockoverlay ! videoconvert ! autovideosink"),
+                                    ("File Playback", "filesrc location=video.mp4 ! decodebin ! videoconvert ! autovideosink"),
+                                    ("UDP Stream Rx", "udpsrc port=5000 ! application/x-rtp,payload=96 ! rtph264depay ! avdec_h264 ! videoconvert ! autovideosink"),
+                                    ("Camera Capture", "v4l2src device=/dev/video0 ! videoconvert ! autovideosink"),
+                                    ("Screen Capture", "ximagesrc ! videoconvert ! autovideosink"),
+                                    ("Tee (Split)", "videotestsrc ! tee name=t ! queue ! autovideosink t. ! queue ! fakesink"),
+                                ];
+
+                                ui.horizontal_wrapped(|ui| {
+                                    for (name, pipeline) in examples {
+                                        if ui.small_button(name).on_hover_text(pipeline).clicked() {
+                                            self.import_json_buffer = pipeline.to_string();
+                                        }
+                                    }
+                                });
+                            });
                     }
                 }
                 ui.add_space(5.0);
@@ -3255,12 +3276,13 @@ impl eframe::App for StromApp {
                     tracing::debug!("Stats not available for flow {}", flow_id);
                     self.stats_cache.remove(&flow_id);
                 }
-                AppMessage::GstLaunchExported { pipeline, flow_name } => {
+                AppMessage::GstLaunchExported {
+                    pipeline,
+                    flow_name,
+                } => {
                     ctx.copy_text(pipeline);
-                    self.status = format!(
-                        "Flow '{}' exported to clipboard as gst-launch",
-                        flow_name
-                    );
+                    self.status =
+                        format!("Flow '{}' exported to clipboard as gst-launch", flow_name);
                 }
                 AppMessage::GstLaunchExportError(e) => {
                     self.error = Some(format!("Failed to export as gst-launch: {}", e));
@@ -3279,7 +3301,10 @@ impl eframe::App for StromApp {
             spawn_task(async move {
                 match api.export_gst_launch(&elements, &links).await {
                     Ok(pipeline) => {
-                        let _ = tx.send(AppMessage::GstLaunchExported { pipeline, flow_name });
+                        let _ = tx.send(AppMessage::GstLaunchExported {
+                            pipeline,
+                            flow_name,
+                        });
                     }
                     Err(e) => {
                         let _ = tx.send(AppMessage::GstLaunchExportError(e.to_string()));
