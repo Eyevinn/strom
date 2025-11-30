@@ -536,3 +536,304 @@ fn format_element(elem: &Element, include_name: bool) -> String {
 
     parts.join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use strom_types::element::{Element, Link, PropertyValue};
+
+    fn init_gst() {
+        let _ = gstreamer::init();
+    }
+
+    // ========================================================================
+    // Export Tests (elements_to_gst_launch, format_element)
+    // ========================================================================
+
+    #[test]
+    fn test_format_element_simple() {
+        let elem = Element {
+            id: "src".to_string(),
+            element_type: "videotestsrc".to_string(),
+            properties: HashMap::new(),
+            pad_properties: HashMap::new(),
+            position: (0.0, 0.0),
+        };
+
+        let result = format_element(&elem, false);
+        assert_eq!(result, "videotestsrc");
+    }
+
+    #[test]
+    fn test_format_element_with_name() {
+        let elem = Element {
+            id: "mysource".to_string(),
+            element_type: "videotestsrc".to_string(),
+            properties: HashMap::new(),
+            pad_properties: HashMap::new(),
+            position: (0.0, 0.0),
+        };
+
+        let result = format_element(&elem, true);
+        assert_eq!(result, "videotestsrc name=mysource");
+    }
+
+    #[test]
+    fn test_format_element_with_properties() {
+        let mut properties = HashMap::new();
+        properties.insert("pattern".to_string(), PropertyValue::Int(18));
+        properties.insert("is-live".to_string(), PropertyValue::Bool(true));
+
+        let elem = Element {
+            id: "src".to_string(),
+            element_type: "videotestsrc".to_string(),
+            properties,
+            pad_properties: HashMap::new(),
+            position: (0.0, 0.0),
+        };
+
+        let result = format_element(&elem, false);
+        // Properties order is not guaranteed, so check contains
+        assert!(result.starts_with("videotestsrc"));
+        assert!(result.contains("pattern=18"));
+        assert!(result.contains("is-live=true"));
+    }
+
+    #[test]
+    fn test_format_element_string_with_spaces() {
+        let mut properties = HashMap::new();
+        properties.insert("location".to_string(), PropertyValue::String("my file.mp4".to_string()));
+
+        let elem = Element {
+            id: "sink".to_string(),
+            element_type: "filesink".to_string(),
+            properties,
+            pad_properties: HashMap::new(),
+            position: (0.0, 0.0),
+        };
+
+        let result = format_element(&elem, false);
+        assert!(result.contains("location=\"my file.mp4\""));
+    }
+
+    #[test]
+    fn test_elements_to_gst_launch_simple_chain() {
+        let elements = vec![
+            Element {
+                id: "src".to_string(),
+                element_type: "videotestsrc".to_string(),
+                properties: HashMap::new(),
+                pad_properties: HashMap::new(),
+                position: (0.0, 0.0),
+            },
+            Element {
+                id: "conv".to_string(),
+                element_type: "videoconvert".to_string(),
+                properties: HashMap::new(),
+                pad_properties: HashMap::new(),
+                position: (100.0, 0.0),
+            },
+            Element {
+                id: "sink".to_string(),
+                element_type: "autovideosink".to_string(),
+                properties: HashMap::new(),
+                pad_properties: HashMap::new(),
+                position: (200.0, 0.0),
+            },
+        ];
+
+        let links = vec![
+            Link {
+                from: "src".to_string(),
+                to: "conv".to_string(),
+            },
+            Link {
+                from: "conv".to_string(),
+                to: "sink".to_string(),
+            },
+        ];
+
+        let result = elements_to_gst_launch(&elements, &links);
+        assert_eq!(result, "videotestsrc ! videoconvert ! autovideosink");
+    }
+
+    #[test]
+    fn test_elements_to_gst_launch_empty() {
+        let result = elements_to_gst_launch(&[], &[]);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_elements_to_gst_launch_single_element() {
+        let elements = vec![Element {
+            id: "src".to_string(),
+            element_type: "videotestsrc".to_string(),
+            properties: HashMap::new(),
+            pad_properties: HashMap::new(),
+            position: (0.0, 0.0),
+        }];
+
+        let result = elements_to_gst_launch(&elements, &[]);
+        assert_eq!(result, "videotestsrc");
+    }
+
+    #[test]
+    fn test_elements_to_gst_launch_with_properties() {
+        let mut props = HashMap::new();
+        props.insert("pattern".to_string(), PropertyValue::Int(18));
+
+        let elements = vec![
+            Element {
+                id: "src".to_string(),
+                element_type: "videotestsrc".to_string(),
+                properties: props,
+                pad_properties: HashMap::new(),
+                position: (0.0, 0.0),
+            },
+            Element {
+                id: "sink".to_string(),
+                element_type: "fakesink".to_string(),
+                properties: HashMap::new(),
+                pad_properties: HashMap::new(),
+                position: (100.0, 0.0),
+            },
+        ];
+
+        let links = vec![Link {
+            from: "src".to_string(),
+            to: "sink".to_string(),
+        }];
+
+        let result = elements_to_gst_launch(&elements, &links);
+        assert_eq!(result, "videotestsrc pattern=18 ! fakesink");
+    }
+
+    // ========================================================================
+    // Parse Tests (require GStreamer initialization)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_simple_pipeline() {
+        init_gst();
+
+        let pipeline = gst::parse::launch("videotestsrc ! fakesink").unwrap();
+        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+
+        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
+        assert_eq!(elements.len(), 2);
+
+        // Check element types
+        let types: Vec<_> = elements
+            .iter()
+            .map(|e| e.factory().unwrap().name().to_string())
+            .collect();
+        assert!(types.contains(&"videotestsrc".to_string()));
+        assert!(types.contains(&"fakesink".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pipeline_with_properties() {
+        init_gst();
+
+        let pipeline = gst::parse::launch("videotestsrc pattern=ball ! fakesink").unwrap();
+        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+
+        // Find videotestsrc and check its pattern property
+        for elem in bin.iterate_elements().into_iter().flatten() {
+            if elem.factory().unwrap().name() == "videotestsrc" {
+                let pattern: i32 = elem.property("pattern");
+                // ball = 18 in GStreamer's VideoTestSrcPattern enum
+                assert_eq!(pattern, 18);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_pipeline() {
+        init_gst();
+
+        let result = gst::parse::launch("this_element_does_not_exist ! fakesink");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_non_default_properties() {
+        init_gst();
+
+        // Create element with default properties
+        let elem = gst::ElementFactory::make("videotestsrc").build().unwrap();
+        let props = extract_non_default_properties(&elem);
+        // Should be empty or minimal - default values aren't included
+        assert!(props.is_empty() || props.len() < 3);
+
+        // Create element with non-default pattern
+        let elem2 = gst::ElementFactory::make("videotestsrc")
+            .property("pattern", 18i32) // ball pattern
+            .build()
+            .unwrap();
+        let props2 = extract_non_default_properties(&elem2);
+        assert!(props2.contains_key("pattern"));
+    }
+
+    #[test]
+    fn test_values_equal_integers() {
+        use gstreamer::glib::Value;
+
+        let a = 42i32.to_value();
+        let b = 42i32.to_value();
+        let c = 43i32.to_value();
+
+        assert!(values_equal(&a, &b));
+        assert!(!values_equal(&a, &c));
+    }
+
+    #[test]
+    fn test_values_equal_strings() {
+        use gstreamer::glib::Value;
+
+        let a = "hello".to_value();
+        let b = "hello".to_value();
+        let c = "world".to_value();
+
+        assert!(values_equal(&a, &b));
+        assert!(!values_equal(&a, &c));
+    }
+
+    #[test]
+    fn test_values_equal_booleans() {
+        use gstreamer::glib::Value;
+
+        let a = true.to_value();
+        let b = true.to_value();
+        let c = false.to_value();
+
+        assert!(values_equal(&a, &b));
+        assert!(!values_equal(&a, &c));
+    }
+
+    #[test]
+    fn test_gvalue_to_property_value() {
+        use gstreamer::glib::Value;
+
+        // Integer
+        let v = 42i32.to_value();
+        assert!(matches!(gvalue_to_property_value(&v), Some(PropertyValue::Int(42))));
+
+        // Boolean
+        let v = true.to_value();
+        assert!(matches!(gvalue_to_property_value(&v), Some(PropertyValue::Bool(true))));
+
+        // String
+        let v = "test".to_string().to_value();
+        assert!(matches!(gvalue_to_property_value(&v), Some(PropertyValue::String(s)) if s == "test"));
+
+        // Float
+        let v = 3.14f64.to_value();
+        if let Some(PropertyValue::Float(f)) = gvalue_to_property_value(&v) {
+            assert!((f - 3.14).abs() < 0.001);
+        } else {
+            panic!("Expected Float");
+        }
+    }
+}
