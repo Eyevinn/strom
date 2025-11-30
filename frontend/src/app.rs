@@ -1604,70 +1604,89 @@ impl StromApp {
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
                                 ui.add_space(4.0);
-                                if ui.small_button("🗑").on_hover_text("Delete flow").clicked() {
-                                    self.flow_pending_deletion = Some((flow.id, flow.name.clone()));
-                                }
-                                if ui.small_button("📋").on_hover_text("Copy flow").clicked() {
-                                    self.flow_pending_copy = Some(flow.clone());
-                                }
-                                // Export to gst-launch syntax (elements only, not blocks)
-                                let has_only_elements =
-                                    !flow.elements.is_empty() && flow.blocks.is_empty();
-                                let gst_export_btn = ui
-                                    .add_enabled(
-                                        has_only_elements,
-                                        egui::Button::new("🖥").small(),
-                                    )
-                                    .on_hover_text(if has_only_elements {
-                                        "Export as gst-launch-1.0"
-                                    } else {
-                                        "Export as gst-launch (only available for flows with elements, not blocks)"
-                                    });
-                                if gst_export_btn.clicked() && has_only_elements {
-                                    self.pending_gst_launch_export = Some((
-                                        flow.elements.clone(),
-                                        flow.links.clone(),
-                                        flow.name.clone(),
-                                    ));
-                                }
-                                if ui
-                                    .small_button("📤")
-                                    .on_hover_text("Export flow as JSON")
-                                    .clicked()
-                                {
-                                    // Serialize flow to JSON and copy to clipboard
-                                    match serde_json::to_string_pretty(flow) {
-                                        Ok(json) => {
-                                            ui.ctx().copy_text(json);
-                                            self.status = format!(
-                                                "Flow '{}' exported to clipboard as JSON",
-                                                flow.name
-                                            );
-                                        }
-                                        Err(e) => {
-                                            self.error =
-                                                Some(format!("Failed to export flow: {}", e));
-                                        }
+
+                                // Single menu button with dropdown
+                                ui.menu_button("⋮", |ui| {
+                                    ui.set_min_width(150.0);
+
+                                    // Properties
+                                    if ui.button("⚙  Properties").clicked() {
+                                        self.editing_properties_idx = Some(idx);
+                                        self.properties_name_buffer = flow.name.clone();
+                                        self.properties_description_buffer =
+                                            flow.properties.description.clone().unwrap_or_default();
+                                        self.properties_clock_type_buffer =
+                                            flow.properties.clock_type;
+                                        self.properties_ptp_domain_buffer = flow
+                                            .properties
+                                            .ptp_domain
+                                            .map(|d| d.to_string())
+                                            .unwrap_or_else(|| "0".to_string());
+                                        self.properties_thread_priority_buffer =
+                                            flow.properties.thread_priority;
+                                        ui.close();
                                     }
-                                }
-                                if ui
-                                    .small_button("⚙")
-                                    .on_hover_text("Flow properties")
-                                    .clicked()
-                                {
-                                    self.editing_properties_idx = Some(idx);
-                                    self.properties_name_buffer = flow.name.clone();
-                                    self.properties_description_buffer =
-                                        flow.properties.description.clone().unwrap_or_default();
-                                    self.properties_clock_type_buffer = flow.properties.clock_type;
-                                    self.properties_ptp_domain_buffer = flow
-                                        .properties
-                                        .ptp_domain
-                                        .map(|d| d.to_string())
-                                        .unwrap_or_else(|| "0".to_string());
-                                    self.properties_thread_priority_buffer =
-                                        flow.properties.thread_priority;
-                                }
+
+                                    ui.separator();
+
+                                    // Export as JSON
+                                    if ui.button("📤  Export as JSON").clicked() {
+                                        match serde_json::to_string_pretty(flow) {
+                                            Ok(json) => {
+                                                ui.ctx().copy_text(json);
+                                                self.status = format!(
+                                                    "Flow '{}' exported to clipboard as JSON",
+                                                    flow.name
+                                                );
+                                            }
+                                            Err(e) => {
+                                                self.error =
+                                                    Some(format!("Failed to export flow: {}", e));
+                                            }
+                                        }
+                                        ui.close();
+                                    }
+
+                                    // Export to gst-launch (only if flow has elements, not blocks)
+                                    let has_only_elements =
+                                        !flow.elements.is_empty() && flow.blocks.is_empty();
+                                    let tooltip = if has_only_elements {
+                                        "Export as gst-launch-1.0 pipeline"
+                                    } else {
+                                        "Only available for flows with elements, not blocks"
+                                    };
+                                    if ui
+                                        .add_enabled(
+                                            has_only_elements,
+                                            egui::Button::new("🖥  Export as gst-launch"),
+                                        )
+                                        .on_hover_text(tooltip)
+                                        .clicked()
+                                        && has_only_elements
+                                    {
+                                        self.pending_gst_launch_export = Some((
+                                            flow.elements.clone(),
+                                            flow.links.clone(),
+                                            flow.name.clone(),
+                                        ));
+                                        ui.close();
+                                    }
+
+                                    ui.separator();
+
+                                    // Copy flow
+                                    if ui.button("📋  Copy").clicked() {
+                                        self.flow_pending_copy = Some(flow.clone());
+                                        ui.close();
+                                    }
+
+                                    // Delete flow
+                                    if ui.button("🗑  Delete").clicked() {
+                                        self.flow_pending_deletion =
+                                            Some((flow.id, flow.name.clone()));
+                                        ui.close();
+                                    }
+                                });
 
                                 // Show clock type indicator (before settings gear)
                                 use strom_types::flow::{ClockSyncStatus, GStreamerClockType};
