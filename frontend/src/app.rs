@@ -2425,14 +2425,14 @@ impl StromApp {
                             .default_open(true)
                             .show(ui, |ui| {
                                 let examples = [
-                                    ("Test Video", "videotestsrc pattern=ball ! videoconvert ! autovideosink"),
-                                    ("Test Audio", "audiotestsrc wave=sine freq=440 ! audioconvert ! autoaudiosink"),
-                                    ("Video + Overlay", "videotestsrc ! clockoverlay ! videoconvert ! autovideosink"),
-                                    ("Record Video", "videotestsrc num-buffers=300 ! x264enc ! mp4mux ! filesink location=test.mp4"),
-                                    ("RTP Stream Send", "videotestsrc ! x264enc tune=zerolatency bitrate=500 ! rtph264pay ! udpsink port=5000 host=127.0.0.1"),
-                                    ("RTP Stream Receive", "udpsrc port=5000 ! application/x-rtp,payload=96 ! rtph264depay ! avdec_h264 ! videoconvert ! autovideosink"),
-                                    ("Record + Display", "videotestsrc ! tee name=t t. ! queue ! x264enc ! mp4mux ! filesink location=output.mp4 t. ! queue ! autovideosink"),
-                                    ("AV Mux", "videotestsrc ! x264enc ! mp4mux name=mux ! filesink location=av.mp4 audiotestsrc ! lamemp3enc ! mux."),
+                                    ("Test Video", "videotestsrc pattern=ball is-live=true ! videoconvert ! autovideosink"),
+                                    ("Test Audio", "audiotestsrc wave=sine freq=440 is-live=true ! audioconvert ! autoaudiosink"),
+                                    ("Video + Overlay", "videotestsrc is-live=true ! clockoverlay ! videoconvert ! autovideosink"),
+                                    ("Record Video", "videotestsrc num-buffers=300 is-live=true ! x264enc ! mp4mux ! filesink location=test.mp4"),
+                                    ("RTP Stream Send", "videotestsrc is-live=true ! x264enc tune=zerolatency bitrate=500 ! rtph264pay ! udpsink port=5000 host=127.0.0.1"),
+                                    ("RTP Stream Receive", "udpsrc ! application/x-rtp,payload=96 ! rtph264depay ! avdec_h264 ! videoconvert ! autovideosink"),
+                                    ("Record + Display", "videotestsrc is-live=true ! tee name=t t. ! queue ! x264enc ! mp4mux ! filesink location=output.mp4 t. ! queue ! autovideosink"),
+                                    ("AV Mux", "videotestsrc is-live=true ! x264enc ! mp4mux name=mux ! filesink location=av.mp4 audiotestsrc is-live=true ! lamemp3enc ! mux."),
                                     ("File Playback", "filesrc location=video.mp4 ! decodebin ! videoconvert ! autovideosink"),
                                     ("Camera", "v4l2src ! videoconvert ! autovideosink"),
                                 ];
