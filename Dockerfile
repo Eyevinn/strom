@@ -74,6 +74,8 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     rustup target add aarch64-unknown-linux-gnu && \
     # Setup multi-arch for ARM64 (Ubuntu-style, matching setup-arm64-cross.sh)
     dpkg --add-architecture arm64 && \
+    # Restrict default ubuntu.sources to amd64 only (archive.ubuntu.com doesn't have arm64)
+    sed -i 's/^Types:/Architectures: amd64\nTypes:/' /etc/apt/sources.list.d/ubuntu.sources && \
     # Add ARM64 package sources from Ubuntu ports (plucky = 25.04)
     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
