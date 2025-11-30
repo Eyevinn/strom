@@ -1,15 +1,21 @@
-# Dockerfile for Strom - Ubuntu-based multi-stage build with Zig cross-compilation
+# Dockerfile for Strom - Ubuntu 25.04 (Plucky)-based multi-stage build with Zig cross-compilation
 
 # Stage 1: Frontend builder - Build WASM frontend on native platform
 # IMPORTANT: Always build on native platform - WASM output is platform-independent!
-FROM --platform=$BUILDPLATFORM rust:1-slim AS frontend-builder
+FROM --platform=$BUILDPLATFORM ubuntu:plucky AS frontend-builder
 WORKDIR /app
 
 # Get native build platform architecture
 ARG BUILDARCH
 
-# Install curl for downloading trunk
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# Install Rust and dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install trunk for native platform and add WASM target
 RUN TRUNK_ARCH=$(case ${BUILDARCH} in \
@@ -28,7 +34,7 @@ COPY . .
 RUN cd frontend && trunk build --release
 
 # Stage 2: Backend builder - Build backend with Zig cross-compilation support
-FROM rust:1-slim AS backend-builder
+FROM ubuntu:plucky AS backend-builder
 WORKDIR /app
 
 # Get build and target platform info for cross-compilation detection
@@ -37,13 +43,16 @@ ARG TARGETPLATFORM
 ARG BUILDARCH
 ARG TARGETARCH
 
-# Install base dependencies
+# Install Rust and base dependencies
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     pkg-config \
     curl \
     xz-utils \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Cross-compilation setup: Install Zig and ARM64 libraries when cross-compiling
 # Uses Ubuntu ports.ubuntu.com for ARM64 packages (matching local setup)
@@ -64,10 +73,10 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     rustup target add aarch64-unknown-linux-gnu && \
     # Setup multi-arch for ARM64 (Ubuntu-style, matching setup-arm64-cross.sh)
     dpkg --add-architecture arm64 && \
-    # Add ARM64 package sources from Ubuntu ports
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
+    # Add ARM64 package sources from Ubuntu ports (plucky = 25.04)
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky-security main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
     apt-get update && \
     # Install ARM64 GStreamer development libraries
     apt-get install -y --no-install-recommends \
@@ -118,8 +127,8 @@ else \
     cargo build --release --package strom-mcp-server; \
 fi
 
-# Stage 3: Runtime - Minimal runtime image with Ubuntu noble
-FROM ubuntu:noble-20241118.1 AS runtime
+# Stage 3: Runtime - Minimal runtime image with Ubuntu 25.04 (plucky) for GStreamer 1.26
+FROM ubuntu:plucky AS runtime
 WORKDIR /app
 
 # Install only GStreamer runtime dependencies
