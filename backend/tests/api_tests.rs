@@ -240,8 +240,8 @@ async fn test_parse_gst_launch_with_properties() {
         .find(|e| e["element_type"] == "videotestsrc")
         .expect("Should have videotestsrc");
 
-    // pattern=ball is enum value 18
-    assert_eq!(vts["properties"]["pattern"], 18);
+    // pattern=ball should be converted to human-readable string "ball"
+    assert_eq!(vts["properties"]["pattern"], "ball");
     assert_eq!(vts["properties"]["num-buffers"], 100);
 }
 
