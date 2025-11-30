@@ -1606,7 +1606,7 @@ impl StromApp {
                                 ui.add_space(4.0);
 
                                 // Single menu button with dropdown
-                                ui.menu_button("⋮", |ui| {
+                                ui.menu_button("...", |ui| {
                                     ui.set_min_width(150.0);
 
                                     // Properties
