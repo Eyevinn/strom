@@ -78,7 +78,7 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources && \
     # Block ARM64 Python packages (critical - prevents apt from removing amd64 Python!)
     mkdir -p /etc/apt/preferences.d && \
-    echo -e "Package: python3*:arm64\nPin: release *\nPin-Priority: -1" > /etc/apt/preferences.d/block-arm64-python && \
+    printf 'Package: python3*:arm64\nPin: release *\nPin-Priority: -1\n' > /etc/apt/preferences.d/block-arm64-python && \
     # Add ARM64 package sources from Ubuntu ports (plucky = 25.04)
     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
