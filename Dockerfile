@@ -72,10 +72,13 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     cargo install --locked cargo-zigbuild && \
     # Add Rust ARM64 target
     rustup target add aarch64-unknown-linux-gnu && \
-    # Setup multi-arch for ARM64 (Ubuntu-style, matching setup-arm64-cross.sh)
+    # Setup multi-arch for ARM64 (matching setup-arm64-cross.sh)
     dpkg --add-architecture arm64 && \
-    # Restrict default ubuntu.sources to amd64 only (archive.ubuntu.com doesn't have arm64)
-    sed -i 's/^Types:/Architectures: amd64\nTypes:/' /etc/apt/sources.list.d/ubuntu.sources && \
+    # Update ubuntu.sources to specify amd64 architecture (archive.ubuntu.com doesn't have arm64)
+    sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources && \
+    # Block ARM64 Python packages (critical - prevents apt from removing amd64 Python!)
+    mkdir -p /etc/apt/preferences.d && \
+    echo -e "Package: python3*:arm64\nPin: release *\nPin-Priority: -1" > /etc/apt/preferences.d/block-arm64-python && \
     # Add ARM64 package sources from Ubuntu ports (plucky = 25.04)
     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
     echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
