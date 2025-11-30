@@ -2428,11 +2428,13 @@ impl StromApp {
                                     ("Test Video", "videotestsrc pattern=ball ! videoconvert ! autovideosink"),
                                     ("Test Audio", "audiotestsrc wave=sine freq=440 ! audioconvert ! autoaudiosink"),
                                     ("Video + Overlay", "videotestsrc ! clockoverlay ! videoconvert ! autovideosink"),
+                                    ("Record Video", "videotestsrc num-buffers=300 ! x264enc ! mp4mux ! filesink location=test.mp4"),
+                                    ("RTP Stream Send", "videotestsrc ! x264enc tune=zerolatency bitrate=500 ! rtph264pay ! udpsink port=5000 host=127.0.0.1"),
+                                    ("RTP Stream Receive", "udpsrc port=5000 ! application/x-rtp,payload=96 ! rtph264depay ! avdec_h264 ! videoconvert ! autovideosink"),
+                                    ("Record + Display", "videotestsrc ! tee name=t t. ! queue ! x264enc ! mp4mux ! filesink location=output.mp4 t. ! queue ! autovideosink"),
+                                    ("AV Mux", "videotestsrc ! x264enc ! mp4mux name=mux ! filesink location=av.mp4 audiotestsrc ! lamemp3enc ! mux."),
                                     ("File Playback", "filesrc location=video.mp4 ! decodebin ! videoconvert ! autovideosink"),
-                                    ("UDP Stream Rx", "udpsrc port=5000 ! application/x-rtp,payload=96 ! rtph264depay ! avdec_h264 ! videoconvert ! autovideosink"),
-                                    ("Camera Capture", "v4l2src device=/dev/video0 ! videoconvert ! autovideosink"),
-                                    ("Screen Capture", "ximagesrc ! videoconvert ! autovideosink"),
-                                    ("Tee (Split)", "videotestsrc ! tee name=t ! queue ! autovideosink t. ! queue ! fakesink"),
+                                    ("Camera", "v4l2src ! videoconvert ! autovideosink"),
                                 ];
 
                                 ui.horizontal_wrapped(|ui| {
@@ -2609,18 +2611,31 @@ impl StromApp {
                     }
 
                     // Step 2: Create a new flow with a name based on first element
+                    // Add timestamp to make each import unique
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
                     let flow_name = format!(
-                        "Imported: {}",
+                        "Imported: {} ({})",
                         parsed
                             .elements
                             .first()
                             .map(|e| e.element_type.as_str())
-                            .unwrap_or("pipeline")
+                            .unwrap_or("pipeline"),
+                        timestamp
                     );
 
                     let mut new_flow = Flow::new(&flow_name);
                     new_flow.elements = parsed.elements;
                     new_flow.links = parsed.links;
+
+                    // Save the original gst-launch syntax in the description
+                    new_flow.properties.description = Some(format!(
+                        "Imported from gst-launch-1.0:\n\n```\n{}\n```",
+                        pipeline
+                    ));
 
                     // Step 3: Create the flow via API
                     match api.create_flow(&new_flow).await {

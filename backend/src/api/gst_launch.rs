@@ -1629,6 +1629,125 @@ mod tests {
     }
 
     // ========================================================================
+    // Real-World Pipeline Pattern Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_tee_pattern() {
+        init_gst();
+
+        // Tee pattern: record and display simultaneously
+        let input = r#"videotestsrc ! tee name=t
+            t. ! queue ! x264enc ! mp4mux ! filesink location=test.mp4
+            t. ! queue ! autovideosink"#;
+
+        let cleaned = preprocess_pipeline_string(input);
+        let pipeline = gst::parse::launch(&cleaned).unwrap();
+        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+
+        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
+
+        // Should have: videotestsrc, tee, queue (x2), x264enc, mp4mux, filesink, autovideosink
+        assert!(
+            elements.len() >= 6,
+            "Expected at least 6 elements in tee pipeline, got {}",
+            elements.len()
+        );
+
+        // Verify we have a tee element
+        let tee_elem = elements
+            .iter()
+            .find(|e| e.factory().unwrap().name() == "tee")
+            .expect("Should have tee element");
+
+        let tee_name: String = tee_elem.property("name");
+        assert_eq!(tee_name, "t", "Expected tee to be named 't'");
+    }
+
+    #[test]
+    fn test_parse_caps_with_properties() {
+        init_gst();
+
+        // Caps filter with properties containing hyphens and underscores
+        let input = "videotestsrc ! video/x-raw,width=640,height=480,framerate=30/1 ! fakesink";
+
+        let pipeline = gst::parse::launch(input).unwrap();
+        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+
+        // Should parse successfully with capsfilter
+        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
+        assert!(
+            elements.len() >= 2,
+            "Should have at least videotestsrc and fakesink"
+        );
+    }
+
+    #[test]
+    fn test_parse_properties_with_hyphens() {
+        init_gst();
+
+        // Properties with hyphens and underscores
+        let input = "videotestsrc is-live=true num-buffers=100 ! fakesink sync=false";
+
+        let pipeline = gst::parse::launch(input).unwrap();
+        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+
+        // Extract elements
+        let mut elements = Vec::new();
+        for (idx, gst_elem) in bin.iterate_elements().into_iter().flatten().enumerate() {
+            let elem = extract_element_info(&gst_elem, idx).unwrap();
+            elements.push(elem);
+        }
+
+        // Find videotestsrc and verify hyphenated properties
+        let videotestsrc = elements
+            .iter()
+            .find(|e| e.element_type == "videotestsrc")
+            .expect("videotestsrc not found");
+
+        assert!(matches!(
+            videotestsrc.properties.get("is-live"),
+            Some(PropertyValue::Bool(true))
+        ));
+        assert!(matches!(
+            videotestsrc.properties.get("num-buffers"),
+            Some(PropertyValue::Int(100))
+        ));
+    }
+
+    #[test]
+    fn test_parse_rtp_streaming_pattern() {
+        init_gst();
+
+        // Simple RTP pattern (without the complex caps string that has typed values)
+        let input = "videotestsrc ! x264enc ! rtph264pay ! udpsink port=5000";
+
+        let pipeline = gst::parse::launch(input).unwrap();
+        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+
+        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
+
+        // Should have: videotestsrc, x264enc, rtph264pay, udpsink
+        assert!(
+            elements.len() >= 4,
+            "Expected at least 4 elements in RTP pipeline, got {}",
+            elements.len()
+        );
+
+        // Verify we have the RTP payload element
+        let types: Vec<_> = elements
+            .iter()
+            .map(|e| e.factory().unwrap().name().to_string())
+            .collect();
+
+        assert!(
+            types.contains(&"rtph264pay".to_string()),
+            "Missing rtph264pay"
+        );
+        assert!(types.contains(&"udpsink".to_string()), "Missing udpsink");
+    }
+
+    // ========================================================================
     // Complex Multi-Branch Pipeline Tests (Mux)
     // ========================================================================
 
