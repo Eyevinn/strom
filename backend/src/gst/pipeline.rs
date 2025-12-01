@@ -384,8 +384,8 @@ impl PipelineManager {
         let main_handler_id = bus.connect_message(None, move |_bus, msg| {
             use gst::MessageView;
 
-            // Log ALL bus messages to debug
-            debug!("Bus message type: {:?}", msg.type_());
+            // Log ALL bus messages to trace (very verbose)
+            trace!("Bus message type: {:?}", msg.type_());
 
             match msg.view() {
                 MessageView::Error(err) => {
