@@ -177,14 +177,41 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         srtsink.set_property("wait-for-connection", wait_for_connection);
         srtsink.set_property("auto-reconnect", auto_reconnect);
 
-        // Set sync=true for clock-based streaming (drop frames to maintain real-time)
-        srtsink.set_property("sync", true);
-
-        // Enable QoS to generate Quality-of-Service events upstream when dropping buffers
-        srtsink.set_property("qos", true);
+        // IMPORTANT: sync=false for transcoding workloads
+        //
+        // Background:
+        // When receiving SRT streams from remote encoders, the timestamps in the stream
+        // reflect the remote encoder's clock (which may have started hours ago).
+        // This creates massive timestamp discontinuities relative to the local pipeline clock.
+        //
+        // With sync=true, srtsink tries to play buffers according to their timestamps:
+        // - It sees timestamps from 7+ hours ago
+        // - Thinks it's massively behind schedule
+        // - Sends QoS events upstream telling elements to drop frames
+        // - Creates false "falling behind" warnings even when GPU/CPU performance is fine
+        //
+        // Example symptoms:
+        // - QoS warnings: "falling behind 10-75%" despite good performance
+        // - Massive jitter: 26+ trillion nanoseconds (= 7+ hours)
+        // - Decoder reports low proportion (0.2-0.9) even though it's working efficiently
+        //
+        // Solution for transcoding (encode-as-fast-as-possible):
+        // - sync=false: Don't try to maintain real-time clock synchronization
+        // - qos=false: Don't send QoS events based on impossible timestamps
+        // - Buffers are pushed as fast as they're produced
+        //
+        // When you WOULD want sync=true:
+        // - Live playback/monitoring where you need real-time output
+        // - Synchronized multi-stream outputs
+        // - When timestamps are consistent with pipeline clock
+        //
+        // See also: notes.txt "QoS/SYNC ISSUE IN TRANSCODING PIPELINES"
+        // Fixed: 2025-12-01
+        srtsink.set_property("sync", false);
+        srtsink.set_property("qos", false);
 
         info!(
-            "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync=true, qos=true",
+            "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync=false, qos=false (transcoding mode)",
             srt_uri, latency, wait_for_connection, auto_reconnect
         );
 
