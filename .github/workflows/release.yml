@@ -179,6 +179,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build backend (with embedded frontend)
+        shell: bash
         run: |
           if [ "${{ matrix.platform }}" = "linux" ]; then
             # Use cargo-zigbuild for Linux to target glibc 2.31 (Ubuntu 20.04+)
@@ -189,6 +190,7 @@ jobs:
           fi
 
       - name: Build MCP server
+        shell: bash
         run: |
           if [ "${{ matrix.platform }}" = "linux" ]; then
             # Use cargo-zigbuild for Linux to target glibc 2.31 (Ubuntu 20.04+)
