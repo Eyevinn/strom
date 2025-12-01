@@ -3015,7 +3015,7 @@ impl eframe::App for StromApp {
                     self.error = Some(format!("Pad properties: {}", error));
                 }
                 AppMessage::Event(event) => {
-                    tracing::debug!("Received WebSocket event: {}", event.description());
+                    tracing::trace!("Received WebSocket event: {}", event.description());
                     // Handle flow state changes
                     use strom_types::StromEvent;
                     match event {

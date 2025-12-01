@@ -8,7 +8,7 @@ use std::time::Duration;
 use strom_types::StromEvent;
 use tokio::select;
 use tokio::time::interval;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::state::AppState;
 
@@ -85,7 +85,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
             // Ping interval for keep-alive
             _ = ping_interval.tick() => {
-                debug!("Sending ping to client");
+                trace!("Sending ping to client");
                 if let Err(e) = sender.send(Message::Ping(vec![].into())).await {
                     debug!("Failed to send ping, client likely disconnected: {}", e);
                     break;
@@ -106,7 +106,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             message = receiver.next() => {
                 match message {
                     Some(Ok(Message::Pong(_))) => {
-                        debug!("Received pong from client");
+                        trace!("Received pong from client");
                     }
                     Some(Ok(Message::Close(_))) => {
                         info!("Client sent close message");
@@ -148,7 +148,7 @@ async fn send_event(
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     event: StromEvent,
 ) -> Result<(), axum::Error> {
-    debug!("Sending event to client: {}", event.description());
+    trace!("Sending event to client: {}", event.description());
 
     match serde_json::to_string(&event) {
         Ok(json) => {

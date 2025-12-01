@@ -133,12 +133,12 @@ impl WebSocketClient {
                                     attempt = 1;
                                 }
 
-                                tracing::debug!("Received WebSocket message: {}", text);
+                                tracing::trace!("Received WebSocket message: {}", text);
 
                                 // Parse the event
                                 match serde_json::from_str::<StromEvent>(&text) {
                                     Ok(event) => {
-                                        tracing::debug!(
+                                        tracing::trace!(
                                             "Parsed WebSocket event: {}",
                                             event.description()
                                         );
@@ -151,7 +151,7 @@ impl WebSocketClient {
                                 }
                             }
                             Ok(Message::Bytes(_)) => {
-                                tracing::debug!("Received binary message (ignored)");
+                                tracing::trace!("Received binary message (ignored)");
                             }
                             Err(e) => {
                                 tracing::error!("WebSocket error: {:?}", e);
@@ -228,12 +228,12 @@ impl WebSocketClient {
                                     attempt = 1;
                                 }
 
-                                tracing::debug!("Received WebSocket message: {}", text);
+                                tracing::trace!("Received WebSocket message: {}", text);
 
                                 // Parse the event
                                 match serde_json::from_str::<StromEvent>(&text) {
                                     Ok(event) => {
-                                        tracing::debug!(
+                                        tracing::trace!(
                                             "Parsed WebSocket event: {}",
                                             event.description()
                                         );
@@ -246,14 +246,14 @@ impl WebSocketClient {
                                 }
                             }
                             Ok(Message::Binary(_)) => {
-                                tracing::debug!("Received binary message (ignored)");
+                                tracing::trace!("Received binary message (ignored)");
                             }
                             Ok(Message::Ping(_)) => {
                                 // Pong is automatically handled by tokio-tungstenite
-                                tracing::debug!("Received ping");
+                                tracing::trace!("Received ping");
                             }
                             Ok(Message::Pong(_)) => {
-                                tracing::debug!("Received pong");
+                                tracing::trace!("Received pong");
                             }
                             Ok(Message::Close(_)) => {
                                 tracing::info!("WebSocket closed by server");

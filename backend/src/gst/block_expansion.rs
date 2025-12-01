@@ -4,7 +4,7 @@ use crate::blocks::builtin;
 use crate::blocks::BusMessageConnectFn;
 use gstreamer as gst;
 use strom_types::{BlockInstance, Link};
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::PipelineError;
 
@@ -83,10 +83,11 @@ pub async fn expand_blocks(
 
     // Resolve and add external links (between elements and/or blocks)
     for link in regular_links {
+        info!("🔗 Resolving link: {} -> {}", link.from, link.to);
         let from = resolve_pad(link.from.as_str(), blocks).await?;
         let to = resolve_pad(link.to.as_str(), blocks).await?;
 
-        debug!("External link: {} -> {}", from, to);
+        info!("🔗 Resolved external link: {} -> {}", from, to);
         all_links.push(Link { from, to });
     }
 
@@ -142,9 +143,9 @@ async fn resolve_pad(pad_ref: &str, blocks: &[BlockInstance]) -> Result<String, 
                         external_pad.internal_pad_name
                     );
 
-                    debug!(
-                        "Resolved block external pad '{}' -> '{}'",
-                        pad_ref, resolved
+                    info!(
+                        "🔗 Resolved block external pad '{}' -> '{}' (internal_element_id='{}', internal_pad_name='{}')",
+                        pad_ref, resolved, external_pad.internal_element_id, external_pad.internal_pad_name
                     );
 
                     return Ok(resolved);
