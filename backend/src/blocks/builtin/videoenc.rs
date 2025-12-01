@@ -62,17 +62,8 @@ impl BlockBuilder for VideoEncBuilder {
         // Parse encoder preference (optional, default: auto)
         let preference = parse_encoder_preference(properties);
 
-        // Parse allow_software_fallback (optional, default: true)
-        let allow_software_fallback = properties
-            .get("allow_software_fallback")
-            .and_then(|v| match v {
-                PropertyValue::Bool(b) => Some(*b),
-                _ => None,
-            })
-            .unwrap_or(true);
-
         // Select best available encoder
-        let encoder_name = select_encoder(codec, preference, allow_software_fallback)?;
+        let encoder_name = select_encoder(codec, preference)?;
         info!(
             "🎞️ Selected encoder '{}' for codec {:?} with preference {:?}",
             encoder_name, codec, preference
@@ -94,7 +85,15 @@ impl BlockBuilder for VideoEncBuilder {
                 PropertyValue::String(s) => Some(s.as_str()),
                 _ => None,
             })
-            .unwrap_or("medium");
+            .unwrap_or("ultrafast");
+
+        let tune = properties
+            .get("tune")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .unwrap_or("zerolatency");
 
         let rate_control = parse_rate_control(properties);
 
@@ -128,6 +127,7 @@ impl BlockBuilder for VideoEncBuilder {
             &encoder_name,
             bitrate,
             quality_preset,
+            tune,
             rate_control,
             keyframe_interval,
         );
@@ -226,11 +226,7 @@ fn parse_rate_control(properties: &HashMap<String, PropertyValue>) -> RateContro
 }
 
 /// Select the best available encoder for the given codec and preference.
-fn select_encoder(
-    codec: Codec,
-    preference: EncoderPreference,
-    allow_software_fallback: bool,
-) -> Result<String, BlockBuildError> {
+fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String, BlockBuildError> {
     let registry = gst::Registry::get();
 
     // Get priority list of encoders to try
@@ -266,28 +262,21 @@ fn select_encoder(
             )))
         }
         EncoderPreference::Auto => {
-            if allow_software_fallback {
-                // Try software encoders as fallback
-                let software_list = get_software_encoder_list(codec);
-                for encoder_name in &software_list {
-                    if registry
-                        .find_feature(encoder_name, gst::ElementFactory::static_type())
-                        .is_some()
-                    {
-                        warn!("⚠️ Using software fallback encoder: {}", encoder_name);
-                        return Ok(encoder_name.to_string());
-                    }
+            // Try software encoders as fallback
+            let software_list = get_software_encoder_list(codec);
+            for encoder_name in &software_list {
+                if registry
+                    .find_feature(encoder_name, gst::ElementFactory::static_type())
+                    .is_some()
+                {
+                    warn!("⚠️ Using software fallback encoder: {}", encoder_name);
+                    return Ok(encoder_name.to_string());
                 }
-                Err(BlockBuildError::InvalidConfiguration(format!(
-                    "No encoder available for {:?} (tried hardware and software)",
-                    codec
-                )))
-            } else {
-                Err(BlockBuildError::InvalidConfiguration(format!(
-                    "No hardware encoder available for {:?} and software fallback is disabled",
-                    codec
-                )))
             }
+            Err(BlockBuildError::InvalidConfiguration(format!(
+                "No encoder available for {:?} (tried hardware and software)",
+                codec
+            )))
         }
     }
 }
@@ -371,6 +360,7 @@ fn set_encoder_properties(
     encoder_name: &str,
     bitrate: u32,
     quality_preset: &str,
+    tune: &str,
     rate_control: RateControl,
     keyframe_interval: u32,
 ) {
@@ -381,6 +371,8 @@ fn set_encoder_properties(
         // x264/x265: speed-preset (enum property) - use set_property_from_str for enum
         let preset_nick = map_quality_preset_x264(quality_preset);
         encoder.set_property_from_str("speed-preset", preset_nick);
+        // x264/x265: tune (enum property) - optimize for specific use case
+        encoder.set_property_from_str("tune", tune);
     } else if encoder_name.starts_with("nv") {
         // NVENC encoders: bitrate in kbps
         encoder.set_property("bitrate", bitrate);
@@ -473,8 +465,8 @@ fn set_encoder_properties(
     }
 
     info!(
-        "🎞️ Set encoder properties: bitrate={} kbps, preset={}, rate_control={:?}, gop={}",
-        bitrate, quality_preset, rate_control, keyframe_interval
+        "🎞️ Set encoder properties: bitrate={} kbps, preset={}, tune={}, rate_control={:?}, gop={}",
+        bitrate, quality_preset, tune, rate_control, keyframe_interval
     );
 }
 
@@ -678,10 +670,31 @@ fn videoenc_definition() -> BlockDefinition {
                         EnumValue { value: "veryslow".to_string(), label: Some("Very Slow".to_string()) },
                     ],
                 },
-                default_value: Some(PropertyValue::String("medium".to_string())),
+                default_value: Some(PropertyValue::String("ultrafast".to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "quality_preset".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "tune".to_string(),
+                label: "Tune".to_string(),
+                description: "Optimize encoder for specific use case (x264/x265 only). Zero latency disables look-ahead for minimal delay.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue { value: "zerolatency".to_string(), label: Some("Zero Latency (streaming/real-time)".to_string()) },
+                        EnumValue { value: "film".to_string(), label: Some("Film (high quality)".to_string()) },
+                        EnumValue { value: "animation".to_string(), label: Some("Animation".to_string()) },
+                        EnumValue { value: "grain".to_string(), label: Some("Grain (preserve film grain)".to_string()) },
+                        EnumValue { value: "stillimage".to_string(), label: Some("Still Image".to_string()) },
+                        EnumValue { value: "fastdecode".to_string(), label: Some("Fast Decode".to_string()) },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("zerolatency".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "tune".to_string(),
                     transform: None,
                 },
             },
@@ -712,18 +725,6 @@ fn videoenc_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "keyframe_interval".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
-                name: "allow_software_fallback".to_string(),
-                label: "Allow Software Fallback".to_string(),
-                description: "Allow fallback to software encoding if no hardware encoder is available (only relevant for Auto/Hardware modes)".to_string(),
-                property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "allow_software_fallback".to_string(),
                     transform: None,
                 },
             },

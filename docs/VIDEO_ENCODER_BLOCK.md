@@ -180,17 +180,33 @@ Target bitrate in kilobits per second.
 Encoding quality/speed tradeoff. Slower presets provide better quality at the same bitrate.
 
 **Options:**
-- `ultrafast` - Fastest encoding, lowest quality
+- `ultrafast` - Fastest encoding, lowest quality (recommended for live/real-time)
 - `fast` - Fast encoding, good for live streaming
-- `medium` - Balanced (recommended)
+- `medium` - Balanced
 - `slow` - Slower encoding, better quality
 - `veryslow` - Slowest encoding, best quality
 
-**Default:** `medium`
+**Default:** `ultrafast`
 
 **Note:** Presets are mapped to encoder-specific equivalents. Not all encoders support all presets.
 
-### 5. `rate_control` (Enum, Optional)
+### 5. `tune` (Enum, Optional)
+
+Optimize encoder for specific use case. **Only applies to x264/x265 software encoders.**
+
+**Options:**
+- `zerolatency` - Zero latency mode for streaming/real-time (disables look-ahead, minimal delay)
+- `film` - High quality for film content
+- `animation` - Optimized for animation
+- `grain` - Preserve film grain
+- `stillimage` - Optimized for still images (slideshows)
+- `fastdecode` - Fast decode (reduces decode complexity)
+
+**Default:** `zerolatency`
+
+**Note:** Hardware encoders (NVENC, QSV, VA-API, AMF) don't use this property - they have low latency built-in.
+
+### 6. `rate_control` (Enum, Optional)
 
 Rate control mode for encoding.
 
@@ -201,7 +217,7 @@ Rate control mode for encoding.
 
 **Default:** `vbr`
 
-### 6. `keyframe_interval` (UInt, Optional)
+### 7. `keyframe_interval` (UInt, Optional)
 
 GOP (Group of Pictures) size - number of frames between keyframes.
 
@@ -213,14 +229,6 @@ GOP (Group of Pictures) size - number of frames between keyframes.
 - 60fps video: 120 frames = 2 second GOP
 - Smaller values: More keyframes, better seek performance, larger file size
 - Larger values: Fewer keyframes, better compression, worse seek performance
-
-### 7. `allow_software_fallback` (Bool, Optional)
-
-Allow fallback to software encoding if no hardware encoder is available.
-
-**Only relevant when `encoder_preference` is `auto` or `hardware`.**
-
-**Default:** `true`
 
 ## Property Mapping
 
@@ -273,17 +281,18 @@ Multiple property names are tried:
   "codec": "h264",
   "encoder_preference": "auto",
   "bitrate": 5000,
-  "quality_preset": "medium",
+  "quality_preset": "ultrafast",
+  "tune": "zerolatency",
   "rate_control": "vbr",
-  "keyframe_interval": 60,
-  "allow_software_fallback": true
+  "keyframe_interval": 60
 }
 ```
 
 **Behavior:**
 - Will use `nvh264enc` on systems with NVIDIA GPU
 - Falls back to `x264enc` if no hardware encoder available
-- 5 Mbps VBR encoding at medium quality
+- 5 Mbps VBR encoding with ultra fast preset
+- Zero latency tuning for minimal delay (when using software encoder)
 - 60-frame GOP (2 seconds at 30fps)
 
 ### Example 2: Force Software H.265
@@ -308,7 +317,6 @@ Multiple property names are tried:
 {
   "codec": "av1",
   "encoder_preference": "hardware",
-  "allow_software_fallback": false,
   "bitrate": 3000,
   "rate_control": "cbr"
 }
@@ -326,14 +334,16 @@ Multiple property names are tried:
   "codec": "h264",
   "encoder_preference": "auto",
   "bitrate": 4000,
-  "quality_preset": "fast",
+  "quality_preset": "ultrafast",
+  "tune": "zerolatency",
   "rate_control": "cbr",
   "keyframe_interval": 60
 }
 ```
 
 **Behavior:**
-- Fast encoding preset for low latency
+- Ultra fast encoding preset for minimal latency
+- Zero latency tuning (for software encoder)
 - CBR for consistent network bandwidth
 - 2-second GOP for good seek performance
 
@@ -470,8 +480,8 @@ gst-launch-1.0 videotestsrc ! videoconvert ! nvh264enc ! h264parse ! fakesink -v
    - Intel: `gst-plugins-bad` with qsv
    - VA-API: `gstreamer1.0-vaapi`
    - AMD: `gst-plugins-bad` with amf
-3. Set `allow_software_fallback: true` to use software encoding
-4. Use `encoder_preference: software` to force software encoding
+3. Use `encoder_preference: "auto"` to enable automatic fallback to software encoding
+4. Use `encoder_preference: "software"` to force software encoding
 
 ### Encoder selection not working as expected
 

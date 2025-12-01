@@ -186,7 +186,7 @@ fn test_encoder_selection_software_only() {
     init_gst();
 
     // Software-only should only try software encoders
-    let result = select_encoder(Codec::H264, EncoderPreference::SoftwareOnly, true);
+    let result = select_encoder(Codec::H264, EncoderPreference::SoftwareOnly);
 
     match result {
         Ok(encoder) => {
@@ -207,7 +207,7 @@ fn test_encoder_selection_with_fallback() {
     init_gst();
 
     // Auto mode with fallback should find something
-    let result = select_encoder(Codec::H264, EncoderPreference::Auto, true);
+    let result = select_encoder(Codec::H264, EncoderPreference::Auto);
 
     assert!(
         result.is_ok(),
@@ -248,7 +248,15 @@ fn test_encoder_property_setting_x264() {
         .expect("Should create x264enc");
 
     // Test that we can set properties without panicking
-    set_encoder_properties(&encoder, "x264enc", 4000, "medium", RateControl::VBR, 60);
+    set_encoder_properties(
+        &encoder,
+        "x264enc",
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+        60,
+    );
 
     // Verify bitrate was set
     let bitrate: u32 = encoder.property("bitrate");
@@ -280,7 +288,15 @@ fn test_encoder_property_setting_nvenc() {
             .unwrap_or_else(|_| panic!("Should create {}", encoder_name));
 
         // Test property setting without panicking
-        set_encoder_properties(&encoder, encoder_name, 4000, "medium", RateControl::VBR, 60);
+        set_encoder_properties(
+            &encoder,
+            encoder_name,
+            4000,
+            "medium",
+            "zerolatency",
+            RateControl::VBR,
+            60,
+        );
 
         // Verify bitrate
         let bitrate: u32 = encoder.property("bitrate");
@@ -318,7 +334,15 @@ fn test_gop_size_properties() {
             "x264enc should have key-int-max property"
         );
 
-        set_encoder_properties(&encoder, "x264enc", 4000, "medium", RateControl::VBR, 60);
+        set_encoder_properties(
+            &encoder,
+            "x264enc",
+            4000,
+            "medium",
+            "zerolatency",
+            RateControl::VBR,
+            60,
+        );
 
         // x264enc's key-int-max is u32 (guint), not i32 (gint)
         let gop: u32 = encoder.property("key-int-max");
@@ -338,7 +362,15 @@ fn test_gop_size_properties() {
                 encoder_name
             );
 
-            set_encoder_properties(&encoder, encoder_name, 4000, "medium", RateControl::VBR, 60);
+            set_encoder_properties(
+                &encoder,
+                encoder_name,
+                4000,
+                "medium",
+                "zerolatency",
+                RateControl::VBR,
+                60,
+            );
 
             let gop: i32 = encoder.property("gop-size");
             assert_eq!(
@@ -371,6 +403,7 @@ fn test_gop_size_type_casting() {
             "x264enc",
             4000,
             "medium",
+            "zerolatency",
             RateControl::VBR,
             *gop_value,
         );
@@ -460,7 +493,15 @@ fn test_all_available_encoders() {
             .unwrap_or_else(|_| panic!("Should create {}", encoder_name));
 
         // Test basic property setting
-        set_encoder_properties(&encoder, encoder_name, 4000, "medium", RateControl::VBR, 60);
+        set_encoder_properties(
+            &encoder,
+            encoder_name,
+            4000,
+            "medium",
+            "zerolatency",
+            RateControl::VBR,
+            60,
+        );
 
         println!("✓ {} configured successfully", encoder_name);
     }
