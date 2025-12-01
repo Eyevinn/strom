@@ -198,14 +198,16 @@ jobs:
           targets: wasm32-unknown-unknown,${{ matrix.target }}
 
       # Linux x86_64: Install GStreamer via apt (ubuntu-24.04 has 1.24+)
+      # Also install build tools for vendored OpenSSL compilation
       - name: Cache apt packages (Linux x86_64)
         if: matrix.platform == 'linux' && matrix.target == 'x86_64-unknown-linux-gnu'
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools
-          version: 1.1
+          packages: libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools perl make
+          version: 1.2
 
       # Linux ARM64: Install cross-compilation tools and ARM64 GStreamer (ubuntu-24.04 has 1.24+)
+      # Also install build tools for vendored OpenSSL compilation
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.platform == 'linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -227,7 +229,7 @@ jobs:
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-security main universe
           EOF
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu perl make
           sudo apt-get install -y libssl-dev:arm64 pkg-config:arm64 libunwind-dev:arm64
           sudo apt-get install -y libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64 libgstreamer-plugins-bad1.0-dev:arm64
           echo "PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
