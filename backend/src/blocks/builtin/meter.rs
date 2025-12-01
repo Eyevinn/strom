@@ -6,7 +6,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{block::*, EnumValue, PropertyValue, StromEvent, *};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 /// Audio Meter block builder.
 pub struct MeterBuilder;
@@ -104,12 +104,12 @@ fn connect_level_message_handler(
                 let structure_name = s.name();
 
                 if structure_name == "level" {
-                    debug!("📊 Received 'level' message from GStreamer bus!");
+                    trace!("📊 Received 'level' message from GStreamer bus!");
 
                     // Extract element ID from the source
                     if let Some(source) = msg.src() {
                         let full_element_id = source.name().to_string();
-                        debug!("📊 Level message from element: {}", full_element_id);
+                        trace!("📊 Level message from element: {}", full_element_id);
 
                         // Strip ":level" suffix to get the block ID
                         // Meter blocks create elements like "block_id:level", but UI looks up by "block_id"
@@ -119,7 +119,7 @@ fn connect_level_message_handler(
                             } else {
                                 full_element_id
                             };
-                        debug!("📊 Using block ID for lookup: {}", element_id);
+                        trace!("📊 Using block ID for lookup: {}", element_id);
 
                         // Extract RMS, peak, and decay values from the message structure
                         // These are GValueArrays containing one f64 per channel
@@ -127,15 +127,18 @@ fn connect_level_message_handler(
                         let peak = extract_level_values(s, "peak");
                         let decay = extract_level_values(s, "decay");
 
-                        debug!(
+                        trace!(
                             "📊 Extracted values: rms={:?}, peak={:?}, decay={:?}",
-                            rms, peak, decay
+                            rms,
+                            peak,
+                            decay
                         );
 
                         if !rms.is_empty() {
-                            debug!(
+                            trace!(
                                 "📊 Broadcasting MeterData event for flow {} element {}",
-                                flow_id, element_id
+                                flow_id,
+                                element_id
                             );
                             // Broadcast meter data event
                             events.broadcast(StromEvent::MeterData {
