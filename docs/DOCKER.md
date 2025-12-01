@@ -125,33 +125,35 @@ Configure Claude Desktop:
 
 ## Multi-Stage Build
 
-The Dockerfile uses a multi-stage build with cargo-chef for optimal caching:
+The Dockerfile uses a multi-stage build with Zig cross-compilation support:
 
-1. **Planner**: Analyzes dependencies
-2. **Builder**: Builds dependencies and binaries
-3. **Runtime**: Minimal Debian image with only runtime dependencies
+1. **Frontend Builder**: Builds WASM frontend on native platform
+2. **Backend Builder**: Builds backend with optional Zig cross-compilation for ARM64
+3. **Runtime**: Ubuntu 25.04 (Plucky) with GStreamer 1.26.0
 
 ### Build Stages
 
 ```dockerfile
-# Stage 1: Dependency analysis
-FROM rust:1.82-bookworm as planner
-RUN cargo chef prepare
+# Stage 1: Frontend builder
+FROM --platform=$BUILDPLATFORM ubuntu:plucky AS frontend-builder
+# Builds WASM frontend (platform-independent output)
 
-# Stage 2: Build everything
-FROM rust:1.82-bookworm as builder
-RUN cargo chef cook    # Build dependencies (cached)
-RUN cargo build        # Build binaries
+# Stage 2: Backend builder
+FROM --platform=$BUILDPLATFORM ubuntu:plucky AS backend-builder
+# Installs Rust and optionally Zig for cross-compilation
+# Supports native builds and ARM64 cross-compilation
 
-# Stage 3: Minimal runtime
-FROM debian:trixie-slim
+# Stage 3: Runtime
+FROM ubuntu:plucky AS runtime
+# Minimal Ubuntu with GStreamer 1.26.0 runtime
 COPY --from=builder binaries
 ```
 
 This approach:
-- Caches dependencies for faster rebuilds
-- Produces small final images (~200MB vs ~2GB)
-- Includes only runtime dependencies
+- Uses Ubuntu 25.04 for GStreamer 1.26.0 support
+- Enables ARM64 cross-compilation via Zig (targets glibc 2.36)
+- Platform-independent WASM frontend build
+- Multi-architecture support (amd64/arm64)
 
 ## Health Checks
 

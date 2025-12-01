@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Strom! This document provides gui
 
 ### Prerequisites
 
-- Rust 1.75 or later
+- Rust 1.82 or later (stable toolchain recommended)
 - GStreamer 1.0 development libraries
 - trunk (for building the frontend)
 

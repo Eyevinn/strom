@@ -76,7 +76,7 @@ The script will:
 - `SKIP_GSTREAMER=true` - Skip GStreamer (not recommended)
 - `SKIP_GRAPHVIZ=true` - Skip Graphviz (debug graphs won't work)
 - `INSTALL_DIR=/custom/path` - Custom installation directory
-- `VERSION=v0.2.5` - Install specific version
+- `VERSION=v0.2.6` - Install specific version
 
 After installation, run `strom` and open `http://localhost:8080` in your browser.
 
@@ -183,7 +183,7 @@ Pre-built multi-architecture Docker images are available (amd64 and arm64):
 
 ```bash
 docker pull eyevinntechnology/strom:latest
-docker pull eyevinntechnology/strom:0.2.5  # Specific version
+docker pull eyevinntechnology/strom:0.2.6  # Specific version
 ```
 
 ## Architecture

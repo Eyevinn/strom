@@ -6,7 +6,7 @@
 
 Make sure you have the following installed:
 
-1. **Rust** (1.82+)
+1. **Rust** (1.82 or later, stable toolchain recommended)
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
