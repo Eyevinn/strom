@@ -3062,7 +3062,7 @@ impl eframe::App for StromApp {
                             peak,
                             decay,
                         } => {
-                            tracing::debug!(
+                            tracing::trace!(
                                 "📊 METER DATA RECEIVED: flow={}, element={}, channels={}, rms={:?}, peak={:?}",
                                 flow_id,
                                 element_id,
@@ -3076,7 +3076,7 @@ impl eframe::App for StromApp {
                                 element_id.clone(),
                                 crate::meter::MeterData { rms, peak, decay },
                             );
-                            tracing::debug!("📊 Meter data stored for element {}", element_id);
+                            tracing::trace!("📊 Meter data stored for element {}", element_id);
                         }
                         StromEvent::SystemStats(stats) => {
                             self.system_monitor.update(stats);

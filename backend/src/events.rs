@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use strom_types::StromEvent;
 use tokio::sync::broadcast;
-use tracing::debug;
+use tracing::{debug, trace};
 
 /// Event broadcaster for WebSocket connections.
 #[derive(Clone)]
@@ -23,7 +23,15 @@ impl EventBroadcaster {
 
     /// Broadcast an event to all connected WebSocket clients.
     pub fn broadcast(&self, event: StromEvent) {
-        debug!("Broadcasting event: {}", event.description());
+        // Use trace for high-frequency events, debug for others
+        match &event {
+            StromEvent::MeterData { .. } => {
+                trace!("Broadcasting event: {}", event.description());
+            }
+            _ => {
+                debug!("Broadcasting event: {}", event.description());
+            }
+        }
         // broadcast::send returns the number of receivers
         // We don't care about the result since clients may or may not be connected
         let _ = self.sender.send(event);
