@@ -16,6 +16,8 @@ struct ConfigFile {
     server: ServerConfig,
     #[serde(default)]
     storage: StorageConfig,
+    #[serde(default)]
+    logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -30,6 +32,15 @@ struct StorageConfig {
     data_dir: Option<PathBuf>,
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LoggingConfig {
+    /// Path to log file (if set, logs will be written to file in addition to stdout)
+    log_file: Option<PathBuf>,
+    /// Log level (trace, debug, info, warn, error)
+    /// If not set, uses RUST_LOG environment variable or defaults to "info"
+    log_level: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -48,6 +59,10 @@ pub struct Config {
     /// PostgreSQL database URL (if set, PostgreSQL is used instead of JSON files)
     /// Format: postgresql://user:password@host/database_name
     pub database_url: Option<String>,
+    /// Path to log file (if set, logs will be written to file in addition to stdout)
+    pub log_file: Option<PathBuf>,
+    /// Log level (if set, overrides RUST_LOG environment variable)
+    pub log_level: Option<String>,
 }
 
 impl Config {
@@ -78,6 +93,7 @@ impl Config {
                 port: strom_types::DEFAULT_PORT,
             },
             storage: StorageConfig::default(),
+            logging: LoggingConfig::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -134,6 +150,8 @@ impl Config {
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             database_url: config_file.storage.database_url,
+            log_file: config_file.logging.log_file,
+            log_level: config_file.logging.log_level,
         })
     }
 
@@ -160,6 +178,8 @@ impl Config {
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             database_url,
+            log_file: None,
+            log_level: None,
         })
     }
 
@@ -192,6 +212,8 @@ impl Default for Config {
                 flows_path: PathBuf::from("flows.json"),
                 blocks_path: PathBuf::from("blocks.json"),
                 database_url: None,
+                log_file: None,
+                log_level: None,
             }
         })
     }

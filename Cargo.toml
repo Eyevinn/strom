@@ -26,7 +26,9 @@ gstreamer-app = "0.24.2"
 gstreamer-net = "0.24.2"
 gst-plugin-webrtc = { git = "https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs", features = ["whep", "whip"], rev = "83625619" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+time = { version = "0.3", features = ["formatting", "local-offset"] }
+tracing-appender = "0.2.4"
 utoipa = { version = "5.4", features = ["axum_extras", "uuid"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 

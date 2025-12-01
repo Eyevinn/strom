@@ -5,11 +5,87 @@ use gstreamer::glib;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing::{error, info};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[cfg(feature = "gui")]
 use strom::create_app_with_state_and_auth;
 use strom::{auth, config::Config, create_app_with_state, state::AppState};
+
+/// Initialize logging with optional file output and configurable log level
+fn init_logging(log_file: Option<&PathBuf>, log_level: Option<&String>) -> anyhow::Result<()> {
+    use tracing_subscriber::fmt::time::OffsetTime;
+    use time::UtcOffset;
+
+    // Get local UTC offset for timestamp formatting
+    // This must be done before any threads are spawned
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let timer = OffsetTime::new(
+        local_offset,
+        time::format_description::well_known::Rfc3339,
+    );
+
+    // Priority: RUST_LOG env var > config file log_level > default "info"
+    let env_filter = if let Ok(filter) = EnvFilter::try_from_default_env() {
+        // RUST_LOG is set, use it (highest priority)
+        filter
+    } else if let Some(level) = log_level {
+        // Use log level from config file
+        EnvFilter::new(level)
+    } else {
+        // Default to info
+        EnvFilter::new("info")
+    };
+
+    if let Some(log_path) = log_file {
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Clear the log file if it exists by truncating it
+        if log_path.exists() {
+            std::fs::write(log_path, "")?;
+        }
+
+        // Set up file appender
+        let file_appender = tracing_appender::rolling::never(
+            log_path.parent().unwrap_or(std::path::Path::new(".")),
+            log_path.file_name().unwrap_or(std::ffi::OsStr::new("strom.log")),
+        );
+
+        // Create layers: stdout + file with local time
+        let stdout_layer = fmt::layer()
+            .with_target(false)
+            .with_timer(timer.clone())
+            .compact()
+            .with_writer(std::io::stdout);
+
+        let file_layer = fmt::layer()
+            .with_target(true)
+            .with_timer(timer)
+            .with_ansi(false)
+            .with_writer(file_appender);
+
+        // Combine layers
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stdout_layer)
+            .with(file_layer)
+            .init();
+
+        eprintln!("Logging to file: {}", log_path.display());
+    } else {
+        // Stdout only with local time
+        fmt()
+            .with_env_filter(env_filter)
+            .with_target(false)
+            .with_timer(timer)
+            .compact()
+            .init();
+    }
+
+    Ok(())
+}
 
 /// Handle the hash-password subcommand
 fn handle_hash_password(password: Option<&str>) -> anyhow::Result<()> {
@@ -150,14 +226,24 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize logging - use RUST_LOG env var or default to info
-    fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .compact()
-        .init();
+    // Load configuration early to get log_file setting
+    let config = Config::from_figment(
+        args.port,
+        args.data_dir.clone(),
+        args.flows_path.clone(),
+        args.blocks_path.clone(),
+        args.database_url.clone(),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to load configuration: {}", e);
+        std::process::exit(1);
+    });
+
+    // Initialize logging with optional file output and log level
+    if let Err(e) = init_logging(config.log_file.as_ref(), config.log_level.as_ref()) {
+        eprintln!("Failed to initialize logging: {}", e);
+        std::process::exit(1);
+    }
 
     // Determine if GUI should be enabled
     #[cfg(feature = "gui")]
@@ -175,50 +261,22 @@ fn main() -> anyhow::Result<()> {
     {
         if gui_enabled {
             // GUI mode: Run HTTP server in background, GUI on main thread
-            run_with_gui(
-                args.port,
-                args.data_dir,
-                args.flows_path,
-                args.blocks_path,
-                args.database_url,
-                args.no_auto_restart,
-            )
+            run_with_gui(config, args.no_auto_restart)
         } else {
             // Headless mode: Run HTTP server on main thread
-            run_headless(
-                args.port,
-                args.data_dir,
-                args.flows_path,
-                args.blocks_path,
-                args.database_url,
-                args.no_auto_restart,
-            )
+            run_headless(config, args.no_auto_restart)
         }
     }
 
     #[cfg(not(feature = "gui"))]
     {
         // Always headless when gui feature is disabled
-        run_headless(
-            args.port,
-            args.data_dir,
-            args.flows_path,
-            args.blocks_path,
-            args.database_url,
-            args.no_auto_restart,
-        )
+        run_headless(config, args.no_auto_restart)
     }
 }
 
 #[cfg(feature = "gui")]
-fn run_with_gui(
-    port: Option<u16>,
-    data_dir: Option<PathBuf>,
-    flows_path: Option<PathBuf>,
-    blocks_path: Option<PathBuf>,
-    database_url: Option<String>,
-    no_auto_restart: bool,
-) -> anyhow::Result<()> {
+fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -254,9 +312,6 @@ fn run_with_gui(
         start_glib_main_loop();
         info!("GLib main loop started in background thread");
 
-        // Load configuration from CLI args, env vars, and config files
-        let config = Config::from_figment(port, data_dir, flows_path, blocks_path, database_url)
-            .expect("Failed to resolve configuration");
         info!("Configuration loaded");
 
         let actual_port = config.port;
@@ -364,14 +419,7 @@ fn run_with_gui(
 }
 
 #[tokio::main]
-async fn run_headless(
-    port: Option<u16>,
-    data_dir: Option<PathBuf>,
-    flows_path: Option<PathBuf>,
-    blocks_path: Option<PathBuf>,
-    database_url: Option<String>,
-    no_auto_restart: bool,
-) -> anyhow::Result<()> {
+async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
     // Initialize GStreamer INSIDE tokio runtime
     gstreamer::init()?;
     info!("GStreamer initialized");
@@ -383,8 +431,6 @@ async fn run_headless(
     start_glib_main_loop();
     info!("GLib main loop started in background thread");
 
-    // Load configuration from CLI args, env vars, and config files
-    let config = Config::from_figment(port, data_dir, flows_path, blocks_path, database_url)?;
     info!("Configuration loaded");
 
     // Create application with persistent storage

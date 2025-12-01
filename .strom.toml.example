@@ -1,52 +1,77 @@
-# Strom Configuration File Example
+# Strom Configuration File
 #
-# Copy this file to `.strom.toml` in your project directory and modify as needed.
-# The `.strom.toml` file is gitignored, so your local settings won't be committed.
+# This file demonstrates all available configuration options.
+# Copy this file to .strom.toml and customize as needed.
 #
 # Configuration priority (highest to lowest):
-# 1. Command-line arguments (--port, --data-dir, etc.)
-# 2. Environment variables (STROM_PORT, STROM_DATA_DIR, etc.)
+# 1. Command-line arguments
+# 2. Environment variables (STROM_* prefix)
 # 3. Local config file (.strom.toml in current directory)
 # 4. User config file (~/.config/strom/config.toml on Linux)
 # 5. Default values
 
+# ============================================================================
+# Server Configuration
+# ============================================================================
 [server]
-# Port for the web server
+# Port to listen on for HTTP/WebSocket connections
 # Default: 8080
-# CLI: --port <PORT>
-# Env: STROM_SERVER_PORT
+# CLI: --port 8080
+# Env: STROM_SERVER_PORT=8080
 port = 8080
 
+# ============================================================================
+# Storage Configuration
+# ============================================================================
 [storage]
 # PostgreSQL database URL (recommended for production)
-# If set, PostgreSQL is used instead of JSON files
+# If set, PostgreSQL is used instead of JSON files for flow storage
 # Format: postgresql://user:password@host/database_name
-# CLI: --database-url <URL>
-# Env: STROM_STORAGE_DATABASE_URL
-# database_url = "postgresql://user:pass@localhost/strom"
+# CLI: --database-url postgresql://...
+# Env: STROM_STORAGE_DATABASE_URL=postgresql://...
+# database_url = "postgresql://strom:password@localhost/strom"
 
-# Data directory for JSON storage
-# When using JSON storage (no database_url), this directory will contain
-# flows.json and blocks.json files.
-#
-# Default locations:
-#   Linux:   ~/.local/share/strom/
-#   Windows: %APPDATA%\strom\
-#   macOS:   ~/Library/Application Support/strom/
-#   Docker:  ./data/
-#
-# CLI: --data-dir <PATH>
-# Env: STROM_STORAGE_DATA_DIR
-# data_dir = "./data"
+# Data directory (contains flows.json and blocks.json when using JSON storage)
+# Default:
+#   - Docker: ./data/ (current directory)
+#   - Linux: ~/.local/share/strom/
+# CLI: --data-dir /path/to/data
+# Env: STROM_STORAGE_DATA_DIR=/path/to/data
+# data_dir = "/var/lib/strom"
 
-# Individual file paths (override data_dir)
-# These allow you to specify custom locations for individual files
-# instead of using the data_dir. Useful for development or custom setups.
+# Custom path to flows storage file (overrides data_dir)
+# CLI: --flows-path /custom/flows.json
+# Env: STROM_STORAGE_FLOWS_PATH=/custom/flows.json
+# flows_path = "/custom/path/flows.json"
+
+# Custom path to blocks storage file (overrides data_dir)
+# CLI: --blocks-path /custom/blocks.json
+# Env: STROM_STORAGE_BLOCKS_PATH=/custom/blocks.json
+# blocks_path = "/custom/path/blocks.json"
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+[logging]
+# Path to log file (if set, logs will be written to file in addition to stdout)
+# File logs include timestamps and module targets (no ANSI colors)
+# Console logs remain compact for readability
+# Env: STROM_LOGGING_LOG_FILE=strom.log
+# log_file = "strom.log"
+# log_file = "/var/log/strom/strom.log"
+
+# Log level (if set, overrides RUST_LOG environment variable)
+# Values: trace, debug, info, warn, error
+# Default: info
+# Env: STROM_LOGGING_LOG_LEVEL=debug
+# log_level = "info"
+# log_level = "debug"
+
+# Advanced: Module-specific logging (requires RUST_LOG environment variable)
+# RUST_LOG=strom=debug,strom::gst=trace
+# RUST_LOG=info,strom::gst::pipeline=debug
 #
-# CLI: --flows-path <PATH>
-# Env: STROM_STORAGE_FLOWS_PATH
-# flows_path = "./custom/flows.json"
-#
-# CLI: --blocks-path <PATH>
-# Env: STROM_STORAGE_BLOCKS_PATH
-# blocks_path = "./custom/blocks.json"
+# Priority for log level:
+# 1. RUST_LOG environment variable (highest)
+# 2. log_level in this config file
+# 3. Default: "info"
