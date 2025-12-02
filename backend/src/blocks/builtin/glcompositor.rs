@@ -380,12 +380,9 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 
 /// Get GLCompositor block definition (metadata only).
 fn glcompositor_definition() -> BlockDefinition {
-    BlockDefinition {
-        id: "builtin.glcompositor".to_string(),
-        name: "OpenGL Video Compositor".to_string(),
-        description: "Hardware-accelerated OpenGL video compositor for combining multiple video inputs with positioning, scaling, and alpha blending. Each input can be independently positioned and sized on the output canvas.".to_string(),
-        category: "Video".to_string(),
-        exposed_properties: vec![
+    const MAX_INPUTS: usize = 16;
+
+    let mut exposed_properties = vec![
             ExposedProperty {
                 name: "num_inputs".to_string(),
                 label: "Number of Inputs".to_string(),
@@ -489,201 +486,128 @@ fn glcompositor_definition() -> BlockDefinition {
                     transform: None,
                 },
             },
-            // Note: Per-input properties (input_N_xpos, etc.) are dynamically generated
-            // based on num_inputs. For now, we expose common defaults for 2 inputs.
-            // TODO: Generate these dynamically in the UI based on num_inputs value.
-            ExposedProperty {
-                name: "input_0_xpos".to_string(),
-                label: "Input 0 X Position".to_string(),
-                description: "X position of input 0 on the canvas".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(0)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_0_xpos".to_string(),
-                    transform: None,
-                },
+        ];
+
+    // Dynamically generate per-input properties for all possible inputs (0 to MAX_INPUTS-1)
+    for i in 0..MAX_INPUTS {
+        let default_xpos = if i == 0 { 0 } else { 960 };
+
+        // XPos
+        exposed_properties.push(ExposedProperty {
+            name: format!("input_{}_xpos", i),
+            label: format!("Input {} X Position", i),
+            description: format!("X position of input {} on the canvas", i),
+            property_type: PropertyType::Int,
+            default_value: Some(PropertyValue::Int(default_xpos)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("input_{}_xpos", i),
+                transform: None,
             },
-            ExposedProperty {
-                name: "input_0_ypos".to_string(),
-                label: "Input 0 Y Position".to_string(),
-                description: "Y position of input 0 on the canvas".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(0)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_0_ypos".to_string(),
-                    transform: None,
-                },
+        });
+
+        // YPos
+        exposed_properties.push(ExposedProperty {
+            name: format!("input_{}_ypos", i),
+            label: format!("Input {} Y Position", i),
+            description: format!("Y position of input {} on the canvas", i),
+            property_type: PropertyType::Int,
+            default_value: Some(PropertyValue::Int(0)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("input_{}_ypos", i),
+                transform: None,
             },
-            ExposedProperty {
-                name: "input_0_width".to_string(),
-                label: "Input 0 Width".to_string(),
-                description: "Width of input 0 (-1 = source width)".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(-1)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_0_width".to_string(),
-                    transform: None,
-                },
+        });
+
+        // Width
+        exposed_properties.push(ExposedProperty {
+            name: format!("input_{}_width", i),
+            label: format!("Input {} Width", i),
+            description: format!("Width of input {} (-1 = source width)", i),
+            property_type: PropertyType::Int,
+            default_value: Some(PropertyValue::Int(-1)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("input_{}_width", i),
+                transform: None,
             },
-            ExposedProperty {
-                name: "input_0_height".to_string(),
-                label: "Input 0 Height".to_string(),
-                description: "Height of input 0 (-1 = source height)".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(-1)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_0_height".to_string(),
-                    transform: None,
-                },
+        });
+
+        // Height
+        exposed_properties.push(ExposedProperty {
+            name: format!("input_{}_height", i),
+            label: format!("Input {} Height", i),
+            description: format!("Height of input {} (-1 = source height)", i),
+            property_type: PropertyType::Int,
+            default_value: Some(PropertyValue::Int(-1)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("input_{}_height", i),
+                transform: None,
             },
-            ExposedProperty {
-                name: "input_0_alpha".to_string(),
-                label: "Input 0 Alpha".to_string(),
-                description: "Alpha/transparency of input 0 (0.0-1.0)".to_string(),
-                property_type: PropertyType::Float,
-                default_value: Some(PropertyValue::Float(1.0)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_0_alpha".to_string(),
-                    transform: None,
-                },
+        });
+
+        // Alpha
+        exposed_properties.push(ExposedProperty {
+            name: format!("input_{}_alpha", i),
+            label: format!("Input {} Alpha", i),
+            description: format!("Alpha/transparency of input {} (0.0-1.0)", i),
+            property_type: PropertyType::Float,
+            default_value: Some(PropertyValue::Float(1.0)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("input_{}_alpha", i),
+                transform: None,
             },
-            ExposedProperty {
-                name: "input_0_zorder".to_string(),
-                label: "Input 0 Z-Order".to_string(),
-                description: "Z-order of input 0 (higher = on top)".to_string(),
-                property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(0)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_0_zorder".to_string(),
-                    transform: None,
-                },
+        });
+
+        // Z-Order
+        exposed_properties.push(ExposedProperty {
+            name: format!("input_{}_zorder", i),
+            label: format!("Input {} Z-Order", i),
+            description: format!("Z-order of input {} (higher = on top)", i),
+            property_type: PropertyType::UInt,
+            default_value: Some(PropertyValue::UInt(i as u64)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("input_{}_zorder", i),
+                transform: None,
             },
-            ExposedProperty {
-                name: "input_0_sizing_policy".to_string(),
-                label: "Input 0 Sizing Policy".to_string(),
-                description: "How to scale input 0: 'none' (stretch to fill) or 'keep-aspect-ratio' (preserve aspect with padding)".to_string(),
-                property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue {
-                            value: "none".to_string(),
-                            label: Some("None (Stretch to Fill)".to_string()),
-                        },
-                        EnumValue {
-                            value: "keep-aspect-ratio".to_string(),
-                            label: Some("Keep Aspect Ratio".to_string()),
-                        },
-                    ],
-                },
-                default_value: Some(PropertyValue::String("keep-aspect-ratio".to_string())),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_0_sizing_policy".to_string(),
-                    transform: None,
-                },
+        });
+
+        // Sizing Policy
+        exposed_properties.push(ExposedProperty {
+            name: format!("input_{}_sizing_policy", i),
+            label: format!("Input {} Sizing Policy", i),
+            description: format!("How to scale input {}: 'none' (stretch to fill) or 'keep-aspect-ratio' (preserve aspect with padding)", i),
+            property_type: PropertyType::Enum {
+                values: vec![
+                    EnumValue {
+                        value: "none".to_string(),
+                        label: Some("None (Stretch to Fill)".to_string()),
+                    },
+                    EnumValue {
+                        value: "keep-aspect-ratio".to_string(),
+                        label: Some("Keep Aspect Ratio".to_string()),
+                    },
+                ],
             },
-            // Input 1 properties
-            ExposedProperty {
-                name: "input_1_xpos".to_string(),
-                label: "Input 1 X Position".to_string(),
-                description: "X position of input 1 on the canvas".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(960)),  // Right half by default
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_1_xpos".to_string(),
-                    transform: None,
-                },
+            default_value: Some(PropertyValue::String("keep-aspect-ratio".to_string())),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("input_{}_sizing_policy", i),
+                transform: None,
             },
-            ExposedProperty {
-                name: "input_1_ypos".to_string(),
-                label: "Input 1 Y Position".to_string(),
-                description: "Y position of input 1 on the canvas".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(0)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_1_ypos".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
-                name: "input_1_width".to_string(),
-                label: "Input 1 Width".to_string(),
-                description: "Width of input 1 (-1 = source width)".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(-1)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_1_width".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
-                name: "input_1_height".to_string(),
-                label: "Input 1 Height".to_string(),
-                description: "Height of input 1 (-1 = source height)".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(-1)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_1_height".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
-                name: "input_1_alpha".to_string(),
-                label: "Input 1 Alpha".to_string(),
-                description: "Alpha/transparency of input 1 (0.0-1.0)".to_string(),
-                property_type: PropertyType::Float,
-                default_value: Some(PropertyValue::Float(1.0)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_1_alpha".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
-                name: "input_1_zorder".to_string(),
-                label: "Input 1 Z-Order".to_string(),
-                description: "Z-order of input 1 (higher = on top)".to_string(),
-                property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(1)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_1_zorder".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
-                name: "input_1_sizing_policy".to_string(),
-                label: "Input 1 Sizing Policy".to_string(),
-                description: "How to scale input 1: 'none' (stretch to fill) or 'keep-aspect-ratio' (preserve aspect with padding)".to_string(),
-                property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue {
-                            value: "none".to_string(),
-                            label: Some("None (Stretch to Fill)".to_string()),
-                        },
-                        EnumValue {
-                            value: "keep-aspect-ratio".to_string(),
-                            label: Some("Keep Aspect Ratio".to_string()),
-                        },
-                    ],
-                },
-                default_value: Some(PropertyValue::String("keep-aspect-ratio".to_string())),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "input_1_sizing_policy".to_string(),
-                    transform: None,
-                },
-            },
-        ],
+        });
+    }
+
+    BlockDefinition {
+        id: "builtin.glcompositor".to_string(),
+        name: "OpenGL Video Compositor".to_string(),
+        description: "Hardware-accelerated OpenGL video compositor for combining multiple video inputs with positioning, scaling, and alpha blending. Each input can be independently positioned and sized on the output canvas.".to_string(),
+        category: "Video".to_string(),
+        exposed_properties,
         // External pads are computed dynamically based on num_inputs
         external_pads: ExternalPads {
             inputs: vec![
