@@ -26,7 +26,7 @@ use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom_types::{block::*, PropertyValue, *};
+use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::info;
 
 /// MPEG-TS/SRT Output block builder.
@@ -274,12 +274,12 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
 
             // Link: identity -> capsfilter -> mpegtsmux
             internal_links.push((
-                format!("{}:src", video_input_id),
-                format!("{}:sink", video_capsfilter_id),
+                ElementPadRef::pad(&video_input_id, "src"),
+                ElementPadRef::pad(&video_capsfilter_id, "sink"),
             ));
             internal_links.push((
-                format!("{}:src", video_capsfilter_id),
-                format!("{}:sink_{}", mux_id, next_mux_pad),
+                ElementPadRef::pad(&video_capsfilter_id, "src"),
+                ElementPadRef::pad(&mux_id, format!("sink_{}", next_mux_pad)),
             ));
             next_mux_pad += 1;
 
@@ -318,18 +318,21 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
 
             // Chain: audioconvert -> audioresample -> avenc_aac -> aacparse -> mpegtsmux
             internal_links.push((
-                format!("{}:src", audio_input_id),
-                format!("{}:sink", audioresample_id),
+                ElementPadRef::pad(&audio_input_id, "src"),
+                ElementPadRef::pad(&audioresample_id, "sink"),
             ));
             internal_links.push((
-                format!("{}:src", audioresample_id),
-                format!("{}:sink", encoder_id),
+                ElementPadRef::pad(&audioresample_id, "src"),
+                ElementPadRef::pad(&encoder_id, "sink"),
             ));
-            internal_links.push((format!("{}:src", encoder_id), format!("{}:sink", parser_id)));
+            internal_links.push((
+                ElementPadRef::pad(&encoder_id, "src"),
+                ElementPadRef::pad(&parser_id, "sink"),
+            ));
             // Link parser to mpegtsmux request pad
             internal_links.push((
-                format!("{}:src", parser_id),
-                format!("{}:sink_{}", mux_id, next_mux_pad),
+                ElementPadRef::pad(&parser_id, "src"),
+                ElementPadRef::pad(&mux_id, format!("sink_{}", next_mux_pad)),
             ));
             next_mux_pad += 1;
 
@@ -340,7 +343,10 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         }
 
         // Link mux to sink
-        internal_links.push((format!("{}:src", mux_id), format!("{}:sink", sink_id)));
+        internal_links.push((
+            ElementPadRef::pad(&mux_id, "src"),
+            ElementPadRef::pad(&sink_id, "sink"),
+        ));
 
         info!(
             "📡 Created MPEG-TS/SRT block with {} video track(s) and {} audio chain(s)",
@@ -351,6 +357,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             elements,
             internal_links,
             bus_message_handler: None,
+            pad_properties: HashMap::new(),
         })
     }
 }

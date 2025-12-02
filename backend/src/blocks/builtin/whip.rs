@@ -6,7 +6,7 @@ use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom_types::{block::*, PropertyValue, *};
+use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::debug;
 
 /// WHIP Output block builder.
@@ -113,12 +113,12 @@ impl BlockBuilder for WHIPOutputBuilder {
         // The first audio pad requested will be audio_0
         let internal_links = vec![
             (
-                format!("{}:src", audioconvert_id),
-                format!("{}:sink", audioresample_id),
+                ElementPadRef::pad(&audioconvert_id, "src"),
+                ElementPadRef::pad(&audioresample_id, "sink"),
             ),
             (
-                format!("{}:src", audioresample_id),
-                format!("{}:audio_0", whipclientsink_id),
+                ElementPadRef::pad(&audioresample_id, "src"),
+                ElementPadRef::pad(&whipclientsink_id, "audio_0"),
             ),
         ];
 
@@ -130,6 +130,7 @@ impl BlockBuilder for WHIPOutputBuilder {
             ],
             internal_links,
             bus_message_handler: None,
+            pad_properties: HashMap::new(),
         })
     }
 }

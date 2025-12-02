@@ -9,7 +9,7 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use strom_types::{block::*, PropertyValue, *};
+use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 
 /// WHEP Input block builder.
@@ -361,20 +361,20 @@ impl BlockBuilder for WHEPInputBuilder {
         // The whepclientsrc pads are linked dynamically via pad-added callback
         let internal_links = vec![
             (
-                format!("{}:src", silence_id),
-                format!("{}:sink_%u", liveadder_id),
+                ElementPadRef::pad(&silence_id, "src"),
+                ElementPadRef::pad(&liveadder_id, "sink_%u"),
             ),
             (
-                format!("{}:src", liveadder_id),
-                format!("{}:sink", capsfilter_id),
+                ElementPadRef::pad(&liveadder_id, "src"),
+                ElementPadRef::pad(&capsfilter_id, "sink"),
             ),
             (
-                format!("{}:src", capsfilter_id),
-                format!("{}:sink", output_audioconvert_id),
+                ElementPadRef::pad(&capsfilter_id, "src"),
+                ElementPadRef::pad(&output_audioconvert_id, "sink"),
             ),
             (
-                format!("{}:src", output_audioconvert_id),
-                format!("{}:sink", output_audioresample_id),
+                ElementPadRef::pad(&output_audioconvert_id, "src"),
+                ElementPadRef::pad(&output_audioresample_id, "sink"),
             ),
         ];
 
@@ -389,6 +389,7 @@ impl BlockBuilder for WHEPInputBuilder {
             ],
             internal_links,
             bus_message_handler: None,
+            pad_properties: HashMap::new(),
         })
     }
 }

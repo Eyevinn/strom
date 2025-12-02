@@ -6,7 +6,7 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::io::Write;
 use std::str::FromStr;
-use strom_types::{block::*, EnumValue, PropertyValue, *};
+use strom_types::{block::*, element::ElementPadRef, EnumValue, PropertyValue, *};
 use tracing::{debug, info, warn};
 
 // AES67 Input defaults
@@ -323,21 +323,22 @@ impl BlockBuilder for AES67InputBuilder {
                 ],
                 internal_links: vec![
                     (
-                        format!("{}:src", filesrc_id),
-                        format!("{}:sink", sdpdemux_id),
+                        ElementPadRef::pad(&filesrc_id, "src"),
+                        ElementPadRef::pad(&sdpdemux_id, "sink"),
                     ),
                     // sdpdemux:stream_0 -> decodebin:sink (dynamic pad - pipeline builder handles)
                     (
-                        format!("{}:stream_0", sdpdemux_id),
-                        format!("{}:sink", decodebin_id),
+                        ElementPadRef::pad(&sdpdemux_id, "stream_0"),
+                        ElementPadRef::pad(&decodebin_id, "sink"),
                     ),
                     // decodebin -> audioconvert is dynamic (handled by pad-added above)
                     (
-                        format!("{}:src", audioconvert_id),
-                        format!("{}:sink", audioresample_id),
+                        ElementPadRef::pad(&audioconvert_id, "src"),
+                        ElementPadRef::pad(&audioresample_id, "sink"),
                     ),
                 ],
                 bus_message_handler: None,
+                pad_properties: HashMap::new(),
             })
         } else {
             // No decode - output RTP stream directly
@@ -347,10 +348,11 @@ impl BlockBuilder for AES67InputBuilder {
                     (sdpdemux_id.clone(), sdpdemux),
                 ],
                 internal_links: vec![(
-                    format!("{}:src", filesrc_id),
-                    format!("{}:sink", sdpdemux_id),
+                    ElementPadRef::pad(&filesrc_id, "src"),
+                    ElementPadRef::pad(&sdpdemux_id, "sink"),
                 )],
                 bus_message_handler: None,
+                pad_properties: HashMap::new(),
             })
         }
     }
@@ -499,20 +501,20 @@ impl BlockBuilder for AES67OutputBuilder {
         // Define internal links
         let internal_links = vec![
             (
-                format!("{}:src", audioconvert_id),
-                format!("{}:sink", audioresample_id),
+                ElementPadRef::pad(&audioconvert_id, "src"),
+                ElementPadRef::pad(&audioresample_id, "sink"),
             ),
             (
-                format!("{}:src", audioresample_id),
-                format!("{}:sink", capsfilter_id),
+                ElementPadRef::pad(&audioresample_id, "src"),
+                ElementPadRef::pad(&capsfilter_id, "sink"),
             ),
             (
-                format!("{}:src", capsfilter_id),
-                format!("{}:sink", payloader_id),
+                ElementPadRef::pad(&capsfilter_id, "src"),
+                ElementPadRef::pad(&payloader_id, "sink"),
             ),
             (
-                format!("{}:src", payloader_id),
-                format!("{}:sink", udpsink_id),
+                ElementPadRef::pad(&payloader_id, "src"),
+                ElementPadRef::pad(&udpsink_id, "sink"),
             ),
         ];
 
@@ -526,6 +528,7 @@ impl BlockBuilder for AES67OutputBuilder {
             ],
             internal_links,
             bus_message_handler: None,
+            pad_properties: HashMap::new(),
         })
     }
 }

@@ -93,3 +93,7 @@ tempfile = "3.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3.0"
+
+[[example]]
+name = "test-glvideomixer"
+path = "../examples/test-glvideomixer.rs"

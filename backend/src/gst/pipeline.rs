@@ -9,6 +9,7 @@ use gstreamer::prelude::*;
 use gstreamer_net as gst_net;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use strom_types::element::ElementPadRef;
 use strom_types::flow::ThreadPriorityStatus;
 use strom_types::{Element, Flow, FlowId, Link, PipelineState, PropertyValue, StromEvent};
 use thiserror::Error;
@@ -262,6 +263,22 @@ impl PipelineManager {
         );
         manager.block_message_connect_fns = expanded.bus_message_handlers;
 
+        // Merge pad properties from blocks with existing pad properties
+        info!(
+            "🎨 Merging {} element(s) with pad properties from blocks",
+            expanded.pad_properties.len()
+        );
+        if !expanded.pad_properties.is_empty() {
+            for (elem_id, pads) in &expanded.pad_properties {
+                info!(
+                    "🎨   Element {}: {} pad(s) with properties",
+                    elem_id,
+                    pads.len()
+                );
+            }
+        }
+        manager.pad_properties.extend(expanded.pad_properties);
+
         // Analyze links and auto-insert tee elements where needed
         debug!("Analyzing links and inserting tee elements if needed...");
         let processed_links = Self::insert_tees_if_needed(&expanded.links);
@@ -296,14 +313,14 @@ impl PipelineManager {
                 link.to
             );
             if let Err(e) = manager.try_link_elements(link) {
-                debug!(
-                    "Could not link immediately: {} - will try when pad becomes available ({})",
-                    e, link.from
+                info!(
+                    "Could not link immediately: {} -> {} (error: {}). Will retry when pad becomes available.",
+                    link.from, link.to, e
                 );
                 // Store as pending link
                 manager.pending_links.push(link.clone());
             } else {
-                debug!("Successfully linked: {} -> {}", link.from, link.to);
+                info!("Successfully linked: {} -> {}", link.from, link.to);
             }
         }
         debug!(
@@ -316,11 +333,8 @@ impl PipelineManager {
         manager.setup_dynamic_pad_handlers();
         debug!("Dynamic pad handlers set up");
 
-        // Apply pad properties now that pads have been created (during linking)
-        // Note: Request pads (like audiomixer sink_%u) are created during linking
-        debug!("Applying pad properties...");
-        manager.apply_pad_properties();
-        debug!("Pad properties applied");
+        // Note: Pad properties are applied in start() after reaching READY state
+        // This ensures aggregator request pads are fully initialized before accessing them
 
         // Enable QoS on all pads (both with and without user-defined properties)
         debug!("Enabling QoS on all pads...");
@@ -808,11 +822,28 @@ impl PipelineManager {
     /// Try to link two elements according to a link definition.
     /// Returns Ok if successful, Err if pads don't exist yet (dynamic pads).
     fn try_link_elements(&self, link: &Link) -> Result<(), PipelineError> {
-        debug!("Trying to link: {} -> {}", link.from, link.to);
+        // Convert to structured ElementPadRef for type-safe handling
+        let (from_ref, to_ref) = link.to_pad_refs();
 
-        // Parse element:pad format (e.g., "src" or "src:pad_name")
-        let (from_element, from_pad) = Self::parse_element_pad(&link.from);
-        let (to_element, to_pad) = Self::parse_element_pad(&link.to);
+        debug!(
+            "Trying to link: {} -> {}",
+            from_ref.element_id, to_ref.element_id
+        );
+
+        self.try_link_elements_refs(&from_ref, &to_ref, link)
+    }
+
+    /// Type-safe link implementation using ElementPadRef structs.
+    fn try_link_elements_refs(
+        &self,
+        from_ref: &ElementPadRef,
+        to_ref: &ElementPadRef,
+        link: &Link,
+    ) -> Result<(), PipelineError> {
+        let from_element = &from_ref.element_id;
+        let from_pad = from_ref.pad_name.as_deref();
+        let to_element = &to_ref.element_id;
+        let to_pad = to_ref.pad_name.as_deref();
 
         let src = self
             .elements
@@ -825,7 +856,40 @@ impl PipelineManager {
             .ok_or_else(|| PipelineError::ElementNotFound(to_element.to_string()))?;
 
         // Link with or without specific pads
-        if let (Some(src_pad_name), Some(sink_pad_name)) = (from_pad, to_pad) {
+        if let (Some(src_pad_name), None) = (from_pad, to_pad) {
+            // Source pad specified, sink pad auto-requested (for aggregators)
+            let element_type_name = sink
+                .factory()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default();
+
+            if element_type_name == "mpegtsmux" || element_type_name == "glvideomixerelement" {
+                debug!(
+                    "Linking {}:{} -> {} (aggregator, auto-request sink pad)",
+                    from_element, src_pad_name, element_type_name
+                );
+                // Use link_pads with source pad specified and sink pad as None
+                // This lets GStreamer automatically request and create a new sink pad on the aggregator
+                if let Err(e) = src.link_pads(Some(src_pad_name), sink, None::<&str>) {
+                    return Err(PipelineError::LinkError(
+                        link.from.clone(),
+                        format!("Failed to auto-link to {}: {}", element_type_name, e),
+                    ));
+                }
+                debug!("Successfully linked: {} -> {}", link.from, link.to);
+                return Ok(());
+            } else {
+                // Not an aggregator - try simple link_pads
+                if let Err(e) = src.link_pads(Some(src_pad_name), sink, None::<&str>) {
+                    return Err(PipelineError::LinkError(
+                        link.from.clone(),
+                        format!("Failed to link: {}", e),
+                    ));
+                }
+                debug!("Successfully linked: {} -> {}", link.from, link.to);
+                return Ok(());
+            }
+        } else if let (Some(src_pad_name), Some(sink_pad_name)) = (from_pad, to_pad) {
             // Try to get the pad - try static first, then request if not found
             let src_pad_obj = if let Some(pad) = src.static_pad(src_pad_name) {
                 pad
@@ -901,23 +965,31 @@ impl PipelineManager {
                 sink_pad_name, to_element
             );
 
-            // Special handling for mpegtsmux - use direct element-to-element linking to avoid request_pad() deadlock
+            // Special handling for aggregator elements (mpegtsmux, glvideomixerelement) -
+            // use link_pads with specified source pad and None for sink to let GStreamer auto-create request pads.
+            // Aggregators need to be in READY state before requesting pads, but link_pads handles this automatically.
             let element_type_name = sink
                 .factory()
                 .map(|f| f.name().to_string())
                 .unwrap_or_default();
-            if element_type_name == "mpegtsmux" {
-                debug!("Using element-level linking for mpegtsmux");
-                // For mpegtsmux, link directly at element level using the source element
-                // GStreamer will internally handle pad requesting without us having to call request_pad()
-                // We need to link from source element, not from the source pad object
-                if let Err(e) = src.link(sink) {
+            if element_type_name == "mpegtsmux" || element_type_name == "glvideomixerelement" {
+                debug!(
+                    "Using link_pads(Some({}), None) for aggregator: {}",
+                    src_pad_name, element_type_name
+                );
+                // For aggregator elements, use link_pads with source pad specified and sink pad as None
+                // This lets GStreamer automatically request and create a new sink pad on the aggregator
+                // This avoids NULL pointer crashes and pad name collisions
+                if let Err(e) = src.link_pads(Some(src_pad_name), sink, None::<&str>) {
                     return Err(PipelineError::LinkError(
                         link.from.clone(),
-                        format!("Failed to auto-link to mpegtsmux: {}", e),
+                        format!("Failed to auto-link to {}: {}", element_type_name, e),
                     ));
                 }
-                debug!("Auto-linked to mpegtsmux: {} -> {}", link.from, link.to);
+                debug!(
+                    "Auto-linked to {}: {}:{} -> {}:auto",
+                    element_type_name, from_element, src_pad_name, to_element
+                );
                 return Ok(());
             }
 
@@ -1018,7 +1090,19 @@ impl PipelineManager {
 
             debug!("Successfully linked: {} -> {}", link.from, link.to);
         } else {
-            // Simple link without pad names
+            // Simple link without pad names - check if sink is an aggregator
+            let element_type_name = sink
+                .factory()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default();
+
+            if element_type_name == "mpegtsmux" || element_type_name == "glvideomixerelement" {
+                warn!(
+                    "Aggregator {} linked without pad names - this may cause issues. Consider using explicit pad names.",
+                    element_type_name
+                );
+            }
+
             src.link(sink).map_err(|e| {
                 PipelineError::LinkError(link.from.clone(), format!("{} - {}", link.to, e))
             })?;
@@ -1159,18 +1243,45 @@ impl PipelineManager {
                 continue;
             };
 
+            // Debug: List all pads on this element (with error handling for corrupted pad names)
+            let all_pads: Vec<String> = element
+                .pads()
+                .iter()
+                .filter_map(|p| {
+                    // Safely try to get pad name - if it fails (corrupted memory), skip it
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.name().to_string()))
+                        .ok()
+                })
+                .collect();
+            info!(
+                "🎨 Element {} has {} pad(s): {:?}",
+                element_id,
+                all_pads.len(),
+                all_pads
+            );
+
             for (pad_name, properties) in pad_props {
-                // Try to get the pad - try static first, then request
+                // Get the pad - it should already exist from linking
+                // Try static pad first, then iterate through all pads (for request pads)
                 let pad = if let Some(p) = element.static_pad(pad_name) {
                     p
-                } else if let Some(p) = element.request_pad_simple(pad_name) {
-                    p
                 } else {
-                    warn!(
-                        "Pad {}:{} not found when trying to apply pad properties",
-                        element_id, pad_name
-                    );
-                    continue;
+                    // For request pads (like mixer sink_0, sink_1), they were created during linking
+                    // Iterate through existing pads instead of calling request_pad_simple (which can crash)
+                    match element
+                        .pads()
+                        .into_iter()
+                        .find(|p| p.name().as_str() == pad_name.as_str())
+                    {
+                        Some(p) => p,
+                        None => {
+                            warn!(
+                                "Pad {}:{} not found when trying to apply pad properties. Available pads: {:?}",
+                                element_id, pad_name, all_pads
+                            );
+                            continue;
+                        }
+                    }
                 };
 
                 // Enable QoS by default if the pad supports it (for buffer drop monitoring)
@@ -1179,11 +1290,12 @@ impl PipelineManager {
                     debug!("Enabled QoS on pad {}:{}", element_id, pad_name);
                 }
 
-                debug!(
-                    "Applying {} properties to pad {}:{}",
+                info!(
+                    "🎨 Applying {} properties to pad {}:{}: {:?}",
                     properties.len(),
                     element_id,
-                    pad_name
+                    pad_name,
+                    properties.keys().collect::<Vec<_>>()
                 );
 
                 // Apply each property
@@ -1432,6 +1544,18 @@ impl PipelineManager {
         );
         self.configure_clock()?;
         info!("Clock configured");
+
+        // Set to READY state first to ensure aggregator request pads are fully initialized
+        info!("Setting pipeline '{}' to READY state...", self.flow_name);
+        self.pipeline
+            .set_state(gst::State::Ready)
+            .map_err(|e| PipelineError::StateChange(format!("Failed to reach READY: {}", e)))?;
+        info!("Pipeline in READY state");
+
+        // Now apply pad properties (aggregator request pads are now accessible)
+        info!("Applying pad properties after READY state...");
+        self.apply_pad_properties();
+        info!("Pad properties applied");
 
         info!(
             "Setting pipeline '{}' to PLAYING state (this may block)...",
@@ -2022,59 +2146,16 @@ impl PipelineManager {
             element_id, pad_name, prop_name, prop_value
         );
 
-        // Set property based on type
-        match prop_value {
-            PropertyValue::String(v) => {
-                pad.set_property_from_str(prop_name, v);
-            }
-            PropertyValue::Int(v) => {
-                // Check property type to determine if we need i32 or i64
-                if let Some(pspec) = pad.find_property(prop_name) {
-                    let type_name = pspec.value_type().name();
-                    if type_name == "gint" || type_name == "glong" {
-                        if let Ok(v32) = i32::try_from(*v) {
-                            pad.set_property(prop_name, v32);
-                        } else {
-                            return Err(PipelineError::InvalidProperty {
-                                element: format!("{}:{}", element_id, pad_name),
-                                property: prop_name.to_string(),
-                                reason: format!("Value {} doesn't fit in i32", v),
-                            });
-                        }
-                    } else {
-                        pad.set_property(prop_name, *v);
-                    }
-                } else {
-                    pad.set_property(prop_name, *v);
-                }
-            }
-            PropertyValue::UInt(v) => {
-                if let Some(pspec) = pad.find_property(prop_name) {
-                    let type_name = pspec.value_type().name();
-                    if type_name == "guint" || type_name == "gulong" {
-                        if let Ok(v32) = u32::try_from(*v) {
-                            pad.set_property(prop_name, v32);
-                        } else {
-                            return Err(PipelineError::InvalidProperty {
-                                element: format!("{}:{}", element_id, pad_name),
-                                property: prop_name.to_string(),
-                                reason: format!("Value {} doesn't fit in u32", v),
-                            });
-                        }
-                    } else {
-                        pad.set_property(prop_name, *v);
-                    }
-                } else {
-                    pad.set_property(prop_name, *v);
-                }
-            }
-            PropertyValue::Float(v) => {
-                pad.set_property(prop_name, *v);
-            }
-            PropertyValue::Bool(v) => {
-                pad.set_property(prop_name, *v);
-            }
-        }
+        // Use set_property_from_str for all types - GStreamer handles type conversion automatically
+        let value_str = match prop_value {
+            PropertyValue::String(v) => v.clone(),
+            PropertyValue::Int(v) => v.to_string(),
+            PropertyValue::UInt(v) => v.to_string(),
+            PropertyValue::Float(v) => v.to_string(),
+            PropertyValue::Bool(v) => v.to_string(),
+        };
+
+        pad.set_property_from_str(prop_name, &value_str);
 
         Ok(())
     }

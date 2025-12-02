@@ -63,6 +63,7 @@ impl BlockBuilder for MeterBuilder {
             elements: vec![(level_id, level)],
             internal_links: vec![], // No internal links - it's a single element
             bus_message_handler,
+            pad_properties: HashMap::new(),
         })
     }
 }

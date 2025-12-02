@@ -270,24 +270,28 @@ impl AppState {
     /// Get all discovered GStreamer elements from cache.
     /// Elements are discovered lazily on first request.
     pub async fn discover_elements(&self) -> Vec<ElementInfo> {
+        // TEMPORARILY DISABLED: Element discovery disabled to test if it's interfering with glvideomixerelement
+        info!("Element discovery disabled for testing");
+        Vec::new()
+
         // Check if cache is empty
-        {
-            let cached = self.inner.cached_elements.read().await;
-            if !cached.is_empty() {
-                return cached.clone();
-            }
-        }
+        // {
+        //     let cached = self.inner.cached_elements.read().await;
+        //     if !cached.is_empty() {
+        //         return cached.clone();
+        //     }
+        // }
 
-        // Cache is empty, perform discovery
-        info!("Element cache empty, performing lazy discovery...");
-        if let Err(e) = self.discover_and_cache_elements().await {
-            error!("Failed to discover elements: {}", e);
-            return Vec::new();
-        }
+        // // Cache is empty, perform discovery
+        // info!("Element cache empty, performing lazy discovery...");
+        // if let Err(e) = self.discover_and_cache_elements().await {
+        //     error!("Failed to discover elements: {}", e);
+        //     return Vec::new();
+        // }
 
-        // Return the now-populated cache
-        let cached = self.inner.cached_elements.read().await;
-        cached.clone()
+        // // Return the now-populated cache
+        // let cached = self.inner.cached_elements.read().await;
+        // cached.clone()
     }
 
     /// Get information about a specific element from cache.

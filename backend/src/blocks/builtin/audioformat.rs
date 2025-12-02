@@ -18,7 +18,7 @@
 use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use std::collections::HashMap;
-use strom_types::{block::*, EnumValue, PropertyValue, *};
+use strom_types::{block::*, element::ElementPadRef, EnumValue, PropertyValue, *};
 use tracing::info;
 
 /// Audio Format block builder.
@@ -125,12 +125,12 @@ impl BlockBuilder for AudioFormatBuilder {
         // Chain: audioresample -> audioconvert -> capsfilter
         let internal_links = vec![
             (
-                format!("{}:src", resample_id),
-                format!("{}:sink", convert_id),
+                ElementPadRef::pad(&resample_id, "src"),
+                ElementPadRef::pad(&convert_id, "sink"),
             ),
             (
-                format!("{}:src", convert_id),
-                format!("{}:sink", capsfilter_id),
+                ElementPadRef::pad(&convert_id, "src"),
+                ElementPadRef::pad(&capsfilter_id, "sink"),
             ),
         ];
 
@@ -142,6 +142,7 @@ impl BlockBuilder for AudioFormatBuilder {
             ],
             internal_links,
             bus_message_handler: None,
+            pad_properties: HashMap::new(),
         })
     }
 }

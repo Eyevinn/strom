@@ -8,6 +8,9 @@ use tracing::debug;
 
 use super::PipelineError;
 
+use std::collections::HashMap;
+use strom_types::PropertyValue;
+
 /// Result of expanding blocks into elements and links.
 pub struct ExpandedPipeline {
     /// GStreamer elements (from both regular elements and expanded blocks)
@@ -16,6 +19,8 @@ pub struct ExpandedPipeline {
     pub links: Vec<Link>,
     /// Bus message handler connection functions from blocks
     pub bus_message_handlers: Vec<BusMessageConnectFn>,
+    /// Pad properties from blocks (element_id -> pad_name -> property_name -> value)
+    pub pad_properties: HashMap<String, HashMap<String, HashMap<String, PropertyValue>>>,
 }
 
 /// Expand block instances into GStreamer elements using BlockBuilder trait.
@@ -31,6 +36,8 @@ pub async fn expand_blocks(
     let mut gst_elements = Vec::new();
     let mut all_links = Vec::new();
     let mut bus_message_handlers = Vec::new();
+    let mut all_pad_properties: HashMap<String, HashMap<String, HashMap<String, PropertyValue>>> =
+        HashMap::new();
 
     debug!("Expanding {} block instance(s)", blocks.len());
 
@@ -69,15 +76,28 @@ pub async fn expand_blocks(
         // Add the created elements
         gst_elements.extend(build_result.elements);
 
-        // Add internal links (convert from tuple format to Link format)
-        for (from, to) in build_result.internal_links {
-            all_links.push(Link { from, to });
+        // Add internal links (convert from ElementPadRef to Link string format)
+        for (from_ref, to_ref) in build_result.internal_links {
+            all_links.push(Link {
+                from: from_ref.to_string_format(),
+                to: to_ref.to_string_format(),
+            });
         }
 
         // Collect bus message handler connection function if provided
         if let Some(bus_message_handler) = build_result.bus_message_handler {
             debug!("Block {} provided a bus message handler", block_instance.id);
             bus_message_handlers.push(bus_message_handler);
+        }
+
+        // Merge pad properties from this block
+        if !build_result.pad_properties.is_empty() {
+            debug!(
+                "Block {} provided pad properties for {} element(s)",
+                block_instance.id,
+                build_result.pad_properties.len()
+            );
+            all_pad_properties.extend(build_result.pad_properties);
         }
     }
 
@@ -91,16 +111,18 @@ pub async fn expand_blocks(
     }
 
     debug!(
-        "Block expansion complete: {} GStreamer elements, {} links, {} bus message handlers",
+        "Block expansion complete: {} GStreamer elements, {} links, {} bus message handlers, {} elements with pad properties",
         gst_elements.len(),
         all_links.len(),
-        bus_message_handlers.len()
+        bus_message_handlers.len(),
+        all_pad_properties.len()
     );
 
     Ok(ExpandedPipeline {
         gst_elements,
         links: all_links,
         bus_message_handlers,
+        pad_properties: all_pad_properties,
     })
 }
 

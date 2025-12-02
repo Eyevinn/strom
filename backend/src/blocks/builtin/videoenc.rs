@@ -20,7 +20,7 @@ use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom_types::{block::*, EnumValue, PropertyValue, *};
+use strom_types::{block::*, element::ElementPadRef, EnumValue, PropertyValue, *};
 use tracing::{info, warn};
 
 /// Video Encoder block builder.
@@ -169,13 +169,16 @@ impl BlockBuilder for VideoEncBuilder {
         // Chain: videoconvert -> encoder -> parser -> capsfilter
         let internal_links = vec![
             (
-                format!("{}:src", convert_id),
-                format!("{}:sink", encoder_id),
+                ElementPadRef::pad(&convert_id, "src"),
+                ElementPadRef::pad(&encoder_id, "sink"),
             ),
-            (format!("{}:src", encoder_id), format!("{}:sink", parser_id)),
             (
-                format!("{}:src", parser_id),
-                format!("{}:sink", capsfilter_id),
+                ElementPadRef::pad(&encoder_id, "src"),
+                ElementPadRef::pad(&parser_id, "sink"),
+            ),
+            (
+                ElementPadRef::pad(&parser_id, "src"),
+                ElementPadRef::pad(&capsfilter_id, "sink"),
             ),
         ];
 
@@ -188,6 +191,7 @@ impl BlockBuilder for VideoEncBuilder {
             ],
             internal_links,
             bus_message_handler: None,
+            pad_properties: HashMap::new(),
         })
     }
 }

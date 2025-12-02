@@ -28,6 +28,8 @@ pub struct Element {
 }
 
 /// A link between two element pads.
+///
+/// For API/serialization compatibility, this uses strings. Internally converted to ElementPadRef.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct Link {
@@ -35,6 +37,95 @@ pub struct Link {
     pub from: String,
     /// Destination element and pad (format: "element_id" or "element_id:pad_name")
     pub to: String,
+}
+
+impl Link {
+    /// Convert to structured ElementPadRef pair for type-safe internal use
+    pub fn to_pad_refs(&self) -> (ElementPadRef, ElementPadRef) {
+        (
+            ElementPadRef::from_string(&self.from),
+            ElementPadRef::from_string(&self.to),
+        )
+    }
+
+    /// Create from structured ElementPadRef pair
+    pub fn from_pad_refs(from: ElementPadRef, to: ElementPadRef) -> Self {
+        Self {
+            from: from.to_string_format(),
+            to: to.to_string_format(),
+        }
+    }
+}
+
+/// Reference to an element pad (structured).
+/// Used internally for type-safe linking without string parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElementPadRef {
+    /// Element ID (may contain colons for namespaced blocks, e.g., "block_id:element_name")
+    pub element_id: String,
+    /// Optional pad name (None for element-level linking)
+    pub pad_name: Option<String>,
+}
+
+impl ElementPadRef {
+    /// Create a reference to an element (no specific pad)
+    pub fn element(element_id: impl Into<String>) -> Self {
+        Self {
+            element_id: element_id.into(),
+            pad_name: None,
+        }
+    }
+
+    /// Create a reference to a specific pad on an element
+    pub fn pad(element_id: impl Into<String>, pad_name: impl Into<String>) -> Self {
+        Self {
+            element_id: element_id.into(),
+            pad_name: Some(pad_name.into()),
+        }
+    }
+
+    /// Parse from string format "element_id:pad_name" or "element_id::" (element-only).
+    ///
+    /// The "::" suffix indicates element-level linking (no specific pad).
+    /// Uses rsplit_once to handle namespaced element IDs with colons.
+    pub fn from_string(spec: &str) -> Self {
+        // Check for "::" suffix (element-only marker)
+        if let Some(stripped) = spec.strip_suffix("::") {
+            return Self {
+                element_id: stripped.to_string(),
+                pad_name: None,
+            };
+        }
+
+        // Normal "element:pad" format
+        if let Some((element, pad)) = spec.rsplit_once(':') {
+            Self {
+                element_id: element.to_string(),
+                pad_name: Some(pad.to_string()),
+            }
+        } else {
+            // No colon - just element ID
+            Self {
+                element_id: spec.to_string(),
+                pad_name: None,
+            }
+        }
+    }
+
+    /// Convert to string format for Link serialization.
+    ///
+    /// Uses a special "::" separator for element-only references to distinguish them
+    /// from element:pad references when element IDs contain colons.
+    ///
+    /// Format:
+    /// - Element with pad: "element_id:pad_name"
+    /// - Element without pad: "element_id::"
+    pub fn to_string_format(&self) -> String {
+        match &self.pad_name {
+            Some(pad) => format!("{}:{}", self.element_id, pad),
+            None => format!("{}::", self.element_id), // Special marker for element-only
+        }
+    }
 }
 
 /// Property value that can be various types.
