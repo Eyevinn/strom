@@ -224,13 +224,18 @@ impl BlockBuilder for GLCompositorBuilder {
                 .unwrap_or(i as u32);
             sink_pad.set_property_from_str("zorder", &zorder.to_string());
 
-            // Enable QoS on pad for proper quality-of-service event handling
-            // Actually they do not have qos.
+            // Get sizing policy (default: keep-aspect-ratio)
+            let sizing_policy = properties
+                .get(&format!("input_{}_sizing_policy", i))
+                .and_then(|v| match v {
+                    PropertyValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("keep-aspect-ratio");
+            sink_pad.set_property_from_str("sizing-policy", sizing_policy);
 
-            sink_pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
-
-            info!("🎬 Pad {} properties set: xpos={}, ypos={}, width={}, height={}, alpha={}, zorder={}, qos=true",
-                  sink_pad.name(), xpos, ypos, width, height, alpha, zorder);
+            info!("🎬 Pad {} properties set: xpos={}, ypos={}, width={}, height={}, alpha={}, zorder={}, sizing-policy={}",
+                  sink_pad.name(), xpos, ypos, width, height, alpha, zorder, sizing_policy);
 
             mixer_sink_pads.push(sink_pad);
         }
@@ -559,6 +564,29 @@ fn glcompositor_definition() -> BlockDefinition {
                     transform: None,
                 },
             },
+            ExposedProperty {
+                name: "input_0_sizing_policy".to_string(),
+                label: "Input 0 Sizing Policy".to_string(),
+                description: "How to scale input 0: 'none' (stretch to fill) or 'keep-aspect-ratio' (preserve aspect with padding)".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "none".to_string(),
+                            label: Some("None (Stretch to Fill)".to_string()),
+                        },
+                        EnumValue {
+                            value: "keep-aspect-ratio".to_string(),
+                            label: Some("Keep Aspect Ratio".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("keep-aspect-ratio".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "input_0_sizing_policy".to_string(),
+                    transform: None,
+                },
+            },
             // Input 1 properties
             ExposedProperty {
                 name: "input_1_xpos".to_string(),
@@ -629,6 +657,29 @@ fn glcompositor_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "input_1_zorder".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "input_1_sizing_policy".to_string(),
+                label: "Input 1 Sizing Policy".to_string(),
+                description: "How to scale input 1: 'none' (stretch to fill) or 'keep-aspect-ratio' (preserve aspect with padding)".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "none".to_string(),
+                            label: Some("None (Stretch to Fill)".to_string()),
+                        },
+                        EnumValue {
+                            value: "keep-aspect-ratio".to_string(),
+                            label: Some("Keep Aspect Ratio".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("keep-aspect-ratio".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "input_1_sizing_policy".to_string(),
                     transform: None,
                 },
             },
