@@ -76,6 +76,15 @@ impl BlockBuilder for GLCompositorBuilder {
         let output_height = parse_output_height(properties);
         let background = parse_background(properties);
 
+        // Get gl_output property (default false = include gldownload for compatibility)
+        let gl_output = properties
+            .get("gl_output")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false); // Default to false (include gldownload)
+
         info!(
             "🎬 Creating compositor: {} inputs, {}x{} output, background={:?}",
             num_inputs, output_width, output_height, background
@@ -240,19 +249,21 @@ impl BlockBuilder for GLCompositorBuilder {
             mixer_sink_pads.push(sink_pad);
         }
 
-        // Create gldownload for output
-        let download_id = format!("{}:gldownload", instance_id);
-        let download = gst::ElementFactory::make("gldownload")
-            .name(&download_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("gldownload: {}", e)))?;
-
-        // Create capsfilter with output dimensions
+        // Create output chain based on gl_output setting
         let capsfilter_id = format!("{}:capsfilter", instance_id);
-        let caps_str = format!(
-            "video/x-raw,width={},height={}",
-            output_width, output_height
-        );
+        let caps_str = if gl_output {
+            // GL output: keep in GL memory
+            format!(
+                "video/x-raw(memory:GLMemory),width={},height={}",
+                output_width, output_height
+            )
+        } else {
+            // System memory output: regular video/x-raw
+            format!(
+                "video/x-raw,width={},height={}",
+                output_width, output_height
+            )
+        };
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
         })?;
@@ -262,6 +273,24 @@ impl BlockBuilder for GLCompositorBuilder {
             .property("caps", &caps)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
+
+        // Optionally create gldownload if not outputting GL memory
+        let download_id = if !gl_output {
+            Some(format!("{}:gldownload", instance_id))
+        } else {
+            None
+        };
+
+        let download = if let Some(ref id) = download_id {
+            Some(
+                gst::ElementFactory::make("gldownload")
+                    .name(id)
+                    .build()
+                    .map_err(|e| BlockBuildError::ElementCreation(format!("gldownload: {}", e)))?,
+            )
+        } else {
+            None
+        };
 
         // Create glupload elements for each input
         let mut elements = vec![(mixer_id.clone(), mixer.clone())];
@@ -288,19 +317,33 @@ impl BlockBuilder for GLCompositorBuilder {
             ));
         }
 
-        // Add output elements
-        elements.push((download_id.clone(), download));
-        elements.push((capsfilter_id.clone(), capsfilter));
+        // Add output elements and create links based on gl_output setting
+        if let Some(ref dl_id) = download_id {
+            // gl_output=false: mixer -> gldownload -> capsfilter
+            elements.push((dl_id.clone(), download.unwrap()));
+            elements.push((capsfilter_id.clone(), capsfilter));
 
-        // Link mixer -> gldownload -> capsfilter (pad-level linking)
-        internal_links.push((
-            ElementPadRef::pad(&mixer_id, "src"),
-            ElementPadRef::pad(&download_id, "sink"),
-        ));
-        internal_links.push((
-            ElementPadRef::pad(&download_id, "src"),
-            ElementPadRef::pad(&capsfilter_id, "sink"),
-        ));
+            internal_links.push((
+                ElementPadRef::pad(&mixer_id, "src"),
+                ElementPadRef::pad(dl_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(dl_id, "src"),
+                ElementPadRef::pad(&capsfilter_id, "sink"),
+            ));
+
+            info!("🎬 Output chain: mixer -> gldownload -> capsfilter (system memory)");
+        } else {
+            // gl_output=true: mixer -> capsfilter (stay in GL memory)
+            elements.push((capsfilter_id.clone(), capsfilter));
+
+            internal_links.push((
+                ElementPadRef::pad(&mixer_id, "src"),
+                ElementPadRef::pad(&capsfilter_id, "sink"),
+            ));
+
+            info!("🎬 Output chain: mixer -> capsfilter (GL memory)");
+        }
 
         info!(
             "🎬 GLCompositor block created: {} inputs with pads pre-configured in NULL state",
@@ -483,6 +526,18 @@ fn glcompositor_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "force_live".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "gl_output".to_string(),
+                label: "GL Memory Output".to_string(),
+                description: "Output in OpenGL memory (true) for chaining GL elements, or system memory (false, default) for compatibility with encoders. When true, skips gldownload for better performance with GL processing chains.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "gl_output".to_string(),
                     transform: None,
                 },
             },
