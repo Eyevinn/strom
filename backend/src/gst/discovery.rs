@@ -4,7 +4,7 @@ use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom_types::element::{ElementInfo, MediaType, PadInfo, PadPresence};
+use strom_types::element::{ElementInfo, MediaType};
 use tracing::{debug, warn};
 
 /// GStreamer element discovery service.
@@ -553,6 +553,8 @@ impl ElementDiscovery {
     }
 
     /// Introspect a GStreamer element factory.
+    /// LIGHTWEIGHT VERSION: Only gets name, description, and category.
+    /// Does NOT create element instances or introspect pads/properties during discover_all().
     fn introspect_element_factory(
         &self,
         factory: &gst::ElementFactory,
@@ -570,78 +572,22 @@ impl ElementDiscovery {
             .unwrap_or_default();
         let category = Self::determine_category(&klass);
 
-        // Get pad templates
-        let mut src_pads = Vec::new();
-        let mut sink_pads = Vec::new();
-
-        // Try to create a temporary element for introspection
-        // Wrap in catch_unwind to prevent crashes from problematic elements
-        // This is safe because discovery now happens only once at startup
-        let temp_element: Option<gst::Element> =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                factory.create().build().ok()
-            }))
-            .ok()
-            .flatten();
-
-        for static_pad_template in factory.static_pad_templates() {
-            // IMPORTANT: Don't call caps.to_string() during discover_all()!
-            // Calling caps.to_string() on thousands of pad templates corrupts
-            // GStreamer's global pad template registry, causing strcmp crashes
-            // when creating aggregator elements like mpegtsmux later.
-            // See MPEGTSMUX_CRASH_INVESTIGATION.md for details.
-            // Caps will be lazy-loaded on-demand when user clicks the element.
-            let caps_string = String::new();
-
-            // Determine pad presence
-            let presence = match static_pad_template.presence() {
-                gst::PadPresence::Always => PadPresence::Always,
-                gst::PadPresence::Sometimes => PadPresence::Sometimes,
-                gst::PadPresence::Request => PadPresence::Request,
-            };
-
-            // Determine media type - use Generic since we don't have caps
-            let media_type = MediaType::Generic;
-
-            // Try to introspect pad properties
-            let properties = if let Some(ref element) = temp_element {
-                // Get the pad template from the element (not the static one)
-                if let Some(pad_template) =
-                    element.pad_template(static_pad_template.name_template())
-                {
-                    self.introspect_pad_template_properties(element, &pad_template)
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-
-            let pad_info = PadInfo {
-                name: static_pad_template.name_template().to_string(),
-                caps: caps_string,
-                presence,
-                media_type,
-                properties,
-            };
-
-            match static_pad_template.direction() {
-                gst::PadDirection::Src => src_pads.push(pad_info),
-                gst::PadDirection::Sink => sink_pads.push(pad_info),
-                _ => {}
-            }
-        }
-
-        // Introspect element properties
-        let properties = self.introspect_properties(factory)?;
+        // IMPORTANT: We do NOT create element instances during discover_all()!
+        // Creating thousands of elements is:
+        // 1. Very slow (adds seconds to startup)
+        // 2. Dangerous - some elements crash when created
+        // 3. State-corrupting - elements like mpegtsmux corrupt global state
+        //
+        // Instead, we only return basic info (name, description, category).
+        // Pads and properties can be introspected on-demand when needed.
 
         Ok(ElementInfo {
             name,
             description,
             category,
-            src_pads,
-            sink_pads,
-            properties,
+            src_pads: Vec::new(),   // No pad introspection during discovery
+            sink_pads: Vec::new(),  // No pad introspection during discovery
+            properties: Vec::new(), // No property introspection during discovery
         })
     }
 
@@ -699,6 +645,7 @@ impl ElementDiscovery {
     }
 
     /// Introspect pad template properties by getting or creating a pad.
+    #[allow(dead_code)]
     fn introspect_pad_template_properties(
         &self,
         element: &gst::Element,
@@ -968,6 +915,7 @@ impl ElementDiscovery {
     /// Introspect element properties from a factory.
     /// During startup discovery, this returns empty to avoid crashes.
     /// Use introspect_element_properties_lazy() for on-demand property loading.
+    #[allow(dead_code)]
     fn introspect_properties(
         &self,
         factory: &gst::ElementFactory,

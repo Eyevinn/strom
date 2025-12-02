@@ -197,7 +197,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         //
         // Solution for transcoding (encode-as-fast-as-possible):
         // - sync=false: Don't try to maintain real-time clock synchronization
-        // - qos=false: Don't send QoS events based on impossible timestamps
+        // - qos=true: Enable QoS events so sink can report back pressure to upstream
         // - Buffers are pushed as fast as they're produced
         //
         // When you WOULD want sync=true:
@@ -208,10 +208,10 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         // See also: notes.txt "QoS/SYNC ISSUE IN TRANSCODING PIPELINES"
         // Fixed: 2025-12-01
         srtsink.set_property("sync", false);
-        srtsink.set_property("qos", false);
+        srtsink.set_property("qos", true);
 
         info!(
-            "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync=false, qos=false (transcoding mode)",
+            "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync=false, qos=true",
             srt_uri, latency, wait_for_connection, auto_reconnect
         );
 

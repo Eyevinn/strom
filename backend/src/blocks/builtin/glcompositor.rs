@@ -41,13 +41,13 @@ impl BlockBuilder for GLCompositorBuilder {
             .unwrap_or(2)
             .clamp(1, 16);
 
-        // Create input pads dynamically - map to videoconvert which is before glupload
+        // Create input pads dynamically - map directly to glupload (no videoconvert)
         let mut inputs = Vec::new();
         for i in 0..num_inputs {
             inputs.push(ExternalPad {
                 name: format!("video_in_{}", i),
                 media_type: MediaType::Video,
-                internal_element_id: format!("videoconvert_{}", i),
+                internal_element_id: format!("glupload_{}", i),
                 internal_pad_name: "sink".to_string(),
             });
         }
@@ -87,10 +87,23 @@ impl BlockBuilder for GLCompositorBuilder {
 
         // Create the main mixer element
         let mixer_id = format!("{}:mixer", instance_id);
+
+        // Get force_live property (construction-time only, default true for live mixing)
+        let force_live = properties
+            .get("force_live")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(true); // Default to true for live mixing behavior
+
         let mixer = gst::ElementFactory::make("glvideomixerelement")
             .name(&mixer_id)
+            .property("force-live", force_live)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("glvideomixerelement: {}", e)))?;
+
+        info!("🎬 Mixer created with force-live={}", force_live);
 
         // Set mixer properties in NULL state
         mixer.set_property_from_str("background", background);
@@ -250,29 +263,16 @@ impl BlockBuilder for GLCompositorBuilder {
         let mut internal_links = Vec::new();
 
         for (i, sink_pad) in mixer_sink_pads.iter().enumerate() {
-            // Create videoconvert to handle format conversion before GL upload
-            let convert_id = format!("{}:videoconvert_{}", instance_id, i);
-            let videoconvert = gst::ElementFactory::make("videoconvert")
-                .name(&convert_id)
-                .build()
-                .map_err(|e| {
-                    BlockBuildError::ElementCreation(format!("videoconvert_{}: {}", i, e))
-                })?;
-
+            // Create glupload for hardware-accelerated format conversion
+            // Note: videoconvert removed - it's a CPU bottleneck for live video!
+            // glupload can handle format conversion directly with GPU acceleration
             let upload_id = format!("{}:glupload_{}", instance_id, i);
             let upload = gst::ElementFactory::make("glupload")
                 .name(&upload_id)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("glupload_{}: {}", i, e)))?;
 
-            elements.push((convert_id.clone(), videoconvert));
             elements.push((upload_id.clone(), upload));
-
-            // Link videoconvert -> glupload (pad-level linking)
-            internal_links.push((
-                ElementPadRef::pad(&convert_id, "src"),
-                ElementPadRef::pad(&upload_id, "sink"),
-            ));
 
             // Link glupload -> mixer (using pre-created pad)
             // We already requested and configured the pad above in NULL state
@@ -469,6 +469,18 @@ fn glcompositor_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "min_upstream_latency".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "force_live".to_string(),
+                label: "Force Live Mode".to_string(),
+                description: "Always operate in live mode and aggregate on timeout regardless of whether any live sources are linked upstream. Construction-time only - cannot be changed after block creation.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "force_live".to_string(),
                     transform: None,
                 },
             },

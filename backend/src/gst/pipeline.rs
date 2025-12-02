@@ -1458,6 +1458,21 @@ impl PipelineManager {
                 })?;
 
                 info!("PTP clock configured: domain={}", domain);
+
+                // For PTP clock with direct media timing (AES67 / RFC 7273):
+                // Set base_time to 0 and start_time to NONE.
+                // This makes RTP timestamps directly correspond to the PTP reference clock,
+                // which is required for mediaclk:direct=0 signaling.
+                //
+                // Combined with timestamp-offset=0 on the RTP payloader (set in aes67.rs),
+                // this ensures GStreamer generates RTP timestamps that directly reflect
+                // the pipeline clock time.
+                self.pipeline.set_base_time(gst::ClockTime::ZERO);
+                self.pipeline.set_start_time(gst::ClockTime::NONE);
+                info!(
+                    "Pipeline '{}' configured for PTP direct media timing: base_time=0, start_time=None",
+                    self.flow_name
+                );
             }
             GStreamerClockType::Monotonic => {
                 info!("Using Monotonic clock for pipeline '{}'", self.flow_name);
@@ -1491,20 +1506,8 @@ impl PipelineManager {
             }
         }
 
-        // For direct media timing (AES67 / RFC 7273):
-        // Set base_time to 0 and start_time to NONE for ALL clock types.
-        // This makes RTP timestamps directly correspond to the reference clock,
-        // which is required for mediaclk:direct=0 signaling.
-        //
-        // Combined with timestamp-offset=0 on the RTP payloader (set in aes67.rs),
-        // this ensures GStreamer generates RTP timestamps that directly reflect
-        // the pipeline clock time.
-        self.pipeline.set_base_time(gst::ClockTime::ZERO);
-        self.pipeline.set_start_time(gst::ClockTime::NONE);
-        info!(
-            "Pipeline '{}' configured for direct media timing: base_time=0, start_time=None",
-            self.flow_name
-        );
+        // Note: For non-PTP clocks, we let GStreamer manage base_time and start_time automatically.
+        // Only PTP clock (above) sets base_time=0 and start_time=None for AES67 direct media timing.
 
         Ok(())
     }
