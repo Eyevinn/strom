@@ -41,14 +41,14 @@ impl BlockBuilder for GLCompositorBuilder {
             .unwrap_or(2)
             .clamp(1, 16);
 
-        // Check if queues are enabled (default false)
+        // Check if queues are enabled (default true)
         let use_queues = properties
             .get("use_queues")
             .and_then(|v| match v {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         // Create input pads dynamically - map to queue or glupload depending on use_queues
         let mut inputs = Vec::new();
@@ -100,14 +100,14 @@ impl BlockBuilder for GLCompositorBuilder {
             })
             .unwrap_or(false); // Default to false (include gldownload)
 
-        // Get use_queues property (default false = skip queues for lower latency)
+        // Get use_queues property (default true = use queues for latency buffering)
         let use_queues = properties
             .get("use_queues")
             .and_then(|v| match v {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(false); // Default to false (no queues)
+            .unwrap_or(true); // Default to true (use queues)
 
         info!(
             "🎬 Creating compositor: {} inputs, {}x{} output, background={:?}",
@@ -648,9 +648,9 @@ fn glcompositor_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "use_queues".to_string(),
                 label: "Use Input Queues".to_string(),
-                description: "Add queue elements on inputs for latency buffering (false, default = direct connection for lowest latency). Enable if sources have low/zero max latency and you encounter 'Impossible to configure latency' errors.".to_string(),
+                description: "Add queue elements on inputs for latency buffering (true, default = use queues to handle sources with varying latency). Disable for direct connection if you need absolute lowest latency and all sources have proper max latency reporting.".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(false)),
+                default_value: Some(PropertyValue::Bool(true)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "use_queues".to_string(),
