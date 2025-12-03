@@ -41,13 +41,28 @@ impl BlockBuilder for GLCompositorBuilder {
             .unwrap_or(2)
             .clamp(1, 16);
 
-        // Create input pads dynamically - map directly to glupload (no videoconvert)
+        // Check if queues are enabled (default false)
+        let use_queues = properties
+            .get("use_queues")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        // Create input pads dynamically - map to queue or glupload depending on use_queues
         let mut inputs = Vec::new();
         for i in 0..num_inputs {
+            let internal_element_id = if use_queues {
+                format!("queue_{}", i)
+            } else {
+                format!("glupload_{}", i)
+            };
+
             inputs.push(ExternalPad {
                 name: format!("video_in_{}", i),
                 media_type: MediaType::Video,
-                internal_element_id: format!("glupload_{}", i),
+                internal_element_id,
                 internal_pad_name: "sink".to_string(),
             });
         }
@@ -84,6 +99,15 @@ impl BlockBuilder for GLCompositorBuilder {
                 _ => None,
             })
             .unwrap_or(false); // Default to false (include gldownload)
+
+        // Get use_queues property (default false = skip queues for lower latency)
+        let use_queues = properties
+            .get("use_queues")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false); // Default to false (no queues)
 
         info!(
             "🎬 Creating compositor: {} inputs, {}x{} output, background={:?}",
@@ -177,7 +201,20 @@ impl BlockBuilder for GLCompositorBuilder {
 
             // Set pad properties in NULL state
             // Get per-input properties from block properties, with sensible defaults
-            let default_xpos = if i == 0 { 0 } else { 960 };
+            // Default layout with vertical spacing for future text labels:
+            // - Row 1 (y=0): Inputs 0-1 as large halves (960x540 each) + 30px spacing
+            // - Row 2 (y=570): Inputs 2-5 side by side (480x270 each) + 30px spacing
+            // - Row 3 (y=870): Inputs 6-15 small tiles (192x108 each) + 30px spacing for labels
+            let (default_xpos, default_ypos, default_width, default_height) = match i {
+                0 => (0i64, 0i64, 960i64, 540i64),          // Top-left half
+                1 => (960, 0, 960, 540),                    // Top-right half
+                2 => (0, 570, 480, 270),                    // Second row, 1st position
+                3 => (480, 570, 480, 270),                  // Second row, 2nd position
+                4 => (960, 570, 480, 270),                  // Second row, 3rd position
+                5 => (1440, 570, 480, 270),                 // Second row, 4th position
+                n => ((n - 6) as i64 * 192, 870, 192, 108), // Third row, small tiles
+            };
+
             let xpos = properties
                 .get(&format!("input_{}_xpos", i))
                 .and_then(|v| match v {
@@ -193,7 +230,7 @@ impl BlockBuilder for GLCompositorBuilder {
                     PropertyValue::Int(i) => Some(*i),
                     _ => None,
                 })
-                .unwrap_or(0);
+                .unwrap_or(default_ypos);
             sink_pad.set_property_from_str("ypos", &ypos.to_string());
 
             let width = properties
@@ -202,7 +239,7 @@ impl BlockBuilder for GLCompositorBuilder {
                     PropertyValue::Int(i) => Some(*i),
                     _ => None,
                 })
-                .unwrap_or(-1);
+                .unwrap_or(default_width);
             sink_pad.set_property_from_str("width", &width.to_string());
 
             let height = properties
@@ -211,7 +248,7 @@ impl BlockBuilder for GLCompositorBuilder {
                     PropertyValue::Int(i) => Some(*i),
                     _ => None,
                 })
-                .unwrap_or(-1);
+                .unwrap_or(default_height);
             sink_pad.set_property_from_str("height", &height.to_string());
 
             let alpha = properties
@@ -253,8 +290,10 @@ impl BlockBuilder for GLCompositorBuilder {
         let capsfilter_id = format!("{}:capsfilter", instance_id);
         let caps_str = if gl_output {
             // GL output: keep in GL memory
+            // glvideomixerelement only outputs RGBA format in GL memory
+            // Note: texture-target is automatically negotiated, don't restrict it
             format!(
-                "video/x-raw(memory:GLMemory),width={},height={}",
+                "video/x-raw(memory:GLMemory),format=RGBA,width={},height={}",
                 output_width, output_height
             )
         } else {
@@ -264,6 +303,9 @@ impl BlockBuilder for GLCompositorBuilder {
                 output_width, output_height
             )
         };
+
+        info!("🎬 Output caps: {}", caps_str);
+
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
         })?;
@@ -292,7 +334,7 @@ impl BlockBuilder for GLCompositorBuilder {
             None
         };
 
-        // Create glupload elements for each input
+        // Create input chain elements for each input
         let mut elements = vec![(mixer_id.clone(), mixer.clone())];
         let mut internal_links = Vec::new();
 
@@ -308,13 +350,39 @@ impl BlockBuilder for GLCompositorBuilder {
 
             elements.push((upload_id.clone(), upload));
 
-            // Link glupload -> mixer (using pre-created pad)
-            // We already requested and configured the pad above in NULL state
             let mixer_pad_name = sink_pad.name().to_string();
-            internal_links.push((
-                ElementPadRef::pad(&upload_id, "src"),
-                ElementPadRef::pad(&mixer_id, &mixer_pad_name),
-            ));
+
+            if use_queues {
+                // Create queue for latency buffering (solves "Impossible to configure latency" errors)
+                // Queue provides buffering needed when sources have low/zero max latency
+                let queue_id = format!("{}:queue_{}", instance_id, i);
+                let queue = gst::ElementFactory::make("queue")
+                    .name(&queue_id)
+                    .property("max-size-buffers", 3u32) // Buffer up to 3 frames
+                    .property("max-size-bytes", 0u32) // No byte limit
+                    .property("max-size-time", 0u64) // No time limit
+                    .property("flush-on-eos", true)
+                    .build()
+                    .map_err(|e| BlockBuildError::ElementCreation(format!("queue_{}: {}", i, e)))?;
+
+                elements.push((queue_id.clone(), queue));
+
+                // Link queue -> glupload -> mixer
+                internal_links.push((
+                    ElementPadRef::pad(&queue_id, "src"),
+                    ElementPadRef::pad(&upload_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::pad(&upload_id, "src"),
+                    ElementPadRef::pad(&mixer_id, &mixer_pad_name),
+                ));
+            } else {
+                // Link glupload -> mixer directly (no queue for lower latency)
+                internal_links.push((
+                    ElementPadRef::pad(&upload_id, "src"),
+                    ElementPadRef::pad(&mixer_id, &mixer_pad_name),
+                ));
+            }
         }
 
         // Add output elements and create links based on gl_output setting
@@ -541,11 +609,35 @@ fn glcompositor_definition() -> BlockDefinition {
                     transform: None,
                 },
             },
+            ExposedProperty {
+                name: "use_queues".to_string(),
+                label: "Use Input Queues".to_string(),
+                description: "Add queue elements on inputs for latency buffering (false, default = direct connection for lowest latency). Enable if sources have low/zero max latency and you encounter 'Impossible to configure latency' errors.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "use_queues".to_string(),
+                    transform: None,
+                },
+            },
         ];
 
     // Dynamically generate per-input properties for all possible inputs (0 to MAX_INPUTS-1)
+    // Default layout with vertical spacing for future text labels:
+    // - Row 1 (y=0): Inputs 0-1 as large halves (960x540 each) + 30px spacing
+    // - Row 2 (y=570): Inputs 2-5 side by side (480x270 each) + 30px spacing
+    // - Row 3 (y=870): Inputs 6-15 small tiles (192x108 each) + 30px spacing for labels
     for i in 0..MAX_INPUTS {
-        let default_xpos = if i == 0 { 0 } else { 960 };
+        let (default_xpos, default_ypos, default_width, default_height) = match i {
+            0 => (0i64, 0i64, 960i64, 540i64),          // Top-left half
+            1 => (960, 0, 960, 540),                    // Top-right half
+            2 => (0, 570, 480, 270),                    // Second row, 1st position
+            3 => (480, 570, 480, 270),                  // Second row, 2nd position
+            4 => (960, 570, 480, 270),                  // Second row, 3rd position
+            5 => (1440, 570, 480, 270),                 // Second row, 4th position
+            n => ((n - 6) as i64 * 192, 870, 192, 108), // Third row, small tiles
+        };
 
         // XPos
         exposed_properties.push(ExposedProperty {
@@ -567,7 +659,7 @@ fn glcompositor_definition() -> BlockDefinition {
             label: format!("Input {} Y Position", i),
             description: format!("Y position of input {} on the canvas", i),
             property_type: PropertyType::Int,
-            default_value: Some(PropertyValue::Int(0)),
+            default_value: Some(PropertyValue::Int(default_ypos)),
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: format!("input_{}_ypos", i),
@@ -581,7 +673,7 @@ fn glcompositor_definition() -> BlockDefinition {
             label: format!("Input {} Width", i),
             description: format!("Width of input {} (-1 = source width)", i),
             property_type: PropertyType::Int,
-            default_value: Some(PropertyValue::Int(-1)),
+            default_value: Some(PropertyValue::Int(default_width)),
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: format!("input_{}_width", i),
@@ -595,7 +687,7 @@ fn glcompositor_definition() -> BlockDefinition {
             label: format!("Input {} Height", i),
             description: format!("Height of input {} (-1 = source height)", i),
             property_type: PropertyType::Int,
-            default_value: Some(PropertyValue::Int(-1)),
+            default_value: Some(PropertyValue::Int(default_height)),
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: format!("input_{}_height", i),
