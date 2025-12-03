@@ -1023,4 +1023,90 @@ impl ApiClient {
         info!("Successfully exported pipeline");
         Ok(export_response.pipeline)
     }
+
+    /// Get pad properties from a running element in a flow.
+    pub async fn get_pad_properties(
+        &self,
+        flow_id: &str,
+        element_id: &str,
+        pad_name: &str,
+    ) -> ApiResult<std::collections::HashMap<String, strom_types::PropertyValue>> {
+        use strom_types::api::PadPropertiesResponse;
+        use tracing::info;
+
+        let url = format!(
+            "{}/flows/{}/elements/{}/pads/{}/properties",
+            self.base_url, flow_id, element_id, pad_name
+        );
+        info!("Fetching pad properties from: {}", url);
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+
+        let pad_props_response: PadPropertiesResponse = response
+            .json()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+
+        info!(
+            "Successfully fetched {} pad properties",
+            pad_props_response.properties.len()
+        );
+        Ok(pad_props_response.properties)
+    }
+
+    /// Update a pad property on a running element in a flow.
+    pub async fn update_pad_property(
+        &self,
+        flow_id: &str,
+        element_id: &str,
+        pad_name: &str,
+        property_name: &str,
+        value: strom_types::PropertyValue,
+    ) -> ApiResult<()> {
+        use strom_types::api::UpdatePadPropertyRequest;
+        use tracing::info;
+
+        let url = format!(
+            "{}/flows/{}/elements/{}/pads/{}/properties",
+            self.base_url, flow_id, element_id, pad_name
+        );
+        info!(
+            "Updating pad property: {} on {}:{} in flow {}",
+            property_name, element_id, pad_name, flow_id
+        );
+
+        let request = UpdatePadPropertyRequest {
+            property_name: property_name.to_string(),
+            value,
+        };
+
+        let response = self
+            .with_auth(self.client.patch(&url).json(&request))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network request failed: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        info!("Successfully updated pad property");
+        Ok(())
+    }
 }

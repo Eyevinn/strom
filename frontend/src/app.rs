@@ -4,6 +4,7 @@ use egui::{CentralPanel, Color32, Context, SidePanel, TopBottomPanel};
 use strom_types::{Flow, PipelineState};
 
 use crate::api::{ApiClient, AuthStatusResponse};
+use crate::compositor_editor::CompositorEditor;
 use crate::graph::GraphEditor;
 use crate::login::LoginScreen;
 use crate::meter::MeterDataStore;
@@ -13,6 +14,67 @@ use crate::state::{AppMessage, AppStateChannels, ConnectionState};
 use crate::system_monitor::SystemMonitorStore;
 use crate::webrtc_stats::WebRtcStatsStore;
 use crate::ws::WebSocketClient;
+
+// Local storage helpers (WASM only)
+#[cfg(target_arch = "wasm32")]
+pub fn set_local_storage(key: &str, value: &str) {
+    if let Some(window) = web_sys::window() {
+        if let Ok(Some(storage)) = window.local_storage() {
+            let _ = storage.set_item(key, value);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn get_local_storage(key: &str) -> Option<String> {
+    if let Some(window) = web_sys::window() {
+        if let Ok(Some(storage)) = window.local_storage() {
+            return storage.get_item(key).ok().flatten();
+        }
+    }
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn remove_local_storage(key: &str) {
+    if let Some(window) = web_sys::window() {
+        if let Ok(Some(storage)) = window.local_storage() {
+            let _ = storage.remove_item(key);
+        }
+    }
+}
+
+// Stubs for native mode (use in-memory HashMap)
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
+#[cfg(not(target_arch = "wasm32"))]
+static LOCAL_STORAGE: Mutex<Option<std::collections::HashMap<String, String>>> = Mutex::new(None);
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_local_storage(key: &str, value: &str) {
+    let mut storage = LOCAL_STORAGE.lock().unwrap();
+    if storage.is_none() {
+        *storage = Some(std::collections::HashMap::new());
+    }
+    storage
+        .as_mut()
+        .unwrap()
+        .insert(key.to_string(), value.to_string());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn get_local_storage(key: &str) -> Option<String> {
+    let storage = LOCAL_STORAGE.lock().unwrap();
+    storage.as_ref()?.get(key).cloned()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove_local_storage(key: &str) {
+    let mut storage = LOCAL_STORAGE.lock().unwrap();
+    if let Some(ref mut map) = *storage {
+        map.remove(key);
+    }
+}
 
 /// Theme preference for the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +96,7 @@ enum ImportFormat {
 
 // Cross-platform task spawning
 #[cfg(target_arch = "wasm32")]
-fn spawn_task<F>(future: F)
+pub fn spawn_task<F>(future: F)
 where
     F: std::future::Future<Output = ()> + 'static,
 {
@@ -42,7 +104,7 @@ where
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_task<F>(future: F)
+pub fn spawn_task<F>(future: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
@@ -155,6 +217,8 @@ pub struct StromApp {
     last_stats_fetch: instant::Instant,
     /// Whether to show the stats panel
     show_stats_panel: bool,
+    /// Compositor layout editor (if open)
+    compositor_editor: Option<CompositorEditor>,
 }
 
 impl StromApp {
@@ -253,6 +317,7 @@ impl StromApp {
             stats_cache: std::collections::HashMap::new(),
             last_stats_fetch: instant::Instant::now(),
             show_stats_panel: false,
+            compositor_editor: None,
         };
 
         // Apply initial theme based on system preference
@@ -328,6 +393,7 @@ impl StromApp {
             stats_cache: std::collections::HashMap::new(),
             last_stats_fetch: instant::Instant::now(),
             show_stats_panel: false,
+            compositor_editor: None,
         };
 
         // Apply initial theme based on system preference
@@ -3408,6 +3474,73 @@ impl eframe::App for StromApp {
 
         // Handle keyboard shortcuts
         self.handle_keyboard_shortcuts(ctx);
+
+        // Check for compositor editor open signal
+        if let Some(block_id) = get_local_storage("open_compositor_editor") {
+            remove_local_storage("open_compositor_editor");
+
+            // Get current flow
+            if let Some(flow_idx) = self.selected_flow_idx {
+                let flow = &self.flows[flow_idx];
+
+                // Find the block
+                if let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) {
+                    // Extract properties
+                    let output_width = block
+                        .properties
+                        .get("output_width")
+                        .and_then(|v| match v {
+                            strom_types::PropertyValue::UInt(u) => Some(*u as u32),
+                            strom_types::PropertyValue::Int(i) if *i > 0 => Some(*i as u32),
+                            _ => None,
+                        })
+                        .unwrap_or(1920);
+
+                    let output_height = block
+                        .properties
+                        .get("output_height")
+                        .and_then(|v| match v {
+                            strom_types::PropertyValue::UInt(u) => Some(*u as u32),
+                            strom_types::PropertyValue::Int(i) if *i > 0 => Some(*i as u32),
+                            _ => None,
+                        })
+                        .unwrap_or(1080);
+
+                    let num_inputs = block
+                        .properties
+                        .get("num_inputs")
+                        .and_then(|v| match v {
+                            strom_types::PropertyValue::UInt(u) => Some(*u as usize),
+                            strom_types::PropertyValue::Int(i) if *i > 0 => Some(*i as usize),
+                            _ => None,
+                        })
+                        .unwrap_or(2);
+
+                    // Create editor
+                    let mut editor = CompositorEditor::new(
+                        flow.id,
+                        block_id.clone(),
+                        output_width,
+                        output_height,
+                        num_inputs,
+                        self.api.clone(),
+                    );
+
+                    // Load current properties from backend
+                    editor.load_properties(ctx);
+
+                    self.compositor_editor = Some(editor);
+                }
+            }
+        }
+
+        // Show compositor editor if open (as a window, doesn't block main UI)
+        if let Some(ref mut editor) = self.compositor_editor {
+            let is_open = editor.show(ctx);
+            if !is_open {
+                self.compositor_editor = None;
+            }
+        }
 
         self.render_toolbar(ctx);
         self.render_flow_list(ctx);

@@ -8,6 +8,7 @@
 
 mod api;
 mod app;
+mod compositor_editor;
 mod graph;
 mod login;
 mod meter;

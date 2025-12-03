@@ -8,6 +8,8 @@ use strom_types::{
 };
 use uuid::Uuid;
 
+use crate::app::set_local_storage;
+
 /// Represents the state of the graph editor.
 pub struct GraphEditor {
     /// Elements (nodes) in the graph
@@ -556,6 +558,13 @@ impl GraphEditor {
                     self.selected_link = None;
                     self.active_property_tab = PropertyTab::Element; // Switch to Element Properties tab
                     self.focused_pad = None; // Clear pad focus
+                }
+
+                // Handle double-click to open compositor editor for glcompositor blocks
+                if node_response.double_clicked()
+                    && block.block_definition_id == "builtin.glcompositor"
+                {
+                    set_local_storage("open_compositor_editor", &block.id);
                 }
 
                 // Handle node dragging

@@ -334,6 +334,13 @@ impl PropertyInspector {
                 delete_requested = true;
             }
 
+            // Edit Layout button for compositor blocks
+            if definition.id == "builtin.glcompositor"
+                && ui.button("✏ Edit Layout").clicked()
+            {
+                crate::app::set_local_storage("open_compositor_editor", &block.id);
+            }
+
             ui.separator();
 
             ui.label("💡 Only modified properties are saved");

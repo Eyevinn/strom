@@ -2076,11 +2076,35 @@ impl PipelineManager {
                 PropertyValue::Float(v)
             }
             _ => {
-                return Err(PipelineError::InvalidProperty {
-                    element: format!("{}:{}", element_id, pad_name),
-                    property: property_name.to_string(),
-                    reason: format!("Unsupported property type: {}", type_name),
-                });
+                // Check if it's an enum type
+                if pspec.value_type().is_a(glib::Type::ENUM) {
+                    // Get the enum value as an integer and convert to nick string
+                    let value = pad.property_value(property_name);
+                    if let Ok(enum_value) = value.get::<i32>() {
+                        // Get the enum class and find the nick for this value
+                        if let Some(enum_class) = glib::EnumClass::with_type(pspec.value_type()) {
+                            if let Some(enum_val) = enum_class.value(enum_value) {
+                                PropertyValue::String(enum_val.nick().to_string())
+                            } else {
+                                PropertyValue::Int(enum_value as i64)
+                            }
+                        } else {
+                            PropertyValue::Int(enum_value as i64)
+                        }
+                    } else {
+                        return Err(PipelineError::InvalidProperty {
+                            element: format!("{}:{}", element_id, pad_name),
+                            property: property_name.to_string(),
+                            reason: format!("Failed to read enum value for type: {}", type_name),
+                        });
+                    }
+                } else {
+                    return Err(PipelineError::InvalidProperty {
+                        element: format!("{}:{}", element_id, pad_name),
+                        property: property_name.to_string(),
+                        reason: format!("Unsupported property type: {}", type_name),
+                    });
+                }
             }
         };
 
