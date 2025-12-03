@@ -4,7 +4,7 @@ members = ["types", "backend", "frontend", "mcp-server"]
 default-members = ["backend"]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Per"]
