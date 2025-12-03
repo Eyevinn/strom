@@ -200,20 +200,10 @@ impl BlockBuilder for GLCompositorBuilder {
             info!("🎬 Requested pad: {}", sink_pad.name());
 
             // Set pad properties in NULL state
-            // Get per-input properties from block properties, with sensible defaults
-            // Default layout with vertical spacing for future text labels:
-            // - Row 1 (y=0): Inputs 0-1 as large halves (960x540 each) + 30px spacing
-            // - Row 2 (y=570): Inputs 2-5 side by side (480x270 each) + 30px spacing
-            // - Row 3 (y=870): Inputs 6-15 small tiles (192x108 each) + 30px spacing for labels
-            let (default_xpos, default_ypos, default_width, default_height) = match i {
-                0 => (0i64, 0i64, 960i64, 540i64),          // Top-left half
-                1 => (960, 0, 960, 540),                    // Top-right half
-                2 => (0, 570, 480, 270),                    // Second row, 1st position
-                3 => (480, 570, 480, 270),                  // Second row, 2nd position
-                4 => (960, 570, 480, 270),                  // Second row, 3rd position
-                5 => (1440, 570, 480, 270),                 // Second row, 4th position
-                n => ((n - 6) as i64 * 192, 870, 192, 108), // Third row, small tiles
-            };
+            // Get per-input properties from block properties, with computed defaults
+            // based on the output canvas resolution
+            let (default_xpos, default_ypos, default_width, default_height) =
+                calculate_default_layout(i, output_width, output_height);
 
             let xpos = properties
                 .get(&format!("input_{}_xpos", i))
@@ -484,6 +474,52 @@ fn parse_background(properties: &HashMap<String, PropertyValue>) -> &'static str
         .unwrap_or("black")
 }
 
+/// Calculate default position and size for an input based on output resolution.
+///
+/// Creates a 3-row tiered layout:
+/// - Row 1: Inputs 0-1 as large halves (50% width, 50% height)
+/// - Row 2: Inputs 2-5 side by side (25% width, 25% height)
+/// - Row 3: Inputs 6-15 small tiles (10% width, 10% height)
+///
+/// With 30px vertical spacing between rows for labels.
+fn calculate_default_layout(
+    input_index: usize,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (i64, i64, i64, i64) {
+    let w = canvas_width as i64;
+    let h = canvas_height as i64;
+
+    // Row heights (as percentage of canvas height)
+    let row1_h = h / 2; // 50% height for row 1
+    let row2_h = h / 4; // 25% height for row 2
+    let row3_h = h / 10; // 10% height for row 3
+
+    // Vertical positions with 30px spacing
+    let row1_y = 0;
+    let row2_y = row1_h + 30;
+    let row3_y = row2_y + row2_h + 30;
+
+    match input_index {
+        // Row 1: Two large halves
+        0 => (0, row1_y, w / 2, row1_h),
+        1 => (w / 2, row1_y, w / 2, row1_h),
+
+        // Row 2: Four medium tiles
+        2 => (0, row2_y, w / 4, row2_h),
+        3 => (w / 4, row2_y, w / 4, row2_h),
+        4 => (w / 2, row2_y, w / 4, row2_h),
+        5 => (w * 3 / 4, row2_y, w / 4, row2_h),
+
+        // Row 3: Small tiles (10 tiles at 10% width each)
+        n => {
+            let tile_w = w / 10;
+            let tile_x = ((n - 6) as i64) * tile_w;
+            (tile_x, row3_y, tile_w, row3_h)
+        }
+    }
+}
+
 /// Get metadata for GLCompositor block (for UI/API).
 pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![glcompositor_definition()]
@@ -624,20 +660,10 @@ fn glcompositor_definition() -> BlockDefinition {
         ];
 
     // Dynamically generate per-input properties for all possible inputs (0 to MAX_INPUTS-1)
-    // Default layout with vertical spacing for future text labels:
-    // - Row 1 (y=0): Inputs 0-1 as large halves (960x540 each) + 30px spacing
-    // - Row 2 (y=570): Inputs 2-5 side by side (480x270 each) + 30px spacing
-    // - Row 3 (y=870): Inputs 6-15 small tiles (192x108 each) + 30px spacing for labels
+    // Default layout is computed based on default canvas size (1920x1080)
     for i in 0..MAX_INPUTS {
-        let (default_xpos, default_ypos, default_width, default_height) = match i {
-            0 => (0i64, 0i64, 960i64, 540i64),          // Top-left half
-            1 => (960, 0, 960, 540),                    // Top-right half
-            2 => (0, 570, 480, 270),                    // Second row, 1st position
-            3 => (480, 570, 480, 270),                  // Second row, 2nd position
-            4 => (960, 570, 480, 270),                  // Second row, 3rd position
-            5 => (1440, 570, 480, 270),                 // Second row, 4th position
-            n => ((n - 6) as i64 * 192, 870, 192, 108), // Third row, small tiles
-        };
+        let (default_xpos, default_ypos, default_width, default_height) =
+            calculate_default_layout(i, 1920, 1080);
 
         // XPos
         exposed_properties.push(ExposedProperty {
