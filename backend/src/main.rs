@@ -13,16 +13,13 @@ use strom::{auth, config::Config, create_app_with_state, state::AppState};
 
 /// Initialize logging with optional file output and configurable log level
 fn init_logging(log_file: Option<&PathBuf>, log_level: Option<&String>) -> anyhow::Result<()> {
-    use tracing_subscriber::fmt::time::OffsetTime;
     use time::UtcOffset;
+    use tracing_subscriber::fmt::time::OffsetTime;
 
     // Get local UTC offset for timestamp formatting
     // This must be done before any threads are spawned
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let timer = OffsetTime::new(
-        local_offset,
-        time::format_description::well_known::Rfc3339,
-    );
+    let timer = OffsetTime::new(local_offset, time::format_description::well_known::Rfc3339);
 
     // Priority: RUST_LOG env var > config file log_level > default "info"
     let env_filter = if let Ok(filter) = EnvFilter::try_from_default_env() {
@@ -50,7 +47,9 @@ fn init_logging(log_file: Option<&PathBuf>, log_level: Option<&String>) -> anyho
         // Set up file appender
         let file_appender = tracing_appender::rolling::never(
             log_path.parent().unwrap_or(std::path::Path::new(".")),
-            log_path.file_name().unwrap_or(std::ffi::OsStr::new("strom.log")),
+            log_path
+                .file_name()
+                .unwrap_or(std::ffi::OsStr::new("strom.log")),
         );
 
         // Create layers: stdout + file with local time
