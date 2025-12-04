@@ -3559,6 +3559,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "network-interface"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07709a6d4eba90ab10ec170a0530b3aafc81cb8a2d380e4423ae41fc55fe5745"
+dependencies = [
+ "cc",
+ "libc",
+ "thiserror 2.0.17",
+ "winapi",
+]
+
+[[package]]
 name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5536,6 +5548,7 @@ dependencies = [
  "http-body-util",
  "libc",
  "mime_guess",
+ "network-interface",
  "nvml-wrapper",
  "openssl",
  "rust-embed",

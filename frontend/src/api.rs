@@ -1109,4 +1109,42 @@ impl ApiClient {
         info!("Successfully updated pad property");
         Ok(())
     }
+
+    /// List available network interfaces.
+    pub async fn list_network_interfaces(
+        &self,
+    ) -> ApiResult<strom_types::NetworkInterfacesResponse> {
+        use tracing::info;
+
+        let url = format!("{}/network/interfaces", self.base_url);
+        info!("Fetching network interfaces from: {}", url);
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error fetching interfaces: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        let interfaces: strom_types::NetworkInterfacesResponse =
+            response.json().await.map_err(|e| {
+                tracing::error!("Failed to parse network interfaces response: {}", e);
+                ApiError::Decode(e.to_string())
+            })?;
+
+        info!(
+            "Successfully loaded {} network interfaces",
+            interfaces.interfaces.len()
+        );
+        Ok(interfaces)
+    }
 }

@@ -172,6 +172,10 @@ pub struct StromApp {
     /// Auth token for native GUI authentication
     #[cfg(not(target_arch = "wasm32"))]
     auth_token: Option<String>,
+    /// Cached network interfaces (for network interface property dropdown)
+    network_interfaces: Vec<strom_types::NetworkInterfaceInfo>,
+    /// Whether network interfaces have been loaded
+    network_interfaces_loaded: bool,
     /// Meter data storage for all audio level meters
     meter_data: MeterDataStore,
     /// WebRTC stats storage for all WebRTC connections
@@ -321,6 +325,8 @@ impl StromApp {
             last_stats_fetch: instant::Instant::now(),
             show_stats_panel: false,
             compositor_editor: None,
+            network_interfaces: Vec::new(),
+            network_interfaces_loaded: false,
         };
 
         // Apply initial theme based on system preference
@@ -398,6 +404,8 @@ impl StromApp {
             last_stats_fetch: instant::Instant::now(),
             show_stats_panel: false,
             compositor_editor: None,
+            network_interfaces: Vec::new(),
+            network_interfaces_loaded: false,
         };
 
         // Apply initial theme based on system preference
@@ -603,6 +611,39 @@ impl StromApp {
             }
             ctx.request_repaint();
         });
+    }
+
+    /// Load network interfaces from the backend (for network interface property dropdown).
+    fn load_network_interfaces(&mut self, ctx: egui::Context) {
+        if self.network_interfaces_loaded {
+            return;
+        }
+        self.network_interfaces_loaded = true; // Prevent multiple concurrent requests
+        tracing::info!("Loading network interfaces from backend...");
+
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+
+        spawn_task(async move {
+            match api.list_network_interfaces().await {
+                Ok(response) => {
+                    tracing::info!(
+                        "Successfully loaded {} network interfaces",
+                        response.interfaces.len()
+                    );
+                    let _ = tx.send(AppMessage::NetworkInterfacesLoaded(response.interfaces));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load network interfaces: {}", e);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Get cached network interfaces (for property inspector).
+    pub fn network_interfaces(&self) -> &[strom_types::NetworkInterfaceInfo] {
+        &self.network_interfaces
     }
 
     /// Poll WebRTC stats for running flows that have WebRTC elements.
@@ -1932,6 +1973,19 @@ impl StromApp {
                         .cloned();
                     let flow_id = self.current_flow().map(|f| f.id);
 
+                    // Load network interfaces if block has NetworkInterface properties
+                    if let Some(ref def) = definition_opt {
+                        let has_network_prop = def.exposed_properties.iter().any(|prop| {
+                            matches!(
+                                prop.property_type,
+                                strom_types::block::PropertyType::NetworkInterface
+                            )
+                        });
+                        if has_network_prop {
+                            self.load_network_interfaces(ctx.clone());
+                        }
+                    }
+
                     // Get stats for this flow if available
                     let stats = flow_id
                         .map(|fid| fid.to_string())
@@ -1941,7 +1995,16 @@ impl StromApp {
                     if let (Some(block), Some(def)) =
                         (self.graph.get_selected_block_mut(), definition_opt)
                     {
-                        let delete_requested = PropertyInspector::show_block(ui, block, &def, flow_id, &self.meter_data, &self.webrtc_stats, stats);
+                        let delete_requested = PropertyInspector::show_block(
+                            ui,
+                            block,
+                            &def,
+                            flow_id,
+                            &self.meter_data,
+                            &self.webrtc_stats,
+                            stats,
+                            &self.network_interfaces,
+                        );
 
                         // Handle deletion request
                         if delete_requested {
@@ -3568,6 +3631,10 @@ impl eframe::App for StromApp {
                 }
                 AppMessage::GstLaunchExportError(e) => {
                     self.error = Some(format!("Failed to export as gst-launch: {}", e));
+                }
+                AppMessage::NetworkInterfacesLoaded(interfaces) => {
+                    tracing::info!("Network interfaces loaded: {} interfaces", interfaces.len());
+                    self.network_interfaces = interfaces;
                 }
                 // SDP messages are handled elsewhere
                 AppMessage::SdpLoaded { .. } | AppMessage::SdpError(_) => {}

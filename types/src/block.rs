@@ -27,7 +27,11 @@ pub enum PropertyType {
     UInt,
     Float,
     Bool,
-    Enum { values: Vec<EnumValue> },
+    Enum {
+        values: Vec<EnumValue>,
+    },
+    /// Network interface selector - frontend fetches available interfaces from API
+    NetworkInterface,
 }
 
 /// Block definition - metadata for creating block instances.

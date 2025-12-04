@@ -99,6 +99,9 @@ pub enum AppMessage {
     GstLaunchExported { pipeline: String, flow_name: String },
     /// gst-launch export failed
     GstLaunchExportError(String),
+
+    /// Network interfaces loaded from API
+    NetworkInterfacesLoaded(Vec<strom_types::NetworkInterfaceInfo>),
 }
 
 /// WebSocket connection state.

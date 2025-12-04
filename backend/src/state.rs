@@ -424,7 +424,14 @@ impl AppState {
             self.inner.pipelines.read().await
         };
 
-        // Drop the pipelines guard - we don't need to query caps anymore
+        // Get PTP clock identity from pipeline if available (for SDP generation)
+        let ptp_clock_identity = pipelines_guard
+            .get(id)
+            .and_then(|p| p.get_ptp_info())
+            .and_then(|info| info.grandmaster_clock_id)
+            .map(|id| crate::blocks::sdp::convert_clock_id_to_sdp_format(&id));
+
+        // Drop the pipelines guard - we don't need it anymore
         drop(pipelines_guard);
 
         // Generate SDP for AES67 output blocks and store in runtime_data
@@ -456,13 +463,14 @@ impl AppState {
                 );
 
                 // Generate SDP with flow properties for correct clock signaling (RFC 7273)
+                // Include PTP clock identity if available for accurate ts-refclk attribute
                 let sdp = crate::blocks::sdp::generate_aes67_output_sdp(
                     block,
                     &flow.name,
                     sample_rate,
                     channels,
                     Some(&flow.properties),
-                    None, // PTP clock identity - could be obtained from pipeline clock if needed
+                    ptp_clock_identity.as_deref(),
                 );
 
                 // Initialize runtime_data if needed

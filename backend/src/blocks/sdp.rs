@@ -8,6 +8,12 @@ use gstreamer as gst;
 use strom_types::flow::{FlowProperties, GStreamerClockType};
 use strom_types::{BlockInstance, PropertyValue};
 
+/// Convert PTP clock ID from colon-separated format (XX:XX:XX:XX:XX:XX:XX:XX)
+/// to hyphen-separated format (XX-XX-XX-XX-XX-XX-XX-XX) as required by RFC 7273.
+pub fn convert_clock_id_to_sdp_format(clock_id: &str) -> String {
+    clock_id.replace(':', "-")
+}
+
 /// Extract audio format details from GStreamer caps.
 /// Returns (sample_rate, channels) or None if the caps don't contain audio info.
 pub fn parse_audio_caps(caps: &gst::Caps) -> Option<(i32, i32)> {
@@ -771,5 +777,26 @@ mod tests {
         // Monotonic clock uses local reference and sender media clock
         assert!(sdp.contains("a=ts-refclk:local"));
         assert!(sdp.contains("a=mediaclk:sender"));
+    }
+
+    #[test]
+    fn test_convert_clock_id_to_sdp_format() {
+        // Test conversion from colon-separated (PtpInfo format) to hyphen-separated (SDP format)
+        assert_eq!(
+            convert_clock_id_to_sdp_format("00:11:22:33:44:55:66:77"),
+            "00-11-22-33-44-55-66-77"
+        );
+
+        // Test with actual EUI-64 format clock ID
+        assert_eq!(
+            convert_clock_id_to_sdp_format("EC:46:70:FF:FE:02:E2:3A"),
+            "EC-46-70-FF-FE-02-E2-3A"
+        );
+
+        // Test with all zeros (placeholder)
+        assert_eq!(
+            convert_clock_id_to_sdp_format("00:00:00:FF:FE:00:00:00"),
+            "00-00-00-FF-FE-00-00-00"
+        );
     }
 }

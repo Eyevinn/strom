@@ -12,6 +12,9 @@ use strom_types::block::{
     CreateBlockRequest, ExposedProperty, ExternalPad, ExternalPads, PropertyMapping, PropertyType,
 };
 use strom_types::flow::{FlowProperties, GStreamerClockType};
+use strom_types::network::{
+    Ipv4AddressInfo, Ipv6AddressInfo, NetworkInterfaceInfo, NetworkInterfacesResponse,
+};
 use strom_types::stats::{BlockStats, StatMetadata, StatValue, Statistic};
 use utoipa::OpenApi;
 
@@ -40,6 +43,7 @@ use utoipa::OpenApi;
         crate::api::blocks::get_categories,
         crate::api::gst_launch::parse_gst_launch,
         crate::api::gst_launch::export_gst_launch,
+        crate::api::network::list_interfaces,
         crate::api::version::get_version,
     ),
     components(
@@ -76,6 +80,10 @@ use utoipa::OpenApi;
             ParseGstLaunchResponse,
             ExportGstLaunchRequest,
             ExportGstLaunchResponse,
+            NetworkInterfacesResponse,
+            NetworkInterfaceInfo,
+            Ipv4AddressInfo,
+            Ipv6AddressInfo,
         )
     ),
     tags(
@@ -83,6 +91,7 @@ use utoipa::OpenApi;
         (name = "elements", description = "GStreamer element discovery endpoints"),
         (name = "blocks", description = "Reusable block management endpoints"),
         (name = "gst-launch", description = "gst-launch-1.0 import/export endpoints"),
+        (name = "Network", description = "Network interface discovery endpoints"),
         (name = "System", description = "System information endpoints")
     ),
     info(

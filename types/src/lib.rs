@@ -11,6 +11,7 @@ pub mod block;
 pub mod element;
 pub mod events;
 pub mod flow;
+pub mod network;
 pub mod state;
 pub mod stats;
 pub mod system_monitor;
@@ -23,6 +24,9 @@ pub use block::{
 pub use element::{Element, ElementId, Link, MediaType, PropertyValue};
 pub use events::StromEvent;
 pub use flow::{Flow, FlowId, ThreadPriority, ThreadPriorityStatus};
+pub use network::{
+    Ipv4AddressInfo, Ipv6AddressInfo, NetworkInterfaceInfo, NetworkInterfacesResponse,
+};
 pub use state::PipelineState;
 pub use stats::{
     BlockStats, BlockStatsResponse, FlowStats, FlowStatsResponse, RtpJitterbufferStats,

@@ -67,9 +67,22 @@ impl BlockBuilder for AES67InputBuilder {
             })
             .unwrap_or(AES67_INPUT_DEFAULT_TIMEOUT_MS as u64);
 
+        // Get interface property
+        let interface = properties.get("interface").and_then(|v| {
+            if let PropertyValue::String(s) = v {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.clone())
+                }
+            } else {
+                None
+            }
+        });
+
         debug!(
-            "AES67 Input [{}]: decode={}, latency_ms={}, timeout_ms={}",
-            instance_id, decode, latency_ms, timeout_ms
+            "AES67 Input [{}]: decode={}, latency_ms={}, timeout_ms={}, interface={:?}",
+            instance_id, decode, latency_ms, timeout_ms, interface
         );
 
         // Write SDP to temp file
@@ -89,6 +102,7 @@ impl BlockBuilder for AES67InputBuilder {
             .name(&sdpdemux_id)
             .property("latency", latency_ms) // Jitterbuffer latency in ms
             .property("timeout", timeout_ms * 1000) // Convert ms to microseconds (0 = disabled)
+            .property("timeout-inactive-rtp-sources", false) // Keep RTP sources even if inactive
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("sdpdemux: {}", e)))?;
 
@@ -126,8 +140,9 @@ impl BlockBuilder for AES67InputBuilder {
         });
 
         // sdpdemux is a GstBin - we can listen for element-added to find internal rtpbin
-        // and attach handlers for SSRC changes
+        // and attach handlers for SSRC changes, and set multicast interface on udpsrc
         let sdpdemux_id_for_element_handler = sdpdemux_id.clone();
+        let interface_for_handler = interface.clone();
         let sdpdemux_bin = sdpdemux
             .clone()
             .dynamic_cast::<gst::Bin>()
@@ -144,6 +159,17 @@ impl BlockBuilder for AES67InputBuilder {
                 "AES67 Input [{}]: Internal element added: {} (type: {})",
                 sdpdemux_id_for_element_handler, element_name, factory_name
             );
+
+            // Set multicast interface on udpsrc elements
+            if factory_name == "udpsrc" {
+                if let Some(ref iface) = interface_for_handler {
+                    info!(
+                        "AES67 Input [{}]: Setting multicast interface '{}' on {}",
+                        sdpdemux_id_for_element_handler, iface, element_name
+                    );
+                    element.set_property("multicast-iface", iface);
+                }
+            }
 
             // Look for rtpbin to attach SSRC change handlers
             if factory_name == "rtpbin" {
@@ -430,6 +456,18 @@ impl BlockBuilder for AES67OutputBuilder {
             })
             .unwrap_or(5004);
 
+        let interface = properties.get("interface").and_then(|v| {
+            if let PropertyValue::String(s) = v {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.clone())
+                }
+            } else {
+                None
+            }
+        });
+
         // Create namespaced element IDs
         let audioconvert_id = format!("{}:audioconvert", instance_id);
         let audioresample_id = format!("{}:audioresample", instance_id);
@@ -485,7 +523,7 @@ impl BlockBuilder for AES67OutputBuilder {
         // Set processing-deadline to match ptime for proper timing
         let processing_deadline_ns = ptime_ns as u64;
 
-        let udpsink = gst::ElementFactory::make("udpsink")
+        let mut udpsink_builder = gst::ElementFactory::make("udpsink")
             .name(&udpsink_id)
             .property("host", &host)
             .property("port", port)
@@ -494,7 +532,18 @@ impl BlockBuilder for AES67OutputBuilder {
             .property(
                 "processing-deadline",
                 gst::ClockTime::from_nseconds(processing_deadline_ns),
-            )
+            );
+
+        // Set multicast interface if specified
+        if let Some(ref iface) = interface {
+            debug!(
+                "AES67 Output [{}]: Using network interface '{}' for multicast",
+                instance_id, iface
+            );
+            udpsink_builder = udpsink_builder.property("multicast-iface", iface);
+        }
+
+        let udpsink = udpsink_builder
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("udpsink: {}", e)))?;
 
@@ -593,6 +642,18 @@ fn aes67_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "timeout_ms".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "interface".to_string(),
+                label: "Network Interface".to_string(),
+                description: "Network interface to use for multicast. Leave empty for system default.".to_string(),
+                property_type: PropertyType::NetworkInterface,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "interface".to_string(),
                     transform: None,
                 },
             },
@@ -717,6 +778,18 @@ fn aes67_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "port".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "interface".to_string(),
+                label: "Network Interface".to_string(),
+                description: "Network interface to use for multicast. Leave empty for system default.".to_string(),
+                property_type: PropertyType::NetworkInterface,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "interface".to_string(),
                     transform: None,
                 },
             },

@@ -293,6 +293,7 @@ impl PropertyInspector {
 
     /// Show the property inspector for the given block.
     /// Returns true if delete was requested.
+    #[allow(clippy::too_many_arguments)]
     pub fn show_block(
         ui: &mut Ui,
         block: &mut BlockInstance,
@@ -301,6 +302,7 @@ impl PropertyInspector {
         meter_data_store: &crate::meter::MeterDataStore,
         webrtc_stats_store: &crate::webrtc_stats::WebRtcStatsStore,
         stats: Option<&crate::api::FlowStatsInfo>,
+        network_interfaces: &[strom_types::NetworkInterfaceInfo],
     ) -> bool {
         let block_id = block.id.clone();
         let mut delete_requested = false;
@@ -357,6 +359,7 @@ impl PropertyInspector {
                                 exposed_prop,
                                 definition,
                                 flow_id,
+                                network_interfaces,
                             );
                         }
                     } else {
@@ -514,6 +517,7 @@ impl PropertyInspector {
         exposed_prop: &ExposedProperty,
         _definition: &BlockDefinition,
         _flow_id: Option<strom_types::FlowId>,
+        network_interfaces: &[strom_types::NetworkInterfaceInfo],
     ) {
         let prop_name = &exposed_prop.name;
         let display_label = &exposed_prop.label;
@@ -600,21 +604,26 @@ impl PropertyInspector {
                 }
 
                 if let Some(mut value) = current_value {
-                    // Check if this is an enum with labels
-                    let changed = if let strom_types::block::PropertyType::Enum { values } =
-                        &exposed_prop.property_type
-                    {
-                        Self::show_block_enum_editor(ui, &mut value, values)
-                    } else {
-                        // Convert block::PropertyType to element::PropertyType for other types
-                        let prop_type = Self::convert_block_prop_type(&exposed_prop.property_type);
-                        Self::show_property_editor(
-                            ui,
-                            &mut value,
-                            prop_type.as_ref(),
-                            default_value,
-                            false, // Block properties are always writable
-                        )
+                    // Check property type for special handling
+                    let changed = match &exposed_prop.property_type {
+                        strom_types::block::PropertyType::Enum { values } => {
+                            Self::show_block_enum_editor(ui, &mut value, values)
+                        }
+                        strom_types::block::PropertyType::NetworkInterface => {
+                            Self::show_network_interface_editor(ui, &mut value, network_interfaces)
+                        }
+                        _ => {
+                            // Convert block::PropertyType to element::PropertyType for other types
+                            let prop_type =
+                                Self::convert_block_prop_type(&exposed_prop.property_type);
+                            Self::show_property_editor(
+                                ui,
+                                &mut value,
+                                prop_type.as_ref(),
+                                default_value,
+                                false, // Block properties are always writable
+                            )
+                        }
                     };
 
                     if changed {
@@ -929,6 +938,74 @@ impl PropertyInspector {
                         }
                     }
                 });
+            changed
+        } else {
+            false
+        }
+    }
+
+    /// Show network interface selector dropdown.
+    fn show_network_interface_editor(
+        ui: &mut Ui,
+        value: &mut PropertyValue,
+        interfaces: &[strom_types::NetworkInterfaceInfo],
+    ) -> bool {
+        if let PropertyValue::String(s) = value {
+            let mut changed = false;
+
+            // Build display text for current selection
+            let selected_display = if s.is_empty() {
+                "Default (all interfaces)".to_string()
+            } else {
+                // Find interface to show with IP info
+                interfaces
+                    .iter()
+                    .find(|iface| iface.name == *s)
+                    .map(|iface| {
+                        let ip = iface
+                            .ipv4_addresses
+                            .first()
+                            .map(|addr| addr.address.as_str())
+                            .unwrap_or("no IP");
+                        format!("{} ({})", iface.name, ip)
+                    })
+                    .unwrap_or_else(|| s.clone())
+            };
+
+            egui::ComboBox::from_id_salt(ui.next_auto_id())
+                .selected_text(&selected_display)
+                .show_ui(ui, |ui| {
+                    // Default option - empty string
+                    if ui
+                        .selectable_label(s.is_empty(), "Default (all interfaces)")
+                        .clicked()
+                    {
+                        *s = String::new();
+                        changed = true;
+                    }
+
+                    // List all available interfaces
+                    for iface in interfaces {
+                        // Skip loopback interfaces
+                        if iface.is_loopback {
+                            continue;
+                        }
+
+                        // Build display with IP info
+                        let ip_info = iface
+                            .ipv4_addresses
+                            .first()
+                            .map(|addr| addr.address.as_str())
+                            .unwrap_or("no IP");
+                        let display = format!("{} ({})", iface.name, ip_info);
+
+                        if ui.selectable_label(*s == iface.name, &display).clicked() {
+                            *s = iface.name.clone();
+                            changed = true;
+                        }
+                    }
+                });
+
             changed
         } else {
             false

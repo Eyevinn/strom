@@ -19,6 +19,7 @@ pub mod events;
 pub mod gst;
 pub mod gui;
 pub mod layout;
+pub mod network;
 pub mod openapi;
 pub mod paths;
 pub mod state;
@@ -138,6 +139,8 @@ pub async fn create_app_with_state_and_auth(
             "/gst-launch/export",
             post(api::gst_launch::export_gst_launch),
         )
+        // Network interfaces
+        .route("/network/interfaces", get(api::network::list_interfaces))
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 
