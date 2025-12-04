@@ -167,6 +167,11 @@ pub struct PipelineManager {
     qos_broadcast_task: Option<tokio::task::JoinHandle<()>>,
     /// PTP clock reference (stored for querying grandmaster/master info)
     ptp_clock: Option<gst_net::PtpClock>,
+    /// PTP statistics (updated by statistics callback)
+    ptp_stats: std::sync::Arc<std::sync::RwLock<Option<strom_types::flow::PtpStats>>>,
+    /// PTP statistics callback handle (must be kept alive)
+    #[allow(dead_code)]
+    ptp_stats_callback: Option<gst_net::PtpStatisticsCallback>,
 }
 
 impl PipelineManager {
@@ -205,6 +210,8 @@ impl PipelineManager {
             qos_aggregator: QoSAggregator::new(),
             qos_broadcast_task: None,
             ptp_clock: None,
+            ptp_stats: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            ptp_stats_callback: None,
         };
 
         // Expand blocks into GStreamer elements
@@ -1488,6 +1495,62 @@ impl PipelineManager {
                 // Store PTP clock reference for later queries
                 self.ptp_clock = Some(ptp_clock);
 
+                // Set up PTP statistics callback
+                let ptp_stats = self.ptp_stats.clone();
+                let stats_flow_name = self.flow_name.clone();
+                let stats_domain = domain;
+                let stats_callback = gst_net::PtpClock::add_statistics_callback(
+                    move |callback_domain, stats| {
+                        // Only process stats for our domain
+                        if callback_domain != stats_domain {
+                            return glib::ControlFlow::Continue;
+                        }
+
+                        // Check if this is a TIME_UPDATED event (has the fields we want)
+                        let name = stats.name();
+                        if name == "GstPtpStatisticsTimeUpdated" {
+                            // Extract statistics from the GstStructure
+                            let mean_path_delay_ns = stats.get::<u64>("mean-path-delay-avg").ok();
+                            let clock_offset_ns = stats.get::<i64>("discontinuity").ok();
+                            let r_squared = stats.get::<f64>("r-squared").ok();
+                            let clock_rate = stats.get::<f64>("rate").ok();
+
+                            // Update stored stats
+                            if let Ok(mut guard) = ptp_stats.write() {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+
+                                *guard = Some(strom_types::flow::PtpStats {
+                                    mean_path_delay_ns,
+                                    clock_offset_ns,
+                                    r_squared,
+                                    clock_rate,
+                                    last_update: Some(now),
+                                });
+                            }
+
+                            // Log significant clock corrections (> 100µs)
+                            if let Some(offset) = clock_offset_ns {
+                                if offset.abs() > 100_000 {
+                                    tracing::debug!(
+                                        "[{}] PTP clock correction: {}µs, path_delay: {}µs, r²: {:.4}",
+                                        stats_flow_name,
+                                        offset / 1000,
+                                        mean_path_delay_ns.unwrap_or(0) / 1000,
+                                        r_squared.unwrap_or(0.0)
+                                    );
+                                }
+                            }
+                        }
+
+                        glib::ControlFlow::Continue
+                    },
+                );
+                self.ptp_stats_callback = Some(stats_callback);
+                info!("PTP statistics callback registered for domain {}", domain);
+
                 // For PTP clock with direct media timing (AES67 / RFC 7273):
                 // Set base_time to 0 and start_time to NONE.
                 // This makes RTP timestamps directly correspond to the PTP reference clock,
@@ -1813,12 +1876,16 @@ impl PipelineManager {
         let configured_domain = self.properties.ptp_domain.unwrap_or(0);
         let restart_needed = configured_domain != actual_domain;
 
+        // Get statistics from the stored stats
+        let stats = self.ptp_stats.read().ok().and_then(|guard| guard.clone());
+
         Some(PtpInfo {
             domain: actual_domain,
             synced,
             grandmaster_clock_id,
             master_clock_id,
             restart_needed,
+            stats,
         })
     }
 

@@ -2392,6 +2392,60 @@ impl StromApp {
                                         ui.monospace(master);
                                     });
                                 }
+                                // Show PTP statistics if available
+                                if let Some(ref stats) = ptp_info.stats {
+                                    ui.add_space(5.0);
+                                    ui.collapsing("Clock Statistics", |ui| {
+                                        if let Some(delay_ns) = stats.mean_path_delay_ns {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Path Delay:");
+                                                let delay_us = delay_ns as f64 / 1000.0;
+                                                ui.monospace(format!("{:.1} µs", delay_us));
+                                            });
+                                        }
+                                        if let Some(offset_ns) = stats.clock_offset_ns {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Clock Offset:");
+                                                let offset_us = offset_ns as f64 / 1000.0;
+                                                let color = if offset_us.abs() < 10.0 {
+                                                    Color32::from_rgb(0, 200, 0)
+                                                } else if offset_us.abs() < 100.0 {
+                                                    Color32::from_rgb(255, 165, 0)
+                                                } else {
+                                                    Color32::from_rgb(200, 0, 0)
+                                                };
+                                                ui.colored_label(
+                                                    color,
+                                                    format!("{:+.1} µs", offset_us),
+                                                );
+                                            });
+                                        }
+                                        if let Some(r_squared) = stats.r_squared {
+                                            ui.horizontal(|ui| {
+                                                ui.label("R² (quality):");
+                                                let color = if r_squared > 0.99 {
+                                                    Color32::from_rgb(0, 200, 0)
+                                                } else if r_squared > 0.95 {
+                                                    Color32::from_rgb(255, 165, 0)
+                                                } else {
+                                                    Color32::from_rgb(200, 0, 0)
+                                                };
+                                                ui.colored_label(
+                                                    color,
+                                                    format!("{:.6}", r_squared),
+                                                );
+                                            });
+                                        }
+                                        if let Some(rate) = stats.clock_rate {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Clock Rate:");
+                                                // Show ppm deviation from 1.0
+                                                let ppm = (rate - 1.0) * 1_000_000.0;
+                                                ui.monospace(format!("{:+.2} ppm", ppm));
+                                            });
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
