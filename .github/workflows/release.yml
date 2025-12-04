@@ -150,12 +150,30 @@ jobs:
           echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
           echo "AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
 
-      # Windows: Install GStreamer and pkg-config via Chocolatey
-      # Pin to 1.24.13 - older versions get removed from freedesktop.org causing 404s
+      # Windows: Install GStreamer directly from freedesktop.org
+      # Chocolatey package is broken (downloads removed versions), so we install MSIs directly
       - name: Install GStreamer (Windows)
         if: matrix.platform == 'windows'
         run: |
-          choco install pkgconfiglite gstreamer --version=1.24.13 gstreamer-devel --version=1.24.13 --yes --no-progress
+          $GSTREAMER_VERSION = "1.24.13"
+          $BASE_URL = "https://gstreamer.freedesktop.org/data/pkg/windows/$GSTREAMER_VERSION/msvc"
+
+          # Download and install runtime
+          Write-Host "Downloading GStreamer runtime..."
+          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer.msi
+          Write-Host "Installing GStreamer runtime..."
+          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer.msi /quiet /qn INSTALLDIR=D:\gstreamer'
+
+          # Download and install development files
+          Write-Host "Downloading GStreamer development files..."
+          Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-devel-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer-devel.msi
+          Write-Host "Installing GStreamer development files..."
+          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /qn INSTALLDIR=D:\gstreamer'
+
+          # Install pkg-config via Chocolatey (still needed)
+          choco install pkgconfiglite --yes --no-progress
+
+          # Set environment variables
           echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=D:\gstreamer\1.0\msvc_x86_64\" >> $env:GITHUB_ENV
           echo "D:\gstreamer\1.0\msvc_x86_64\bin" >> $env:GITHUB_PATH
           echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
