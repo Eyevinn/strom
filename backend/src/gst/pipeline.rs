@@ -165,6 +165,8 @@ pub struct PipelineManager {
     qos_aggregator: QoSAggregator,
     /// Handle for the periodic QoS stats broadcast task
     qos_broadcast_task: Option<tokio::task::JoinHandle<()>>,
+    /// PTP clock reference (stored for querying grandmaster/master info)
+    ptp_clock: Option<gst_net::PtpClock>,
 }
 
 impl PipelineManager {
@@ -202,6 +204,7 @@ impl PipelineManager {
             cached_state: std::sync::Arc::new(std::sync::RwLock::new(PipelineState::Null)),
             qos_aggregator: QoSAggregator::new(),
             qos_broadcast_task: None,
+            ptp_clock: None,
         };
 
         // Expand blocks into GStreamer elements
@@ -1457,7 +1460,33 @@ impl PipelineManager {
                     PipelineError::StateChange(format!("Failed to set PTP clock: {}", e))
                 })?;
 
-                info!("PTP clock configured: domain={}", domain);
+                // Log initial PTP state
+                let synced = ptp_clock.is_synced();
+                let gm_id = ptp_clock.grandmaster_clock_id();
+                let master_id = ptp_clock.master_clock_id();
+                info!(
+                    "PTP clock configured: domain={}, synced={}, grandmaster={}, master={}",
+                    domain,
+                    synced,
+                    strom_types::flow::PtpInfo::format_clock_id(gm_id),
+                    strom_types::flow::PtpInfo::format_clock_id(master_id)
+                );
+
+                // Set up callback for grandmaster changes
+                let flow_name = self.flow_name.clone();
+                ptp_clock.connect_grandmaster_clock_id_notify(move |clock| {
+                    let gm_id = clock.grandmaster_clock_id();
+                    let synced = clock.is_synced();
+                    info!(
+                        "[{}] PTP grandmaster changed: {}, synced={}",
+                        flow_name,
+                        strom_types::flow::PtpInfo::format_clock_id(gm_id),
+                        synced
+                    );
+                });
+
+                // Store PTP clock reference for later queries
+                self.ptp_clock = Some(ptp_clock);
 
                 // For PTP clock with direct media timing (AES67 / RFC 7273):
                 // Set base_time to 0 and start_time to NONE.
@@ -1720,16 +1749,16 @@ impl PipelineManager {
 
         match self.properties.clock_type {
             GStreamerClockType::Ptp => {
-                // For PTP clocks, use the is_synced() method from gst::Clock trait
-                // This returns true only when the clock has synchronized with a PTP master
-                if let Some(clock) = self.pipeline.clock() {
-                    if clock.is_synced() {
+                // For PTP clocks, use the stored PTP clock reference for accurate sync status
+                // This ensures consistency with get_ptp_info()
+                if let Some(ref ptp_clock) = self.ptp_clock {
+                    if ptp_clock.is_synced() {
                         ClockSyncStatus::Synced
                     } else {
                         ClockSyncStatus::NotSynced
                     }
                 } else {
-                    // No clock set yet
+                    // No PTP clock stored (shouldn't happen if properly configured)
                     ClockSyncStatus::NotSynced
                 }
             }
@@ -1752,6 +1781,45 @@ impl PipelineManager {
                 ClockSyncStatus::Unknown
             }
         }
+    }
+
+    /// Get detailed PTP clock information.
+    /// Returns None if the pipeline is not using a PTP clock.
+    pub fn get_ptp_info(&self) -> Option<strom_types::flow::PtpInfo> {
+        use strom_types::flow::PtpInfo;
+
+        // Use the stored PTP clock reference
+        let ptp_clock = self.ptp_clock.as_ref()?;
+
+        // Get the actual domain from the running clock (not from saved properties)
+        let actual_domain = ptp_clock.domain() as u8;
+        let synced = ptp_clock.is_synced();
+        let gm_id = ptp_clock.grandmaster_clock_id();
+        let master_id = ptp_clock.master_clock_id();
+
+        // Only include IDs if they're non-zero (indicating valid data)
+        let grandmaster_clock_id = if gm_id != 0 {
+            Some(PtpInfo::format_clock_id(gm_id))
+        } else {
+            None
+        };
+        let master_clock_id = if master_id != 0 {
+            Some(PtpInfo::format_clock_id(master_id))
+        } else {
+            None
+        };
+
+        // Check if configured domain differs from running domain
+        let configured_domain = self.properties.ptp_domain.unwrap_or(0);
+        let restart_needed = configured_domain != actual_domain;
+
+        Some(PtpInfo {
+            domain: actual_domain,
+            synced,
+            grandmaster_clock_id,
+            master_clock_id,
+            restart_needed,
+        })
     }
 
     /// Get the underlying GStreamer pipeline (for debugging).

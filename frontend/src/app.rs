@@ -1654,6 +1654,13 @@ impl StromApp {
                                 ui.label(format!("Sync Status: {}", status_text));
                             }
 
+                            // Display PTP grandmaster info if available
+                            if let Some(ref ptp_info) = flow.properties.ptp_info {
+                                if let Some(ref gm) = ptp_info.grandmaster_clock_id {
+                                    ui.label(format!("Grandmaster: {}", gm));
+                                }
+                            }
+
                             ui.add_space(5.0);
                             let state_text = match flow.state {
                                 Some(PipelineState::Playing) => "Running",
@@ -2345,6 +2352,49 @@ impl StromApp {
                             }
                         }
                     });
+
+                    // Show PTP clock details (grandmaster, master)
+                    if matches!(
+                        self.properties_clock_type_buffer,
+                        strom_types::flow::GStreamerClockType::Ptp
+                    ) {
+                        if let Some(flow) = self.flows.get(idx) {
+                            if let Some(ref ptp_info) = flow.properties.ptp_info {
+                                ui.add_space(5.0);
+                                // Show warning if restart needed - compare buffer with running domain
+                                // This shows immediately when user changes the domain field
+                                let buffer_domain: u8 = self
+                                    .properties_ptp_domain_buffer
+                                    .parse()
+                                    .unwrap_or(0);
+                                let domain_changed = buffer_domain != ptp_info.domain;
+                                if domain_changed {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(
+                                            Color32::from_rgb(255, 165, 0),
+                                            "⚠ Restart needed - domain changed",
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Running domain:");
+                                        ui.monospace(format!("{}", ptp_info.domain));
+                                    });
+                                }
+                                if let Some(ref gm) = ptp_info.grandmaster_clock_id {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Grandmaster:");
+                                        ui.monospace(gm);
+                                    });
+                                }
+                                if let Some(ref master) = ptp_info.master_clock_id {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Master Clock:");
+                                        ui.monospace(master);
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
 
                 ui.add_space(15.0);

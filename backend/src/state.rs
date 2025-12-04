@@ -170,10 +170,16 @@ impl AppState {
             .values()
             .map(|flow| {
                 let mut flow = flow.clone();
-                // Update state, clock sync status, and thread priority status for running pipelines
+                // Update state, clock sync status, PTP info, and thread priority status for running pipelines
                 if let Some(pipeline) = pipelines.get(&flow.id) {
                     flow.state = Some(pipeline.get_state());
                     flow.properties.clock_sync_status = Some(pipeline.get_clock_sync_status());
+                    // Get PTP info and check if restart is needed (configured domain differs from running)
+                    if let Some(mut ptp_info) = pipeline.get_ptp_info() {
+                        let configured_domain = flow.properties.ptp_domain.unwrap_or(0);
+                        ptp_info.restart_needed = configured_domain != ptp_info.domain;
+                        flow.properties.ptp_info = Some(ptp_info);
+                    }
                     flow.properties.thread_priority_status = pipeline.get_thread_priority_status();
                 }
                 // Compute external pads for dynamic blocks
@@ -190,10 +196,16 @@ impl AppState {
 
         flows.get(id).map(|flow| {
             let mut flow = flow.clone();
-            // Update state, clock sync status, and thread priority status for running pipeline
+            // Update state, clock sync status, PTP info, and thread priority status for running pipeline
             if let Some(pipeline) = pipelines.get(id) {
                 flow.state = Some(pipeline.get_state());
                 flow.properties.clock_sync_status = Some(pipeline.get_clock_sync_status());
+                // Get PTP info and check if restart is needed (configured domain differs from running)
+                if let Some(mut ptp_info) = pipeline.get_ptp_info() {
+                    let configured_domain = flow.properties.ptp_domain.unwrap_or(0);
+                    ptp_info.restart_needed = configured_domain != ptp_info.domain;
+                    flow.properties.ptp_info = Some(ptp_info);
+                }
                 flow.properties.thread_priority_status = pipeline.get_thread_priority_status();
             }
             // Compute external pads for dynamic blocks

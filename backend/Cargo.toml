@@ -76,8 +76,8 @@ uuid.workspace = true
 # MIME type detection for static assets
 mime_guess = "2.0"
 
-# Embed static assets
-rust-embed = "8.0"
+# Embed static assets (debug-embed forces embedding even in debug builds)
+rust-embed = { version = "8.0", features = ["debug-embed"] }
 
 # System monitoring
 sysinfo = "0.37"
