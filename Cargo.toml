@@ -35,5 +35,7 @@ utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 # Frontend
 egui = "0.33"
 eframe = { version = "0.33", features = ["default_fonts", "glow", "persistence"] }
-reqwest = { version = "0.12", features = ["json"] }
+# Use rustls instead of native-tls to avoid OpenSSL dependency
+# This enables cross-compilation with zigbuild to older glibc versions
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 gloo-net = { version = "0.6", features = ["websocket"] }
