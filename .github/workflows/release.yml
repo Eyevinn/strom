@@ -96,7 +96,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown,${{ matrix.target }}
 
-      # Linux: Install Zig for glibc-targeted builds (supports both x86_64 and ARM64)
+      # Linux: Install Zig for glibc-targeted builds
       - name: Install Zig (Linux)
         if: matrix.platform == 'linux'
         run: |
@@ -121,6 +121,13 @@ jobs:
         with:
           packages: libssl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools
           version: 1.2
+
+      # Linux x86_64: Set up environment for zigbuild
+      - name: Set up zigbuild environment (Linux x86_64)
+        if: matrix.platform == 'linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          # Tell zig linker where to find x86_64 libraries
+          echo "RUSTFLAGS=-L /usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
       # Linux ARM64: Install cross-compilation tools and ARM64 GStreamer (ubuntu-24.04 has 1.24+)
       - name: Install cross-compilation tools (Linux ARM64)
@@ -149,6 +156,13 @@ jobs:
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
           echo "AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
+          # Tell zig linker where to find ARM64 libraries
+          echo "RUSTFLAGS=-L /usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
+
+      # Windows: Install Strawberry Perl (needed for OpenSSL build)
+      - name: Install Strawberry Perl (Windows)
+        if: matrix.platform == 'windows'
+        run: choco install strawberryperl --yes --no-progress
 
       # Windows: Install GStreamer directly from freedesktop.org
       # Chocolatey package is broken (downloads removed versions), so we install MSIs directly
