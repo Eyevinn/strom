@@ -1856,7 +1856,6 @@ impl PipelineManager {
 
         // Get the actual domain from the running clock (not from saved properties)
         let actual_domain = ptp_clock.domain() as u8;
-        let synced = ptp_clock.is_synced();
         let gm_id = ptp_clock.grandmaster_clock_id();
         let master_id = ptp_clock.master_clock_id();
 
@@ -1878,6 +1877,9 @@ impl PipelineManager {
 
         // Get statistics from the stored stats
         let stats = self.ptp_stats.read().ok().and_then(|guard| guard.clone());
+
+        // Get sync status directly from the PTP clock
+        let synced = ptp_clock.is_synced();
 
         Some(PtpInfo {
             domain: actual_domain,

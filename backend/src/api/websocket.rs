@@ -92,13 +92,23 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
 
-            // System stats interval
+            // System stats interval (also sends PTP stats for flows with PTP clocks)
             _ = stats_interval.tick() => {
+                // Send system stats
                 let stats = state.get_system_stats().await;
                 let event = StromEvent::SystemStats(stats);
                 if let Err(e) = send_event(&mut sender, event).await {
                     debug!("Failed to send system stats, client likely disconnected: {}", e);
                     break;
+                }
+
+                // Send PTP stats for flows with PTP clocks
+                let ptp_events = state.get_ptp_stats_events().await;
+                for ptp_event in ptp_events {
+                    if let Err(e) = send_event(&mut sender, ptp_event).await {
+                        debug!("Failed to send PTP stats, client likely disconnected: {}", e);
+                        break;
+                    }
                 }
             }
 

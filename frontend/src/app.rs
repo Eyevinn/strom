@@ -178,6 +178,8 @@ pub struct StromApp {
     webrtc_stats: WebRtcStatsStore,
     /// System monitoring statistics
     system_monitor: SystemMonitorStore,
+    /// PTP clock statistics per flow
+    ptp_stats: crate::ptp_monitor::PtpStatsStore,
     /// Whether to show the detailed system monitor window
     show_system_monitor: bool,
     /// Last time WebRTC stats were polled
@@ -301,6 +303,7 @@ impl StromApp {
             meter_data: MeterDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
+            ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
             show_system_monitor: false,
             theme_preference: ThemePreference::System,
             version_info: None,
@@ -376,6 +379,7 @@ impl StromApp {
             meter_data: MeterDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
+            ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
             show_system_monitor: false,
             last_webrtc_poll: std::time::Instant::now(),
             theme_preference: ThemePreference::System,
@@ -2259,8 +2263,12 @@ impl StromApp {
             .collapsible(false)
             .resizable(true)
             .default_width(400.0)
+            .default_height(500.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(ui.available_height() - 50.0) // Leave room for buttons
+                    .show(ui, |ui| {
                 ui.heading("Flow Properties");
                 ui.add_space(5.0);
 
@@ -2286,7 +2294,7 @@ impl StromApp {
                     use strom_types::flow::GStreamerClockType;
 
                     egui::ComboBox::from_id_salt("clock_type_selector")
-                        .selected_text(format!("{:?}", self.properties_clock_type_buffer))
+                        .selected_text(self.properties_clock_type_buffer.label())
                         .show_ui(ui, |ui| {
                             for clock_type in GStreamerClockType::all() {
                                 let label = if *clock_type == GStreamerClockType::Monotonic {
@@ -2395,45 +2403,58 @@ impl StromApp {
                                 // Show PTP statistics if available
                                 if let Some(ref stats) = ptp_info.stats {
                                     ui.add_space(5.0);
+                                    let graphs = crate::ptp_monitor::PtpStatsGraphs::new(
+                                        &self.ptp_stats,
+                                        flow.id,
+                                    );
                                     ui.collapsing("Clock Statistics", |ui| {
-                                        if let Some(delay_ns) = stats.mean_path_delay_ns {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Path Delay:");
-                                                let delay_us = delay_ns as f64 / 1000.0;
-                                                ui.monospace(format!("{:.1} µs", delay_us));
-                                            });
-                                        }
                                         if let Some(offset_ns) = stats.clock_offset_ns {
                                             ui.horizontal(|ui| {
-                                                ui.label("Clock Offset:");
-                                                let offset_us = offset_ns as f64 / 1000.0;
-                                                let color = if offset_us.abs() < 10.0 {
-                                                    Color32::from_rgb(0, 200, 0)
-                                                } else if offset_us.abs() < 100.0 {
-                                                    Color32::from_rgb(255, 165, 0)
-                                                } else {
-                                                    Color32::from_rgb(200, 0, 0)
-                                                };
-                                                ui.colored_label(
-                                                    color,
-                                                    format!("{:+.1} µs", offset_us),
-                                                );
+                                                graphs.draw_offset_graph(ui);
+                                                ui.vertical(|ui| {
+                                                    ui.label("Clock Offset");
+                                                    let offset_us = offset_ns as f64 / 1000.0;
+                                                    let color = if offset_us.abs() < 10.0 {
+                                                        Color32::from_rgb(0, 200, 0)
+                                                    } else if offset_us.abs() < 100.0 {
+                                                        Color32::from_rgb(255, 165, 0)
+                                                    } else {
+                                                        Color32::from_rgb(200, 0, 0)
+                                                    };
+                                                    ui.colored_label(
+                                                        color,
+                                                        format!("{:+.1} µs", offset_us),
+                                                    );
+                                                });
                                             });
                                         }
                                         if let Some(r_squared) = stats.r_squared {
                                             ui.horizontal(|ui| {
-                                                ui.label("R² (quality):");
-                                                let color = if r_squared > 0.99 {
-                                                    Color32::from_rgb(0, 200, 0)
-                                                } else if r_squared > 0.95 {
-                                                    Color32::from_rgb(255, 165, 0)
-                                                } else {
-                                                    Color32::from_rgb(200, 0, 0)
-                                                };
-                                                ui.colored_label(
-                                                    color,
-                                                    format!("{:.6}", r_squared),
-                                                );
+                                                graphs.draw_r_squared_graph(ui);
+                                                ui.vertical(|ui| {
+                                                    ui.label("R² (quality)");
+                                                    let color = if r_squared > 0.99 {
+                                                        Color32::from_rgb(0, 200, 0)
+                                                    } else if r_squared > 0.95 {
+                                                        Color32::from_rgb(255, 165, 0)
+                                                    } else {
+                                                        Color32::from_rgb(200, 0, 0)
+                                                    };
+                                                    ui.colored_label(
+                                                        color,
+                                                        format!("{:.6}", r_squared),
+                                                    );
+                                                });
+                                            });
+                                        }
+                                        if let Some(delay_ns) = stats.mean_path_delay_ns {
+                                            ui.horizontal(|ui| {
+                                                graphs.draw_delay_graph(ui);
+                                                ui.vertical(|ui| {
+                                                    ui.label("Path Delay");
+                                                    let delay_us = delay_ns as f64 / 1000.0;
+                                                    ui.monospace(format!("{:.1} µs", delay_us));
+                                                });
                                             });
                                         }
                                         if let Some(rate) = stats.clock_rate {
@@ -2505,9 +2526,13 @@ impl StromApp {
                     }
                 }
 
-                ui.add_space(15.0);
+                }); // End ScrollArea
 
-                // Buttons
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(5.0);
+
+                // Buttons (outside scroll area)
                 ui.horizontal(|ui| {
                     if ui.button("💾 Save").clicked() {
                         // Update flow properties
@@ -3250,6 +3275,57 @@ impl eframe::App for StromApp {
                         }
                         StromEvent::SystemStats(stats) => {
                             self.system_monitor.update(stats);
+                        }
+                        StromEvent::PtpStats {
+                            flow_id,
+                            domain,
+                            synced,
+                            mean_path_delay_ns,
+                            clock_offset_ns,
+                            r_squared,
+                            clock_rate,
+                        } => {
+                            // Update PTP stats in the corresponding flow for real-time display
+                            if let Some(flow) = self.flows.iter_mut().find(|f| f.id == flow_id) {
+                                // Update clock_sync_status (used by the UI for status display)
+                                flow.properties.clock_sync_status = Some(if synced {
+                                    strom_types::flow::ClockSyncStatus::Synced
+                                } else {
+                                    strom_types::flow::ClockSyncStatus::NotSynced
+                                });
+
+                                // Ensure ptp_info exists
+                                if flow.properties.ptp_info.is_none() {
+                                    flow.properties.ptp_info =
+                                        Some(strom_types::flow::PtpInfo::default());
+                                }
+                                if let Some(ref mut ptp_info) = flow.properties.ptp_info {
+                                    ptp_info.domain = domain;
+                                    ptp_info.synced = synced;
+                                    // Update stats
+                                    let stats = strom_types::flow::PtpStats {
+                                        mean_path_delay_ns,
+                                        clock_offset_ns,
+                                        r_squared,
+                                        clock_rate,
+                                        last_update: None,
+                                    };
+                                    ptp_info.stats = Some(stats);
+                                }
+                            }
+
+                            // Also update the PTP stats store for history tracking
+                            self.ptp_stats.update(
+                                flow_id,
+                                crate::ptp_monitor::PtpStatsData {
+                                    domain,
+                                    synced,
+                                    mean_path_delay_ns,
+                                    clock_offset_ns,
+                                    r_squared,
+                                    clock_rate,
+                                },
+                            );
                         }
                         _ => {}
                     }

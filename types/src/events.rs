@@ -71,6 +71,22 @@ pub enum StromEvent {
     },
     /// System monitoring statistics (CPU and GPU)
     SystemStats(SystemStats),
+    /// PTP clock statistics for a flow
+    PtpStats {
+        flow_id: FlowId,
+        /// PTP domain
+        domain: u8,
+        /// Whether clock is synchronized
+        synced: bool,
+        /// Mean path delay to master in nanoseconds
+        mean_path_delay_ns: Option<u64>,
+        /// Clock offset/correction in nanoseconds
+        clock_offset_ns: Option<i64>,
+        /// R-squared (clock estimation quality, 0.0-1.0)
+        r_squared: Option<f64>,
+        /// Clock rate ratio (local vs master)
+        clock_rate: Option<f64>,
+    },
     /// Quality of Service statistics (aggregated buffer drop info)
     QoSStats {
         flow_id: FlowId,
@@ -229,6 +245,25 @@ impl StromEvent {
                         target, flow_id, event_count, avg_proportion
                     )
                 }
+            }
+            StromEvent::PtpStats {
+                flow_id,
+                synced,
+                mean_path_delay_ns,
+                clock_offset_ns,
+                ..
+            } => {
+                let status = if *synced { "synced" } else { "not synced" };
+                let delay = mean_path_delay_ns
+                    .map(|ns| format!("{:.1}µs delay", ns as f64 / 1000.0))
+                    .unwrap_or_default();
+                let offset = clock_offset_ns
+                    .map(|ns| format!("{:.1}µs offset", ns as f64 / 1000.0))
+                    .unwrap_or_default();
+                format!(
+                    "PTP stats for flow {}: {} {} {}",
+                    flow_id, status, delay, offset
+                )
             }
         }
     }
