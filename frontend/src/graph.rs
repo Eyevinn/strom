@@ -57,6 +57,13 @@ pub struct GraphEditor {
     pub active_property_tab: PropertyTab,
     /// Pad to focus/highlight in the active tab
     pub focused_pad: Option<String>,
+    /// QoS health status per element (for rendering indicators)
+    qos_health_map: HashMap<String, crate::qos_monitor::QoSHealth>,
+    /// Last known canvas rect (for centering calculations)
+    last_canvas_rect: Option<egui::Rect>,
+    /// Flag indicating a QoS marker was clicked (to signal log panel should open)
+    /// Uses Cell for interior mutability since draw_* functions take &self
+    qos_marker_clicked: std::cell::Cell<bool>,
 }
 
 /// Property panel tab selection
@@ -113,6 +120,9 @@ impl Default for GraphEditor {
             hovered_link: None,
             active_property_tab: PropertyTab::Element,
             focused_pad: None,
+            qos_health_map: HashMap::new(),
+            last_canvas_rect: None,
+            qos_marker_clicked: std::cell::Cell::new(false),
         }
     }
 }
@@ -121,6 +131,14 @@ impl GraphEditor {
     /// Create a new graph editor.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the QoS health map for rendering indicators on nodes
+    pub fn set_qos_health_map(
+        &mut self,
+        health_map: HashMap<String, crate::qos_monitor::QoSHealth>,
+    ) {
+        self.qos_health_map = health_map;
     }
 
     /// Calculate the vertical offset for a pad given its index and total count.
@@ -238,6 +256,53 @@ impl GraphEditor {
     /// Check if anything is selected in the graph (element, block, or link).
     pub fn has_selection(&self) -> bool {
         self.selected.is_some() || self.selected_link.is_some()
+    }
+
+    /// Check if a QoS marker was clicked during the last frame.
+    pub fn was_qos_marker_clicked(&self) -> bool {
+        self.qos_marker_clicked.get()
+    }
+
+    /// Select a node (element) by its ID.
+    pub fn select_node(&mut self, id: ElementId) {
+        self.selected = Some(id);
+        self.selected_link = None;
+    }
+
+    /// Select a block by its ID.
+    pub fn select_block(&mut self, id: &str) {
+        self.selected = Some(id.to_string());
+        self.selected_link = None;
+    }
+
+    /// Center the view on the currently selected element or block.
+    pub fn center_on_selected(&mut self) {
+        if let Some(ref selected_id) = self.selected {
+            // Get the canvas center offset (half of canvas size)
+            // If we don't have a stored rect yet, use a reasonable default
+            let canvas_center_offset = self
+                .last_canvas_rect
+                .map(|r| egui::vec2(r.width() / 2.0, r.height() / 2.0))
+                .unwrap_or(egui::vec2(400.0, 300.0));
+
+            // Try to find the position of the selected element
+            if let Some(element) = self.elements.iter().find(|e| &e.id == selected_id) {
+                // Center on element position
+                // pan_offset formula: to make world pos appear at screen center
+                // screen_center = rect_min + (pos * zoom) + pan_offset
+                // pan_offset = screen_center - rect_min - (pos * zoom)
+                // Since screen_center - rect_min = canvas_center_offset:
+                // pan_offset = canvas_center_offset - (pos * zoom)
+                let pos = element.position;
+                self.pan_offset =
+                    canvas_center_offset - egui::vec2(pos.0 * self.zoom, pos.1 * self.zoom);
+            } else if let Some(block) = self.blocks.iter().find(|b| &b.id == selected_id) {
+                // Center on block position
+                let pos = &block.position;
+                self.pan_offset =
+                    canvas_center_offset - egui::vec2(pos.x * self.zoom, pos.y * self.zoom);
+            }
+        }
     }
 
     /// Set element metadata for rendering ports.
@@ -430,9 +495,15 @@ impl GraphEditor {
 
     /// Render the graph editor.
     pub fn show(&mut self, ui: &mut Ui) -> Response {
+        // Reset the QoS marker clicked flag at the start of each frame
+        self.qos_marker_clicked.set(false);
+
         ui.push_id("graph_editor", |ui| {
             let (response, painter) =
                 ui.allocate_painter(ui.available_size_before_wrap(), Sense::click_and_drag());
+
+            // Store the canvas rect for centering calculations
+            self.last_canvas_rect = Some(response.rect);
 
             let zoom = self.zoom;
             let pan_offset = self.pan_offset;
@@ -841,7 +912,16 @@ impl GraphEditor {
         is_selected: bool,
         is_hovered: bool,
     ) -> Response {
-        let stroke_color = if ui.visuals().dark_mode {
+        // Check for QoS issues
+        let qos_health = self.qos_health_map.get(&element.id.to_string());
+        let has_qos_issues = qos_health
+            .map(|h| *h != crate::qos_monitor::QoSHealth::Ok)
+            .unwrap_or(false);
+
+        let stroke_color = if has_qos_issues {
+            // QoS issues - use warning/critical color for border
+            qos_health.unwrap().color()
+        } else if ui.visuals().dark_mode {
             // Dark theme borders
             if is_selected {
                 Color32::from_rgb(100, 220, 220) // Cyan
@@ -861,7 +941,9 @@ impl GraphEditor {
             }
         };
 
-        let stroke_width = if is_selected {
+        let stroke_width = if has_qos_issues {
+            3.0 // Thicker border for QoS issues
+        } else if is_selected {
             2.5
         } else if is_hovered {
             1.5
@@ -889,6 +971,27 @@ impl GraphEditor {
             }
         };
 
+        // Draw QoS glow effect behind the node if there are issues
+        if has_qos_issues {
+            let glow_color = qos_health.unwrap().color();
+            // Draw multiple expanding rectangles for glow effect
+            for i in 1..=3 {
+                let expand = i as f32 * 2.0 * self.zoom;
+                let alpha = 60 - (i * 15) as u8; // Fade out
+                let glow_rect = rect.expand(expand);
+                painter.rect_filled(
+                    glow_rect,
+                    5.0 + expand,
+                    Color32::from_rgba_unmultiplied(
+                        glow_color.r(),
+                        glow_color.g(),
+                        glow_color.b(),
+                        alpha,
+                    ),
+                );
+            }
+        }
+
         // Draw node background
         painter.rect(
             rect,
@@ -913,6 +1016,35 @@ impl GraphEditor {
             FontId::proportional(14.0 * self.zoom),
             text_color,
         );
+
+        // Draw QoS indicator if there are issues - make it clickable
+        if let Some(qos_health) = self.qos_health_map.get(&element.id.to_string()) {
+            if *qos_health != crate::qos_monitor::QoSHealth::Ok {
+                let qos_icon_pos = rect.right_top() + vec2(-20.0 * self.zoom, 8.0 * self.zoom);
+                let icon_size = 16.0 * self.zoom;
+                let qos_icon_rect = egui::Rect::from_center_size(
+                    qos_icon_pos + vec2(0.0, icon_size / 2.0),
+                    vec2(icon_size, icon_size),
+                );
+
+                // Check if the QoS icon is clicked
+                let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+                let clicked = ui.input(|i| i.pointer.primary_clicked());
+                if let Some(pos) = pointer_pos {
+                    if clicked && qos_icon_rect.contains(pos) {
+                        self.qos_marker_clicked.set(true);
+                    }
+                }
+
+                painter.text(
+                    qos_icon_pos,
+                    egui::Align2::CENTER_TOP,
+                    qos_health.icon(),
+                    FontId::proportional(14.0 * self.zoom),
+                    qos_health.color(),
+                );
+            }
+        }
 
         // Draw ports based on element metadata
         let port_size = 16.0 * self.zoom;
@@ -1203,7 +1335,16 @@ impl GraphEditor {
         is_selected: bool,
         is_hovered: bool,
     ) -> Response {
-        let stroke_color = if ui.visuals().dark_mode {
+        // Check for QoS issues
+        let qos_health = self.qos_health_map.get(&block.id);
+        let has_qos_issues = qos_health
+            .map(|h| *h != crate::qos_monitor::QoSHealth::Ok)
+            .unwrap_or(false);
+
+        let stroke_color = if has_qos_issues {
+            // QoS issues - use warning/critical color for border
+            qos_health.unwrap().color()
+        } else if ui.visuals().dark_mode {
             // Dark theme borders
             if is_selected {
                 Color32::from_rgb(200, 100, 255) // Purple for blocks
@@ -1223,7 +1364,9 @@ impl GraphEditor {
             }
         };
 
-        let stroke_width = if is_selected {
+        let stroke_width = if has_qos_issues {
+            3.0 // Thicker border for QoS issues
+        } else if is_selected {
             2.5
         } else if is_hovered {
             1.5
@@ -1250,6 +1393,27 @@ impl GraphEditor {
                 Color32::from_rgb(235, 215, 255) // Soft lavender
             }
         };
+
+        // Draw QoS glow effect behind the node if there are issues
+        if has_qos_issues {
+            let glow_color = qos_health.unwrap().color();
+            // Draw multiple expanding rectangles for glow effect
+            for i in 1..=3 {
+                let expand = i as f32 * 2.0 * self.zoom;
+                let alpha = 60 - (i * 15) as u8; // Fade out
+                let glow_rect = rect.expand(expand);
+                painter.rect_filled(
+                    glow_rect,
+                    5.0 + expand,
+                    Color32::from_rgba_unmultiplied(
+                        glow_color.r(),
+                        glow_color.g(),
+                        glow_color.b(),
+                        alpha,
+                    ),
+                );
+            }
+        }
 
         // Draw node background with rounded corners
         painter.rect(
@@ -1301,6 +1465,35 @@ impl GraphEditor {
             FontId::proportional(14.0 * self.zoom),
             text_color,
         );
+
+        // Draw QoS indicator if there are issues - make it clickable
+        if let Some(qos_health) = self.qos_health_map.get(&block.id) {
+            if *qos_health != crate::qos_monitor::QoSHealth::Ok {
+                let qos_icon_pos = rect.right_top() + vec2(-20.0 * self.zoom, 8.0 * self.zoom);
+                let icon_size = 16.0 * self.zoom;
+                let qos_icon_rect = egui::Rect::from_center_size(
+                    qos_icon_pos + vec2(0.0, icon_size / 2.0),
+                    vec2(icon_size, icon_size),
+                );
+
+                // Check if the QoS icon is clicked
+                let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+                let clicked = ui.input(|i| i.pointer.primary_clicked());
+                if let Some(pos) = pointer_pos {
+                    if clicked && qos_icon_rect.contains(pos) {
+                        self.qos_marker_clicked.set(true);
+                    }
+                }
+
+                painter.text(
+                    qos_icon_pos,
+                    egui::Align2::CENTER_TOP,
+                    qos_health.icon(),
+                    FontId::proportional(14.0 * self.zoom),
+                    qos_health.color(),
+                );
+            }
+        }
 
         // Render any dynamic content (e.g., meter visualization)
         if let Some(content_info) = self.block_content_map.get(&block.id) {
