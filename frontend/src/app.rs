@@ -2210,7 +2210,7 @@ impl StromApp {
                             ui.separator();
                             ui.small(
                                 egui::RichText::new(
-                                    "Drag nodes to move | Pan canvas | Scroll=zoom | Del=delete",
+                                    "Drag nodes (snaps to grid) | Scroll=pan | Ctrl+Scroll=zoom | Del=delete",
                                 )
                                 .color(legend_text_color),
                             );

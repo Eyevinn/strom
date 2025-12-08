@@ -10,6 +10,14 @@ use uuid::Uuid;
 
 use crate::app::set_local_storage;
 
+/// Grid size for snapping (in world coordinates)
+const GRID_SIZE: f32 = 50.0;
+
+/// Snap a value to the grid
+fn snap_to_grid(value: f32) -> f32 {
+    (value / GRID_SIZE).round() * GRID_SIZE
+}
+
 /// Represents the state of the graph editor.
 pub struct GraphEditor {
     /// Elements (nodes) in the graph
@@ -435,17 +443,48 @@ impl GraphEditor {
             let from_screen =
                 |pos: Pos2| -> Pos2 { ((pos - rect_min - pan_offset) / zoom).to_pos2() };
 
-            // Handle zoom
-            if let Some(hover_pos) = response.hover_pos() {
-                let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
-                if scroll_delta != 0.0 {
-                    let zoom_delta = scroll_delta * 0.001;
+            // Handle zoom and scroll - use global pointer position so it works even over nodes
+            let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+            let pointer_in_canvas = pointer_pos
+                .map(|p| response.rect.contains(p))
+                .unwrap_or(false);
+
+            if pointer_in_canvas {
+                let hover_pos = pointer_pos.unwrap();
+                let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
+                let pinch_zoom = ui.input(|i| i.zoom_delta());
+                let modifiers = ui.input(|i| i.modifiers);
+
+                // Pinch-to-zoom (trackpad) or Ctrl+Scroll or Alt+Scroll
+                if pinch_zoom != 1.0 {
+                    let zoom_factor = pinch_zoom;
+                    self.zoom = (self.zoom * zoom_factor).clamp(0.1, 3.0);
+
+                    // Adjust pan to zoom towards cursor
+                    let world_pos = from_screen(hover_pos);
+                    let new_screen_pos = to_screen(world_pos);
+                    self.pan_offset += hover_pos - new_screen_pos;
+                } else if (modifiers.ctrl || modifiers.alt) && scroll_delta.y != 0.0 {
+                    // Ctrl+Scroll or Alt+Scroll: Zoom
+                    let zoom_delta = scroll_delta.y * 0.001;
                     self.zoom = (self.zoom + zoom_delta).clamp(0.1, 3.0);
 
                     // Adjust pan to zoom towards cursor
                     let world_pos = from_screen(hover_pos);
                     let new_screen_pos = to_screen(world_pos);
                     self.pan_offset += hover_pos - new_screen_pos;
+                }
+                // Horizontal scroll (trackpad horizontal swipe)
+                else if scroll_delta.x != 0.0 {
+                    self.pan_offset.x += scroll_delta.x;
+                }
+                // Shift+Scroll: Horizontal pan (for mouse wheels)
+                else if modifiers.shift && scroll_delta.y != 0.0 {
+                    self.pan_offset.x += scroll_delta.y;
+                }
+                // Plain scroll: Vertical pan
+                else if scroll_delta.y != 0.0 {
+                    self.pan_offset.y += scroll_delta.y;
                 }
             }
 
@@ -531,7 +570,7 @@ impl GraphEditor {
                 }
             }
 
-            // Update element positions
+            // Update element positions (no snapping during drag - snap on release)
             for (id, new_pos) in elements_to_update {
                 if let Some(elem) = self.elements.iter_mut().find(|e| e.id == id) {
                     elem.position = new_pos;
@@ -627,7 +666,7 @@ impl GraphEditor {
                 }
             }
 
-            // Update block positions
+            // Update block positions (no snapping during drag - snap on release)
             for (id, new_pos) in blocks_to_update {
                 if let Some(block) = self.blocks.iter_mut().find(|b| b.id == id) {
                     block.position = strom_types::block::Position {
@@ -650,6 +689,21 @@ impl GraphEditor {
 
             // Reset dragging state when mouse is released
             if !ui.input(|i| i.pointer.primary_down()) {
+                // Snap to grid when drag ends
+                if let Some(ref drag_id) = self.dragging {
+                    // Check if it's an element
+                    if let Some(elem) = self.elements.iter_mut().find(|e| &e.id == drag_id) {
+                        elem.position =
+                            (snap_to_grid(elem.position.0), snap_to_grid(elem.position.1));
+                    }
+                    // Check if it's a block
+                    if let Some(block) = self.blocks.iter_mut().find(|b| &b.id == drag_id) {
+                        block.position = strom_types::block::Position {
+                            x: snap_to_grid(block.position.x),
+                            y: snap_to_grid(block.position.y),
+                        };
+                    }
+                }
                 self.dragging = None;
 
                 // Finalize link creation
@@ -747,8 +801,13 @@ impl GraphEditor {
             Color32::from_gray(200) // Light theme: lighter grid lines
         };
 
-        let start_x = (rect.min.x / grid_spacing).floor() * grid_spacing;
-        let start_y = (rect.min.y / grid_spacing).floor() * grid_spacing;
+        // Grid offset from panning - grid moves with content
+        // Use rem_euclid for always-positive remainder
+        let offset_x = self.pan_offset.x.rem_euclid(grid_spacing);
+        let offset_y = self.pan_offset.y.rem_euclid(grid_spacing);
+
+        let start_x = (rect.min.x / grid_spacing).floor() * grid_spacing + offset_x;
+        let start_y = (rect.min.y / grid_spacing).floor() * grid_spacing + offset_y;
 
         // Vertical lines
         let mut x = start_x;
