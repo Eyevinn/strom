@@ -1033,26 +1033,41 @@ impl StromApp {
             return;
         }
 
+        // Get the currently selected flow ID for dynamic pads fetching
+        let selected_flow_id = self.current_flow().map(|f| f.id);
+
         // Fetch stats for each running flow
         for flow_id in running_flows {
             let api = self.api.clone();
             let tx = self.channels.sender();
             let ctx = ctx.clone();
             let flow_id_str = flow_id.to_string();
+            let fetch_dynamic_pads = selected_flow_id == Some(flow_id);
 
             spawn_task(async move {
                 match api.get_flow_stats(flow_id).await {
                     Ok(stats) => {
                         let _ = tx.send(AppMessage::StatsLoaded {
-                            flow_id: flow_id_str,
+                            flow_id: flow_id_str.clone(),
                             stats,
                         });
                     }
                     Err(_) => {
                         // Flow not running or stats not available - silently ignore
-                        let _ = tx.send(AppMessage::StatsNotAvailable(flow_id_str));
+                        let _ = tx.send(AppMessage::StatsNotAvailable(flow_id_str.clone()));
                     }
                 }
+
+                // Also fetch dynamic pads for the selected flow
+                if fetch_dynamic_pads {
+                    if let Ok(pads) = api.get_dynamic_pads(flow_id).await {
+                        let _ = tx.send(AppMessage::DynamicPadsLoaded {
+                            flow_id: flow_id_str,
+                            pads,
+                        });
+                    }
+                }
+
                 ctx.request_repaint();
             });
         }
@@ -1281,6 +1296,7 @@ impl StromApp {
                     self.selected_flow_idx = Some(new_idx);
                     // Clear graph selection when switching flows
                     self.graph.deselect_all();
+                    self.graph.clear_runtime_dynamic_pads();
                     self.graph.load(flow.elements.clone(), flow.links.clone());
                     self.graph.load_blocks(flow.blocks.clone());
                 }
@@ -1291,6 +1307,7 @@ impl StromApp {
             self.selected_flow_idx = Some(idx);
             // Clear graph selection when switching flows
             self.graph.deselect_all();
+            self.graph.clear_runtime_dynamic_pads();
             self.graph.load(flow.elements.clone(), flow.links.clone());
             self.graph.load_blocks(flow.blocks.clone());
         }
@@ -1315,6 +1332,7 @@ impl StromApp {
                     self.selected_flow_idx = Some(new_idx);
                     // Clear graph selection when switching flows
                     self.graph.deselect_all();
+                    self.graph.clear_runtime_dynamic_pads();
                     self.graph.load(flow.elements.clone(), flow.links.clone());
                     self.graph.load_blocks(flow.blocks.clone());
                 }
@@ -1325,6 +1343,7 @@ impl StromApp {
             self.selected_flow_idx = Some(idx);
             // Clear graph selection when switching flows
             self.graph.deselect_all();
+            self.graph.clear_runtime_dynamic_pads();
             self.graph.load(flow.elements.clone(), flow.links.clone());
             self.graph.load_blocks(flow.blocks.clone());
         }
@@ -1718,6 +1737,8 @@ impl StromApp {
                             self.selected_flow_idx = Some(idx);
                             // Clear graph selection when switching flows
                             self.graph.deselect_all();
+                            // Clear runtime dynamic pads (will be re-fetched if flow is running)
+                            self.graph.clear_runtime_dynamic_pads();
                             // Load flow into graph editor
                             self.graph.load(flow.elements.clone(), flow.links.clone());
                             self.graph.load_blocks(flow.blocks.clone());
@@ -3888,6 +3909,19 @@ impl eframe::App for StromApp {
                 AppMessage::StatsNotAvailable(flow_id) => {
                     tracing::debug!("Stats not available for flow {}", flow_id);
                     self.stats_cache.remove(&flow_id);
+                }
+                AppMessage::DynamicPadsLoaded { flow_id, pads } => {
+                    tracing::debug!(
+                        "Dynamic pads loaded for flow {}: {} elements",
+                        flow_id,
+                        pads.len()
+                    );
+                    // Update graph editor if this is the currently selected flow
+                    if let Some(current_flow) = self.current_flow() {
+                        if current_flow.id.to_string() == flow_id {
+                            self.graph.set_runtime_dynamic_pads(pads);
+                        }
+                    }
                 }
                 AppMessage::GstLaunchExported {
                     pipeline,

@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 use strom_types::{
     api::{
@@ -18,7 +19,6 @@ use strom_types::{
 };
 use tempfile::NamedTempFile;
 use tracing::{error, info, trace};
-use utoipa;
 
 use crate::layout;
 use crate::state::AppState;
@@ -506,6 +506,37 @@ pub async fn debug_graph(
         svg_output.stdout,
     )
         .into_response())
+}
+
+/// Get runtime dynamic pads for a flow.
+///
+/// Returns information about dynamic pads (like decodebin outputs) that were
+/// created at runtime and auto-linked to tees. These pads can be connected
+/// to other elements in the UI.
+pub async fn get_dynamic_pads(
+    State(state): State<AppState>,
+    Path(id): Path<FlowId>,
+) -> Result<Json<DynamicPadsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    trace!("Getting dynamic pads for flow: {}", id);
+
+    let pads = state.get_dynamic_pads(&id).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(
+                "Flow not found or not running. Start the flow first.",
+            )),
+        )
+    })?;
+
+    Ok(Json(DynamicPadsResponse { pads }))
+}
+
+/// Response containing runtime dynamic pads information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicPadsResponse {
+    /// Map of element_id -> {pad_name -> tee_element_name}
+    /// These are pads that appeared at runtime without defined links.
+    pub pads: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
 /// Generate SDP for a specific block in a flow.

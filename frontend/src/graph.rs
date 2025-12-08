@@ -24,6 +24,9 @@ pub struct GraphEditor {
     block_definition_map: HashMap<String, BlockDefinition>,
     /// Dynamic content info per block (block_id -> content info)
     block_content_map: HashMap<String, BlockContentInfo>,
+    /// Runtime dynamic pads from the backend (element_id -> pad_name -> tee_name)
+    /// These are pads created at runtime (e.g., by decodebin) that weren't in the original flow.
+    runtime_dynamic_pads: HashMap<String, HashMap<String, String>>,
     /// Currently selected element ID
     pub selected: Option<ElementId>,
     /// Element being dragged
@@ -90,6 +93,7 @@ impl Default for GraphEditor {
             element_info_map: HashMap::new(),
             block_definition_map: HashMap::new(),
             block_content_map: HashMap::new(),
+            runtime_dynamic_pads: HashMap::new(),
             selected: None,
             dragging: None,
             pan_offset: Vec2::ZERO,
@@ -258,6 +262,18 @@ impl GraphEditor {
     /// Clear all block content info (typically called before re-rendering).
     pub fn clear_block_content(&mut self) {
         self.block_content_map.clear();
+    }
+
+    /// Set runtime dynamic pads for the current flow.
+    /// These are pads created at runtime by elements like decodebin that aren't in the flow definition.
+    /// The map is element_id -> (pad_name -> tee_name).
+    pub fn set_runtime_dynamic_pads(&mut self, pads: HashMap<String, HashMap<String, String>>) {
+        self.runtime_dynamic_pads = pads;
+    }
+
+    /// Clear runtime dynamic pads (e.g., when flow stops or changes).
+    pub fn clear_runtime_dynamic_pads(&mut self) {
+        self.runtime_dynamic_pads.clear();
     }
 
     /// Get the currently selected block instance.
@@ -1857,7 +1873,18 @@ impl GraphEditor {
     /// don't exist until runtime.
     fn get_pads_from_links(&self, element: &Element) -> (Vec<PadToRender>, Vec<PadToRender>) {
         let sink_pads = self.get_actual_input_pads(&element.id);
-        let src_pads = self.get_actual_output_pads(&element.id);
+        let mut src_pads = self.get_actual_output_pads(&element.id);
+
+        // Add runtime dynamic pads that aren't already in the list
+        // These are pads created by elements like decodebin that don't have links defined
+        if let Some(dynamic_pads) = self.runtime_dynamic_pads.get(&element.id) {
+            for pad_name in dynamic_pads.keys() {
+                if !src_pads.contains(pad_name) {
+                    src_pads.push(pad_name.clone());
+                }
+            }
+            src_pads.sort();
+        }
 
         let sink_pads_to_render: Vec<PadToRender> = sink_pads
             .into_iter()

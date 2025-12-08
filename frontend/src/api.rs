@@ -773,6 +773,38 @@ impl ApiClient {
 
         Ok(stats_info)
     }
+
+    /// Get dynamic pads for a running flow (pads created at runtime by elements like decodebin).
+    pub async fn get_dynamic_pads(
+        &self,
+        id: FlowId,
+    ) -> ApiResult<std::collections::HashMap<String, std::collections::HashMap<String, String>>>
+    {
+        let url = format!("{}/flows/{}/dynamic-pads", self.base_url, id);
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+
+        #[derive(Deserialize)]
+        struct DynamicPadsResponse {
+            pads: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+        }
+
+        let response: DynamicPadsResponse = response
+            .json()
+            .await
+            .map_err(|e| ApiError::Decode(e.to_string()))?;
+
+        Ok(response.pads)
+    }
 }
 
 /// Login request payload

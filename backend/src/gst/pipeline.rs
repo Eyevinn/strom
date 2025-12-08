@@ -172,6 +172,10 @@ pub struct PipelineManager {
     /// PTP statistics callback handle (must be kept alive)
     #[allow(dead_code)]
     ptp_stats_callback: Option<gst_net::PtpStatisticsCallback>,
+    /// Dynamic pads that were auto-linked to tees because no link was defined
+    /// Maps element_id -> {pad_name -> tee_element_name}
+    /// These tees have allow-not-linked=true so unlinked streams don't block the pipeline
+    dynamic_pad_tees: std::sync::Arc<std::sync::RwLock<HashMap<String, HashMap<String, String>>>>,
 }
 
 impl PipelineManager {
@@ -212,6 +216,7 @@ impl PipelineManager {
             ptp_clock: None,
             ptp_stats: std::sync::Arc::new(std::sync::RwLock::new(None)),
             ptp_stats_callback: None,
+            dynamic_pad_tees: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         // Expand blocks into GStreamer elements
@@ -1135,31 +1140,42 @@ impl PipelineManager {
     }
 
     /// Set up pad-added signal handlers for elements with dynamic pads.
+    /// This handles two cases:
+    /// 1. Dynamic pads with pending links - link them when they appear
+    /// 2. Dynamic pads WITHOUT links - auto-attach a tee with allow-not-linked=true
+    ///    so unlinked streams don't block the pipeline
     fn setup_dynamic_pad_handlers(&mut self) {
-        if self.pending_links.is_empty() {
-            return;
-        }
-
         info!(
-            "Setting up dynamic pad handlers for {} pending link(s)",
+            "Setting up dynamic pad handlers ({} pending link(s))",
             self.pending_links.len()
         );
 
-        // For each element that might have dynamic pads, connect to pad-added signal
+        // Clone what we need for the closures
         let elements_map = self.elements.clone();
         let pending_links = self.pending_links.clone();
+        let pipeline = self.pipeline.clone();
+        let dynamic_pad_tees = self.dynamic_pad_tees.clone();
 
         for (element_id, element) in &self.elements {
             let element_id = element_id.clone();
             let elements_map = elements_map.clone();
             let pending_links = pending_links.clone();
+            let pipeline = pipeline.clone();
+            let dynamic_pad_tees = dynamic_pad_tees.clone();
 
             // Connect to pad-added signal
             element.connect_pad_added(move |_elem, new_pad| {
                 let new_pad_name = new_pad.name();
-                debug!("Pad added on element {}: {}", element_id, new_pad_name);
+
+                // Only handle src pads (output pads)
+                if new_pad.direction() != gst::PadDirection::Src {
+                    return;
+                }
+
+                debug!("Dynamic src pad added on element {}: {}", element_id, new_pad_name);
 
                 // Check if any pending links match this pad
+                let mut found_link = false;
                 for link in &pending_links {
                     let (from_elem, from_pad) = Self::parse_element_pad(&link.from);
                     let (to_elem, to_pad) = Self::parse_element_pad(&link.to);
@@ -1216,6 +1232,7 @@ impl PipelineManager {
                                                     "Successfully linked dynamic pad: {} -> {}",
                                                     link.from, link.to
                                                 );
+                                                found_link = true;
                                             }
                                             Err(e) => {
                                                 error!(
@@ -1227,6 +1244,74 @@ impl PipelineManager {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                // If no pending link matched this pad, auto-attach a tee with allow-not-linked=true
+                // This prevents unlinked dynamic pads from blocking the pipeline
+                if !found_link && new_pad.peer().is_none() {
+                    let tee_name = format!("{}_{}_autotee", element_id, new_pad_name);
+                    info!(
+                        "Auto-creating tee '{}' for unlinked dynamic pad {}:{}",
+                        tee_name, element_id, new_pad_name
+                    );
+
+                    // Create a tee with allow-not-linked=true
+                    let tee = match gst::ElementFactory::make("tee")
+                        .name(&tee_name)
+                        .property("allow-not-linked", true)
+                        .build()
+                    {
+                        Ok(t) => t,
+                        Err(e) => {
+                            error!("Failed to create auto-tee for {}:{}: {}", element_id, new_pad_name, e);
+                            return;
+                        }
+                    };
+
+                    // Add tee to pipeline
+                    if let Err(e) = pipeline.add(&tee) {
+                        error!("Failed to add auto-tee to pipeline: {}", e);
+                        return;
+                    }
+
+                    // Sync tee state with pipeline
+                    if let Err(e) = tee.sync_state_with_parent() {
+                        error!("Failed to sync auto-tee state: {}", e);
+                        return;
+                    }
+
+                    // Link dynamic pad to tee sink
+                    let tee_sink = match tee.static_pad("sink") {
+                        Some(pad) => pad,
+                        None => {
+                            error!("Auto-tee has no sink pad");
+                            return;
+                        }
+                    };
+
+                    match new_pad.link(&tee_sink) {
+                        Ok(_) => {
+                            info!(
+                                "Successfully auto-linked dynamic pad {}:{} -> {}",
+                                element_id, new_pad_name, tee_name
+                            );
+
+                            // Record this auto-tee for the API/frontend
+                            if let Ok(mut tees) = dynamic_pad_tees.write() {
+                                tees.entry(element_id.clone())
+                                    .or_default()
+                                    .insert(new_pad_name.to_string(), tee_name);
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to link dynamic pad {}:{} to auto-tee: {}",
+                                element_id, new_pad_name, e
+                            );
+                            // Clean up the tee we added
+                            let _ = pipeline.remove(&tee);
                         }
                     }
                 }
@@ -1815,6 +1900,16 @@ impl PipelineManager {
     /// Get the flow ID this pipeline manages.
     pub fn flow_id(&self) -> FlowId {
         self.flow_id
+    }
+
+    /// Get runtime dynamic pads that have been auto-linked to tees.
+    /// Returns a map of element_id -> {pad_name -> tee_element_name}
+    /// These are pads that appeared at runtime without defined links.
+    pub fn get_dynamic_pads(&self) -> HashMap<String, HashMap<String, String>> {
+        self.dynamic_pad_tees
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     /// Get the thread priority status for this pipeline.

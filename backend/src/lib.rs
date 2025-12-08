@@ -86,6 +86,10 @@ pub async fn create_app_with_state_and_auth(
         .route("/flows/{id}/stats", get(api::flows::get_flow_stats))
         .route("/flows/{id}/debug-graph", get(api::flows::debug_graph))
         .route(
+            "/flows/{id}/dynamic-pads",
+            get(api::flows::get_dynamic_pads),
+        )
+        .route(
             "/flows/{id}/properties",
             patch(api::flows::update_flow_properties),
         )

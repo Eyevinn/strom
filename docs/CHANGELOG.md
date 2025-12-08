@@ -5,40 +5,237 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ## [Unreleased]
 
 ### Added
-- Multi-port support with media type classification
-  - Visual color coding for audio (green), video (orange), and generic (blue) ports
-  - A/V labels inside audio and video ports for better visual distinction
-  - Support for elements with multiple input/output pads
-  - PadPresence (Always/Sometimes/Request) and MediaType enums
-- Dynamic pad linking for runtime-created pads
-  - Automatic pad-added signal handlers
-  - Support for elements like decodebin, demuxers with dynamic outputs
-  - Pending link queue for pads not yet available
-- Automatic tee insertion for multiple outputs
-  - Detects when one source connects to multiple destinations
-  - Automatically inserts and configures tee elements
-  - No manual configuration needed
-- Server-Sent Events (SSE) for real-time updates
-  - Pipeline state changes, errors, warnings, and info messages
-  - Flow lifecycle events (created, updated, deleted, started, stopped)
-  - End-of-stream notifications
-  - Keep-alive pings
-  - Backend endpoint: `GET /api/events`
-- Pipeline debug visualization feature
-  - DOT graph generation from running GStreamer pipelines
-  - Automatic SVG conversion using Graphviz
-  - "Debug Graph" button in UI toolbar
-  - Opens interactive SVG in new browser tab
-  - Backend endpoint: `GET /api/flows/:id/debug-graph`
+- V4L2 encoder support for Raspberry Pi hardware encoding (#115)
 
-### Changed
-- Upgraded Rust version requirement to 1.82+
-- Improved property type handling for i32/i64 and u32/u64 conversions
-- Enhanced element introspection to skip write-only properties
+---
+
+## [0.2.9] - 2025-12-04
+
+### Added
+- Real-time PTP clock statistics with inline graphs (#109)
+- AES67 improvements: PTP clock in SDP and network interface selector (#112)
 
 ### Fixed
-- Property type mismatches causing runtime errors
-- Element introspection panics on write-only properties
+- Remove OpenSSL dependency, use rustls everywhere (#111)
+- Use rustls instead of native-tls in MCP server (#114)
+- Add RUSTFLAGS for zigbuild and Strawberry Perl for Windows CI (#108)
+- Download GStreamer directly from freedesktop.org for Windows CI (#107)
+
+---
+
+## [0.2.8] - 2025-12-03
+
+### Added
+- Blackmagic DeckLink SDI/HDMI block support (#99)
+- Visual compositor layout editor (MVP/POC) (#104)
+
+### Fixed
+- Pin Windows GStreamer to 1.24.13 in CI workflows (#105)
+- Add libssl-dev to CI and release workflows (#103)
+
+---
+
+## [0.2.7] - 2025-12-03
+
+### Added
+- OpenGL video compositor block (`glvideomixer`) (#98)
+- MPEG-TS/SRT output block with dynamic pads architecture
+- Improved video encoder for low-latency streaming (#96)
+- MPEG-TS codec validation and documentation
+- QoS monitoring for streaming pipelines
+- Dynamic block pads architecture for computed external pads
+
+### Changed
+- Improved logging with file output and reduced verbosity (#100)
+
+### Fixed
+- Disable sync/QoS in MPEG-TS/SRT output for transcoding pipelines (#97)
+- SRT crash during auto-restart on server startup
+- Proper H.264 stream formatting and MPEG-TS timing for SRT output
+- Block pad alignment and link validation
+- Codec parser and keyframe generation in video encoder
+
+### Documentation
+- WSL2-specific segfault debugging guide (#101)
+- Updated documentation to reflect current codebase state (#95)
+
+---
+
+## [0.2.6] - 2025-12-01
+
+### Added
+- One-liner install script with GStreamer and Graphviz support (#83)
+- Interactive configuration menu for installation
+- Static OpenSSL linking for Ubuntu 20.04+ compatibility (#91)
+
+### Changed
+- Use Zig for glibc-targeted Linux builds in CI
+
+### Fixed
+- Auto-detect piped stdin and enable automated mode
+- Set DEBIAN_FRONTEND=noninteractive for apt-get commands
+- Redirect all log output to stderr for command substitution
+- Use /dev/tty for interactive input to support piped execution
+- Root user support in install script
+
+### Legal
+- Add MIT and Apache-2.0 license files (#93)
+
+---
+
+## [0.2.5] - 2025-11-30
+
+### Added
+- Real-time CPU, memory, and GPU monitoring in topbar (#70)
+- Video Encoder block with automatic hardware acceleration detection (#68)
+- Audio Format and Video Format blocks with enum label support (#66)
+- Hierarchical configuration file support (#67)
+- gst-launch-1.0 import/export support (#78)
+- ARM64 cross-compilation support (#79)
+- Dependabot for automated dependency updates (#72)
+
+---
+
+## [0.2.4] - 2025-11-27
+
+### Added
+- Improved keyboard delete behavior and auto-navigate to new flows (#62)
+
+### Fixed
+- Proper multi-level ghostpad handling in WHEP input (#64)
+- GStreamer 1.26.2 compatibility: Add libnice and update gst-plugins-rs (#63)
+- Build only AMD64 Docker images to reduce publish time (#61)
+
+---
+
+## [0.2.3] - 2025-11-26
+
+### Fixed
+- Extend Docker publish timeout to 2 hours (#59)
+
+---
+
+## [0.2.2] - 2025-11-26
+
+### Fixed
+- Use correct trunk architecture for ARM64 Docker builds (#57)
+
+---
+
+## [0.2.1] - 2025-11-26
+
+### Added
+- ARM64 Docker support and architecture labels (#55)
+- Trigger Docker publish on tag creation (#53)
+
+---
+
+## [0.2.0] - 2025-11-26
+
+### Added
+- PostgreSQL storage support (#47)
+- Frontend GUI improvements: UX, theming, and keyboard shortcuts (#50)
+
+### Changed
+- **Breaking:** Rename backend crate and binary from `strom-backend` to `strom` (#49)
+- **Breaking:** Update default ports (backend 3000->8080, trunk 8080->8095) (#48)
+
+### Fixed
+- Clear error message for port binding failures (#51)
+
+---
+
+## [0.1.8] - 2025-11-25
+
+### Fixed
+- Hardcode Docker image name to eyevinntechnology/strom (#45)
+
+---
+
+## [0.1.7] - 2025-11-25
+
+### Fixed
+- Remove invalid sha tag from Docker publish workflow (#43)
+
+---
+
+## [0.1.6] - 2025-11-25
+
+### Changed
+- Split Dockerfile into separate frontend and backend builders for optimization
+- Update trunk to v0.21.14 in Docker
+
+### Fixed
+- Docker frontend URL detection and build optimizations (#41)
+
+---
+
+## [0.1.5] - 2025-11-24
+
+### Added
+- WHIP/WHEP WebRTC blocks with statistics visualization (#30)
+- Thread priority configuration for GStreamer streaming threads (#31)
+- RFC 7273 clock signaling for AES67 SDP generation (#29)
+- RTP jitterbuffer statistics display for AES67
+- Human-readable labels for block properties (#28)
+- 6 GUI improvements for flow management and monitoring (#28)
+
+### Fixed
+- AES67 Input: Disable RTCP, handle SSRC changes (#32)
+- Windows thread priority conversion (#35)
+- Use `mediaclk:sender` for local clocks per RFC 7273 (#34)
+- PTP/NTP clock sync status detection (#33)
+- Reduce log verbosity for element state changes (#38)
+- WHIP output error handling with multiple bus handlers (#37)
+- Various improvements to WHEP input and AES67 output (#36)
+
+---
+
+## [0.1.4] - 2025-11-21
+
+### Added
+- Session-based login with HTML form and password manager support (#18)
+- Dual authentication support (session login + API keys)
+- Native GUI auto-authentication
+
+### Fixed
+- CORS configuration for credentials support
+- Switch Docker cache from registry to GitHub Actions (#23)
+- Build Docker image in headless mode to fix CI hang (#25)
+- Pass backend port to native GUI frontend (#22)
+- Auto-detect WSL and default to X11 for clipboard compatibility (#20)
+
+---
+
+## [0.1.3] - 2025-11-21
+
+### Fixed
+- Add verbose output for Docker build debugging (#19)
+
+---
+
+## [0.1.2] - 2025-11-20
+
+### Fixed
+- Switch to Docker registry cache for better build performance (#16)
+- Reduce resource usage in Docker builds to prevent compilation hangs
+- Disable Docker build attestations to prevent hangs (#15)
+
+---
+
+## [0.1.1] - 2025-11-20
+
+### Added
+- Manual dispatch to Docker publish workflow (#11)
+- README enhancements: CI/CD info, getting started guide, screenshot (#12)
+
+### Changed
+- Disable ARM64 Docker builds temporarily to improve publish time (#14)
+
+### Fixed
+- Update Docker Hub organization to eyevinntechnology (#13)
+
+---
 
 ## [0.1.0] - 2025-01-13
 
@@ -104,6 +301,8 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Comprehensive error handling
 - Unit and integration tests
 - Development and production build configurations
+
+---
 
 ## [0.0.1] - Initial Architecture
 

@@ -95,6 +95,12 @@ pub enum AppMessage {
     /// Statistics loading failed (flow not running)
     StatsNotAvailable(String),
 
+    /// Dynamic pads loaded for a running flow (element_id -> pad_name -> tee_name)
+    DynamicPadsLoaded {
+        flow_id: String,
+        pads: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    },
+
     /// gst-launch export completed successfully (pipeline string, flow_name)
     GstLaunchExported { pipeline: String, flow_name: String },
     /// gst-launch export failed

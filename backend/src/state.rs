@@ -591,6 +591,16 @@ impl AppState {
         pipelines.get(id).map(|p| p.generate_dot_graph())
     }
 
+    /// Get runtime dynamic pads that were auto-linked to tees.
+    /// Returns a map of element_id -> {pad_name -> tee_element_name}
+    pub async fn get_dynamic_pads(
+        &self,
+        id: &FlowId,
+    ) -> Option<std::collections::HashMap<String, std::collections::HashMap<String, String>>> {
+        let pipelines = self.inner.pipelines.read().await;
+        pipelines.get(id).map(|p| p.get_dynamic_pads())
+    }
+
     /// Update a property on a running pipeline element.
     pub async fn update_element_property(
         &self,
