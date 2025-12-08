@@ -2493,9 +2493,9 @@ dependencies = [
 
 [[package]]
 name = "gstreamer-net"
-version = "0.24.2"
+version = "0.24.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ef1db8f5fcc467e40325cf1d72554dc2b36ccde33680c70549625cca1f25d31"
+checksum = "44e0afa0ccd2f8a25126f815ce344c8dcad00c383ff6e3a30f97ba3f4310bebf"
 dependencies = [
  "gio 0.21.4",
  "glib 0.21.4",
@@ -5432,7 +5432,7 @@ dependencies = [
  "gst-plugin-webrtc",
  "gstreamer 0.24.3",
  "gstreamer-app 0.24.2",
- "gstreamer-net 0.24.2",
+ "gstreamer-net 0.24.4",
  "http-body-util",
  "libc",
  "mime_guess",
