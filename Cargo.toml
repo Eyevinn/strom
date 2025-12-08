@@ -21,7 +21,7 @@ tokio = { version = "1.48", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
-gstreamer = "0.24.3"
+gstreamer = "0.24.4"
 gstreamer-app = "0.24.2"
 gstreamer-net = "0.24.2"
 gst-plugin-webrtc = { git = "https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs", features = ["whep", "whip"], rev = "83625619" }

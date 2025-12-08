@@ -2308,9 +2308,9 @@ dependencies = [
 
 [[package]]
 name = "gstreamer"
-version = "0.24.3"
+version = "0.24.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69ac2f12970a2f85a681d2ceaa40c32fe86cc202ead315e0dfa2223a1217cd24"
+checksum = "0bed73742c5d54cb48533be608b67d89f96e1ebbba280be7823f1ef995e3a9d7"
 dependencies = [
  "cfg-if",
  "futures-channel",
@@ -2325,7 +2325,7 @@ dependencies = [
  "num-integer",
  "num-rational",
  "option-operations",
- "pastey 0.1.1",
+ "pastey 0.2.0",
  "pin-project-lite",
  "smallvec",
  "thiserror 2.0.17",
@@ -2366,7 +2366,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "glib 0.21.4",
- "gstreamer 0.24.3",
+ "gstreamer 0.24.4",
  "gstreamer-app-sys 0.24.0",
  "gstreamer-base 0.24.2",
  "libc",
@@ -2448,7 +2448,7 @@ dependencies = [
  "atomic_refcell",
  "cfg-if",
  "glib 0.21.4",
- "gstreamer 0.24.3",
+ "gstreamer 0.24.4",
  "gstreamer-base-sys 0.24.2",
  "libc",
 ]
@@ -2499,7 +2499,7 @@ checksum = "4ef1db8f5fcc467e40325cf1d72554dc2b36ccde33680c70549625cca1f25d31"
 dependencies = [
  "gio 0.21.4",
  "glib 0.21.4",
- "gstreamer 0.24.3",
+ "gstreamer 0.24.4",
  "gstreamer-net-sys 0.24.0",
 ]
 
@@ -5430,7 +5430,7 @@ dependencies = [
  "figment",
  "futures",
  "gst-plugin-webrtc",
- "gstreamer 0.24.3",
+ "gstreamer 0.24.4",
  "gstreamer-app 0.24.2",
  "gstreamer-net 0.24.2",
  "http-body-util",
