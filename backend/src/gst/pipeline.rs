@@ -1167,7 +1167,26 @@ impl PipelineManager {
                     // Check if this new pad matches a pending source pad
                     if from_elem == element_id {
                         if let Some(expected_pad_name) = from_pad {
-                            if new_pad_name == expected_pad_name {
+                            // Smart pad matching for dynamic pads:
+                            // - Exact match: "src_0" == "src_0"
+                            // - Pattern match: "src" matches "src_0", "src_1", etc.
+                            //   (for elements with Sometimes pads like decodebin's src_%u template)
+                            let pad_matches = new_pad_name == expected_pad_name
+                                || (new_pad_name.starts_with(expected_pad_name)
+                                    && new_pad_name
+                                        .strip_prefix(expected_pad_name)
+                                        .is_some_and(|suffix| {
+                                            suffix.starts_with('_')
+                                                && suffix[1..].chars().all(|c| c.is_ascii_digit())
+                                        }));
+
+                            if pad_matches {
+                                if new_pad_name != expected_pad_name {
+                                    debug!(
+                                        "Dynamic pad pattern match: expected '{}', got '{}' on element {}",
+                                        expected_pad_name, new_pad_name, element_id
+                                    );
+                                }
                                 // This is the source pad we're waiting for
                                 if let (Some(_src_elem), Some(sink_elem)) =
                                     (elements_map.get(from_elem), elements_map.get(to_elem))
