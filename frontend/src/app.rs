@@ -179,8 +179,8 @@ pub struct StromApp {
     api: ApiClient,
     /// List of all flows
     flows: Vec<Flow>,
-    /// Currently selected flow index
-    selected_flow_idx: Option<usize>,
+    /// Currently selected flow ID (using ID instead of index for robustness)
+    selected_flow_id: Option<strom_types::FlowId>,
     /// Graph editor for the current flow
     graph: GraphEditor,
     /// Element palette
@@ -213,8 +213,8 @@ pub struct StromApp {
     connection_state: ConnectionState,
     /// Channel-based state management
     channels: AppStateChannels,
-    /// Flow properties being edited (flow index)
-    editing_properties_idx: Option<usize>,
+    /// Flow properties being edited (flow ID)
+    editing_properties_flow_id: Option<strom_types::FlowId>,
     /// Temporary name buffer for properties dialog
     properties_name_buffer: String,
     /// Temporary description buffer for properties dialog
@@ -349,7 +349,7 @@ impl StromApp {
         let mut app = Self {
             api: ApiClient::new(&api_base_url),
             flows: Vec::new(),
-            selected_flow_idx: None,
+            selected_flow_id: None,
             graph: GraphEditor::new(),
             palette: ElementPalette::new(),
             status: "Ready".to_string(),
@@ -366,7 +366,7 @@ impl StromApp {
             ws_client: None,
             connection_state: ConnectionState::Disconnected,
             channels,
-            editing_properties_idx: None,
+            editing_properties_flow_id: None,
             properties_name_buffer: String::new(),
             properties_description_buffer: String::new(),
             properties_clock_type_buffer: strom_types::flow::GStreamerClockType::Monotonic,
@@ -427,7 +427,7 @@ impl StromApp {
         let mut app = Self {
             api: ApiClient::new_with_auth(&api_base_url, auth_token.clone()),
             flows: Vec::new(),
-            selected_flow_idx: None,
+            selected_flow_id: None,
             graph: GraphEditor::new(),
             palette: ElementPalette::new(),
             status: "Ready".to_string(),
@@ -444,7 +444,7 @@ impl StromApp {
             ws_client: None,
             connection_state: ConnectionState::Disconnected,
             channels,
-            editing_properties_idx: None,
+            editing_properties_flow_id: None,
             properties_name_buffer: String::new(),
             properties_description_buffer: String::new(),
             properties_clock_type_buffer: strom_types::flow::GStreamerClockType::Monotonic,
@@ -605,13 +605,40 @@ impl StromApp {
 
     /// Get the currently selected flow.
     fn current_flow(&self) -> Option<&Flow> {
-        self.selected_flow_idx.and_then(|idx| self.flows.get(idx))
+        self.selected_flow_id
+            .and_then(|id| self.flows.iter().find(|f| f.id == id))
     }
 
     /// Get the currently selected flow mutably.
     fn current_flow_mut(&mut self) -> Option<&mut Flow> {
-        self.selected_flow_idx
-            .and_then(|idx| self.flows.get_mut(idx))
+        self.selected_flow_id
+            .and_then(|id| self.flows.iter_mut().find(|f| f.id == id))
+    }
+
+    /// Get the index of the currently selected flow (for UI rendering).
+    fn selected_flow_index(&self) -> Option<usize> {
+        self.selected_flow_id
+            .and_then(|id| self.flows.iter().position(|f| f.id == id))
+    }
+
+    /// Select a flow by ID.
+    fn select_flow(&mut self, flow_id: strom_types::FlowId) {
+        if let Some(flow) = self.flows.iter().find(|f| f.id == flow_id) {
+            self.selected_flow_id = Some(flow_id);
+            self.graph.deselect_all();
+            self.graph.load(flow.elements.clone(), flow.links.clone());
+            self.graph.load_blocks(flow.blocks.clone());
+            tracing::info!("Selected flow: {} ({})", flow.name, flow_id);
+        } else {
+            tracing::warn!("Cannot select flow {}: not found", flow_id);
+        }
+    }
+
+    /// Clear the current flow selection.
+    fn clear_flow_selection(&mut self) {
+        self.selected_flow_id = None;
+        self.graph.load(vec![], vec![]);
+        self.graph.load_blocks(vec![]);
     }
 
     /// Add a log entry, maintaining the maximum size limit.
@@ -1076,13 +1103,13 @@ impl StromApp {
     /// Save the current flow to the backend.
     fn save_current_flow(&mut self, ctx: &Context) {
         tracing::info!(
-            "save_current_flow called, selected_flow_idx: {:?}",
-            self.selected_flow_idx
+            "save_current_flow called, selected_flow_id: {:?}",
+            self.selected_flow_id
         );
 
-        if let Some(idx) = self.selected_flow_idx {
+        if let Some(flow_id) = self.selected_flow_id {
             // Update flow with current graph state
-            if let Some(flow) = self.flows.get_mut(idx) {
+            if let Some(flow) = self.flows.iter_mut().find(|f| f.id == flow_id) {
                 flow.elements = self.graph.elements.clone();
                 flow.blocks = self.graph.blocks.clone();
                 flow.links = self.graph.links.clone();
@@ -1123,7 +1150,7 @@ impl StromApp {
                     ctx.request_repaint();
                 });
             } else {
-                tracing::warn!("save_current_flow: No flow found at index {}", idx);
+                tracing::warn!("save_current_flow: No flow found with id {}", flow_id);
             }
         } else {
             tracing::warn!("save_current_flow: No flow selected");
@@ -1283,17 +1310,17 @@ impl StromApp {
             return;
         }
 
-        // Create sorted list to match the display order
-        let mut sorted_flows: Vec<(usize, &Flow)> = self.flows.iter().enumerate().collect();
-        sorted_flows.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+        // Create sorted list to match the display order (by name)
+        let mut sorted_flows: Vec<&Flow> = self.flows.iter().collect();
+        sorted_flows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-        if let Some(current_idx) = self.selected_flow_idx {
+        if let Some(current_id) = self.selected_flow_id {
             // Find position of current selection in sorted list
-            if let Some(pos) = sorted_flows.iter().position(|(idx, _)| *idx == current_idx) {
+            if let Some(pos) = sorted_flows.iter().position(|f| f.id == current_id) {
                 if pos > 0 {
                     // Move to previous flow
-                    let (new_idx, flow) = sorted_flows[pos - 1];
-                    self.selected_flow_idx = Some(new_idx);
+                    let flow = sorted_flows[pos - 1];
+                    self.selected_flow_id = Some(flow.id);
                     // Clear graph selection when switching flows
                     self.graph.deselect_all();
                     self.graph.clear_runtime_dynamic_pads();
@@ -1303,8 +1330,8 @@ impl StromApp {
             }
         } else if !sorted_flows.is_empty() {
             // No selection, select first flow
-            let (idx, flow) = sorted_flows[0];
-            self.selected_flow_idx = Some(idx);
+            let flow = sorted_flows[0];
+            self.selected_flow_id = Some(flow.id);
             // Clear graph selection when switching flows
             self.graph.deselect_all();
             self.graph.clear_runtime_dynamic_pads();
@@ -1319,17 +1346,17 @@ impl StromApp {
             return;
         }
 
-        // Create sorted list to match the display order
-        let mut sorted_flows: Vec<(usize, &Flow)> = self.flows.iter().enumerate().collect();
-        sorted_flows.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+        // Create sorted list to match the display order (by name)
+        let mut sorted_flows: Vec<&Flow> = self.flows.iter().collect();
+        sorted_flows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-        if let Some(current_idx) = self.selected_flow_idx {
+        if let Some(current_id) = self.selected_flow_id {
             // Find position of current selection in sorted list
-            if let Some(pos) = sorted_flows.iter().position(|(idx, _)| *idx == current_idx) {
+            if let Some(pos) = sorted_flows.iter().position(|f| f.id == current_id) {
                 if pos < sorted_flows.len() - 1 {
                     // Move to next flow
-                    let (new_idx, flow) = sorted_flows[pos + 1];
-                    self.selected_flow_idx = Some(new_idx);
+                    let flow = sorted_flows[pos + 1];
+                    self.selected_flow_id = Some(flow.id);
                     // Clear graph selection when switching flows
                     self.graph.deselect_all();
                     self.graph.clear_runtime_dynamic_pads();
@@ -1339,8 +1366,8 @@ impl StromApp {
             }
         } else if !sorted_flows.is_empty() {
             // No selection, select first flow
-            let (idx, flow) = sorted_flows[0];
-            self.selected_flow_idx = Some(idx);
+            let flow = sorted_flows[0];
+            self.selected_flow_id = Some(flow.id);
             // Clear graph selection when switching flows
             self.graph.deselect_all();
             self.graph.clear_runtime_dynamic_pads();
@@ -1363,8 +1390,8 @@ impl StromApp {
                 self.show_import_dialog = false;
             } else if self.flow_pending_deletion.is_some() {
                 self.flow_pending_deletion = None;
-            } else if self.editing_properties_idx.is_some() {
-                self.editing_properties_idx = None;
+            } else if self.editing_properties_flow_id.is_some() {
+                self.editing_properties_flow_id = None;
             } else if !wants_keyboard {
                 // Priority 2: Deselect in graph editor
                 self.graph.deselect_all();
@@ -1717,14 +1744,12 @@ impl StromApp {
                     ui.label("No flows yet");
                     ui.label("Click 'New Flow' to get started");
                 } else {
-                    // Create sorted list of (original_index, flow) tuples
-                    let mut sorted_flows: Vec<(usize, &Flow)> =
-                        self.flows.iter().enumerate().collect();
-                    sorted_flows
-                        .sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+                    // Create sorted list of flows (by name)
+                    let mut sorted_flows: Vec<&Flow> = self.flows.iter().collect();
+                    sorted_flows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-                    for (idx, flow) in sorted_flows {
-                        let selected = self.selected_flow_idx == Some(idx);
+                    for flow in sorted_flows {
+                        let selected = self.selected_flow_id == Some(flow.id);
 
                         // Create full-width selectable area
                         let (rect, response) = ui.allocate_exact_size(
@@ -1733,8 +1758,8 @@ impl StromApp {
                         );
 
                         if response.clicked() {
-                            // Select the flow
-                            self.selected_flow_idx = Some(idx);
+                            // Select the flow by ID
+                            self.selected_flow_id = Some(flow.id);
                             // Clear graph selection when switching flows
                             self.graph.deselect_all();
                             // Clear runtime dynamic pads (will be re-fetched if flow is running)
@@ -1793,7 +1818,7 @@ impl StromApp {
 
                         // Handle click on the text itself (in addition to the background)
                         if name_label.clicked() {
-                            self.selected_flow_idx = Some(idx);
+                            self.selected_flow_id = Some(flow.id);
                             // Clear graph selection when switching flows
                             self.graph.deselect_all();
                             self.graph.load(flow.elements.clone(), flow.links.clone());
@@ -1859,7 +1884,7 @@ impl StromApp {
 
                                     // Properties
                                     if ui.button("⚙  Properties").clicked() {
-                                        self.editing_properties_idx = Some(idx);
+                                        self.editing_properties_flow_id = Some(flow.id);
                                         self.properties_name_buffer = flow.name.clone();
                                         self.properties_description_buffer =
                                             flow.properties.description.clone().unwrap_or_default();
@@ -2530,15 +2555,15 @@ impl StromApp {
 
     /// Render the flow properties dialog.
     fn render_flow_properties_dialog(&mut self, ctx: &Context) {
-        if self.editing_properties_idx.is_none() {
-            return;
-        }
+        let flow_id = match self.editing_properties_flow_id {
+            Some(id) => id,
+            None => return,
+        };
 
-        let idx = self.editing_properties_idx.unwrap();
-        let flow = match self.flows.get(idx) {
+        let flow = match self.flows.iter().find(|f| f.id == flow_id) {
             Some(f) => f,
             None => {
-                self.editing_properties_idx = None;
+                self.editing_properties_flow_id = None;
                 return;
             }
         };
@@ -2624,7 +2649,7 @@ impl StromApp {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         ui.label("Clock Status:");
-                        if let Some(flow) = self.flows.get(idx) {
+                        if let Some(flow) = self.editing_properties_flow_id.and_then(|id| self.flows.iter().find(|f| f.id == id)) {
                             if let Some(sync_status) = flow.properties.clock_sync_status {
                                 use strom_types::flow::ClockSyncStatus;
                                 match sync_status {
@@ -2652,7 +2677,7 @@ impl StromApp {
                         self.properties_clock_type_buffer,
                         strom_types::flow::GStreamerClockType::Ptp
                     ) {
-                        if let Some(flow) = self.flows.get(idx) {
+                        if let Some(flow) = self.editing_properties_flow_id.and_then(|id| self.flows.iter().find(|f| f.id == id)) {
                             if let Some(ref ptp_info) = flow.properties.ptp_info {
                                 ui.add_space(5.0);
                                 // Show warning if restart needed - compare buffer with running domain
@@ -2792,7 +2817,7 @@ impl StromApp {
                 ui.label(self.properties_thread_priority_buffer.description());
 
                 // Show thread priority status for running pipelines
-                if let Some(flow) = self.flows.get(idx) {
+                if let Some(flow) = self.editing_properties_flow_id.and_then(|id| self.flows.iter().find(|f| f.id == id)) {
                     if let Some(ref status) = flow.properties.thread_priority_status {
                         ui.add_space(5.0);
                         ui.horizontal(|ui| {
@@ -2822,7 +2847,7 @@ impl StromApp {
                 ui.horizontal(|ui| {
                     if ui.button("💾 Save").clicked() {
                         // Update flow properties
-                        if let Some(flow) = self.flows.get_mut(idx) {
+                        if let Some(flow) = self.editing_properties_flow_id.and_then(|id| self.flows.iter_mut().find(|f| f.id == id)) {
                             // Update flow name
                             flow.name = self.properties_name_buffer.clone();
 
@@ -2864,11 +2889,11 @@ impl StromApp {
                                 ctx_clone.request_repaint();
                             });
                         }
-                        self.editing_properties_idx = None;
+                        self.editing_properties_flow_id = None;
                     }
 
                     if ui.button("Cancel").clicked() {
-                        self.editing_properties_idx = None;
+                        self.editing_properties_flow_id = None;
                     }
                 });
             });
@@ -3412,19 +3437,22 @@ impl eframe::App for StromApp {
             match msg {
                 AppMessage::FlowsLoaded(flows) => {
                     tracing::info!("Received FlowsLoaded: {} flows", flows.len());
+
+                    // Remember the previously selected flow ID (using ID, not index!)
+                    let previously_selected_id = self.selected_flow_id;
+
                     self.flows = flows;
                     self.status = format!("Loaded {} flows", self.flows.len());
                     self.loading = false;
 
-                    // Check if there's a pending flow navigation
+                    // Check if there's a pending flow navigation (takes priority)
                     if let Some(pending_flow_id) = self.pending_flow_navigation.take() {
                         tracing::info!(
                             "Processing pending navigation to flow ID: {}",
                             pending_flow_id
                         );
-                        if let Some(idx) = self.flows.iter().position(|f| f.id == pending_flow_id) {
-                            self.selected_flow_idx = Some(idx);
-                            let flow = &self.flows[idx];
+                        if let Some(flow) = self.flows.iter().find(|f| f.id == pending_flow_id) {
+                            self.selected_flow_id = Some(pending_flow_id);
                             // Clear graph selection and load the new flow
                             self.graph.deselect_all();
                             self.graph.load(flow.elements.clone(), flow.links.clone());
@@ -3436,6 +3464,17 @@ impl eframe::App for StromApp {
                                 pending_flow_id
                             );
                         }
+                    } else if let Some(prev_id) = previously_selected_id {
+                        // No pending navigation - check if previously selected flow still exists
+                        if !self.flows.iter().any(|f| f.id == prev_id) {
+                            // Flow was deleted - clear selection and graph
+                            tracing::info!(
+                                "Previously selected flow {} was deleted, clearing selection",
+                                prev_id
+                            );
+                            self.clear_flow_selection();
+                        }
+                        // If flow still exists, selection is automatically valid (ID-based!)
                     }
                 }
                 AppMessage::FlowsError(error) => {
@@ -4029,9 +4068,7 @@ impl eframe::App for StromApp {
             remove_local_storage("open_compositor_editor");
 
             // Get current flow
-            if let Some(flow_idx) = self.selected_flow_idx {
-                let flow = &self.flows[flow_idx];
-
+            if let Some(flow) = self.current_flow() {
                 // Find the block
                 if let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) {
                     // Extract resolution from output_resolution property
