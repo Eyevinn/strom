@@ -248,6 +248,8 @@ pub struct StromApp {
     ptp_stats: crate::ptp_monitor::PtpStatsStore,
     /// QoS (buffer drop) statistics per flow/element
     qos_stats: crate::qos_monitor::QoSStore,
+    /// Track when flows started (for QoS grace period)
+    flow_start_times: std::collections::HashMap<strom_types::FlowId, instant::Instant>,
     /// Whether to show the detailed system monitor window
     show_system_monitor: bool,
     /// Last time WebRTC stats were polled
@@ -379,6 +381,7 @@ impl StromApp {
             system_monitor: SystemMonitorStore::new(),
             ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
             qos_stats: crate::qos_monitor::QoSStore::new(),
+            flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             theme_preference: ThemePreference::System,
             version_info: None,
@@ -461,6 +464,7 @@ impl StromApp {
             system_monitor: SystemMonitorStore::new(),
             ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
             qos_stats: crate::qos_monitor::QoSStore::new(),
+            flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: std::time::Instant::now(),
             theme_preference: ThemePreference::System,
@@ -3704,14 +3708,16 @@ impl eframe::App for StromApp {
                         }
                         StromEvent::FlowDeleted { flow_id } => {
                             tracing::info!("Flow deleted, triggering full refresh");
-                            // Clear QoS stats for deleted flow
+                            // Clear QoS stats and start time for deleted flow
                             self.qos_stats.clear_flow(&flow_id);
+                            self.flow_start_times.remove(&flow_id);
                             self.needs_refresh = true;
                         }
                         StromEvent::FlowStopped { flow_id } => {
                             tracing::info!("Flow {} stopped, clearing QoS stats", flow_id);
-                            // Clear QoS stats when flow is stopped (no longer relevant)
+                            // Clear QoS stats and start time when flow is stopped
                             self.qos_stats.clear_flow(&flow_id);
+                            self.flow_start_times.remove(&flow_id);
 
                             // Fetch updated flow state
                             let api = self.api.clone();
@@ -3733,13 +3739,35 @@ impl eframe::App for StromApp {
                                 }
                             });
                         }
-                        StromEvent::FlowUpdated { flow_id }
-                        | StromEvent::FlowStarted { flow_id } => {
-                            // For updates/start, fetch the specific flow to update it in-place
-                            tracing::info!(
-                                "Flow {} updated/started, fetching updated flow",
-                                flow_id
-                            );
+                        StromEvent::FlowStarted { flow_id } => {
+                            // Record when the flow started (for QoS grace period)
+                            self.flow_start_times
+                                .insert(flow_id, instant::Instant::now());
+
+                            // Fetch the updated flow state
+                            tracing::info!("Flow {} started, fetching updated flow", flow_id);
+                            let api = self.api.clone();
+                            let tx = self.channels.sender();
+                            let ctx = ctx.clone();
+
+                            spawn_task(async move {
+                                match api.get_flow(flow_id).await {
+                                    Ok(flow) => {
+                                        tracing::info!("Fetched started flow: {}", flow.name);
+                                        let _ = tx.send(AppMessage::FlowFetched(flow));
+                                        ctx.request_repaint();
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to fetch started flow: {}", e);
+                                        let _ = tx.send(AppMessage::RefreshNeeded);
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            });
+                        }
+                        StromEvent::FlowUpdated { flow_id } => {
+                            // For updates, fetch the specific flow to update it in-place
+                            tracing::info!("Flow {} updated, fetching updated flow", flow_id);
                             let api = self.api.clone();
                             let tx = self.channels.sender();
                             let ctx = ctx.clone();
@@ -3915,6 +3943,23 @@ impl eframe::App for StromApp {
                             total_processed,
                             is_falling_behind,
                         } => {
+                            // Grace period: ignore QoS events in first 3 seconds after flow start
+                            // (transient issues during startup are common and not indicative of real problems)
+                            const QOS_GRACE_PERIOD_SECS: u64 = 3;
+                            let in_grace_period = self
+                                .flow_start_times
+                                .get(&flow_id)
+                                .map(|start| {
+                                    start.elapsed()
+                                        < std::time::Duration::from_secs(QOS_GRACE_PERIOD_SECS)
+                                })
+                                .unwrap_or(false);
+
+                            if in_grace_period {
+                                // Skip QoS processing during grace period
+                                continue;
+                            }
+
                             // Update QoS store
                             self.qos_stats.update(
                                 flow_id,
