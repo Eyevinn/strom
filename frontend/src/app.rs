@@ -94,6 +94,68 @@ enum ImportFormat {
     GstLaunch,
 }
 
+/// Log message severity level
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    /// Informational message
+    Info,
+    /// Warning message
+    Warning,
+    /// Error message
+    Error,
+}
+
+/// A log entry for pipeline messages
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    /// Timestamp when the message was received
+    pub timestamp: instant::Instant,
+    /// Severity level
+    pub level: LogLevel,
+    /// The message content
+    pub message: String,
+    /// Optional source element that generated the message
+    pub source: Option<String>,
+    /// Optional flow ID this message relates to
+    pub flow_id: Option<strom_types::FlowId>,
+}
+
+impl LogEntry {
+    /// Create a new log entry
+    pub fn new(
+        level: LogLevel,
+        message: String,
+        source: Option<String>,
+        flow_id: Option<strom_types::FlowId>,
+    ) -> Self {
+        Self {
+            timestamp: instant::Instant::now(),
+            level,
+            message,
+            source,
+            flow_id,
+        }
+    }
+
+    /// Get the color for this log level
+    pub fn color(&self) -> Color32 {
+        match self.level {
+            LogLevel::Info => Color32::from_rgb(100, 180, 255),
+            LogLevel::Warning => Color32::from_rgb(255, 200, 50),
+            LogLevel::Error => Color32::from_rgb(255, 80, 80),
+        }
+    }
+
+    /// Get the icon/prefix for this log level
+    pub fn prefix(&self) -> &'static str {
+        match self.level {
+            LogLevel::Info => "ℹ",
+            LogLevel::Warning => "⚠",
+            LogLevel::Error => "✖",
+        }
+    }
+}
+
 // Cross-platform task spawning
 #[cfg(target_arch = "wasm32")]
 pub fn spawn_task<F>(future: F)
@@ -225,6 +287,12 @@ pub struct StromApp {
     show_stats_panel: bool,
     /// Compositor layout editor (if open)
     compositor_editor: Option<CompositorEditor>,
+    /// Log entries for pipeline messages (errors, warnings, info)
+    log_entries: Vec<LogEntry>,
+    /// Whether to show the log panel
+    show_log_panel: bool,
+    /// Maximum number of log entries to keep
+    max_log_entries: usize,
 }
 
 impl StromApp {
@@ -327,6 +395,9 @@ impl StromApp {
             compositor_editor: None,
             network_interfaces: Vec::new(),
             network_interfaces_loaded: false,
+            log_entries: Vec::new(),
+            show_log_panel: false,
+            max_log_entries: 100,
         };
 
         // Apply initial theme based on system preference
@@ -406,6 +477,9 @@ impl StromApp {
             compositor_editor: None,
             network_interfaces: Vec::new(),
             network_interfaces_loaded: false,
+            log_entries: Vec::new(),
+            show_log_panel: false,
+            max_log_entries: 100,
         };
 
         // Apply initial theme based on system preference
@@ -538,6 +612,41 @@ impl StromApp {
     fn current_flow_mut(&mut self) -> Option<&mut Flow> {
         self.selected_flow_idx
             .and_then(|idx| self.flows.get_mut(idx))
+    }
+
+    /// Add a log entry, maintaining the maximum size limit.
+    fn add_log_entry(&mut self, entry: LogEntry) {
+        self.log_entries.push(entry);
+        // Trim to max size
+        while self.log_entries.len() > self.max_log_entries {
+            self.log_entries.remove(0);
+        }
+    }
+
+    /// Clear all log entries.
+    fn clear_log_entries(&mut self) {
+        self.log_entries.clear();
+        self.error = None;
+    }
+
+    /// Get log entry counts by level.
+    fn log_counts(&self) -> (usize, usize, usize) {
+        let errors = self
+            .log_entries
+            .iter()
+            .filter(|e| e.level == LogLevel::Error)
+            .count();
+        let warnings = self
+            .log_entries
+            .iter()
+            .filter(|e| e.level == LogLevel::Warning)
+            .count();
+        let infos = self
+            .log_entries
+            .iter()
+            .filter(|e| e.level == LogLevel::Info)
+            .count();
+        (errors, warnings, infos)
     }
 
     /// Load GStreamer elements from the backend.
@@ -2172,9 +2281,30 @@ impl StromApp {
                 ui.separator();
                 ui.label(format!("Flows: {}", self.flows.len()));
 
-                if let Some(error) = &self.error {
+                // Log message counts with toggle button
+                let (errors, warnings, _infos) = self.log_counts();
+                if errors > 0 || warnings > 0 {
                     ui.separator();
-                    ui.colored_label(Color32::RED, format!("Error: {}", error));
+                    let toggle_text = if self.show_log_panel {
+                        format!("Messages: {} errors, {} warnings [hide]", errors, warnings)
+                    } else {
+                        format!("Messages: {} errors, {} warnings [show]", errors, warnings)
+                    };
+                    let color = if errors > 0 {
+                        Color32::from_rgb(255, 80, 80)
+                    } else {
+                        Color32::from_rgb(255, 200, 50)
+                    };
+                    if ui
+                        .add(
+                            egui::Label::new(egui::RichText::new(&toggle_text).color(color))
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Click to toggle message panel")
+                        .clicked()
+                    {
+                        self.show_log_panel = !self.show_log_panel;
+                    }
                 }
 
                 // Version info on the right side
@@ -2214,7 +2344,7 @@ impl StromApp {
                                 if version_info.git_dirty {
                                     ui.colored_label(
                                         Color32::YELLOW,
-                                        "⚠ Working directory had uncommitted changes",
+                                        "Working directory had uncommitted changes",
                                     );
                                 }
                             });
@@ -2222,6 +2352,78 @@ impl StromApp {
                 });
             });
         });
+    }
+
+    /// Render the log panel showing errors, warnings, and info messages.
+    fn render_log_panel(&mut self, ctx: &Context) {
+        if !self.show_log_panel || self.log_entries.is_empty() {
+            return;
+        }
+
+        // Calculate dynamic height based on number of entries (min 80px, max 200px)
+        let panel_height = (self.log_entries.len() as f32 * 20.0).clamp(80.0, 200.0);
+
+        TopBottomPanel::bottom("log_panel")
+            .resizable(true)
+            .min_height(80.0)
+            .max_height(400.0)
+            .default_height(panel_height)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("Pipeline Messages");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Clear").clicked() {
+                            self.clear_log_entries();
+                        }
+                        if ui.button("Hide").clicked() {
+                            self.show_log_panel = false;
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // Scrollable area for log entries
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        // Show entries in reverse chronological order (newest first)
+                        for entry in self.log_entries.iter().rev() {
+                            ui.horizontal(|ui| {
+                                // Level indicator
+                                ui.colored_label(entry.color(), entry.prefix());
+
+                                // Source element if available
+                                if let Some(ref source) = entry.source {
+                                    ui.colored_label(
+                                        Color32::from_rgb(150, 150, 255),
+                                        format!("[{}]", source),
+                                    );
+                                }
+
+                                // Flow ID if available (abbreviated)
+                                if let Some(flow_id) = entry.flow_id {
+                                    let flow_name = self
+                                        .flows
+                                        .iter()
+                                        .find(|f| f.id == flow_id)
+                                        .map(|f| f.name.as_str())
+                                        .unwrap_or("unknown");
+                                    ui.colored_label(Color32::GRAY, format!("({})", flow_name));
+                                }
+
+                                // Message - use selectable label so user can copy text
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&entry.message).color(entry.color()),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                                );
+                            });
+                        }
+                    });
+            });
     }
 
     /// Render the new flow dialog.
@@ -3310,8 +3512,69 @@ impl eframe::App for StromApp {
                                 }
                             });
                         }
-                        StromEvent::PipelineError { error, .. } => {
-                            self.error = Some(format!("Pipeline error: {}", error));
+                        StromEvent::PipelineError {
+                            flow_id,
+                            error,
+                            source,
+                        } => {
+                            tracing::error!(
+                                "Pipeline error in flow {}: {} (source: {:?})",
+                                flow_id,
+                                error,
+                                source
+                            );
+                            // Add to log entries
+                            self.add_log_entry(LogEntry::new(
+                                LogLevel::Error,
+                                error.clone(),
+                                source.clone(),
+                                Some(flow_id),
+                            ));
+                            // Also set the legacy error field for status bar
+                            let error_msg = if let Some(ref src) = source {
+                                format!("{}: {}", src, error)
+                            } else {
+                                error
+                            };
+                            self.error = Some(error_msg);
+                            // Auto-show log panel on errors
+                            self.show_log_panel = true;
+                        }
+                        StromEvent::PipelineWarning {
+                            flow_id,
+                            warning,
+                            source,
+                        } => {
+                            tracing::warn!(
+                                "Pipeline warning in flow {}: {} (source: {:?})",
+                                flow_id,
+                                warning,
+                                source
+                            );
+                            self.add_log_entry(LogEntry::new(
+                                LogLevel::Warning,
+                                warning,
+                                source,
+                                Some(flow_id),
+                            ));
+                        }
+                        StromEvent::PipelineInfo {
+                            flow_id,
+                            message,
+                            source,
+                        } => {
+                            tracing::info!(
+                                "Pipeline info in flow {}: {} (source: {:?})",
+                                flow_id,
+                                message,
+                                source
+                            );
+                            self.add_log_entry(LogEntry::new(
+                                LogLevel::Info,
+                                message,
+                                source,
+                                Some(flow_id),
+                            ));
                         }
                         StromEvent::MeterData {
                             flow_id,
@@ -3584,7 +3847,12 @@ impl eframe::App for StromApp {
                 AppMessage::FlowOperationError(message) => {
                     tracing::error!("Flow operation failed: {}", message);
                     self.status = "Ready".to_string();
-                    self.error = Some(message);
+                    self.error = Some(message.clone());
+                    // Add to log entries
+                    let flow_id = self.current_flow().map(|f| f.id);
+                    self.add_log_entry(LogEntry::new(LogLevel::Error, message, None, flow_id));
+                    // Auto-show log panel on errors
+                    self.show_log_panel = true;
                 }
                 AppMessage::FlowCreated(flow_id) => {
                     tracing::info!(
@@ -3809,6 +4077,7 @@ impl eframe::App for StromApp {
 
         self.render_canvas(ctx);
         self.render_status_bar(ctx);
+        self.render_log_panel(ctx);
         self.render_new_flow_dialog(ctx);
         self.render_delete_confirmation_dialog(ctx);
         self.render_system_monitor_window(ctx);
