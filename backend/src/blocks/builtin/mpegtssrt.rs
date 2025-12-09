@@ -142,6 +142,16 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             })
             .unwrap_or(true);
 
+        // Get sync (optional, default true)
+        // sync=false is useful for transcoding workloads where timestamps may be discontinuous
+        let sync = properties
+            .get("sync")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(true);
+
         // Create mpegtsmux with alignment=7 for UDP streaming
         let mux_id = format!("{}:mpegtsmux", instance_id);
         let mux = gst::ElementFactory::make("mpegtsmux")
@@ -207,12 +217,12 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         //
         // See also: notes.txt "QoS/SYNC ISSUE IN TRANSCODING PIPELINES"
         // Fixed: 2025-12-01
-        srtsink.set_property("sync", false);
+        srtsink.set_property("sync", sync);
         srtsink.set_property("qos", true);
 
         info!(
-            "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync=false, qos=true",
-            srt_uri, latency, wait_for_connection, auto_reconnect
+            "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync={}, qos=true",
+            srt_uri, latency, wait_for_connection, auto_reconnect, sync
         );
 
         // Get number of video and audio tracks from properties
@@ -444,6 +454,18 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "auto_reconnect".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "sync".to_string(),
+                label: "Sync".to_string(),
+                description: "Synchronize output to pipeline clock. Set to false for transcoding workloads with discontinuous timestamps (default: true)".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "sync".to_string(),
                     transform: None,
                 },
             },
