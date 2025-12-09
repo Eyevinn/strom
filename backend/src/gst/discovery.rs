@@ -254,11 +254,27 @@ impl ElementDiscovery {
             }
         };
 
+        // Clear any existing pad info and rebuild from templates
+        element_info.src_pads.clear();
+        element_info.sink_pads.clear();
+
         // Introspect pad properties for each pad template
         for pad_template in factory.static_pad_templates() {
             let template_name = pad_template.name_template().to_string();
 
-            // Get pad to introspect (safely request pads if needed)
+            // Get caps and classify media type
+            let caps = pad_template.caps();
+            let caps_string = caps.to_string();
+            let media_type = Self::classify_media_type(&caps_string);
+
+            // Determine presence type
+            let presence = match pad_template.presence() {
+                gst::PadPresence::Always => strom_types::element::PadPresence::Always,
+                gst::PadPresence::Sometimes => strom_types::element::PadPresence::Sometimes,
+                gst::PadPresence::Request => strom_types::element::PadPresence::Request,
+            };
+
+            // Get pad to introspect properties (safely request pads if needed)
             let pad = match pad_template.presence() {
                 gst::PadPresence::Always => element.static_pad(&template_name),
                 gst::PadPresence::Request => {
@@ -293,33 +309,34 @@ impl ElementDiscovery {
             };
 
             // Introspect pad properties if we got a pad
-            if let Some(pad) = pad {
-                let properties = self.introspect_pad_properties(&pad);
+            let properties = if let Some(pad) = pad {
+                self.introspect_pad_properties(&pad)
+            } else {
+                Vec::new()
+            };
 
-                // Update the appropriate pad info with properties
-                match pad_template.direction() {
-                    gst::PadDirection::Src => {
-                        if let Some(pad_info) = element_info
-                            .src_pads
-                            .iter_mut()
-                            .find(|p| p.name == template_name)
-                        {
-                            pad_info.properties = properties;
-                        }
-                    }
-                    gst::PadDirection::Sink => {
-                        if let Some(pad_info) = element_info
-                            .sink_pads
-                            .iter_mut()
-                            .find(|p| p.name == template_name)
-                        {
-                            pad_info.properties = properties;
-                        }
-                    }
-                    _ => {}
+            // Create PadInfo and add to appropriate list
+            let pad_info = strom_types::element::PadInfo {
+                name: template_name,
+                caps: caps_string,
+                presence,
+                media_type,
+                properties,
+            };
+
+            match pad_template.direction() {
+                gst::PadDirection::Src => {
+                    element_info.src_pads.push(pad_info);
                 }
+                gst::PadDirection::Sink => {
+                    element_info.sink_pads.push(pad_info);
+                }
+                _ => {}
             }
         }
+
+        // Update cache with populated pad info
+        self.cache.insert(name.to_string(), element_info.clone());
 
         Some(element_info)
     }
@@ -553,8 +570,8 @@ impl ElementDiscovery {
     }
 
     /// Introspect a GStreamer element factory.
-    /// LIGHTWEIGHT VERSION: Only gets name, description, and category.
-    /// Does NOT create element instances or introspect pads/properties during discover_all().
+    /// Gets name, description, category, and basic pad info from static pad templates.
+    /// Does NOT create element instances - pad properties are loaded on-demand.
     fn introspect_element_factory(
         &self,
         factory: &gst::ElementFactory,
@@ -572,22 +589,46 @@ impl ElementDiscovery {
             .unwrap_or_default();
         let category = Self::determine_category(&klass);
 
-        // IMPORTANT: We do NOT create element instances during discover_all()!
-        // Creating thousands of elements is:
-        // 1. Very slow (adds seconds to startup)
-        // 2. Dangerous - some elements crash when created
-        // 3. State-corrupting - elements like mpegtsmux corrupt global state
-        //
-        // Instead, we only return basic info (name, description, category).
-        // Pads and properties can be introspected on-demand when needed.
+        // Get basic pad info from static pad templates (no element creation needed!)
+        // This is safe and fast - we just read metadata from the factory.
+        // Detailed pad properties require element creation and are loaded on-demand.
+        let mut src_pads = Vec::new();
+        let mut sink_pads = Vec::new();
+
+        for pad_template in factory.static_pad_templates() {
+            let template_name = pad_template.name_template().to_string();
+            let caps = pad_template.caps();
+            let caps_string = caps.to_string();
+            let media_type = Self::classify_media_type(&caps_string);
+
+            let presence = match pad_template.presence() {
+                gst::PadPresence::Always => strom_types::element::PadPresence::Always,
+                gst::PadPresence::Sometimes => strom_types::element::PadPresence::Sometimes,
+                gst::PadPresence::Request => strom_types::element::PadPresence::Request,
+            };
+
+            let pad_info = strom_types::element::PadInfo {
+                name: template_name,
+                caps: caps_string,
+                presence,
+                media_type,
+                properties: Vec::new(), // Properties loaded on-demand
+            };
+
+            match pad_template.direction() {
+                gst::PadDirection::Src => src_pads.push(pad_info),
+                gst::PadDirection::Sink => sink_pads.push(pad_info),
+                _ => {}
+            }
+        }
 
         Ok(ElementInfo {
             name,
             description,
             category,
-            src_pads: Vec::new(),   // No pad introspection during discovery
-            sink_pads: Vec::new(),  // No pad introspection during discovery
-            properties: Vec::new(), // No property introspection during discovery
+            src_pads,
+            sink_pads,
+            properties: Vec::new(), // Properties loaded on-demand
         })
     }
 

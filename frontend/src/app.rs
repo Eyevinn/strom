@@ -2376,7 +2376,12 @@ impl StromApp {
                     let world_pos = ((center - response.rect.min - self.graph.pan_offset)
                         / self.graph.zoom)
                         .to_pos2();
-                    self.graph.add_element(element_type, world_pos);
+                    self.graph.add_element(element_type.clone(), world_pos);
+
+                    // Trigger pad info loading if not already cached
+                    if !self.palette.has_pad_properties_cached(&element_type) {
+                        self.load_element_pad_properties(element_type, ctx);
+                    }
                 }
 
                 // Handle adding blocks from palette
@@ -3681,16 +3686,14 @@ impl eframe::App for StromApp {
                     self.error = Some(format!("Element properties: {}", error));
                 }
                 AppMessage::ElementPadPropertiesLoaded(info) => {
-                    let sink_prop_count: usize =
-                        info.sink_pads.iter().map(|p| p.properties.len()).sum();
-                    let src_prop_count: usize =
-                        info.src_pads.iter().map(|p| p.properties.len()).sum();
                     tracing::info!(
-                        "Received ElementPadPropertiesLoaded: {} (sink: {} props, src: {} props)",
+                        "Received ElementPadPropertiesLoaded: {} (sink: {} pads, src: {} pads)",
                         info.name,
-                        sink_prop_count,
-                        src_prop_count
+                        info.sink_pads.len(),
+                        info.src_pads.len()
                     );
+                    // Update graph's element info map so pads render correctly
+                    self.graph.set_element_info(info.name.clone(), info.clone());
                     self.palette.cache_element_pad_properties(info);
                 }
                 AppMessage::ElementPadPropertiesError(error) => {
