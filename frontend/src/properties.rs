@@ -337,7 +337,7 @@ impl PropertyInspector {
             }
 
             // Edit Layout button for compositor blocks
-            if definition.id == "builtin.glcompositor"
+            if (definition.id == "builtin.glcompositor" || definition.id == "builtin.compositor")
                 && ui.button("✏ Edit Layout").clicked()
             {
                 crate::app::set_local_storage("open_compositor_editor", &block.id);

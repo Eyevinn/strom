@@ -758,7 +758,7 @@ fn glcompositor_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.glcompositor".to_string(),
         name: "OpenGL Video Compositor".to_string(),
-        description: "Hardware-accelerated OpenGL video compositor for combining multiple video inputs with positioning, scaling, and alpha blending. Each input can be independently positioned and sized on the output canvas.".to_string(),
+        description: "Hardware-accelerated OpenGL video compositor. Note: Consider using the new 'Video Compositor' block instead, which supports both GPU and CPU backends with automatic fallback.".to_string(),
         category: "Video".to_string(),
         exposed_properties,
         // External pads are computed dynamically based on num_inputs

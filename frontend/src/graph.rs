@@ -701,9 +701,10 @@ impl GraphEditor {
                     self.focused_pad = None; // Clear pad focus
                 }
 
-                // Handle double-click to open compositor editor for glcompositor blocks
+                // Handle double-click to open compositor editor for compositor blocks
                 if node_response.double_clicked()
-                    && block.block_definition_id == "builtin.glcompositor"
+                    && (block.block_definition_id == "builtin.glcompositor"
+                        || block.block_definition_id == "builtin.compositor")
                 {
                     set_local_storage("open_compositor_editor", &block.id);
                 }
