@@ -254,7 +254,7 @@ pub struct StromApp {
     show_system_monitor: bool,
     /// Last time WebRTC stats were polled
     #[cfg(not(target_arch = "wasm32"))]
-    last_webrtc_poll: std::time::Instant,
+    last_webrtc_poll: instant::Instant,
     /// Current theme preference
     theme_preference: ThemePreference,
     /// Version information from the backend
@@ -466,7 +466,7 @@ impl StromApp {
             qos_stats: crate::qos_monitor::QoSStore::new(),
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
-            last_webrtc_poll: std::time::Instant::now(),
+            last_webrtc_poll: instant::Instant::now(),
             theme_preference: ThemePreference::System,
             version_info: None,
             login_screen: LoginScreen::default(),
@@ -3304,12 +3304,8 @@ impl StromApp {
                     }
 
                     // Step 2: Create a new flow with a name based on first element
-                    // Add timestamp to make each import unique
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    let timestamp = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
+                    // Add random suffix to make each import unique
+                    let unique_id = &uuid::Uuid::new_v4().to_string()[..8];
                     let flow_name = format!(
                         "Imported: {} ({})",
                         parsed
@@ -3317,7 +3313,7 @@ impl StromApp {
                             .first()
                             .map(|e| e.element_type.as_str())
                             .unwrap_or("pipeline"),
-                        timestamp
+                        unique_id
                     );
 
                     let mut new_flow = Flow::new(&flow_name);
@@ -4339,7 +4335,7 @@ impl eframe::App for StromApp {
             let poll_interval = std::time::Duration::from_secs(1);
             if self.last_webrtc_poll.elapsed() >= poll_interval {
                 self.poll_webrtc_stats(ctx);
-                self.last_webrtc_poll = std::time::Instant::now();
+                self.last_webrtc_poll = instant::Instant::now();
             }
         }
 

@@ -1,6 +1,7 @@
 //! WebRTC statistics visualization widget.
 
 use egui::{Color32, Ui};
+use instant::Instant;
 use std::collections::HashMap;
 use strom_types::api::{RtpStreamStats, WebRtcConnectionStats, WebRtcStats};
 use strom_types::FlowId;
@@ -16,7 +17,7 @@ pub struct WebRtcStatsKey {
 pub struct WebRtcStatsStore {
     data: HashMap<WebRtcStatsKey, WebRtcStats>,
     /// Timestamp of last update for each flow
-    last_update: HashMap<FlowId, std::time::Instant>,
+    last_update: HashMap<FlowId, Instant>,
 }
 
 impl WebRtcStatsStore {
@@ -31,7 +32,7 @@ impl WebRtcStatsStore {
     pub fn update(&mut self, flow_id: FlowId, stats: WebRtcStats) {
         let key = WebRtcStatsKey { flow_id };
         self.data.insert(key, stats);
-        self.last_update.insert(flow_id, std::time::Instant::now());
+        self.last_update.insert(flow_id, Instant::now());
     }
 
     /// Get WebRTC stats for a specific flow.

@@ -3,6 +3,7 @@
 //! This module exposes the frontend application for embedding in native mode.
 
 #![warn(clippy::all, rust_2018_idioms)]
+#![deny(clippy::disallowed_types)]
 #![allow(dead_code)]
 
 mod api;

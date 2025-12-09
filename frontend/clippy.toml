@@ -1,0 +1,7 @@
+# Clippy configuration for the frontend crate
+# These types don't work in WASM - use the `instant` crate instead
+
+disallowed-types = [
+    { path = "std::time::Instant", reason = "Use `instant::Instant` instead - std::time::Instant doesn't work in WASM" },
+    { path = "std::time::SystemTime", reason = "SystemTime::now() doesn't work in WASM. Use `uuid` for unique IDs or `js_sys::Date` for wall-clock time" },
+]
