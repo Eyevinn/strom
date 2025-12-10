@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use strom_types::{
     api::{
         AvailableOutput, AvailableSourcesResponse, CreateFlowRequest, ElementPropertiesResponse,
@@ -17,7 +17,6 @@ use strom_types::{
     },
     Flow, FlowId,
 };
-use tempfile::NamedTempFile;
 use tracing::{error, info, trace};
 
 use crate::layout;
@@ -526,35 +525,14 @@ pub async fn debug_graph(
         )
     })?;
 
-    // Create temporary DOT file
-    let mut dot_file = NamedTempFile::new().map_err(|e| {
-        error!("Failed to create temporary DOT file: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::with_details(
-                "Failed to create temporary file",
-                e.to_string(),
-            )),
-        )
-    })?;
-
-    use std::io::Write;
-    dot_file.write_all(dot_content.as_bytes()).map_err(|e| {
-        error!("Failed to write DOT content: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::with_details(
-                "Failed to write DOT file",
-                e.to_string(),
-            )),
-        )
-    })?;
-
-    // Convert DOT to SVG using the 'dot' command
-    let svg_output = Command::new("dot")
+    // Convert DOT to SVG using the 'dot' command via stdin
+    // (avoids temp file permission issues on Windows corporate machines)
+    let mut child = Command::new("dot")
         .arg("-Tsvg")
-        .arg(dot_file.path())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| {
             error!("Failed to execute 'dot' command: {}", e);
             (
@@ -565,6 +543,32 @@ pub async fn debug_graph(
                 )),
             )
         })?;
+
+    // Write DOT content to stdin
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(dot_content.as_bytes()).map_err(|e| {
+            error!("Failed to write DOT content to stdin: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to write DOT content",
+                    e.to_string(),
+                )),
+            )
+        })?;
+    }
+
+    let svg_output = child.wait_with_output().map_err(|e| {
+        error!("Failed to wait for 'dot' command: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::with_details(
+                "Failed to complete SVG conversion",
+                e.to_string(),
+            )),
+        )
+    })?;
 
     if !svg_output.status.success() {
         let stderr = String::from_utf8_lossy(&svg_output.stderr);
