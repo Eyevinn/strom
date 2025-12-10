@@ -2911,20 +2911,20 @@ impl StromApp {
                                 use strom_types::flow::ClockSyncStatus;
                                 match sync_status {
                                     ClockSyncStatus::Synced => {
-                                        ui.colored_label(Color32::from_rgb(0, 200, 0), "● Synced");
+                                        ui.colored_label(Color32::from_rgb(0, 200, 0), "✓ Synced");
                                     }
                                     ClockSyncStatus::NotSynced => {
                                         ui.colored_label(
                                             Color32::from_rgb(200, 0, 0),
-                                            "● Not Synced",
+                                            "✗ Not Synced",
                                         );
                                     }
                                     ClockSyncStatus::Unknown => {
-                                        ui.colored_label(Color32::GRAY, "● Unknown");
+                                        ui.colored_label(Color32::GRAY, "○ Unknown");
                                     }
                                 }
                             } else {
-                                ui.colored_label(Color32::GRAY, "● Unknown");
+                                ui.colored_label(Color32::GRAY, "○ Unknown");
                             }
                         }
                     });
@@ -3082,13 +3082,13 @@ impl StromApp {
                             if status.achieved {
                                 ui.colored_label(
                                     Color32::from_rgb(0, 200, 0),
-                                    format!("● Achieved ({} threads)", status.threads_configured),
+                                    format!("✓ Achieved ({} threads)", status.threads_configured),
                                 );
                             } else if let Some(ref err) = status.error {
-                                ui.colored_label(Color32::from_rgb(255, 165, 0), "● Warning");
+                                ui.colored_label(Color32::from_rgb(255, 165, 0), "⚠ Warning");
                                 ui.label(format!("- {}", err));
                             } else {
-                                ui.colored_label(Color32::GRAY, "● Not set");
+                                ui.colored_label(Color32::GRAY, "○ Not set");
                             }
                         });
                     }

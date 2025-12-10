@@ -552,7 +552,7 @@ impl PropertyInspector {
                 if has_custom_value {
                     ui.colored_label(
                         Color32::from_rgb(150, 100, 255), // Purple for blocks
-                        format!("● {}:", display_label),
+                        format!("• {}:", display_label),
                     );
                 } else {
                     ui.label(format!("{}:", display_label));
@@ -607,7 +607,7 @@ impl PropertyInspector {
                 if has_custom_value {
                     ui.colored_label(
                         Color32::from_rgb(150, 100, 255), // Purple for blocks
-                        format!("● {}:", display_label),
+                        format!("• {}:", display_label),
                     );
                 } else {
                     ui.label(format!("{}:", display_label));
@@ -720,7 +720,7 @@ impl PropertyInspector {
             if has_custom_value {
                 ui.colored_label(
                     Color32::from_rgb(255, 150, 100), // Orange for pad properties
-                    format!("● {}:", prop_name),
+                    format!("• {}:", prop_name),
                 );
             } else {
                 ui.label(format!("{}:", prop_name));
@@ -851,7 +851,7 @@ impl PropertyInspector {
             if has_custom_value {
                 ui.colored_label(
                     Color32::from_rgb(100, 200, 255),
-                    format!("● {}:", prop_name),
+                    format!("• {}:", prop_name),
                 );
             } else {
                 ui.label(format!("{}:", prop_name));
@@ -1052,7 +1052,7 @@ impl PropertyInspector {
                     .filter(|d| !d.is_empty())
                     .map(|d| d.as_str())
                     .unwrap_or(&ch.name);
-                let status = if ch.is_active { "●" } else { "○" };
+                let status = if ch.is_active { "▶" } else { "■" };
                 format!("{} {} / {}", status, ch.flow_name, name_part)
             };
 

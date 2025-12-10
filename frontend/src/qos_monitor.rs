@@ -47,7 +47,7 @@ impl QoSHealth {
 
     pub fn icon(&self) -> &'static str {
         match self {
-            QoSHealth::Ok => "●",
+            QoSHealth::Ok => "✓",
             QoSHealth::Warning => "⚠",
             QoSHealth::Critical => "⛔",
         }
