@@ -22,6 +22,7 @@ pub mod layout;
 pub mod network;
 pub mod openapi;
 pub mod paths;
+pub mod sharing;
 pub mod state;
 pub mod stats;
 pub mod storage;
@@ -145,6 +146,8 @@ pub async fn create_app_with_state_and_auth(
         )
         // Network interfaces
         .route("/network/interfaces", get(api::network::list_interfaces))
+        // Sources (for inter-pipeline sharing)
+        .route("/sources", get(api::flows::get_available_sources))
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 

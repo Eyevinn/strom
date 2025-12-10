@@ -221,11 +221,14 @@ impl PipelineManager {
 
         // Expand blocks into GStreamer elements
         info!("Starting block expansion (block_in_place)...");
+        let flow_id = flow.id;
         let expanded = tokio::task::block_in_place(|| {
             info!("Inside block_in_place, calling block_on...");
             tokio::runtime::Handle::current().block_on(async {
                 info!("Inside block_on, calling expand_blocks...");
-                let result = super::block_expansion::expand_blocks(&flow.blocks, &flow.links).await;
+                let result =
+                    super::block_expansion::expand_blocks(&flow.blocks, &flow.links, &flow_id)
+                        .await;
                 info!("expand_blocks completed");
                 result
             })
@@ -295,8 +298,9 @@ impl PipelineManager {
         manager.pad_properties.extend(expanded.pad_properties);
 
         // Analyze links and auto-insert tee elements where needed
+        let all_links = expanded.links;
         debug!("Analyzing links and inserting tee elements if needed...");
-        let processed_links = Self::insert_tees_if_needed(&expanded.links);
+        let processed_links = Self::insert_tees_if_needed(&all_links);
         info!(
             "Link analysis complete: {} links, {} tees",
             processed_links.links.len(),

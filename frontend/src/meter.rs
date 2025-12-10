@@ -8,8 +8,8 @@ use strom_types::FlowId;
 
 /// Time-to-live for meter data before it's considered stale.
 /// If no updates are received within this duration, the meter data is invalidated.
-/// Set to 500ms since meter updates typically arrive every ~100ms when active.
-const METER_DATA_TTL: Duration = Duration::from_millis(500);
+/// Set to 1000ms to allow for brief network hiccups while meter updates typically arrive every ~100ms.
+const METER_DATA_TTL: Duration = Duration::from_millis(1000);
 
 /// Meter data for a specific element (block or element).
 #[derive(Debug, Clone)]

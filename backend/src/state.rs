@@ -3,6 +3,7 @@
 use crate::blocks::BlockRegistry;
 use crate::events::EventBroadcaster;
 use crate::gst::{ElementDiscovery, PipelineError, PipelineManager};
+use crate::sharing::ChannelRegistry;
 use crate::storage::{JsonFileStorage, Storage};
 use crate::system_monitor::SystemMonitor;
 use std::collections::HashMap;
@@ -36,6 +37,8 @@ struct AppStateInner {
     block_registry: BlockRegistry,
     /// System monitor for CPU and GPU statistics
     system_monitor: SystemMonitor,
+    /// Channel registry for inter-pipeline sharing
+    channel_registry: ChannelRegistry,
 }
 
 impl AppState {
@@ -51,6 +54,7 @@ impl AppState {
                 events: EventBroadcaster::default(),
                 block_registry: BlockRegistry::new(blocks_path),
                 system_monitor: SystemMonitor::new(),
+                channel_registry: ChannelRegistry::new(),
             }),
         }
     }
@@ -63,6 +67,11 @@ impl AppState {
     /// Get the block registry.
     pub fn blocks(&self) -> &BlockRegistry {
         &self.inner.block_registry
+    }
+
+    /// Get the channel registry for inter-pipeline sharing.
+    pub fn channels(&self) -> &ChannelRegistry {
+        &self.inner.channel_registry
     }
 
     /// Create new application state with JSON file storage.
@@ -486,6 +495,51 @@ impl AppState {
             }
         }
 
+        // Register channels for InterOutput blocks
+        for block in &flow.blocks {
+            if block.block_definition_id == "builtin.inter_output" {
+                // Channel name is auto-generated from flow_id + block_id
+                let channel_name = format!("strom_{}_{}", id, block.id);
+
+                let media_type = block
+                    .properties
+                    .get("media_type")
+                    .and_then(|v| match v {
+                        PropertyValue::String(s) => match s.as_str() {
+                            "video" => Some(strom_types::MediaType::Video),
+                            "audio" => Some(strom_types::MediaType::Audio),
+                            _ => Some(strom_types::MediaType::Generic),
+                        },
+                        _ => None,
+                    })
+                    .unwrap_or(strom_types::MediaType::Generic);
+
+                info!(
+                    "Registering inter channel '{}' from flow {} block {}",
+                    channel_name, id, block.id
+                );
+
+                self.inner
+                    .channel_registry
+                    .register(crate::sharing::ChannelInfo {
+                        source_flow_id: *id,
+                        output_name: block.id.clone(),
+                        channel_name: channel_name.clone(),
+                        media_type,
+                    })
+                    .await;
+
+                // Broadcast event for subscribers
+                self.inner
+                    .events
+                    .broadcast(StromEvent::SourceOutputAvailable {
+                        source_flow_id: *id,
+                        output_name: block.id.clone(),
+                        channel_name: channel_name.clone(),
+                    });
+            }
+        }
+
         // Update flow state and persist
         // Note: runtime_data is marked with skip_serializing_if in BlockInstance,
         // so it won't be persisted to storage (which is correct - it's runtime-only data)
@@ -556,9 +610,32 @@ impl AppState {
             }
         };
 
-        if let Some(flow) = flow {
-            if let Err(e) = self.inner.storage.save_flow(&flow).await {
+        if let Some(ref flow) = flow {
+            if let Err(e) = self.inner.storage.save_flow(flow).await {
                 error!("Failed to save flow state: {}", e);
+            }
+
+            // Unregister inter channels and broadcast events
+            for block in &flow.blocks {
+                if block.block_definition_id == "builtin.inter_output" {
+                    // Channel name is auto-generated from flow_id + block_id
+                    let channel_name = format!("strom_{}_{}", id, block.id);
+
+                    info!(
+                        "Unregistering inter channel '{}' from flow {} block {}",
+                        channel_name, id, block.id
+                    );
+
+                    self.inner.channel_registry.unregister(&channel_name).await;
+
+                    // Broadcast event for subscribers
+                    self.inner
+                        .events
+                        .broadcast(StromEvent::SourceOutputUnavailable {
+                            source_flow_id: *id,
+                            output_name: block.id.clone(),
+                        });
+                }
             }
         }
 

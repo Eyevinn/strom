@@ -303,6 +303,7 @@ impl PropertyInspector {
         webrtc_stats_store: &crate::webrtc_stats::WebRtcStatsStore,
         stats: Option<&crate::api::FlowStatsInfo>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
+        available_channels: &[strom_types::api::AvailableOutput],
     ) -> bool {
         let block_id = block.id.clone();
         let mut delete_requested = false;
@@ -360,6 +361,7 @@ impl PropertyInspector {
                                 definition,
                                 flow_id,
                                 network_interfaces,
+                                available_channels,
                             );
                         }
                     } else {
@@ -515,9 +517,10 @@ impl PropertyInspector {
         ui: &mut Ui,
         block: &mut BlockInstance,
         exposed_prop: &ExposedProperty,
-        _definition: &BlockDefinition,
+        definition: &BlockDefinition,
         _flow_id: Option<strom_types::FlowId>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
+        available_channels: &[strom_types::api::AvailableOutput],
     ) {
         let prop_name = &exposed_prop.name;
         let display_label = &exposed_prop.label;
@@ -533,6 +536,13 @@ impl PropertyInspector {
 
         if current_value.is_none() {
             current_value = default_value.cloned();
+        }
+
+        // For string properties without a value, initialize to empty string
+        if current_value.is_none() {
+            if let strom_types::block::PropertyType::String = &exposed_prop.property_type {
+                current_value = Some(PropertyValue::String(String::new()));
+            }
         }
 
         // For multiline, use vertical layout
@@ -604,25 +614,37 @@ impl PropertyInspector {
                 }
 
                 if let Some(mut value) = current_value {
-                    // Check property type for special handling
-                    let changed = match &exposed_prop.property_type {
-                        strom_types::block::PropertyType::Enum { values } => {
-                            Self::show_block_enum_editor(ui, &mut value, values)
-                        }
-                        strom_types::block::PropertyType::NetworkInterface => {
-                            Self::show_network_interface_editor(ui, &mut value, network_interfaces)
-                        }
-                        _ => {
-                            // Convert block::PropertyType to element::PropertyType for other types
-                            let prop_type =
-                                Self::convert_block_prop_type(&exposed_prop.property_type);
-                            Self::show_property_editor(
-                                ui,
-                                &mut value,
-                                prop_type.as_ref(),
-                                default_value,
-                                false, // Block properties are always writable
-                            )
+                    // Special handling for InterInput channel property - show dropdown with available channels
+                    let is_inter_input_channel =
+                        definition.id == "builtin.inter_input" && prop_name == "channel";
+
+                    let changed = if is_inter_input_channel {
+                        Self::show_inter_channel_editor(ui, &mut value, available_channels)
+                    } else {
+                        // Check property type for special handling
+                        match &exposed_prop.property_type {
+                            strom_types::block::PropertyType::Enum { values } => {
+                                Self::show_block_enum_editor(ui, &mut value, values)
+                            }
+                            strom_types::block::PropertyType::NetworkInterface => {
+                                Self::show_network_interface_editor(
+                                    ui,
+                                    &mut value,
+                                    network_interfaces,
+                                )
+                            }
+                            _ => {
+                                // Convert block::PropertyType to element::PropertyType for other types
+                                let prop_type =
+                                    Self::convert_block_prop_type(&exposed_prop.property_type);
+                                Self::show_property_editor(
+                                    ui,
+                                    &mut value,
+                                    prop_type.as_ref(),
+                                    default_value,
+                                    false, // Block properties are always writable
+                                )
+                            }
                         }
                     };
 
@@ -1002,6 +1024,85 @@ impl PropertyInspector {
                         if ui.selectable_label(*s == iface.name, &display).clicked() {
                             *s = iface.name.clone();
                             changed = true;
+                        }
+                    }
+                });
+
+            changed
+        } else {
+            false
+        }
+    }
+
+    /// Show channel selector for InterInput blocks.
+    /// Shows a dropdown with available channels (from all flows with InterOutput blocks).
+    fn show_inter_channel_editor(
+        ui: &mut Ui,
+        value: &mut PropertyValue,
+        available_channels: &[strom_types::api::AvailableOutput],
+    ) -> bool {
+        if let PropertyValue::String(s) = value {
+            let mut changed = false;
+
+            // Helper to format display text for a channel
+            let format_channel_display = |ch: &strom_types::api::AvailableOutput| -> String {
+                let name_part = ch
+                    .description
+                    .as_ref()
+                    .filter(|d| !d.is_empty())
+                    .map(|d| d.as_str())
+                    .unwrap_or(&ch.name);
+                let status = if ch.is_active { "●" } else { "○" };
+                format!("{} {} / {}", status, ch.flow_name, name_part)
+            };
+
+            // Build display text for current selection
+            let selected_display = if s.is_empty() {
+                "(select channel)".to_string()
+            } else {
+                // Find channel to show with more info
+                available_channels
+                    .iter()
+                    .find(|ch| ch.channel_name == *s)
+                    .map(format_channel_display)
+                    .unwrap_or_else(|| format!("(unknown: {})", s))
+            };
+
+            egui::ComboBox::from_id_salt(ui.next_auto_id())
+                .selected_text(&selected_display)
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    if available_channels.is_empty() {
+                        ui.label("No Inter Output blocks found");
+                        ui.small("Add Inter Output blocks to flows to publish streams");
+                    } else {
+                        for channel in available_channels {
+                            let display = format_channel_display(channel);
+                            let response =
+                                ui.selectable_label(*s == channel.channel_name, &display);
+
+                            // Show tooltip with channel details
+                            response.clone().on_hover_ui(|ui| {
+                                ui.label(format!("Flow: {}", channel.flow_name));
+                                if let Some(desc) = &channel.description {
+                                    ui.label(format!("Description: {}", desc));
+                                }
+                                ui.label(format!("Block ID: {}", channel.name));
+                                ui.label(format!(
+                                    "Status: {}",
+                                    if channel.is_active {
+                                        "Active"
+                                    } else {
+                                        "Inactive"
+                                    }
+                                ));
+                                ui.small(&channel.channel_name);
+                            });
+
+                            if response.clicked() {
+                                *s = channel.channel_name.clone();
+                                changed = true;
+                            }
                         }
                     }
                 });

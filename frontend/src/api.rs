@@ -1179,4 +1179,41 @@ impl ApiClient {
         );
         Ok(interfaces)
     }
+
+    /// Get available inter-pipeline channels.
+    ///
+    /// Returns channels published by running flows with InterOutput blocks.
+    pub async fn get_available_sources(
+        &self,
+    ) -> ApiResult<strom_types::api::AvailableSourcesResponse> {
+        use tracing::info;
+
+        let url = format!("{}/sources", self.base_url);
+        info!("Fetching available sources from: {}", url);
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error fetching sources: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        let sources: strom_types::api::AvailableSourcesResponse =
+            response.json().await.map_err(|e| {
+                tracing::error!("Failed to parse available sources response: {}", e);
+                ApiError::Decode(e.to_string())
+            })?;
+
+        info!("Successfully loaded {} source flows", sources.sources.len());
+        Ok(sources)
+    }
 }

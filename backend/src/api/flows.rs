@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 use strom_types::{
     api::{
-        CreateFlowRequest, ElementPropertiesResponse, ErrorResponse, FlowListResponse,
-        FlowResponse, FlowStatsResponse, LatencyResponse, PadPropertiesResponse,
-        UpdateFlowPropertiesRequest, UpdatePadPropertyRequest, UpdatePropertyRequest,
-        WebRtcStatsResponse,
+        AvailableOutput, AvailableSourcesResponse, CreateFlowRequest, ElementPropertiesResponse,
+        ErrorResponse, FlowListResponse, FlowResponse, FlowStatsResponse, LatencyResponse,
+        PadPropertiesResponse, SourceFlowInfo, UpdateFlowPropertiesRequest,
+        UpdatePadPropertyRequest, UpdatePropertyRequest, WebRtcStatsResponse,
     },
     Flow, FlowId,
 };
@@ -80,6 +80,81 @@ fn is_pad_valid(
 pub async fn list_flows(State(state): State<AppState>) -> Json<FlowListResponse> {
     let flows = state.get_flows().await;
     Json(FlowListResponse { flows })
+}
+
+/// Get available source flows for subscription.
+///
+/// Returns all flows that have InterOutput blocks, along with information
+/// about whether each output is currently active (flow is running).
+/// This scans all flow definitions, not just running flows.
+#[utoipa::path(
+    get,
+    path = "/api/sources",
+    tag = "flows",
+    responses(
+        (status = 200, description = "List of available source flows", body = AvailableSourcesResponse)
+    )
+)]
+pub async fn get_available_sources(
+    State(state): State<AppState>,
+) -> Json<AvailableSourcesResponse> {
+    use strom_types::element::MediaType;
+    use strom_types::PropertyValue;
+
+    // Get all active channels from registry to check which are running
+    let active_channels = state.channels().list_all().await;
+    let active_channel_names: std::collections::HashSet<_> = active_channels
+        .iter()
+        .map(|ch| ch.channel_name.clone())
+        .collect();
+
+    // Scan all flows for InterOutput blocks
+    let flows = state.get_flows().await;
+    let mut sources: Vec<SourceFlowInfo> = Vec::new();
+
+    for flow in flows {
+        let mut outputs: Vec<AvailableOutput> = Vec::new();
+
+        for block in &flow.blocks {
+            if block.block_definition_id == "builtin.inter_output" {
+                // Generate the channel name (same logic as InterOutputBuilder)
+                let channel_name = format!("strom_{}_{}", flow.id, block.id);
+
+                // Get description from block properties
+                let description = block.properties.get("description").and_then(|v| match v {
+                    PropertyValue::String(s) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                });
+
+                // Check if this channel is active (flow is running)
+                let is_active = active_channel_names.contains(&channel_name);
+
+                outputs.push(AvailableOutput {
+                    name: block.id.clone(),
+                    channel_name,
+                    flow_name: flow.name.clone(),
+                    description,
+                    media_type: MediaType::Generic, // rsinter is format-agnostic
+                    is_active,
+                });
+            }
+        }
+
+        if !outputs.is_empty() {
+            sources.push(SourceFlowInfo {
+                flow_id: flow.id,
+                flow_name: flow.name.clone(),
+                outputs,
+            });
+        }
+    }
+
+    info!(
+        "Returning {} source flows with {} total outputs",
+        sources.len(),
+        sources.iter().map(|s| s.outputs.len()).sum::<usize>()
+    );
+    Json(AvailableSourcesResponse { sources })
 }
 
 /// Get a specific flow by ID.

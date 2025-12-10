@@ -255,9 +255,9 @@ fn videoformat_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🎬".to_string()),
-            color: Some("#FF9800".to_string()), // Orange for video
             width: Some(1.5),
             height: Some(2.0),
+            ..Default::default()
         }),
     }
 }

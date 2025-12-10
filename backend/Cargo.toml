@@ -40,6 +40,7 @@ gstreamer.workspace = true
 gstreamer-app.workspace = true
 gstreamer-net.workspace = true
 gst-plugin-webrtc.workspace = true
+gst-plugin-inter.workspace = true
 
 # Error handling
 anyhow = "1.0"

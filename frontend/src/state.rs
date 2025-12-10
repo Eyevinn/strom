@@ -108,6 +108,9 @@ pub enum AppMessage {
 
     /// Network interfaces loaded from API
     NetworkInterfacesLoaded(Vec<strom_types::NetworkInterfaceInfo>),
+
+    /// Available inter channels loaded from API
+    AvailableChannelsLoaded(Vec<strom_types::api::AvailableOutput>),
 }
 
 /// WebSocket connection state.

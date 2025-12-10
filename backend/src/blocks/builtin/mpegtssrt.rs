@@ -486,9 +486,9 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("📡".to_string()),
-            color: Some("#FF6B35".to_string()), // Orange-red for transport stream output
             width: Some(2.5),
             height: Some(3.0),
+            ..Default::default()
         }),
     }
 }

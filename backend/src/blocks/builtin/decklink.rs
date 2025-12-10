@@ -541,9 +541,9 @@ fn decklink_video_input_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("📹".to_string()),
-            color: Some("#E91E63".to_string()), // Pink for video input
             width: Some(2.0),
             height: Some(1.5),
+            ..Default::default()
         }),
     }
 }
@@ -640,9 +640,9 @@ fn decklink_audio_input_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🎵".to_string()),
-            color: Some("#9C27B0".to_string()), // Purple for audio input
             width: Some(2.0),
             height: Some(1.5),
+            ..Default::default()
         }),
     }
 }
@@ -696,9 +696,9 @@ fn decklink_video_output_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("📺".to_string()),
-            color: Some("#FF5722".to_string()), // Deep orange for video output
             width: Some(2.0),
             height: Some(1.5),
+            ..Default::default()
         }),
     }
 }
@@ -735,9 +735,9 @@ fn decklink_audio_output_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🔊".to_string()),
-            color: Some("#3F51B5".to_string()), // Indigo for audio output
             width: Some(2.0),
             height: Some(1.5),
+            ..Default::default()
         }),
     }
 }

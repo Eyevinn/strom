@@ -25,6 +25,7 @@ gstreamer = "0.24.4"
 gstreamer-app = "0.24.2"
 gstreamer-net = "0.24.4"
 gst-plugin-webrtc = { git = "https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs", features = ["whep", "whip"], rev = "83625619" }
+gst-plugin-inter = { git = "https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs", rev = "83625619" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 time = { version = "0.3", features = ["formatting", "local-offset"] }

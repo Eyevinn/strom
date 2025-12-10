@@ -538,9 +538,9 @@ fn build_software_compositor(
 fn create_input_queue(queue_id: &str, index: usize) -> Result<gst::Element, BlockBuildError> {
     gst::ElementFactory::make("queue")
         .name(queue_id)
-        .property("max-size-buffers", 3u32)
-        .property("max-size-bytes", 0u32)
-        .property("max-size-time", 0u64)
+        //.property("max-size-buffers", 3u32)
+        //.property("max-size-bytes", 0u32)
+        //.property("max-size-time", 0u64)
         .property("flush-on-eos", true)
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("queue_{}: {}", index, e)))
@@ -1115,9 +1115,9 @@ fn compositor_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🎬".to_string()),
-            color: Some("#7B1FA2".to_string()), // Darker purple to distinguish from glcompositor
             width: Some(2.0),
             height: Some(2.5),
+            ..Default::default()
         }),
     }
 }

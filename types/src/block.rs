@@ -172,16 +172,12 @@ pub struct Position {
 }
 
 /// UI metadata for block rendering
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BlockUIMetadata {
     /// Icon or visual identifier (emoji or name)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-
-    /// Color for visual distinction (hex color)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
 
     /// Width in the editor (in grid units)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,6 +186,32 @@ pub struct BlockUIMetadata {
     /// Height in the editor (in grid units)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<f32>,
+
+    // Light mode colors (all optional, use defaults if unset)
+    /// Fill/background color in light mode (hex color)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_fill_color: Option<String>,
+
+    /// Stroke/border color in light mode (hex color)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_stroke_color: Option<String>,
+
+    /// Text color in light mode (hex color)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_text_color: Option<String>,
+
+    // Dark mode colors (all optional, use defaults if unset)
+    /// Fill/background color in dark mode (hex color)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dark_fill_color: Option<String>,
+
+    /// Stroke/border color in dark mode (hex color)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dark_stroke_color: Option<String>,
+
+    /// Text color in dark mode (hex color)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dark_text_color: Option<String>,
 }
 
 /// Request to create a new block definition (currently not supported for user-defined blocks)

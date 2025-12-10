@@ -87,6 +87,24 @@ pub enum StromEvent {
         /// Clock rate ratio (local vs master)
         clock_rate: Option<f64>,
     },
+    /// A flow's published output became available (flow started)
+    SourceOutputAvailable {
+        source_flow_id: FlowId,
+        output_name: String,
+        channel_name: String,
+    },
+    /// A flow's published output became unavailable (flow stopped)
+    SourceOutputUnavailable {
+        source_flow_id: FlowId,
+        output_name: String,
+    },
+    /// Subscription connection status changed
+    SubscriptionStatusChanged {
+        consumer_flow_id: FlowId,
+        source_flow_id: FlowId,
+        output_name: String,
+        connected: bool,
+    },
     /// Quality of Service statistics (aggregated buffer drop info)
     QoSStats {
         flow_id: FlowId,
@@ -263,6 +281,41 @@ impl StromEvent {
                 format!(
                     "PTP stats for flow {}: {} {} {}",
                     flow_id, status, delay, offset
+                )
+            }
+            StromEvent::SourceOutputAvailable {
+                source_flow_id,
+                output_name,
+                channel_name,
+            } => {
+                format!(
+                    "Source output '{}' from flow {} available (channel: {})",
+                    output_name, source_flow_id, channel_name
+                )
+            }
+            StromEvent::SourceOutputUnavailable {
+                source_flow_id,
+                output_name,
+            } => {
+                format!(
+                    "Source output '{}' from flow {} unavailable",
+                    output_name, source_flow_id
+                )
+            }
+            StromEvent::SubscriptionStatusChanged {
+                consumer_flow_id,
+                source_flow_id,
+                output_name,
+                connected,
+            } => {
+                let status = if *connected {
+                    "connected"
+                } else {
+                    "disconnected"
+                };
+                format!(
+                    "Subscription to '{}' from flow {} in flow {}: {}",
+                    output_name, source_flow_id, consumer_flow_id, status
                 )
             }
         }

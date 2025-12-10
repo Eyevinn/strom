@@ -672,9 +672,9 @@ fn aes67_input_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🎵".to_string()),
-            color: Some("#4CAF50".to_string()),
             width: Some(2.0),
             height: Some(1.5),
+            ..Default::default()
         }),
     }
 }
@@ -806,9 +806,9 @@ fn aes67_output_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("📡".to_string()),
-            color: Some("#2196F3".to_string()),
             width: Some(2.5),
             height: Some(2.0),
+            ..Default::default()
         }),
     }
 }

@@ -1,6 +1,6 @@
 //! API request and response types.
 
-use crate::element::{ElementInfo, PropertyValue};
+use crate::element::{ElementInfo, MediaType, PropertyValue};
 use crate::flow::{Flow, FlowId, FlowProperties};
 use crate::state::PipelineState;
 use serde::{Deserialize, Serialize};
@@ -412,4 +412,47 @@ impl ErrorResponse {
             details: Some(details.into()),
         }
     }
+}
+
+// ============================================================================
+// Sources API Types (for inter-pipeline sharing)
+// ============================================================================
+
+/// Information about an available published output from a source flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AvailableOutput {
+    /// Name of the published output (block ID)
+    pub name: String,
+    /// Channel name for inter-pipeline communication (what InterInput blocks use)
+    pub channel_name: String,
+    /// Name of the flow that publishes this output
+    pub flow_name: String,
+    /// Description of the output
+    pub description: Option<String>,
+    /// Media type (Audio, Video, Generic)
+    pub media_type: MediaType,
+    /// Whether the source flow is currently running (output is active)
+    pub is_active: bool,
+}
+
+/// Information about a flow that has published outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SourceFlowInfo {
+    /// The flow ID
+    #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+    pub flow_id: FlowId,
+    /// The flow name
+    pub flow_name: String,
+    /// Available outputs from this flow
+    pub outputs: Vec<AvailableOutput>,
+}
+
+/// Response containing available source flows for subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AvailableSourcesResponse {
+    /// List of flows that have published outputs
+    pub sources: Vec<SourceFlowInfo>,
 }

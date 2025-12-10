@@ -3,7 +3,7 @@
 use egui::{pos2, vec2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 use std::collections::HashMap;
 use strom_types::{
-    element::{ElementInfo, PadInfo},
+    element::{ElementInfo, PadInfo, PropertyValue},
     BlockDefinition, BlockInstance, Element, ElementId, Link, MediaType,
 };
 use uuid::Uuid;
@@ -16,6 +16,36 @@ const GRID_SIZE: f32 = 50.0;
 /// Snap a value to the grid
 fn snap_to_grid(value: f32) -> f32 {
     (value / GRID_SIZE).round() * GRID_SIZE
+}
+
+/// Parse a hex color string (e.g., "#4CAF50") to Color32
+fn parse_hex_color(hex: &str) -> Option<Color32> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Color32::from_rgb(r, g, b))
+}
+
+/// Brighten a color by adding to each component
+fn brighten_color(color: Color32, amount: u8) -> Color32 {
+    Color32::from_rgb(
+        color.r().saturating_add(amount),
+        color.g().saturating_add(amount),
+        color.b().saturating_add(amount),
+    )
+}
+
+/// Darken a color by subtracting from each component
+fn darken_color(color: Color32, amount: u8) -> Color32 {
+    Color32::from_rgb(
+        color.r().saturating_sub(amount),
+        color.g().saturating_sub(amount),
+        color.b().saturating_sub(amount),
+    )
 }
 
 /// Represents the state of the graph editor.
@@ -198,12 +228,22 @@ impl GraphEditor {
 
     /// Add a new block instance to the graph at the given position.
     pub fn add_block(&mut self, block_definition_id: String, pos: Pos2) {
+        self.add_block_with_props(block_definition_id, pos, HashMap::new());
+    }
+
+    /// Add a new block instance with initial properties.
+    pub fn add_block_with_props(
+        &mut self,
+        block_definition_id: String,
+        pos: Pos2,
+        properties: HashMap<String, PropertyValue>,
+    ) {
         let id = format!("b{}", Uuid::new_v4().simple());
         let block = BlockInstance {
             id: id.clone(),
             block_definition_id,
             name: None,
-            properties: HashMap::new(),
+            properties,
             position: strom_types::block::Position { x: pos.x, y: pos.y },
             runtime_data: None,
             computed_external_pads: None,
@@ -683,8 +723,18 @@ impl GraphEditor {
                 let is_selected = self.selected.as_ref() == Some(&block.id);
                 let is_hovered = self.hovered_element.as_ref() == Some(&block.id);
 
-                let node_response =
-                    self.draw_block_node(ui, &painter, block, node_rect, is_selected, is_hovered);
+                // Get block definition for UI metadata (icon, color)
+                let definition = self.get_block_definition(block);
+
+                let node_response = self.draw_block_node(
+                    ui,
+                    &painter,
+                    block,
+                    definition,
+                    node_rect,
+                    is_selected,
+                    is_hovered,
+                );
 
                 // Track hover state
                 if node_response.hovered() {
@@ -1327,11 +1377,13 @@ impl GraphEditor {
     }
 
     /// Draw a block instance node
+    #[allow(clippy::too_many_arguments)]
     fn draw_block_node(
         &self,
         ui: &mut Ui,
         painter: &egui::Painter,
         block: &BlockInstance,
+        definition: Option<&BlockDefinition>,
         rect: Rect,
         is_selected: bool,
         is_hovered: bool,
@@ -1342,57 +1394,88 @@ impl GraphEditor {
             .map(|h| *h != crate::qos_monitor::QoSHealth::Ok)
             .unwrap_or(false);
 
+        // Get custom colors from ui_metadata if available
+        let ui_meta = definition.and_then(|d| d.ui_metadata.as_ref());
+
+        let custom_stroke = ui_meta
+            .and_then(|m| {
+                if ui.visuals().dark_mode {
+                    m.dark_stroke_color.as_ref()
+                } else {
+                    m.light_stroke_color.as_ref()
+                }
+            })
+            .and_then(|c| parse_hex_color(c));
+
+        let custom_fill = ui_meta
+            .and_then(|m| {
+                if ui.visuals().dark_mode {
+                    m.dark_fill_color.as_ref()
+                } else {
+                    m.light_fill_color.as_ref()
+                }
+            })
+            .and_then(|c| parse_hex_color(c));
+
         let stroke_color = if has_qos_issues {
-            // QoS issues - use warning/critical color for border
             qos_health.unwrap().color()
+        } else if let Some(color) = custom_stroke {
+            if is_selected {
+                brighten_color(color, 30)
+            } else if is_hovered {
+                brighten_color(color, 15)
+            } else {
+                color
+            }
         } else if ui.visuals().dark_mode {
-            // Dark theme borders
             if is_selected {
-                Color32::from_rgb(200, 100, 255) // Purple for blocks
+                Color32::from_rgb(180, 120, 220)
             } else if is_hovered {
-                Color32::from_gray(154)
+                Color32::from_rgb(160, 100, 210)
             } else {
-                Color32::from_rgb(150, 80, 200) // Darker purple
+                Color32::from_rgb(150, 80, 200)
             }
+        } else if is_selected {
+            Color32::from_rgb(140, 60, 180)
+        } else if is_hovered {
+            Color32::from_rgb(130, 50, 170)
         } else {
-            // Light theme borders - vibrant purple/magenta
-            if is_selected {
-                Color32::from_rgb(160, 0, 200) // Vibrant magenta
-            } else if is_hovered {
-                Color32::from_rgb(140, 40, 180) // Medium purple
-            } else {
-                Color32::from_rgb(120, 60, 160) // Darker purple
-            }
+            Color32::from_rgb(120, 40, 160)
         };
 
         let stroke_width = if has_qos_issues {
             3.0 // Thicker border for QoS issues
         } else if is_selected {
-            2.5
+            2.0
         } else if is_hovered {
             1.5
         } else {
             1.0
         };
 
-        let fill_color = if ui.visuals().dark_mode {
-            // Dark theme: dark purple backgrounds
+        let fill_color = if let Some(color) = custom_fill {
+            // Use custom fill color directly
             if is_selected {
-                Color32::from_rgb(60, 40, 80)
+                brighten_color(color, 15)
             } else if is_hovered {
-                Color32::from_rgb(50, 35, 65)
+                brighten_color(color, 8)
             } else {
-                Color32::from_rgb(40, 30, 50)
+                color
             }
+        } else if ui.visuals().dark_mode {
+            if is_selected {
+                Color32::from_rgb(55, 40, 70)
+            } else if is_hovered {
+                Color32::from_rgb(48, 35, 62)
+            } else {
+                Color32::from_rgb(40, 30, 55)
+            }
+        } else if is_selected {
+            Color32::from_rgb(230, 210, 245)
+        } else if is_hovered {
+            Color32::from_rgb(235, 220, 248)
         } else {
-            // Light theme: vibrant purple/lavender backgrounds
-            if is_selected {
-                Color32::from_rgb(220, 180, 255) // Bright lavender
-            } else if is_hovered {
-                Color32::from_rgb(230, 200, 255) // Lighter lavender
-            } else {
-                Color32::from_rgb(235, 215, 255) // Soft lavender
-            }
+            Color32::from_rgb(240, 225, 250)
         };
 
         // Draw QoS glow effect behind the node if there are issues
@@ -1425,10 +1508,7 @@ impl GraphEditor {
             egui::epaint::StrokeKind::Inside,
         );
 
-        // Get the block definition to show the human-readable name
-        let block_definition = self.block_definition_map.get(&block.block_definition_id);
-
-        // Draw block icon
+        // Draw block icon (use custom icon from ui_metadata if available)
         // Note: multiply offsets by zoom since rect is in screen-space
         let icon_pos = rect.min + vec2(10.0 * self.zoom, 8.0 * self.zoom);
         let icon_color = if ui.visuals().dark_mode {
@@ -1436,29 +1516,44 @@ impl GraphEditor {
         } else {
             Color32::from_gray(40) // Dark icon for light backgrounds
         };
+        let icon = definition
+            .and_then(|d| d.ui_metadata.as_ref())
+            .and_then(|m| m.icon.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("📦");
         painter.text(
             icon_pos,
             egui::Align2::LEFT_TOP,
-            "📦",
+            icon,
             FontId::proportional(16.0 * self.zoom),
             icon_color,
         );
 
         // Draw block name (use human-readable name from definition if available)
-        let block_name = block_definition
-            .map(|def| def.name.as_str())
-            .unwrap_or_else(|| {
-                block
-                    .block_definition_id
-                    .strip_prefix("builtin.")
-                    .unwrap_or(&block.block_definition_id)
-            });
+        let block_name = definition.map(|def| def.name.as_str()).unwrap_or_else(|| {
+            block
+                .block_definition_id
+                .strip_prefix("builtin.")
+                .unwrap_or(&block.block_definition_id)
+        });
         let text_pos = rect.min + vec2(35.0 * self.zoom, 10.0 * self.zoom);
-        let text_color = if ui.visuals().dark_mode {
-            Color32::from_rgb(220, 180, 255) // Light purple for dark backgrounds
-        } else {
-            Color32::from_rgb(80, 40, 120) // Dark purple for light backgrounds
-        };
+        let custom_text = ui_meta
+            .and_then(|m| {
+                if ui.visuals().dark_mode {
+                    m.dark_text_color.as_ref()
+                } else {
+                    m.light_text_color.as_ref()
+                }
+            })
+            .and_then(|c| parse_hex_color(c));
+
+        let text_color = custom_text.unwrap_or_else(|| {
+            if ui.visuals().dark_mode {
+                Color32::from_rgb(220, 180, 255)
+            } else {
+                Color32::from_rgb(80, 40, 120)
+            }
+        });
         painter.text(
             text_pos,
             egui::Align2::LEFT_TOP,

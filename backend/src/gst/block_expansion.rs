@@ -29,9 +29,13 @@ pub struct ExpandedPipeline {
 /// 1. Calls BlockBuilder.build() for each block instance to get GStreamer elements
 /// 2. Adds internal links from the blocks
 /// 3. Resolves external links through block external pads
+///
+/// The `flow_id` is injected as a special `_flow_id` property for blocks that need it
+/// (e.g., InterOutput blocks use it to generate unique channel names).
 pub async fn expand_blocks(
     blocks: &[BlockInstance],
     regular_links: &[Link],
+    flow_id: &strom_types::FlowId,
 ) -> Result<ExpandedPipeline, PipelineError> {
     let mut gst_elements = Vec::new();
     let mut all_links = Vec::new();
@@ -56,9 +60,20 @@ pub async fn expand_blocks(
             block_instance.id, block_instance.block_definition_id
         );
 
+        // Inject _flow_id and _block_id into properties for blocks that need them
+        let mut properties = block_instance.properties.clone();
+        properties.insert(
+            "_flow_id".to_string(),
+            PropertyValue::String(flow_id.to_string()),
+        );
+        properties.insert(
+            "_block_id".to_string(),
+            PropertyValue::String(block_instance.id.clone()),
+        );
+
         // Call the builder to create GStreamer elements
         let build_result = builder
-            .build(&block_instance.id, &block_instance.properties)
+            .build(&block_instance.id, &properties)
             .map_err(|e| {
                 PipelineError::InvalidFlow(format!(
                     "Failed to build block {}: {}",
@@ -231,10 +246,12 @@ async fn resolve_pad(pad_ref: &str, blocks: &[BlockInstance]) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strom_types::FlowId;
 
     #[tokio::test]
     async fn test_expand_no_blocks() {
-        let result = expand_blocks(&[], &[]).await;
+        let flow_id = FlowId::new_v4();
+        let result = expand_blocks(&[], &[], &flow_id).await;
         assert!(result.is_ok());
 
         let expanded = result.unwrap();

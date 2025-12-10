@@ -852,9 +852,9 @@ fn videoenc_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🎞️".to_string()),
-            color: Some("#FF5722".to_string()), // Deep Orange for video encoding
             width: Some(1.5),
             height: Some(2.5),
+            ..Default::default()
         }),
     }
 }

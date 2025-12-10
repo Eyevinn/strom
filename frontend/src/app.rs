@@ -238,6 +238,12 @@ pub struct StromApp {
     network_interfaces: Vec<strom_types::NetworkInterfaceInfo>,
     /// Whether network interfaces have been loaded
     network_interfaces_loaded: bool,
+    /// Cached available inter channels (for InterInput channel dropdown)
+    available_channels: Vec<strom_types::api::AvailableOutput>,
+    /// Whether available channels have been loaded
+    available_channels_loaded: bool,
+    /// Last InterInput block ID we refreshed channels for (to avoid repeated refreshes)
+    last_inter_input_refresh: Option<String>,
     /// Meter data storage for all audio level meters
     meter_data: MeterDataStore,
     /// WebRTC stats storage for all WebRTC connections
@@ -401,6 +407,9 @@ impl StromApp {
             compositor_editor: None,
             network_interfaces: Vec::new(),
             network_interfaces_loaded: false,
+            available_channels: Vec::new(),
+            available_channels_loaded: false,
+            last_inter_input_refresh: None,
             log_entries: Vec::new(),
             show_log_panel: false,
             max_log_entries: 100,
@@ -485,6 +494,9 @@ impl StromApp {
             compositor_editor: None,
             network_interfaces: Vec::new(),
             network_interfaces_loaded: false,
+            available_channels: Vec::new(),
+            available_channels_loaded: false,
+            last_inter_input_refresh: None,
             log_entries: Vec::new(),
             show_log_panel: false,
             max_log_entries: 100,
@@ -788,6 +800,50 @@ impl StromApp {
     /// Get cached network interfaces (for property inspector).
     pub fn network_interfaces(&self) -> &[strom_types::NetworkInterfaceInfo] {
         &self.network_interfaces
+    }
+
+    /// Load available inter channels from the backend (for InterInput channel dropdown).
+    fn load_available_channels(&mut self, ctx: egui::Context) {
+        if self.available_channels_loaded {
+            return;
+        }
+        self.available_channels_loaded = true; // Prevent multiple concurrent requests
+        tracing::info!("Loading available inter channels from backend...");
+
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+
+        spawn_task(async move {
+            match api.get_available_sources().await {
+                Ok(response) => {
+                    // Flatten all outputs from all source flows
+                    let all_channels: Vec<_> = response
+                        .sources
+                        .into_iter()
+                        .flat_map(|source| source.outputs)
+                        .collect();
+                    tracing::info!(
+                        "Successfully loaded {} available inter channels",
+                        all_channels.len()
+                    );
+                    let _ = tx.send(AppMessage::AvailableChannelsLoaded(all_channels));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load available channels: {}", e);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Refresh available channels (called when flow state changes).
+    pub fn refresh_available_channels(&mut self) {
+        self.available_channels_loaded = false;
+    }
+
+    /// Get cached available channels (for property inspector).
+    pub fn available_channels(&self) -> &[strom_types::api::AvailableOutput] {
+        &self.available_channels
     }
 
     /// Poll WebRTC stats for running flows that have WebRTC elements.
@@ -2216,6 +2272,19 @@ impl StromApp {
                         if has_network_prop {
                             self.load_network_interfaces(ctx.clone());
                         }
+
+                        // Load available channels if this is an InterInput block
+                        // Only refresh once when selection changes to this block
+                        if def.id == "builtin.inter_input" {
+                            if let Some(block) = self.graph.get_selected_block() {
+                                let block_id = block.id.clone();
+                                if self.last_inter_input_refresh.as_ref() != Some(&block_id) {
+                                    self.last_inter_input_refresh = Some(block_id);
+                                    self.refresh_available_channels();
+                                }
+                            }
+                            self.load_available_channels(ctx.clone());
+                        }
                     }
 
                     // Get stats for this flow if available
@@ -2236,6 +2305,7 @@ impl StromApp {
                             &self.webrtc_stats,
                             stats,
                             &self.network_interfaces,
+                            &self.available_channels,
                         );
 
                         // Handle deletion request
@@ -2391,7 +2461,26 @@ impl StromApp {
                     let world_pos = ((center - response.rect.min - self.graph.pan_offset)
                         / self.graph.zoom)
                         .to_pos2();
-                    self.graph.add_block(block_id, world_pos);
+
+                    // Set default description for InterOutput blocks
+                    if block_id == "builtin.inter_output" {
+                        // Count existing inter_output blocks to get next number
+                        let counter = self
+                            .graph
+                            .blocks
+                            .iter()
+                            .filter(|b| b.block_definition_id == "builtin.inter_output")
+                            .count()
+                            + 1;
+                        let mut props = std::collections::HashMap::new();
+                        props.insert(
+                            "description".to_string(),
+                            strom_types::PropertyValue::String(format!("stream_{}", counter)),
+                        );
+                        self.graph.add_block_with_props(block_id, world_pos, props);
+                    } else {
+                        self.graph.add_block(block_id, world_pos);
+                    }
                 }
 
                 // Handle delete key for elements and links
@@ -3716,6 +3805,8 @@ impl eframe::App for StromApp {
                             tracing::info!("Flow {} stopped, clearing QoS stats", flow_id);
                             // Clear QoS stats and start time when flow is stopped
                             self.qos_stats.clear_flow(&flow_id);
+                            // Refresh available channels (channels may have been removed)
+                            self.refresh_available_channels();
                             self.flow_start_times.remove(&flow_id);
 
                             // Fetch updated flow state
@@ -3742,6 +3833,8 @@ impl eframe::App for StromApp {
                             // Record when the flow started (for QoS grace period)
                             self.flow_start_times
                                 .insert(flow_id, instant::Instant::now());
+                            // Refresh available channels (new channels may be available)
+                            self.refresh_available_channels();
 
                             // Fetch the updated flow state
                             tracing::info!("Flow {} started, fetching updated flow", flow_id);
@@ -4267,6 +4360,10 @@ impl eframe::App for StromApp {
                 AppMessage::NetworkInterfacesLoaded(interfaces) => {
                     tracing::info!("Network interfaces loaded: {} interfaces", interfaces.len());
                     self.network_interfaces = interfaces;
+                }
+                AppMessage::AvailableChannelsLoaded(channels) => {
+                    tracing::info!("Available channels loaded: {} channels", channels.len());
+                    self.available_channels = channels;
                 }
                 // SDP messages are handled elsewhere
                 AppMessage::SdpLoaded { .. } | AppMessage::SdpError(_) => {}

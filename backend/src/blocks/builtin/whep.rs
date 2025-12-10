@@ -824,9 +824,9 @@ fn whep_input_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🌐".to_string()),
-            color: Some("#4CAF50".to_string()), // Green for inputs
             width: Some(2.5),
             height: Some(1.5),
+            ..Default::default()
         }),
     }
 }

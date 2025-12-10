@@ -261,9 +261,9 @@ fn audioformat_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🎵".to_string()),
-            color: Some("#9C27B0".to_string()), // Purple for audio
             width: Some(1.5),
             height: Some(2.0),
+            ..Default::default()
         }),
     }
 }

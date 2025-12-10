@@ -787,9 +787,9 @@ fn glcompositor_definition() -> BlockDefinition {
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("🎬".to_string()),
-            color: Some("#9C27B0".to_string()), // Purple for compositor
             width: Some(2.0),
             height: Some(2.5),
+            ..Default::default()
         }),
     }
 }
