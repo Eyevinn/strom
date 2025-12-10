@@ -1519,6 +1519,16 @@ impl StromApp {
             ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
         }
 
+        // Ctrl+C - Copy selected element/block in graph
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C)) {
+            self.graph.copy_selected();
+        }
+
+        // Ctrl+V - Paste element/block in graph
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V)) {
+            self.graph.paste_clipboard();
+        }
+
         // Shift+F9 - Stop Flow (must be checked before plain F9)
         if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::F9)) {
             self.stop_flow(ctx);
@@ -2491,6 +2501,7 @@ impl StromApp {
                     self.graph.remove_selected(); // Remove selected element (if any)
                     self.graph.remove_selected_link(); // Remove selected link (if any)
                 }
+
             } else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(100.0);

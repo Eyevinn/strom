@@ -94,6 +94,8 @@ pub struct GraphEditor {
     /// Flag indicating a QoS marker was clicked (to signal log panel should open)
     /// Uses Cell for interior mutability since draw_* functions take &self
     qos_marker_clicked: std::cell::Cell<bool>,
+    /// Clipboard for copy/paste operations
+    clipboard: Option<ClipboardContent>,
 }
 
 /// Property panel tab selection
@@ -119,6 +121,13 @@ struct PadToRender {
 
 /// Callback type for rendering custom block content
 pub type BlockRenderCallback = Box<dyn Fn(&mut egui::Ui, egui::Rect) + 'static>;
+
+/// Content that can be stored in the clipboard for copy/paste operations
+#[derive(Clone)]
+pub enum ClipboardContent {
+    Element(Element),
+    Block(BlockInstance),
+}
 
 /// Dynamic content information for a block (e.g., meter visualization).
 /// This allows the graph editor to remain generic while supporting blocks with custom content.
@@ -153,6 +162,7 @@ impl Default for GraphEditor {
             qos_health_map: HashMap::new(),
             last_canvas_rect: None,
             qos_marker_clicked: std::cell::Cell::new(false),
+            clipboard: None,
         }
     }
 }
@@ -285,6 +295,75 @@ impl GraphEditor {
                 self.selected_link = None;
             }
         }
+    }
+
+    /// Copy the currently selected element or block to the clipboard.
+    pub fn copy_selected(&mut self) {
+        if let Some(ref id) = self.selected {
+            // Check if it's an element
+            if let Some(element) = self.elements.iter().find(|e| &e.id == id) {
+                self.clipboard = Some(ClipboardContent::Element(element.clone()));
+                return;
+            }
+            // Check if it's a block
+            if let Some(block) = self.blocks.iter().find(|b| &b.id == id) {
+                self.clipboard = Some(ClipboardContent::Block(block.clone()));
+            }
+        }
+    }
+
+    /// Paste the clipboard content at an offset from the original position.
+    /// Returns true if something was pasted.
+    pub fn paste_clipboard(&mut self) -> bool {
+        const PASTE_OFFSET: f32 = 30.0;
+
+        if let Some(ref content) = self.clipboard.clone() {
+            match content {
+                ClipboardContent::Element(element) => {
+                    let new_id = format!("e{}", Uuid::new_v4().simple());
+                    let new_element = Element {
+                        id: new_id.clone(),
+                        element_type: element.element_type.clone(),
+                        properties: element.properties.clone(),
+                        pad_properties: element.pad_properties.clone(),
+                        position: (
+                            element.position.0 + PASTE_OFFSET,
+                            element.position.1 + PASTE_OFFSET,
+                        ),
+                    };
+                    self.elements.push(new_element);
+                    self.selected = Some(new_id);
+                    self.selected_link = None;
+                    true
+                }
+                ClipboardContent::Block(block) => {
+                    let new_id = format!("b{}", Uuid::new_v4().simple());
+                    let new_block = BlockInstance {
+                        id: new_id.clone(),
+                        block_definition_id: block.block_definition_id.clone(),
+                        name: block.name.clone(),
+                        properties: block.properties.clone(),
+                        position: strom_types::block::Position {
+                            x: block.position.x + PASTE_OFFSET,
+                            y: block.position.y + PASTE_OFFSET,
+                        },
+                        runtime_data: None, // Don't copy runtime data
+                        computed_external_pads: block.computed_external_pads.clone(),
+                    };
+                    self.blocks.push(new_block);
+                    self.selected = Some(new_id);
+                    self.selected_link = None;
+                    true
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Check if there's content in the clipboard.
+    pub fn has_clipboard(&self) -> bool {
+        self.clipboard.is_some()
     }
 
     /// Deselect all elements and links.
