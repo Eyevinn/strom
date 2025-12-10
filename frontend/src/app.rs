@@ -4363,7 +4363,18 @@ impl eframe::App for StromApp {
                     tracing::info!("Network interfaces loaded: {} interfaces", interfaces.len());
                     self.network_interfaces = interfaces;
                 }
-                AppMessage::AvailableChannelsLoaded(channels) => {
+                AppMessage::AvailableChannelsLoaded(mut channels) => {
+                    // Sort by flow name, then by description/name
+                    channels.sort_by(|a, b| {
+                        let flow_cmp = a.flow_name.cmp(&b.flow_name);
+                        if flow_cmp != std::cmp::Ordering::Equal {
+                            return flow_cmp;
+                        }
+                        // Then by description or block name
+                        let a_label = a.description.as_ref().unwrap_or(&a.name);
+                        let b_label = b.description.as_ref().unwrap_or(&b.name);
+                        a_label.cmp(b_label)
+                    });
                     tracing::info!("Available channels loaded: {} channels", channels.len());
                     self.available_channels = channels;
                 }
