@@ -2215,20 +2215,31 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-inter"
-version = "0.15.0-alpha.1"
-source = "git+https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs?rev=83625619#83625619e21fa1ea3ed69dd663934cb9066556af"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b41d8cc2684c20a10397b2aae55673ad136d4ab98ef0ad73a930fa7767147029"
 dependencies = [
  "anyhow",
- "gst-plugin-version-helper",
- "gstreamer 0.25.0",
- "gstreamer-app 0.25.0",
- "gstreamer-utils",
+ "gst-plugin-version-helper 0.8.3",
+ "gstreamer 0.24.4",
+ "gstreamer-app 0.24.2",
+ "gstreamer-utils 0.24.4",
 ]
 
 [[package]]
 name = "gst-plugin-version-helper"
 version = "0.8.1"
 source = "git+https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs?rev=83625619#83625619e21fa1ea3ed69dd663934cb9066556af"
+dependencies = [
+ "chrono",
+ "toml_edit 0.23.7",
+]
+
+[[package]]
+name = "gst-plugin-version-helper"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a68a894ef2d738054b950e1dbef5d9012b63fd968d4d32dbccd31bd8d8d4b219"
 dependencies = [
  "chrono",
  "toml_edit 0.23.7",
@@ -2246,7 +2257,7 @@ dependencies = [
  "ctrlc",
  "fastrand",
  "futures",
- "gst-plugin-version-helper",
+ "gst-plugin-version-helper 0.8.1",
  "gst-plugin-webrtc-signalling",
  "gst-plugin-webrtc-signalling-protocol",
  "gstreamer 0.25.0",
@@ -2256,8 +2267,8 @@ dependencies = [
  "gstreamer-net 0.25.0",
  "gstreamer-rtp",
  "gstreamer-sdp",
- "gstreamer-utils",
- "gstreamer-video",
+ "gstreamer-utils 0.25.0",
+ "gstreamer-video 0.25.0",
  "gstreamer-webrtc",
  "http",
  "human_bytes",
@@ -2622,12 +2633,40 @@ dependencies = [
 
 [[package]]
 name = "gstreamer-utils"
+version = "0.24.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3117f395f1ce1a9528774edbd5828c4d9de9c24568c1446cb138c73906b70420"
+dependencies = [
+ "gstreamer 0.24.4",
+ "gstreamer-app 0.24.2",
+ "gstreamer-video 0.24.4",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "gstreamer-utils"
 version = "0.25.0"
 source = "git+https://gitlab.freedesktop.org/gstreamer/gstreamer-rs?branch=main#6027fb48e04b3702439e971193a0381a1ad42a75"
 dependencies = [
  "gstreamer 0.25.0",
  "gstreamer-app 0.25.0",
- "gstreamer-video",
+ "gstreamer-video 0.25.0",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "gstreamer-video"
+version = "0.24.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33987f6a6a99750a07b0341d6288bac89b9b301be4672a209935203d4608d547"
+dependencies = [
+ "cfg-if",
+ "futures-channel",
+ "glib 0.21.4",
+ "gstreamer 0.24.4",
+ "gstreamer-base 0.24.2",
+ "gstreamer-video-sys 0.24.4",
+ "libc",
  "thiserror 2.0.17",
 ]
 
@@ -2641,10 +2680,24 @@ dependencies = [
  "glib 0.22.0",
  "gstreamer 0.25.0",
  "gstreamer-base 0.25.0",
- "gstreamer-video-sys",
+ "gstreamer-video-sys 0.25.0",
  "libc",
  "serde",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "gstreamer-video-sys"
+version = "0.24.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a00c28faad96cd40a7b7592433051199691b131b08f622ed5d51c54e049792d3"
+dependencies = [
+ "glib-sys 0.21.2",
+ "gobject-sys 0.21.2",
+ "gstreamer-base-sys 0.24.2",
+ "gstreamer-sys 0.24.2",
+ "libc",
+ "system-deps",
 ]
 
 [[package]]
@@ -2955,7 +3008,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -6934,7 +6987,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
