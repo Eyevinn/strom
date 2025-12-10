@@ -3860,6 +3860,8 @@ impl eframe::App for StromApp {
                         StromEvent::FlowUpdated { flow_id } => {
                             // For updates, fetch the specific flow to update it in-place
                             tracing::info!("Flow {} updated, fetching updated flow", flow_id);
+                            // Refresh available channels (flow name may have changed)
+                            self.refresh_available_channels();
                             let api = self.api.clone();
                             let tx = self.channels.sender();
                             let ctx = ctx.clone();
