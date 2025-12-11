@@ -331,6 +331,9 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
             .await
             .expect("Failed to load storage");
 
+        // Start background services (SAP discovery listener and announcer)
+        state.start_services().await;
+
         // GStreamer elements are discovered lazily on first /api/elements request
 
         // Create the HTTP app BEFORE auto-restart
@@ -443,6 +446,9 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
         AppState::with_json_storage(&config.flows_path, &config.blocks_path)
     };
     state.load_from_storage().await?;
+
+    // Start background services (SAP discovery listener and announcer)
+    state.start_services().await;
 
     // GStreamer elements are discovered lazily on first /api/elements request
 

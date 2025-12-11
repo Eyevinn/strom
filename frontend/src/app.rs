@@ -94,6 +94,18 @@ enum ImportFormat {
     GstLaunch,
 }
 
+/// Application page/section
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppPage {
+    /// Flow editor (default view)
+    #[default]
+    Flows,
+    /// SAP/AES67 stream discovery
+    Discovery,
+    /// PTP clock monitoring
+    Clocks,
+}
+
 /// Log message severity level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -303,6 +315,14 @@ pub struct StromApp {
     show_log_panel: bool,
     /// Maximum number of log entries to keep
     max_log_entries: usize,
+    /// Current application page
+    current_page: AppPage,
+    /// Discovery page state
+    discovery_page: crate::discovery::DiscoveryPage,
+    /// Clocks page state (PTP monitoring)
+    clocks_page: crate::clocks::ClocksPage,
+    /// Flow list filter text
+    flow_filter: String,
 }
 
 impl StromApp {
@@ -413,6 +433,10 @@ impl StromApp {
             log_entries: Vec::new(),
             show_log_panel: false,
             max_log_entries: 100,
+            current_page: AppPage::default(),
+            discovery_page: crate::discovery::DiscoveryPage::new(),
+            clocks_page: crate::clocks::ClocksPage::new(),
+            flow_filter: String::new(),
         };
 
         // Apply initial theme based on system preference
@@ -500,6 +524,10 @@ impl StromApp {
             log_entries: Vec::new(),
             show_log_panel: false,
             max_log_entries: 100,
+            current_page: AppPage::default(),
+            discovery_page: crate::discovery::DiscoveryPage::new(),
+            clocks_page: crate::clocks::ClocksPage::new(),
+            flow_filter: String::new(),
         };
 
         // Apply initial theme based on system preference
@@ -1582,19 +1610,132 @@ impl StromApp {
 
     /// Render the top toolbar.
     fn render_toolbar(&mut self, ctx: &Context) {
-        TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Strom heading as clickable link to GitHub
-                if ui
-                    .heading("⚡ Strom")
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Visit Strom on GitHub")
-                    .clicked()
-                {
-                    ctx.open_url(egui::OpenUrl::new_tab(
-                        "https://github.com/Eyevinn/strom",
-                    ));
-                }
+        // First top bar: System-wide controls
+        TopBottomPanel::top("system_bar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    // Strom heading as clickable link to GitHub
+                    if ui
+                        .heading("⚡ Strom")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Visit Strom on GitHub")
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
+                    }
+                    ui.separator();
+
+                    // Navigation tabs (bigger text)
+                    if ui
+                        .selectable_label(
+                            self.current_page == AppPage::Flows,
+                            egui::RichText::new("Flows").size(16.0),
+                        )
+                        .clicked()
+                    {
+                        self.current_page = AppPage::Flows;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.current_page == AppPage::Discovery,
+                            egui::RichText::new("Discovery").size(16.0),
+                        )
+                        .on_hover_text("Browse SAP/AES67 streams")
+                        .clicked()
+                    {
+                        self.current_page = AppPage::Discovery;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.current_page == AppPage::Clocks,
+                            egui::RichText::new("Clocks").size(16.0),
+                        )
+                        .on_hover_text("PTP clock synchronization")
+                        .clicked()
+                    {
+                        self.current_page = AppPage::Clocks;
+                    }
+
+                    // Right-aligned system controls
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // System monitoring widget (rightmost)
+                        let has_gpu = self
+                            .system_monitor
+                            .latest()
+                            .map(|s| !s.gpu_stats.is_empty())
+                            .unwrap_or(false);
+                        let monitor_height = if has_gpu { 30.0 } else { 24.0 };
+
+                        let monitor_response = ui.add(
+                            crate::system_monitor::CompactSystemMonitor::new(&self.system_monitor)
+                                .width(180.0)
+                                .height(monitor_height),
+                        );
+                        if monitor_response.clicked() {
+                            self.show_system_monitor = !self.show_system_monitor;
+                        }
+                        monitor_response.on_hover_text("Click to show detailed system monitoring");
+
+                        ui.separator();
+
+                        // Logout button (only show if auth is enabled and user is authenticated)
+                        if let Some(ref status) = self.auth_status {
+                            if status.auth_required
+                                && status.authenticated
+                                && ui.button("🚪").on_hover_text("Logout").clicked()
+                            {
+                                self.handle_logout(ctx.clone());
+                            }
+                        }
+
+                        // Theme switch button (leftmost)
+                        let theme_icon = match self.theme_preference {
+                            ThemePreference::System => "🖥",
+                            ThemePreference::Light => "☀",
+                            ThemePreference::Dark => "🌙",
+                        };
+
+                        if ui
+                            .button(theme_icon)
+                            .on_hover_text("Change theme")
+                            .clicked()
+                        {
+                            let new_theme = match self.theme_preference {
+                                ThemePreference::System => ThemePreference::Light,
+                                ThemePreference::Light => ThemePreference::Dark,
+                                ThemePreference::Dark => ThemePreference::System,
+                            };
+                            self.theme_preference = new_theme;
+                            self.apply_theme(ctx.clone());
+                        }
+                    });
+                });
+            });
+
+        // Second top bar: Page-specific controls
+        self.render_page_toolbar(ctx);
+    }
+
+    /// Render the page-specific toolbar (second row)
+    fn render_page_toolbar(&mut self, ctx: &Context) {
+        match self.current_page {
+            AppPage::Flows => self.render_flows_toolbar(ctx),
+            AppPage::Discovery => self.render_discovery_toolbar(ctx),
+            AppPage::Clocks => self.render_clocks_toolbar(ctx),
+        }
+    }
+
+    /// Render the flows page toolbar
+    fn render_flows_toolbar(&mut self, ctx: &Context) {
+        TopBottomPanel::top("page_toolbar")
+            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(8, 4)))
+            .show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.label(egui::RichText::new("Flows").heading());
                 ui.separator();
 
                 if ui
@@ -1631,12 +1772,12 @@ impl StromApp {
                     self.save_current_flow(ctx);
                 }
 
-                ui.separator();
-
-                // Flow controls
+                // Flow controls - only show when a flow is selected
                 let flow_info = self.current_flow().map(|f| (f.id, f.state));
 
                 if let Some((flow_id, state)) = flow_info {
+                    ui.separator();
+
                     let state = state.unwrap_or(PipelineState::Null);
 
                     // Map internal states to user-friendly names
@@ -1722,8 +1863,6 @@ impl StromApp {
                         self.stop_flow(ctx);
                     }
 
-                    ui.separator();
-
                     if ui
                         .button("🔍 Debug Graph")
                         .on_hover_text(format!(
@@ -1732,13 +1871,12 @@ impl StromApp {
                         ))
                         .clicked()
                     {
-                        // Open debug graph in new tab (works on both WASM and native)
                         let url = self.api.get_debug_graph_url(flow_id);
                         ctx.open_url(egui::OpenUrl::new_tab(&url));
                     }
+                }
 
-                    ui.separator();
-
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .button("ℹ Help")
                         .on_hover_text("Visit Strom on GitHub (F1)")
@@ -1748,61 +1886,50 @@ impl StromApp {
                             "https://github.com/Eyevinn/strom",
                         ));
                     }
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label("GStreamer Flow Engine");
-
-                    ui.separator();
-
-                    // System monitoring widget (height adjusts based on GPU availability)
-                    let has_gpu = self.system_monitor.latest()
-                        .map(|s| !s.gpu_stats.is_empty())
-                        .unwrap_or(false);
-                    let monitor_height = if has_gpu { 30.0 } else { 24.0 };
-
-                    let monitor_response = ui.add(
-                        crate::system_monitor::CompactSystemMonitor::new(&self.system_monitor)
-                            .width(180.0)
-                            .height(monitor_height),
-                    );
-                    if monitor_response.clicked() {
-                        self.show_system_monitor = !self.show_system_monitor;
-                    }
-                    monitor_response.on_hover_text("Click to show detailed system monitoring");
-
-                    ui.separator();
-
-                    // Logout button (only show if auth is enabled and user is authenticated)
-                    if let Some(ref status) = self.auth_status {
-                        if status.auth_required && status.authenticated {
-                            if ui.button("🚪 Logout").on_hover_text("Logout").clicked() {
-                                self.handle_logout(ctx.clone());
-                            }
-                            ui.separator();
-                        }
-                    }
-
-                    // Theme switch button
-                    let theme_icon = match self.theme_preference {
-                        ThemePreference::System => "🖥",
-                        ThemePreference::Light => "☀",
-                        ThemePreference::Dark => "🌙",
-                    };
-
-                    if ui.button(theme_icon).on_hover_text("Change theme").clicked() {
-                        // Cycle through themes: System -> Light -> Dark -> System
-                        let new_theme = match self.theme_preference {
-                            ThemePreference::System => ThemePreference::Light,
-                            ThemePreference::Light => ThemePreference::Dark,
-                            ThemePreference::Dark => ThemePreference::System,
-                        };
-                        self.theme_preference = new_theme;
-                        self.apply_theme(ctx.clone());
-                    }
                 });
             });
         });
+    }
+
+    /// Render the discovery page toolbar
+    fn render_discovery_toolbar(&mut self, ctx: &Context) {
+        let is_loading = self.discovery_page.loading;
+
+        TopBottomPanel::top("page_toolbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(egui::RichText::new("Discovery").heading());
+                    ui.separator();
+
+                    if ui.button("Refresh").clicked() {
+                        self.discovery_page
+                            .refresh(&self.api, ctx, &self.channels.sender());
+                    }
+                    if is_loading {
+                        ui.spinner();
+                    }
+                });
+            });
+    }
+
+    /// Render the clocks page toolbar
+    fn render_clocks_toolbar(&mut self, ctx: &Context) {
+        TopBottomPanel::top("page_toolbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(egui::RichText::new("Clocks").heading());
+                    ui.separator();
+                    ui.label("PTP clocks are shared per domain");
+                });
+            });
     }
 
     /// Render the flow list sidebar.
@@ -1811,16 +1938,85 @@ impl StromApp {
             .default_width(200.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading("Flows");
-                ui.separator();
+                // Filter input at top
+                ui.horizontal(|ui| {
+                    ui.label("Filter:");
+                    ui.add(egui::TextEdit::singleline(&mut self.flow_filter));
+                    if !self.flow_filter.is_empty() && ui.small_button("✕").clicked() {
+                        self.flow_filter.clear();
+                    }
+                });
+                ui.add_space(4.0);
 
                 if self.flows.is_empty() {
                     ui.label("No flows yet");
                     ui.label("Click 'New Flow' to get started");
                 } else {
-                    // Create sorted list of flows (by name)
-                    let mut sorted_flows: Vec<&Flow> = self.flows.iter().collect();
+                    // Create sorted and filtered list of flows (by name)
+                    let filter_lower = self.flow_filter.to_lowercase();
+                    let mut sorted_flows: Vec<&Flow> = self
+                        .flows
+                        .iter()
+                        .filter(|f| {
+                            filter_lower.is_empty() || f.name.to_lowercase().contains(&filter_lower)
+                        })
+                        .collect();
                     sorted_flows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+                    if sorted_flows.is_empty() {
+                        ui.label("No matching flows");
+                        return;
+                    }
+
+                    // Handle keyboard navigation
+                    let list_id = ui.id().with("flow_list_nav");
+                    let has_focus = ui.memory(|mem| mem.has_focus(list_id));
+
+                    if has_focus {
+                        let current_idx = self
+                            .selected_flow_id
+                            .and_then(|sel| sorted_flows.iter().position(|f| f.id == sel));
+
+                        ui.input(|input| {
+                            if input.key_pressed(egui::Key::ArrowDown) {
+                                if let Some(idx) = current_idx {
+                                    if idx + 1 < sorted_flows.len() {
+                                        let flow = sorted_flows[idx + 1];
+                                        self.selected_flow_id = Some(flow.id);
+                                        self.graph.deselect_all();
+                                        self.graph.clear_runtime_dynamic_pads();
+                                        self.graph.load(flow.elements.clone(), flow.links.clone());
+                                        self.graph.load_blocks(flow.blocks.clone());
+                                    }
+                                } else {
+                                    let flow = sorted_flows[0];
+                                    self.selected_flow_id = Some(flow.id);
+                                    self.graph.deselect_all();
+                                    self.graph.clear_runtime_dynamic_pads();
+                                    self.graph.load(flow.elements.clone(), flow.links.clone());
+                                    self.graph.load_blocks(flow.blocks.clone());
+                                }
+                            } else if input.key_pressed(egui::Key::ArrowUp) {
+                                if let Some(idx) = current_idx {
+                                    if idx > 0 {
+                                        let flow = sorted_flows[idx - 1];
+                                        self.selected_flow_id = Some(flow.id);
+                                        self.graph.deselect_all();
+                                        self.graph.clear_runtime_dynamic_pads();
+                                        self.graph.load(flow.elements.clone(), flow.links.clone());
+                                        self.graph.load_blocks(flow.blocks.clone());
+                                    }
+                                } else if !sorted_flows.is_empty() {
+                                    let flow = sorted_flows[sorted_flows.len() - 1];
+                                    self.selected_flow_id = Some(flow.id);
+                                    self.graph.deselect_all();
+                                    self.graph.clear_runtime_dynamic_pads();
+                                    self.graph.load(flow.elements.clone(), flow.links.clone());
+                                    self.graph.load_blocks(flow.blocks.clone());
+                                }
+                            }
+                        });
+                    }
 
                     for flow in sorted_flows {
                         let selected = self.selected_flow_id == Some(flow.id);
@@ -1841,6 +2037,8 @@ impl StromApp {
                             // Load flow into graph editor
                             self.graph.load(flow.elements.clone(), flow.links.clone());
                             self.graph.load_blocks(flow.blocks.clone());
+                            // Request focus for keyboard navigation
+                            ui.memory_mut(|mem| mem.request_focus(list_id));
                         }
 
                         // Check for QoS issues to tint the background
@@ -2104,45 +2302,42 @@ impl StromApp {
                                     }
                                 });
 
-                                // Show clock type indicator (before settings gear)
+                                // Show clock sync indicator for PTP/NTP (small colored dot)
                                 use strom_types::flow::{ClockSyncStatus, GStreamerClockType};
-                                let clock_label = match flow.properties.clock_type {
-                                    GStreamerClockType::Ptp => Some("PTP"),
-                                    GStreamerClockType::Ntp => Some("NTP"),
-                                    GStreamerClockType::Realtime => Some("RT"),
-                                    GStreamerClockType::Monotonic => None,
-                                };
-
-                                if let Some(label) = clock_label {
-                                    // Determine color based on sync status for PTP/NTP
-                                    let text_color = match flow.properties.clock_type {
-                                        GStreamerClockType::Ptp | GStreamerClockType::Ntp => {
-                                            match flow.properties.clock_sync_status {
-                                                Some(ClockSyncStatus::Synced) => {
-                                                    Color32::from_rgb(0, 200, 0)
-                                                }
-                                                Some(ClockSyncStatus::NotSynced) => {
-                                                    Color32::from_rgb(200, 0, 0)
-                                                }
-                                                _ => Color32::GRAY,
-                                            }
-                                        }
-                                        _ => Color32::GRAY,
+                                if matches!(
+                                    flow.properties.clock_type,
+                                    GStreamerClockType::Ptp | GStreamerClockType::Ntp
+                                ) {
+                                    let (text_color, tooltip) = match flow
+                                        .properties
+                                        .clock_sync_status
+                                    {
+                                        Some(ClockSyncStatus::Synced) => (
+                                            Color32::from_rgb(0, 200, 0),
+                                            format!(
+                                                "{:?} - Synchronized",
+                                                flow.properties.clock_type
+                                            ),
+                                        ),
+                                        Some(ClockSyncStatus::NotSynced) => (
+                                            Color32::from_rgb(200, 0, 0),
+                                            format!(
+                                                "{:?} - Not Synchronized",
+                                                flow.properties.clock_type
+                                            ),
+                                        ),
+                                        Some(ClockSyncStatus::Unknown) | None => (
+                                            Color32::GRAY,
+                                            format!("{:?} - Unknown", flow.properties.clock_type),
+                                        ),
                                     };
 
-                                    // Draw bordered text badge
-                                    ui.add_space(2.0);
-                                    egui::Frame::NONE
-                                        .stroke(egui::Stroke::new(1.0, text_color))
-                                        .inner_margin(egui::Margin::symmetric(2, 0))
-                                        .corner_radius(1.0)
-                                        .show(ui, |ui| {
-                                            ui.add(egui::Label::new(
-                                                egui::RichText::new(label)
-                                                    .size(9.0)
-                                                    .color(text_color),
-                                            ));
-                                        });
+                                    // Small colored dot indicator
+                                    ui.add_space(4.0);
+                                    ui.add(egui::Label::new(
+                                        egui::RichText::new("*").size(12.0).color(text_color),
+                                    ))
+                                    .on_hover_text(tooltip);
                                 }
 
                                 // Show thread priority warning indicator if priority not achieved
@@ -2868,7 +3063,7 @@ impl StromApp {
                 ui.add_space(10.0);
 
                 // Clock Type
-                ui.label("GStreamer Clock Type:");
+                ui.label("Clock Type:");
                 ui.horizontal(|ui| {
                     use strom_types::flow::GStreamerClockType;
 
@@ -2922,130 +3117,55 @@ impl StromApp {
                                 use strom_types::flow::ClockSyncStatus;
                                 match sync_status {
                                     ClockSyncStatus::Synced => {
-                                        ui.colored_label(Color32::from_rgb(0, 200, 0), "✓ Synced");
+                                        ui.colored_label(Color32::from_rgb(0, 200, 0), "[OK] Synced");
                                     }
                                     ClockSyncStatus::NotSynced => {
                                         ui.colored_label(
                                             Color32::from_rgb(200, 0, 0),
-                                            "✗ Not Synced",
+                                            "[!] Not Synced",
                                         );
                                     }
                                     ClockSyncStatus::Unknown => {
-                                        ui.colored_label(Color32::GRAY, "○ Unknown");
+                                        ui.colored_label(Color32::GRAY, "[-] Unknown");
                                     }
                                 }
                             } else {
-                                ui.colored_label(Color32::GRAY, "○ Unknown");
+                                ui.colored_label(Color32::GRAY, "[-] Unknown");
                             }
                         }
                     });
 
-                    // Show PTP clock details (grandmaster, master)
+                    // Show PTP-specific options and link to Clocks page
                     if matches!(
                         self.properties_clock_type_buffer,
                         strom_types::flow::GStreamerClockType::Ptp
                     ) {
                         if let Some(flow) = self.editing_properties_flow_id.and_then(|id| self.flows.iter().find(|f| f.id == id)) {
+                            ui.add_space(5.0);
+
+                            // Show warning if restart needed - compare buffer with running domain
                             if let Some(ref ptp_info) = flow.properties.ptp_info {
-                                ui.add_space(5.0);
-                                // Show warning if restart needed - compare buffer with running domain
-                                // This shows immediately when user changes the domain field
                                 let buffer_domain: u8 = self
                                     .properties_ptp_domain_buffer
                                     .parse()
                                     .unwrap_or(0);
                                 let domain_changed = buffer_domain != ptp_info.domain;
                                 if domain_changed {
-                                    ui.horizontal(|ui| {
-                                        ui.colored_label(
-                                            Color32::from_rgb(255, 165, 0),
-                                            "⚠ Restart needed - domain changed",
-                                        );
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Running domain:");
-                                        ui.monospace(format!("{}", ptp_info.domain));
-                                    });
-                                }
-                                if let Some(ref gm) = ptp_info.grandmaster_clock_id {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Grandmaster:");
-                                        ui.monospace(gm);
-                                    });
-                                }
-                                if let Some(ref master) = ptp_info.master_clock_id {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Master Clock:");
-                                        ui.monospace(master);
-                                    });
-                                }
-                                // Show PTP statistics if available
-                                if let Some(ref stats) = ptp_info.stats {
-                                    ui.add_space(5.0);
-                                    let graphs = crate::ptp_monitor::PtpStatsGraphs::new(
-                                        &self.ptp_stats,
-                                        flow.id,
+                                    ui.colored_label(
+                                        Color32::from_rgb(255, 165, 0),
+                                        "! Restart needed - domain changed",
                                     );
-                                    ui.collapsing("Clock Statistics", |ui| {
-                                        if let Some(offset_ns) = stats.clock_offset_ns {
-                                            ui.horizontal(|ui| {
-                                                graphs.draw_offset_graph(ui);
-                                                ui.vertical(|ui| {
-                                                    ui.label("Clock Offset");
-                                                    let offset_us = offset_ns as f64 / 1000.0;
-                                                    let color = if offset_us.abs() < 10.0 {
-                                                        Color32::from_rgb(0, 200, 0)
-                                                    } else if offset_us.abs() < 100.0 {
-                                                        Color32::from_rgb(255, 165, 0)
-                                                    } else {
-                                                        Color32::from_rgb(200, 0, 0)
-                                                    };
-                                                    ui.colored_label(
-                                                        color,
-                                                        format!("{:+.1} µs", offset_us),
-                                                    );
-                                                });
-                                            });
-                                        }
-                                        if let Some(r_squared) = stats.r_squared {
-                                            ui.horizontal(|ui| {
-                                                graphs.draw_r_squared_graph(ui);
-                                                ui.vertical(|ui| {
-                                                    ui.label("R² (quality)");
-                                                    let color = if r_squared > 0.99 {
-                                                        Color32::from_rgb(0, 200, 0)
-                                                    } else if r_squared > 0.95 {
-                                                        Color32::from_rgb(255, 165, 0)
-                                                    } else {
-                                                        Color32::from_rgb(200, 0, 0)
-                                                    };
-                                                    ui.colored_label(
-                                                        color,
-                                                        format!("{:.6}", r_squared),
-                                                    );
-                                                });
-                                            });
-                                        }
-                                        if let Some(delay_ns) = stats.mean_path_delay_ns {
-                                            ui.horizontal(|ui| {
-                                                graphs.draw_delay_graph(ui);
-                                                ui.vertical(|ui| {
-                                                    ui.label("Path Delay");
-                                                    let delay_us = delay_ns as f64 / 1000.0;
-                                                    ui.monospace(format!("{:.1} µs", delay_us));
-                                                });
-                                            });
-                                        }
-                                        if let Some(rate) = stats.clock_rate {
-                                            ui.horizontal(|ui| {
-                                                ui.label("Clock Rate:");
-                                                // Show ppm deviation from 1.0
-                                                let ppm = (rate - 1.0) * 1_000_000.0;
-                                                ui.monospace(format!("{:+.2} ppm", ppm));
-                                            });
-                                        }
-                                    });
                                 }
+                            }
+
+                            // Button to open Clocks page for detailed stats
+                            ui.add_space(5.0);
+                            if ui
+                                .button("View PTP Statistics")
+                                .on_hover_text("Open Clocks page for detailed PTP statistics")
+                                .clicked()
+                            {
+                                self.current_page = AppPage::Clocks;
                             }
                         }
                     }
@@ -3093,13 +3213,13 @@ impl StromApp {
                             if status.achieved {
                                 ui.colored_label(
                                     Color32::from_rgb(0, 200, 0),
-                                    format!("✓ Achieved ({} threads)", status.threads_configured),
+                                    format!("[OK] Achieved ({} threads)", status.threads_configured),
                                 );
                             } else if let Some(ref err) = status.error {
-                                ui.colored_label(Color32::from_rgb(255, 165, 0), "⚠ Warning");
+                                ui.colored_label(Color32::from_rgb(255, 165, 0), "[!] Warning");
                                 ui.label(format!("- {}", err));
                             } else {
-                                ui.colored_label(Color32::GRAY, "○ Not set");
+                                ui.colored_label(Color32::GRAY, "[-] Not set");
                             }
                         });
                     }
@@ -3991,6 +4111,8 @@ impl eframe::App for StromApp {
                             clock_offset_ns,
                             r_squared,
                             clock_rate,
+                            grandmaster_id,
+                            master_id,
                         } => {
                             // Update PTP stats in the corresponding flow for real-time display
                             if let Some(flow) = self.flows.iter_mut().find(|f| f.id == flow_id) {
@@ -4031,6 +4153,8 @@ impl eframe::App for StromApp {
                                     clock_offset_ns,
                                     r_squared,
                                     clock_rate,
+                                    grandmaster_id,
+                                    master_id,
                                 },
                             );
                         }
@@ -4389,6 +4513,18 @@ impl eframe::App for StromApp {
                     tracing::info!("Available channels loaded: {} channels", channels.len());
                     self.available_channels = channels;
                 }
+                AppMessage::DiscoveredStreamsLoaded(streams) => {
+                    tracing::info!("Discovered streams loaded: {} streams", streams.len());
+                    self.discovery_page.set_discovered_streams(streams);
+                }
+                AppMessage::AnnouncedStreamsLoaded(streams) => {
+                    tracing::info!("Announced streams loaded: {} streams", streams.len());
+                    self.discovery_page.set_announced_streams(streams);
+                }
+                AppMessage::StreamSdpLoaded { stream_id, sdp } => {
+                    tracing::info!("Stream SDP loaded for: {}", stream_id);
+                    self.discovery_page.set_stream_sdp(stream_id, sdp);
+                }
                 // SDP messages are handled elsewhere
                 AppMessage::SdpLoaded { .. } | AppMessage::SdpError(_) => {}
             }
@@ -4533,31 +4669,49 @@ impl eframe::App for StromApp {
         }
 
         self.render_toolbar(ctx);
-        self.render_flow_list(ctx);
 
-        // Always show palette, even if no flow selected
-        if self.current_flow().is_some() {
-            self.render_palette(ctx);
-        } else {
-            // Show simplified palette when no flow is selected
-            SidePanel::right("palette")
-                .default_width(250.0)
-                .resizable(true)
-                .show(ctx, |ui| {
-                    ui.heading("Elements");
-                    ui.separator();
-                    ui.label("Select or create a flow to see the element palette");
+        // Render page-specific content
+        match self.current_page {
+            AppPage::Flows => {
+                self.render_flow_list(ctx);
+
+                // Always show palette, even if no flow selected
+                if self.current_flow().is_some() {
+                    self.render_palette(ctx);
+                } else {
+                    // Show simplified palette when no flow is selected
+                    SidePanel::right("palette")
+                        .default_width(250.0)
+                        .resizable(true)
+                        .show(ctx, |ui| {
+                            ui.heading("Elements");
+                            ui.separator();
+                            ui.label("Select or create a flow to see the element palette");
+                        });
+                }
+
+                self.render_canvas(ctx);
+                self.render_log_panel(ctx);
+                self.render_new_flow_dialog(ctx);
+                self.render_delete_confirmation_dialog(ctx);
+                self.render_flow_properties_dialog(ctx);
+                self.render_import_dialog(ctx);
+            }
+            AppPage::Discovery => {
+                CentralPanel::default().show(ctx, |ui| {
+                    self.discovery_page
+                        .render(ui, &self.api, ctx, &self.channels.tx);
                 });
+            }
+            AppPage::Clocks => {
+                CentralPanel::default().show(ctx, |ui| {
+                    self.clocks_page.render(ui, &self.ptp_stats, &self.flows);
+                });
+            }
         }
 
-        self.render_canvas(ctx);
         self.render_status_bar(ctx);
-        self.render_log_panel(ctx);
-        self.render_new_flow_dialog(ctx);
-        self.render_delete_confirmation_dialog(ctx);
         self.render_system_monitor_window(ctx);
-        self.render_flow_properties_dialog(ctx);
-        self.render_import_dialog(ctx);
 
         // Process pending flow copy (after render to avoid borrow checker issues)
         if let Some(flow) = self.flow_pending_copy.take() {

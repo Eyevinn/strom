@@ -1216,4 +1216,104 @@ impl ApiClient {
         info!("Successfully loaded {} source flows", sources.sources.len());
         Ok(sources)
     }
+
+    /// Get discovered SAP/AES67 streams.
+    pub async fn get_discovered_streams(
+        &self,
+    ) -> ApiResult<Vec<crate::discovery::DiscoveredStream>> {
+        use tracing::info;
+
+        let url = format!("{}/discovery/streams", self.base_url);
+        info!("Fetching discovered streams from: {}", url);
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error fetching discovered streams: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        let streams: Vec<crate::discovery::DiscoveredStream> =
+            response.json().await.map_err(|e| {
+                tracing::error!("Failed to parse discovered streams response: {}", e);
+                ApiError::Decode(e.to_string())
+            })?;
+
+        info!("Successfully loaded {} discovered streams", streams.len());
+        Ok(streams)
+    }
+
+    /// Get streams we are announcing via SAP.
+    pub async fn get_announced_streams(&self) -> ApiResult<Vec<crate::discovery::AnnouncedStream>> {
+        use tracing::info;
+
+        let url = format!("{}/discovery/announced", self.base_url);
+        info!("Fetching announced streams from: {}", url);
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error fetching announced streams: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        let streams: Vec<crate::discovery::AnnouncedStream> =
+            response.json().await.map_err(|e| {
+                tracing::error!("Failed to parse announced streams response: {}", e);
+                ApiError::Decode(e.to_string())
+            })?;
+
+        info!("Successfully loaded {} announced streams", streams.len());
+        Ok(streams)
+    }
+
+    /// Get the SDP for a specific discovered stream.
+    pub async fn get_stream_sdp(&self, stream_id: &str) -> ApiResult<String> {
+        use tracing::info;
+
+        let url = format!("{}/discovery/streams/{}/sdp", self.base_url, stream_id);
+        info!("Fetching SDP for stream: {}", stream_id);
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error fetching stream SDP: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        let sdp = response.text().await.map_err(|e| {
+            tracing::error!("Failed to read SDP response: {}", e);
+            ApiError::Decode(e.to_string())
+        })?;
+
+        info!("Successfully loaded SDP for stream: {}", stream_id);
+        Ok(sdp)
+    }
 }

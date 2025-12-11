@@ -8,8 +8,11 @@
 
 mod api;
 mod app;
+mod clocks;
 mod compositor_editor;
+mod discovery;
 mod graph;
+mod list_navigator;
 mod login;
 mod meter;
 mod palette;

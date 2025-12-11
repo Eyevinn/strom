@@ -86,6 +86,10 @@ pub enum StromEvent {
         r_squared: Option<f64>,
         /// Clock rate ratio (local vs master)
         clock_rate: Option<f64>,
+        /// Grandmaster clock ID (EUI-64 identifier)
+        grandmaster_id: Option<u64>,
+        /// Master clock ID (EUI-64 identifier)
+        master_id: Option<u64>,
     },
     /// A flow's published output became available (flow started)
     SourceOutputAvailable {
@@ -131,6 +135,17 @@ pub enum StromEvent {
         /// Whether pipeline is falling behind (avg_proportion < 1.0)
         is_falling_behind: bool,
     },
+    /// A new AES67 stream was discovered via SAP or mDNS
+    StreamDiscovered {
+        stream_id: String,
+        name: String,
+        /// Discovery source: "sap" or "mdns"
+        source: String,
+    },
+    /// A discovered stream was updated (re-announced)
+    StreamUpdated { stream_id: String },
+    /// A discovered stream expired or was deleted
+    StreamRemoved { stream_id: String },
 }
 
 impl StromEvent {
@@ -317,6 +332,22 @@ impl StromEvent {
                     "Subscription to '{}' from flow {} in flow {}: {}",
                     output_name, source_flow_id, consumer_flow_id, status
                 )
+            }
+            StromEvent::StreamDiscovered {
+                stream_id,
+                name,
+                source,
+            } => {
+                format!(
+                    "Discovered AES67 stream '{}' ({}) via {}",
+                    name, stream_id, source
+                )
+            }
+            StromEvent::StreamUpdated { stream_id } => {
+                format!("Updated AES67 stream {}", stream_id)
+            }
+            StromEvent::StreamRemoved { stream_id } => {
+                format!("Removed AES67 stream {}", stream_id)
             }
         }
     }

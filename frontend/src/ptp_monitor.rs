@@ -15,6 +15,8 @@ pub struct PtpStatsData {
     pub clock_offset_ns: Option<i64>,
     pub r_squared: Option<f64>,
     pub clock_rate: Option<f64>,
+    pub grandmaster_id: Option<u64>,
+    pub master_id: Option<u64>,
 }
 
 /// Data store for PTP statistics with history per flow.
@@ -26,7 +28,7 @@ pub struct PtpStatsStore {
 
 /// PTP stats history for a single flow.
 #[derive(Clone)]
-pub(crate) struct PtpFlowHistory {
+pub struct PtpFlowHistory {
     /// Clock offset history in microseconds
     clock_offset_history: VecDeque<f64>,
     /// R-squared history (0.0-1.0)
@@ -35,6 +37,28 @@ pub(crate) struct PtpFlowHistory {
     path_delay_history: VecDeque<f64>,
     /// Latest stats
     latest: Option<PtpStatsData>,
+}
+
+impl PtpFlowHistory {
+    /// Get the latest PTP stats.
+    pub fn latest(&self) -> Option<&PtpStatsData> {
+        self.latest.as_ref()
+    }
+
+    /// Get the clock offset history (in microseconds).
+    pub fn clock_offset_history(&self) -> &VecDeque<f64> {
+        &self.clock_offset_history
+    }
+
+    /// Get the R² history.
+    pub fn r_squared_history(&self) -> &VecDeque<f64> {
+        &self.r_squared_history
+    }
+
+    /// Get the path delay history (in microseconds).
+    pub fn path_delay_history(&self) -> &VecDeque<f64> {
+        &self.path_delay_history
+    }
 }
 
 impl Default for PtpFlowHistory {

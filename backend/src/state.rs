@@ -1,8 +1,10 @@
 //! Application state management.
 
 use crate::blocks::BlockRegistry;
+use crate::discovery::DiscoveryService;
 use crate::events::EventBroadcaster;
 use crate::gst::{ElementDiscovery, PipelineError, PipelineManager};
+use crate::ptp_monitor::PtpMonitor;
 use crate::sharing::ChannelRegistry;
 use crate::storage::{JsonFileStorage, Storage};
 use crate::system_monitor::SystemMonitor;
@@ -39,11 +41,16 @@ struct AppStateInner {
     system_monitor: SystemMonitor,
     /// Channel registry for inter-pipeline sharing
     channel_registry: ChannelRegistry,
+    /// AES67 stream discovery service (SAP/mDNS)
+    discovery: DiscoveryService,
+    /// PTP clock monitoring service
+    ptp_monitor: PtpMonitor,
 }
 
 impl AppState {
     /// Create new application state with the given storage backend.
     pub fn new(storage: impl Storage + 'static, blocks_path: impl Into<PathBuf>) -> Self {
+        let events = EventBroadcaster::default();
         Self {
             inner: Arc::new(AppStateInner {
                 flows: RwLock::new(HashMap::new()),
@@ -51,10 +58,12 @@ impl AppState {
                 element_discovery: RwLock::new(ElementDiscovery::new()),
                 cached_elements: RwLock::new(Vec::new()),
                 pipelines: RwLock::new(HashMap::new()),
-                events: EventBroadcaster::default(),
+                events: events.clone(),
                 block_registry: BlockRegistry::new(blocks_path),
                 system_monitor: SystemMonitor::new(),
                 channel_registry: ChannelRegistry::new(),
+                discovery: DiscoveryService::new(events),
+                ptp_monitor: PtpMonitor::new(),
             }),
         }
     }
@@ -72,6 +81,24 @@ impl AppState {
     /// Get the channel registry for inter-pipeline sharing.
     pub fn channels(&self) -> &ChannelRegistry {
         &self.inner.channel_registry
+    }
+
+    /// Get the discovery service for AES67 streams.
+    pub fn discovery(&self) -> &DiscoveryService {
+        &self.inner.discovery
+    }
+
+    /// Get the PTP clock monitor.
+    pub fn ptp_monitor(&self) -> &PtpMonitor {
+        &self.inner.ptp_monitor
+    }
+
+    /// Start background services (SAP discovery, etc).
+    pub async fn start_services(&self) {
+        info!("Starting discovery service (SAP listener and announcer)...");
+        if let Err(e) = self.inner.discovery.start().await {
+            warn!("Failed to start discovery service: {}", e);
+        }
     }
 
     /// Create new application state with JSON file storage.
@@ -114,6 +141,24 @@ impl AppState {
                             flow.name, flow.state
                         );
                         flow.state = None;
+                    }
+                }
+
+                // Register flows with PTP monitor for those that have PTP configured
+                for flow in flows.values() {
+                    if flow.properties.clock_type == strom_types::flow::GStreamerClockType::Ptp {
+                        let domain = flow.properties.ptp_domain.unwrap_or(0);
+                        if let Err(e) = self.inner.ptp_monitor.register_flow(flow.id, domain) {
+                            warn!(
+                                "Failed to register flow '{}' with PTP monitor: {}",
+                                flow.name, e
+                            );
+                        } else {
+                            info!(
+                                "Registered flow '{}' with PTP monitor (domain {})",
+                                flow.name, domain
+                            );
+                        }
                     }
                 }
 
@@ -242,6 +287,17 @@ impl AppState {
             return Err(e.into());
         }
 
+        // Register/unregister with PTP monitor based on clock configuration
+        if flow.properties.clock_type == strom_types::flow::GStreamerClockType::Ptp {
+            let domain = flow.properties.ptp_domain.unwrap_or(0);
+            if let Err(e) = self.inner.ptp_monitor.register_flow(flow.id, domain) {
+                warn!("Failed to register flow with PTP monitor: {}", e);
+            }
+        } else {
+            // Flow doesn't use PTP - unregister if it was previously registered
+            self.inner.ptp_monitor.unregister_flow(flow.id);
+        }
+
         // Broadcast event
         if is_new {
             self.inner
@@ -279,6 +335,9 @@ impl AppState {
             let mut flows = self.inner.flows.write().await;
             flows.remove(id);
         }
+
+        // Unregister from PTP monitor
+        self.inner.ptp_monitor.unregister_flow(*id);
 
         // Broadcast event
         self.inner
@@ -492,6 +551,12 @@ impl AppState {
                     runtime_data.insert("sdp".to_string(), sdp.clone());
                     info!("Stored SDP for block {}: {} bytes", block.id, sdp.len());
                 }
+
+                // Register stream for SAP announcement
+                self.inner
+                    .discovery
+                    .announce_stream(*id, &block.id, &sdp)
+                    .await;
             }
         }
 
@@ -635,6 +700,14 @@ impl AppState {
                             source_flow_id: *id,
                             output_name: block.id.clone(),
                         });
+                }
+
+                // Remove SAP announcement for AES67 output blocks
+                if block.block_definition_id == "builtin.aes67_output" {
+                    self.inner
+                        .discovery
+                        .remove_announcement(*id, &block.id)
+                        .await;
                 }
             }
         }
@@ -851,27 +924,13 @@ impl AppState {
         self.inner.system_monitor.collect_stats().await
     }
 
-    /// Get PTP statistics events for all running pipelines with PTP clocks.
-    /// Returns a Vec of StromEvent::PtpStats for each flow with an active PTP clock.
+    /// Get PTP statistics events for all flows with PTP configured.
+    ///
+    /// This returns stats for all PTP domains being monitored, regardless of
+    /// whether the flows are currently running. PTP clocks are shared resources
+    /// and sync status is available even when no pipeline is using them.
     pub async fn get_ptp_stats_events(&self) -> Vec<StromEvent> {
-        let pipelines = self.inner.pipelines.read().await;
-        let mut events = Vec::new();
-
-        for (flow_id, pipeline) in pipelines.iter() {
-            if let Some(ptp_info) = pipeline.get_ptp_info() {
-                events.push(StromEvent::PtpStats {
-                    flow_id: *flow_id,
-                    domain: ptp_info.domain,
-                    synced: ptp_info.synced,
-                    mean_path_delay_ns: ptp_info.stats.as_ref().and_then(|s| s.mean_path_delay_ns),
-                    clock_offset_ns: ptp_info.stats.as_ref().and_then(|s| s.clock_offset_ns),
-                    r_squared: ptp_info.stats.as_ref().and_then(|s| s.r_squared),
-                    clock_rate: ptp_info.stats.as_ref().and_then(|s| s.clock_rate),
-                });
-            }
-        }
-
-        events
+        self.inner.ptp_monitor.get_stats_events()
     }
 }
 

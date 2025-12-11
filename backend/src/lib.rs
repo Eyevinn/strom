@@ -15,6 +15,7 @@ pub mod assets;
 pub mod auth;
 pub mod blocks;
 pub mod config;
+pub mod discovery;
 pub mod events;
 pub mod gst;
 pub mod gui;
@@ -22,6 +23,7 @@ pub mod layout;
 pub mod network;
 pub mod openapi;
 pub mod paths;
+pub mod ptp_monitor;
 pub mod sharing;
 pub mod state;
 pub mod stats;
@@ -148,6 +150,14 @@ pub async fn create_app_with_state_and_auth(
         .route("/network/interfaces", get(api::network::list_interfaces))
         // Sources (for inter-pipeline sharing)
         .route("/sources", get(api::flows::get_available_sources))
+        // Discovery (SAP/AES67)
+        .route("/discovery/streams", get(api::discovery::list_streams))
+        .route("/discovery/streams/{id}", get(api::discovery::get_stream))
+        .route(
+            "/discovery/streams/{id}/sdp",
+            get(api::discovery::get_stream_sdp),
+        )
+        .route("/discovery/announced", get(api::discovery::list_announced))
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 
