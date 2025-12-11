@@ -5,7 +5,7 @@ use std::path::Path;
 use strom_types::BlockDefinition;
 use thiserror::Error;
 use tokio::fs;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 #[derive(Error, Debug)]
 pub enum StorageError {
