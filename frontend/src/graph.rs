@@ -481,6 +481,11 @@ impl GraphEditor {
         self.blocks.iter_mut().find(|b| b.id == selected_id)
     }
 
+    /// Get a mutable reference to a block by ID.
+    pub fn get_block_by_id_mut(&mut self, block_id: &str) -> Option<&mut BlockInstance> {
+        self.blocks.iter_mut().find(|b| b.id == block_id)
+    }
+
     /// Get the block definition for a block instance.
     pub fn get_block_definition(&self, block: &BlockInstance) -> Option<&BlockDefinition> {
         self.block_definition_map.get(&block.block_definition_id)

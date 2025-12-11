@@ -118,6 +118,8 @@ pub enum AppMessage {
     AnnouncedStreamsLoaded(Vec<crate::discovery::AnnouncedStream>),
     /// SDP loaded for a discovered stream
     StreamSdpLoaded { stream_id: String, sdp: String },
+    /// SDP loaded from stream picker (for updating AES67 Input block)
+    StreamPickerSdpLoaded { block_id: String, sdp: String },
 }
 
 /// WebSocket connection state.

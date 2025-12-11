@@ -58,6 +58,8 @@ pub struct DiscoveryPage {
     pub last_fetch: instant::Instant,
     /// Whether we're currently loading
     pub loading: bool,
+    /// Pending SDP for creating a new flow (set when "Create Flow" is clicked)
+    pub pending_create_flow_sdp: Option<String>,
     /// Error message if any
     pub error: Option<String>,
     /// Search filter
@@ -77,6 +79,7 @@ impl DiscoveryPage {
             announced_streams: Vec::new(),
             last_fetch: instant::Instant::now(),
             loading: false,
+            pending_create_flow_sdp: None,
             error: None,
             search_filter: String::new(),
             selected_stream: None,
@@ -371,11 +374,6 @@ impl DiscoveryPage {
                         ui.label(format!("{}s", stream.ttl_secs));
                         ui.end_row();
                     });
-
-                // TODO: Add "Create AES67 Input" button
-                // if ui.button("Create AES67 Input Block").clicked() {
-                //     // Create a new flow or add block to existing flow
-                // }
             }
             SelectedStream::Announced(flow_id, block_id) => {
                 let Some(stream) = self
@@ -454,6 +452,16 @@ impl DiscoveryPage {
                             .desired_width(f32::INFINITY),
                     );
                 });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("📋 Copy SDP").clicked() {
+                    ui.ctx().copy_text(sdp.clone());
+                }
+                if ui.button("➕ Create Flow").clicked() {
+                    self.pending_create_flow_sdp = Some(sdp.clone());
+                }
+            });
         } else {
             ui.label("Loading SDP...");
         }
@@ -549,6 +557,11 @@ impl DiscoveryPage {
                 self.selected_stream_sdp = Some(sdp);
             }
         }
+    }
+
+    /// Take pending create flow SDP if set.
+    pub fn take_pending_create_flow_sdp(&mut self) -> Option<String> {
+        self.pending_create_flow_sdp.take()
     }
 }
 

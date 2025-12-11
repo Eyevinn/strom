@@ -8,6 +8,15 @@ use strom_types::{
     BlockDefinition, BlockInstance, Element, PropertyValue,
 };
 
+/// Result from showing the block property inspector.
+#[derive(Default)]
+pub struct BlockInspectorResult {
+    /// Whether delete was requested
+    pub delete_requested: bool,
+    /// Whether browse streams was requested (for AES67 Input SDP)
+    pub browse_streams_requested: bool,
+}
+
 /// Property inspector panel.
 pub struct PropertyInspector;
 
@@ -292,7 +301,7 @@ impl PropertyInspector {
     }
 
     /// Show the property inspector for the given block.
-    /// Returns true if delete was requested.
+    /// Returns actions requested by the user.
     #[allow(clippy::too_many_arguments)]
     pub fn show_block(
         ui: &mut Ui,
@@ -304,9 +313,9 @@ impl PropertyInspector {
         stats: Option<&crate::api::FlowStatsInfo>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
-    ) -> bool {
+    ) -> BlockInspectorResult {
         let block_id = block.id.clone();
-        let mut delete_requested = false;
+        let mut result = BlockInspectorResult::default();
 
         ui.push_id(&block_id, |ui| {
             // Block name (read-only)
@@ -334,7 +343,17 @@ impl PropertyInspector {
 
             // Delete button
             if ui.button("🗑 Delete Block").clicked() {
-                delete_requested = true;
+                result.delete_requested = true;
+            }
+
+            // Browse Streams button for AES67 Input blocks
+            if definition.id == "builtin.aes67_input"
+                && ui
+                    .button("🔍 Browse Streams")
+                    .on_hover_text("Select from discovered SAP streams")
+                    .clicked()
+            {
+                result.browse_streams_requested = true;
             }
 
             // Edit Layout button for compositor blocks
@@ -510,7 +529,7 @@ impl PropertyInspector {
                 });
         });
 
-        delete_requested
+        result
     }
 
     fn show_exposed_property(

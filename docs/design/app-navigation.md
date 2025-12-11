@@ -1,20 +1,12 @@
-# Application Navigation & Pages Design
+# Application Navigation & Pages
 
-## Current State
+## Current Implementation
 
-The frontend is currently flow-centric with no top-level navigation:
-- Flow list in left sidebar
-- Graph editor in center
-- Properties panel on right
-- All UI revolves around the selected flow
-
-## Proposed Navigation Structure
-
-Add a primary navigation bar to switch between major sections:
+The frontend now has a multi-page structure with top-level navigation:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  [Strom Logo]  │ Flows │ Discovery │ PTP │ Files │ Settings │   │
+│  [Strom Logo]  │ Flows │ Discovery │ Clocks │     [Status Bar] │
 ├────────────────┴────────────────────────────────────────────────┤
 │                                                                 │
 │                    Page Content Area                            │
@@ -22,284 +14,134 @@ Add a primary navigation bar to switch between major sections:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Pages Overview
+## Pages
 
-### 1. Flows (existing, default)
-Current flow editor - no changes needed to core functionality.
-- Flow list
-- Graph editor
-- Properties panel
-- Palette
+### 1. Flows (default)
 
-### 2. Discovery (SAP Browser)
-Browse and manage discovered AES67 streams.
+The main flow editor page with:
+- Flow list in left sidebar (with filter/search)
+- Graph editor in center
+- Properties/palette panel on right
+- Block palette for adding elements
 
-**Features:**
-- List discovered streams with details (name, origin, channels, sample rate)
-- Filter/search by name, encoding, source
-- View raw SDP
-- Create AES67 Input block from discovered stream
-- Show our announced streams
-- Real-time updates via WebSocket
+### 2. Discovery
 
-**Settings within page:**
-- SAP multicast address (default: 224.2.127.254, configurable for network-wide reach)
-- SAP port (default: 9875)
-- Enable/disable listener
-- Enable/disable announcer
-- Network interface selection
-
-### 3. PTP (Clock Synchronization)
-Dedicated PTP monitoring and configuration.
+Browse and manage AES67 streams discovered via SAP:
 
 **Features:**
-- PTP clock status (synced/not synced)
-- Clock statistics:
+- Split view: stream list + details panel
+- Tabs for Discovered (RX) and Announced (TX) streams
+- Filter/search by name, origin, multicast address
+- View raw SDP content
+- "Copy SDP" button
+- "Create Flow" button - creates new flow with AES67 Input pre-configured
+- Auto-refresh every 5 seconds
+
+**Stream Details:**
+- Name, source, multicast address, port
+- Audio format (channels, sample rate, encoding)
+- Origin host, first/last seen times, TTL
+
+### 3. Clocks
+
+PTP clock monitoring grouped by domain:
+
+**Features:**
+- Domain list with sync status indicators
+- Detailed stats per domain:
+  - Sync status (Synchronized / Not Synchronized)
+  - Grandmaster and Master clock IDs
+  - Clock offset (nanoseconds/microseconds)
   - Mean path delay
-  - Clock offset
-  - R-squared (estimation quality)
+  - R² (clock estimation quality)
   - Clock rate ratio
-- PTP domain selection
-- Historical graphs (offset over time)
-- Multi-domain support (show all active domains)
+- Historical graphs:
+  - Clock offset over time
+  - R² quality over time
+  - Path delay over time
+- List of flows using each domain
 
-**Settings:**
-- Default PTP domain
-- PTP network interface
+**Note:** PTP clocks are shared resources - one clock instance per domain regardless of how many flows use it.
 
-### 4. Files (Media Management)
-Upload, browse, and manage media files.
+---
 
-**Features:**
-- File browser (tree view or list)
-- Upload files (drag & drop)
-- Download files
-- Organize into folders
-- Preview (thumbnails for video/images)
-- File metadata display
-
-**Categories:**
-- Playout files (video, audio, images)
-- Recordings (captured streams)
-- SDP files (manual imports)
-- Logs (server logs download)
-
-**Settings:**
-- Storage paths
-- Auto-cleanup policies
-- Recording settings
-
-### 5. Settings (Application Configuration)
-Central configuration page.
-
-**Sections:**
-
-#### 5.1 Server Identity
-- Hostname (display name for this Strom instance)
-- Description/notes
-- Location (for multi-server deployments)
-- Admin contact
-
-#### 5.2 Network Configuration
-- Primary network interface
-- SAP settings (also accessible from Discovery page)
-- PTP settings (also accessible from PTP page)
-
-#### 5.3 Authentication
-- Enable/disable authentication
-- User management (if multi-user in future)
-- API key management
-
-#### 5.4 Storage
-- Media storage path
-- Recording output path
-- Log retention
-- Auto-cleanup settings
-
-#### 5.5 Appearance
-- Theme (dark/light)
-- UI density
-- Default view on startup
-
-#### 5.6 About
-- Version info
-- License
-- System information
-
-## Backend API Changes
-
-### New Endpoints
-
-```
-# Discovery Settings
-GET  /api/settings/discovery
-PUT  /api/settings/discovery
-  {
-    sap_enabled: bool,
-    sap_multicast_address: string,
-    sap_port: u16,
-    sap_interface: string | null,
-    announcer_enabled: bool
-  }
-
-# PTP Settings
-GET  /api/settings/ptp
-PUT  /api/settings/ptp
-  {
-    default_domain: u8,
-    interface: string | null
-  }
-
-# Server Identity
-GET  /api/settings/identity
-PUT  /api/settings/identity
-  {
-    hostname: string,
-    description: string,
-    location: string,
-    admin_contact: string
-  }
-
-# Storage Settings
-GET  /api/settings/storage
-PUT  /api/settings/storage
-  {
-    media_path: string,
-    recording_path: string,
-    log_retention_days: u32
-  }
-
-# Files API
-GET  /api/files                    # List files
-GET  /api/files/{path}             # Get file info or contents
-POST /api/files/{path}             # Upload file
-DELETE /api/files/{path}           # Delete file
-GET  /api/files/{path}/download    # Download file
-
-# Logs
-GET  /api/logs                     # List log files
-GET  /api/logs/{name}              # Get log contents
-GET  /api/logs/{name}/download     # Download log file
-```
-
-### Settings Storage
-
-Options:
-1. **Config file** (`strom.toml`) - Already exists for some settings
-2. **Database** - If using SQLx already
-3. **Separate settings file** - `settings.json` in config directory
-
-Recommendation: Extend existing `strom.toml` / use figment for layered config.
-
-## Frontend Implementation
+## Implementation Details
 
 ### Navigation State
 
-Add to `StromApp`:
 ```rust
-enum AppPage {
+pub enum AppPage {
     Flows,
     Discovery,
-    Ptp,
-    Files,
-    Settings,
+    Clocks,
 }
 
 struct StromApp {
     current_page: AppPage,
+    discovery_page: DiscoveryPage,
+    clocks_page: ClocksPage,
     // ... existing fields
 }
 ```
 
-### Page Components
+### File Structure
 
-New files:
 ```
-frontend/src/pages/
-├── mod.rs
-├── discovery.rs      # SAP browser
-├── ptp.rs           # PTP statistics (extract from existing)
-├── files.rs         # File management
-└── settings.rs      # Settings page
-
-frontend/src/components/
-├── nav_bar.rs       # Top navigation bar
-└── settings/
-    ├── mod.rs
-    ├── identity.rs
-    ├── network.rs
-    ├── storage.rs
-    └── appearance.rs
+frontend/src/
+├── app.rs              # Main app, page routing, navigation
+├── discovery.rs        # Discovery page component
+├── clocks.rs           # Clocks page component
+├── list_navigator.rs   # Reusable list widget with keyboard nav
+├── ptp_monitor.rs      # PTP stats data structures
+└── ...
 ```
 
-### Render Flow
+### Reusable Components
 
+**ListNavigator** (`list_navigator.rs`):
+- Consistent list styling across pages
+- Keyboard navigation (arrow keys, Home, End)
+- Support for tags, secondary text, status indicators
+- Click and scroll-to-selection handling
+
+Used by: Flow list, Discovery stream lists, Clocks domain list
+
+---
+
+## Future Pages
+
+### Files (planned)
+Media file management:
+- Upload/download files
+- Browse recordings, playout files, SDP files
+- Preview thumbnails
+
+### Settings (planned)
+Application configuration:
+- Server identity
+- Network settings
+- Storage paths
+- Appearance (theme)
+
+---
+
+## Backend Support
+
+### Discovery API
+```
+GET  /api/discovery/streams           # List discovered streams
+GET  /api/discovery/streams/{id}      # Get stream details
+GET  /api/discovery/streams/{id}/sdp  # Get raw SDP
+GET  /api/discovery/announced         # List announced streams
+```
+
+### PTP Stats
+PTP statistics are sent via WebSocket events:
 ```rust
-fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-    // Top navigation bar (always visible)
-    self.render_nav_bar(ctx);
-
-    // Page content
-    match self.current_page {
-        AppPage::Flows => self.render_flows_page(ctx),
-        AppPage::Discovery => self.render_discovery_page(ctx),
-        AppPage::Ptp => self.render_ptp_page(ctx),
-        AppPage::Files => self.render_files_page(ctx),
-        AppPage::Settings => self.render_settings_page(ctx),
-    }
-
-    // Status bar (always visible)
-    self.render_status_bar(ctx);
+StromEvent::PtpStats {
+    flow_id: FlowId,
+    stats: PtpStatsData,
 }
 ```
 
-## SAP Multicast Address Note
-
-You're correct about the address scope:
-
-- **224.2.127.254** (SAP standard) - Administratively scoped, typically stays within local network segment
-- **239.x.x.x** range - Organization-local scope, can be routed within enterprise
-- Some deployments use **239.255.255.255** or custom addresses for wider reach
-
-The SAP address should be configurable because:
-1. Default SAP address may not cross routers
-2. Enterprise networks may have designated AES67 discovery addresses
-3. Dante uses the standard address but some custom systems don't
-
-## Implementation Phases
-
-### Phase 1: Navigation Framework
-1. Add navigation bar component
-2. Add page routing enum
-3. Restructure app.rs to support pages
-4. Move existing flows UI into "Flows" page
-
-### Phase 2: Discovery Page
-1. Create discovery page component
-2. Add stream list with real-time updates
-3. Add "Create from stream" action
-4. Add discovery settings section
-
-### Phase 3: Settings Page
-1. Create settings page structure
-2. Add identity settings
-3. Add appearance settings (theme)
-4. Backend API for settings persistence
-
-### Phase 4: PTP Page
-1. Extract PTP monitor to dedicated page
-2. Add historical graphs
-3. Add configuration options
-
-### Phase 5: Files Page
-1. Backend file management API
-2. Upload/download functionality
-3. File browser UI
-4. Integration with playout blocks
-
-## Open Questions
-
-1. **Settings persistence**: Config file vs database?
-2. **Files storage**: Local filesystem? Object storage?
-3. **Multi-instance**: Should settings sync across instances?
-4. **Permissions**: Per-page access control in future?
+Stats are collected by a centralized PTP monitor that registers a global GStreamer callback.

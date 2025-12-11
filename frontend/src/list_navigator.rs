@@ -183,25 +183,3 @@ pub fn list_navigator<'a>(
         has_focus,
     }
 }
-
-/// A simpler version that works with a scroll area.
-/// Call this inside a ScrollArea.
-pub fn list_navigator_items<'a, F>(
-    ui: &mut Ui,
-    id_source: &str,
-    items: impl Iterator<Item = ListItem<'a>>,
-    selected_id: Option<&str>,
-    mut on_select: F,
-) -> bool
-where
-    F: FnMut(&str),
-{
-    let result = list_navigator(ui, id_source, items, selected_id);
-
-    if let Some(id) = result.selected {
-        on_select(&id);
-        true
-    } else {
-        false
-    }
-}

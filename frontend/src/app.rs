@@ -323,6 +323,8 @@ pub struct StromApp {
     clocks_page: crate::clocks::ClocksPage,
     /// Flow list filter text
     flow_filter: String,
+    /// Show stream picker modal for this block ID (when browsing discovered streams for AES67 Input)
+    show_stream_picker_for_block: Option<String>,
 }
 
 impl StromApp {
@@ -437,6 +439,7 @@ impl StromApp {
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
             flow_filter: String::new(),
+            show_stream_picker_for_block: None,
         };
 
         // Apply initial theme based on system preference
@@ -528,6 +531,7 @@ impl StromApp {
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
             flow_filter: String::new(),
+            show_stream_picker_for_block: None,
         };
 
         // Apply initial theme based on system preference
@@ -1282,6 +1286,88 @@ impl StromApp {
                 }
                 Err(e) => {
                     tracing::error!("Failed to create flow: {}", e);
+                    let _ = tx.send(AppMessage::FlowOperationError(format!(
+                        "Failed to create flow: {}",
+                        e
+                    )));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Create a new flow from an SDP (from discovered stream).
+    fn create_flow_from_sdp(&mut self, sdp: String, ctx: &Context) {
+        use strom_types::{block::Position, BlockInstance, PropertyValue};
+
+        // Parse stream name from SDP
+        let stream_name = sdp
+            .lines()
+            .find(|l| l.starts_with("s="))
+            .map(|l| l.trim_start_matches("s=").trim())
+            .unwrap_or("Discovered Stream");
+
+        let flow_name = format!("AES67 - {}", stream_name);
+
+        // Create flow with AES67 Input block
+        let mut new_flow = Flow::new(flow_name.clone());
+
+        // Create AES67 Input block instance
+        let block = BlockInstance {
+            id: uuid::Uuid::new_v4().to_string(),
+            block_definition_id: "builtin.aes67_input".to_string(),
+            name: Some(stream_name.to_string()),
+            properties: std::collections::HashMap::from([(
+                "SDP".to_string(),
+                PropertyValue::String(sdp),
+            )]),
+            position: Position { x: 100.0, y: 100.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        };
+
+        new_flow.blocks.push(block);
+
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+        let ctx = ctx.clone();
+
+        self.status = "Creating flow from SDP...".to_string();
+        // Switch to Flows page
+        self.current_page = AppPage::Flows;
+
+        spawn_task(async move {
+            // First create the empty flow to get an ID
+            match api.create_flow(&new_flow).await {
+                Ok(created_flow) => {
+                    tracing::info!("Flow created from SDP: {}", created_flow.name);
+                    let flow_id = created_flow.id;
+                    let flow_name = created_flow.name.clone();
+
+                    // Now update the flow with the blocks
+                    let mut full_flow = new_flow;
+                    full_flow.id = flow_id;
+
+                    match api.update_flow(&full_flow).await {
+                        Ok(_) => {
+                            tracing::info!("Flow updated with AES67 Input block: {}", flow_name);
+                            let _ = tx.send(AppMessage::FlowOperationSuccess(format!(
+                                "Flow '{}' created from discovered stream",
+                                flow_name
+                            )));
+                            let _ = tx.send(AppMessage::FlowCreated(flow_id));
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to update flow with block: {}", e);
+                            let _ = tx.send(AppMessage::FlowOperationError(format!(
+                                "Failed to add block to flow: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create flow from SDP: {}", e);
                     let _ = tx.send(AppMessage::FlowOperationError(format!(
                         "Failed to create flow: {}",
                         e
@@ -2501,7 +2587,8 @@ impl StromApp {
                     if let (Some(block), Some(def)) =
                         (self.graph.get_selected_block_mut(), definition_opt)
                     {
-                        let delete_requested = PropertyInspector::show_block(
+                        let block_id = block.id.clone();
+                        let result = PropertyInspector::show_block(
                             ui,
                             block,
                             &def,
@@ -2514,8 +2601,15 @@ impl StromApp {
                         );
 
                         // Handle deletion request
-                        if delete_requested {
+                        if result.delete_requested {
                             self.graph.remove_selected();
+                        }
+
+                        // Handle browse streams request (for AES67 Input)
+                        if result.browse_streams_requested {
+                            self.show_stream_picker_for_block = Some(block_id);
+                            // Refresh discovered streams for the picker
+                            self.discovery_page.refresh(&self.api, ctx, &self.channels.tx);
                         }
                     } else {
                         ui.label("Block definition not found");
@@ -3285,6 +3379,110 @@ impl StromApp {
                     }
                 });
             });
+    }
+
+    /// Render the stream picker modal for selecting discovered streams.
+    fn render_stream_picker_modal(&mut self, ctx: &Context) {
+        let Some(block_id) = self.show_stream_picker_for_block.clone() else {
+            return;
+        };
+
+        let mut close_modal = false;
+        let mut selected_sdp: Option<String> = None;
+
+        egui::Window::new("Select Discovered Stream")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(500.0)
+            .default_height(400.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Select a stream to use its SDP:");
+                ui.add_space(8.0);
+
+                let streams = &self.discovery_page.discovered_streams;
+                let is_loading = self.discovery_page.loading;
+
+                if is_loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading discovered streams...");
+                    });
+                } else if streams.is_empty() {
+                    ui.label("No discovered streams available.");
+                    ui.label("Make sure SAP discovery is running and streams are being announced on the network.");
+                    ui.add_space(8.0);
+                    if ui.button("🔄 Refresh").clicked() {
+                        self.discovery_page.refresh(&self.api, ctx, &self.channels.tx);
+                    }
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for stream in streams {
+                                let text = format!(
+                                    "{} - {}:{} ({}ch {}Hz)",
+                                    stream.name,
+                                    stream.multicast_address,
+                                    stream.port,
+                                    stream.channels,
+                                    stream.sample_rate
+                                );
+
+                                if ui.selectable_label(false, &text).clicked() {
+                                    // Fetch SDP for this stream
+                                    // For now, we'll construct it from the stream info
+                                    // In a real implementation, we'd fetch the actual SDP
+                                    selected_sdp = Some(stream.id.clone());
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close_modal = true;
+                    }
+                });
+            });
+
+        if close_modal {
+            self.show_stream_picker_for_block = None;
+        }
+
+        // If a stream was selected, fetch its SDP and update the block
+        if let Some(stream_id) = selected_sdp {
+            self.show_stream_picker_for_block = None;
+
+            // Fetch the SDP and update the block
+            let api = self.api.clone();
+            let tx = self.channels.sender();
+            let ctx = ctx.clone();
+
+            spawn_task(async move {
+                match api.get_stream_sdp(&stream_id).await {
+                    Ok(sdp) => {
+                        tracing::info!(
+                            "Fetched SDP for stream {}, sending to block {}",
+                            stream_id,
+                            block_id
+                        );
+                        let _ = tx.send(AppMessage::StreamPickerSdpLoaded { block_id, sdp });
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to fetch stream SDP for {}: {}", stream_id, e);
+                        let _ = tx.send(AppMessage::FlowOperationError(format!(
+                            "Failed to fetch stream SDP: {}",
+                            e
+                        )));
+                    }
+                }
+                ctx.request_repaint();
+            });
+        }
     }
 
     /// Render the import flow dialog.
@@ -4525,6 +4723,24 @@ impl eframe::App for StromApp {
                     tracing::info!("Stream SDP loaded for: {}", stream_id);
                     self.discovery_page.set_stream_sdp(stream_id, sdp);
                 }
+                AppMessage::StreamPickerSdpLoaded { block_id, sdp } => {
+                    tracing::info!(
+                        "Stream picker SDP loaded for block: {}, SDP length: {}",
+                        block_id,
+                        sdp.len()
+                    );
+                    // Find the block and update its SDP property
+                    if let Some(block) = self.graph.get_block_by_id_mut(&block_id) {
+                        block
+                            .properties
+                            .insert("SDP".to_string(), strom_types::PropertyValue::String(sdp));
+                        self.status = "SDP applied to block".to_string();
+                        tracing::info!("SDP property updated for block {}", block_id);
+                    } else {
+                        tracing::warn!("Block {} not found in graph when applying SDP", block_id);
+                        self.error = Some(format!("Block not found: {}", block_id));
+                    }
+                }
                 // SDP messages are handled elsewhere
                 AppMessage::SdpLoaded { .. } | AppMessage::SdpError(_) => {}
             }
@@ -4696,12 +4912,18 @@ impl eframe::App for StromApp {
                 self.render_delete_confirmation_dialog(ctx);
                 self.render_flow_properties_dialog(ctx);
                 self.render_import_dialog(ctx);
+                self.render_stream_picker_modal(ctx);
             }
             AppPage::Discovery => {
                 CentralPanel::default().show(ctx, |ui| {
                     self.discovery_page
                         .render(ui, &self.api, ctx, &self.channels.tx);
                 });
+
+                // Handle pending create flow from discovery
+                if let Some(sdp) = self.discovery_page.take_pending_create_flow_sdp() {
+                    self.create_flow_from_sdp(sdp, ctx);
+                }
             }
             AppPage::Clocks => {
                 CentralPanel::default().show(ctx, |ui| {

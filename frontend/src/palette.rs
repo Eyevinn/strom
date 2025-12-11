@@ -266,40 +266,43 @@ impl ElementPalette {
             .show(ui, |ui| {
                 match self.current_tab {
                     PaletteTab::Elements => {
-                        let filtered: Vec<ElementInfo> = self
+                        let mut filtered: Vec<ElementInfo> = self
                             .elements
                             .iter()
                             .filter(|e| {
-                                // If search is empty, only show audiotestsrc and autoaudiosink
-                                if search.is_empty() {
-                                    if e.name != "audiotestsrc" && e.name != "autoaudiosink" {
-                                        return false;
-                                    }
-                                } else {
-                                    // Otherwise, filter by search text
-                                    let matches_search =
-                                        e.name.to_lowercase().contains(&search.to_lowercase())
-                                            || e.description
-                                                .to_lowercase()
-                                                .contains(&search.to_lowercase());
-                                    if !matches_search {
-                                        return false;
-                                    }
-                                }
+                                // Filter by search text if provided
+                                let matches_search = search.is_empty()
+                                    || e.name.to_lowercase().contains(&search.to_lowercase())
+                                    || e.description
+                                        .to_lowercase()
+                                        .contains(&search.to_lowercase());
 
                                 let matches_category = category_filter.is_none()
                                     || category_filter.as_ref() == Some(&e.category);
 
-                                matches_category
+                                matches_search && matches_category
                             })
                             .cloned()
                             .collect();
 
+                        // Sort by name and limit to 50 for performance
+                        filtered.sort_by(|a, b| a.name.cmp(&b.name));
+                        let total_count = filtered.len();
+                        let display_limit = 50;
+                        filtered.truncate(display_limit);
+
                         if filtered.is_empty() {
                             ui.label("No elements found");
                         } else {
-                            for element in filtered {
-                                self.draw_element_item(ui, &element);
+                            for element in &filtered {
+                                self.draw_element_item(ui, element);
+                            }
+                            if total_count > display_limit {
+                                ui.add_space(4.0);
+                                ui.label(format!(
+                                    "Showing {} of {} elements. Use filter to find more.",
+                                    display_limit, total_count
+                                ));
                             }
                         }
                     }
