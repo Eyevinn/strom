@@ -918,6 +918,30 @@ impl PropertyInspector {
             });
         }
 
+        // Show contextual hints for important properties on specific element types
+        // Test sources (audiotestsrc, videotestsrc) with is-live=false can cause CPU saturation
+        if prop_name == "is-live"
+            && (element.element_type == "audiotestsrc" || element.element_type == "videotestsrc")
+        {
+            let is_live = element
+                .properties
+                .get("is-live")
+                .and_then(|v| match v {
+                    PropertyValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or(false);
+
+            if !is_live {
+                ui.indent(prop_name, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(Color32::from_rgb(255, 180, 0), "⚠");
+                        ui.small("Set to true for live streaming to prevent CPU saturation");
+                    });
+                });
+            }
+        }
+
         // Add spacing after each property
         ui.add_space(8.0);
     }

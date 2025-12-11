@@ -96,6 +96,38 @@ pub enum ClockSyncStatus {
     Unknown,
 }
 
+/// Warning code for flow configuration issues.
+///
+/// These codes allow programmatic handling of warnings while the
+/// human-readable message provides details for users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum FlowWarningCode {
+    /// Test source (audiotestsrc, videotestsrc) without is-live=true
+    /// may cause CPU saturation by running as fast as possible
+    NonLiveTestSource,
+    /// File source may process data as fast as possible without rate limiting
+    NonLiveFileSource,
+}
+
+/// Warning about potential flow configuration issues.
+///
+/// Warnings are informational and don't prevent flow execution,
+/// but alert users to configurations that may cause problems
+/// (e.g., CPU saturation from non-live pipelines).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct FlowWarning {
+    /// ID of the element this warning relates to (None for flow-level warnings)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_id: Option<String>,
+    /// Warning code for programmatic handling
+    pub code: FlowWarningCode,
+    /// Human-readable warning message
+    pub message: String,
+}
+
 /// PTP clock information (IEEE 1588).
 ///
 /// Contains detailed information about the PTP clock state including
@@ -225,6 +257,13 @@ pub struct FlowProperties {
     /// (set to true when starting a flow, false when manually stopping it)
     #[serde(default)]
     pub auto_restart: bool,
+
+    /// Warnings about potential configuration issues (computed by backend)
+    ///
+    /// These are informational warnings that don't prevent flow execution,
+    /// such as test sources without is-live=true that may cause CPU saturation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<FlowWarning>,
 }
 
 /// A complete GStreamer pipeline definition.

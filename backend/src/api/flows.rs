@@ -15,7 +15,8 @@ use strom_types::{
         PadPropertiesResponse, SourceFlowInfo, UpdateFlowPropertiesRequest,
         UpdatePadPropertyRequest, UpdatePropertyRequest, WebRtcStatsResponse,
     },
-    Flow, FlowId,
+    flow::{FlowWarning, FlowWarningCode},
+    Flow, FlowId, PropertyValue,
 };
 use tracing::{error, info, trace};
 
@@ -67,6 +68,52 @@ fn is_pad_valid(
     false
 }
 
+/// Compute warnings for potential flow configuration issues.
+///
+/// Detects configurations that may cause CPU saturation, such as test sources
+/// without is-live=true that will run as fast as possible instead of real-time.
+fn compute_flow_warnings(flow: &Flow) -> Vec<FlowWarning> {
+    let mut warnings = Vec::new();
+
+    // Known test sources that should have is-live=true for live streaming
+    // Without is-live=true, these sources produce buffers as fast as possible,
+    // which can saturate the CPU.
+    const TEST_SOURCES: &[&str] = &["audiotestsrc", "videotestsrc"];
+
+    for element in &flow.elements {
+        if TEST_SOURCES.contains(&element.element_type.as_str()) {
+            // Check if is-live is set to true
+            let is_live = element
+                .properties
+                .get("is-live")
+                .and_then(|v| match v {
+                    PropertyValue::Bool(b) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or(false);
+
+            if !is_live {
+                warnings.push(FlowWarning {
+                    element_id: Some(element.id.clone()),
+                    code: FlowWarningCode::NonLiveTestSource,
+                    message: format!(
+                        "{}: Consider setting is-live=true for real-time output. \
+                         Without it, the pipeline runs as fast as possible which may saturate the CPU.",
+                        element.id
+                    ),
+                });
+            }
+        }
+    }
+
+    warnings
+}
+
+/// Apply computed warnings to a flow's properties.
+fn apply_warnings_to_flow(flow: &mut Flow) {
+    flow.properties.warnings = compute_flow_warnings(flow);
+}
+
 /// List all flows.
 #[utoipa::path(
     get,
@@ -77,7 +124,11 @@ fn is_pad_valid(
     )
 )]
 pub async fn list_flows(State(state): State<AppState>) -> Json<FlowListResponse> {
-    let flows = state.get_flows().await;
+    let mut flows = state.get_flows().await;
+    // Compute warnings for each flow
+    for flow in &mut flows {
+        apply_warnings_to_flow(flow);
+    }
     Json(FlowListResponse { flows })
 }
 
@@ -98,7 +149,6 @@ pub async fn get_available_sources(
     State(state): State<AppState>,
 ) -> Json<AvailableSourcesResponse> {
     use strom_types::element::MediaType;
-    use strom_types::PropertyValue;
 
     // Get all active channels from registry to check which are running
     let active_channels = state.channels().list_all().await;
@@ -174,7 +224,10 @@ pub async fn get_flow(
     Path(id): Path<FlowId>,
 ) -> Result<Json<FlowResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.get_flow(&id).await {
-        Some(flow) => Ok(Json(FlowResponse { flow })),
+        Some(mut flow) => {
+            apply_warnings_to_flow(&mut flow);
+            Ok(Json(FlowResponse { flow }))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Flow not found")),
@@ -386,6 +439,9 @@ pub async fn update_flow(
         }
     }
 
+    // Apply warnings to the response
+    apply_warnings_to_flow(&mut flow);
+
     Ok(Json(FlowResponse { flow }))
 }
 
@@ -457,7 +513,10 @@ pub async fn start_flow(
 
     // Return updated flow with state
     match state.get_flow(&id).await {
-        Some(flow) => Ok(Json(FlowResponse { flow })),
+        Some(mut flow) => {
+            apply_warnings_to_flow(&mut flow);
+            Ok(Json(FlowResponse { flow }))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Flow not found")),
@@ -496,7 +555,10 @@ pub async fn stop_flow(
 
     // Return updated flow with state
     match state.get_flow(&id).await {
-        Some(flow) => Ok(Json(FlowResponse { flow })),
+        Some(mut flow) => {
+            apply_warnings_to_flow(&mut flow);
+            Ok(Json(FlowResponse { flow }))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Flow not found")),
@@ -999,6 +1061,9 @@ pub async fn update_flow_properties(
     }
 
     info!("Successfully updated properties for flow {}", id);
+
+    // Apply warnings to the response
+    apply_warnings_to_flow(&mut flow);
 
     Ok(Json(FlowResponse { flow }))
 }

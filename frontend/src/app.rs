@@ -2296,6 +2296,28 @@ impl StromApp {
                             }
                         }
 
+                        // Show warning indicator if flow has configuration warnings
+                        if !flow.properties.warnings.is_empty() {
+                            let warning_label = child_ui
+                                .colored_label(Color32::from_rgb(255, 180, 0), "⚠")
+                                .interact(egui::Sense::click());
+
+                            warning_label.on_hover_ui(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Configuration Warnings")
+                                        .strong()
+                                        .color(Color32::from_rgb(255, 180, 0)),
+                                );
+                                ui.separator();
+                                for warning in &flow.properties.warnings {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(Color32::from_rgb(255, 180, 0), "•");
+                                        ui.label(&warning.message);
+                                    });
+                                }
+                            });
+                        }
+
                         child_ui.add_space(4.0);
 
                         // Show flow name with hover tooltip - make it clickable too
