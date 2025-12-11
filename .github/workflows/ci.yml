@@ -230,7 +230,9 @@ jobs:
           EOF
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu perl make
-          sudo apt-get install -y libssl-dev:arm64 pkg-config:arm64 libunwind-dev:arm64
+          # Install linux-libc-dev:arm64 first to resolve dependency conflicts
+          sudo apt-get install -y linux-libc-dev:arm64
+          sudo apt-get install -y pkg-config:arm64 libunwind-dev:arm64
           sudo apt-get install -y libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64 libgstreamer-plugins-bad1.0-dev:arm64
           echo "PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
