@@ -35,6 +35,8 @@ pub struct ElementPalette {
     pub dragging_block: Option<String>,
     /// Currently selected tab
     current_tab: PaletteTab,
+    /// Request to focus the search box on next frame
+    focus_search_requested: bool,
 }
 
 impl ElementPalette {
@@ -209,7 +211,12 @@ impl ElementPalette {
         // Search box
         ui.horizontal(|ui| {
             ui.label("Search:");
-            ui.text_edit_singleline(&mut self.search);
+            let search_id = egui::Id::new("palette_search_box");
+            let response = ui.add(egui::TextEdit::singleline(&mut self.search).id(search_id));
+            if self.focus_search_requested {
+                self.focus_search_requested = false;
+                response.request_focus();
+            }
         });
 
         ui.add_space(5.0);
@@ -501,5 +508,25 @@ impl ElementPalette {
     /// Get block definition for a specific block ID.
     pub fn get_block_info(&self, block_id: &str) -> Option<&BlockDefinition> {
         self.blocks.iter().find(|b| b.id == block_id)
+    }
+
+    /// Request focus on the search box (will be applied on next frame).
+    pub fn focus_search(&mut self) {
+        self.focus_search_requested = true;
+    }
+
+    /// Check if the Elements tab is currently active.
+    pub fn is_elements_tab(&self) -> bool {
+        self.current_tab == PaletteTab::Elements
+    }
+
+    /// Switch to Elements tab.
+    pub fn switch_to_elements(&mut self) {
+        self.current_tab = PaletteTab::Elements;
+    }
+
+    /// Switch to Blocks tab.
+    pub fn switch_to_blocks(&mut self) {
+        self.current_tab = PaletteTab::Blocks;
     }
 }

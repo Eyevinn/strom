@@ -235,6 +235,11 @@ impl AppState {
                         flow.properties.ptp_info = Some(ptp_info);
                     }
                     flow.properties.thread_priority_status = pipeline.get_thread_priority_status();
+                } else {
+                    // Clear runtime-only status when no pipeline is running
+                    flow.properties.thread_priority_status = None;
+                    flow.properties.clock_sync_status = None;
+                    flow.properties.ptp_info = None;
                 }
                 // Compute external pads for dynamic blocks
                 Self::compute_flow_external_pads(&mut flow);
@@ -261,6 +266,11 @@ impl AppState {
                     flow.properties.ptp_info = Some(ptp_info);
                 }
                 flow.properties.thread_priority_status = pipeline.get_thread_priority_status();
+            } else {
+                // Clear runtime-only status when no pipeline is running
+                flow.properties.thread_priority_status = None;
+                flow.properties.clock_sync_status = None;
+                flow.properties.ptp_info = None;
             }
             // Compute external pads for dynamic blocks
             Self::compute_flow_external_pads(&mut flow);

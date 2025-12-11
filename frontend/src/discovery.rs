@@ -70,6 +70,8 @@ pub struct DiscoveryPage {
     pub selected_stream_sdp: Option<String>,
     /// Currently selected tab
     pub selected_tab: StreamTab,
+    /// Request to focus the search box on next frame
+    focus_search_requested: bool,
 }
 
 impl DiscoveryPage {
@@ -85,7 +87,13 @@ impl DiscoveryPage {
             selected_stream: None,
             selected_stream_sdp: None,
             selected_tab: StreamTab::default(),
+            focus_search_requested: false,
         }
+    }
+
+    /// Request focus on the search box (will be applied on next frame).
+    pub fn focus_search(&mut self) {
+        self.focus_search_requested = true;
     }
 
     /// Render the discovery page.
@@ -114,7 +122,13 @@ impl DiscoveryPage {
                 // Search filter at top of list
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
-                    ui.add(egui::TextEdit::singleline(&mut self.search_filter));
+                    let filter_id = egui::Id::new("discovery_search_filter");
+                    let response =
+                        ui.add(egui::TextEdit::singleline(&mut self.search_filter).id(filter_id));
+                    if self.focus_search_requested {
+                        self.focus_search_requested = false;
+                        response.request_focus();
+                    }
                     if !self.search_filter.is_empty() && ui.small_button("✕").clicked() {
                         self.search_filter.clear();
                     }

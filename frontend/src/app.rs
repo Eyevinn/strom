@@ -106,6 +106,22 @@ pub enum AppPage {
     Clocks,
 }
 
+/// Focus target for Ctrl+F cycling
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FocusTarget {
+    /// No specific focus target
+    #[default]
+    None,
+    /// Flow list filter (Flows page)
+    FlowFilter,
+    /// Elements palette search (Flows page)
+    PaletteElements,
+    /// Blocks palette search (Flows page)
+    PaletteBlocks,
+    /// Discovery search filter (Discovery page)
+    DiscoveryFilter,
+}
+
 /// Log message severity level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -325,6 +341,10 @@ pub struct StromApp {
     flow_filter: String,
     /// Show stream picker modal for this block ID (when browsing discovered streams for AES67 Input)
     show_stream_picker_for_block: Option<String>,
+    /// Current focus target for Ctrl+F cycling
+    focus_target: FocusTarget,
+    /// Request to focus the flow filter on next frame
+    focus_flow_filter_requested: bool,
 }
 
 impl StromApp {
@@ -411,7 +431,7 @@ impl StromApp {
             qos_stats: crate::qos_monitor::QoSStore::new(),
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
-            theme_preference: ThemePreference::System,
+            theme_preference: ThemePreference::Dark,
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -440,6 +460,8 @@ impl StromApp {
             clocks_page: crate::clocks::ClocksPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
+            focus_target: FocusTarget::None,
+            focus_flow_filter_requested: false,
         };
 
         // Apply initial theme based on system preference
@@ -503,7 +525,7 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::System,
+            theme_preference: ThemePreference::Dark,
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -532,6 +554,8 @@ impl StromApp {
             clocks_page: crate::clocks::ClocksPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
+            focus_target: FocusTarget::None,
+            focus_flow_filter_requested: false,
         };
 
         // Apply initial theme based on system preference
@@ -1576,51 +1600,19 @@ impl StromApp {
             }
         }
 
-        // Don't process other shortcuts if text input has focus
-        if wants_keyboard {
-            return;
-        }
-
-        // Up/Down arrow keys - Navigate flow list
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            self.navigate_flow_list_up();
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.navigate_flow_list_down();
-        }
-
-        // Delete key - Delete selected flow (only if nothing is selected in graph editor)
-        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) && !self.graph.has_selection() {
-            if let Some(flow) = self.current_flow() {
-                self.flow_pending_deletion = Some((flow.id, flow.name.clone()));
-            }
-        }
-
-        // Ctrl+N - New Flow
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
-            self.show_new_flow_dialog = true;
-        }
-
-        // Ctrl+S - Save
+        // Ctrl+S - Save (works even in text inputs)
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)) {
             self.save_current_flow(ctx);
         }
 
-        // Ctrl+O - Import
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
-            self.show_import_dialog = true;
-            self.import_json_buffer.clear();
-            self.import_error = None;
-        }
-
-        // F5 or Ctrl+R - Refresh
+        // F5 or Ctrl+R - Refresh (works even in text inputs)
         if ctx.input(|i| {
             i.key_pressed(egui::Key::F5) || (i.modifiers.command && i.key_pressed(egui::Key::R))
         }) {
             self.needs_refresh = true;
         }
 
-        // Ctrl+D - Debug Graph
+        // Ctrl+D - Debug Graph (works even in text inputs)
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::D)) {
             if let Some(flow) = self.current_flow() {
                 let url = self.api.get_debug_graph_url(flow.id);
@@ -1628,26 +1620,11 @@ impl StromApp {
             }
         }
 
-        // F1 - Help (GitHub)
-        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
-            ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
-        }
-
-        // Ctrl+C - Copy selected element/block in graph
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C)) {
-            self.graph.copy_selected();
-        }
-
-        // Ctrl+V - Paste element/block in graph
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V)) {
-            self.graph.paste_clipboard();
-        }
-
-        // Shift+F9 - Stop Flow (must be checked before plain F9)
+        // Shift+F9 - Stop Flow (works even in text inputs, must be checked before plain F9)
         if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::F9)) {
             self.stop_flow(ctx);
         }
-        // F9 - Start/Restart Flow (only if Shift is NOT pressed)
+        // F9 - Start/Restart Flow (works even in text inputs)
         else if ctx.input(|i| !i.modifiers.shift && i.key_pressed(egui::Key::F9)) {
             if let Some(flow) = self.current_flow() {
                 let state = flow.state.unwrap_or(PipelineState::Null);
@@ -1657,8 +1634,8 @@ impl StromApp {
                     // Restart
                     let api = self.api.clone();
                     let tx = self.channels.sender();
-                    let ctx_clone = ctx.clone();
                     let flow_id = flow.id;
+                    let ctx_clone = ctx.clone();
 
                     self.status = "Restarting flow...".to_string();
 
@@ -1687,10 +1664,95 @@ impl StromApp {
                         ctx_clone.request_repaint();
                     });
                 } else {
-                    // Start
                     self.start_flow(ctx);
                 }
             }
+        }
+
+        // Ctrl+F - Find: cycle through filter boxes (works even in text inputs)
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+            // Deselect any selected element/block
+            self.graph.deselect_all();
+
+            // Cycle to next focus target based on current page
+            match self.current_page {
+                AppPage::Flows => {
+                    self.focus_target = match self.focus_target {
+                        FocusTarget::None | FocusTarget::PaletteBlocks => {
+                            self.focus_flow_filter_requested = true;
+                            FocusTarget::FlowFilter
+                        }
+                        FocusTarget::FlowFilter => {
+                            self.palette.switch_to_elements();
+                            self.palette.focus_search();
+                            FocusTarget::PaletteElements
+                        }
+                        FocusTarget::PaletteElements => {
+                            self.palette.switch_to_blocks();
+                            self.palette.focus_search();
+                            FocusTarget::PaletteBlocks
+                        }
+                        _ => {
+                            self.focus_flow_filter_requested = true;
+                            FocusTarget::FlowFilter
+                        }
+                    };
+                }
+                AppPage::Discovery => {
+                    self.discovery_page.focus_search();
+                    self.focus_target = FocusTarget::DiscoveryFilter;
+                }
+                AppPage::Clocks => {
+                    // No filters on Clocks page
+                }
+            }
+        }
+
+        // Don't process other shortcuts if text input has focus
+        if wants_keyboard {
+            return;
+        }
+
+        // Up/Down arrow keys - Navigate flow list
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            self.navigate_flow_list_up();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            self.navigate_flow_list_down();
+        }
+
+        // Delete key - Delete selected flow (only if nothing is selected in graph editor)
+        if ctx.input(|i| i.key_pressed(egui::Key::Delete)) && !self.graph.has_selection() {
+            if let Some(flow) = self.current_flow() {
+                self.flow_pending_deletion = Some((flow.id, flow.name.clone()));
+            }
+        }
+
+        // Ctrl+N - New Flow
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+            self.show_new_flow_dialog = true;
+        }
+
+        // Ctrl+O - Import
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O)) {
+            self.show_import_dialog = true;
+            self.import_json_buffer.clear();
+            self.import_error = None;
+        }
+
+        // F1 - Help (GitHub)
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
+        }
+
+        // Ctrl+C - Copy selected element/block in graph
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C)) {
+            self.graph.copy_selected();
+        }
+
+        // Ctrl+V - Paste element/block in graph
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V)) {
+            self.graph.paste_clipboard();
         }
     }
 
@@ -1724,6 +1786,7 @@ impl StromApp {
                         .clicked()
                     {
                         self.current_page = AppPage::Flows;
+                        self.focus_target = FocusTarget::None;
                     }
                     if ui
                         .selectable_label(
@@ -1734,6 +1797,7 @@ impl StromApp {
                         .clicked()
                     {
                         self.current_page = AppPage::Discovery;
+                        self.focus_target = FocusTarget::None;
                     }
                     if ui
                         .selectable_label(
@@ -1744,6 +1808,7 @@ impl StromApp {
                         .clicked()
                     {
                         self.current_page = AppPage::Clocks;
+                        self.focus_target = FocusTarget::None;
                     }
 
                     // Right-aligned system controls
@@ -1942,7 +2007,7 @@ impl StromApp {
                     }
 
                     if ui
-                        .button("⏸ Stop")
+                        .button("⏹ Stop")
                         .on_hover_text("Stop pipeline (Shift+F9)")
                         .clicked()
                     {
@@ -1962,17 +2027,6 @@ impl StromApp {
                     }
                 }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button("ℹ Help")
-                        .on_hover_text("Visit Strom on GitHub (F1)")
-                        .clicked()
-                    {
-                        ctx.open_url(egui::OpenUrl::new_tab(
-                            "https://github.com/Eyevinn/strom",
-                        ));
-                    }
-                });
             });
         });
     }
@@ -2027,7 +2081,13 @@ impl StromApp {
                 // Filter input at top
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
-                    ui.add(egui::TextEdit::singleline(&mut self.flow_filter));
+                    let filter_id = egui::Id::new("flow_list_filter");
+                    let response =
+                        ui.add(egui::TextEdit::singleline(&mut self.flow_filter).id(filter_id));
+                    if self.focus_flow_filter_requested {
+                        self.focus_flow_filter_requested = false;
+                        response.request_focus();
+                    }
                     if !self.flow_filter.is_empty() && ui.small_button("✕").clicked() {
                         self.flow_filter.clear();
                     }
