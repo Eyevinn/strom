@@ -540,6 +540,51 @@ impl AppState {
                     channels.unwrap_or(2)
                 );
 
+                // Get the multicast destination address for routing lookup
+                let multicast_host = block
+                    .properties
+                    .get("host")
+                    .and_then(|v| {
+                        if let PropertyValue::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "239.69.1.1".to_string());
+
+                // Determine origin IP:
+                // 1. If interface is explicitly set, use that interface's IP
+                // 2. Otherwise, ask the kernel which source IP it would use for the multicast address
+                //    This respects the routing table and ensures the SDP origin matches actual traffic
+                let origin_ip = block
+                    .properties
+                    .get("interface")
+                    .and_then(|v| {
+                        if let PropertyValue::String(s) = v {
+                            if !s.is_empty() {
+                                crate::network::get_interface_ipv4(s).map(|ip| ip.to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        // Query kernel for the source IP it would use for this multicast destination
+                        crate::network::get_source_ipv4_for_destination(&multicast_host)
+                            .map(|ip| ip.to_string())
+                    })
+                    .or_else(|| crate::network::get_default_ipv4().map(|ip| ip.to_string()));
+
+                // Check if RAVENNA extensions are enabled for this block
+                let ravenna_extensions = block
+                    .properties
+                    .get("ravenna_extensions")
+                    .map(|v| matches!(v, PropertyValue::Bool(true)))
+                    .unwrap_or(false);
+
                 // Generate SDP with flow properties for correct clock signaling (RFC 7273)
                 // Include PTP clock identity if available for accurate ts-refclk attribute
                 let sdp = crate::blocks::sdp::generate_aes67_output_sdp(
@@ -549,6 +594,8 @@ impl AppState {
                     channels,
                     Some(&flow.properties),
                     ptp_clock_identity.as_deref(),
+                    origin_ip.as_deref(),
+                    ravenna_extensions,
                 );
 
                 // Initialize runtime_data if needed

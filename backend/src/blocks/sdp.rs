@@ -9,9 +9,10 @@ use strom_types::flow::{FlowProperties, GStreamerClockType};
 use strom_types::{BlockInstance, PropertyValue};
 
 /// Convert PTP clock ID from colon-separated format (XX:XX:XX:XX:XX:XX:XX:XX)
-/// to hyphen-separated format (XX-XX-XX-XX-XX-XX-XX-XX) as required by RFC 7273.
+/// to hyphen-separated format (xx-xx-xx-xx-xx-xx-xx-xx) as required by RFC 7273.
+/// Uses lowercase hex for better interoperability with RAVENNA/AES67 devices.
 pub fn convert_clock_id_to_sdp_format(clock_id: &str) -> String {
-    clock_id.replace(':', "-")
+    clock_id.replace(':', "-").to_lowercase()
 }
 
 /// Extract audio format details from GStreamer caps.
@@ -150,6 +151,17 @@ fn is_multicast_address(addr: &str) -> bool {
 ///
 /// The `ptp_clock_identity` parameter can provide the actual PTP clock identity
 /// for accurate signaling when using PTP.
+///
+/// The `origin_ip` parameter specifies the source IP address for the SDP origin line
+/// and source-filter attribute. If None, defaults to "0.0.0.0".
+///
+/// # RAVENNA Extensions
+///
+/// When `ravenna_extensions` is true, the following additional attributes are included:
+/// - `a=clock-domain:PTPv2 <domain>` - Indicates the PTP domain
+/// - `a=framecount:<samples>` - Number of samples per RTP packet
+/// - `a=sync-time:0` - Synchronization offset (always 0 for direct clock mapping)
+#[allow(clippy::too_many_arguments)]
 pub fn generate_aes67_output_sdp(
     block: &BlockInstance,
     session_name: &str,
@@ -157,6 +169,8 @@ pub fn generate_aes67_output_sdp(
     channels: Option<i32>,
     flow_properties: Option<&FlowProperties>,
     ptp_clock_identity: Option<&str>,
+    origin_ip: Option<&str>,
+    ravenna_extensions: bool,
 ) -> String {
     // Extract properties or use defaults
     let host = block
@@ -205,9 +219,8 @@ pub fn generate_aes67_output_sdp(
         })
         .unwrap_or(1.0);
 
-    // Get local IP for origin field (o=)
-    // In a real implementation, you'd detect the actual network interface IP
-    let origin_ip = "127.0.0.1";
+    // Use provided origin IP or default to 0.0.0.0
+    let origin_ip = origin_ip.unwrap_or("0.0.0.0");
 
     // Session ID and version (using timestamp)
     let session_id = std::time::SystemTime::now()
@@ -229,44 +242,84 @@ pub fn generate_aes67_output_sdp(
 
     // Check if the host is a multicast address and format connection line accordingly
     // Multicast IPv4 addresses are in range 224.0.0.0 to 239.255.255.255
-    let connection_line = if is_multicast_address(host) {
+    let is_multicast = is_multicast_address(host);
+    let connection_line = if is_multicast {
         format!("c=IN IP4 {}/32", host) // Add TTL for multicast
     } else {
         format!("c=IN IP4 {}", host) // No TTL for unicast
+    };
+
+    // Generate source-filter for multicast addresses (RFC 4570)
+    // This helps receivers know the expected source for the multicast stream
+    let source_filter = if is_multicast {
+        format!("a=source-filter: incl IN IP4 {} {}\r\n", host, origin_ip)
+    } else {
+        String::new()
     };
 
     // Generate clock signaling attributes per RFC 7273
     let ts_refclk = generate_ts_refclk(flow_properties, ptp_clock_identity);
     let mediaclk = generate_mediaclk(flow_properties);
 
+    // Generate RAVENNA extensions if enabled
+    // Session-level: clock-domain (before m= line)
+    // Media-level: framecount, sync-time (after m= line, with repeated ts-refclk/mediaclk)
+    let (session_ravenna, media_ravenna) = if ravenna_extensions {
+        let ptp_domain = flow_properties.and_then(|p| p.ptp_domain).unwrap_or(0);
+
+        // Calculate framecount from ptime and sample rate
+        // framecount = ptime_ms * sample_rate / 1000
+        let framecount = (ptime * sample_rate as f64 / 1000.0).round() as i32;
+
+        let session = format!("a=clock-domain:PTPv2 {}\r\n", ptp_domain);
+        let media = format!(
+            "{}\r\n{}\r\na=sync-time:0\r\na=framecount:{}\r\n",
+            ts_refclk, mediaclk, framecount
+        );
+        (session, media)
+    } else {
+        (String::new(), String::new())
+    };
+
     // Generate SDP
+    // Structure follows RFC 4566 with AES67/RAVENNA extensions:
+    // v= (version)
+    // o= (origin)
+    // s= (session name)
+    // c= (connection)
+    // t= (timing)
+    // a= (session-level attributes: ts-refclk, mediaclk, clock-domain)
+    // m= (media description)
+    // a= (media-level attributes: source-filter, rtpmap, ptime, etc.)
     format!(
         "v=0\r
 o=- {} {} IN IP4 {}\r
 s={}\r
 {}\r
 t=0 0\r
-a=recvonly\r
-m=audio {} RTP/AVP {}\r
-a=rtpmap:{} {}/{}/{}\r
+{}\r
+{}\r
+{}m=audio {} RTP/AVP {}\r
+{}a=rtpmap:{} {}/{}/{}\r
 a=ptime:{}\r
-{}\r
-{}\r
-",
+{}",
         session_id,
         session_id,
         origin_ip,
         session_name,
         connection_line,
+        ts_refclk,
+        mediaclk,
+        session_ravenna,
         port,
         payload_type,
+        source_filter,
         payload_type,
         encoding,
         sample_rate,
         channels,
         ptime,
-        ts_refclk,
-        mediaclk
+        media_ravenna
     )
 }
 
@@ -329,7 +382,8 @@ mod tests {
             computed_external_pads: None,
         };
 
-        let sdp = generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None);
+        let sdp =
+            generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
 
         assert!(sdp.contains("s=Test Stream"));
         assert!(sdp.contains("c=IN IP4 239.69.1.1/32")); // Multicast should have /32 TTL
@@ -338,6 +392,8 @@ mod tests {
         // Default clock signaling (no flow properties) should use local/sender
         assert!(sdp.contains("a=ts-refclk:local"));
         assert!(sdp.contains("a=mediaclk:sender"));
+        // Multicast should have source-filter with default origin IP
+        assert!(sdp.contains("a=source-filter: incl IN IP4 239.69.1.1 0.0.0.0"));
     }
 
     #[test]
@@ -359,11 +415,23 @@ mod tests {
             computed_external_pads: None,
         };
 
-        let sdp = generate_aes67_output_sdp(&block, "Custom Stream", None, None, None, None);
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "Custom Stream",
+            None,
+            None,
+            None,
+            None,
+            Some("10.0.0.5"),
+            false,
+        );
 
         assert!(sdp.contains("s=Custom Stream"));
         assert!(sdp.contains("c=IN IP4 239.1.2.3/32")); // Multicast should have /32 TTL
         assert!(sdp.contains("m=audio 6000 RTP/AVP 96"));
+        assert!(sdp.contains("o=- ")); // Origin line should contain our IP
+        assert!(sdp.contains(" IN IP4 10.0.0.5"));
+        assert!(sdp.contains("a=source-filter: incl IN IP4 239.1.2.3 10.0.0.5"));
     }
 
     #[test]
@@ -379,8 +447,16 @@ mod tests {
         };
 
         // Test with audiotestsrc defaults: 44.1kHz mono
-        let sdp =
-            generate_aes67_output_sdp(&block, "Test Stream", Some(44100), Some(1), None, None);
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "Test Stream",
+            Some(44100),
+            Some(1),
+            None,
+            None,
+            None,
+            false,
+        );
 
         assert!(sdp.contains("s=Test Stream"));
         assert!(sdp.contains("a=rtpmap:96 L24/44100/1"));
@@ -404,11 +480,12 @@ mod tests {
             computed_external_pads: None,
         };
 
-        let sdp = generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None);
+        let sdp =
+            generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
 
         // Should use L16 encoding, not L24
         assert!(sdp.contains("a=rtpmap:96 L16/48000/2"));
-        assert!(!sdp.contains("L24"));
+        assert!(!sdp.contains("a=rtpmap:96 L24")); // Check rtpmap specifically
     }
 
     #[test]
@@ -429,7 +506,8 @@ mod tests {
             computed_external_pads: None,
         };
 
-        let sdp = generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None);
+        let sdp =
+            generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
 
         // Should use L24 encoding
         assert!(sdp.contains("a=rtpmap:96 L24/48000/2"));
@@ -453,11 +531,12 @@ mod tests {
             computed_external_pads: None,
         };
 
-        let sdp = generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None);
+        let sdp =
+            generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
 
         // Should have ptime=4.0, not 1.0
         assert!(sdp.contains("a=ptime:4"));
-        assert!(!sdp.contains("a=ptime:1"));
+        assert!(!sdp.contains("a=ptime:1\r")); // Be specific to avoid matching session ID
     }
 
     #[test]
@@ -499,6 +578,8 @@ mod tests {
             Some(8),
             None,
             None,
+            None,
+            false,
         );
 
         // Verify all properties are correctly reflected in SDP
@@ -548,11 +629,22 @@ mod tests {
             computed_external_pads: None,
         };
 
-        let sdp = generate_aes67_output_sdp(&block, "Unicast Stream", None, None, None, None);
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "Unicast Stream",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
 
         // Unicast addresses should NOT have /TTL suffix
         assert!(sdp.contains("c=IN IP4 192.168.1.100\r"));
         assert!(!sdp.contains("/32"));
+        // Unicast should NOT have source-filter
+        assert!(!sdp.contains("a=source-filter:"));
     }
 
     #[test]
@@ -573,10 +665,21 @@ mod tests {
             computed_external_pads: None,
         };
 
-        let sdp = generate_aes67_output_sdp(&block, "Multicast Stream", None, None, None, None);
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "Multicast Stream",
+            None,
+            None,
+            None,
+            None,
+            Some("192.168.1.50"),
+            false,
+        );
 
         // Multicast addresses MUST have /32 TTL suffix
         assert!(sdp.contains("c=IN IP4 239.69.11.44/32\r"));
+        // Multicast should have source-filter
+        assert!(sdp.contains("a=source-filter: incl IN IP4 239.69.11.44 192.168.1.50"));
     }
 
     // RFC 7273 clock signaling tests
@@ -723,6 +826,8 @@ mod tests {
             None,
             Some(&flow_props),
             Some("12-34-56-FF-FE-78-9A-BC"),
+            None,
+            false,
         );
 
         assert!(sdp.contains("a=ts-refclk:ptp=IEEE1588-2008:12-34-56-FF-FE-78-9A-BC:127"));
@@ -747,8 +852,16 @@ mod tests {
             ..Default::default()
         };
 
-        let sdp =
-            generate_aes67_output_sdp(&block, "NTP Stream", None, None, Some(&flow_props), None);
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "NTP Stream",
+            None,
+            None,
+            Some(&flow_props),
+            None,
+            None,
+            false,
+        );
 
         assert!(sdp.contains("a=ts-refclk:ntp=time.google.com"));
         assert!(sdp.contains("a=mediaclk:direct=0"));
@@ -771,8 +884,16 @@ mod tests {
             ..Default::default()
         };
 
-        let sdp =
-            generate_aes67_output_sdp(&block, "Local Stream", None, None, Some(&flow_props), None);
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "Local Stream",
+            None,
+            None,
+            Some(&flow_props),
+            None,
+            None,
+            false,
+        );
 
         // Monotonic clock uses local reference and sender media clock
         assert!(sdp.contains("a=ts-refclk:local"));
@@ -780,23 +901,107 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_sdp_with_ravenna_extensions() {
+        let block = BlockInstance {
+            id: "block_0".to_string(),
+            block_definition_id: "builtin.aes67_output".to_string(),
+            name: None,
+            properties: HashMap::new(),
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        };
+
+        let flow_props = FlowProperties {
+            clock_type: GStreamerClockType::Ptp,
+            ptp_domain: Some(42),
+            ..Default::default()
+        };
+
+        // Test with RAVENNA extensions enabled
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "RAVENNA Stream",
+            Some(48000),
+            Some(8),
+            Some(&flow_props),
+            Some("ec-46-70-ff-fe-0a-a1-81"),
+            Some("100.67.0.167"),
+            true, // Enable RAVENNA extensions
+        );
+
+        // Check session-level attributes
+        assert!(sdp.contains("a=clock-domain:PTPv2 42"));
+
+        // Check media-level RAVENNA attributes
+        // framecount = ptime_ms * sample_rate / 1000 = 1.0 * 48000 / 1000 = 48
+        assert!(sdp.contains("a=framecount:48"));
+        assert!(sdp.contains("a=sync-time:0"));
+
+        // ts-refclk and mediaclk should appear at media level too when RAVENNA is enabled
+        assert!(sdp.contains("a=ts-refclk:ptp=IEEE1588-2008:ec-46-70-ff-fe-0a-a1-81:42"));
+        assert!(sdp.contains("a=mediaclk:direct=0"));
+    }
+
+    #[test]
+    fn test_generate_sdp_without_ravenna_extensions() {
+        let block = BlockInstance {
+            id: "block_0".to_string(),
+            block_definition_id: "builtin.aes67_output".to_string(),
+            name: None,
+            properties: HashMap::new(),
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        };
+
+        let flow_props = FlowProperties {
+            clock_type: GStreamerClockType::Ptp,
+            ptp_domain: Some(42),
+            ..Default::default()
+        };
+
+        // Test without RAVENNA extensions
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "AES67 Stream",
+            Some(48000),
+            Some(8),
+            Some(&flow_props),
+            Some("ec-46-70-ff-fe-0a-a1-81"),
+            Some("100.67.0.167"),
+            false, // Disable RAVENNA extensions
+        );
+
+        // RAVENNA-specific attributes should NOT be present
+        assert!(!sdp.contains("a=clock-domain:"));
+        assert!(!sdp.contains("a=framecount:"));
+        assert!(!sdp.contains("a=sync-time:"));
+
+        // But standard AES67 attributes should still be present
+        assert!(sdp.contains("a=ts-refclk:ptp=IEEE1588-2008:ec-46-70-ff-fe-0a-a1-81:42"));
+        assert!(sdp.contains("a=mediaclk:direct=0"));
+    }
+
+    #[test]
     fn test_convert_clock_id_to_sdp_format() {
-        // Test conversion from colon-separated (PtpInfo format) to hyphen-separated (SDP format)
+        // Test conversion from colon-separated (PtpInfo format) to hyphen-separated lowercase (SDP format)
+        // Lowercase is used for better interoperability with RAVENNA/AES67 devices
         assert_eq!(
             convert_clock_id_to_sdp_format("00:11:22:33:44:55:66:77"),
             "00-11-22-33-44-55-66-77"
         );
 
-        // Test with actual EUI-64 format clock ID
+        // Test with actual EUI-64 format clock ID - should be lowercased
         assert_eq!(
             convert_clock_id_to_sdp_format("EC:46:70:FF:FE:02:E2:3A"),
-            "EC-46-70-FF-FE-02-E2-3A"
+            "ec-46-70-ff-fe-02-e2-3a"
         );
 
         // Test with all zeros (placeholder)
         assert_eq!(
             convert_clock_id_to_sdp_format("00:00:00:FF:FE:00:00:00"),
-            "00-00-00-FF-FE-00-00-00"
+            "00-00-00-ff-fe-00-00-00"
         );
     }
 }

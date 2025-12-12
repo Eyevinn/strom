@@ -468,6 +468,26 @@ impl BlockBuilder for AES67OutputBuilder {
             }
         });
 
+        // Validate packet size fits within AES67/Ethernet MTU constraints
+        // RTP payload must fit in ~1440 bytes (1500 MTU - 20 IP - 8 UDP - 12 RTP - ~20 safety margin)
+        // Payload size = framecount × channels × bytes_per_sample
+        // framecount = ptime_ms × sample_rate / 1000
+        const MAX_RTP_PAYLOAD_BYTES: i64 = 1440;
+        let bytes_per_sample = bit_depth / 8;
+        let framecount = (ptime_ms * sample_rate as f64 / 1000.0).round() as i64;
+        let payload_size = framecount * channels * bytes_per_sample;
+
+        if payload_size > MAX_RTP_PAYLOAD_BYTES {
+            let max_framecount = MAX_RTP_PAYLOAD_BYTES / (channels * bytes_per_sample);
+            let max_ptime_ms = max_framecount as f64 * 1000.0 / sample_rate as f64;
+            return Err(BlockBuildError::InvalidConfiguration(format!(
+                "RTP packet too large: {} bytes (max {}). With {} channels at {}-bit, \
+                 ptime {}ms produces {} samples/packet. Maximum ptime for this configuration is {:.3}ms.",
+                payload_size, MAX_RTP_PAYLOAD_BYTES, channels, bit_depth,
+                ptime_ms, framecount, max_ptime_ms
+            )));
+        }
+
         // Create namespaced element IDs
         let audioconvert_id = format!("{}:audioconvert", instance_id);
         let audioresample_id = format!("{}:audioresample", instance_id);
@@ -793,6 +813,18 @@ fn aes67_output_definition() -> BlockDefinition {
                     transform: None,
                 },
             },
+            ExposedProperty {
+                name: "ravenna_extensions".to_string(),
+                label: "RAVENNA Extensions".to_string(),
+                description: "Include RAVENNA-specific SDP attributes (clock-domain, framecount, sync-time) for improved compatibility with RAVENNA devices.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ravenna_extensions".to_string(),
+                    transform: None,
+                },
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {
@@ -837,4 +869,50 @@ fn write_temp_file(content: &str) -> Result<String, BlockBuildError> {
     debug!("Created temp file for SDP: {}", path_str);
 
     Ok(path_str)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Helper to calculate max ptime for given configuration
+    fn max_ptime_ms(channels: i64, bit_depth: i64, sample_rate: i64) -> f64 {
+        const MAX_RTP_PAYLOAD_BYTES: i64 = 1440;
+        let bytes_per_sample = bit_depth / 8;
+        let max_framecount = MAX_RTP_PAYLOAD_BYTES / (channels * bytes_per_sample);
+        max_framecount as f64 * 1000.0 / sample_rate as f64
+    }
+
+    #[test]
+    fn test_aes67_packet_size_limits() {
+        // 2 channels, 24-bit, 48kHz: max = 1440 / (2*3) = 240 samples = 5ms
+        assert!(max_ptime_ms(2, 24, 48000) >= 5.0);
+
+        // 8 channels, 24-bit, 48kHz: max = 1440 / (8*3) = 60 samples = 1.25ms
+        let max_8ch = max_ptime_ms(8, 24, 48000);
+        assert!(max_8ch >= 1.0, "8ch should allow at least 1ms ptime");
+        assert!(max_8ch < 2.0, "8ch should not allow 2ms ptime");
+
+        // 16 channels, 24-bit, 48kHz: max = 1440 / (16*3) = 30 samples = 0.625ms
+        let max_16ch = max_ptime_ms(16, 24, 48000);
+        assert!(max_16ch >= 0.5, "16ch should allow at least 0.5ms ptime");
+        assert!(max_16ch < 1.0, "16ch should not allow 1ms ptime");
+
+        // 64 channels, 24-bit, 48kHz: max = 1440 / (64*3) = 7 samples = 0.146ms
+        let max_64ch = max_ptime_ms(64, 24, 48000);
+        assert!(
+            max_64ch >= 0.125,
+            "64ch should allow at least 0.125ms ptime"
+        );
+        assert!(max_64ch < 0.25, "64ch should not allow 0.25ms ptime");
+    }
+
+    #[test]
+    fn test_aes67_packet_size_16bit() {
+        // 16-bit allows more channels per packet
+        // 64 channels, 16-bit, 48kHz: max = 1440 / (64*2) = 11 samples = 0.229ms
+        let max_64ch_16bit = max_ptime_ms(64, 16, 48000);
+        assert!(
+            max_64ch_16bit > max_ptime_ms(64, 24, 48000),
+            "16-bit should allow longer ptime than 24-bit"
+        );
+    }
 }
