@@ -456,6 +456,17 @@ impl BlockBuilder for AES67OutputBuilder {
             })
             .unwrap_or(5004);
 
+        let source_port = properties
+            .get("source_port")
+            .and_then(|v| {
+                if let PropertyValue::Int(i) = v {
+                    Some(*i as i32)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(5004);
+
         let interface = properties.get("interface").and_then(|v| {
             if let PropertyValue::String(s) = v {
                 if s.is_empty() {
@@ -547,6 +558,7 @@ impl BlockBuilder for AES67OutputBuilder {
             .name(&udpsink_id)
             .property("host", &host)
             .property("port", port)
+            .property("bind-port", source_port)
             .property("async", false)
             .property("sync", true)
             .property(
@@ -791,13 +803,25 @@ fn aes67_output_definition() -> BlockDefinition {
             },
             ExposedProperty {
                 name: "port".to_string(),
-                label: "UDP Port".to_string(),
+                label: "Destination Port".to_string(),
                 description: "Destination UDP port number".to_string(),
                 property_type: PropertyType::Int,
                 default_value: Some(PropertyValue::Int(5004)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "port".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "source_port".to_string(),
+                label: "Source Port".to_string(),
+                description: "Local UDP port to send from. Should match destination port for AES67 compliance.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(5004)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "source_port".to_string(),
                     transform: None,
                 },
             },
