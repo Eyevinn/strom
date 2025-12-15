@@ -2162,9 +2162,9 @@ dependencies = [
 
 [[package]]
 name = "gstreamer-app"
-version = "0.24.2"
+version = "0.24.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0af5d403738faf03494dfd502d223444b4b44feb997ba28ab3f118ee6d40a0b2"
+checksum = "895753fb0f976693f321e6b9d68f746ef9095f1a5b8277c11d85d807a949fbfc"
 dependencies = [
  "futures-core",
  "futures-sink",
