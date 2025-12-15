@@ -4771,11 +4771,11 @@ impl eframe::App for StromApp {
                     self.available_channels = channels;
                 }
                 AppMessage::DiscoveredStreamsLoaded(streams) => {
-                    tracing::info!("Discovered streams loaded: {} streams", streams.len());
+                    tracing::debug!("Discovered streams loaded: {} streams", streams.len());
                     self.discovery_page.set_discovered_streams(streams);
                 }
                 AppMessage::AnnouncedStreamsLoaded(streams) => {
-                    tracing::info!("Announced streams loaded: {} streams", streams.len());
+                    tracing::debug!("Announced streams loaded: {} streams", streams.len());
                     self.discovery_page.set_announced_streams(streams);
                 }
                 AppMessage::StreamSdpLoaded { stream_id, sdp } => {

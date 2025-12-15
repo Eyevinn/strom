@@ -1221,10 +1221,8 @@ impl ApiClient {
     pub async fn get_discovered_streams(
         &self,
     ) -> ApiResult<Vec<crate::discovery::DiscoveredStream>> {
-        use tracing::info;
-
         let url = format!("{}/discovery/streams", self.base_url);
-        info!("Fetching discovered streams from: {}", url);
+        tracing::debug!("Fetching discovered streams from: {}", url);
 
         let response = self
             .with_auth(self.client.get(&url))
@@ -1248,16 +1246,14 @@ impl ApiClient {
                 ApiError::Decode(e.to_string())
             })?;
 
-        info!("Successfully loaded {} discovered streams", streams.len());
+        tracing::debug!("Successfully loaded {} discovered streams", streams.len());
         Ok(streams)
     }
 
     /// Get streams we are announcing via SAP.
     pub async fn get_announced_streams(&self) -> ApiResult<Vec<crate::discovery::AnnouncedStream>> {
-        use tracing::info;
-
         let url = format!("{}/discovery/announced", self.base_url);
-        info!("Fetching announced streams from: {}", url);
+        tracing::debug!("Fetching announced streams from: {}", url);
 
         let response = self
             .with_auth(self.client.get(&url))
@@ -1281,7 +1277,7 @@ impl ApiClient {
                 ApiError::Decode(e.to_string())
             })?;
 
-        info!("Successfully loaded {} announced streams", streams.len());
+        tracing::debug!("Successfully loaded {} announced streams", streams.len());
         Ok(streams)
     }
 
