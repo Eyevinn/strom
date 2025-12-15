@@ -112,7 +112,8 @@ fn handle_hash_password(password: Option<&str>) -> anyhow::Result<()> {
         Ok(hash) => {
             println!("\nPassword hash:");
             println!("{}", hash);
-            println!("\nAdd this to your environment:");
+            println!("\nAdd both variables to your environment to enable authentication:");
+            println!("export STROM_ADMIN_USER='admin'");
             println!("export STROM_ADMIN_PASSWORD_HASH='{}'", hash);
         }
         Err(e) => {
