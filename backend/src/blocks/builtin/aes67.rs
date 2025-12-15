@@ -105,9 +105,16 @@ impl BlockBuilder for AES67InputBuilder {
             .name(&sdpdemux_id)
             .property("latency", latency_ms) // Jitterbuffer latency in ms
             .property("timeout", timeout_ms * 1000) // Convert ms to microseconds (0 = disabled)
-            .property("timeout-inactive-rtp-sources", false) // Keep RTP sources even if inactive
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("sdpdemux: {}", e)))?;
+
+        // Keep RTP sources even if inactive (GStreamer 1.24+)
+        if sdpdemux
+            .find_property("timeout-inactive-rtp-sources")
+            .is_some()
+        {
+            sdpdemux.set_property("timeout-inactive-rtp-sources", false);
+        }
 
         // Disable RTCP for AES67 input - set as string enum value
         sdpdemux.set_property_from_str("rtcp-mode", "inactivate");
