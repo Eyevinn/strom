@@ -395,7 +395,8 @@ impl BlockBuilder for WHEPInputBuilder {
 }
 
 /// Setup a stream from whepclientsrc with caps detection.
-/// Uses a pad probe to detect actual caps before deciding how to handle the stream:
+/// Uses an identity element to immediately claim the pad (preventing auto-tee),
+/// then a pad probe to detect actual caps before deciding how to handle the stream:
 /// - Audio: decode and route to liveadder
 /// - Video: discard via fakesink (no decode to avoid expensive video decoding)
 fn setup_stream_with_caps_detection(
@@ -408,6 +409,41 @@ fn setup_stream_with_caps_detection(
     // Get the pipeline
     let pipeline = get_pipeline_from_element(src)?;
 
+    // Create identity element IMMEDIATELY to claim the pad and prevent auto-tee
+    let identity_name = format!("{}:stream_identity_{}", instance_id, stream_num);
+    let identity = gst::ElementFactory::make("identity")
+        .name(&identity_name)
+        .build()
+        .map_err(|e| format!("Failed to create identity: {}", e))?;
+
+    // Add identity to pipeline
+    pipeline
+        .add(&identity)
+        .map_err(|e| format!("Failed to add identity to pipeline: {}", e))?;
+
+    // Sync identity state with pipeline
+    identity
+        .sync_state_with_parent()
+        .map_err(|e| format!("Failed to sync identity state: {}", e))?;
+
+    // Link src_pad to identity IMMEDIATELY - this prevents auto-tee from claiming the pad
+    let identity_sink = identity
+        .static_pad("sink")
+        .ok_or("Identity has no sink pad")?;
+    src_pad
+        .link(&identity_sink)
+        .map_err(|e| format!("Failed to link to identity: {:?}", e))?;
+
+    info!(
+        "WHEP: Stream {} linked to identity (preventing auto-tee)",
+        stream_num
+    );
+
+    // Get identity's src pad for the probe
+    let identity_src = identity
+        .static_pad("src")
+        .ok_or("Identity has no src pad")?;
+
     // Create weak references for the probe callback
     let pipeline_weak = pipeline.downgrade();
     let liveadder_weak = liveadder.downgrade();
@@ -417,8 +453,8 @@ fn setup_stream_with_caps_detection(
     let handled = Arc::new(AtomicBool::new(false));
     let handled_clone = Arc::clone(&handled);
 
-    // Add a probe to detect caps events
-    src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+    // Add a probe on identity's src pad to detect caps events
+    identity_src.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
         // Only handle once
         if handled_clone.load(Ordering::SeqCst) {
             return gst::PadProbeReturn::Pass;
@@ -513,7 +549,10 @@ fn setup_stream_with_caps_detection(
         gst::PadProbeReturn::Pass
     });
 
-    info!("WHEP: Caps probe installed on stream {}", stream_num);
+    info!(
+        "WHEP: Caps probe installed on stream {} (via identity)",
+        stream_num
+    );
     Ok(())
 }
 
