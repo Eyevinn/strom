@@ -219,6 +219,19 @@ pub fn generate_aes67_output_sdp(
         })
         .unwrap_or(1.0);
 
+    // Get multicast TTL (default 32)
+    let ttl = block
+        .properties
+        .get("ttl")
+        .and_then(|v| {
+            if let PropertyValue::Int(i) = v {
+                Some(*i as i32)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(32);
+
     // Use provided origin IP or default to 0.0.0.0
     let origin_ip = origin_ip.unwrap_or("0.0.0.0");
 
@@ -242,9 +255,10 @@ pub fn generate_aes67_output_sdp(
 
     // Check if the host is a multicast address and format connection line accordingly
     // Multicast IPv4 addresses are in range 224.0.0.0 to 239.255.255.255
+    // For multicast, format is: c=IN IP4 <address>/<ttl>
     let is_multicast = is_multicast_address(host);
     let connection_line = if is_multicast {
-        format!("c=IN IP4 {}/32", host) // Add TTL for multicast
+        format!("c=IN IP4 {}/{}", host, ttl)
     } else {
         format!("c=IN IP4 {}", host) // No TTL for unicast
     };
@@ -386,7 +400,7 @@ mod tests {
             generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
 
         assert!(sdp.contains("s=Test Stream"));
-        assert!(sdp.contains("c=IN IP4 239.69.1.1/32")); // Multicast should have /32 TTL
+        assert!(sdp.contains("c=IN IP4 239.69.1.1/32")); // Multicast with default TTL=32
         assert!(sdp.contains("m=audio 5004 RTP/AVP 96"));
         assert!(sdp.contains("a=rtpmap:96 L24/48000/2"));
         // Default clock signaling (no flow properties) should use local/sender
@@ -427,7 +441,7 @@ mod tests {
         );
 
         assert!(sdp.contains("s=Custom Stream"));
-        assert!(sdp.contains("c=IN IP4 239.1.2.3/32")); // Multicast should have /32 TTL
+        assert!(sdp.contains("c=IN IP4 239.1.2.3/32")); // Multicast with default TTL=32
         assert!(sdp.contains("m=audio 6000 RTP/AVP 96"));
         assert!(sdp.contains("o=- ")); // Origin line should contain our IP
         assert!(sdp.contains(" IN IP4 10.0.0.5"));
@@ -584,7 +598,7 @@ mod tests {
 
         // Verify all properties are correctly reflected in SDP
         assert!(sdp.contains("s=Multi-channel Stream"));
-        assert!(sdp.contains("c=IN IP4 239.1.2.3/32")); // Multicast should have /32 TTL
+        assert!(sdp.contains("c=IN IP4 239.1.2.3/32")); // Multicast with default TTL=32
         assert!(sdp.contains("m=audio 5008 RTP/AVP 96"));
         assert!(sdp.contains("a=rtpmap:96 L16/96000/8")); // L16 for 16-bit
         assert!(sdp.contains("a=ptime:0.125")); // 0.125 ms ptime
@@ -676,10 +690,44 @@ mod tests {
             false,
         );
 
-        // Multicast addresses MUST have /32 TTL suffix
+        // Multicast addresses MUST have /TTL suffix (default TTL=32)
         assert!(sdp.contains("c=IN IP4 239.69.11.44/32\r"));
         // Multicast should have source-filter
         assert!(sdp.contains("a=source-filter: incl IN IP4 239.69.11.44 192.168.1.50"));
+    }
+
+    #[test]
+    fn test_generate_sdp_custom_ttl() {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "host".to_string(),
+            PropertyValue::String("239.69.11.44".to_string()),
+        );
+        properties.insert("ttl".to_string(), PropertyValue::Int(64));
+
+        let block = BlockInstance {
+            id: "block_0".to_string(),
+            block_definition_id: "builtin.aes67_output".to_string(),
+            name: None,
+            properties,
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        };
+
+        let sdp = generate_aes67_output_sdp(
+            &block,
+            "Custom TTL Stream",
+            None,
+            None,
+            None,
+            None,
+            Some("192.168.1.50"),
+            false,
+        );
+
+        // Custom TTL=64 should be reflected in connection line
+        assert!(sdp.contains("c=IN IP4 239.69.11.44/64\r"));
     }
 
     // RFC 7273 clock signaling tests

@@ -14,6 +14,9 @@ const AES67_INPUT_DEFAULT_DECODE: bool = true;
 const AES67_INPUT_DEFAULT_LATENCY_MS: i64 = 20;
 const AES67_INPUT_DEFAULT_TIMEOUT_MS: i64 = 0;
 
+// AES67 Output defaults
+const AES67_OUTPUT_DEFAULT_TTL: i64 = 32;
+
 /// AES67 Input block builder.
 pub struct AES67InputBuilder;
 
@@ -479,6 +482,17 @@ impl BlockBuilder for AES67OutputBuilder {
             }
         });
 
+        let ttl = properties
+            .get("ttl")
+            .and_then(|v| {
+                if let PropertyValue::Int(i) = v {
+                    Some(*i as i32)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(AES67_OUTPUT_DEFAULT_TTL as i32);
+
         // Validate packet size fits within AES67/Ethernet MTU constraints
         // RTP payload must fit in ~1440 bytes (1500 MTU - 20 IP - 8 UDP - 12 RTP - ~20 safety margin)
         // Payload size = framecount × channels × bytes_per_sample
@@ -561,6 +575,7 @@ impl BlockBuilder for AES67OutputBuilder {
             .property("bind-port", source_port)
             .property("async", false)
             .property("sync", true)
+            .property("ttl-mc", ttl)
             .property(
                 "processing-deadline",
                 gst::ClockTime::from_nseconds(processing_deadline_ns),
@@ -574,6 +589,11 @@ impl BlockBuilder for AES67OutputBuilder {
             );
             udpsink_builder = udpsink_builder.property("multicast-iface", iface);
         }
+
+        debug!(
+            "AES67 Output [{}]: Multicast TTL set to {}",
+            instance_id, ttl
+        );
 
         let udpsink = udpsink_builder
             .build()
@@ -834,6 +854,18 @@ fn aes67_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "interface".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "ttl".to_string(),
+                label: "Multicast TTL".to_string(),
+                description: "Time-to-live for multicast packets. Controls how many network hops the stream can traverse. Default 32 is suitable for most networks.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(AES67_OUTPUT_DEFAULT_TTL)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ttl".to_string(),
                     transform: None,
                 },
             },
