@@ -287,7 +287,6 @@ pub struct StromApp {
     /// Whether to show the detailed system monitor window
     show_system_monitor: bool,
     /// Last time WebRTC stats were polled
-    #[cfg(not(target_arch = "wasm32"))]
     last_webrtc_poll: instant::Instant,
     /// Current theme preference
     theme_preference: ThemePreference,
@@ -431,6 +430,7 @@ impl StromApp {
             qos_stats: crate::qos_monitor::QoSStore::new(),
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
+            last_webrtc_poll: instant::Instant::now(),
             theme_preference: ThemePreference::Dark,
             version_info: None,
             login_screen: LoginScreen::default(),
@@ -903,8 +903,7 @@ impl StromApp {
     }
 
     /// Poll WebRTC stats for running flows that have WebRTC elements.
-    /// Called periodically (every second) for native mode.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Called periodically (every second).
     fn poll_webrtc_stats(&mut self, ctx: &Context) {
         // Find running flows
         let running_flows: Vec<_> = self
@@ -4862,8 +4861,7 @@ impl eframe::App for StromApp {
             self.needs_refresh = false;
         }
 
-        // Poll WebRTC stats every second for running flows (native only)
-        #[cfg(not(target_arch = "wasm32"))]
+        // Poll WebRTC stats every second for running flows
         {
             let poll_interval = std::time::Duration::from_secs(1);
             if self.last_webrtc_poll.elapsed() >= poll_interval {
