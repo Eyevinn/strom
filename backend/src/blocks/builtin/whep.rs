@@ -135,20 +135,16 @@ fn build_whepsrc(
     }
 
     // Create liveadder - this is our always-present mixer for dynamic audio streams
+    // force-live=true: operate in live mode and aggregate on timeout even without upstream live sources
+    // start-time-selection=first: use the first buffer's timestamp as start time (essential for PTP clocks)
+    //   Without this, liveadder defaults to start-time=0, but PTP clock running time is billions of ns
     let liveadder = gst::ElementFactory::make("liveadder")
         .name(&liveadder_id)
         .property("latency", mixer_latency_ms as u32)
+        .property("force-live", true)
+        .property_from_str("start-time-selection", "first")
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("liveadder: {}", e)))?;
-
-    // Create a silent audio source to keep liveadder running even without input
-    let silence_id = format!("{}:silence", instance_id);
-    let silence = gst::ElementFactory::make("audiotestsrc")
-        .name(&silence_id)
-        .property_from_str("wave", "silence")
-        .property("is-live", true)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("audiotestsrc (silence): {}", e)))?;
 
     // Create capsfilter to enforce 48kHz stereo audio after liveadder
     let caps = gst::Caps::builder("audio/x-raw")
@@ -210,12 +206,10 @@ fn build_whepsrc(
         whep_endpoint, stun_server
     );
 
-    // Internal links: silence -> liveadder -> capsfilter -> audioconvert -> audioresample
+    // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
+    // Note: No silence generator - using force-live=true on liveadder instead
+    // WHEP audio streams are linked dynamically via pad-added callback
     let internal_links = vec![
-        (
-            ElementPadRef::pad(&silence_id, "src"),
-            ElementPadRef::pad(&liveadder_id, "sink_%u"),
-        ),
         (
             ElementPadRef::pad(&liveadder_id, "src"),
             ElementPadRef::pad(&capsfilter_id, "sink"),
@@ -233,7 +227,6 @@ fn build_whepsrc(
     Ok(BlockBuildResult {
         elements: vec![
             (whepsrc_id, whepsrc),
-            (silence_id, silence),
             (liveadder_id, liveadder),
             (capsfilter_id, capsfilter),
             (output_audioconvert_id, output_audioconvert),
@@ -337,22 +330,16 @@ fn build_whepclientsrc(
     }
 
     // Create liveadder - this is our always-present mixer for dynamic audio streams
-    // latency property is in milliseconds as a guint (u32)
+    // force-live=true: operate in live mode and aggregate on timeout even without upstream live sources
+    // start-time-selection=first: use the first buffer's timestamp as start time (essential for PTP clocks)
+    //   Without this, liveadder defaults to start-time=0, but PTP clock running time is billions of ns
     let liveadder = gst::ElementFactory::make("liveadder")
         .name(&liveadder_id)
         .property("latency", mixer_latency_ms as u32)
+        .property("force-live", true)
+        .property_from_str("start-time-selection", "first")
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("liveadder: {}", e)))?;
-
-    // Create a silent audio source to keep liveadder running even without input
-    // This prevents the pipeline from getting stuck when no audio streams are present
-    let silence_id = format!("{}:silence", instance_id);
-    let silence = gst::ElementFactory::make("audiotestsrc")
-        .name(&silence_id)
-        .property_from_str("wave", "silence")
-        .property("is-live", true)
-        .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("audiotestsrc (silence): {}", e)))?;
 
     // Create capsfilter to enforce 48kHz stereo audio after liveadder
     let caps = gst::Caps::builder("audio/x-raw")
@@ -582,13 +569,10 @@ fn build_whepclientsrc(
         whep_endpoint, stun_server
     );
 
-    // Internal links: silence -> liveadder -> capsfilter -> audioconvert -> audioresample
-    // The whepclientsrc pads are linked dynamically via pad-added callback
+    // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
+    // Note: No silence generator - using force-live=true on liveadder instead
+    // WHEP audio streams are linked dynamically via pad-added callback
     let internal_links = vec![
-        (
-            ElementPadRef::pad(&silence_id, "src"),
-            ElementPadRef::pad(&liveadder_id, "sink_%u"),
-        ),
         (
             ElementPadRef::pad(&liveadder_id, "src"),
             ElementPadRef::pad(&capsfilter_id, "sink"),
@@ -606,7 +590,6 @@ fn build_whepclientsrc(
     Ok(BlockBuildResult {
         elements: vec![
             (whepclientsrc_id, whepclientsrc),
-            (silence_id, silence),
             (liveadder_id, liveadder),
             (capsfilter_id, capsfilter),
             (output_audioconvert_id, output_audioconvert),
@@ -926,6 +909,8 @@ fn setup_audio_decode_chain(
                             stream_num_clone,
                             liveadder_sink.name()
                         );
+                        // Enable QoS messages on this pad so we can see if buffers are being dropped
+                        liveadder_sink.set_property("qos-messages", true);
                         let audioresample_src = audioresample.static_pad("src").unwrap();
                         if let Err(e) = audioresample_src.link(&liveadder_sink) {
                             error!("Failed to link audioresample to liveadder: {:?}", e);
