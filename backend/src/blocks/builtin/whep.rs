@@ -1,6 +1,9 @@
 //! WHEP (WebRTC-HTTP Egress Protocol) input block builder.
 //!
-//! Uses GStreamer's whepclientsrc for receiving WebRTC streams via WHEP signalling.
+//! Supports two GStreamer implementations:
+//! - `whepclientsrc` (new): Uses signaller interface
+//! - `whepsrc` (stable): Simpler implementation with direct properties
+//!
 //! Handles dynamic pad creation by linking new audio streams to a liveadder mixer.
 
 use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
@@ -23,26 +26,37 @@ impl BlockBuilder for WHEPInputBuilder {
     ) -> Result<BlockBuildResult, BlockBuildError> {
         debug!("Building WHEP Input block instance: {}", instance_id);
 
-        // Get required WHEP endpoint
-        let whep_endpoint = properties
-            .get("whep_endpoint")
+        // Get implementation choice (default to stable whepsrc)
+        let use_new = properties
+            .get("implementation")
             .and_then(|v| {
                 if let PropertyValue::String(s) = v {
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s.clone())
-                    }
+                    Some(s == "whepclientsrc")
                 } else {
                     None
                 }
             })
-            .ok_or_else(|| {
-                BlockBuildError::InvalidProperty("whep_endpoint property required".to_string())
-            })?;
+            .unwrap_or(false);
 
-        // Get optional auth token
-        let auth_token = properties.get("auth_token").and_then(|v| {
+        if use_new {
+            build_whepclientsrc(instance_id, properties)
+        } else {
+            build_whepsrc(instance_id, properties)
+        }
+    }
+}
+
+/// Build using the stable whepsrc implementation
+fn build_whepsrc(
+    instance_id: &str,
+    properties: &HashMap<String, PropertyValue>,
+) -> Result<BlockBuildResult, BlockBuildError> {
+    info!("Building WHEP Input using whepsrc (stable)");
+
+    // Get required WHEP endpoint
+    let whep_endpoint = properties
+        .get("whep_endpoint")
+        .and_then(|v| {
             if let PropertyValue::String(s) = v {
                 if s.is_empty() {
                     None
@@ -52,151 +66,362 @@ impl BlockBuilder for WHEPInputBuilder {
             } else {
                 None
             }
-        });
+        })
+        .ok_or_else(|| {
+            BlockBuildError::InvalidProperty("whep_endpoint property required".to_string())
+        })?;
 
-        // Get STUN server (optional)
-        let stun_server = properties
-            .get("stun_server")
-            .and_then(|v| {
-                if let PropertyValue::String(s) = v {
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s.clone())
-                    }
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
-
-        // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
-        let mixer_latency_ms = properties
-            .get("mixer_latency_ms")
-            .and_then(|v| {
-                if let PropertyValue::Int(i) = v {
-                    Some(*i as u64)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(30);
-
-        // Create namespaced element IDs
-        let instance_id_owned = instance_id.to_string();
-        let whepclientsrc_id = format!("{}:whepclientsrc", instance_id);
-        let liveadder_id = format!("{}:liveadder", instance_id);
-        let capsfilter_id = format!("{}:capsfilter", instance_id);
-        let output_audioconvert_id = format!("{}:output_audioconvert", instance_id);
-        let output_audioresample_id = format!("{}:output_audioresample", instance_id);
-
-        // Create whepclientsrc element
-        let whepclientsrc = gst::ElementFactory::make("whepclientsrc")
-            .name(&whepclientsrc_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("whepclientsrc: {}", e)))?;
-
-        // Set STUN server property on the source
-        whepclientsrc.set_property("stun-server", &stun_server);
-
-        // Access the signaller child and set its properties
-        let signaller = whepclientsrc.property::<gst::glib::Object>("signaller");
-        signaller.set_property("whep-endpoint", &whep_endpoint);
-
-        if let Some(token) = &auth_token {
-            signaller.set_property("auth-token", token);
+    // Get optional auth token
+    let auth_token = properties.get("auth_token").and_then(|v| {
+        if let PropertyValue::String(s) = v {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        } else {
+            None
         }
+    });
 
-        // Create liveadder - this is our always-present mixer for dynamic audio streams
-        // latency property is in milliseconds as a guint (u32)
-        let liveadder = gst::ElementFactory::make("liveadder")
-            .name(&liveadder_id)
-            .property("latency", mixer_latency_ms as u32)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("liveadder: {}", e)))?;
-
-        // Create a silent audio source to keep liveadder running even without input
-        // This prevents the pipeline from getting stuck when no audio streams are present
-        let silence_id = format!("{}:silence", instance_id);
-        let silence = gst::ElementFactory::make("audiotestsrc")
-            .name(&silence_id)
-            .property_from_str("wave", "silence")
-            .property("is-live", true)
-            .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("audiotestsrc (silence): {}", e))
-            })?;
-
-        // Create capsfilter to enforce 48kHz stereo audio after liveadder
-        let caps = gst::Caps::builder("audio/x-raw")
-            .field("rate", 48000i32)
-            .field("channels", 2i32)
-            .build();
-        let capsfilter = gst::ElementFactory::make("capsfilter")
-            .name(&capsfilter_id)
-            .property("caps", &caps)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
-
-        // Create output audio processing chain (after liveadder -> capsfilter)
-        let output_audioconvert = gst::ElementFactory::make("audioconvert")
-            .name(&output_audioconvert_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("output_audioconvert: {}", e)))?;
-
-        let output_audioresample = gst::ElementFactory::make("audioresample")
-            .name(&output_audioresample_id)
-            .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("output_audioresample: {}", e))
-            })?;
-
-        // Counter for unique element naming
-        let stream_counter = Arc::new(AtomicUsize::new(0));
-
-        // Clone references for the pad-added callback
-        let liveadder_weak = liveadder.downgrade();
-        let stream_counter_clone = Arc::clone(&stream_counter);
-
-        // Set up pad-added callback on whepclientsrc
-        // This handles dynamic pads created when WebRTC streams are negotiated
-        // NOTE: We can't trust pad names OR query_caps at pad-added time.
-        // The actual caps are only set after negotiation completes.
-        // Strategy: Install a pad probe to detect actual caps, then:
-        // - Audio: decode and route to liveadder
-        // - Video: discard via fakesink (no decode - that would be expensive)
-        whepclientsrc.connect_pad_added(move |src, pad| {
-            let pad_name = pad.name();
-
-            info!(
-                "WHEP: New pad added on whepclientsrc: {} - waiting for caps to determine media type",
-                pad_name
-            );
-
-            if let Some(liveadder) = liveadder_weak.upgrade() {
-                let stream_num = stream_counter_clone.fetch_add(1, Ordering::SeqCst);
-                if let Err(e) = setup_stream_with_caps_detection(
-                    src,
-                    pad,
-                    &liveadder,
-                    &instance_id_owned,
-                    stream_num,
-                ) {
-                    error!("Failed to setup stream with caps detection: {}", e);
+    // Get STUN server (optional)
+    let stun_server = properties
+        .get("stun_server")
+        .and_then(|v| {
+            if let PropertyValue::String(s) = v {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.clone())
                 }
             } else {
-                error!("WHEP: liveadder no longer exists");
+                None
             }
-        });
+        })
+        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
 
-        // ALSO hook into the internal webrtcbin to catch pads that don't get ghostpadded
-        // whepclientsrc is a GstBin - we need to find the webrtcbin inside and listen to its pad-added
-        if let Ok(bin) = whepclientsrc.clone().downcast::<gst::Bin>() {
-            let liveadder_weak2 = liveadder.downgrade();
-            let whepclientsrc_weak = whepclientsrc.downgrade();
+    // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
+    let mixer_latency_ms = properties
+        .get("mixer_latency_ms")
+        .and_then(|v| {
+            if let PropertyValue::Int(i) = v {
+                Some(*i as u64)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(30);
 
-            // Use deep-element-added to catch webrtcbin when it's created
-            bin.connect("deep-element-added", false, move |values| {
+    // Create namespaced element IDs
+    let instance_id_owned = instance_id.to_string();
+    let whepsrc_id = format!("{}:whepsrc", instance_id);
+    let liveadder_id = format!("{}:liveadder", instance_id);
+    let capsfilter_id = format!("{}:capsfilter", instance_id);
+    let output_audioconvert_id = format!("{}:output_audioconvert", instance_id);
+    let output_audioresample_id = format!("{}:output_audioresample", instance_id);
+
+    // Create whepsrc element (stable - direct properties)
+    let whepsrc = gst::ElementFactory::make("whepsrc")
+        .name(&whepsrc_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("whepsrc: {}", e)))?;
+
+    // Set properties directly on whepsrc (no signaller child)
+    whepsrc.set_property("whep-endpoint", &whep_endpoint);
+    whepsrc.set_property("stun-server", &stun_server);
+
+    if let Some(token) = &auth_token {
+        whepsrc.set_property("auth-token", token);
+    }
+
+    // Create liveadder - this is our always-present mixer for dynamic audio streams
+    let liveadder = gst::ElementFactory::make("liveadder")
+        .name(&liveadder_id)
+        .property("latency", mixer_latency_ms as u32)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("liveadder: {}", e)))?;
+
+    // Create a silent audio source to keep liveadder running even without input
+    let silence_id = format!("{}:silence", instance_id);
+    let silence = gst::ElementFactory::make("audiotestsrc")
+        .name(&silence_id)
+        .property_from_str("wave", "silence")
+        .property("is-live", true)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("audiotestsrc (silence): {}", e)))?;
+
+    // Create capsfilter to enforce 48kHz stereo audio after liveadder
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("rate", 48000i32)
+        .field("channels", 2i32)
+        .build();
+    let capsfilter = gst::ElementFactory::make("capsfilter")
+        .name(&capsfilter_id)
+        .property("caps", &caps)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
+
+    // Create output audio processing chain
+    let output_audioconvert = gst::ElementFactory::make("audioconvert")
+        .name(&output_audioconvert_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("output_audioconvert: {}", e)))?;
+
+    let output_audioresample = gst::ElementFactory::make("audioresample")
+        .name(&output_audioresample_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("output_audioresample: {}", e)))?;
+
+    // Counter for unique element naming
+    let stream_counter = Arc::new(AtomicUsize::new(0));
+
+    // Clone references for the pad-added callback
+    let liveadder_weak = liveadder.downgrade();
+    let stream_counter_clone = Arc::clone(&stream_counter);
+
+    // Set up pad-added callback on whepsrc
+    // whepsrc also creates dynamic src_%u pads like whepclientsrc
+    whepsrc.connect_pad_added(move |src, pad| {
+        let pad_name = pad.name();
+
+        info!(
+            "WHEP (stable): New pad added on whepsrc: {} - waiting for caps to determine media type",
+            pad_name
+        );
+
+        if let Some(liveadder) = liveadder_weak.upgrade() {
+            let stream_num = stream_counter_clone.fetch_add(1, Ordering::SeqCst);
+            if let Err(e) = setup_stream_with_caps_detection(
+                src,
+                pad,
+                &liveadder,
+                &instance_id_owned,
+                stream_num,
+            ) {
+                error!("Failed to setup stream with caps detection: {}", e);
+            }
+        } else {
+            error!("WHEP (stable): liveadder no longer exists");
+        }
+    });
+
+    debug!(
+        "WHEP Input (whepsrc stable) configured: endpoint={}, stun={}",
+        whep_endpoint, stun_server
+    );
+
+    // Internal links: silence -> liveadder -> capsfilter -> audioconvert -> audioresample
+    let internal_links = vec![
+        (
+            ElementPadRef::pad(&silence_id, "src"),
+            ElementPadRef::pad(&liveadder_id, "sink_%u"),
+        ),
+        (
+            ElementPadRef::pad(&liveadder_id, "src"),
+            ElementPadRef::pad(&capsfilter_id, "sink"),
+        ),
+        (
+            ElementPadRef::pad(&capsfilter_id, "src"),
+            ElementPadRef::pad(&output_audioconvert_id, "sink"),
+        ),
+        (
+            ElementPadRef::pad(&output_audioconvert_id, "src"),
+            ElementPadRef::pad(&output_audioresample_id, "sink"),
+        ),
+    ];
+
+    Ok(BlockBuildResult {
+        elements: vec![
+            (whepsrc_id, whepsrc),
+            (silence_id, silence),
+            (liveadder_id, liveadder),
+            (capsfilter_id, capsfilter),
+            (output_audioconvert_id, output_audioconvert),
+            (output_audioresample_id, output_audioresample),
+        ],
+        internal_links,
+        bus_message_handler: None,
+        pad_properties: HashMap::new(),
+    })
+}
+
+/// Build using the new whepclientsrc (signaller-based) implementation
+fn build_whepclientsrc(
+    instance_id: &str,
+    properties: &HashMap<String, PropertyValue>,
+) -> Result<BlockBuildResult, BlockBuildError> {
+    info!("Building WHEP Input using whepclientsrc (new implementation)");
+
+    // Get required WHEP endpoint
+    let whep_endpoint = properties
+        .get("whep_endpoint")
+        .and_then(|v| {
+            if let PropertyValue::String(s) = v {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.clone())
+                }
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            BlockBuildError::InvalidProperty("whep_endpoint property required".to_string())
+        })?;
+
+    // Get optional auth token
+    let auth_token = properties.get("auth_token").and_then(|v| {
+        if let PropertyValue::String(s) = v {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        } else {
+            None
+        }
+    });
+
+    // Get STUN server (optional)
+    let stun_server = properties
+        .get("stun_server")
+        .and_then(|v| {
+            if let PropertyValue::String(s) = v {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.clone())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
+
+    // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
+    let mixer_latency_ms = properties
+        .get("mixer_latency_ms")
+        .and_then(|v| {
+            if let PropertyValue::Int(i) = v {
+                Some(*i as u64)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(30);
+
+    // Create namespaced element IDs
+    let instance_id_owned = instance_id.to_string();
+    let whepclientsrc_id = format!("{}:whepclientsrc", instance_id);
+    let liveadder_id = format!("{}:liveadder", instance_id);
+    let capsfilter_id = format!("{}:capsfilter", instance_id);
+    let output_audioconvert_id = format!("{}:output_audioconvert", instance_id);
+    let output_audioresample_id = format!("{}:output_audioresample", instance_id);
+
+    // Create whepclientsrc element
+    let whepclientsrc = gst::ElementFactory::make("whepclientsrc")
+        .name(&whepclientsrc_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("whepclientsrc: {}", e)))?;
+
+    // Set STUN server property on the source
+    whepclientsrc.set_property("stun-server", &stun_server);
+
+    // Access the signaller child and set its properties
+    let signaller = whepclientsrc.property::<gst::glib::Object>("signaller");
+    signaller.set_property("whep-endpoint", &whep_endpoint);
+
+    if let Some(token) = &auth_token {
+        signaller.set_property("auth-token", token);
+    }
+
+    // Create liveadder - this is our always-present mixer for dynamic audio streams
+    // latency property is in milliseconds as a guint (u32)
+    let liveadder = gst::ElementFactory::make("liveadder")
+        .name(&liveadder_id)
+        .property("latency", mixer_latency_ms as u32)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("liveadder: {}", e)))?;
+
+    // Create a silent audio source to keep liveadder running even without input
+    // This prevents the pipeline from getting stuck when no audio streams are present
+    let silence_id = format!("{}:silence", instance_id);
+    let silence = gst::ElementFactory::make("audiotestsrc")
+        .name(&silence_id)
+        .property_from_str("wave", "silence")
+        .property("is-live", true)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("audiotestsrc (silence): {}", e)))?;
+
+    // Create capsfilter to enforce 48kHz stereo audio after liveadder
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("rate", 48000i32)
+        .field("channels", 2i32)
+        .build();
+    let capsfilter = gst::ElementFactory::make("capsfilter")
+        .name(&capsfilter_id)
+        .property("caps", &caps)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
+
+    // Create output audio processing chain (after liveadder -> capsfilter)
+    let output_audioconvert = gst::ElementFactory::make("audioconvert")
+        .name(&output_audioconvert_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("output_audioconvert: {}", e)))?;
+
+    let output_audioresample = gst::ElementFactory::make("audioresample")
+        .name(&output_audioresample_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("output_audioresample: {}", e)))?;
+
+    // Counter for unique element naming
+    let stream_counter = Arc::new(AtomicUsize::new(0));
+
+    // Clone references for the pad-added callback
+    let liveadder_weak = liveadder.downgrade();
+    let stream_counter_clone = Arc::clone(&stream_counter);
+
+    // Set up pad-added callback on whepclientsrc
+    // This handles dynamic pads created when WebRTC streams are negotiated
+    // NOTE: We can't trust pad names OR query_caps at pad-added time.
+    // The actual caps are only set after negotiation completes.
+    // Strategy: Install a pad probe to detect actual caps, then:
+    // - Audio: decode and route to liveadder
+    // - Video: discard via fakesink (no decode - that would be expensive)
+    whepclientsrc.connect_pad_added(move |src, pad| {
+        let pad_name = pad.name();
+
+        info!(
+            "WHEP: New pad added on whepclientsrc: {} - waiting for caps to determine media type",
+            pad_name
+        );
+
+        if let Some(liveadder) = liveadder_weak.upgrade() {
+            let stream_num = stream_counter_clone.fetch_add(1, Ordering::SeqCst);
+            if let Err(e) = setup_stream_with_caps_detection(
+                src,
+                pad,
+                &liveadder,
+                &instance_id_owned,
+                stream_num,
+            ) {
+                error!("Failed to setup stream with caps detection: {}", e);
+            }
+        } else {
+            error!("WHEP: liveadder no longer exists");
+        }
+    });
+
+    // ALSO hook into the internal webrtcbin to catch pads that don't get ghostpadded
+    // whepclientsrc is a GstBin - we need to find the webrtcbin inside and listen to its pad-added
+    if let Ok(bin) = whepclientsrc.clone().downcast::<gst::Bin>() {
+        let liveadder_weak2 = liveadder.downgrade();
+        let whepclientsrc_weak = whepclientsrc.downgrade();
+
+        // Use deep-element-added to catch webrtcbin when it's created
+        bin.connect("deep-element-added", false, move |values| {
                 let _bin = values[0].get::<gst::Bin>().unwrap();
                 let element = values[2].get::<gst::Element>().unwrap();
                 let element_name = element.name();
@@ -350,51 +575,50 @@ impl BlockBuilder for WHEPInputBuilder {
 
                 None
             });
-        }
-
-        debug!(
-            "WHEP Input configured: endpoint={}, stun={}",
-            whep_endpoint, stun_server
-        );
-
-        // Internal links: silence -> liveadder -> capsfilter -> audioconvert -> audioresample
-        // The whepclientsrc pads are linked dynamically via pad-added callback
-        let internal_links = vec![
-            (
-                ElementPadRef::pad(&silence_id, "src"),
-                ElementPadRef::pad(&liveadder_id, "sink_%u"),
-            ),
-            (
-                ElementPadRef::pad(&liveadder_id, "src"),
-                ElementPadRef::pad(&capsfilter_id, "sink"),
-            ),
-            (
-                ElementPadRef::pad(&capsfilter_id, "src"),
-                ElementPadRef::pad(&output_audioconvert_id, "sink"),
-            ),
-            (
-                ElementPadRef::pad(&output_audioconvert_id, "src"),
-                ElementPadRef::pad(&output_audioresample_id, "sink"),
-            ),
-        ];
-
-        Ok(BlockBuildResult {
-            elements: vec![
-                (whepclientsrc_id, whepclientsrc),
-                (silence_id, silence),
-                (liveadder_id, liveadder),
-                (capsfilter_id, capsfilter),
-                (output_audioconvert_id, output_audioconvert),
-                (output_audioresample_id, output_audioresample),
-            ],
-            internal_links,
-            bus_message_handler: None,
-            pad_properties: HashMap::new(),
-        })
     }
+
+    debug!(
+        "WHEP Input configured: endpoint={}, stun={}",
+        whep_endpoint, stun_server
+    );
+
+    // Internal links: silence -> liveadder -> capsfilter -> audioconvert -> audioresample
+    // The whepclientsrc pads are linked dynamically via pad-added callback
+    let internal_links = vec![
+        (
+            ElementPadRef::pad(&silence_id, "src"),
+            ElementPadRef::pad(&liveadder_id, "sink_%u"),
+        ),
+        (
+            ElementPadRef::pad(&liveadder_id, "src"),
+            ElementPadRef::pad(&capsfilter_id, "sink"),
+        ),
+        (
+            ElementPadRef::pad(&capsfilter_id, "src"),
+            ElementPadRef::pad(&output_audioconvert_id, "sink"),
+        ),
+        (
+            ElementPadRef::pad(&output_audioconvert_id, "src"),
+            ElementPadRef::pad(&output_audioresample_id, "sink"),
+        ),
+    ];
+
+    Ok(BlockBuildResult {
+        elements: vec![
+            (whepclientsrc_id, whepclientsrc),
+            (silence_id, silence),
+            (liveadder_id, liveadder),
+            (capsfilter_id, capsfilter),
+            (output_audioconvert_id, output_audioconvert),
+            (output_audioresample_id, output_audioresample),
+        ],
+        internal_links,
+        bus_message_handler: None,
+        pad_properties: HashMap::new(),
+    })
 }
 
-/// Setup a stream from whepclientsrc with caps detection.
+/// Setup a stream from whepclientsrc/whepsrc with caps detection.
 /// Uses an identity element to immediately claim the pad (preventing auto-tee),
 /// then a pad probe to detect actual caps before deciding how to handle the stream:
 /// - Audio: decode and route to liveadder
@@ -796,9 +1020,32 @@ fn whep_input_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.whep_input".to_string(),
         name: "WHEP Input".to_string(),
-        description: "Receives audio/video via WebRTC WHEP protocol. Uses whepclientsrc with liveadder for multi-stream mixing.".to_string(),
+        description: "Receives audio/video via WebRTC WHEP protocol. Default uses stable whepsrc element.".to_string(),
         category: "Inputs".to_string(),
         exposed_properties: vec![
+            ExposedProperty {
+                name: "implementation".to_string(),
+                label: "Implementation".to_string(),
+                description: "Choose GStreamer element: whepsrc (stable) or whepclientsrc (new, may have issues with some servers)".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "whepsrc".to_string(),
+                            label: Some("whepsrc (stable)".to_string()),
+                        },
+                        EnumValue {
+                            value: "whepclientsrc".to_string(),
+                            label: Some("whepclientsrc (new)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("whepsrc".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "implementation".to_string(),
+                    transform: None,
+                },
+            },
             ExposedProperty {
                 name: "whep_endpoint".to_string(),
                 label: "WHEP Endpoint".to_string(),

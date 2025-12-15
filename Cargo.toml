@@ -24,7 +24,8 @@ tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 gstreamer = { version = "0.24.4", features = ["v1_20"] }
 gstreamer-app = { version = "0.24.2", features = ["v1_20"] }
 gstreamer-net = { version = "0.24.4", features = ["v1_20"] }
-gst-plugin-webrtc = { git = "https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs", features = ["whep", "whip"], rev = "83625619" }
+# gst-plugin-webrtc = { git = "https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs", features = ["whep", "whip"], rev = "83625619" }
+gst-plugin-webrtchttp = "0.14"
 gst-plugin-inter = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
