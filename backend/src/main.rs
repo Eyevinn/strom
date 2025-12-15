@@ -4,8 +4,10 @@ use clap::Parser;
 use gstreamer::glib;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+use strom_types::flow::GStreamerClockType;
 
 #[cfg(feature = "gui")]
 use strom::create_app_with_state_and_auth;
@@ -533,28 +535,125 @@ async fn restart_flows(state: &AppState) {
 
     info!("Restarting flows that have auto_restart enabled...");
     let flows = state.get_flows().await;
-    let mut count = 0;
+
+    // Separate flows into PTP and non-PTP
+    let mut non_ptp_flows = Vec::new();
+    let mut ptp_flows = Vec::new();
+
     for flow in flows {
         if flow.properties.auto_restart {
-            count += 1;
+            if flow.properties.clock_type == GStreamerClockType::Ptp {
+                ptp_flows.push(flow);
+            } else {
+                non_ptp_flows.push(flow);
+            }
+        }
+    }
+
+    let mut count = 0;
+
+    // Start non-PTP flows immediately
+    for flow in non_ptp_flows {
+        count += 1;
+        info!(
+            "Auto-restarting flow {}: {} ({}) [non-PTP]",
+            count, flow.name, flow.id
+        );
+        match state.start_flow(&flow.id).await {
+            Ok(_) => {
+                info!("Successfully restarted flow: {}", flow.name);
+                // Small delay between flow starts to avoid overwhelming GStreamer
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                error!("Failed to restart flow {}: {}", flow.name, e);
+            }
+        }
+    }
+
+    // For PTP flows, wait for PTP clock to sync before starting
+    if !ptp_flows.is_empty() {
+        // Collect unique PTP domains that need to be synced
+        let mut domains_to_wait: std::collections::HashSet<u8> = std::collections::HashSet::new();
+        for flow in &ptp_flows {
+            let domain = flow.properties.ptp_domain.unwrap_or(0);
+            domains_to_wait.insert(domain);
+            // Register the flow with PTP monitor so it starts tracking the domain
+            if let Err(e) = state.ptp_monitor().register_flow(flow.id, domain) {
+                warn!(
+                    "Failed to register flow {} for PTP domain {}: {}",
+                    flow.name, domain, e
+                );
+            }
+        }
+
+        info!(
+            "Waiting for PTP sync on {} domain(s) before starting {} PTP flow(s)...",
+            domains_to_wait.len(),
+            ptp_flows.len()
+        );
+
+        // Wait for all PTP domains to sync (with timeout)
+        const PTP_SYNC_TIMEOUT_SECS: u64 = 30;
+        const PTP_POLL_INTERVAL_MS: u64 = 500;
+        let start_time = std::time::Instant::now();
+
+        loop {
+            // Check if all domains are synced
+            let all_synced = domains_to_wait
+                .iter()
+                .all(|domain| state.ptp_monitor().is_domain_synced(*domain));
+
+            if all_synced {
+                info!("All PTP domains synchronized, starting PTP flows...");
+                break;
+            }
+
+            // Check timeout
+            if start_time.elapsed().as_secs() >= PTP_SYNC_TIMEOUT_SECS {
+                warn!(
+                    "PTP sync timeout after {}s, starting PTP flows anyway (may have clock issues)",
+                    PTP_SYNC_TIMEOUT_SECS
+                );
+                break;
+            }
+
+            // Log which domains are still waiting
+            let unsynced: Vec<u8> = domains_to_wait
+                .iter()
+                .filter(|d| !state.ptp_monitor().is_domain_synced(**d))
+                .copied()
+                .collect();
             info!(
-                "Auto-restarting flow {}: {} ({})",
-                count, flow.name, flow.id
+                "Waiting for PTP sync on domain(s) {:?} ({:.1}s elapsed)",
+                unsynced,
+                start_time.elapsed().as_secs_f32()
+            );
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(PTP_POLL_INTERVAL_MS)).await;
+        }
+
+        // Now start PTP flows
+        for flow in ptp_flows {
+            count += 1;
+            let domain = flow.properties.ptp_domain.unwrap_or(0);
+            let synced = state.ptp_monitor().is_domain_synced(domain);
+            info!(
+                "Auto-restarting flow {}: {} ({}) [PTP domain {}, synced={}]",
+                count, flow.name, flow.id, domain, synced
             );
             match state.start_flow(&flow.id).await {
                 Ok(_) => {
                     info!("Successfully restarted flow: {}", flow.name);
-                    // Small delay between flow starts to avoid overwhelming GStreamer
-                    // and to give SRT time to initialize properly
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
                 Err(e) => {
                     error!("Failed to restart flow {}: {}", flow.name, e);
-                    // Continue with other flows even if one fails
                 }
             }
         }
     }
+
     if count > 0 {
         info!("Auto-restart complete: {} flow(s) restarted", count);
     }
