@@ -1,13 +1,15 @@
 //! WHIP (WebRTC-HTTP Ingestion Protocol) output block builder.
 //!
-//! Uses GStreamer's whipclientsink for WebRTC streaming via WHIP signalling.
+//! Supports two GStreamer implementations:
+//! - `whipclientsink` (new): Uses signaller interface, handles encoding internally
+//! - `whipsink` (legacy): Simpler implementation, requires pre-encoded RTP input
 
 use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
-use tracing::debug;
+use tracing::{debug, info};
 
 /// WHIP Output block builder.
 pub struct WHIPOutputBuilder;
@@ -20,22 +22,64 @@ impl BlockBuilder for WHIPOutputBuilder {
     ) -> Result<BlockBuildResult, BlockBuildError> {
         debug!("Building WHIP Output block instance: {}", instance_id);
 
-        // Get required WHIP endpoint
-        let whip_endpoint = properties
-            .get("whip_endpoint")
+        // Get implementation choice (default to stable whipsink)
+        let use_new = properties
+            .get("implementation")
             .and_then(|v| {
                 if let PropertyValue::String(s) = v {
-                    Some(s.clone())
+                    Some(s == "whipclientsink")
                 } else {
                     None
                 }
             })
-            .ok_or_else(|| {
-                BlockBuildError::InvalidProperty("whip_endpoint property required".to_string())
-            })?;
+            .unwrap_or(false);
 
-        // Get optional auth token
-        let auth_token = properties.get("auth_token").and_then(|v| {
+        if use_new {
+            build_whipclientsink(instance_id, properties)
+        } else {
+            build_whipsink(instance_id, properties)
+        }
+    }
+}
+
+/// Build using the new whipclientsink (signaller-based) implementation
+fn build_whipclientsink(
+    instance_id: &str,
+    properties: &HashMap<String, PropertyValue>,
+) -> Result<BlockBuildResult, BlockBuildError> {
+    info!("Building WHIP Output using whipclientsink (new implementation)");
+
+    // Get required WHIP endpoint
+    let whip_endpoint = properties
+        .get("whip_endpoint")
+        .and_then(|v| {
+            if let PropertyValue::String(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            BlockBuildError::InvalidProperty("whip_endpoint property required".to_string())
+        })?;
+
+    // Get optional auth token
+    let auth_token = properties.get("auth_token").and_then(|v| {
+        if let PropertyValue::String(s) = v {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        } else {
+            None
+        }
+    });
+
+    // Get STUN server (optional)
+    let stun_server = properties
+        .get("stun_server")
+        .and_then(|v| {
             if let PropertyValue::String(s) = v {
                 if s.is_empty() {
                     None
@@ -45,94 +89,207 @@ impl BlockBuilder for WHIPOutputBuilder {
             } else {
                 None
             }
-        });
-
-        // Get STUN server (optional)
-        let stun_server = properties
-            .get("stun_server")
-            .and_then(|v| {
-                if let PropertyValue::String(s) = v {
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s.clone())
-                    }
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
-
-        // Create namespaced element IDs
-        let whipclientsink_id = format!("{}:whipclientsink", instance_id);
-
-        // For audio input, we need audioconvert and audioresample before the sink
-        let audioconvert_id = format!("{}:audioconvert", instance_id);
-        let audioresample_id = format!("{}:audioresample", instance_id);
-
-        // Create audio processing elements
-        let audioconvert = gst::ElementFactory::make("audioconvert")
-            .name(&audioconvert_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
-
-        let audioresample = gst::ElementFactory::make("audioresample")
-            .name(&audioresample_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
-
-        // Create whipclientsink element
-        let whipclientsink = gst::ElementFactory::make("whipclientsink")
-            .name(&whipclientsink_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("whipclientsink: {}", e)))?;
-
-        // Set signaller properties using the child proxy interface
-        // whipclientsink exposes signaller properties via signaller::property-name
-        whipclientsink.set_property("stun-server", &stun_server);
-
-        // Disable video codecs by setting video-caps to empty
-        whipclientsink.set_property("video-caps", gst::Caps::new_empty());
-
-        // Access the signaller child and set its properties
-        let signaller = whipclientsink.property::<gst::glib::Object>("signaller");
-
-        signaller.set_property("whip-endpoint", &whip_endpoint);
-
-        if let Some(token) = &auth_token {
-            signaller.set_property("auth-token", token);
-        }
-
-        debug!(
-            "WHIP Output configured: endpoint={}, stun={}",
-            whip_endpoint, stun_server
-        );
-
-        // Define internal links
-        // Note: whipclientsink uses request pads (audio_%u, video_%u)
-        // The first audio pad requested will be audio_0
-        let internal_links = vec![
-            (
-                ElementPadRef::pad(&audioconvert_id, "src"),
-                ElementPadRef::pad(&audioresample_id, "sink"),
-            ),
-            (
-                ElementPadRef::pad(&audioresample_id, "src"),
-                ElementPadRef::pad(&whipclientsink_id, "audio_0"),
-            ),
-        ];
-
-        Ok(BlockBuildResult {
-            elements: vec![
-                (audioconvert_id, audioconvert),
-                (audioresample_id, audioresample),
-                (whipclientsink_id, whipclientsink),
-            ],
-            internal_links,
-            bus_message_handler: None,
-            pad_properties: HashMap::new(),
         })
+        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
+
+    // Create namespaced element IDs
+    let whipclientsink_id = format!("{}:whipclientsink", instance_id);
+    let audioconvert_id = format!("{}:audioconvert", instance_id);
+    let audioresample_id = format!("{}:audioresample", instance_id);
+
+    // Create audio processing elements
+    let audioconvert = gst::ElementFactory::make("audioconvert")
+        .name(&audioconvert_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
+
+    let audioresample = gst::ElementFactory::make("audioresample")
+        .name(&audioresample_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
+
+    // Create whipclientsink element
+    let whipclientsink = gst::ElementFactory::make("whipclientsink")
+        .name(&whipclientsink_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("whipclientsink: {}", e)))?;
+
+    // Set signaller properties using the child proxy interface
+    whipclientsink.set_property("stun-server", &stun_server);
+
+    // Disable video codecs by setting video-caps to empty
+    whipclientsink.set_property("video-caps", gst::Caps::new_empty());
+
+    // Access the signaller child and set its properties
+    let signaller = whipclientsink.property::<gst::glib::Object>("signaller");
+    signaller.set_property("whip-endpoint", &whip_endpoint);
+
+    if let Some(token) = &auth_token {
+        signaller.set_property("auth-token", token);
     }
+
+    debug!(
+        "WHIP Output (whipclientsink) configured: endpoint={}, stun={}",
+        whip_endpoint, stun_server
+    );
+
+    // Define internal links
+    // whipclientsink uses request pads (audio_%u, video_%u)
+    let internal_links = vec![
+        (
+            ElementPadRef::pad(&audioconvert_id, "src"),
+            ElementPadRef::pad(&audioresample_id, "sink"),
+        ),
+        (
+            ElementPadRef::pad(&audioresample_id, "src"),
+            ElementPadRef::pad(&whipclientsink_id, "audio_0"),
+        ),
+    ];
+
+    Ok(BlockBuildResult {
+        elements: vec![
+            (audioconvert_id, audioconvert),
+            (audioresample_id, audioresample),
+            (whipclientsink_id, whipclientsink),
+        ],
+        internal_links,
+        bus_message_handler: None,
+        pad_properties: HashMap::new(),
+    })
+}
+
+/// Build using the stable whipsink implementation
+fn build_whipsink(
+    instance_id: &str,
+    properties: &HashMap<String, PropertyValue>,
+) -> Result<BlockBuildResult, BlockBuildError> {
+    info!("Building WHIP Output using whipsink (stable)");
+
+    // Get required WHIP endpoint
+    let whip_endpoint = properties
+        .get("whip_endpoint")
+        .and_then(|v| {
+            if let PropertyValue::String(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            BlockBuildError::InvalidProperty("whip_endpoint property required".to_string())
+        })?;
+
+    // Get optional auth token
+    let auth_token = properties.get("auth_token").and_then(|v| {
+        if let PropertyValue::String(s) = v {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        } else {
+            None
+        }
+    });
+
+    // Get STUN server (optional)
+    let stun_server = properties
+        .get("stun_server")
+        .and_then(|v| {
+            if let PropertyValue::String(s) = v {
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.clone())
+                }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
+
+    // Create namespaced element IDs
+    let whipsink_id = format!("{}:whipsink", instance_id);
+    let audioconvert_id = format!("{}:audioconvert", instance_id);
+    let audioresample_id = format!("{}:audioresample", instance_id);
+    let opusenc_id = format!("{}:opusenc", instance_id);
+    let rtpopuspay_id = format!("{}:rtpopuspay", instance_id);
+
+    // Create audio processing elements
+    let audioconvert = gst::ElementFactory::make("audioconvert")
+        .name(&audioconvert_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
+
+    let audioresample = gst::ElementFactory::make("audioresample")
+        .name(&audioresample_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
+
+    // Create Opus encoder
+    let opusenc = gst::ElementFactory::make("opusenc")
+        .name(&opusenc_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("opusenc: {}", e)))?;
+
+    // Create RTP payloader for Opus
+    let rtpopuspay = gst::ElementFactory::make("rtpopuspay")
+        .name(&rtpopuspay_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("rtpopuspay: {}", e)))?;
+
+    // Create whipsink element (legacy)
+    let whipsink = gst::ElementFactory::make("whipsink")
+        .name(&whipsink_id)
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("whipsink: {}", e)))?;
+
+    // Set properties directly on whipsink (no signaller child)
+    whipsink.set_property("whip-endpoint", &whip_endpoint);
+    whipsink.set_property("stun-server", &stun_server);
+
+    if let Some(token) = &auth_token {
+        whipsink.set_property("auth-token", token);
+    }
+
+    debug!(
+        "WHIP Output (whipsink legacy) configured: endpoint={}, stun={}",
+        whip_endpoint, stun_server
+    );
+
+    // Define internal links
+    // whipsink uses generic sink_%u pads for RTP streams
+    let internal_links = vec![
+        (
+            ElementPadRef::pad(&audioconvert_id, "src"),
+            ElementPadRef::pad(&audioresample_id, "sink"),
+        ),
+        (
+            ElementPadRef::pad(&audioresample_id, "src"),
+            ElementPadRef::pad(&opusenc_id, "sink"),
+        ),
+        (
+            ElementPadRef::pad(&opusenc_id, "src"),
+            ElementPadRef::pad(&rtpopuspay_id, "sink"),
+        ),
+        (
+            ElementPadRef::pad(&rtpopuspay_id, "src"),
+            ElementPadRef::pad(&whipsink_id, "sink_0"),
+        ),
+    ];
+
+    Ok(BlockBuildResult {
+        elements: vec![
+            (audioconvert_id, audioconvert),
+            (audioresample_id, audioresample),
+            (opusenc_id, opusenc),
+            (rtpopuspay_id, rtpopuspay),
+            (whipsink_id, whipsink),
+        ],
+        internal_links,
+        bus_message_handler: None,
+        pad_properties: HashMap::new(),
+    })
 }
 
 /// Get metadata for WHIP blocks (for UI/API).
@@ -145,9 +302,32 @@ fn whip_output_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.whip_output".to_string(),
         name: "WHIP Output".to_string(),
-        description: "Sends audio/video via WebRTC WHIP protocol. Uses whipclientsink for signalling and media transport.".to_string(),
+        description: "Sends audio via WebRTC WHIP protocol. Default uses stable whipsink element.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
+            ExposedProperty {
+                name: "implementation".to_string(),
+                label: "Implementation".to_string(),
+                description: "Choose GStreamer element: whipsink (stable) or whipclientsink (new, may have issues with some servers)".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "whipsink".to_string(),
+                            label: Some("whipsink (stable)".to_string()),
+                        },
+                        EnumValue {
+                            value: "whipclientsink".to_string(),
+                            label: Some("whipclientsink (new)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("whipsink".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "implementation".to_string(),
+                    transform: None,
+                },
+            },
             ExposedProperty {
                 name: "whip_endpoint".to_string(),
                 label: "WHIP Endpoint".to_string(),
