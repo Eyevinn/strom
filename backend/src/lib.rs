@@ -148,6 +148,8 @@ pub async fn create_app_with_state_and_auth(
         )
         // Network interfaces
         .route("/network/interfaces", get(api::network::list_interfaces))
+        // Media files browser
+        .route("/media/files", get(api::media::list_media_files))
         // Sources (for inter-pipeline sharing)
         .route("/sources", get(api::flows::get_available_sources))
         // Discovery (SAP/AES67)
@@ -158,6 +160,27 @@ pub async fn create_app_with_state_and_auth(
             get(api::discovery::get_stream_sdp),
         )
         .route("/discovery/announced", get(api::discovery::list_announced))
+        // Media player controls
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/player/state",
+            get(api::mediaplayer::get_player_state),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/player/playlist",
+            post(api::mediaplayer::set_playlist),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/player/control",
+            post(api::mediaplayer::control_player),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/player/seek",
+            post(api::mediaplayer::seek_player),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/player/goto",
+            post(api::mediaplayer::goto_file),
+        )
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 

@@ -827,8 +827,23 @@ impl GraphEditor {
                     self.hovered_element = None;
                 }
 
+                // Check if block has interactive content (buttons that need clicks)
+                let has_interactive_content = self
+                    .block_content_map
+                    .get(&block.id)
+                    .map(|c| c.render_callback.is_some())
+                    .unwrap_or(false);
+
                 // Handle node selection
-                if node_response.clicked() || (node_response.dragged() && self.dragging.is_none()) {
+                // For interactive blocks: only select on drag start (not click) so buttons work
+                // For normal blocks: select on click or drag start
+                let should_select = if has_interactive_content {
+                    node_response.drag_started()
+                } else {
+                    node_response.clicked() || (node_response.dragged() && self.dragging.is_none())
+                };
+
+                if should_select {
                     self.selected = Some(block.id.clone());
                     self.selected_link = None;
                     self.active_property_tab = PropertyTab::Element; // Switch to Element Properties tab
@@ -842,6 +857,8 @@ impl GraphEditor {
                 {
                     set_local_storage("open_compositor_editor", &block.id);
                 }
+
+                // Note: Playlist editor for media player is opened via the + button in the compact UI
 
                 // Handle node dragging
                 if node_response.dragged() {
@@ -1592,6 +1609,21 @@ impl GraphEditor {
             egui::epaint::StrokeKind::Inside,
         );
 
+        // Add block interaction EARLY - before render_callback adds buttons
+        // This way buttons added later will take priority over this interaction
+        let content_info = self.block_content_map.get(&block.id);
+        let has_interactive_content = content_info
+            .map(|c| c.render_callback.is_some())
+            .unwrap_or(false);
+
+        let block_response = if has_interactive_content {
+            // Drag only - clicks pass through to buttons inside
+            ui.interact(rect, ui.id().with(&block.id), Sense::drag())
+        } else {
+            // Normal blocks: click and drag
+            ui.interact(rect, ui.id().with(&block.id), Sense::click_and_drag())
+        };
+
         // Draw block icon (use custom icon from ui_metadata if available)
         // Note: multiply offsets by zoom since rect is in screen-space
         let icon_pos = rect.min + vec2(10.0 * self.zoom, 8.0 * self.zoom);
@@ -1877,7 +1909,8 @@ impl GraphEditor {
             }
         }
 
-        ui.interact(rect, ui.id().with(&block.id), Sense::click_and_drag())
+        // Return the block response that was created early (before render_callback)
+        block_response
     }
 
     fn draw_link(

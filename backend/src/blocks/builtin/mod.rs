@@ -6,6 +6,7 @@ pub mod compositor;
 pub mod decklink;
 pub mod glcompositor;
 pub mod inter;
+pub mod mediaplayer;
 pub mod meter;
 pub mod mpegtssrt;
 pub mod videoenc;
@@ -38,6 +39,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
 
     // Add Inter-pipeline blocks
     blocks.extend(inter::get_blocks());
+
+    // Add Media Player blocks
+    blocks.extend(mediaplayer::get_blocks());
 
     // Add Meter blocks
     blocks.extend(meter::get_blocks());
@@ -79,6 +83,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.glcompositor" => Some(Arc::new(glcompositor::GLCompositorBuilder)),
         "builtin.inter_output" => Some(Arc::new(inter::InterOutputBuilder)),
         "builtin.inter_input" => Some(Arc::new(inter::InterInputBuilder)),
+        "builtin.media_player" => Some(Arc::new(mediaplayer::MediaPlayerBuilder)),
         "builtin.meter" => Some(Arc::new(meter::MeterBuilder)),
         "builtin.mpegtssrt_output" => Some(Arc::new(mpegtssrt::MpegTsSrtOutputBuilder)),
         "builtin.videoenc" => Some(Arc::new(videoenc::VideoEncBuilder)),

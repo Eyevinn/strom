@@ -363,6 +363,13 @@ impl PropertyInspector {
                 crate::app::set_local_storage("open_compositor_editor", &block.id);
             }
 
+            // Edit Playlist button for media player blocks
+            if definition.id == "builtin.media_player"
+                && ui.button("🎵 Edit Playlist").clicked()
+            {
+                crate::app::set_local_storage("open_playlist_editor", &block.id);
+            }
+
             ui.separator();
 
             ui.label("💡 Only modified properties are saved");

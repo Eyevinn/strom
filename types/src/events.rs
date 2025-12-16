@@ -146,6 +146,28 @@ pub enum StromEvent {
     StreamUpdated { stream_id: String },
     /// A discovered stream expired or was deleted
     StreamRemoved { stream_id: String },
+    /// Media player position update (periodic)
+    MediaPlayerPosition {
+        flow_id: FlowId,
+        block_id: String,
+        /// Current position in nanoseconds
+        position_ns: u64,
+        /// Total duration in nanoseconds
+        duration_ns: u64,
+        /// Current file index (0-based)
+        current_file_index: usize,
+        /// Total number of files in playlist
+        total_files: usize,
+    },
+    /// Media player state changed
+    MediaPlayerStateChanged {
+        flow_id: FlowId,
+        block_id: String,
+        /// Playback state: "playing", "paused", "stopped", "buffering"
+        state: String,
+        /// Current file path (if any)
+        current_file: Option<String>,
+    },
 }
 
 impl StromEvent {
@@ -348,6 +370,44 @@ impl StromEvent {
             }
             StromEvent::StreamRemoved { stream_id } => {
                 format!("Removed AES67 stream {}", stream_id)
+            }
+            StromEvent::MediaPlayerPosition {
+                flow_id,
+                block_id,
+                position_ns,
+                duration_ns,
+                current_file_index,
+                total_files,
+            } => {
+                let pos_secs = *position_ns as f64 / 1_000_000_000.0;
+                let dur_secs = *duration_ns as f64 / 1_000_000_000.0;
+                format!(
+                    "Media player {} in flow {}: {:.1}s / {:.1}s (file {}/{})",
+                    block_id,
+                    flow_id,
+                    pos_secs,
+                    dur_secs,
+                    current_file_index + 1,
+                    total_files
+                )
+            }
+            StromEvent::MediaPlayerStateChanged {
+                flow_id,
+                block_id,
+                state,
+                current_file,
+            } => {
+                if let Some(file) = current_file {
+                    format!(
+                        "Media player {} in flow {} state: {} ({})",
+                        block_id, flow_id, state, file
+                    )
+                } else {
+                    format!(
+                        "Media player {} in flow {} state: {}",
+                        block_id, flow_id, state
+                    )
+                }
             }
         }
     }

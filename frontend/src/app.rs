@@ -7,6 +7,7 @@ use crate::api::{ApiClient, AuthStatusResponse};
 use crate::compositor_editor::CompositorEditor;
 use crate::graph::GraphEditor;
 use crate::login::LoginScreen;
+use crate::mediaplayer::{MediaPlayerDataStore, PlaylistEditor};
 use crate::meter::MeterDataStore;
 use crate::palette::ElementPalette;
 use crate::properties::PropertyInspector;
@@ -274,6 +275,8 @@ pub struct StromApp {
     last_inter_input_refresh: Option<String>,
     /// Meter data storage for all audio level meters
     meter_data: MeterDataStore,
+    /// Media player data storage for all media player blocks
+    mediaplayer_data: MediaPlayerDataStore,
     /// WebRTC stats storage for all WebRTC connections
     webrtc_stats: WebRtcStatsStore,
     /// System monitoring statistics
@@ -324,6 +327,8 @@ pub struct StromApp {
     show_stats_panel: bool,
     /// Compositor layout editor (if open)
     compositor_editor: Option<CompositorEditor>,
+    /// Playlist editor (if open)
+    playlist_editor: Option<PlaylistEditor>,
     /// Log entries for pipeline messages (errors, warnings, info)
     log_entries: Vec<LogEntry>,
     /// Whether to show the log panel
@@ -424,6 +429,7 @@ impl StromApp {
             properties_ptp_domain_buffer: String::new(),
             properties_thread_priority_buffer: strom_types::flow::ThreadPriority::High,
             meter_data: MeterDataStore::new(),
+            mediaplayer_data: MediaPlayerDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
             ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
@@ -447,6 +453,7 @@ impl StromApp {
             last_stats_fetch: instant::Instant::now(),
             show_stats_panel: false,
             compositor_editor: None,
+            playlist_editor: None,
             network_interfaces: Vec::new(),
             network_interfaces_loaded: false,
             available_channels: Vec::new(),
@@ -518,6 +525,7 @@ impl StromApp {
             port,
             auth_token,
             meter_data: MeterDataStore::new(),
+            mediaplayer_data: MediaPlayerDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
             ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
@@ -541,6 +549,7 @@ impl StromApp {
             last_stats_fetch: instant::Instant::now(),
             show_stats_panel: false,
             compositor_editor: None,
+            playlist_editor: None,
             network_interfaces: Vec::new(),
             network_interfaces_loaded: false,
             available_channels: Vec::new(),
@@ -2781,6 +2790,49 @@ impl StromApp {
                             );
                         }
                     }
+
+                    // Setup dynamic content for Media Player blocks
+                    let player_blocks: Vec<_> = self
+                        .graph
+                        .blocks
+                        .iter()
+                        .filter(|b| b.block_definition_id == "builtin.media_player")
+                        .map(|b| b.id.clone())
+                        .collect();
+
+                    for block_id in player_blocks {
+                        // Get player data or use default
+                        let player_data = self
+                            .mediaplayer_data
+                            .get(&flow_id, &block_id)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        let height = crate::mediaplayer::calculate_compact_height();
+                        let player_data_clone = player_data.clone();
+                        let block_id_for_action = block_id.clone();
+
+                        self.graph.set_block_content(
+                            block_id,
+                            crate::graph::BlockContentInfo {
+                                additional_height: height + 10.0,
+                                render_callback: Some(Box::new(move |ui, _rect| {
+                                    if let Some((action, seek_pos)) =
+                                        crate::mediaplayer::show_compact(ui, &player_data_clone)
+                                    {
+                                        // Use local storage to signal actions
+                                        let action_data = if let Some(pos) = seek_pos {
+                                            format!("{}:{}:{}", block_id_for_action, action, pos)
+                                        } else {
+                                            format!("{}:{}", block_id_for_action, action)
+                                        };
+                                        tracing::debug!("Setting player_action: {}", action_data);
+                                        set_local_storage("player_action", &action_data);
+                                    }
+                                })),
+                            },
+                        );
+                    }
                 }
 
                 // Update QoS health map for the current flow before rendering
@@ -4357,6 +4409,49 @@ impl eframe::App for StromApp {
                             );
                             tracing::trace!("📊 Meter data stored for element {}", element_id);
                         }
+                        StromEvent::MediaPlayerPosition {
+                            flow_id,
+                            block_id,
+                            position_ns,
+                            duration_ns,
+                            current_file_index,
+                            total_files,
+                        } => {
+                            tracing::trace!(
+                                "Media player position: flow={}, block={}, pos={}ns, dur={}ns",
+                                flow_id,
+                                block_id,
+                                position_ns,
+                                duration_ns
+                            );
+                            self.mediaplayer_data.update_position(
+                                flow_id,
+                                block_id,
+                                position_ns,
+                                duration_ns,
+                                current_file_index,
+                                total_files,
+                            );
+                        }
+                        StromEvent::MediaPlayerStateChanged {
+                            flow_id,
+                            block_id,
+                            state,
+                            current_file,
+                        } => {
+                            tracing::debug!(
+                                "Media player state changed: flow={}, block={}, state={}",
+                                flow_id,
+                                block_id,
+                                state
+                            );
+                            self.mediaplayer_data.update_state(
+                                flow_id,
+                                block_id,
+                                state,
+                                current_file,
+                            );
+                        }
                         StromEvent::SystemStats(stats) => {
                             self.system_monitor.update(stats);
                         }
@@ -4939,6 +5034,245 @@ impl eframe::App for StromApp {
             let is_open = editor.show(ctx);
             if !is_open {
                 self.compositor_editor = None;
+            }
+        }
+
+        // Check for playlist editor open signal
+        if let Some(block_id) = get_local_storage("open_playlist_editor") {
+            remove_local_storage("open_playlist_editor");
+
+            // Get current flow
+            if let Some(flow) = self.current_flow() {
+                // Find the block
+                if let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) {
+                    // Create playlist editor
+                    let mut editor = PlaylistEditor::new(flow.id, block_id.clone());
+
+                    // Load current playlist from block properties
+                    if let Some(strom_types::PropertyValue::String(playlist_json)) =
+                        block.properties.get("playlist")
+                    {
+                        if let Ok(playlist) = serde_json::from_str::<Vec<String>>(playlist_json) {
+                            editor.set_playlist(playlist);
+                        }
+                    }
+
+                    self.playlist_editor = Some(editor);
+                }
+            }
+        }
+
+        // Show playlist editor if open (as a window, doesn't block main UI)
+        if let Some(ref mut editor) = self.playlist_editor {
+            // Check if browser needs to load files
+            if let Some(path) = editor.get_browser_path_to_load() {
+                let api = self.api.clone();
+                let path_opt = if path.is_empty() { None } else { Some(path) };
+
+                // Use local storage to pass results back
+                #[cfg(target_arch = "wasm32")]
+                {
+                    wasm_bindgen_futures::spawn_local(async move {
+                        match api.list_media_files(path_opt.as_deref()).await {
+                            Ok(result) => {
+                                // Serialize result to local storage
+                                if let Ok(json) = serde_json::to_string(&result) {
+                                    set_local_storage("media_browser_result", &json);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to list media files: {}", e);
+                                set_local_storage("media_browser_result", "error");
+                            }
+                        }
+                    });
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let rt = tokio::runtime::Handle::try_current();
+                    if let Ok(handle) = rt {
+                        handle.spawn(async move {
+                            match api.list_media_files(path_opt.as_deref()).await {
+                                Ok(result) => {
+                                    if let Ok(json) = serde_json::to_string(&result) {
+                                        set_local_storage("media_browser_result", &json);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to list media files: {}", e);
+                                    set_local_storage("media_browser_result", "error");
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Check for media browser results
+            if let Some(result_json) = get_local_storage("media_browser_result") {
+                remove_local_storage("media_browser_result");
+                if result_json != "error" {
+                    if let Ok(result) =
+                        serde_json::from_str::<crate::api::ListMediaResponse>(&result_json)
+                    {
+                        let entries: Vec<crate::mediaplayer::MediaEntry> = result
+                            .entries
+                            .into_iter()
+                            .map(|e| crate::mediaplayer::MediaEntry {
+                                name: e.name,
+                                path: e.path,
+                                is_dir: e.is_dir,
+                                size: e.size,
+                            })
+                            .collect();
+                        editor.set_browser_entries(
+                            result.current_path,
+                            result.parent_path,
+                            entries,
+                        );
+                    }
+                } else {
+                    // Clear loading state on error
+                    editor.browser_loading = false;
+                }
+            }
+
+            if let Some(playlist) = editor.show(ctx) {
+                // User clicked Save - send playlist to API
+                let flow_id = editor.flow_id;
+                let block_id = editor.block_id.clone();
+                let api = self.api.clone();
+
+                #[cfg(target_arch = "wasm32")]
+                {
+                    wasm_bindgen_futures::spawn_local(async move {
+                        if let Err(e) = api.set_player_playlist(flow_id, &block_id, playlist).await
+                        {
+                            tracing::error!("Failed to set playlist: {}", e);
+                        }
+                    });
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let rt = tokio::runtime::Handle::try_current();
+                    if let Ok(handle) = rt {
+                        handle.spawn(async move {
+                            if let Err(e) =
+                                api.set_player_playlist(flow_id, &block_id, playlist).await
+                            {
+                                tracing::error!("Failed to set playlist: {}", e);
+                            }
+                        });
+                    }
+                }
+            }
+
+            if !editor.open {
+                self.playlist_editor = None;
+            }
+        }
+
+        // Check for player action signals (from compact UI controls)
+        if let Some(action_data) = get_local_storage("player_action") {
+            remove_local_storage("player_action");
+            tracing::info!("Received player action: {}", action_data);
+
+            // Parse action data: "block_id:action" or "block_id:action:position"
+            let parts: Vec<&str> = action_data.split(':').collect();
+            if parts.len() >= 2 {
+                let block_id = parts[0].to_string();
+                let action = parts[1];
+                tracing::info!("Parsed action: block={}, action={}", block_id, action);
+
+                if let Some(flow) = self.current_flow() {
+                    let flow_id = flow.id;
+                    let api = self.api.clone();
+                    tracing::info!("Sending action to flow {}", flow_id);
+
+                    match action {
+                        "play" | "pause" | "next" | "previous" => {
+                            let action_str = action.to_string();
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                wasm_bindgen_futures::spawn_local(async move {
+                                    if let Err(e) =
+                                        api.control_player(flow_id, &block_id, &action_str).await
+                                    {
+                                        tracing::error!("Failed to control player: {}", e);
+                                    }
+                                });
+                            }
+
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                let rt = tokio::runtime::Handle::try_current();
+                                if let Ok(handle) = rt {
+                                    handle.spawn(async move {
+                                        if let Err(e) = api
+                                            .control_player(flow_id, &block_id, &action_str)
+                                            .await
+                                        {
+                                            tracing::error!("Failed to control player: {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        "seek" if parts.len() >= 3 => {
+                            if let Ok(position_ns) = parts[2].parse::<u64>() {
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    wasm_bindgen_futures::spawn_local(async move {
+                                        if let Err(e) =
+                                            api.seek_player(flow_id, &block_id, position_ns).await
+                                        {
+                                            tracing::error!("Failed to seek player: {}", e);
+                                        }
+                                    });
+                                }
+
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    let rt = tokio::runtime::Handle::try_current();
+                                    if let Ok(handle) = rt {
+                                        handle.spawn(async move {
+                                            if let Err(e) = api
+                                                .seek_player(flow_id, &block_id, position_ns)
+                                                .await
+                                            {
+                                                tracing::error!("Failed to seek player: {}", e);
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        "playlist" => {
+                            // Open playlist editor for this block
+                            let mut editor = PlaylistEditor::new(flow_id, block_id.clone());
+
+                            // Load current playlist from block properties
+                            if let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) {
+                                if let Some(strom_types::PropertyValue::String(playlist_json)) =
+                                    block.properties.get("playlist")
+                                {
+                                    if let Ok(playlist) =
+                                        serde_json::from_str::<Vec<String>>(playlist_json)
+                                    {
+                                        editor.set_playlist(playlist);
+                                    }
+                                }
+                            }
+
+                            self.playlist_editor = Some(editor);
+                        }
+                        _ => {
+                            tracing::warn!("Unknown player action: {}", action);
+                        }
+                    }
+                }
             }
         }
 

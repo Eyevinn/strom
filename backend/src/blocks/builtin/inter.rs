@@ -28,11 +28,15 @@ struct BufferConfig {
 ///
 /// Creates an `intersink` element from the rsinter plugin.
 /// The rsinter plugin is format-agnostic - it works with any media type.
-fn create_intersink(element_id: &str, channel_name: &str) -> Result<gst::Element, BlockBuildError> {
+fn create_intersink(
+    element_id: &str,
+    channel_name: &str,
+    sync: bool,
+) -> Result<gst::Element, BlockBuildError> {
     let element = gst::ElementFactory::make("intersink")
         .name(element_id)
         .property("producer-name", channel_name)
-        .property("sync", false) // Don't sync to clock - allows playing without consumers
+        .property("sync", sync)
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("intersink: {}", e)))?;
 
@@ -129,15 +133,26 @@ impl BlockBuilder for InterOutputBuilder {
         // Generate unique channel name from flow_id and block_id
         let channel_name = format!("strom_{}_{}", flow_id, block_id);
 
+        // Get sync property (default true for real-time playback)
+        let sync = properties
+            .get("sync")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                PropertyValue::String(s) => s.parse::<bool>().ok(),
+                _ => None,
+            })
+            .unwrap_or(true);
+
         let element_id = format!("{}:intersink", instance_id);
 
         // Create the intersink element (rsinter is format-agnostic)
-        let intersink = create_intersink(&element_id, &channel_name)?;
+        let intersink = create_intersink(&element_id, &channel_name, sync)?;
 
         tracing::info!(
-            "InterOutput block created: {} -> channel '{}'",
+            "InterOutput block created: {} -> channel '{}' (sync={})",
             instance_id,
-            channel_name
+            channel_name,
+            sync
         );
 
         Ok(BlockBuildResult {
@@ -222,19 +237,33 @@ fn inter_output_definition() -> BlockDefinition {
         name: "Inter Output".to_string(),
         description: "Publishes a stream for other flows to consume. The channel name is automatically generated from the flow and block IDs.".to_string(),
         category: "Inter-Pipeline".to_string(),
-        exposed_properties: vec![ExposedProperty {
-            name: "description".to_string(),
-            label: "Description".to_string(),
-            description: "Description for this output (shown in Inter Input dropdowns)"
-                .to_string(),
-            property_type: PropertyType::String,
-            default_value: None,
-            mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: "description".to_string(),
-                transform: None,
+        exposed_properties: vec![
+            ExposedProperty {
+                name: "description".to_string(),
+                label: "Description".to_string(),
+                description: "Description for this output (shown in Inter Input dropdowns)"
+                    .to_string(),
+                property_type: PropertyType::String,
+                default_value: None,
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "description".to_string(),
+                    transform: None,
+                },
             },
-        }],
+            ExposedProperty {
+                name: "sync".to_string(),
+                label: "Sync".to_string(),
+                description: "Sync to clock for real-time playback. Disable for live sources if causing issues.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "sync".to_string(),
+                    transform: None,
+                },
+            },
+        ],
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {
                 name: "sink".to_string(),
