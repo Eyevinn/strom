@@ -300,10 +300,22 @@ impl MediaPlayerState {
 
     /// Get duration in nanoseconds.
     pub fn duration(&self) -> Option<u64> {
-        let pipeline = self.get_pipeline()?;
-        pipeline
-            .query_duration::<gst::ClockTime>()
-            .map(|t| t.nseconds())
+        // Try pipeline query first
+        if let Some(pipeline) = self.get_pipeline() {
+            if let Some(duration) = pipeline.query_duration::<gst::ClockTime>() {
+                return Some(duration.nseconds());
+            }
+        }
+
+        // Fallback: try querying the source element directly
+        // This can help if dynamic linking isn't complete yet
+        if let Some(source) = self.source_element.upgrade() {
+            if let Some(duration) = source.query_duration::<gst::ClockTime>() {
+                return Some(duration.nseconds());
+            }
+        }
+
+        None
     }
 
     /// Get the current playback state as a string.
