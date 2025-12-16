@@ -322,12 +322,12 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
         // Create application with persistent storage
         let state = if let Some(ref db_url) = config.database_url {
             info!("Using PostgreSQL storage");
-            AppState::with_postgres_storage(db_url, &config.blocks_path)
+            AppState::with_postgres_storage(db_url, &config.blocks_path, &config.media_path)
                 .await
                 .expect("Failed to initialize PostgreSQL storage")
         } else {
             info!("Using JSON file storage");
-            AppState::with_json_storage(&config.flows_path, &config.blocks_path)
+            AppState::with_json_storage(&config.flows_path, &config.blocks_path, &config.media_path)
         };
         state
             .load_from_storage()
@@ -443,10 +443,10 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
     // Create application with persistent storage
     let state = if let Some(ref db_url) = config.database_url {
         info!("Using PostgreSQL storage");
-        AppState::with_postgres_storage(db_url, &config.blocks_path).await?
+        AppState::with_postgres_storage(db_url, &config.blocks_path, &config.media_path).await?
     } else {
         info!("Using JSON file storage");
-        AppState::with_json_storage(&config.flows_path, &config.blocks_path)
+        AppState::with_json_storage(&config.flows_path, &config.blocks_path, &config.media_path)
     };
     state.load_from_storage().await?;
 

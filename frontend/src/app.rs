@@ -105,6 +105,8 @@ pub enum AppPage {
     Discovery,
     /// PTP clock monitoring
     Clocks,
+    /// Media file browser
+    Media,
 }
 
 /// Focus target for Ctrl+F cycling
@@ -121,6 +123,8 @@ enum FocusTarget {
     PaletteBlocks,
     /// Discovery search filter (Discovery page)
     DiscoveryFilter,
+    /// Media search filter (Media page)
+    MediaFilter,
 }
 
 /// Log message severity level
@@ -341,6 +345,8 @@ pub struct StromApp {
     discovery_page: crate::discovery::DiscoveryPage,
     /// Clocks page state (PTP monitoring)
     clocks_page: crate::clocks::ClocksPage,
+    /// Media file browser page state
+    media_page: crate::media::MediaPage,
     /// Flow list filter text
     flow_filter: String,
     /// Show stream picker modal for this block ID (when browsing discovered streams for AES67 Input)
@@ -465,6 +471,7 @@ impl StromApp {
             current_page: AppPage::default(),
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
+            media_page: crate::media::MediaPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
             focus_target: FocusTarget::None,
@@ -561,6 +568,7 @@ impl StromApp {
             current_page: AppPage::default(),
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
+            media_page: crate::media::MediaPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
             focus_target: FocusTarget::None,
@@ -1713,6 +1721,10 @@ impl StromApp {
                 AppPage::Clocks => {
                     // No filters on Clocks page
                 }
+                AppPage::Media => {
+                    self.media_page.focus_search();
+                    self.focus_target = FocusTarget::MediaFilter;
+                }
             }
         }
 
@@ -1818,6 +1830,17 @@ impl StromApp {
                         self.current_page = AppPage::Clocks;
                         self.focus_target = FocusTarget::None;
                     }
+                    if ui
+                        .selectable_label(
+                            self.current_page == AppPage::Media,
+                            egui::RichText::new("Media").size(16.0),
+                        )
+                        .on_hover_text("Media file browser")
+                        .clicked()
+                    {
+                        self.current_page = AppPage::Media;
+                        self.focus_target = FocusTarget::None;
+                    }
 
                     // Right-aligned system controls
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1885,6 +1908,7 @@ impl StromApp {
             AppPage::Flows => self.render_flows_toolbar(ctx),
             AppPage::Discovery => self.render_discovery_toolbar(ctx),
             AppPage::Clocks => self.render_clocks_toolbar(ctx),
+            AppPage::Media => self.render_media_toolbar(ctx),
         }
     }
 
@@ -2076,6 +2100,31 @@ impl StromApp {
                     ui.label(egui::RichText::new("Clocks").heading());
                     ui.separator();
                     ui.label("PTP clocks are shared per domain");
+                });
+            });
+    }
+
+    /// Render the media page toolbar
+    fn render_media_toolbar(&mut self, ctx: &Context) {
+        let is_loading = self.media_page.loading;
+
+        TopBottomPanel::top("page_toolbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(egui::RichText::new("Media Files").heading());
+                    ui.separator();
+
+                    if ui.button("Refresh").clicked() {
+                        self.media_page
+                            .refresh(&self.api, ctx, &self.channels.sender());
+                    }
+                    if is_loading {
+                        ui.spinner();
+                    }
                 });
             });
     }
@@ -4895,6 +4944,27 @@ impl eframe::App for StromApp {
                         self.error = Some(format!("Block not found: {}", block_id));
                     }
                 }
+                AppMessage::MediaListLoaded(response) => {
+                    tracing::debug!(
+                        "Media list loaded: {} entries in {}",
+                        response.entries.len(),
+                        response.current_path
+                    );
+                    self.media_page.set_entries(response);
+                }
+                AppMessage::MediaSuccess(message) => {
+                    tracing::info!("Media operation success: {}", message);
+                    self.status = message;
+                }
+                AppMessage::MediaError(message) => {
+                    tracing::error!("Media operation error: {}", message);
+                    self.error = Some(message);
+                }
+                AppMessage::MediaRefresh => {
+                    tracing::debug!("Media refresh requested");
+                    self.media_page
+                        .refresh(&self.api, ctx, &self.channels.sender());
+                }
                 // SDP messages are handled elsewhere
                 AppMessage::SdpLoaded { .. } | AppMessage::SdpError(_) => {}
             }
@@ -5067,13 +5137,11 @@ impl eframe::App for StromApp {
             // Check if browser needs to load files
             if let Some(path) = editor.get_browser_path_to_load() {
                 let api = self.api.clone();
-                let path_opt = if path.is_empty() { None } else { Some(path) };
-
                 // Use local storage to pass results back
                 #[cfg(target_arch = "wasm32")]
                 {
                     wasm_bindgen_futures::spawn_local(async move {
-                        match api.list_media_files(path_opt.as_deref()).await {
+                        match api.list_media(&path).await {
                             Ok(result) => {
                                 // Serialize result to local storage
                                 if let Ok(json) = serde_json::to_string(&result) {
@@ -5093,7 +5161,7 @@ impl eframe::App for StromApp {
                     let rt = tokio::runtime::Handle::try_current();
                     if let Ok(handle) = rt {
                         handle.spawn(async move {
-                            match api.list_media_files(path_opt.as_deref()).await {
+                            match api.list_media(&path).await {
                                 Ok(result) => {
                                     if let Ok(json) = serde_json::to_string(&result) {
                                         set_local_storage("media_browser_result", &json);
@@ -5114,7 +5182,7 @@ impl eframe::App for StromApp {
                 remove_local_storage("media_browser_result");
                 if result_json != "error" {
                     if let Ok(result) =
-                        serde_json::from_str::<crate::api::ListMediaResponse>(&result_json)
+                        serde_json::from_str::<strom_types::api::ListMediaResponse>(&result_json)
                     {
                         let entries: Vec<crate::mediaplayer::MediaEntry> = result
                             .entries
@@ -5122,7 +5190,7 @@ impl eframe::App for StromApp {
                             .map(|e| crate::mediaplayer::MediaEntry {
                                 name: e.name,
                                 path: e.path,
-                                is_dir: e.is_dir,
+                                is_dir: e.is_directory,
                                 size: e.size,
                             })
                             .collect();
@@ -5320,6 +5388,12 @@ impl eframe::App for StromApp {
             AppPage::Clocks => {
                 CentralPanel::default().show(ctx, |ui| {
                     self.clocks_page.render(ui, &self.ptp_stats, &self.flows);
+                });
+            }
+            AppPage::Media => {
+                CentralPanel::default().show(ctx, |ui| {
+                    self.media_page
+                        .render(ui, &self.api, ctx, &self.channels.sender());
                 });
             }
         }

@@ -851,7 +851,7 @@ fn videoenc_definition() -> BlockDefinition {
         },
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
-            icon: Some("🎞️".to_string()),
+            icon: Some("🎞".to_string()),
             width: Some(1.5),
             height: Some(2.5),
             ..Default::default()

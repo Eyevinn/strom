@@ -41,4 +41,4 @@ package.json
 playwright.config.ts
 *.sh
 notes.txt
-/media
+media/

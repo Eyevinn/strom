@@ -32,6 +32,7 @@ struct StorageConfig {
     data_dir: Option<PathBuf>,
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
+    media_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -56,6 +57,8 @@ pub struct Config {
     pub flows_path: PathBuf,
     /// Path to blocks storage file
     pub blocks_path: PathBuf,
+    /// Path to media files directory
+    pub media_path: PathBuf,
     /// PostgreSQL database URL (if set, PostgreSQL is used instead of JSON files)
     /// Format: postgresql://user:password@host/database_name
     pub database_url: Option<String>,
@@ -142,6 +145,7 @@ impl Config {
             data_dir: config_file.storage.data_dir,
             flows_path: config_file.storage.flows_path,
             blocks_path: config_file.storage.blocks_path,
+            media_path: config_file.storage.media_path,
         };
         let data_paths = DataPaths::resolve(path_config)?;
 
@@ -149,6 +153,7 @@ impl Config {
             port: config_file.server.port,
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
+            media_path: data_paths.media_path,
             database_url: config_file.storage.database_url,
             log_file: config_file.logging.log_file,
             log_level: config_file.logging.log_level,
@@ -170,6 +175,7 @@ impl Config {
             data_dir,
             flows_path,
             blocks_path,
+            media_path: None,
         };
         let data_paths = DataPaths::resolve(path_config)?;
 
@@ -177,6 +183,7 @@ impl Config {
             port,
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
+            media_path: data_paths.media_path,
             database_url,
             log_file: None,
             log_level: None,
@@ -211,6 +218,7 @@ impl Default for Config {
                 port: strom_types::DEFAULT_PORT,
                 flows_path: PathBuf::from("flows.json"),
                 blocks_path: PathBuf::from("blocks.json"),
+                media_path: PathBuf::from("media"),
                 database_url: None,
                 log_file: None,
                 log_level: None,
