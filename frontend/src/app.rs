@@ -104,6 +104,8 @@ pub enum AppPage {
     Discovery,
     /// PTP clock monitoring
     Clocks,
+    /// Media file browser
+    Media,
 }
 
 /// Focus target for Ctrl+F cycling
@@ -120,6 +122,8 @@ enum FocusTarget {
     PaletteBlocks,
     /// Discovery search filter (Discovery page)
     DiscoveryFilter,
+    /// Media search filter (Media page)
+    MediaFilter,
 }
 
 /// Log message severity level
@@ -336,6 +340,8 @@ pub struct StromApp {
     discovery_page: crate::discovery::DiscoveryPage,
     /// Clocks page state (PTP monitoring)
     clocks_page: crate::clocks::ClocksPage,
+    /// Media file browser page state
+    media_page: crate::media::MediaPage,
     /// Flow list filter text
     flow_filter: String,
     /// Show stream picker modal for this block ID (when browsing discovered streams for AES67 Input)
@@ -458,6 +464,7 @@ impl StromApp {
             current_page: AppPage::default(),
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
+            media_page: crate::media::MediaPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
             focus_target: FocusTarget::None,
@@ -552,6 +559,7 @@ impl StromApp {
             current_page: AppPage::default(),
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
+            media_page: crate::media::MediaPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
             focus_target: FocusTarget::None,
@@ -1704,6 +1712,10 @@ impl StromApp {
                 AppPage::Clocks => {
                     // No filters on Clocks page
                 }
+                AppPage::Media => {
+                    self.media_page.focus_search();
+                    self.focus_target = FocusTarget::MediaFilter;
+                }
             }
         }
 
@@ -1809,6 +1821,17 @@ impl StromApp {
                         self.current_page = AppPage::Clocks;
                         self.focus_target = FocusTarget::None;
                     }
+                    if ui
+                        .selectable_label(
+                            self.current_page == AppPage::Media,
+                            egui::RichText::new("Media").size(16.0),
+                        )
+                        .on_hover_text("Media file browser")
+                        .clicked()
+                    {
+                        self.current_page = AppPage::Media;
+                        self.focus_target = FocusTarget::None;
+                    }
 
                     // Right-aligned system controls
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1876,6 +1899,7 @@ impl StromApp {
             AppPage::Flows => self.render_flows_toolbar(ctx),
             AppPage::Discovery => self.render_discovery_toolbar(ctx),
             AppPage::Clocks => self.render_clocks_toolbar(ctx),
+            AppPage::Media => self.render_media_toolbar(ctx),
         }
     }
 
@@ -2067,6 +2091,31 @@ impl StromApp {
                     ui.label(egui::RichText::new("Clocks").heading());
                     ui.separator();
                     ui.label("PTP clocks are shared per domain");
+                });
+            });
+    }
+
+    /// Render the media page toolbar
+    fn render_media_toolbar(&mut self, ctx: &Context) {
+        let is_loading = self.media_page.loading;
+
+        TopBottomPanel::top("page_toolbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(egui::RichText::new("Media Files").heading());
+                    ui.separator();
+
+                    if ui.button("Refresh").clicked() {
+                        self.media_page
+                            .refresh(&self.api, ctx, &self.channels.sender());
+                    }
+                    if is_loading {
+                        ui.spinner();
+                    }
                 });
             });
     }
@@ -4800,6 +4849,27 @@ impl eframe::App for StromApp {
                         self.error = Some(format!("Block not found: {}", block_id));
                     }
                 }
+                AppMessage::MediaListLoaded(response) => {
+                    tracing::debug!(
+                        "Media list loaded: {} entries in {}",
+                        response.entries.len(),
+                        response.current_path
+                    );
+                    self.media_page.set_entries(response);
+                }
+                AppMessage::MediaSuccess(message) => {
+                    tracing::info!("Media operation success: {}", message);
+                    self.status = message;
+                }
+                AppMessage::MediaError(message) => {
+                    tracing::error!("Media operation error: {}", message);
+                    self.error = Some(message);
+                }
+                AppMessage::MediaRefresh => {
+                    tracing::debug!("Media refresh requested");
+                    self.media_page
+                        .refresh(&self.api, ctx, &self.channels.sender());
+                }
                 // SDP messages are handled elsewhere
                 AppMessage::SdpLoaded { .. } | AppMessage::SdpError(_) => {}
             }
@@ -4986,6 +5056,12 @@ impl eframe::App for StromApp {
             AppPage::Clocks => {
                 CentralPanel::default().show(ctx, |ui| {
                     self.clocks_page.render(ui, &self.ptp_stats, &self.flows);
+                });
+            }
+            AppPage::Media => {
+                CentralPanel::default().show(ctx, |ui| {
+                    self.media_page
+                        .render(ui, &self.api, ctx, &self.channels.sender());
                 });
             }
         }

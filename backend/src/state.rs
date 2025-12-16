@@ -45,11 +45,17 @@ struct AppStateInner {
     discovery: DiscoveryService,
     /// PTP clock monitoring service
     ptp_monitor: PtpMonitor,
+    /// Media files directory path
+    media_path: PathBuf,
 }
 
 impl AppState {
     /// Create new application state with the given storage backend.
-    pub fn new(storage: impl Storage + 'static, blocks_path: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        storage: impl Storage + 'static,
+        blocks_path: impl Into<PathBuf>,
+        media_path: impl Into<PathBuf>,
+    ) -> Self {
         let events = EventBroadcaster::default();
         Self {
             inner: Arc::new(AppStateInner {
@@ -64,6 +70,7 @@ impl AppState {
                 channel_registry: ChannelRegistry::new(),
                 discovery: DiscoveryService::new(events),
                 ptp_monitor: PtpMonitor::new(),
+                media_path: media_path.into(),
             }),
         }
     }
@@ -93,6 +100,11 @@ impl AppState {
         &self.inner.ptp_monitor
     }
 
+    /// Get the media files directory path.
+    pub fn media_path(&self) -> &PathBuf {
+        &self.inner.media_path
+    }
+
     /// Start background services (SAP discovery, etc).
     pub async fn start_services(&self) {
         info!("Starting discovery service (SAP listener and announcer)...");
@@ -105,8 +117,9 @@ impl AppState {
     pub fn with_json_storage(
         flows_path: impl AsRef<std::path::Path>,
         blocks_path: impl Into<PathBuf>,
+        media_path: impl Into<PathBuf>,
     ) -> Self {
-        Self::new(JsonFileStorage::new(flows_path), blocks_path)
+        Self::new(JsonFileStorage::new(flows_path), blocks_path, media_path)
     }
 
     /// Create new application state with PostgreSQL storage.
@@ -116,13 +129,14 @@ impl AppState {
     pub async fn with_postgres_storage(
         database_url: &str,
         blocks_path: impl Into<PathBuf>,
+        media_path: impl Into<PathBuf>,
     ) -> anyhow::Result<Self> {
         use crate::storage::PostgresStorage;
 
         let storage = PostgresStorage::new(database_url).await?;
         storage.run_migrations().await?;
 
-        Ok(Self::new(storage, blocks_path))
+        Ok(Self::new(storage, blocks_path, media_path))
     }
 
     /// Load flows from storage into memory.
@@ -993,6 +1007,6 @@ impl AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::with_json_storage("flows.json", "blocks.json")
+        Self::with_json_storage("flows.json", "blocks.json", "media")
     }
 }

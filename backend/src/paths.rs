@@ -14,6 +14,8 @@ pub struct DataPaths {
     pub flows_path: PathBuf,
     /// Path to blocks storage file
     pub blocks_path: PathBuf,
+    /// Path to media files directory
+    pub media_path: PathBuf,
 }
 
 /// Configuration for path resolution.
@@ -25,6 +27,8 @@ pub struct PathConfig {
     pub flows_path: Option<PathBuf>,
     /// Explicit path to blocks file
     pub blocks_path: Option<PathBuf>,
+    /// Explicit path to media files directory
+    pub media_path: Option<PathBuf>,
 }
 
 impl DataPaths {
@@ -64,16 +68,33 @@ impl DataPaths {
             base_dir.join("blocks.json")
         };
 
+        // Resolve media path (individual path overrides default ./media)
+        let media_path = if let Some(path) = config.media_path {
+            Self::log_path_override("media", &path, &base_dir);
+            path
+        } else {
+            // Default to ./media in current working directory
+            PathBuf::from("./media")
+        };
+
+        // Ensure media directory exists
+        if !media_path.exists() {
+            std::fs::create_dir_all(&media_path)?;
+            info!("Created media directory: {}", media_path.display());
+        }
+
         // Check for legacy files in current directory
         Self::check_legacy_files(&flows_path, &blocks_path);
 
         info!("Data paths resolved:");
         info!("  Flows:  {}", flows_path.display());
         info!("  Blocks: {}", blocks_path.display());
+        info!("  Media:  {}", media_path.display());
 
         Ok(Self {
             flows_path,
             blocks_path,
+            media_path,
         })
     }
 
@@ -174,6 +195,7 @@ mod tests {
             data_dir: None,
             flows_path: Some(PathBuf::from("/custom/flows.json")),
             blocks_path: Some(PathBuf::from("/custom/blocks.json")),
+            media_path: None,
         };
 
         let paths = DataPaths::resolve(config).unwrap();
@@ -188,6 +210,7 @@ mod tests {
             data_dir: Some(temp_dir.path().to_path_buf()),
             flows_path: None,
             blocks_path: None,
+            media_path: None,
         };
 
         let paths = DataPaths::resolve(config).unwrap();
@@ -202,6 +225,7 @@ mod tests {
             data_dir: Some(temp_dir.path().to_path_buf()),
             flows_path: Some(PathBuf::from("/override/flows.json")),
             blocks_path: None,
+            media_path: None,
         };
 
         let paths = DataPaths::resolve(config).unwrap();

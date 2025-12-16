@@ -2,8 +2,11 @@
 //!
 //! This module exposes the application builder for use in tests.
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue, Method};
-use axum::{middleware, routing::get, routing::patch, routing::post, Extension, Router};
+use axum::{
+    middleware, routing::delete, routing::get, routing::patch, routing::post, Extension, Router,
+};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_sessions::{cookie::time::Duration, Expiry, MemoryStore, SessionManagerLayer};
@@ -158,6 +161,20 @@ pub async fn create_app_with_state_and_auth(
             get(api::discovery::get_stream_sdp),
         )
         .route("/discovery/announced", get(api::discovery::list_announced))
+        // Media file management
+        .route("/media", get(api::media::list_media))
+        .route("/media/file/{*path}", get(api::media::download_file))
+        .route(
+            "/media/upload",
+            post(api::media::upload_files).layer(DefaultBodyLimit::max(500 * 1024 * 1024)), // 500MB limit
+        )
+        .route("/media/rename", post(api::media::rename_media))
+        .route("/media/file/{*path}", delete(api::media::delete_file))
+        .route("/media/directory", post(api::media::create_directory))
+        .route(
+            "/media/directory/{*path}",
+            delete(api::media::delete_directory),
+        )
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 

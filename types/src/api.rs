@@ -456,3 +456,86 @@ pub struct AvailableSourcesResponse {
     /// List of flows that have published outputs
     pub sources: Vec<SourceFlowInfo>,
 }
+
+// ============================================================================
+// Media File API Types
+// ============================================================================
+
+/// A file or directory entry in a media directory listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct MediaFileEntry {
+    /// File or directory name
+    pub name: String,
+    /// Full path relative to media root
+    pub path: String,
+    /// Whether this is a directory
+    pub is_directory: bool,
+    /// File size in bytes (0 for directories)
+    pub size: u64,
+    /// Last modified timestamp (UNIX epoch seconds)
+    pub modified: u64,
+    /// MIME type (None for directories)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// Response containing a directory listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ListMediaResponse {
+    /// Current directory path (relative to media root)
+    pub current_path: String,
+    /// Parent directory path (None if at root)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_path: Option<String>,
+    /// Directory contents
+    pub entries: Vec<MediaFileEntry>,
+}
+
+/// Request to rename a file or directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct RenameMediaRequest {
+    /// Current path (relative to media root)
+    pub old_path: String,
+    /// New name (just the filename, not full path)
+    pub new_name: String,
+}
+
+/// Request to create a directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct CreateDirectoryRequest {
+    /// Path for new directory (relative to media root)
+    pub path: String,
+}
+
+/// Response for media operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct MediaOperationResponse {
+    /// Whether the operation succeeded
+    pub success: bool,
+    /// Human-readable message
+    pub message: String,
+}
+
+impl MediaOperationResponse {
+    /// Create a success response.
+    pub fn success(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            message: message.into(),
+        }
+    }
+
+    /// Create an error response.
+    #[allow(dead_code)]
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+        }
+    }
+}

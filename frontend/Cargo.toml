@@ -17,7 +17,7 @@ egui.workspace = true
 eframe.workspace = true
 
 # HTTP client - works on both WASM and native
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "multipart"] }
 
 # Serialization
 serde.workspace = true
@@ -26,6 +26,9 @@ uuid.workspace = true
 
 # Async utilities
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# URL encoding
+urlencoding = "2.1"
 
 # Logging
 tracing.workspace = true
@@ -39,7 +42,8 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
 tracing-wasm = "0.2"
-web-sys = { version = "0.3", features = ["Window", "EventSource", "MessageEvent", "Event", "Storage"] }
+web-sys = { version = "0.3", features = ["Window", "EventSource", "MessageEvent", "Event", "Storage", "Document", "HtmlInputElement", "FileList", "File", "FileReader", "HtmlElement", "CssStyleDeclaration"] }
+js-sys = "0.3"
 wasm-bindgen = "0.2"
 
 # Native-specific dependencies

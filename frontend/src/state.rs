@@ -120,6 +120,15 @@ pub enum AppMessage {
     StreamSdpLoaded { stream_id: String, sdp: String },
     /// SDP loaded from stream picker (for updating AES67 Input block)
     StreamPickerSdpLoaded { block_id: String, sdp: String },
+
+    /// Media directory listing loaded
+    MediaListLoaded(strom_types::api::ListMediaResponse),
+    /// Media operation completed successfully
+    MediaSuccess(String),
+    /// Media operation failed
+    MediaError(String),
+    /// Request media page refresh
+    MediaRefresh,
 }
 
 /// WebSocket connection state.

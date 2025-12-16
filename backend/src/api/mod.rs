@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod elements;
 pub mod flows;
 pub mod gst_launch;
+pub mod media;
 pub mod network;
 pub mod version;
 pub mod websocket;

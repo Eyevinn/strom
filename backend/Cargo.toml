@@ -18,6 +18,7 @@ strom-types = { path = "../types", features = ["openapi"] }
 axum.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
 futures.workspace = true
 tower-http.workspace = true
 
