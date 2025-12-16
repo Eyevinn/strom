@@ -228,7 +228,7 @@ pub async fn control_player(
     let result = match req.action {
         PlayerAction::Play => player.play(),
         PlayerAction::Pause => player.pause(),
-        PlayerAction::Stop => player.pause(), // Stop is implemented as pause for now
+        PlayerAction::Stop => player.pause(), // TODO: Implement proper stop (pause + seek to beginning)
         PlayerAction::Next => player.next(),
         PlayerAction::Previous => player.previous(),
     };

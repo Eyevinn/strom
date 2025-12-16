@@ -1340,10 +1340,8 @@ impl ApiClient {
 
     /// List contents of a media directory.
     pub async fn list_media(&self, path: &str) -> ApiResult<strom_types::api::ListMediaResponse> {
-        use tracing::info;
-
         let url = format!("{}/media?path={}", self.base_url, urlencoding::encode(path));
-        info!("Fetching media listing from: {}", url);
+        tracing::debug!("Fetching media listing from: {}", url);
 
         let response = self
             .with_auth(self.client.get(&url))
@@ -1366,7 +1364,7 @@ impl ApiClient {
             ApiError::Decode(e.to_string())
         })?;
 
-        info!("Successfully loaded {} entries", listing.entries.len());
+        tracing::debug!("Successfully loaded {} entries", listing.entries.len());
         Ok(listing)
     }
 
