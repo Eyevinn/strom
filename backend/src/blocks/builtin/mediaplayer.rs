@@ -1,6 +1,6 @@
 //! Media player block for file playback with playlist support.
 //!
-//! Uses uridecodebin for file decoding with dynamic pad handling.
+//! Uses uridecodebin for file decoding or parsebin for passthrough of encoded streams.
 //! Supports play, pause, seek, and playlist navigation.
 
 use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder, BusMessageConnectFn};
@@ -13,6 +13,45 @@ use std::sync::{Arc, LazyLock, RwLock};
 use strom_types::{block::*, FlowId, MediaType, PropertyValue, StromEvent};
 use tracing::{debug, error, info};
 use uuid::Uuid;
+
+/// Normalize a file path to a proper URI.
+///
+/// Converts relative paths to absolute file:// URIs.
+/// Passes through URIs that already have a scheme (file://, http://, https://).
+fn normalize_uri(path: &str) -> String {
+    if path.starts_with("file://") || path.starts_with("http://") || path.starts_with("https://") {
+        path.to_string()
+    } else {
+        // Convert to absolute path
+        let file_path = std::path::Path::new(path);
+
+        // Try canonicalize first (requires file to exist)
+        if let Ok(abs_path) = file_path.canonicalize() {
+            return format!("file://{}", abs_path.display());
+        }
+
+        // If canonicalize fails, construct absolute path manually
+        if file_path.is_relative() {
+            if let Ok(cwd) = std::env::current_dir() {
+                let abs_path = cwd.join(file_path);
+                // Try to canonicalize parent directory at least
+                if let Some(parent) = abs_path.parent() {
+                    if let Ok(canonical_parent) = parent.canonicalize() {
+                        if let Some(filename) = abs_path.file_name() {
+                            let final_path = canonical_parent.join(filename);
+                            return format!("file://{}", final_path.display());
+                        }
+                    }
+                }
+                // Fallback: just use joined path
+                return format!("file://{}", abs_path.display());
+            }
+        }
+
+        // Last resort: assume it's already absolute
+        format!("file://{}", path)
+    }
+}
 
 /// Global registry of media player instances for API access.
 pub static MEDIA_PLAYER_REGISTRY: LazyLock<MediaPlayerRegistry> =
@@ -29,8 +68,8 @@ pub struct MediaPlayerKey {
 pub struct MediaPlayerState {
     /// Unique instance ID (to detect stale timers after restart)
     pub instance_id: Uuid,
-    /// Weak reference to the uridecodebin element (uses GLib's ref counting)
-    pub uridecodebin: gst::glib::WeakRef<gst::Element>,
+    /// Weak reference to the source element (uridecodebin or urisourcebin)
+    pub source_element: gst::glib::WeakRef<gst::Element>,
     /// Weak reference to the pipeline (for seeking) - set when bus handler connects
     pub pipeline: RwLock<gst::glib::WeakRef<gst::Pipeline>>,
     /// Current playlist of file URIs
@@ -49,6 +88,8 @@ pub struct MediaPlayerState {
     pub video_linked: AtomicBool,
     /// Whether audio pad has been linked (reset on file switch)
     pub audio_linked: AtomicBool,
+    /// Whether to decode streams (true) or pass through encoded (false)
+    pub decode: bool,
 }
 
 impl MediaPlayerState {
@@ -131,30 +172,15 @@ impl MediaPlayerState {
         self.load_current_file()
     }
 
-    /// Load the current file into the uridecodebin.
+    /// Load the current file into the source element.
     fn load_current_file(&self) -> Result<(), String> {
         let file_path = self.current_file().ok_or("No file to load")?;
-        let uridecodebin = self
-            .uridecodebin
+        let source_element = self
+            .source_element
             .upgrade()
-            .ok_or("uridecodebin no longer exists")?;
+            .ok_or("Source element no longer exists")?;
 
-        // Convert relative paths to absolute file:// URIs
-        let uri = if file_path.starts_with("file://")
-            || file_path.starts_with("http://")
-            || file_path.starts_with("https://")
-        {
-            file_path
-        } else {
-            // Relative path - convert to absolute
-            let path = std::path::Path::new(&file_path);
-            if let Ok(abs_path) = path.canonicalize() {
-                format!("file://{}", abs_path.display())
-            } else {
-                format!("file://{}", file_path)
-            }
-        };
-
+        let uri = normalize_uri(&file_path);
         info!("Loading file: {}", uri);
 
         // Get the pipeline to flush and restart
@@ -169,8 +195,8 @@ impl MediaPlayerState {
             .set_state(gst::State::Ready)
             .map_err(|e| format!("Failed to set state to Ready: {:?}", e))?;
 
-        // Set the new URI on uridecodebin
-        uridecodebin.set_property("uri", &uri);
+        // Set the new URI on source element
+        source_element.set_property("uri", &uri);
 
         // Start playing again
         pipeline
@@ -355,6 +381,14 @@ impl BlockBuilder for MediaPlayerBuilder {
             })
             .unwrap_or(true);
 
+        let decode = properties
+            .get("decode")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false); // Default: passthrough (no decoding)
+
         let position_update_interval_ms = properties
             .get("position_update_interval")
             .and_then(|v| match v {
@@ -375,40 +409,16 @@ impl BlockBuilder for MediaPlayerBuilder {
         // Block ID is the instance ID
         let block_id = instance_id.to_string();
 
-        // Create element IDs
-        let uridecodebin_id = format!("{}:uridecodebin", instance_id);
-        let videoconvert_id = format!("{}:videoconvert", instance_id);
-        let videoscale_id = format!("{}:videoscale", instance_id);
-        let audioconvert_id = format!("{}:audioconvert", instance_id);
-        let audioresample_id = format!("{}:audioresample", instance_id);
-
-        // Create uridecodebin - handles file decoding with dynamic pads
-        let uridecodebin = gst::ElementFactory::make("uridecodebin")
-            .name(&uridecodebin_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("uridecodebin: {}", e)))?;
-
-        // Create video processing chain
-        let videoconvert = gst::ElementFactory::make("videoconvert")
-            .name(&videoconvert_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("videoconvert: {}", e)))?;
-
-        let videoscale = gst::ElementFactory::make("videoscale")
-            .name(&videoscale_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("videoscale: {}", e)))?;
-
-        // Create audio processing chain
-        let audioconvert = gst::ElementFactory::make("audioconvert")
-            .name(&audioconvert_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
-
-        let audioresample = gst::ElementFactory::make("audioresample")
-            .name(&audioresample_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
+        info!(
+            "Media Player {}: decode={} ({})",
+            instance_id,
+            decode,
+            if decode {
+                "decoding to raw"
+            } else {
+                "passthrough encoded"
+            }
+        );
 
         // Read playlist from properties (stored as JSON string)
         let initial_playlist: Vec<String> = properties
@@ -427,42 +437,92 @@ impl BlockBuilder for MediaPlayerBuilder {
             );
         }
 
+        // Build elements based on decode mode
+        if decode {
+            // DECODE MODE: uridecodebin → videoconvert/audioconvert → videoscale/audioresample
+            MediaPlayerBuilder::build_decode_mode(
+                instance_id,
+                &block_id,
+                flow_id,
+                loop_playlist,
+                decode,
+                position_update_interval_ms,
+                initial_playlist,
+            )
+        } else {
+            // PASSTHROUGH MODE: urisourcebin → parsebin → encoded output
+            MediaPlayerBuilder::build_passthrough_mode(
+                instance_id,
+                &block_id,
+                flow_id,
+                loop_playlist,
+                decode,
+                position_update_interval_ms,
+                initial_playlist,
+            )
+        }
+    }
+}
+
+impl MediaPlayerBuilder {
+    /// Build media player in decode mode (raw video/audio output).
+    ///
+    /// Uses uridecodebin which decodes to raw video/audio.
+    /// Output goes through identity elements for consistent pad naming.
+    fn build_decode_mode(
+        instance_id: &str,
+        block_id: &str,
+        flow_id: FlowId,
+        loop_playlist: bool,
+        decode: bool,
+        position_update_interval_ms: u64,
+        initial_playlist: Vec<String>,
+    ) -> Result<BlockBuildResult, BlockBuildError> {
+        // Create element IDs - use consistent names for external pad references
+        let uridecodebin_id = format!("{}:uridecodebin", instance_id);
+        let video_out_id = format!("{}:video_out", instance_id);
+        let audio_out_id = format!("{}:audio_out", instance_id);
+
+        // Create uridecodebin - handles file decoding with dynamic pads
+        let uridecodebin = gst::ElementFactory::make("uridecodebin")
+            .name(&uridecodebin_id)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("uridecodebin: {}", e)))?;
+
+        // Create identity elements for output (provides consistent named pads)
+        let video_out = gst::ElementFactory::make("identity")
+            .name(&video_out_id)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("video_out: {}", e)))?;
+
+        let audio_out = gst::ElementFactory::make("identity")
+            .name(&audio_out_id)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("audio_out: {}", e)))?;
+
         // Create shared state for the media player
-        let instance_id = Uuid::new_v4();
-        let uridecodebin_weak = gst::glib::WeakRef::new();
-        uridecodebin_weak.set(Some(&uridecodebin));
+        let player_instance_id = Uuid::new_v4();
+        let source_element_weak = gst::glib::WeakRef::new();
+        source_element_weak.set(Some(&uridecodebin));
         let state = Arc::new(MediaPlayerState {
-            instance_id,
-            uridecodebin: uridecodebin_weak,
-            pipeline: RwLock::new(gst::glib::WeakRef::new()), // Will be set when bus handler connects
+            instance_id: player_instance_id,
+            source_element: source_element_weak,
+            pipeline: RwLock::new(gst::glib::WeakRef::new()),
             playlist: RwLock::new(initial_playlist.clone()),
             current_index: AtomicUsize::new(0),
             is_paused: AtomicBool::new(false),
             loop_playlist: AtomicBool::new(loop_playlist),
-            block_id: block_id.clone(),
+            block_id: block_id.to_string(),
             flow_id,
             video_linked: AtomicBool::new(false),
             audio_linked: AtomicBool::new(false),
+            decode,
         });
 
         // If we have an initial playlist, set the first URI
         if !initial_playlist.is_empty() {
             if let Some(first_file) = initial_playlist.first() {
-                // Convert relative paths to absolute file:// URIs
-                let uri = if first_file.starts_with("file://")
-                    || first_file.starts_with("http://")
-                    || first_file.starts_with("https://")
-                {
-                    first_file.clone()
-                } else {
-                    // Relative path - convert to absolute
-                    let path = std::path::Path::new(first_file);
-                    if let Ok(abs_path) = path.canonicalize() {
-                        format!("file://{}", abs_path.display())
-                    } else {
-                        format!("file://{}", first_file)
-                    }
-                };
+                let uri = normalize_uri(first_file);
                 info!("Media Player {}: Setting initial URI: {}", instance_id, uri);
                 uridecodebin.set_property("uri", &uri);
             }
@@ -471,13 +531,13 @@ impl BlockBuilder for MediaPlayerBuilder {
         // Register in global registry
         let registry_key = MediaPlayerKey {
             flow_id,
-            block_id: block_id.clone(),
+            block_id: block_id.to_string(),
         };
         MEDIA_PLAYER_REGISTRY.register(registry_key, Arc::clone(&state));
 
         // Setup pad-added callback for dynamic pads from uridecodebin
-        let videoconvert_weak = videoconvert.downgrade();
-        let audioconvert_weak = audioconvert.downgrade();
+        let video_out_weak = video_out.downgrade();
+        let audio_out_weak = audio_out.downgrade();
         let instance_id_owned = instance_id.to_string();
         let state_for_pad_added = Arc::clone(&state);
 
@@ -495,13 +555,12 @@ impl BlockBuilder for MediaPlayerBuilder {
                     if caps_name.starts_with("video/")
                         && !state_for_pad_added.video_linked.load(Ordering::SeqCst)
                     {
-                        // Link video pad to videoconvert
-                        if let Some(videoconvert) = videoconvert_weak.upgrade() {
-                            if let Some(sink_pad) = videoconvert.static_pad("sink") {
+                        if let Some(video_out) = video_out_weak.upgrade() {
+                            if let Some(sink_pad) = video_out.static_pad("sink") {
                                 match pad.link(&sink_pad) {
                                     Ok(_) => {
                                         info!(
-                                            "Media Player {}: Linked video pad to videoconvert",
+                                            "Media Player {}: Linked video pad",
                                             instance_id_owned
                                         );
                                         state_for_pad_added
@@ -517,13 +576,12 @@ impl BlockBuilder for MediaPlayerBuilder {
                     } else if caps_name.starts_with("audio/")
                         && !state_for_pad_added.audio_linked.load(Ordering::SeqCst)
                     {
-                        // Link audio pad to audioconvert
-                        if let Some(audioconvert) = audioconvert_weak.upgrade() {
-                            if let Some(sink_pad) = audioconvert.static_pad("sink") {
+                        if let Some(audio_out) = audio_out_weak.upgrade() {
+                            if let Some(sink_pad) = audio_out.static_pad("sink") {
                                 match pad.link(&sink_pad) {
                                     Ok(_) => {
                                         info!(
-                                            "Media Player {}: Linked audio pad to audioconvert",
+                                            "Media Player {}: Linked audio pad",
                                             instance_id_owned
                                         );
                                         state_for_pad_added
@@ -543,7 +601,7 @@ impl BlockBuilder for MediaPlayerBuilder {
 
         // Create bus message handler for position updates and EOS handling
         let state_for_handler = Arc::clone(&state);
-        let block_id_for_handler = block_id.clone();
+        let block_id_for_handler = block_id.to_string();
         let bus_message_handler: BusMessageConnectFn = Box::new(
             move |bus: &gst::Bus, flow_id: FlowId, events: EventBroadcaster| {
                 connect_media_player_handler(
@@ -557,25 +615,309 @@ impl BlockBuilder for MediaPlayerBuilder {
             },
         );
 
-        // Internal links: videoconvert -> videoscale, audioconvert -> audioresample
-        let internal_links = vec![
-            (
-                strom_types::element::ElementPadRef::pad(&videoconvert_id, "src"),
-                strom_types::element::ElementPadRef::pad(&videoscale_id, "sink"),
-            ),
-            (
-                strom_types::element::ElementPadRef::pad(&audioconvert_id, "src"),
-                strom_types::element::ElementPadRef::pad(&audioresample_id, "sink"),
-            ),
-        ];
+        // No internal links needed - uridecodebin links dynamically to output elements
+        let internal_links = vec![];
 
         Ok(BlockBuildResult {
             elements: vec![
                 (uridecodebin_id, uridecodebin),
-                (videoconvert_id, videoconvert),
-                (videoscale_id, videoscale),
-                (audioconvert_id, audioconvert),
-                (audioresample_id, audioresample),
+                (video_out_id, video_out),
+                (audio_out_id, audio_out),
+            ],
+            internal_links,
+            bus_message_handler: Some(bus_message_handler),
+            pad_properties: HashMap::new(),
+        })
+    }
+
+    /// Build media player in passthrough mode (encoded video/audio output).
+    ///
+    /// Uses urisourcebin which demuxes and parses streams internally.
+    /// Output pads carry the original encoded streams (e.g., H.264, AAC).
+    ///
+    /// Both video and audio outputs use identity - downstream blocks handle any
+    /// required parsing (e.g., MPEGTSSRT block dynamically inserts appropriate parsers).
+    fn build_passthrough_mode(
+        instance_id: &str,
+        block_id: &str,
+        flow_id: FlowId,
+        loop_playlist: bool,
+        decode: bool,
+        position_update_interval_ms: u64,
+        initial_playlist: Vec<String>,
+    ) -> Result<BlockBuildResult, BlockBuildError> {
+        // Create element IDs - use consistent names for external pad references
+        let urisourcebin_id = format!("{}:urisourcebin", instance_id);
+        let video_out_id = format!("{}:video_out", instance_id);
+        let audio_out_id = format!("{}:audio_out", instance_id);
+
+        // Create urisourcebin - reads, demuxes, and parses streams (no decoding)
+        // parse-streams=true enables demuxing and outputs parsed elementary streams
+        let urisourcebin = gst::ElementFactory::make("urisourcebin")
+            .name(&urisourcebin_id)
+            .property("parse-streams", true)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("urisourcebin: {}", e)))?;
+
+        // Use identity for video output - downstream blocks handle any required parsing.
+        // The MPEGTSSRT block dynamically inserts the appropriate parser (h264parse/h265parse)
+        // based on the actual codec detected in the stream.
+        let video_out = gst::ElementFactory::make("identity")
+            .name(&video_out_id)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("video_out identity: {}", e)))?;
+
+        // Use identity for audio output - audio codecs don't have the same format conversion issues
+        let audio_out = gst::ElementFactory::make("identity")
+            .name(&audio_out_id)
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("audio_out: {}", e)))?;
+
+        // Create shared state for the media player
+        let player_instance_id = Uuid::new_v4();
+        let source_element_weak = gst::glib::WeakRef::new();
+        source_element_weak.set(Some(&urisourcebin));
+        let state = Arc::new(MediaPlayerState {
+            instance_id: player_instance_id,
+            source_element: source_element_weak,
+            pipeline: RwLock::new(gst::glib::WeakRef::new()),
+            playlist: RwLock::new(initial_playlist.clone()),
+            current_index: AtomicUsize::new(0),
+            is_paused: AtomicBool::new(false),
+            loop_playlist: AtomicBool::new(loop_playlist),
+            block_id: block_id.to_string(),
+            flow_id,
+            video_linked: AtomicBool::new(false),
+            audio_linked: AtomicBool::new(false),
+            decode,
+        });
+
+        // If we have an initial playlist, set the first URI
+        if !initial_playlist.is_empty() {
+            if let Some(first_file) = initial_playlist.first() {
+                let uri = normalize_uri(first_file);
+                info!("Media Player {}: Setting initial URI: {}", instance_id, uri);
+                urisourcebin.set_property("uri", &uri);
+            }
+        }
+
+        // Register in global registry
+        let registry_key = MediaPlayerKey {
+            flow_id,
+            block_id: block_id.to_string(),
+        };
+        MEDIA_PLAYER_REGISTRY.register(registry_key, Arc::clone(&state));
+
+        // Setup pad-added callback for urisourcebin -> output elements
+        // urisourcebin outputs one pad per elementary stream (video, audio, etc.)
+        // IMPORTANT: We must link immediately before the flow engine's pad-added handler
+        // creates autotees for unlinked pads.
+        let video_out_weak = video_out.downgrade();
+        let audio_out_weak = audio_out.downgrade();
+        let instance_id_for_source = instance_id.to_string();
+        let state_for_pad_added = Arc::clone(&state);
+
+        urisourcebin.connect_pad_added(move |_src, pad| {
+            let pad_name = pad.name();
+            debug!(
+                "Media Player {}: urisourcebin pad added: {}",
+                instance_id_for_source, pad_name
+            );
+
+            // Only handle src pads
+            if pad.direction() != gst::PadDirection::Src {
+                return;
+            }
+
+            // Try to get caps - first current_caps, then query_caps with filter
+            let caps = pad.current_caps().or_else(|| {
+                // Query caps with no filter - this should give us the actual caps
+                let query_caps = pad.query_caps(None);
+                if !query_caps.is_any() && !query_caps.is_empty() {
+                    Some(query_caps)
+                } else {
+                    None
+                }
+            });
+
+            let caps_name = caps
+                .as_ref()
+                .and_then(|c| c.structure(0))
+                .map(|s| s.name().to_string());
+
+            debug!(
+                "Media Player {}: Pad {} caps: {:?}",
+                instance_id_for_source, pad_name, caps_name
+            );
+
+            // Determine media type from caps
+            let is_video = caps_name
+                .as_ref()
+                .map(|n| n.starts_with("video/"))
+                .unwrap_or(false);
+            let is_audio = caps_name
+                .as_ref()
+                .map(|n| n.starts_with("audio/"))
+                .unwrap_or(false);
+
+            // Try to link video
+            if is_video && !state_for_pad_added.video_linked.load(Ordering::SeqCst) {
+                if let Some(video_out) = video_out_weak.upgrade() {
+                    if let Some(sink_pad) = video_out.static_pad("sink") {
+                        // Log caps for debugging
+                        let src_caps = pad.query_caps(None);
+                        let sink_caps = sink_pad.query_caps(None);
+                        debug!(
+                            "Media Player {}: Attempting video link - src caps: {:?}, sink accepts: {:?}",
+                            instance_id_for_source, src_caps.to_string(), sink_caps.to_string()
+                        );
+
+                        match pad.link(&sink_pad) {
+                            Ok(_) => {
+                                info!(
+                                    "Media Player {}: Linked video pad {} ({})",
+                                    instance_id_for_source,
+                                    pad_name,
+                                    caps_name.as_deref().unwrap_or("unknown")
+                                );
+                                state_for_pad_added
+                                    .video_linked
+                                    .store(true, Ordering::SeqCst);
+                                return;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Media Player {}: Failed to link video pad {}: {:?} (src_caps={}, sink_caps={})",
+                                    instance_id_for_source, pad_name, e, src_caps.to_string(), sink_caps.to_string()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // Try to link audio
+            else if is_audio && !state_for_pad_added.audio_linked.load(Ordering::SeqCst) {
+                if let Some(audio_out) = audio_out_weak.upgrade() {
+                    if let Some(sink_pad) = audio_out.static_pad("sink") {
+                        match pad.link(&sink_pad) {
+                            Ok(_) => {
+                                info!(
+                                    "Media Player {}: Linked audio pad {} ({})",
+                                    instance_id_for_source,
+                                    pad_name,
+                                    caps_name.as_deref().unwrap_or("unknown")
+                                );
+                                state_for_pad_added
+                                    .audio_linked
+                                    .store(true, Ordering::SeqCst);
+                                return;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Media Player {}: Failed to link audio pad {}: {:?}",
+                                    instance_id_for_source, pad_name, e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // Caps not determined - try video first (since identity accepts any caps),
+            // if that's already linked, try audio
+            else if !is_video && !is_audio {
+                debug!(
+                    "Media Player {}: Pad {} media type unknown, trying heuristic linking",
+                    instance_id_for_source, pad_name
+                );
+
+                // Try video first if not already linked
+                if !state_for_pad_added.video_linked.load(Ordering::SeqCst) {
+                    if let Some(video_out) = video_out_weak.upgrade() {
+                        if let Some(sink_pad) = video_out.static_pad("sink") {
+                            match pad.link(&sink_pad) {
+                                Ok(_) => {
+                                    info!(
+                                        "Media Player {}: Linked unknown pad {} to video_out (heuristic)",
+                                        instance_id_for_source, pad_name
+                                    );
+                                    state_for_pad_added
+                                        .video_linked
+                                        .store(true, Ordering::SeqCst);
+                                    return;
+                                }
+                                Err(_) => {
+                                    // Video link failed, will try audio next
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Try audio if video already linked or failed
+                if !state_for_pad_added.audio_linked.load(Ordering::SeqCst) {
+                    if let Some(audio_out) = audio_out_weak.upgrade() {
+                        if let Some(sink_pad) = audio_out.static_pad("sink") {
+                            match pad.link(&sink_pad) {
+                                Ok(_) => {
+                                    info!(
+                                        "Media Player {}: Linked unknown pad {} to audio_out (heuristic)",
+                                        instance_id_for_source, pad_name
+                                    );
+                                    state_for_pad_added
+                                        .audio_linked
+                                        .store(true, Ordering::SeqCst);
+                                    return;
+                                }
+                                Err(e) => {
+                                    debug!(
+                                        "Media Player {}: Heuristic link to audio_out also failed: {:?}",
+                                        instance_id_for_source, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we get here without linking, log it (the flow engine will create an autotee)
+            if !state_for_pad_added.video_linked.load(Ordering::SeqCst)
+                || !state_for_pad_added.audio_linked.load(Ordering::SeqCst)
+            {
+                debug!(
+                    "Media Player {}: Pad {} not linked (video_linked={}, audio_linked={})",
+                    instance_id_for_source,
+                    pad_name,
+                    state_for_pad_added.video_linked.load(Ordering::SeqCst),
+                    state_for_pad_added.audio_linked.load(Ordering::SeqCst)
+                );
+            }
+        });
+
+        // Create bus message handler
+        let state_for_handler = Arc::clone(&state);
+        let block_id_for_handler = block_id.to_string();
+        let bus_message_handler: BusMessageConnectFn = Box::new(
+            move |bus: &gst::Bus, flow_id: FlowId, events: EventBroadcaster| {
+                connect_media_player_handler(
+                    bus,
+                    flow_id,
+                    events,
+                    state_for_handler,
+                    block_id_for_handler,
+                    position_update_interval_ms,
+                )
+            },
+        );
+
+        // No static internal links needed - urisourcebin links dynamically to output elements
+        let internal_links = vec![];
+
+        Ok(BlockBuildResult {
+            elements: vec![
+                (urisourcebin_id, urisourcebin),
+                (video_out_id, video_out),
+                (audio_out_id, audio_out),
             ],
             internal_links,
             bus_message_handler: Some(bus_message_handler),
@@ -598,15 +940,15 @@ fn connect_media_player_handler(
 
     debug!("Media Player {}: Connecting bus message handler", block_id);
 
-    // Try to get pipeline from uridecodebin element (it should be in the pipeline now)
-    if let Some(uridecodebin) = state.uridecodebin.upgrade() {
+    // Try to get pipeline from source element (it should be in the pipeline now)
+    if let Some(source_element) = state.source_element.upgrade() {
         // Traverse up to find the pipeline
-        let mut current: Option<gst::Object> = Some(gst::Element::clone(&uridecodebin).upcast());
+        let mut current: Option<gst::Object> = Some(gst::Element::clone(&source_element).upcast());
         while let Some(obj) = current {
             if let Some(pipeline) = obj.downcast_ref::<gst::Pipeline>() {
                 state.set_pipeline(pipeline);
                 info!(
-                    "Media Player {}: Pipeline reference set from uridecodebin",
+                    "Media Player {}: Pipeline reference set from source element",
                     block_id
                 );
                 break;
@@ -743,6 +1085,19 @@ fn media_player_definition() -> BlockDefinition {
         category: "Inputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
+                name: "decode".to_string(),
+                label: "Decode".to_string(),
+                description: "Decode to raw video/audio (true) or pass through encoded streams (false). Passthrough is more efficient for transcoding."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "decode".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
                 name: "loop_playlist".to_string(),
                 label: "Loop Playlist".to_string(),
                 description: "Loop back to the first file when reaching the end of the playlist"
@@ -775,13 +1130,13 @@ fn media_player_definition() -> BlockDefinition {
                 ExternalPad {
                     name: "video_out".to_string(),
                     media_type: MediaType::Video,
-                    internal_element_id: "videoscale".to_string(),
+                    internal_element_id: "video_out".to_string(),
                     internal_pad_name: "src".to_string(),
                 },
                 ExternalPad {
                     name: "audio_out".to_string(),
                     media_type: MediaType::Audio,
-                    internal_element_id: "audioresample".to_string(),
+                    internal_element_id: "audio_out".to_string(),
                     internal_pad_name: "src".to_string(),
                 },
             ],
@@ -793,5 +1148,197 @@ fn media_player_definition() -> BlockDefinition {
             height: Some(2.5),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_uri_file_scheme() {
+        // URIs with file:// scheme should pass through unchanged
+        let uri = "file:///path/to/video.mp4";
+        assert_eq!(normalize_uri(uri), uri);
+    }
+
+    #[test]
+    fn test_normalize_uri_http_scheme() {
+        // HTTP URIs should pass through unchanged
+        let uri = "http://example.com/video.mp4";
+        assert_eq!(normalize_uri(uri), uri);
+    }
+
+    #[test]
+    fn test_normalize_uri_https_scheme() {
+        // HTTPS URIs should pass through unchanged
+        let uri = "https://example.com/video.mp4";
+        assert_eq!(normalize_uri(uri), uri);
+    }
+
+    #[test]
+    fn test_normalize_uri_relative_path() {
+        // Relative paths should get file:// prefix
+        let path = "video.mp4";
+        let result = normalize_uri(path);
+        assert!(result.starts_with("file://"), "Should have file:// prefix");
+        assert!(result.ends_with("video.mp4"), "Should end with filename");
+    }
+
+    #[test]
+    fn test_normalize_uri_absolute_path() {
+        // Absolute paths that don't start with file:// should get the prefix
+        let path = "/tmp/video.mp4";
+        let result = normalize_uri(path);
+        assert_eq!(result, "file:///tmp/video.mp4");
+    }
+
+    #[test]
+    fn test_media_player_registry_basic() {
+        let registry = MediaPlayerRegistry::new();
+
+        let key = MediaPlayerKey {
+            flow_id: Uuid::new_v4(),
+            block_id: "test_block".to_string(),
+        };
+
+        // Initially should not contain the key
+        assert!(!registry.contains(&key));
+        assert!(registry.get(&key).is_none());
+
+        // Create a minimal state for testing (without GStreamer elements)
+        let weak_ref = gst::glib::WeakRef::new();
+        let state = Arc::new(MediaPlayerState {
+            instance_id: Uuid::new_v4(),
+            source_element: weak_ref,
+            pipeline: RwLock::new(gst::glib::WeakRef::new()),
+            playlist: RwLock::new(vec!["file1.mp4".to_string(), "file2.mp4".to_string()]),
+            current_index: AtomicUsize::new(0),
+            is_paused: AtomicBool::new(false),
+            loop_playlist: AtomicBool::new(true),
+            block_id: "test_block".to_string(),
+            flow_id: key.flow_id,
+            video_linked: AtomicBool::new(false),
+            audio_linked: AtomicBool::new(false),
+            decode: false,
+        });
+
+        // Register and verify
+        registry.register(key.clone(), Arc::clone(&state));
+        assert!(registry.contains(&key));
+        assert!(registry.get(&key).is_some());
+
+        // Unregister and verify
+        registry.unregister(&key);
+        assert!(!registry.contains(&key));
+        assert!(registry.get(&key).is_none());
+    }
+
+    #[test]
+    fn test_media_player_state_playlist() {
+        let weak_ref = gst::glib::WeakRef::new();
+        let state = MediaPlayerState {
+            instance_id: Uuid::new_v4(),
+            source_element: weak_ref,
+            pipeline: RwLock::new(gst::glib::WeakRef::new()),
+            playlist: RwLock::new(vec![]),
+            current_index: AtomicUsize::new(0),
+            is_paused: AtomicBool::new(false),
+            loop_playlist: AtomicBool::new(true),
+            block_id: "test".to_string(),
+            flow_id: Uuid::new_v4(),
+            video_linked: AtomicBool::new(false),
+            audio_linked: AtomicBool::new(false),
+            decode: false,
+        };
+
+        // Initially empty
+        assert_eq!(state.playlist_len(), 0);
+        assert!(state.current_file().is_none());
+
+        // Set playlist
+        state.set_playlist(vec![
+            "file1.mp4".to_string(),
+            "file2.mp4".to_string(),
+            "file3.mp4".to_string(),
+        ]);
+        assert_eq!(state.playlist_len(), 3);
+        assert_eq!(state.current_file(), Some("file1.mp4".to_string()));
+    }
+
+    #[test]
+    fn test_media_player_state_string() {
+        let weak_ref = gst::glib::WeakRef::new();
+        let state = MediaPlayerState {
+            instance_id: Uuid::new_v4(),
+            source_element: weak_ref,
+            pipeline: RwLock::new(gst::glib::WeakRef::new()),
+            playlist: RwLock::new(vec![]),
+            current_index: AtomicUsize::new(0),
+            is_paused: AtomicBool::new(false),
+            loop_playlist: AtomicBool::new(true),
+            block_id: "test".to_string(),
+            flow_id: Uuid::new_v4(),
+            video_linked: AtomicBool::new(false),
+            audio_linked: AtomicBool::new(false),
+            decode: false,
+        };
+
+        // Empty playlist = stopped
+        assert_eq!(state.state_string(), "stopped");
+
+        // With playlist, not paused = playing
+        state.set_playlist(vec!["file.mp4".to_string()]);
+        assert_eq!(state.state_string(), "playing");
+
+        // Paused = paused
+        state.is_paused.store(true, Ordering::SeqCst);
+        assert_eq!(state.state_string(), "paused");
+    }
+
+    #[test]
+    fn test_media_player_definition() {
+        let def = media_player_definition();
+
+        assert_eq!(def.id, "builtin.media_player");
+        assert_eq!(def.name, "Media Player");
+        assert_eq!(def.category, "Inputs");
+        assert!(def.built_in);
+
+        // Check exposed properties
+        assert_eq!(def.exposed_properties.len(), 3);
+
+        let decode_prop = def.exposed_properties.iter().find(|p| p.name == "decode");
+        assert!(decode_prop.is_some());
+        let decode_prop = decode_prop.unwrap();
+        assert!(matches!(decode_prop.property_type, PropertyType::Bool));
+        assert!(matches!(
+            decode_prop.default_value,
+            Some(PropertyValue::Bool(false))
+        ));
+
+        let loop_prop = def
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == "loop_playlist");
+        assert!(loop_prop.is_some());
+
+        // Check external pads
+        assert_eq!(def.external_pads.inputs.len(), 0);
+        assert_eq!(def.external_pads.outputs.len(), 2);
+
+        let video_pad = def
+            .external_pads
+            .outputs
+            .iter()
+            .find(|p| p.name == "video_out");
+        assert!(video_pad.is_some());
+
+        let audio_pad = def
+            .external_pads
+            .outputs
+            .iter()
+            .find(|p| p.name == "audio_out");
+        assert!(audio_pad.is_some());
     }
 }
