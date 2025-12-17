@@ -138,19 +138,25 @@ FROM ubuntu:plucky AS runtime
 WORKDIR /app
 
 # Install only GStreamer runtime dependencies
+# Note: Using plucky-proposed to get gstreamer1.0-plugins-bad 1.26.0-1ubuntu2.2+
+# which fixes the nvcodec plugin (Bug #2109413 - was accidentally disabled on amd64)
+# Must pin BOTH libgstreamer-plugins-bad1.0-0 and gstreamer1.0-plugins-bad versions
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y \
+RUN echo "deb http://archive.ubuntu.com/ubuntu plucky-proposed main universe" > /etc/apt/sources.list.d/proposed.list && \
+    apt-get update && apt-get install -y \
     libgstreamer1.0-0 \
     libgstreamer-plugins-base1.0-0 \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
+    libgstreamer-plugins-bad1.0-0=1.26.0-1ubuntu2.2 \
+    gstreamer1.0-plugins-bad=1.26.0-1ubuntu2.2 \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
     gstreamer1.0-nice \
     gstreamer1.0-tools \
     graphviz \
     ca-certificates \
+    && rm /etc/apt/sources.list.d/proposed.list \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binaries from backend-builder to /app
@@ -161,6 +167,9 @@ COPY --from=backend-builder /app/target/release/strom-mcp-server /app/strom-mcp-
 ENV RUST_LOG=info
 ENV STROM_PORT=8080
 ENV STROM_DATA_DIR=/data
+
+# Enable all NVIDIA driver capabilities (needed for NVENC/NVDEC video encoding/decoding)
+ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 # Create data directory for persistent storage
 RUN mkdir -p /data
