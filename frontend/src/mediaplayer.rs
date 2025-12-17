@@ -319,19 +319,11 @@ pub fn show_compact(ui: &mut Ui, player_data: &MediaPlayerData) -> Option<(Strin
         egui::epaint::StrokeKind::Inside,
     );
 
-    // Handle seek interaction
-    let seek_action = if response.clicked() || response.dragged() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let relative_x = (pos.x - rect.min.x).clamp(0.0, rect.width());
-            let seek_progress = relative_x / rect.width();
-            let seek_ns = (seek_progress as f64 * player_data.duration_ns as f64) as u64;
-            Some(("seek".to_string(), Some(seek_ns)))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // Seek is disabled - doesn't work properly with live sinks (sync=true)
+    // Show tooltip explaining why seek is disabled
+    if response.hovered() {
+        response.on_hover_text("Seek disabled: not supported with live streaming output");
+    }
 
     // Time display
     ui.horizontal(|ui| {
@@ -342,7 +334,7 @@ pub fn show_compact(ui: &mut Ui, player_data: &MediaPlayerData) -> Option<(Strin
         ));
     });
 
-    seek_action
+    None
 }
 
 /// Render a full media player widget (for property inspector).
@@ -430,24 +422,17 @@ pub fn show_full(
         ));
     });
 
-    // Progress slider
+    // Progress bar (seek disabled - doesn't work properly with live sinks)
     let progress = if player_data.duration_ns > 0 {
         player_data.position_ns as f32 / player_data.duration_ns as f32
     } else {
         0.0
     };
 
-    let mut slider_value = progress;
-    let slider_response = ui.add(
-        egui::Slider::new(&mut slider_value, 0.0..=1.0)
-            .show_value(false)
-            .text("Seek"),
-    );
-
-    if slider_response.changed() {
-        let seek_ns = (slider_value as f64 * player_data.duration_ns as f64) as u64;
-        action = Some(("seek".to_string(), Some(seek_ns)));
-    }
+    // Show progress as a read-only bar instead of interactive slider
+    let progress_bar = egui::ProgressBar::new(progress).show_percentage();
+    ui.add(progress_bar)
+        .on_hover_text("Seek disabled: not supported with live streaming output");
 
     ui.add_space(5.0);
     ui.label(format!("Block: {}", block_id));

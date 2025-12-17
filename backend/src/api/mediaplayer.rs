@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use strom_types::{api::ErrorResponse, element::PropertyValue, FlowId};
-use tracing::info;
+use tracing::{info, warn};
 use utoipa::ToSchema;
 
 use crate::blocks::builtin::mediaplayer::{MediaPlayerKey, MEDIA_PLAYER_REGISTRY};
@@ -275,6 +275,10 @@ pub async fn seek_player(
     ))?;
 
     info!("Player {} seek to {} ns", block_id, req.position_ns);
+    warn!(
+        "Seek may not work correctly with live streaming outputs (sync=true). \
+         This is a known limitation. See docs/MEDIAPLAYER_TEST_HARNESS.md for details."
+    );
 
     // Seek is now scheduled on GLib main loop, so this returns immediately
     player.seek(req.position_ns).map_err(|e| {
