@@ -14,7 +14,7 @@ use std::sync::Arc;
 use strom_types::element::{ElementInfo, PropertyValue};
 use strom_types::{Flow, FlowId, PipelineState, StromEvent};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -150,7 +150,7 @@ impl AppState {
                 // This prevents showing stale "Playing" states from before the server stopped
                 for flow in flows.values_mut() {
                     if flow.state.is_some() {
-                        info!(
+                        debug!(
                             "Resetting state for flow '{}' from {:?} to None (server restart)",
                             flow.name, flow.state
                         );
