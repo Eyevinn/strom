@@ -194,7 +194,11 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         srtsink.set_property("uri", &srt_uri);
         srtsink.set_property("latency", latency);
         srtsink.set_property("wait-for-connection", wait_for_connection);
-        srtsink.set_property("auto-reconnect", auto_reconnect);
+        // auto-reconnect property was added in newer GStreamer versions
+        let has_auto_reconnect = srtsink.has_property("auto-reconnect");
+        if has_auto_reconnect {
+            srtsink.set_property("auto-reconnect", auto_reconnect);
+        }
 
         // IMPORTANT: sync=false for transcoding workloads
         //
@@ -229,10 +233,17 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         srtsink.set_property("sync", sync);
         srtsink.set_property("qos", true);
 
-        info!(
-            "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync={}, qos=true",
-            srt_uri, latency, wait_for_connection, auto_reconnect, sync
-        );
+        if has_auto_reconnect {
+            info!(
+                "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync={}, qos=true",
+                srt_uri, latency, wait_for_connection, auto_reconnect, sync
+            );
+        } else {
+            info!(
+                "📡 SRT sink configured: uri={}, latency={}ms, wait={}, sync={}, qos=true (auto-reconnect not available)",
+                srt_uri, latency, wait_for_connection, sync
+            );
+        }
 
         // Get number of video and audio tracks from properties
         let num_video_tracks = properties

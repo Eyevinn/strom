@@ -9,7 +9,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 use strom_types::flow::GStreamerClockType;
 
-#[cfg(feature = "gui")]
+#[cfg(not(feature = "no-gui"))]
 use strom::create_app_with_state_and_auth;
 use strom::{auth, config::Config, create_app_with_state, state::AppState};
 
@@ -154,18 +154,18 @@ struct Args {
     #[arg(long, env = "STROM_DATABASE_URL")]
     database_url: Option<String>,
 
-    /// Run in headless mode (no GUI) - only available when gui feature is enabled
-    #[cfg(feature = "gui")]
+    /// Run in headless mode (no GUI)
+    #[cfg(not(feature = "no-gui"))]
     #[arg(long)]
     headless: bool,
 
     /// Force X11 display backend (default on WSL2, option on native Linux)
-    #[cfg(feature = "gui")]
+    #[cfg(not(feature = "no-gui"))]
     #[arg(long)]
     x11: bool,
 
     /// Force Wayland display backend (default on native Linux, option on WSL2)
-    #[cfg(feature = "gui")]
+    #[cfg(not(feature = "no-gui"))]
     #[arg(long)]
     wayland: bool,
 
@@ -175,7 +175,7 @@ struct Args {
 }
 
 /// Detect if running under WSL (Windows Subsystem for Linux).
-#[cfg(feature = "gui")]
+#[cfg(not(feature = "no-gui"))]
 fn is_wsl() -> bool {
     std::fs::read_to_string("/proc/version")
         .map(|v| {
@@ -196,7 +196,7 @@ enum Commands {
 
 fn main() -> anyhow::Result<()> {
     // Parse command line arguments
-    #[cfg_attr(not(feature = "gui"), allow(unused_variables))]
+    #[cfg_attr(feature = "no-gui", allow(unused_variables))]
     let args = Args::parse();
 
     // Handle subcommands before starting server
@@ -212,7 +212,7 @@ fn main() -> anyhow::Result<()> {
     // WSL2 has clipboard issues with Wayland (smithay-clipboard), so default to X11 there
     // Native Linux works better with Wayland by default
     // This must happen before any GUI initialization
-    #[cfg(feature = "gui")]
+    #[cfg(not(feature = "no-gui"))]
     if !args.headless {
         let force_x11 = if args.x11 {
             true // Explicit --x11 flag
@@ -248,9 +248,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Determine if GUI should be enabled
-    #[cfg(feature = "gui")]
+    #[cfg(not(feature = "no-gui"))]
     let gui_enabled = !args.headless;
-    #[cfg(not(feature = "gui"))]
+    #[cfg(feature = "no-gui")]
     let gui_enabled = false;
 
     if gui_enabled {
@@ -259,7 +259,7 @@ fn main() -> anyhow::Result<()> {
         info!("Starting Strom backend server (headless mode)...");
     }
 
-    #[cfg(feature = "gui")]
+    #[cfg(not(feature = "no-gui"))]
     {
         if gui_enabled {
             // GUI mode: Run HTTP server in background, GUI on main thread
@@ -270,14 +270,14 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    #[cfg(not(feature = "gui"))]
+    #[cfg(feature = "no-gui")]
     {
-        // Always headless when gui feature is disabled
+        // Always headless when no-gui feature is enabled
         run_headless(config, args.no_auto_restart)
     }
 }
 
-#[cfg(feature = "gui")]
+#[cfg(not(feature = "no-gui"))]
 fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;

@@ -7,8 +7,8 @@ authors.workspace = true
 default-run = "strom"
 
 [features]
-default = ["gui", "nvidia"]
-gui = ["dep:strom-frontend", "dep:eframe"]
+default = ["nvidia"]
+no-gui = []
 nvidia = ["dep:nvml-wrapper"]
 
 [dependencies]
@@ -97,9 +97,9 @@ crossterm = "0.28"
 socket2 = "0.5"      # Multicast socket options
 flate2 = "1.0"       # Zlib decompression for SAP
 
-# Optional GUI (native frontend)
-strom-frontend = { path = "../frontend", optional = true }
-eframe = { workspace = true, optional = true }
+# GUI (native frontend) - use --features no-gui to disable
+strom-frontend = { path = "../frontend" }
+eframe = { workspace = true }
 
 [build-dependencies]
 chrono = "0.4"
