@@ -94,7 +94,7 @@ reqwest.workspace = true
 crossterm = "0.28"
 
 # SAP/AES67 discovery
-socket2 = "0.5"      # Multicast socket options
+socket2 = "0.6"      # Multicast socket options
 flate2 = "1.0"       # Zlib decompression for SAP
 
 # GUI (native frontend) - use --features no-gui to disable
