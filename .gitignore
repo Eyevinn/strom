@@ -15,9 +15,6 @@ frontend/dist/
 backend/dist/
 backend/.frontend-build-hash
 
-# Node
-node_modules/
-package-lock.json
 
 # Runtime files
 flows.json
@@ -30,15 +27,6 @@ config.toml
 .DS_Store
 Thumbs.db
 
-node_modules
-playwright-report
-.playwright-mcp
-backups
-tests
-test-results
-backup.sh
-package.json
-playwright.config.ts
 /*.sh
-notes.txt
+/notes.txt
 media/

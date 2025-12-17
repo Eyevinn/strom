@@ -113,7 +113,3 @@ serial_test = "3.0"
 [[bin]]
 name = "mediaplayer-test"
 path = "src/bin/mediaplayer_test/main.rs"
-
-[[example]]
-name = "test-glvideomixer"
-path = "../examples/test-glvideomixer.rs"
