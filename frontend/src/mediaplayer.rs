@@ -338,6 +338,10 @@ pub fn show_compact(ui: &mut Ui, player_data: &MediaPlayerData) -> Option<(Strin
 }
 
 /// Render a full media player widget (for property inspector).
+///
+/// TODO: This function is currently unused (dead code). Consider removing it,
+/// or integrating it into the properties panel like meter and webrtc_stats blocks.
+#[allow(dead_code)]
 pub fn show_full(
     ui: &mut Ui,
     block_id: &str,
