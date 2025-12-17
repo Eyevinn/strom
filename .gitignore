@@ -39,6 +39,6 @@ test-results
 backup.sh
 package.json
 playwright.config.ts
-*.sh
+/*.sh
 notes.txt
 media/
