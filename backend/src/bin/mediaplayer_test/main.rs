@@ -208,76 +208,9 @@ async fn main() -> anyhow::Result<()> {
                 "Transition should be smooth",
             ],
         },
-        // --- Edge Case Tests ---
-        TestCase {
-            id: "3.1",
-            name: "Edge: Previous at start of playlist",
-            decode_mode: false,
-            action: TestAction::Previous,
-            expected: &[
-                "Command should be rejected (Already at first file)",
-                "Playback should continue on first file (BigBuckBunny)",
-            ],
-        },
-        TestCase {
-            id: "3.2",
-            name: "Edge: Go to last file",
-            decode_mode: false,
-            action: TestAction::GotoFile(2),
-            expected: &["Should jump to last file (Sintel)"],
-        },
-        TestCase {
-            id: "3.3",
-            name: "Edge: Next at end of playlist (no loop)",
-            decode_mode: false,
-            action: TestAction::Next,
-            expected: &[
-                "Command should be rejected (Already at last file)",
-                "Playback should continue on last file (Sintel)",
-            ],
-        },
-        // --- Loop Playlist Tests ---
-        TestCase {
-            id: "4.1",
-            name: "Loop: Start playlist with loop enabled",
-            decode_mode: false,
-            action: TestAction::StartFlowWithPlaylistLoop(vec![
-                "BigBuckBunny.mp4",
-                "ElephantsDream.mp4",
-                "Sintel.mp4",
-            ]),
-            expected: &["First file (BigBuckBunny) should be playing"],
-        },
-        TestCase {
-            id: "4.2",
-            name: "Loop: Go to last file",
-            decode_mode: false,
-            action: TestAction::GotoFile(2),
-            expected: &["Should be on last file (Sintel)"],
-        },
-        TestCase {
-            id: "4.3",
-            name: "Loop: Next should wrap to first",
-            decode_mode: false,
-            action: TestAction::Next,
-            expected: &[
-                "Should wrap to first file (BigBuckBunny)",
-                "Playback should continue seamlessly",
-            ],
-        },
-        TestCase {
-            id: "4.4",
-            name: "Loop: Previous should wrap to last",
-            decode_mode: false,
-            action: TestAction::Previous,
-            expected: &[
-                "Should wrap to last file (Sintel)",
-                "Playback should continue seamlessly",
-            ],
-        },
         // --- Decode Mode Tests (MediaPlayer -> VideoEncoder -> MPEGTSSRT) ---
         TestCase {
-            id: "5.1",
+            id: "3.1",
             name: "Decode Mode: Basic playback with re-encoding",
             decode_mode: true,
             action: TestAction::StartDecodeMode(vec!["BigBuckBunny.mp4"]),
@@ -288,21 +221,21 @@ async fn main() -> anyhow::Result<()> {
             ],
         },
         TestCase {
-            id: "5.2",
+            id: "3.2",
             name: "Decode Mode: Pause",
             decode_mode: true,
             action: TestAction::Pause,
             expected: &["Video should freeze", "Audio should stop"],
         },
         TestCase {
-            id: "5.3",
+            id: "3.3",
             name: "Decode Mode: Resume",
             decode_mode: true,
             action: TestAction::Play,
             expected: &["Video should resume", "Audio should resume"],
         },
         TestCase {
-            id: "5.4",
+            id: "3.4",
             name: "Decode Mode: Playlist with multiple files",
             decode_mode: true,
             action: TestAction::StartDecodeMode(vec!["BigBuckBunny.mp4", "ElephantsDream.mp4"]),
@@ -312,7 +245,7 @@ async fn main() -> anyhow::Result<()> {
             ],
         },
         TestCase {
-            id: "5.5",
+            id: "3.5",
             name: "Decode Mode: Next file",
             decode_mode: true,
             action: TestAction::Next,
@@ -322,11 +255,89 @@ async fn main() -> anyhow::Result<()> {
             ],
         },
         TestCase {
-            id: "5.6",
+            id: "3.6",
             name: "Decode Mode: Previous file",
             decode_mode: true,
             action: TestAction::Previous,
             expected: &["Should go back to BigBuckBunny"],
+        },
+        // --- Edge Case Tests ---
+        TestCase {
+            id: "4.1",
+            name: "Edge: Previous at start of playlist",
+            decode_mode: false,
+            action: TestAction::StartFlowWithPlaylist(vec![
+                "BigBuckBunny.mp4",
+                "ElephantsDream.mp4",
+                "Sintel.mp4",
+            ]),
+            expected: &["First file (BigBuckBunny) should be playing"],
+        },
+        TestCase {
+            id: "4.2",
+            name: "Edge: Previous at start (should reject)",
+            decode_mode: false,
+            action: TestAction::Previous,
+            expected: &[
+                "Command should be rejected (Already at first file)",
+                "Playback should continue on first file (BigBuckBunny)",
+            ],
+        },
+        TestCase {
+            id: "4.3",
+            name: "Edge: Go to last file",
+            decode_mode: false,
+            action: TestAction::GotoFile(2),
+            expected: &["Should jump to last file (Sintel)"],
+        },
+        TestCase {
+            id: "4.4",
+            name: "Edge: Next at end of playlist (no loop)",
+            decode_mode: false,
+            action: TestAction::Next,
+            expected: &[
+                "Command should be rejected (Already at last file)",
+                "Playback should continue on last file (Sintel)",
+            ],
+        },
+        // --- Loop Playlist Tests ---
+        TestCase {
+            id: "5.1",
+            name: "Loop: Start playlist with loop enabled",
+            decode_mode: false,
+            action: TestAction::StartFlowWithPlaylistLoop(vec![
+                "BigBuckBunny.mp4",
+                "ElephantsDream.mp4",
+                "Sintel.mp4",
+            ]),
+            expected: &["First file (BigBuckBunny) should be playing"],
+        },
+        TestCase {
+            id: "5.2",
+            name: "Loop: Go to last file",
+            decode_mode: false,
+            action: TestAction::GotoFile(2),
+            expected: &["Should be on last file (Sintel)"],
+        },
+        TestCase {
+            id: "5.3",
+            name: "Loop: Next should wrap to first",
+            decode_mode: false,
+            action: TestAction::Next,
+            expected: &[
+                "Should wrap to first file (BigBuckBunny)",
+                "Playback should continue seamlessly",
+            ],
+        },
+        TestCase {
+            id: "5.4",
+            name: "Loop: Previous should wrap to last",
+            decode_mode: false,
+            action: TestAction::Previous,
+            expected: &[
+                "Should wrap to last file (Sintel)",
+                "Playback should continue seamlessly",
+            ],
         },
     ];
 
