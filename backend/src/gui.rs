@@ -1,17 +1,17 @@
 //! Native GUI module - launches the frontend in native mode.
 //!
-//! Only available when the "gui" feature is enabled.
+//! GUI is enabled by default. Use --features no-gui to disable.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-#[cfg(feature = "gui")]
+#[cfg(not(feature = "no-gui"))]
 pub fn launch_gui(port: u16) -> eframe::Result<()> {
     tracing::info!("Launching native GUI connecting to port {}...", port);
     strom_frontend::run_native_gui(port)
 }
 
-#[cfg(feature = "gui")]
+#[cfg(not(feature = "no-gui"))]
 pub fn launch_gui_with_shutdown(port: u16, shutdown_flag: Arc<AtomicBool>) -> eframe::Result<()> {
     tracing::info!(
         "Launching native GUI with shutdown handler connecting to port {}...",
@@ -21,7 +21,7 @@ pub fn launch_gui_with_shutdown(port: u16, shutdown_flag: Arc<AtomicBool>) -> ef
 }
 
 /// Launch the native GUI with authentication token for auto-login.
-#[cfg(feature = "gui")]
+#[cfg(not(feature = "no-gui"))]
 pub fn launch_gui_with_auth(
     port: u16,
     shutdown_flag: Arc<AtomicBool>,
@@ -34,21 +34,21 @@ pub fn launch_gui_with_auth(
     strom_frontend::run_native_gui_with_shutdown(port, shutdown_flag, Some(auth_token))
 }
 
-#[cfg(not(feature = "gui"))]
+#[cfg(feature = "no-gui")]
 pub fn launch_gui(_port: u16) -> Result<(), String> {
-    Err("GUI feature not enabled. Rebuild with --features gui".to_string())
+    Err("GUI disabled. Rebuild without --features no-gui".to_string())
 }
 
-#[cfg(not(feature = "gui"))]
+#[cfg(feature = "no-gui")]
 pub fn launch_gui_with_shutdown(_port: u16, _shutdown_flag: Arc<AtomicBool>) -> Result<(), String> {
-    Err("GUI feature not enabled. Rebuild with --features gui".to_string())
+    Err("GUI disabled. Rebuild without --features no-gui".to_string())
 }
 
-#[cfg(not(feature = "gui"))]
+#[cfg(feature = "no-gui")]
 pub fn launch_gui_with_auth(
     _port: u16,
     _shutdown_flag: Arc<AtomicBool>,
     _auth_token: String,
 ) -> Result<(), String> {
-    Err("GUI feature not enabled. Rebuild with --features gui".to_string())
+    Err("GUI disabled. Rebuild without --features no-gui".to_string())
 }
