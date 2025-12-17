@@ -12,6 +12,9 @@
 - **Element Discovery** - Browse and configure any installed GStreamer element
 - **Reusable Blocks** - Create custom components from element groups (e.g., AES67 receiver)
 - **gst-launch Import/Export** - Import existing `gst-launch-1.0` commands or export flows to gst-launch syntax
+- **SAP/AES67 Discovery** - Browse and monitor network audio streams via SAP announcements
+- **PTP Clock Monitoring** - View PTP synchronization status and statistics per domain
+- **Media File Browser** - Manage media files for playlist playback
 - **System Monitoring** - Real-time CPU, memory, and GPU usage graphs in the topbar
 - **Authentication** - Secure with session login or API keys (optional)
 - **Auto-restart** - Pipelines survive server restarts
@@ -39,52 +42,19 @@ Deploy Strom with just a few clicks - perfect for testing, demos, or production 
 
 ### Option 1: One-liner Install (Recommended)
 
-Install Strom with a single command:
-
 ```bash
-# Interactive install (DEFAULT) - shows configuration menu
 curl -sSL https://raw.githubusercontent.com/Eyevinn/strom/main/install.sh | bash
-
-# Automated install (skip menu for CI/CD)
-curl -sSL https://raw.githubusercontent.com/Eyevinn/strom/main/install.sh | AUTO_INSTALL=true bash
-
-# Automated with minimal GStreamer
-curl -sSL https://raw.githubusercontent.com/Eyevinn/strom/main/install.sh | AUTO_INSTALL=true GSTREAMER_INSTALL_TYPE=minimal bash
-
-# Automated binary only (skip dependencies)
-curl -sSL https://raw.githubusercontent.com/Eyevinn/strom/main/install.sh | AUTO_INSTALL=true SKIP_GSTREAMER=true SKIP_GRAPHVIZ=true bash
 ```
 
-**Interactive mode (default):**
-- Use: `curl -sSL ... | bash`
-- Shows configuration menu to customize installation
-- Reads input from terminal even when piped (uses `/dev/tty`)
-- Choose binary (strom or strom-mcp-server)
-- Select GStreamer type (minimal or full)
-- Configure version and install location
-- Human-friendly with clear defaults
+The interactive installer detects your OS, downloads the latest release, and installs GStreamer dependencies.
 
-**Automated mode (for CI/CD):**
-- Use: `curl -sSL ... | AUTO_INSTALL=true bash`
-- Skips interactive menu entirely
-- Uses defaults or environment variables
-- Perfect for scripts and automation
+For CI/CD or scripted installs, use environment variables:
 
-The script will:
-- Detect your OS and architecture automatically
-- Download the latest release from GitHub
-- Install to `/usr/local/bin` (or `~/.local/bin` if no sudo)
-- Install GStreamer (full or minimal) - **required for Strom to work**
-- Install Graphviz - **required for pipeline debug graphs**
+```bash
+curl -sSL https://raw.githubusercontent.com/Eyevinn/strom/main/install.sh | AUTO_INSTALL=true GSTREAMER_INSTALL_TYPE=minimal bash
+```
 
-**Environment Variables:**
-- `AUTO_INSTALL=true` - Skip interactive menu (default: false)
-- `GSTREAMER_INSTALL_TYPE=minimal` - Core GStreamer + base/good plugins only
-- `GSTREAMER_INSTALL_TYPE=full` - All plugins including bad/ugly/libav + WebRTC support (libnice) (default)
-- `SKIP_GSTREAMER=true` - Skip GStreamer (not recommended)
-- `SKIP_GRAPHVIZ=true` - Skip Graphviz (debug graphs won't work)
-- `INSTALL_DIR=/custom/path` - Custom installation directory
-- `VERSION=v0.2.6` - Install specific version
+Available options: `AUTO_INSTALL`, `GSTREAMER_INSTALL_TYPE` (full/minimal), `SKIP_GSTREAMER`, `SKIP_GRAPHVIZ`, `INSTALL_DIR`, `VERSION`.
 
 After installation, run `strom` and open `http://localhost:8080` in your browser.
 
@@ -129,7 +99,8 @@ Access the web UI at `http://localhost:8080`
 # Install GStreamer
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+  gstreamer1.0-tools libnice-dev gstreamer1.0-nice graphviz
 
 # Install Rust and tools
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -438,15 +409,30 @@ When authentication is enabled, all API endpoints except the following require a
 
 Create reusable components from element groups:
 
-**Built-in Blocks:**
-- **AES67 Receiver** - ST 2110-30 audio receiver with SDP generation
-- **Video Encoder** - H.264/H.265/AV1/VP9 encoding with automatic hardware acceleration (NVENC, VA-API, software fallback)
-- **Video Format** - Resolution, framerate, and pixel format conversion (8K to QVGA, cinema framerates, professional formats)
-- **Audio Format** - Sample rate, channel configuration, and PCM format conversion (supports multi-channel and surround sound with proper channel masks)
-- **Audio/Video Meter** - Level monitoring for audio and video streams
-- Custom blocks via JSON or API
+**Inputs:**
+- **Media Player** - File and playlist playback with position tracking, loop support, and decode/passthrough modes
+- **AES67 Input** - Receives AES67/Ravenna audio via RTP multicast using SDP
+- **WHEP Input** - Receives audio/video via WebRTC WHEP protocol
+- **DeckLink Video/Audio Input** - Captures from Blackmagic DeckLink SDI/HDMI cards
+- **Inter Input** - Subscribes to streams from other flows (inter-pipeline routing)
 
-Example: Add AES67 block to receive network audio streams, automatically generates proper SDP with multicast addressing.
+**Outputs:**
+- **AES67 Output** - Sends AES67/Ravenna audio via RTP multicast with SDP generation
+- **WHIP Output** - Sends audio via WebRTC WHIP protocol
+- **MPEG-TS/SRT Output** - Muxes audio/video to MPEG Transport Stream over SRT
+- **DeckLink Video/Audio Output** - Outputs to Blackmagic DeckLink SDI/HDMI cards
+- **Inter Output** - Publishes streams for other flows to consume
+
+**Processing:**
+- **Video Encoder** - H.264/H.265/AV1/VP9 with automatic hardware acceleration (NVENC, QSV, VA-API, AMF, software)
+- **Video Format** - Resolution, framerate, and pixel format conversion
+- **Audio Format** - Sample rate, channels, and PCM format conversion (supports surround sound)
+- **Video Compositor** - Multi-input compositing with GPU (OpenGL) and CPU backends
+
+**Analysis:**
+- **Audio Meter** - RMS and peak level monitoring per channel
+
+Custom blocks can also be created via JSON or API.
 
 See `docs/BLOCKS_IMPLEMENTATION.md` and `docs/VIDEO_ENCODER_BLOCK.md` for details.
 
@@ -477,9 +463,11 @@ cd strom
 # Install GStreamer dependencies
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+  gstreamer1.0-tools libnice-dev gstreamer1.0-nice graphviz
 
 # Install Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup target add wasm32-unknown-unknown
 cargo install trunk
 
