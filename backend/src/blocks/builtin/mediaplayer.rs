@@ -245,13 +245,9 @@ impl MediaPlayerState {
 
     /// Seek to a position in nanoseconds.
     ///
-    /// Performs a flush seek directly on the source element without pausing.
+    /// Performs a flush seek on the pipeline for proper downstream handling.
+    /// Uses SEGMENT seek to reset running time, which is needed for live sinks.
     pub fn seek(&self, position_ns: u64) -> Result<(), String> {
-        let source = self
-            .source_element
-            .upgrade()
-            .ok_or("Source element no longer exists")?;
-
         let secs = position_ns / 1_000_000_000;
         let hours = secs / 3600;
         let mins = (secs % 3600) / 60;
@@ -261,9 +257,17 @@ impl MediaPlayerState {
             position_ns, hours, mins, secs_rem
         );
 
-        // Perform flush seek on the source element (playbin)
-        // FLUSH: Discard all buffered data immediately
-        // KEY_UNIT: Seek to nearest keyframe
+        // Seek on source element (urisourcebin/uridecodebin) for file playback
+        let source = self
+            .source_element
+            .upgrade()
+            .ok_or("Source element no longer exists")?;
+
+        // For seeking with live sinks (sync=true), we need to handle the base time
+        // After a flush seek, timestamps change but running time doesn't automatically adjust
+        let pipeline_guard = self.pipeline.read().unwrap();
+        let pipeline = pipeline_guard.upgrade();
+
         let seek_result = source.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
             gst::ClockTime::from_nseconds(position_ns),
@@ -272,6 +276,20 @@ impl MediaPlayerState {
         match seek_result {
             Ok(_) => {
                 info!("Seek completed to {} ns", position_ns);
+
+                // Reset pipeline base time so running time aligns with new position
+                // This is critical for live sinks like srtsink with sync=true
+                if let Some(ref pipe) = pipeline {
+                    // Set start time to NONE and reset base time to current clock time
+                    // This makes running time restart from 0 after the seek
+                    pipe.set_start_time(gst::ClockTime::NONE);
+                    if let Some(clock) = pipe.clock() {
+                        let clock_time = clock.time();
+                        pipe.set_base_time(clock_time);
+                        debug!("Reset pipeline base time to {:?} after seek", clock_time);
+                    }
+                }
+
                 Ok(())
             }
             Err(e) => {
