@@ -372,6 +372,10 @@ async fn main() -> anyhow::Result<()> {
                 let _ = api.delete_flow(id).await;
             }
 
+            // Clean up any stale test flows (e.g., from previous runs)
+            api.delete_flows_by_prefix("__MPTEST__").await?;
+            tokio::time::sleep(Duration::from_secs(1)).await; // Wait for SRT port to be released
+
             // Determine playlist files, loop setting, and decode mode
             let (playlist_files, loop_playlist, use_decode_mode): (Vec<String>, bool, bool) =
                 match &test.action {
