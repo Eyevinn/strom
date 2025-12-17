@@ -5206,6 +5206,12 @@ impl eframe::App for StromApp {
                 }
             }
 
+            // Update current playing index from player data
+            if let Some(player_data) = self.mediaplayer_data.get(&editor.flow_id, &editor.block_id)
+            {
+                editor.current_playing_index = Some(player_data.current_file_index);
+            }
+
             if let Some(playlist) = editor.show(ctx) {
                 // User clicked Save - send playlist to API
                 let flow_id = editor.flow_id;

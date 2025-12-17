@@ -202,6 +202,15 @@ pub fn calculate_compact_height() -> f32 {
 pub fn show_compact(ui: &mut Ui, player_data: &MediaPlayerData) -> Option<(String, Option<u64>)> {
     let available_width = ui.available_width().max(100.0);
 
+    // Show current file name (if any)
+    if let Some(ref file) = player_data.current_file {
+        let filename = std::path::Path::new(file)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| file.clone());
+        ui.label(filename);
+    }
+
     // Show playback state and file count
     ui.label(format!(
         "State: {} | Files: {}",
@@ -478,6 +487,8 @@ pub struct PlaylistEditor {
     pub browser_loading: bool,
     /// Whether we need to refresh the file list
     pub browser_needs_refresh: bool,
+    /// Index of the currently playing file (for highlighting)
+    pub current_playing_index: Option<usize>,
 }
 
 impl PlaylistEditor {
@@ -493,6 +504,7 @@ impl PlaylistEditor {
             browser_entries: Vec::new(),
             browser_loading: false,
             browser_needs_refresh: true, // Load on first show
+            current_playing_index: None,
         }
     }
 
@@ -660,8 +672,12 @@ impl PlaylistEditor {
                 let mut to_move_down = None;
 
                 for (i, file) in self.playlist.iter().enumerate() {
+                    let is_playing = self.current_playing_index == Some(i);
                     ui.horizontal(|ui| {
-                        // Index
+                        // Playing indicator or index
+                        if is_playing {
+                            ui.colored_label(Color32::GREEN, ">");
+                        }
                         ui.label(format!("{}.", i + 1));
 
                         // File name (truncated)
@@ -669,7 +685,12 @@ impl PlaylistEditor {
                             .file_name()
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_else(|| file.clone());
-                        ui.label(&display_name).on_hover_text(file);
+                        if is_playing {
+                            ui.colored_label(Color32::GREEN, &display_name)
+                                .on_hover_text(file);
+                        } else {
+                            ui.label(&display_name).on_hover_text(file);
+                        }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Remove button

@@ -245,53 +245,53 @@ impl MediaPlayerState {
 
     /// Seek to a position in nanoseconds.
     ///
-    /// Pauses pipeline, seeks on pipeline, then resumes to avoid buffer burst.
+    /// Performs a flush seek directly on the source element without pausing.
     pub fn seek(&self, position_ns: u64) -> Result<(), String> {
-        let pipeline = self.get_pipeline().ok_or("Pipeline no longer exists")?;
+        let source = self
+            .source_element
+            .upgrade()
+            .ok_or("Source element no longer exists")?;
 
-        let was_playing = !self.is_paused.load(Ordering::SeqCst);
+        let secs = position_ns / 1_000_000_000;
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        let secs_rem = secs % 60;
         info!(
-            "Seeking to {} ns (pause-seek-play on pipeline, was_playing={})",
-            position_ns, was_playing
+            "Seeking to {} ns ({:02}:{:02}:{:02})",
+            position_ns, hours, mins, secs_rem
         );
 
-        let pipeline_clone = pipeline.clone();
-        std::thread::spawn(move || {
-            // Pause pipeline first
-            if was_playing {
-                if let Err(e) = pipeline_clone.set_state(gst::State::Paused) {
-                    error!("Failed to pause before seek: {:?}", e);
-                    return;
-                }
-                // Wait for pause to complete
-                let _ = pipeline_clone.state(gst::ClockTime::from_mseconds(100));
-            }
+        // Perform flush seek on the source element (playbin)
+        // FLUSH: Discard all buffered data immediately
+        // KEY_UNIT: Seek to nearest keyframe
+        let seek_result = source.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::ClockTime::from_nseconds(position_ns),
+        );
 
-            // FLUSH seek on pipeline - properly coordinates all elements
-            match pipeline_clone.seek_simple(
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::ClockTime::from_nseconds(position_ns),
-            ) {
-                Ok(_) => {
-                    info!("Seek completed successfully");
-                    // Resume playing
-                    if was_playing {
-                        if let Err(e) = pipeline_clone.set_state(gst::State::Playing) {
-                            error!("Failed to resume after seek: {:?}", e);
-                        } else {
-                            info!("Resumed playing after seek");
-                        }
-                    }
-                }
-                Err(e) => error!("Seek failed: {:?}", e),
+        match seek_result {
+            Ok(_) => {
+                info!("Seek completed to {} ns", position_ns);
+                Ok(())
             }
-        });
-
-        Ok(())
+            Err(e) => {
+                error!("Seek failed: {:?}", e);
+                Err(format!("Seek failed: {:?}", e))
+            }
+        }
     }
 
     /// Get current position in nanoseconds.
     pub fn position(&self) -> Option<u64> {
+        // Query position from source element (playbin) rather than pipeline
+        // to avoid potential issues with pipeline-level queries
+        if let Some(source) = self.source_element.upgrade() {
+            if let Some(position) = source.query_position::<gst::ClockTime>() {
+                return Some(position.nseconds());
+            }
+        }
+
+        // Fallback to pipeline query
         let pipeline = self.get_pipeline()?;
         pipeline
             .query_position::<gst::ClockTime>()
