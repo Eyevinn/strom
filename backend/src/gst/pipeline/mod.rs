@@ -1,6 +1,9 @@
 //! GStreamer pipeline management.
 
+mod qos;
 mod webrtc_stats;
+
+use qos::QoSAggregator;
 
 use crate::blocks::BlockRegistry;
 use crate::events::EventBroadcaster;
@@ -10,7 +13,6 @@ use gstreamer::glib;
 use gstreamer::prelude::*;
 use gstreamer_net as gst_net;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use strom_types::element::ElementPadRef;
 use strom_types::flow::ThreadPriorityStatus;
 use strom_types::{Element, Flow, FlowId, Link, PipelineState, PropertyValue, StromEvent};
@@ -23,82 +25,6 @@ struct ProcessedLinks {
     links: Vec<Link>,
     /// Map of tee element IDs to their source spec (element:pad they're connected to)
     tees: HashMap<String, String>,
-}
-
-/// Aggregated QoS statistics for a single element.
-#[derive(Debug, Clone)]
-struct ElementQoSStats {
-    event_count: u64,
-    sum_proportion: f64,
-    min_proportion: f64,
-    max_proportion: f64,
-    sum_jitter: i64,
-    total_processed: u64,
-}
-
-impl ElementQoSStats {
-    fn new() -> Self {
-        Self {
-            event_count: 0,
-            sum_proportion: 0.0,
-            min_proportion: f64::MAX,
-            max_proportion: f64::MIN,
-            sum_jitter: 0,
-            total_processed: 0,
-        }
-    }
-
-    fn add_event(&mut self, proportion: f64, jitter: i64, processed: u64) {
-        self.event_count += 1;
-        self.sum_proportion += proportion;
-        self.min_proportion = self.min_proportion.min(proportion);
-        self.max_proportion = self.max_proportion.max(proportion);
-        self.sum_jitter += jitter;
-        self.total_processed = processed; // Keep the latest value
-    }
-
-    fn avg_proportion(&self) -> f64 {
-        if self.event_count > 0 {
-            self.sum_proportion / self.event_count as f64
-        } else {
-            0.0
-        }
-    }
-
-    fn avg_jitter(&self) -> i64 {
-        if self.event_count > 0 {
-            self.sum_jitter / self.event_count as i64
-        } else {
-            0
-        }
-    }
-}
-
-/// QoS statistics aggregator (collects QoS events and broadcasts periodically).
-#[derive(Debug, Clone)]
-struct QoSAggregator {
-    stats: Arc<Mutex<HashMap<String, ElementQoSStats>>>,
-}
-
-impl QoSAggregator {
-    fn new() -> Self {
-        Self {
-            stats: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    fn add_event(&self, element_name: String, proportion: f64, jitter: i64, processed: u64) {
-        let mut stats = self.stats.lock().unwrap();
-        stats
-            .entry(element_name)
-            .or_insert_with(ElementQoSStats::new)
-            .add_event(proportion, jitter, processed);
-    }
-
-    fn extract_and_reset(&self) -> HashMap<String, ElementQoSStats> {
-        let mut stats = self.stats.lock().unwrap();
-        std::mem::take(&mut *stats)
-    }
 }
 
 #[derive(Error, Debug)]
