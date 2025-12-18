@@ -107,6 +107,8 @@ pub enum AppPage {
     Clocks,
     /// Media file browser
     Media,
+    /// System and version information
+    Info,
 }
 
 /// Focus target for Ctrl+F cycling
@@ -347,6 +349,8 @@ pub struct StromApp {
     clocks_page: crate::clocks::ClocksPage,
     /// Media file browser page state
     media_page: crate::media::MediaPage,
+    /// Info page state
+    info_page: crate::info_page::InfoPage,
     /// Flow list filter text
     flow_filter: String,
     /// Show stream picker modal for this block ID (when browsing discovered streams for AES67 Input)
@@ -472,6 +476,7 @@ impl StromApp {
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
             media_page: crate::media::MediaPage::new(),
+            info_page: crate::info_page::InfoPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
             focus_target: FocusTarget::None,
@@ -569,6 +574,7 @@ impl StromApp {
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
             media_page: crate::media::MediaPage::new(),
+            info_page: crate::info_page::InfoPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
             focus_target: FocusTarget::None,
@@ -1725,6 +1731,9 @@ impl StromApp {
                     self.media_page.focus_search();
                     self.focus_target = FocusTarget::MediaFilter;
                 }
+                AppPage::Info => {
+                    // No search/filters on Info page
+                }
             }
         }
 
@@ -1841,6 +1850,17 @@ impl StromApp {
                         self.current_page = AppPage::Media;
                         self.focus_target = FocusTarget::None;
                     }
+                    if ui
+                        .selectable_label(
+                            self.current_page == AppPage::Info,
+                            egui::RichText::new("Info").size(16.0),
+                        )
+                        .on_hover_text("System and version information")
+                        .clicked()
+                    {
+                        self.current_page = AppPage::Info;
+                        self.focus_target = FocusTarget::None;
+                    }
 
                     // Right-aligned system controls
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1909,6 +1929,7 @@ impl StromApp {
             AppPage::Discovery => self.render_discovery_toolbar(ctx),
             AppPage::Clocks => self.render_clocks_toolbar(ctx),
             AppPage::Media => self.render_media_toolbar(ctx),
+            AppPage::Info => self.render_info_toolbar(ctx),
         }
     }
 
@@ -2124,6 +2145,28 @@ impl StromApp {
                     }
                     if is_loading {
                         ui.spinner();
+                    }
+                });
+            });
+    }
+
+    /// Render the info page toolbar
+    fn render_info_toolbar(&mut self, ctx: &Context) {
+        TopBottomPanel::top("page_toolbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.label(egui::RichText::new("System Information").heading());
+                    ui.separator();
+
+                    if ui.button("Refresh").clicked() {
+                        self.load_version(ctx.clone());
+                        // Force reload of network interfaces
+                        self.network_interfaces_loaded = false;
+                        self.load_network_interfaces(ctx.clone());
                     }
                 });
             });
@@ -5414,6 +5457,23 @@ impl eframe::App for StromApp {
                 CentralPanel::default().show(ctx, |ui| {
                     self.media_page
                         .render(ui, &self.api, ctx, &self.channels.sender());
+                });
+            }
+            AppPage::Info => {
+                // Auto-load network interfaces when Info page is shown
+                if self.info_page.should_load_network() {
+                    self.network_interfaces_loaded = false;
+                    self.load_network_interfaces(ctx.clone());
+                }
+
+                CentralPanel::default().show(ctx, |ui| {
+                    self.info_page.render(
+                        ui,
+                        self.version_info.as_ref(),
+                        &self.system_monitor,
+                        &self.network_interfaces,
+                        &self.flows,
+                    );
                 });
             }
         }
