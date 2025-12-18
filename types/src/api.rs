@@ -18,6 +18,9 @@ use utoipa::ToSchema;
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct CreateFlowRequest {
     pub name: String,
+    /// Optional description for the flow
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Request to update an existing flow.

@@ -199,7 +199,12 @@ pub async fn create_flow(
 ) -> Result<(StatusCode, Json<FlowResponse>), (StatusCode, Json<ErrorResponse>)> {
     info!("Received create flow request: name='{}'", req.name);
 
-    let flow = Flow::new(req.name);
+    let mut flow = Flow::new(req.name);
+
+    // Set description if provided
+    if let Some(description) = req.description {
+        flow.properties.description = Some(description);
+    }
 
     info!("Creating flow: {} ({})", flow.name, flow.id);
 
@@ -387,6 +392,32 @@ pub async fn update_flow(
     }
 
     Ok(Json(FlowResponse { flow }))
+}
+
+/// Update an existing flow (PUT alias).
+///
+/// This is an alias for the POST update endpoint, provided for RESTful API conventions.
+#[utoipa::path(
+    put,
+    path = "/api/flows/{id}",
+    tag = "flows",
+    params(
+        ("id" = String, Path, description = "Flow ID (UUID)")
+    ),
+    request_body = Flow,
+    responses(
+        (status = 200, description = "Flow updated", body = FlowResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 404, description = "Flow not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn update_flow_put(
+    state: State<AppState>,
+    id: Path<FlowId>,
+    flow: Json<Flow>,
+) -> Result<Json<FlowResponse>, (StatusCode, Json<ErrorResponse>)> {
+    update_flow(state, id, flow).await
 }
 
 /// Delete a flow.

@@ -169,6 +169,7 @@ impl ApiClient {
 
         let request = CreateFlowRequest {
             name: flow.name.clone(),
+            description: None,
         };
 
         let response = self

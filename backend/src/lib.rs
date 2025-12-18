@@ -5,7 +5,9 @@
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue, Method};
 use axum::{
-    middleware, routing::delete, routing::get, routing::patch, routing::post, Extension, Router,
+    middleware,
+    routing::{delete, get, patch, post, put},
+    Extension, Router,
 };
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -82,10 +84,8 @@ pub async fn create_app_with_state_and_auth(
         .route("/flows", post(api::flows::create_flow))
         .route("/flows/{id}", get(api::flows::get_flow))
         .route("/flows/{id}", post(api::flows::update_flow))
-        .route(
-            "/flows/{id}",
-            axum::routing::delete(api::flows::delete_flow),
-        )
+        .route("/flows/{id}", put(api::flows::update_flow_put))
+        .route("/flows/{id}", delete(api::flows::delete_flow))
         .route("/flows/{id}/start", post(api::flows::start_flow))
         .route("/flows/{id}/stop", post(api::flows::stop_flow))
         .route("/flows/{id}/latency", get(api::flows::get_flow_latency))

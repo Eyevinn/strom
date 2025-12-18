@@ -26,6 +26,7 @@ use utoipa::OpenApi;
         crate::api::flows::create_flow,
         crate::api::flows::get_flow,
         crate::api::flows::update_flow,
+        crate::api::flows::update_flow_put,
         crate::api::flows::delete_flow,
         crate::api::flows::start_flow,
         crate::api::flows::stop_flow,
