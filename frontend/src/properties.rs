@@ -15,6 +15,8 @@ pub struct BlockInspectorResult {
     pub delete_requested: bool,
     /// Whether browse streams was requested (for AES67 Input SDP)
     pub browse_streams_requested: bool,
+    /// VLC playlist download requested (for MPEG-TS/SRT blocks) - contains (srt_uri, latency_ms)
+    pub vlc_playlist_requested: Option<(String, i32)>,
 }
 
 /// Property inspector panel.
@@ -368,6 +370,37 @@ impl PropertyInspector {
                 && ui.button("🎵 Edit Playlist").clicked()
             {
                 crate::app::set_local_storage("open_playlist_editor", &block.id);
+            }
+
+            // Download VLC Playlist button for MPEG-TS/SRT output blocks
+            if definition.id == "builtin.mpegtssrt_output"
+                && ui
+                    .button("📺 Open in VLC")
+                    .on_hover_text("Download XSPF playlist and open in VLC")
+                    .clicked()
+            {
+                    // Get SRT URI from block properties or default
+                    let srt_uri = block
+                        .properties
+                        .get("srt_uri")
+                        .and_then(|v| match v {
+                            PropertyValue::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "srt://:5000?mode=listener".to_string());
+
+                    // Get latency from block properties or default (125ms)
+                    let latency = block
+                        .properties
+                        .get("latency")
+                        .and_then(|v| match v {
+                            PropertyValue::Int(i) => Some(*i as i32),
+                            PropertyValue::UInt(u) => Some(*u as i32),
+                            _ => None,
+                        })
+                        .unwrap_or(125);
+
+                result.vlc_playlist_requested = Some((srt_uri, latency));
             }
 
             ui.separator();
