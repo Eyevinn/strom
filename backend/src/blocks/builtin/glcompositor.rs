@@ -582,7 +582,7 @@ fn glcompositor_definition() -> BlockDefinition {
                 label: "Latency (ms)".to_string(),
                 description: "Additional latency in milliseconds for the mixer aggregator".to_string(),
                 property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(0)),
+                default_value: Some(PropertyValue::UInt(200)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "latency".to_string(),
@@ -594,7 +594,7 @@ fn glcompositor_definition() -> BlockDefinition {
                 label: "Min Upstream Latency (ms)".to_string(),
                 description: "Minimum upstream latency in milliseconds that is reported to upstream elements".to_string(),
                 property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(0)),
+                default_value: Some(PropertyValue::UInt(200)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "min_upstream_latency".to_string(),
