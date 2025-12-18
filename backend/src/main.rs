@@ -148,6 +148,10 @@ struct Args {
     #[arg(long, env = "STROM_BLOCKS_PATH")]
     blocks_path: Option<PathBuf>,
 
+    /// Path to media files directory (overrides --data-dir)
+    #[arg(long, env = "STROM_MEDIA_PATH")]
+    media_path: Option<PathBuf>,
+
     /// Database URL (e.g., postgresql://user:pass@localhost/strom)
     /// If set, database storage is used instead of JSON files
     /// Supported schemes: postgresql://
@@ -234,6 +238,7 @@ fn main() -> anyhow::Result<()> {
         args.data_dir.clone(),
         args.flows_path.clone(),
         args.blocks_path.clone(),
+        args.media_path.clone(),
         args.database_url.clone(),
     )
     .unwrap_or_else(|e| {

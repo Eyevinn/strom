@@ -68,13 +68,12 @@ impl DataPaths {
             base_dir.join("blocks.json")
         };
 
-        // Resolve media path (individual path overrides default ./media)
+        // Resolve media path (individual path overrides base_dir)
         let media_path = if let Some(path) = config.media_path {
             Self::log_path_override("media", &path, &base_dir);
             path
         } else {
-            // Default to ./media in current working directory
-            PathBuf::from("./media")
+            base_dir.join("media")
         };
 
         // Ensure media directory exists
@@ -216,6 +215,7 @@ mod tests {
         let paths = DataPaths::resolve(config).unwrap();
         assert_eq!(paths.flows_path, temp_dir.path().join("flows.json"));
         assert_eq!(paths.blocks_path, temp_dir.path().join("blocks.json"));
+        assert_eq!(paths.media_path, temp_dir.path().join("media"));
     }
 
     #[test]
@@ -231,5 +231,20 @@ mod tests {
         let paths = DataPaths::resolve(config).unwrap();
         assert_eq!(paths.flows_path, PathBuf::from("/override/flows.json"));
         assert_eq!(paths.blocks_path, temp_dir.path().join("blocks.json"));
+    }
+
+    #[test]
+    fn test_explicit_media_path_override() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let media_dir = temp_dir.path().join("custom_media");
+        let config = PathConfig {
+            data_dir: Some(temp_dir.path().to_path_buf()),
+            flows_path: None,
+            blocks_path: None,
+            media_path: Some(media_dir.clone()),
+        };
+
+        let paths = DataPaths::resolve(config).unwrap();
+        assert_eq!(paths.media_path, media_dir);
     }
 }

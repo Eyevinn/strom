@@ -80,6 +80,7 @@ impl Config {
         data_dir: Option<PathBuf>,
         flows_path: Option<PathBuf>,
         blocks_path: Option<PathBuf>,
+        media_path: Option<PathBuf>,
         database_url: Option<String>,
     ) -> anyhow::Result<Self> {
         // Find config file paths
@@ -133,6 +134,9 @@ impl Config {
         if let Some(ref bp) = blocks_path {
             figment = figment.merge(Serialized::default("storage.blocks_path", bp));
         }
+        if let Some(ref mp) = media_path {
+            figment = figment.merge(Serialized::default("storage.media_path", mp));
+        }
         if let Some(ref db) = database_url {
             figment = figment.merge(Serialized::default("storage.database_url", db));
         }
@@ -168,6 +172,7 @@ impl Config {
         data_dir: Option<PathBuf>,
         flows_path: Option<PathBuf>,
         blocks_path: Option<PathBuf>,
+        media_path: Option<PathBuf>,
         database_url: Option<String>,
     ) -> anyhow::Result<Self> {
         // Resolve data paths
@@ -175,7 +180,7 @@ impl Config {
             data_dir,
             flows_path,
             blocks_path,
-            media_path: None,
+            media_path,
         };
         let data_paths = DataPaths::resolve(path_config)?;
 
@@ -203,9 +208,17 @@ impl Config {
         let data_dir = env::var("STROM_DATA_DIR").ok().map(PathBuf::from);
         let flows_path = env::var("STROM_FLOWS_PATH").ok().map(PathBuf::from);
         let blocks_path = env::var("STROM_BLOCKS_PATH").ok().map(PathBuf::from);
+        let media_path = env::var("STROM_MEDIA_PATH").ok().map(PathBuf::from);
         let database_url = env::var("STROM_DATABASE_URL").ok();
 
-        Self::new(port, data_dir, flows_path, blocks_path, database_url)
+        Self::new(
+            port,
+            data_dir,
+            flows_path,
+            blocks_path,
+            media_path,
+            database_url,
+        )
     }
 }
 
@@ -248,7 +261,7 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None).unwrap();
+        let config = Config::from_figment(None, None, None, None, None, None).unwrap();
 
         // Restore (ignore errors)
         let _ = std::env::set_current_dir(original_dir);
@@ -268,6 +281,7 @@ mod tests {
             None,
             Some(flows.clone()),
             Some(blocks.clone()),
+            None,
             Some("postgresql://test".to_string()),
         )
         .unwrap();
@@ -302,7 +316,7 @@ database_url = "postgresql://localhost/test"
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None).unwrap();
+        let config = Config::from_figment(None, None, None, None, None, None).unwrap();
 
         // Restore original directory (ignore errors if it fails)
         let _ = std::env::set_current_dir(original_dir);
@@ -334,7 +348,7 @@ database_url = "postgresql://localhost/test"
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None).unwrap();
+        let config = Config::from_figment(None, None, None, None, None, None).unwrap();
 
         // Restore (restore dir before temp_dir is dropped, ignore errors)
         let _ = std::env::set_current_dir(&original_dir);
@@ -376,7 +390,7 @@ database_url = "postgresql://localhost/test"
         std::env::set_current_dir(&temp_dir).unwrap();
 
         // Pass CLI arg 9999
-        let config = Config::from_figment(Some(9999), None, None, None, None).unwrap();
+        let config = Config::from_figment(Some(9999), None, None, None, None, None).unwrap();
 
         // Restore (restore dir before temp_dir is dropped, ignore errors)
         let _ = std::env::set_current_dir(&original_dir);
@@ -424,7 +438,7 @@ data_dir = "{}"
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None).unwrap();
+        let config = Config::from_figment(None, None, None, None, None, None).unwrap();
 
         // Restore (ignore errors)
         let _ = std::env::set_current_dir(original_dir);
@@ -439,8 +453,15 @@ data_dir = "{}"
         let flows = temp_dir.path().join("flows.json");
         let blocks = temp_dir.path().join("blocks.json");
 
-        let config =
-            Config::new(8080, None, Some(flows.clone()), Some(blocks.clone()), None).unwrap();
+        let config = Config::new(
+            8080,
+            None,
+            Some(flows.clone()),
+            Some(blocks.clone()),
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(config.port, 8080);
         assert_eq!(config.flows_path, flows);
