@@ -281,7 +281,7 @@ impl CompositorEditor {
             let ctx = ctx.clone();
             let mixer_element_id = mixer_element_id.clone();
 
-            crate::logging::spawn_task(async move {
+            crate::utils::spawn_task(async move {
                 match api
                     .get_pad_properties(&flow_id.to_string(), &mixer_element_id, &pad_name)
                     .await
@@ -378,7 +378,7 @@ impl CompositorEditor {
         self.inputs[input_index].pending_update = true;
         self.status = format!("Updating {}...", property_name);
 
-        crate::logging::spawn_task(async move {
+        crate::utils::spawn_task(async move {
             match api
                 .update_pad_property(
                     &flow_id.to_string(),

@@ -13,8 +13,8 @@ use egui::{CentralPanel, Color32, Context};
 use strom_types::{Flow, PipelineState};
 
 use crate::app::{AppPage, ImportFormat, StromApp};
-use crate::logging::spawn_task;
 use crate::state::AppMessage;
+use crate::utils::spawn_task;
 
 impl StromApp {
     /// Render the new flow dialog.

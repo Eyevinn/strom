@@ -1,4 +1,4 @@
-//! Logging types and task spawning utilities.
+//! Logging types for pipeline messages.
 
 use egui::Color32;
 
@@ -62,21 +62,4 @@ impl LogEntry {
             LogLevel::Error => "✖",
         }
     }
-}
-
-// Cross-platform task spawning
-#[cfg(target_arch = "wasm32")]
-pub fn spawn_task<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + 'static,
-{
-    wasm_bindgen_futures::spawn_local(future);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn spawn_task<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(future);
 }

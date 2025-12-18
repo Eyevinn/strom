@@ -495,7 +495,7 @@ impl DiscoveryPage {
         let ctx = ctx.clone();
         let tx = tx.clone();
 
-        crate::logging::spawn_task(async move {
+        crate::utils::spawn_task(async move {
             // Fetch discovered streams
             match api.get_discovered_streams().await {
                 Ok(streams) => {
@@ -551,7 +551,7 @@ impl DiscoveryPage {
         let tx = tx.clone();
         let stream_id = stream_id.to_string();
 
-        crate::logging::spawn_task(async move {
+        crate::utils::spawn_task(async move {
             match api.get_stream_sdp(&stream_id).await {
                 Ok(sdp) => {
                     let _ = tx.send(crate::state::AppMessage::StreamSdpLoaded { stream_id, sdp });

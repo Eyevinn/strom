@@ -6,10 +6,10 @@ use egui::{CentralPanel, Context, SidePanel};
 
 use crate::app::{AppPage, StromApp};
 use crate::compositor_editor::CompositorEditor;
-use crate::logging::{spawn_task, LogEntry, LogLevel};
+use crate::logging::{LogEntry, LogLevel};
 use crate::mediaplayer::PlaylistEditor;
 use crate::state::AppMessage;
-use crate::utils::{get_local_storage, remove_local_storage, set_local_storage};
+use crate::utils::{get_local_storage, remove_local_storage, set_local_storage, spawn_task};
 
 impl StromApp {
     /// Main update loop - processes messages and renders UI.

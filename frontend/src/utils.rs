@@ -1,4 +1,4 @@
-//! Utility functions for local storage, file downloads, and VLC playlist generation.
+//! Utility functions for local storage, file downloads, VLC playlist generation, and task spawning.
 
 // Local storage helpers (WASM only)
 #[cfg(target_arch = "wasm32")]
@@ -279,4 +279,21 @@ fn get_current_hostname() -> String {
 fn get_current_hostname() -> String {
     // VLC doesn't work well with "localhost", use 127.0.0.1 instead
     "127.0.0.1".to_string()
+}
+
+// Cross-platform task spawning
+#[cfg(target_arch = "wasm32")]
+pub fn spawn_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn spawn_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(future);
 }
