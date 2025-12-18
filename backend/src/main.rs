@@ -375,13 +375,34 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
             info!("Auto-restart disabled by --no-auto-restart flag");
         }
 
-        // Run HTTP server with graceful shutdown
+        // Run HTTP server with graceful shutdown for both SIGINT (Ctrl+C) and SIGTERM (Docker stop)
         let shutdown_signal = async move {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to install Ctrl+C handler");
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
 
-            info!("Received Ctrl+C, shutting down gracefully...");
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+
+                tokio::select! {
+                    _ = sigterm.recv() => {
+                        info!("Received SIGTERM, shutting down gracefully...");
+                    }
+                    _ = sigint.recv() => {
+                        info!("Received SIGINT (Ctrl+C), shutting down gracefully...");
+                    }
+                }
+            }
+
+            #[cfg(not(unix))]
+            {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("Failed to install Ctrl+C handler");
+                info!("Received Ctrl+C, shutting down gracefully...");
+            }
 
             // Note: We don't need to explicitly stop flows here.
             // GStreamer will clean up when the process exits, and
@@ -488,13 +509,34 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
         info!("Auto-restart disabled by --no-auto-restart flag");
     }
 
-    // Set up graceful shutdown handler
+    // Set up graceful shutdown handler for both SIGINT (Ctrl+C) and SIGTERM (Docker stop)
     let shutdown_signal = async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
 
-        info!("Received Ctrl+C, shutting down gracefully...");
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, shutting down gracefully...");
+                }
+                _ = sigint.recv() => {
+                    info!("Received SIGINT (Ctrl+C), shutting down gracefully...");
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install Ctrl+C handler");
+            info!("Received Ctrl+C, shutting down gracefully...");
+        }
 
         // Note: We don't need to explicitly stop flows here.
         // GStreamer will clean up when the process exits, and
