@@ -17,11 +17,31 @@ pub struct VersionInfo {
     pub git_dirty: bool,
     /// Build timestamp (ISO 8601 format)
     pub build_timestamp: &'static str,
+    /// GStreamer runtime version
+    pub gstreamer_version: String,
+    /// Operating system name and version
+    pub os_info: String,
+    /// Whether running inside a Docker container
+    pub in_docker: bool,
 }
 
 impl VersionInfo {
     /// Get the current version information
     pub fn get() -> Self {
+        // Get GStreamer version at runtime
+        let (major, minor, micro, nano) = gstreamer::version();
+        let gstreamer_version = if nano > 0 {
+            format!("{}.{}.{}.{}", major, minor, micro, nano)
+        } else {
+            format!("{}.{}.{}", major, minor, micro)
+        };
+
+        // Get OS info
+        let os_info = Self::get_os_info();
+
+        // Check if running in Docker
+        let in_docker = Self::is_in_docker();
+
         Self {
             version: env!("CARGO_PKG_VERSION"),
             git_hash: env!("GIT_HASH"),
@@ -29,7 +49,66 @@ impl VersionInfo {
             git_branch: env!("GIT_BRANCH"),
             git_dirty: env!("GIT_DIRTY") == "true",
             build_timestamp: env!("BUILD_TIMESTAMP"),
+            gstreamer_version,
+            os_info,
+            in_docker,
         }
+    }
+
+    /// Get OS name and version
+    fn get_os_info() -> String {
+        // Try to read /etc/os-release for Linux distributions
+        if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+            let mut name = None;
+            let mut version = None;
+
+            for line in content.lines() {
+                if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
+                    // PRETTY_NAME is the best single field, use it directly
+                    let value = value.trim_matches('"');
+                    return value.to_string();
+                }
+                if let Some(value) = line.strip_prefix("NAME=") {
+                    name = Some(value.trim_matches('"').to_string());
+                }
+                if let Some(value) = line.strip_prefix("VERSION=") {
+                    version = Some(value.trim_matches('"').to_string());
+                }
+            }
+
+            // Fall back to NAME + VERSION if PRETTY_NAME wasn't found
+            match (name, version) {
+                (Some(n), Some(v)) => format!("{} {}", n, v),
+                (Some(n), None) => n,
+                _ => format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            }
+        } else {
+            // Fall back to basic OS info from std::env::consts
+            format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+        }
+    }
+
+    /// Check if running inside a Docker container
+    fn is_in_docker() -> bool {
+        // Method 1: Check for .dockerenv file
+        if std::path::Path::new("/.dockerenv").exists() {
+            return true;
+        }
+
+        // Method 2: Check cgroup for docker/container references
+        if let Ok(content) = std::fs::read_to_string("/proc/1/cgroup") {
+            if content.contains("docker") || content.contains("kubepods") || content.contains("lxc")
+            {
+                return true;
+            }
+        }
+
+        // Method 3: Check for container environment variable
+        if std::env::var("container").is_ok() {
+            return true;
+        }
+
+        false
     }
 
     /// Get a human-readable version string

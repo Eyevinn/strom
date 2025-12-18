@@ -3029,6 +3029,20 @@ impl StromApp {
                                 }
                                 ui.label(format!("Branch: {}", version_info.git_branch));
                                 ui.label(format!("Built: {}", version_info.build_timestamp));
+                                if !version_info.gstreamer_version.is_empty() {
+                                    ui.label(format!(
+                                        "GStreamer: {}",
+                                        version_info.gstreamer_version
+                                    ));
+                                }
+                                if !version_info.os_info.is_empty() {
+                                    let os_text = if version_info.in_docker {
+                                        format!("{} (Docker)", version_info.os_info)
+                                    } else {
+                                        version_info.os_info.clone()
+                                    };
+                                    ui.label(format!("OS: {}", os_text));
+                                }
                                 if version_info.git_dirty {
                                     ui.colored_label(
                                         Color32::YELLOW,

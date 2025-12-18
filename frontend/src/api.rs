@@ -13,6 +13,12 @@ pub struct VersionInfo {
     pub git_branch: String,
     pub git_dirty: bool,
     pub build_timestamp: String,
+    #[serde(default)]
+    pub gstreamer_version: String,
+    #[serde(default)]
+    pub os_info: String,
+    #[serde(default)]
+    pub in_docker: bool,
 }
 
 /// Result type for API operations.
