@@ -7,16 +7,13 @@ use crate::api::VersionInfo;
 use crate::system_monitor::SystemMonitorStore;
 
 const HISTORY_SIZE: usize = 60;
-
-// Row 1: 3 boxes, Row 2+3: 2 boxes with same total width
-const BOX_WIDTH_SMALL: f32 = 280.0;
-const BOX_GAP: f32 = 12.0;
-// Total row width = 3 * 280 + 2 * 12 = 864
-// For 2 boxes: (864 - 12) / 2 = 426
-const BOX_WIDTH_LARGE: f32 = 426.0;
-
-const GRAPH_WIDTH: f32 = 380.0;
+const MARGIN: f32 = 16.0;
+const GAP: f32 = 12.0;
 const GRAPH_HEIGHT: f32 = 60.0;
+// Minimum content width to ensure readability
+const MIN_CONTENT_WIDTH: f32 = 800.0;
+// Frame inner margin (used in render_box)
+const BOX_INNER_MARGIN: f32 = 12.0;
 
 /// Info page state.
 pub struct InfoPage {
@@ -50,67 +47,81 @@ impl InfoPage {
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         flows: &[strom_types::Flow],
     ) {
-        egui::ScrollArea::vertical()
+        // Get available width and use minimum if window is too small
+        // Subtract extra padding to account for scrollbar and frame overhead
+        let available_width = ui.available_width() - 60.0;
+        let content_width = (available_width - 2.0 * MARGIN).max(MIN_CONTENT_WIDTH);
+
+        // Calculate box widths
+        // Row 1: 3 boxes with 2 gaps → box = (content - 2*gap) / 3
+        let box_width_3 = (content_width - 2.0 * GAP) / 3.0;
+        // Row 2+3: 2 boxes with 1 gap → box = (content - gap) / 2
+        let box_width_2 = (content_width - GAP) / 2.0;
+
+        egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add_space(16.0);
+                // Disable default item spacing in horizontal layouts
+                ui.spacing_mut().item_spacing.x = 0.0;
+
+                ui.add_space(MARGIN);
 
                 // Row 1: Version & Build | System | GStreamer
                 ui.horizontal(|ui| {
-                    ui.add_space(16.0);
+                    ui.add_space(MARGIN);
 
-                    render_box(ui, "Version & Build", BOX_WIDTH_SMALL, |ui| {
+                    render_box(ui, "Version & Build", box_width_3, |ui| {
                         self.render_version_content(ui, version_info);
                     });
 
-                    ui.add_space(BOX_GAP);
+                    ui.add_space(GAP);
 
-                    render_box(ui, "System", BOX_WIDTH_SMALL, |ui| {
+                    render_box(ui, "System", box_width_3, |ui| {
                         self.render_system_content(ui, version_info, flows);
                     });
 
-                    ui.add_space(BOX_GAP);
+                    ui.add_space(GAP);
 
-                    render_box(ui, "GStreamer", BOX_WIDTH_SMALL, |ui| {
+                    render_box(ui, "GStreamer", box_width_3, |ui| {
                         self.render_gstreamer_content(ui, version_info);
                     });
                 });
 
-                ui.add_space(BOX_GAP);
+                ui.add_space(GAP);
 
                 // Row 2: CPU | Memory
                 ui.horizontal(|ui| {
-                    ui.add_space(16.0);
+                    ui.add_space(MARGIN);
 
-                    render_box(ui, "CPU", BOX_WIDTH_LARGE, |ui| {
-                        self.render_cpu_content(ui, system_monitor);
+                    render_box(ui, "CPU", box_width_2, |ui| {
+                        self.render_cpu_content(ui, system_monitor, box_width_2);
                     });
 
-                    ui.add_space(BOX_GAP);
+                    ui.add_space(GAP);
 
-                    render_box(ui, "Memory", BOX_WIDTH_LARGE, |ui| {
-                        self.render_memory_content(ui, system_monitor);
+                    render_box(ui, "Memory", box_width_2, |ui| {
+                        self.render_memory_content(ui, system_monitor, box_width_2);
                     });
                 });
 
-                ui.add_space(BOX_GAP);
+                ui.add_space(GAP);
 
                 // Row 3: GPU | Network
                 ui.horizontal(|ui| {
-                    ui.add_space(16.0);
+                    ui.add_space(MARGIN);
 
-                    render_box(ui, "GPU", BOX_WIDTH_LARGE, |ui| {
-                        self.render_gpu_content(ui, system_monitor);
+                    render_box(ui, "GPU", box_width_2, |ui| {
+                        self.render_gpu_content(ui, system_monitor, box_width_2);
                     });
 
-                    ui.add_space(BOX_GAP);
+                    ui.add_space(GAP);
 
-                    render_box(ui, "Network Interfaces", BOX_WIDTH_LARGE, |ui| {
+                    render_box(ui, "Network Interfaces", box_width_2, |ui| {
                         self.render_network_content(ui, network_interfaces);
                     });
                 });
 
-                ui.add_space(16.0);
+                ui.add_space(MARGIN);
             });
     }
 
@@ -223,12 +234,14 @@ impl InfoPage {
         }
     }
 
-    fn render_cpu_content(&self, ui: &mut Ui, system_monitor: &SystemMonitorStore) {
+    fn render_cpu_content(&self, ui: &mut Ui, system_monitor: &SystemMonitorStore, box_width: f32) {
         if let Some(stats) = system_monitor.latest() {
             ui.label(format!("Usage: {:.1}%", stats.cpu_usage));
             ui.add_space(4.0);
 
-            let (_, rect) = ui.allocate_space(Vec2::new(GRAPH_WIDTH, GRAPH_HEIGHT));
+            // Graph width = box width minus inner margin on both sides
+            let graph_width = box_width - 2.0 * BOX_INNER_MARGIN;
+            let (_, rect) = ui.allocate_space(Vec2::new(graph_width, GRAPH_HEIGHT));
             draw_graph(
                 ui.painter(),
                 rect,
@@ -240,7 +253,12 @@ impl InfoPage {
         }
     }
 
-    fn render_memory_content(&self, ui: &mut Ui, system_monitor: &SystemMonitorStore) {
+    fn render_memory_content(
+        &self,
+        ui: &mut Ui,
+        system_monitor: &SystemMonitorStore,
+        box_width: f32,
+    ) {
         if let Some(stats) = system_monitor.latest() {
             let mem_percent = if stats.total_memory > 0 {
                 (stats.used_memory as f32 / stats.total_memory as f32) * 100.0
@@ -256,7 +274,8 @@ impl InfoPage {
             ));
             ui.add_space(4.0);
 
-            let (_, rect) = ui.allocate_space(Vec2::new(GRAPH_WIDTH, GRAPH_HEIGHT));
+            let graph_width = box_width - 2.0 * BOX_INNER_MARGIN;
+            let (_, rect) = ui.allocate_space(Vec2::new(graph_width, GRAPH_HEIGHT));
             draw_graph(
                 ui.painter(),
                 rect,
@@ -268,7 +287,7 @@ impl InfoPage {
         }
     }
 
-    fn render_gpu_content(&self, ui: &mut Ui, system_monitor: &SystemMonitorStore) {
+    fn render_gpu_content(&self, ui: &mut Ui, system_monitor: &SystemMonitorStore, box_width: f32) {
         if let Some(stats) = system_monitor.latest() {
             if stats.gpu_stats.is_empty() {
                 ui.label("No GPU detected");
@@ -281,29 +300,25 @@ impl InfoPage {
                     ui.add_space(4.0);
                 }
 
+                // GPU name
                 ui.label(egui::RichText::new(&gpu.name).strong());
-                ui.add_space(2.0);
+                ui.add_space(4.0);
 
-                ui.horizontal(|ui| {
-                    // Left side: graph
-                    if let Some(gpu_hist) = system_monitor.gpu_history(i) {
-                        let (_, rect) = ui.allocate_space(Vec2::new(280.0, GRAPH_HEIGHT));
-                        draw_graph(
-                            ui.painter(),
-                            rect,
-                            gpu_hist,
-                            Color32::from_rgb(255, 150, 100),
-                        );
-                    }
+                // GPU stats in a grid
+                egui::Grid::new(format!("gpu_{}_grid", i))
+                    .num_columns(2)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        ui.label("Utilization:");
+                        ui.label(format!("{:.1}%", gpu.utilization));
+                        ui.end_row();
 
-                    ui.add_space(12.0);
-
-                    // Right side: stats
-                    ui.vertical(|ui| {
-                        ui.label(format!("Util: {:.1}%", gpu.utilization));
-                        ui.label(format!("Mem: {:.1}%", gpu.memory_utilization));
+                        ui.label("Memory:");
+                        ui.label(format!("{:.1}%", gpu.memory_utilization));
+                        ui.end_row();
 
                         if let Some(temp) = gpu.temperature {
+                            ui.label("Temperature:");
                             let temp_color = if temp > 80.0 {
                                 Color32::RED
                             } else if temp > 70.0 {
@@ -312,13 +327,29 @@ impl InfoPage {
                                 Color32::GREEN
                             };
                             ui.colored_label(temp_color, format!("{:.0}°C", temp));
+                            ui.end_row();
                         }
 
                         if let Some(power) = gpu.power_usage {
+                            ui.label("Power:");
                             ui.label(format!("{:.0}W", power));
+                            ui.end_row();
                         }
                     });
-                });
+
+                ui.add_space(4.0);
+
+                // Full-width graph
+                let graph_width = box_width - 2.0 * BOX_INNER_MARGIN;
+                if let Some(gpu_hist) = system_monitor.gpu_history(i) {
+                    let (_, rect) = ui.allocate_space(Vec2::new(graph_width, GRAPH_HEIGHT));
+                    draw_graph(
+                        ui.painter(),
+                        rect,
+                        gpu_hist,
+                        Color32::from_rgb(255, 150, 100),
+                    );
+                }
             }
         } else {
             ui.label("Waiting for data...");
@@ -389,7 +420,7 @@ fn render_box(ui: &mut Ui, title: &str, width: f32, content: impl FnOnce(&mut Ui
         .fill(Color32::from_gray(30))
         .corner_radius(8.0)
         .stroke(Stroke::new(1.0, Color32::from_gray(60)))
-        .inner_margin(12.0)
+        .inner_margin(BOX_INNER_MARGIN)
         .show(ui, |ui| {
             ui.set_width(width);
 
