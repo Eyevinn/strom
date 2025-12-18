@@ -134,11 +134,12 @@ impl BlockBuilder for DeckLinkAudioInputBuilder {
         let channels = properties
             .get("channels")
             .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as i32),
-                PropertyValue::Int(i) if *i > 0 => Some(*i as i32),
+                PropertyValue::UInt(u) => Some(u.to_string()),
+                PropertyValue::Int(i) if *i > 0 => Some(i.to_string()),
+                PropertyValue::String(s) => Some(s.clone()),
                 _ => None,
             })
-            .unwrap_or(2);
+            .unwrap_or_else(|| "2".to_string());
 
         // Create elements with namespaced IDs
         let audiosrc_id = format!("{}:decklinkaudiosrc", instance_id);
@@ -150,7 +151,7 @@ impl BlockBuilder for DeckLinkAudioInputBuilder {
             .name(&audiosrc_id)
             .property("device-number", device_number)
             .property_from_str("connection", connection)
-            .property("channels", channels)
+            .property_from_str("channels", &channels)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkaudiosrc: {}", e)))?;
 
@@ -617,6 +618,10 @@ fn decklink_audio_input_definition() -> BlockDefinition {
                         EnumValue {
                             value: "16".to_string(),
                             label: Some("16".to_string()),
+                        },
+                        EnumValue {
+                            value: "max".to_string(),
+                            label: Some("Max (auto-detect)".to_string()),
                         },
                     ],
                 },
