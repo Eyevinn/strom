@@ -14,6 +14,7 @@ mod discovery;
 mod graph;
 mod info_page;
 mod list_navigator;
+mod logging;
 mod login;
 mod media;
 mod mediaplayer;
@@ -24,6 +25,7 @@ mod ptp_monitor;
 mod qos_monitor;
 mod state;
 mod system_monitor;
+mod utils;
 mod webrtc_stats;
 mod ws;
 

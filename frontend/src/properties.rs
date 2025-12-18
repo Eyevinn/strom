@@ -362,14 +362,14 @@ impl PropertyInspector {
             if (definition.id == "builtin.glcompositor" || definition.id == "builtin.compositor")
                 && ui.button("✏ Edit Layout").clicked()
             {
-                crate::app::set_local_storage("open_compositor_editor", &block.id);
+                crate::utils::set_local_storage("open_compositor_editor", &block.id);
             }
 
             // Edit Playlist button for media player blocks
             if definition.id == "builtin.media_player"
                 && ui.button("🎵 Edit Playlist").clicked()
             {
-                crate::app::set_local_storage("open_playlist_editor", &block.id);
+                crate::utils::set_local_storage("open_playlist_editor", &block.id);
             }
 
             // Download VLC Playlist button for MPEG-TS/SRT output blocks

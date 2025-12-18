@@ -281,7 +281,7 @@ impl CompositorEditor {
             let ctx = ctx.clone();
             let mixer_element_id = mixer_element_id.clone();
 
-            crate::app::spawn_task(async move {
+            crate::logging::spawn_task(async move {
                 match api
                     .get_pad_properties(&flow_id.to_string(), &mixer_element_id, &pad_name)
                     .await
@@ -290,7 +290,7 @@ impl CompositorEditor {
                         // Store properties in local storage for the UI loop to pick up
                         let key = format!("compositor_props_{}_{}", flow_id, pad_name);
                         if let Ok(json) = serde_json::to_string(&props) {
-                            crate::app::set_local_storage(&key, &json);
+                            crate::utils::set_local_storage(&key, &json);
                         }
                         ctx.request_repaint();
                     }
@@ -306,7 +306,7 @@ impl CompositorEditor {
     fn check_loaded_properties(&mut self) {
         for input in &mut self.inputs {
             let key = format!("compositor_props_{}_{}", self.flow_id, input.pad_name);
-            if let Some(json) = crate::app::get_local_storage(&key) {
+            if let Some(json) = crate::utils::get_local_storage(&key) {
                 if let Ok(props) =
                     serde_json::from_str::<std::collections::HashMap<String, PropertyValue>>(&json)
                 {
@@ -334,7 +334,7 @@ impl CompositorEditor {
                     }
 
                     // Clear the storage key
-                    crate::app::remove_local_storage(&key);
+                    crate::utils::remove_local_storage(&key);
 
                     self.status = "Properties loaded".to_string();
                 }
@@ -378,7 +378,7 @@ impl CompositorEditor {
         self.inputs[input_index].pending_update = true;
         self.status = format!("Updating {}...", property_name);
 
-        crate::app::spawn_task(async move {
+        crate::logging::spawn_task(async move {
             match api
                 .update_pad_property(
                     &flow_id.to_string(),
@@ -399,7 +399,7 @@ impl CompositorEditor {
                         "compositor_update_success_{}_{}",
                         input_index, property_name
                     );
-                    crate::app::set_local_storage(&key, "1");
+                    crate::utils::set_local_storage(&key, "1");
                 }
                 Err(e) => {
                     tracing::error!(
@@ -408,7 +408,7 @@ impl CompositorEditor {
                         e
                     );
                     let key = format!("compositor_update_error_{}_{}", input_index, property_name);
-                    crate::app::set_local_storage(&key, &e.to_string());
+                    crate::utils::set_local_storage(&key, &e.to_string());
                 }
             }
             ctx.request_repaint();
@@ -457,17 +457,17 @@ impl CompositorEditor {
             let error_key = format!("compositor_update_error_{}_", input.input_index);
 
             // Check for success
-            if crate::app::get_local_storage(&success_key).is_some() {
+            if crate::utils::get_local_storage(&success_key).is_some() {
                 input.pending_update = false;
                 input.last_error = None;
-                crate::app::remove_local_storage(&success_key);
+                crate::utils::remove_local_storage(&success_key);
             }
 
             // Check for error
-            if let Some(err) = crate::app::get_local_storage(&error_key) {
+            if let Some(err) = crate::utils::get_local_storage(&error_key) {
                 input.pending_update = false;
                 input.last_error = Some(err);
-                crate::app::remove_local_storage(&error_key);
+                crate::utils::remove_local_storage(&error_key);
             }
         }
     }

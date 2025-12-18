@@ -538,7 +538,7 @@ impl MediaPage {
         let tx = tx.clone();
         let path = self.current_path.clone();
 
-        crate::app::spawn_task(async move {
+        crate::logging::spawn_task(async move {
             match api.list_media(&path).await {
                 Ok(listing) => {
                     let _ = tx.send(crate::state::AppMessage::MediaListLoaded(listing));
@@ -565,7 +565,7 @@ impl MediaPage {
         let tx = tx.clone();
         let path = path.to_string();
 
-        crate::app::spawn_task(async move {
+        crate::logging::spawn_task(async move {
             match api.create_media_directory(&path).await {
                 Ok(result) => {
                     let _ = tx.send(crate::state::AppMessage::MediaSuccess(result.message));
@@ -595,7 +595,7 @@ impl MediaPage {
         let old_path = old_path.to_string();
         let new_name = new_name.to_string();
 
-        crate::app::spawn_task(async move {
+        crate::logging::spawn_task(async move {
             match api.rename_media(&old_path, &new_name).await {
                 Ok(result) => {
                     let _ = tx.send(crate::state::AppMessage::MediaSuccess(result.message));
@@ -624,7 +624,7 @@ impl MediaPage {
         let tx = tx.clone();
         let path = path.to_string();
 
-        crate::app::spawn_task(async move {
+        crate::logging::spawn_task(async move {
             let result = if is_dir {
                 api.delete_media_directory(&path).await
             } else {

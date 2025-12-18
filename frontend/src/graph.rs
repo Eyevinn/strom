@@ -8,7 +8,7 @@ use strom_types::{
 };
 use uuid::Uuid;
 
-use crate::app::set_local_storage;
+use crate::utils::set_local_storage;
 
 /// Grid size for snapping (in world coordinates)
 const GRID_SIZE: f32 = 50.0;
