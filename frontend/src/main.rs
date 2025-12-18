@@ -10,6 +10,7 @@ mod api;
 mod app;
 mod clocks;
 mod compositor_editor;
+mod dialogs;
 mod discovery;
 mod flows_page;
 mod graph;
