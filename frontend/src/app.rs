@@ -23,7 +23,7 @@ use crate::ws::WebSocketClient;
 
 /// Theme preference for the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThemePreference {
+pub(crate) enum ThemePreference {
     System,
     Light,
     Dark,
@@ -31,7 +31,7 @@ enum ThemePreference {
 
 /// Import format for flow import
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum ImportFormat {
+pub(crate) enum ImportFormat {
     /// JSON format (full flow definition)
     #[default]
     Json,
@@ -57,7 +57,7 @@ pub enum AppPage {
 
 /// Focus target for Ctrl+F cycling
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum FocusTarget {
+pub(crate) enum FocusTarget {
     /// No specific focus target
     #[default]
     None,
@@ -76,154 +76,154 @@ enum FocusTarget {
 /// The main Strom application.
 pub struct StromApp {
     /// API client for backend communication
-    api: ApiClient,
+    pub(crate) api: ApiClient,
     /// List of all flows
-    flows: Vec<Flow>,
+    pub(crate) flows: Vec<Flow>,
     /// Currently selected flow ID (using ID instead of index for robustness)
-    selected_flow_id: Option<strom_types::FlowId>,
+    pub(crate) selected_flow_id: Option<strom_types::FlowId>,
     /// Graph editor for the current flow
-    graph: GraphEditor,
+    pub(crate) graph: GraphEditor,
     /// Element palette
-    palette: ElementPalette,
+    pub(crate) palette: ElementPalette,
     /// Status message
-    status: String,
+    pub(crate) status: String,
     /// Error message
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     /// Loading state
-    loading: bool,
+    pub(crate) loading: bool,
     /// Whether flow list needs refresh
-    needs_refresh: bool,
+    pub(crate) needs_refresh: bool,
     /// New flow name input
-    new_flow_name: String,
+    pub(crate) new_flow_name: String,
     /// Show new flow dialog
-    show_new_flow_dialog: bool,
+    pub(crate) show_new_flow_dialog: bool,
     /// Whether elements have been loaded
-    elements_loaded: bool,
+    pub(crate) elements_loaded: bool,
     /// Whether blocks have been loaded
-    blocks_loaded: bool,
+    pub(crate) blocks_loaded: bool,
     /// Flow pending deletion (for confirmation dialog)
-    flow_pending_deletion: Option<(strom_types::FlowId, String)>,
+    pub(crate) flow_pending_deletion: Option<(strom_types::FlowId, String)>,
     /// Flow pending copy (to be processed after render)
-    flow_pending_copy: Option<Flow>,
+    pub(crate) flow_pending_copy: Option<Flow>,
     /// Flow ID to navigate to after next refresh
-    pending_flow_navigation: Option<strom_types::FlowId>,
+    pub(crate) pending_flow_navigation: Option<strom_types::FlowId>,
     /// WebSocket client for real-time updates
-    ws_client: Option<WebSocketClient>,
+    pub(crate) ws_client: Option<WebSocketClient>,
     /// Connection state
-    connection_state: ConnectionState,
+    pub(crate) connection_state: ConnectionState,
     /// Channel-based state management
-    channels: AppStateChannels,
+    pub(crate) channels: AppStateChannels,
     /// Flow properties being edited (flow ID)
-    editing_properties_flow_id: Option<strom_types::FlowId>,
+    pub(crate) editing_properties_flow_id: Option<strom_types::FlowId>,
     /// Temporary name buffer for properties dialog
-    properties_name_buffer: String,
+    pub(crate) properties_name_buffer: String,
     /// Temporary description buffer for properties dialog
-    properties_description_buffer: String,
+    pub(crate) properties_description_buffer: String,
     /// Temporary clock type for properties dialog
-    properties_clock_type_buffer: strom_types::flow::GStreamerClockType,
+    pub(crate) properties_clock_type_buffer: strom_types::flow::GStreamerClockType,
     /// Temporary PTP domain buffer for properties dialog
-    properties_ptp_domain_buffer: String,
+    pub(crate) properties_ptp_domain_buffer: String,
     /// Temporary thread priority for properties dialog
-    properties_thread_priority_buffer: strom_types::flow::ThreadPriority,
+    pub(crate) properties_thread_priority_buffer: strom_types::flow::ThreadPriority,
     /// Shutdown flag for Ctrl+C handling (native mode only)
     #[cfg(not(target_arch = "wasm32"))]
-    shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Port number for backend connection (native mode only)
     #[cfg(not(target_arch = "wasm32"))]
-    port: u16,
+    pub(crate) port: u16,
     /// Auth token for native GUI authentication
     #[cfg(not(target_arch = "wasm32"))]
-    auth_token: Option<String>,
+    pub(crate) auth_token: Option<String>,
     /// Cached network interfaces (for network interface property dropdown)
-    network_interfaces: Vec<strom_types::NetworkInterfaceInfo>,
+    pub(crate) network_interfaces: Vec<strom_types::NetworkInterfaceInfo>,
     /// Whether network interfaces have been loaded
-    network_interfaces_loaded: bool,
+    pub(crate) network_interfaces_loaded: bool,
     /// Cached available inter channels (for InterInput channel dropdown)
-    available_channels: Vec<strom_types::api::AvailableOutput>,
+    pub(crate) available_channels: Vec<strom_types::api::AvailableOutput>,
     /// Whether available channels have been loaded
-    available_channels_loaded: bool,
+    pub(crate) available_channels_loaded: bool,
     /// Last InterInput block ID we refreshed channels for (to avoid repeated refreshes)
-    last_inter_input_refresh: Option<String>,
+    pub(crate) last_inter_input_refresh: Option<String>,
     /// Meter data storage for all audio level meters
-    meter_data: MeterDataStore,
+    pub(crate) meter_data: MeterDataStore,
     /// Media player data storage for all media player blocks
-    mediaplayer_data: MediaPlayerDataStore,
+    pub(crate) mediaplayer_data: MediaPlayerDataStore,
     /// WebRTC stats storage for all WebRTC connections
-    webrtc_stats: WebRtcStatsStore,
+    pub(crate) webrtc_stats: WebRtcStatsStore,
     /// System monitoring statistics
-    system_monitor: SystemMonitorStore,
+    pub(crate) system_monitor: SystemMonitorStore,
     /// PTP clock statistics per flow
-    ptp_stats: crate::ptp_monitor::PtpStatsStore,
+    pub(crate) ptp_stats: crate::ptp_monitor::PtpStatsStore,
     /// QoS (buffer drop) statistics per flow/element
-    qos_stats: crate::qos_monitor::QoSStore,
+    pub(crate) qos_stats: crate::qos_monitor::QoSStore,
     /// Track when flows started (for QoS grace period)
-    flow_start_times: std::collections::HashMap<strom_types::FlowId, instant::Instant>,
+    pub(crate) flow_start_times: std::collections::HashMap<strom_types::FlowId, instant::Instant>,
     /// Whether to show the detailed system monitor window
-    show_system_monitor: bool,
+    pub(crate) show_system_monitor: bool,
     /// Last time WebRTC stats were polled
-    last_webrtc_poll: instant::Instant,
+    pub(crate) last_webrtc_poll: instant::Instant,
     /// Current theme preference
-    theme_preference: ThemePreference,
+    pub(crate) theme_preference: ThemePreference,
     /// Version information from the backend
-    version_info: Option<crate::api::VersionInfo>,
+    pub(crate) version_info: Option<crate::api::VersionInfo>,
     /// Login screen
-    login_screen: LoginScreen,
+    pub(crate) login_screen: LoginScreen,
     /// Authentication status
-    auth_status: Option<AuthStatusResponse>,
+    pub(crate) auth_status: Option<AuthStatusResponse>,
     /// Whether we're checking auth status
-    checking_auth: bool,
+    pub(crate) checking_auth: bool,
     /// Show import flow dialog
-    show_import_dialog: bool,
+    pub(crate) show_import_dialog: bool,
     /// Import format mode (JSON or gst-launch)
-    import_format: ImportFormat,
+    pub(crate) import_format: ImportFormat,
     /// Buffer for import text (JSON or gst-launch pipeline)
-    import_json_buffer: String,
+    pub(crate) import_json_buffer: String,
     /// Error message for import dialog
-    import_error: Option<String>,
+    pub(crate) import_error: Option<String>,
     /// Pending gst-launch export (elements, links, flow_name) - for async processing
-    pending_gst_launch_export: Option<(
+    pub(crate) pending_gst_launch_export: Option<(
         Vec<strom_types::Element>,
         Vec<strom_types::element::Link>,
         String,
     )>,
     /// Cached latency info for flows (flow_id -> LatencyInfo)
-    latency_cache: std::collections::HashMap<String, crate::api::LatencyInfo>,
+    pub(crate) latency_cache: std::collections::HashMap<String, crate::api::LatencyInfo>,
     /// Last time latency was fetched (for periodic refresh)
-    last_latency_fetch: instant::Instant,
+    pub(crate) last_latency_fetch: instant::Instant,
     /// Cached stats info for flows (flow_id -> FlowStatsInfo)
-    stats_cache: std::collections::HashMap<String, crate::api::FlowStatsInfo>,
+    pub(crate) stats_cache: std::collections::HashMap<String, crate::api::FlowStatsInfo>,
     /// Last time stats was fetched (for periodic refresh)
-    last_stats_fetch: instant::Instant,
+    pub(crate) last_stats_fetch: instant::Instant,
     /// Whether to show the stats panel
-    show_stats_panel: bool,
+    pub(crate) show_stats_panel: bool,
     /// Compositor layout editor (if open)
-    compositor_editor: Option<CompositorEditor>,
+    pub(crate) compositor_editor: Option<CompositorEditor>,
     /// Playlist editor (if open)
-    playlist_editor: Option<PlaylistEditor>,
+    pub(crate) playlist_editor: Option<PlaylistEditor>,
     /// Log entries for pipeline messages (errors, warnings, info)
-    log_entries: Vec<LogEntry>,
+    pub(crate) log_entries: Vec<LogEntry>,
     /// Whether to show the log panel
-    show_log_panel: bool,
+    pub(crate) show_log_panel: bool,
     /// Maximum number of log entries to keep
-    max_log_entries: usize,
+    pub(crate) max_log_entries: usize,
     /// Current application page
-    current_page: AppPage,
+    pub(crate) current_page: AppPage,
     /// Discovery page state
-    discovery_page: crate::discovery::DiscoveryPage,
+    pub(crate) discovery_page: crate::discovery::DiscoveryPage,
     /// Clocks page state (PTP monitoring)
-    clocks_page: crate::clocks::ClocksPage,
+    pub(crate) clocks_page: crate::clocks::ClocksPage,
     /// Media file browser page state
-    media_page: crate::media::MediaPage,
+    pub(crate) media_page: crate::media::MediaPage,
     /// Info page state
-    info_page: crate::info_page::InfoPage,
+    pub(crate) info_page: crate::info_page::InfoPage,
     /// Flow list filter text
-    flow_filter: String,
+    pub(crate) flow_filter: String,
     /// Show stream picker modal for this block ID (when browsing discovered streams for AES67 Input)
-    show_stream_picker_for_block: Option<String>,
+    pub(crate) show_stream_picker_for_block: Option<String>,
     /// Current focus target for Ctrl+F cycling
-    focus_target: FocusTarget,
+    pub(crate) focus_target: FocusTarget,
     /// Request to focus the flow filter on next frame
-    focus_flow_filter_requested: bool,
+    pub(crate) focus_flow_filter_requested: bool,
 }
 
 impl StromApp {
@@ -2034,451 +2034,6 @@ impl StromApp {
                         self.load_network_interfaces(ctx.clone());
                     }
                 });
-            });
-    }
-
-    /// Render the flow list sidebar.
-    fn render_flow_list(&mut self, ctx: &Context) {
-        SidePanel::left("flow_list")
-            .default_width(200.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                // Filter input at top
-                ui.horizontal(|ui| {
-                    ui.label("Filter:");
-                    let filter_id = egui::Id::new("flow_list_filter");
-                    let response =
-                        ui.add(egui::TextEdit::singleline(&mut self.flow_filter).id(filter_id));
-                    if self.focus_flow_filter_requested {
-                        self.focus_flow_filter_requested = false;
-                        response.request_focus();
-                    }
-                    if !self.flow_filter.is_empty() && ui.small_button("✕").clicked() {
-                        self.flow_filter.clear();
-                    }
-                });
-                ui.add_space(4.0);
-
-                if self.flows.is_empty() {
-                    ui.label("No flows yet");
-                    ui.label("Click 'New Flow' to get started");
-                } else {
-                    // Create sorted and filtered list of flows (by name)
-                    let filter_lower = self.flow_filter.to_lowercase();
-                    let mut sorted_flows: Vec<&Flow> = self
-                        .flows
-                        .iter()
-                        .filter(|f| {
-                            filter_lower.is_empty() || f.name.to_lowercase().contains(&filter_lower)
-                        })
-                        .collect();
-                    sorted_flows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-
-                    if sorted_flows.is_empty() {
-                        ui.label("No matching flows");
-                        return;
-                    }
-
-                    // Handle keyboard navigation
-                    let list_id = ui.id().with("flow_list_nav");
-                    let has_focus = ui.memory(|mem| mem.has_focus(list_id));
-
-                    if has_focus {
-                        let current_idx = self
-                            .selected_flow_id
-                            .and_then(|sel| sorted_flows.iter().position(|f| f.id == sel));
-
-                        ui.input(|input| {
-                            if input.key_pressed(egui::Key::ArrowDown) {
-                                if let Some(idx) = current_idx {
-                                    if idx + 1 < sorted_flows.len() {
-                                        let flow = sorted_flows[idx + 1];
-                                        self.selected_flow_id = Some(flow.id);
-                                        self.graph.deselect_all();
-                                        self.graph.clear_runtime_dynamic_pads();
-                                        self.graph.load(flow.elements.clone(), flow.links.clone());
-                                        self.graph.load_blocks(flow.blocks.clone());
-                                    }
-                                } else {
-                                    let flow = sorted_flows[0];
-                                    self.selected_flow_id = Some(flow.id);
-                                    self.graph.deselect_all();
-                                    self.graph.clear_runtime_dynamic_pads();
-                                    self.graph.load(flow.elements.clone(), flow.links.clone());
-                                    self.graph.load_blocks(flow.blocks.clone());
-                                }
-                            } else if input.key_pressed(egui::Key::ArrowUp) {
-                                if let Some(idx) = current_idx {
-                                    if idx > 0 {
-                                        let flow = sorted_flows[idx - 1];
-                                        self.selected_flow_id = Some(flow.id);
-                                        self.graph.deselect_all();
-                                        self.graph.clear_runtime_dynamic_pads();
-                                        self.graph.load(flow.elements.clone(), flow.links.clone());
-                                        self.graph.load_blocks(flow.blocks.clone());
-                                    }
-                                } else if !sorted_flows.is_empty() {
-                                    let flow = sorted_flows[sorted_flows.len() - 1];
-                                    self.selected_flow_id = Some(flow.id);
-                                    self.graph.deselect_all();
-                                    self.graph.clear_runtime_dynamic_pads();
-                                    self.graph.load(flow.elements.clone(), flow.links.clone());
-                                    self.graph.load_blocks(flow.blocks.clone());
-                                }
-                            }
-                        });
-                    }
-
-                    for flow in sorted_flows {
-                        let selected = self.selected_flow_id == Some(flow.id);
-
-                        // Create full-width selectable area
-                        let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 20.0),
-                            egui::Sense::click(),
-                        );
-
-                        if response.clicked() {
-                            // Select the flow by ID
-                            self.selected_flow_id = Some(flow.id);
-                            // Clear graph selection when switching flows
-                            self.graph.deselect_all();
-                            // Clear runtime dynamic pads (will be re-fetched if flow is running)
-                            self.graph.clear_runtime_dynamic_pads();
-                            // Load flow into graph editor
-                            self.graph.load(flow.elements.clone(), flow.links.clone());
-                            self.graph.load_blocks(flow.blocks.clone());
-                            // Request focus for keyboard navigation
-                            ui.memory_mut(|mem| mem.request_focus(list_id));
-                        }
-
-                        // Check for QoS issues to tint the background
-                        let qos_health = self.qos_stats.get_flow_health(&flow.id);
-                        let has_qos_issues = qos_health
-                            .map(|h| h != crate::qos_monitor::QoSHealth::Ok)
-                            .unwrap_or(false);
-
-                        // Draw background for selected/hovered item with QoS tint
-                        if selected {
-                            let mut bg_color = ui.visuals().selection.bg_fill;
-                            if has_qos_issues {
-                                // Blend selection color with warning/critical color
-                                let qos_color = qos_health.unwrap().color();
-                                bg_color = Color32::from_rgba_unmultiplied(
-                                    ((bg_color.r() as u16 + qos_color.r() as u16) / 2) as u8,
-                                    ((bg_color.g() as u16 + qos_color.g() as u16) / 2) as u8,
-                                    ((bg_color.b() as u16 + qos_color.b() as u16) / 2) as u8,
-                                    bg_color.a(),
-                                );
-                            }
-                            ui.painter().rect_filled(rect, 2.0, bg_color);
-                        } else if has_qos_issues {
-                            // Draw QoS warning/critical background
-                            let qos_color = qos_health.unwrap().color();
-                            let bg_color = Color32::from_rgba_unmultiplied(
-                                qos_color.r(),
-                                qos_color.g(),
-                                qos_color.b(),
-                                40, // Semi-transparent
-                            );
-                            ui.painter().rect_filled(rect, 2.0, bg_color);
-                            // Also draw a left border for emphasis
-                            let border_rect =
-                                egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height()));
-                            ui.painter().rect_filled(border_rect, 0.0, qos_color);
-                        } else if response.hovered() {
-                            ui.painter().rect_filled(
-                                rect,
-                                2.0,
-                                ui.visuals().widgets.hovered.bg_fill,
-                            );
-                        }
-
-                        // Draw flow name and buttons
-                        let mut child_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(rect)
-                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        );
-                        child_ui.add_space(4.0);
-
-                        let text_color = if selected {
-                            ui.visuals().selection.stroke.color
-                        } else {
-                            ui.visuals().text_color()
-                        };
-
-                        // Show running state icon
-                        let state_icon = match flow.state {
-                            Some(PipelineState::Playing) => "▶",
-                            Some(PipelineState::Paused) => "⏸",
-                            Some(PipelineState::Ready) | Some(PipelineState::Null) | None => "⏹",
-                        };
-                        let state_color = match flow.state {
-                            Some(PipelineState::Playing) => Color32::from_rgb(0, 200, 0),
-                            Some(PipelineState::Paused) => Color32::from_rgb(255, 165, 0),
-                            Some(PipelineState::Ready) | Some(PipelineState::Null) | None => {
-                                Color32::GRAY
-                            }
-                        };
-                        child_ui.colored_label(state_color, state_icon);
-
-                        // Show QoS indicator if there are issues - make it clickable to open log
-                        if let Some(qos_health) = self.qos_stats.get_flow_health(&flow.id) {
-                            if qos_health != crate::qos_monitor::QoSHealth::Ok {
-                                let qos_label = child_ui
-                                    .colored_label(qos_health.color(), qos_health.icon())
-                                    .interact(egui::Sense::click());
-
-                                // Click to open log panel
-                                if qos_label.clicked() {
-                                    self.show_log_panel = true;
-                                }
-
-                                // Show tooltip with problem elements
-                                let problem_elements =
-                                    self.qos_stats.get_problem_elements(&flow.id);
-                                if !problem_elements.is_empty() {
-                                    qos_label.on_hover_ui(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("QoS Issues (click to view log)")
-                                                .strong(),
-                                        );
-                                        ui.separator();
-                                        for (element_id, data) in &problem_elements {
-                                            let health = data.health();
-                                            ui.horizontal(|ui| {
-                                                ui.colored_label(health.color(), health.icon());
-                                                ui.label(format!(
-                                                    "{}: {:.1}%",
-                                                    element_id,
-                                                    data.avg_proportion * 100.0
-                                                ));
-                                            });
-                                        }
-                                    });
-                                }
-                            }
-                        }
-
-                        child_ui.add_space(4.0);
-
-                        // Show flow name with hover tooltip - make it clickable too
-                        let name_label = child_ui
-                            .colored_label(text_color, &flow.name)
-                            .interact(egui::Sense::click());
-
-                        // Handle click on the text itself (in addition to the background)
-                        if name_label.clicked() {
-                            self.selected_flow_id = Some(flow.id);
-                            // Clear graph selection when switching flows
-                            self.graph.deselect_all();
-                            self.graph.load(flow.elements.clone(), flow.links.clone());
-                            self.graph.load_blocks(flow.blocks.clone());
-                        }
-
-                        // Add hover tooltip with flow details
-                        name_label.on_hover_ui(|ui| {
-                            ui.label(egui::RichText::new(&flow.name).strong());
-                            ui.separator();
-
-                            if let Some(ref desc) = flow.properties.description {
-                                if !desc.is_empty() {
-                                    ui.label("Description:");
-                                    ui.label(desc);
-                                    ui.add_space(5.0);
-                                }
-                            }
-
-                            ui.label(format!("Clock: {:?}", flow.properties.clock_type));
-
-                            if let Some(domain) = flow.properties.ptp_domain {
-                                ui.label(format!("PTP Domain: {}", domain));
-                            }
-
-                            if let Some(sync_status) = flow.properties.clock_sync_status {
-                                use strom_types::flow::ClockSyncStatus;
-                                let status_text = match sync_status {
-                                    ClockSyncStatus::Synced => "Synced",
-                                    ClockSyncStatus::NotSynced => "Not Synced",
-                                    ClockSyncStatus::Unknown => "Unknown",
-                                };
-                                ui.label(format!("Sync Status: {}", status_text));
-                            }
-
-                            // Display PTP grandmaster info if available
-                            if let Some(ref ptp_info) = flow.properties.ptp_info {
-                                if let Some(ref gm) = ptp_info.grandmaster_clock_id {
-                                    ui.label(format!("Grandmaster: {}", gm));
-                                }
-                            }
-
-                            ui.add_space(5.0);
-                            let state_text = match flow.state {
-                                Some(PipelineState::Playing) => "Running",
-                                Some(PipelineState::Paused) => "Paused",
-                                Some(PipelineState::Ready) | Some(PipelineState::Null) | None => {
-                                    "Stopped"
-                                }
-                            };
-                            ui.label(format!("State: {}", state_text));
-                        });
-
-                        // Buttons on the right
-                        child_ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.add_space(4.0);
-
-                                // Single menu button with dropdown
-                                ui.menu_button("...", |ui| {
-                                    ui.set_min_width(150.0);
-
-                                    // Properties
-                                    if ui.button("⚙  Properties").clicked() {
-                                        self.editing_properties_flow_id = Some(flow.id);
-                                        self.properties_name_buffer = flow.name.clone();
-                                        self.properties_description_buffer =
-                                            flow.properties.description.clone().unwrap_or_default();
-                                        self.properties_clock_type_buffer =
-                                            flow.properties.clock_type;
-                                        self.properties_ptp_domain_buffer = flow
-                                            .properties
-                                            .ptp_domain
-                                            .map(|d| d.to_string())
-                                            .unwrap_or_else(|| "0".to_string());
-                                        self.properties_thread_priority_buffer =
-                                            flow.properties.thread_priority;
-                                        ui.close();
-                                    }
-
-                                    ui.separator();
-
-                                    // Export as JSON
-                                    if ui.button("📤  Export as JSON").clicked() {
-                                        match serde_json::to_string_pretty(flow) {
-                                            Ok(json) => {
-                                                ui.ctx().copy_text(json);
-                                                self.status = format!(
-                                                    "Flow '{}' exported to clipboard as JSON",
-                                                    flow.name
-                                                );
-                                            }
-                                            Err(e) => {
-                                                self.error =
-                                                    Some(format!("Failed to export flow: {}", e));
-                                            }
-                                        }
-                                        ui.close();
-                                    }
-
-                                    // Export to gst-launch (only if flow has elements, not blocks)
-                                    let has_only_elements =
-                                        !flow.elements.is_empty() && flow.blocks.is_empty();
-                                    let tooltip = if has_only_elements {
-                                        "Export as gst-launch-1.0 pipeline"
-                                    } else {
-                                        "Only available for flows with elements, not blocks"
-                                    };
-                                    if ui
-                                        .add_enabled(
-                                            has_only_elements,
-                                            egui::Button::new("🖥  Export as gst-launch"),
-                                        )
-                                        .on_hover_text(tooltip)
-                                        .clicked()
-                                        && has_only_elements
-                                    {
-                                        self.pending_gst_launch_export = Some((
-                                            flow.elements.clone(),
-                                            flow.links.clone(),
-                                            flow.name.clone(),
-                                        ));
-                                        ui.close();
-                                    }
-
-                                    ui.separator();
-
-                                    // Copy flow
-                                    if ui.button("📋  Copy").clicked() {
-                                        self.flow_pending_copy = Some(flow.clone());
-                                        ui.close();
-                                    }
-
-                                    // Delete flow
-                                    if ui.button("🗑  Delete").clicked() {
-                                        self.flow_pending_deletion =
-                                            Some((flow.id, flow.name.clone()));
-                                        ui.close();
-                                    }
-                                });
-
-                                // Show clock sync indicator for PTP/NTP (small colored dot)
-                                use strom_types::flow::{ClockSyncStatus, GStreamerClockType};
-                                if matches!(
-                                    flow.properties.clock_type,
-                                    GStreamerClockType::Ptp | GStreamerClockType::Ntp
-                                ) {
-                                    let (text_color, tooltip) = match flow
-                                        .properties
-                                        .clock_sync_status
-                                    {
-                                        Some(ClockSyncStatus::Synced) => (
-                                            Color32::from_rgb(0, 200, 0),
-                                            format!(
-                                                "{:?} - Synchronized",
-                                                flow.properties.clock_type
-                                            ),
-                                        ),
-                                        Some(ClockSyncStatus::NotSynced) => (
-                                            Color32::from_rgb(200, 0, 0),
-                                            format!(
-                                                "{:?} - Not Synchronized",
-                                                flow.properties.clock_type
-                                            ),
-                                        ),
-                                        Some(ClockSyncStatus::Unknown) | None => (
-                                            Color32::GRAY,
-                                            format!("{:?} - Unknown", flow.properties.clock_type),
-                                        ),
-                                    };
-
-                                    // Small colored dot indicator
-                                    ui.add_space(4.0);
-                                    ui.add(egui::Label::new(
-                                        egui::RichText::new("*").size(12.0).color(text_color),
-                                    ))
-                                    .on_hover_text(tooltip);
-                                }
-
-                                // Show thread priority warning indicator if priority not achieved
-                                if let Some(ref status) = flow.properties.thread_priority_status {
-                                    if !status.achieved && status.error.is_some() {
-                                        let warning_color = Color32::from_rgb(255, 165, 0);
-                                        let tooltip = status
-                                            .error
-                                            .as_ref()
-                                            .map(|e| format!("Thread priority not set: {}", e))
-                                            .unwrap_or_else(|| {
-                                                "Thread priority warning".to_string()
-                                            });
-
-                                        ui.add_space(2.0);
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new("⚠")
-                                                    .size(12.0)
-                                                    .color(warning_color),
-                                            )
-                                            .sense(egui::Sense::hover()),
-                                        )
-                                        .on_hover_text(tooltip);
-                                    }
-                                }
-                            },
-                        );
-                    }
-                }
             });
     }
 

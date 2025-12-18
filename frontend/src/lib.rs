@@ -11,6 +11,7 @@ mod app;
 mod clocks;
 mod compositor_editor;
 mod discovery;
+mod flows_page;
 mod graph;
 mod info_page;
 mod list_navigator;
