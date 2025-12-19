@@ -279,16 +279,25 @@ fn transform_srt_uri_for_vlc(srt_uri: &str) -> String {
 }
 
 /// Get the hostname of the current server.
+/// Returns "127.0.0.1" instead of "localhost" because VLC doesn't work well with localhost.
 #[cfg(target_arch = "wasm32")]
 fn get_current_hostname() -> String {
-    web_sys::window()
+    let hostname = web_sys::window()
         .and_then(|w| w.location().hostname().ok())
-        .unwrap_or_else(|| "localhost".to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    // VLC doesn't work well with "localhost", use 127.0.0.1 instead
+    if hostname == "localhost" {
+        "127.0.0.1".to_string()
+    } else {
+        hostname
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn get_current_hostname() -> String {
-    "localhost".to_string()
+    // VLC doesn't work well with "localhost", use 127.0.0.1 instead
+    "127.0.0.1".to_string()
 }
 
 /// Theme preference for the application
