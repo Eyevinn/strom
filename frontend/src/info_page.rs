@@ -278,6 +278,20 @@ impl InfoPage {
                         ui.label("Native");
                     }
                     ui.end_row();
+
+                    // System boot time and uptime
+                    if !info.system_boot_time.is_empty() {
+                        ui.label("Booted:");
+                        ui.label(format_datetime_local(&info.system_boot_time));
+                        ui.end_row();
+
+                        if let Some(boot_millis) = parse_iso8601_to_millis(&info.system_boot_time) {
+                            let uptime_millis = current_time_millis() - boot_millis;
+                            ui.label("Uptime:");
+                            ui.label(format_uptime(uptime_millis));
+                            ui.end_row();
+                        }
+                    }
                 }
 
                 // Get hostname from browser location in WASM

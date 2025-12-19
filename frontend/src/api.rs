@@ -23,6 +23,9 @@ pub struct VersionInfo {
     /// This is the process uptime, not the system uptime
     #[serde(default)]
     pub process_started_at: String,
+    /// When the system was booted (ISO 8601 format with timezone)
+    #[serde(default)]
+    pub system_boot_time: String,
 }
 
 /// Result type for API operations.
