@@ -8,6 +8,7 @@ use crate::ptp_monitor::PtpMonitor;
 use crate::sharing::ChannelRegistry;
 use crate::storage::{JsonFileStorage, Storage};
 use crate::system_monitor::SystemMonitor;
+use chrono::Local;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -681,6 +682,7 @@ impl AppState {
         // so it won't be persisted to storage (which is correct - it's runtime-only data)
         flow.state = Some(state);
         flow.properties.auto_restart = true; // Enable auto-restart when flow is started
+        flow.properties.started_at = Some(Local::now().to_rfc3339()); // Record when flow started
         {
             let mut flows = self.inner.flows.write().await;
             flows.insert(*id, flow.clone());
@@ -740,6 +742,7 @@ impl AppState {
                 }
                 flow.state = Some(state);
                 flow.properties.auto_restart = false; // Disable auto-restart when manually stopped
+                flow.properties.started_at = None; // Clear started_at when stopped
                 Some(flow.clone())
             } else {
                 None

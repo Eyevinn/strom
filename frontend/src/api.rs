@@ -19,6 +19,10 @@ pub struct VersionInfo {
     pub os_info: String,
     #[serde(default)]
     pub in_docker: bool,
+    /// When the Strom server process was started (ISO 8601 format with timezone)
+    /// This is the process uptime, not the system uptime
+    #[serde(default)]
+    pub process_started_at: String,
 }
 
 /// Result type for API operations.

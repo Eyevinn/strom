@@ -53,3 +53,4 @@ instant = "0.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 tokio-tungstenite = "0.28"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"

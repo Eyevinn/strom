@@ -199,6 +199,9 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Initialize process startup time before anything else
+    strom::version::init_process_startup_time();
+
     // Parse command line arguments
     #[cfg_attr(feature = "no-gui", allow(unused_variables))]
     let args = Args::parse();

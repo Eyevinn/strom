@@ -5164,6 +5164,7 @@ dependencies = [
 name = "strom-frontend"
 version = "0.3.2"
 dependencies = [
+ "chrono",
  "console_error_panic_hook",
  "eframe",
  "egui",

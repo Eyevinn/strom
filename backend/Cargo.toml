@@ -27,6 +27,9 @@ tower-http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# Date/time
+chrono = "0.4"
+
 # Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true

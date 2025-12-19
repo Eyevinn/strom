@@ -48,7 +48,7 @@ pub enum AppMessage {
     ConnectionStateChanged(ConnectionState),
 
     /// Single flow fetched (for updating after WebSocket events)
-    FlowFetched(Flow),
+    FlowFetched(Box<Flow>),
 
     /// Request full refresh of flows
     RefreshNeeded,

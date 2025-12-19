@@ -225,6 +225,22 @@ pub struct FlowProperties {
     /// (set to true when starting a flow, false when manually stopping it)
     #[serde(default)]
     pub auto_restart: bool,
+
+    /// Timestamp when the flow was started (entered Playing state)
+    /// ISO 8601 format with timezone (e.g., "2024-01-15T14:30:00+01:00")
+    /// None if the flow has never been started or is currently stopped
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+
+    /// Timestamp when the flow was last modified (any change to flow config)
+    /// ISO 8601 format with timezone
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+
+    /// Timestamp when the flow was created
+    /// ISO 8601 format with timezone
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 /// A complete GStreamer pipeline definition.

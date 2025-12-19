@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 use strom_types::{
@@ -206,6 +207,11 @@ pub async fn create_flow(
         flow.properties.description = Some(description);
     }
 
+    // Set creation timestamp
+    let now = Local::now().to_rfc3339();
+    flow.properties.created_at = Some(now.clone());
+    flow.properties.last_modified = Some(now);
+
     info!("Creating flow: {} ({})", flow.name, flow.id);
 
     if let Err(e) = state.upsert_flow(flow.clone()).await {
@@ -331,6 +337,12 @@ pub async fn update_flow(
             flow.name
         );
         layout::apply_auto_layout(&mut flow);
+    }
+
+    // Update last_modified timestamp (preserve created_at from old flow)
+    flow.properties.last_modified = Some(Local::now().to_rfc3339());
+    if flow.properties.created_at.is_none() {
+        flow.properties.created_at = old_flow.properties.created_at.clone();
     }
 
     // Check if the flow is currently running
@@ -1060,8 +1072,13 @@ pub async fn update_flow_properties(
         )
     })?;
 
-    // Update properties
+    // Update properties while preserving timestamps
+    let old_created_at = flow.properties.created_at.clone();
+    let old_started_at = flow.properties.started_at.clone();
     flow.properties = req.properties;
+    flow.properties.created_at = old_created_at;
+    flow.properties.started_at = old_started_at;
+    flow.properties.last_modified = Some(Local::now().to_rfc3339());
 
     // Save the updated flow
     if let Err(e) = state.upsert_flow(flow.clone()).await {

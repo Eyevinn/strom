@@ -6,6 +6,9 @@ use strom_types::{Flow, PipelineState};
 use crate::api::{ApiClient, AuthStatusResponse};
 use crate::compositor_editor::CompositorEditor;
 use crate::graph::GraphEditor;
+use crate::info_page::{
+    current_time_millis, format_datetime_local, format_uptime, parse_iso8601_to_millis,
+};
 use crate::login::LoginScreen;
 use crate::mediaplayer::{MediaPlayerDataStore, PlaylistEditor};
 use crate::meter::MeterDataStore;
@@ -2289,6 +2292,29 @@ impl StromApp {
                         let url = self.api.get_debug_graph_url(flow_id);
                         ctx.open_url(egui::OpenUrl::new_tab(&url));
                     }
+
+                    // Show flow uptime on the right side (only for running flows)
+                    if let Some(flow) = self.flows.iter().find(|f| f.id == flow_id) {
+                        if let Some(ref started_at) = flow.properties.started_at {
+                            if let Some(started_millis) = parse_iso8601_to_millis(started_at) {
+                                let uptime_millis = current_time_millis() - started_millis;
+
+                                // Push to right side
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Build tooltip text
+                                    let mut tooltip = format!("Started: {}", format_datetime_local(started_at));
+                                    if let Some(ref modified) = flow.properties.last_modified {
+                                        tooltip.push_str(&format!("\nLast modified: {}", format_datetime_local(modified)));
+                                    }
+
+                                    ui.label(
+                                        egui::RichText::new(format!("Flow uptime: {}", format_uptime(uptime_millis)))
+                                            .color(Color32::GREEN)
+                                    ).on_hover_text(tooltip);
+                                });
+                            }
+                        }
+                    }
                 }
 
             });
@@ -2668,6 +2694,45 @@ impl StromApp {
                                 }
                             };
                             ui.label(format!("State: {}", state_text));
+
+                            // Show timestamps
+                            if flow.properties.started_at.is_some()
+                                || flow.properties.last_modified.is_some()
+                                || flow.properties.created_at.is_some()
+                            {
+                                ui.add_space(5.0);
+                                ui.separator();
+
+                                if let Some(ref started_at) = flow.properties.started_at {
+                                    ui.label(format!(
+                                        "Started: {}",
+                                        format_datetime_local(started_at)
+                                    ));
+                                    if let Some(started_millis) =
+                                        parse_iso8601_to_millis(started_at)
+                                    {
+                                        let uptime_millis = current_time_millis() - started_millis;
+                                        ui.label(format!(
+                                            "Uptime: {}",
+                                            format_uptime(uptime_millis)
+                                        ));
+                                    }
+                                }
+
+                                if let Some(ref modified) = flow.properties.last_modified {
+                                    ui.label(format!(
+                                        "Last modified: {}",
+                                        format_datetime_local(modified)
+                                    ));
+                                }
+
+                                if let Some(ref created) = flow.properties.created_at {
+                                    ui.label(format!(
+                                        "Created: {}",
+                                        format_datetime_local(created)
+                                    ));
+                                }
+                            }
                         });
 
                         // Buttons on the right
@@ -3768,6 +3833,51 @@ impl StromApp {
                     }
                 }
 
+                // Show timestamps section
+                if let Some(flow) = self.editing_properties_flow_id.and_then(|id| self.flows.iter().find(|f| f.id == id)) {
+                    let has_timestamps = flow.properties.created_at.is_some()
+                        || flow.properties.last_modified.is_some()
+                        || flow.properties.started_at.is_some();
+
+                    if has_timestamps {
+                        ui.add_space(15.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new("Timestamps").strong());
+
+                        egui::Grid::new("timestamps_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                if let Some(ref created) = flow.properties.created_at {
+                                    ui.label("Created:");
+                                    ui.label(format_datetime_local(created));
+                                    ui.end_row();
+                                }
+
+                                if let Some(ref modified) = flow.properties.last_modified {
+                                    ui.label("Last modified:");
+                                    ui.label(format_datetime_local(modified));
+                                    ui.end_row();
+                                }
+
+                                if let Some(ref started) = flow.properties.started_at {
+                                    ui.label("Started:");
+                                    ui.label(format_datetime_local(started));
+                                    ui.end_row();
+
+                                    // Show uptime
+                                    if let Some(started_millis) = parse_iso8601_to_millis(started) {
+                                        let uptime_millis = current_time_millis() - started_millis;
+                                        ui.label("Uptime:");
+                                        ui.label(format_uptime(uptime_millis));
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    }
+                }
+
                 }); // End ScrollArea
 
                 ui.add_space(10.0);
@@ -4596,7 +4706,7 @@ impl eframe::App for StromApp {
                                 match api.get_flow(flow_id).await {
                                     Ok(flow) => {
                                         tracing::info!("Fetched updated flow: {}", flow.name);
-                                        let _ = tx.send(AppMessage::FlowFetched(flow));
+                                        let _ = tx.send(AppMessage::FlowFetched(Box::new(flow)));
                                         ctx.request_repaint();
                                     }
                                     Err(e) => {
@@ -4624,7 +4734,7 @@ impl eframe::App for StromApp {
                                 match api.get_flow(flow_id).await {
                                     Ok(flow) => {
                                         tracing::info!("Fetched started flow: {}", flow.name);
-                                        let _ = tx.send(AppMessage::FlowFetched(flow));
+                                        let _ = tx.send(AppMessage::FlowFetched(Box::new(flow)));
                                         ctx.request_repaint();
                                     }
                                     Err(e) => {
@@ -4648,7 +4758,7 @@ impl eframe::App for StromApp {
                                 match api.get_flow(flow_id).await {
                                     Ok(flow) => {
                                         tracing::info!("Fetched updated flow: {}", flow.name);
-                                        let _ = tx.send(AppMessage::FlowFetched(flow));
+                                        let _ = tx.send(AppMessage::FlowFetched(Box::new(flow)));
                                         ctx.request_repaint();
                                     }
                                     Err(e) => {
@@ -4945,6 +5055,7 @@ impl eframe::App for StromApp {
                     self.connection_state = state;
                 }
                 AppMessage::FlowFetched(flow) => {
+                    let flow = *flow; // Unbox
                     tracing::info!("Received updated flow: {} (id={})", flow.name, flow.id);
 
                     // Check if this is the currently selected flow BEFORE updating

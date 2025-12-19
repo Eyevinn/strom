@@ -7,6 +7,95 @@ use crate::api::VersionInfo;
 use crate::system_monitor::SystemMonitorStore;
 
 const HISTORY_SIZE: usize = 60;
+
+/// Get the current time as Unix timestamp in milliseconds
+pub(crate) fn current_time_millis() -> i64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now() as i64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        chrono::Local::now().timestamp_millis()
+    }
+}
+
+/// Parse an ISO 8601 datetime string to Unix timestamp in milliseconds
+/// Returns None if parsing fails
+pub(crate) fn parse_iso8601_to_millis(s: &str) -> Option<i64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(s));
+        let time = date.get_time();
+        if time.is_nan() {
+            None
+        } else {
+            Some(time as i64)
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Simple RFC3339 parser for native
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.timestamp_millis())
+    }
+}
+
+/// Format an ISO 8601 datetime string to local time display
+pub(crate) fn format_datetime_local(iso_str: &str) -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(iso_str));
+        if date.get_time().is_nan() {
+            iso_str.to_string()
+        } else {
+            // Format as localized string
+            date.to_locale_string("sv-SE", &js_sys::Object::new())
+                .as_string()
+                .unwrap_or_else(|| iso_str.to_string())
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        chrono::DateTime::parse_from_rfc3339(iso_str)
+            .map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| iso_str.to_string())
+    }
+}
+
+/// Format a duration in milliseconds to a human-readable string
+/// e.g., "2d 5h 30m 15s" or "5h 30m" or "30m 15s"
+pub(crate) fn format_uptime(millis: i64) -> String {
+    if millis < 0 {
+        return "N/A".to_string();
+    }
+
+    let total_seconds = millis / 1000;
+    let days = total_seconds / 86400;
+    let hours = (total_seconds % 86400) / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    let mut parts = Vec::new();
+
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 || days > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if minutes > 0 || hours > 0 || days > 0 {
+        parts.push(format!("{}m", minutes));
+    }
+    parts.push(format!("{}s", seconds));
+
+    parts.join(" ")
+}
 const MARGIN: f32 = 16.0;
 const GAP: f32 = 12.0;
 const GRAPH_HEIGHT: f32 = 60.0;
@@ -82,8 +171,8 @@ impl InfoPage {
 
                     ui.add_space(GAP);
 
-                    render_box(ui, "GStreamer", box_width_3, |ui| {
-                        self.render_gstreamer_content(ui, version_info);
+                    render_box(ui, "Process", box_width_3, |ui| {
+                        self.render_process_content(ui, version_info, flows);
                     });
                 });
 
@@ -171,7 +260,7 @@ impl InfoPage {
         &self,
         ui: &mut Ui,
         version_info: Option<&VersionInfo>,
-        flows: &[strom_types::Flow],
+        _flows: &[strom_types::Flow],
     ) {
         egui::Grid::new("system_grid")
             .num_columns(2)
@@ -202,28 +291,49 @@ impl InfoPage {
                         }
                     }
                 }
-
-                // Flow statistics
-                let running_flows = flows
-                    .iter()
-                    .filter(|f| f.state == Some(strom_types::PipelineState::Playing))
-                    .count();
-                let total_flows = flows.len();
-
-                ui.label("Flows:");
-                ui.label(format!("{} / {}", running_flows, total_flows));
-                ui.end_row();
             });
     }
 
-    fn render_gstreamer_content(&self, ui: &mut Ui, version_info: Option<&VersionInfo>) {
+    fn render_process_content(
+        &self,
+        ui: &mut Ui,
+        version_info: Option<&VersionInfo>,
+        flows: &[strom_types::Flow],
+    ) {
         if let Some(info) = version_info {
-            egui::Grid::new("gstreamer_grid")
+            egui::Grid::new("process_grid")
                 .num_columns(2)
                 .spacing([8.0, 2.0])
                 .show(ui, |ui| {
-                    ui.label("Version:");
+                    ui.label("GStreamer:");
                     ui.label(egui::RichText::new(&info.gstreamer_version).monospace());
+                    ui.end_row();
+
+                    // Show process start time and uptime
+                    if !info.process_started_at.is_empty() {
+                        ui.label("Started:");
+                        ui.label(format_datetime_local(&info.process_started_at));
+                        ui.end_row();
+
+                        if let Some(started_millis) =
+                            parse_iso8601_to_millis(&info.process_started_at)
+                        {
+                            let uptime_millis = current_time_millis() - started_millis;
+                            ui.label("Uptime:");
+                            ui.label(format_uptime(uptime_millis));
+                            ui.end_row();
+                        }
+                    }
+
+                    // Flow statistics
+                    let running_flows = flows
+                        .iter()
+                        .filter(|f| f.state == Some(strom_types::PipelineState::Playing))
+                        .count();
+                    let total_flows = flows.len();
+
+                    ui.label("Flows:");
+                    ui.label(format!("{} / {}", running_flows, total_flows));
                     ui.end_row();
                 });
         } else {
