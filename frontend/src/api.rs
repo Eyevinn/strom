@@ -13,6 +13,9 @@ pub struct VersionInfo {
     pub git_branch: String,
     pub git_dirty: bool,
     pub build_timestamp: String,
+    /// Unique build ID (UUID) generated at compile time
+    #[serde(default)]
+    pub build_id: String,
     #[serde(default)]
     pub gstreamer_version: String,
     #[serde(default)]

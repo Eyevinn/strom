@@ -247,6 +247,15 @@ impl InfoPage {
                     ui.label("Build:");
                     ui.label(&info.build_timestamp);
                     ui.end_row();
+
+                    if !info.build_id.is_empty() {
+                        ui.label("Build ID:");
+                        ui.label(
+                            egui::RichText::new(&info.build_id[..8.min(info.build_id.len())])
+                                .monospace(),
+                        );
+                        ui.end_row();
+                    }
                 });
         } else {
             ui.horizontal(|ui| {

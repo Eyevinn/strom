@@ -106,6 +106,7 @@ eframe = { workspace = true }
 
 [build-dependencies]
 chrono = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.8"

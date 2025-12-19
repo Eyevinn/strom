@@ -5059,6 +5059,9 @@ impl eframe::App for StromApp {
                         self.needs_refresh = true;
                         self.elements_loaded = false;
                         self.blocks_loaded = false;
+
+                        // Check if backend has been rebuilt - this will trigger a reload if build_id changed
+                        self.load_version(ctx.clone());
                     }
 
                     self.connection_state = state;
@@ -5162,10 +5165,38 @@ impl eframe::App for StromApp {
                 }
                 AppMessage::VersionLoaded(version_info) => {
                     tracing::info!(
-                        "Version info loaded: v{} ({})",
+                        "Version info loaded: v{} ({}) build_id={}",
                         version_info.version,
-                        version_info.git_hash
+                        version_info.git_hash,
+                        version_info.build_id
                     );
+
+                    // Check if backend build_id differs from the one we got on initial load
+                    // If so, the backend has been rebuilt and we need to reload the frontend
+                    if let Some(ref existing_info) = self.version_info {
+                        if !version_info.build_id.is_empty()
+                            && !existing_info.build_id.is_empty()
+                            && version_info.build_id != existing_info.build_id
+                        {
+                            tracing::warn!(
+                                "Build ID mismatch! Previous: {}, Current: {} - reloading frontend",
+                                existing_info.build_id,
+                                version_info.build_id
+                            );
+
+                            // Force a hard reload to get the new frontend from the backend
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                if let Some(window) = web_sys::window() {
+                                    if let Err(e) = window.location().reload() {
+                                        tracing::error!("Failed to reload page: {:?}", e);
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                    }
+
                     self.version_info = Some(version_info);
                 }
                 AppMessage::AuthStatusLoaded(status) => {

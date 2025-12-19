@@ -176,6 +176,10 @@ struct Args {
     /// Disable automatic restart of flows on startup (useful for development/testing)
     #[arg(long)]
     no_auto_restart: bool,
+
+    /// Print detailed version and build information and exit
+    #[arg(long)]
+    version_info: bool,
 }
 
 /// Detect if running under WSL (Windows Subsystem for Linux).
@@ -213,6 +217,30 @@ fn main() -> anyhow::Result<()> {
                 return handle_hash_password(password.as_deref());
             }
         }
+    }
+
+    // Handle --version-info flag
+    if args.version_info {
+        let info = strom::version::VersionInfo::get();
+        println!("Strom - GStreamer Flow Engine");
+        println!("==============================");
+        println!("Version:     v{}", info.version);
+        if !info.git_tag.is_empty() {
+            println!("Tag:         {}", info.git_tag);
+        }
+        println!("Git Hash:    {}", info.git_hash);
+        println!("Branch:      {}", info.git_branch);
+        if info.git_dirty {
+            println!("Status:      Modified (dirty)");
+        }
+        println!("Build Time:  {}", info.build_timestamp);
+        println!("Build ID:    {}", info.build_id);
+        println!("GStreamer:   {}", info.gstreamer_version);
+        println!("OS:          {}", info.os_info);
+        if info.in_docker {
+            println!("Container:   Docker");
+        }
+        return Ok(());
     }
 
     // Select display backend based on platform and CLI flags
@@ -260,6 +288,20 @@ fn main() -> anyhow::Result<()> {
     let gui_enabled = !args.headless;
     #[cfg(feature = "no-gui")]
     let gui_enabled = false;
+
+    // Log version and build info at startup
+    let version_info = strom::version::VersionInfo::get();
+    info!(
+        "Strom v{} ({}) build_id={} gstreamer={}",
+        version_info.version,
+        if version_info.git_tag.is_empty() {
+            &version_info.git_hash
+        } else {
+            &version_info.git_tag
+        },
+        &version_info.build_id[..8.min(version_info.build_id.len())],
+        version_info.gstreamer_version
+    );
 
     if gui_enabled {
         info!("Starting Strom backend server with GUI...");

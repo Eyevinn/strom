@@ -33,6 +33,9 @@ pub struct VersionInfo {
     pub git_dirty: bool,
     /// Build timestamp (ISO 8601 format)
     pub build_timestamp: &'static str,
+    /// Unique build ID (UUID) generated at compile time
+    /// Used by frontend to detect when backend has been rebuilt
+    pub build_id: &'static str,
     /// GStreamer runtime version
     pub gstreamer_version: String,
     /// Operating system name and version
@@ -76,6 +79,7 @@ impl VersionInfo {
             git_branch: env!("GIT_BRANCH"),
             git_dirty: env!("GIT_DIRTY") == "true",
             build_timestamp: env!("BUILD_TIMESTAMP"),
+            build_id: env!("BUILD_ID"),
             gstreamer_version,
             os_info,
             in_docker,
