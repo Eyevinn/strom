@@ -447,7 +447,12 @@ impl InfoPage {
                         ui.end_row();
 
                         ui.label("Memory:");
-                        ui.label(format!("{:.1}%", gpu.memory_utilization));
+                        ui.label(format!(
+                            "{:.1}% ({:.1} / {:.1} GB)",
+                            gpu.memory_utilization,
+                            gpu.used_memory as f64 / 1_073_741_824.0,
+                            gpu.total_memory as f64 / 1_073_741_824.0
+                        ));
                         ui.end_row();
 
                         if let Some(temp) = gpu.temperature {
@@ -459,13 +464,13 @@ impl InfoPage {
                             } else {
                                 Color32::GREEN
                             };
-                            ui.colored_label(temp_color, format!("{:.0}°C", temp));
+                            ui.colored_label(temp_color, format!("{:.1}°C", temp));
                             ui.end_row();
                         }
 
                         if let Some(power) = gpu.power_usage {
                             ui.label("Power:");
-                            ui.label(format!("{:.0}W", power));
+                            ui.label(format!("{:.1}W", power));
                             ui.end_row();
                         }
                     });
