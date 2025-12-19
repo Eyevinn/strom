@@ -14,7 +14,7 @@
 //! - Multiple background types (black, white, transparent)
 //! - Automatic fallback from GPU to CPU when OpenGL is unavailable
 //!
-//! GPU backend chain: queue -> glupload -> glvideomixerelement -> gldownload -> capsfilter
+//! GPU backend chain: queue -> glupload -> glcolorconvert -> glvideomixerelement -> gldownload -> capsfilter
 //! CPU backend chain: queue -> videoconvert -> compositor -> capsfilter
 
 use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
@@ -343,7 +343,17 @@ fn build_opengl_compositor(
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("glupload_{}: {}", i, e)))?;
 
+        // Create glcolorconvert for GPU-based color space conversion (e.g., NV12 -> RGBA)
+        let colorconvert_id = format!("{}:glcolorconvert_{}", instance_id, i);
+        let colorconvert = gst::ElementFactory::make("glcolorconvert")
+            .name(&colorconvert_id)
+            .build()
+            .map_err(|e| {
+                BlockBuildError::ElementCreation(format!("glcolorconvert_{}: {}", i, e))
+            })?;
+
         elements.push((upload_id.clone(), upload));
+        elements.push((colorconvert_id.clone(), colorconvert));
         let mixer_pad_name = sink_pad.name().to_string();
 
         if use_queues {
@@ -351,19 +361,27 @@ fn build_opengl_compositor(
             let queue = create_input_queue(&queue_id, i)?;
             elements.push((queue_id.clone(), queue));
 
-            // Link: queue -> glupload -> mixer
+            // Link: queue -> glupload -> glcolorconvert -> mixer
             internal_links.push((
                 ElementPadRef::pad(&queue_id, "src"),
                 ElementPadRef::pad(&upload_id, "sink"),
             ));
             internal_links.push((
                 ElementPadRef::pad(&upload_id, "src"),
+                ElementPadRef::pad(&colorconvert_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&colorconvert_id, "src"),
                 ElementPadRef::pad(&mixer_id, &mixer_pad_name),
             ));
         } else {
-            // Link: glupload -> mixer directly
+            // Link: glupload -> glcolorconvert -> mixer directly
             internal_links.push((
                 ElementPadRef::pad(&upload_id, "src"),
+                ElementPadRef::pad(&colorconvert_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&colorconvert_id, "src"),
                 ElementPadRef::pad(&mixer_id, &mixer_pad_name),
             ));
         }

@@ -13,7 +13,7 @@
 //! - Configurable output canvas size
 //! - Multiple background types (checker, black, white, transparent)
 //!
-//! The block creates a chain: glupload (per input) -> glvideomixerelement -> gldownload -> capsfilter
+//! The block creates a chain: glupload -> glcolorconvert (per input) -> glvideomixerelement -> gldownload -> capsfilter
 
 use crate::blocks::{BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -331,16 +331,24 @@ impl BlockBuilder for GLCompositorBuilder {
         let mut internal_links = Vec::new();
 
         for (i, sink_pad) in mixer_sink_pads.iter().enumerate() {
-            // Create glupload for hardware-accelerated format conversion
-            // Note: videoconvert removed - it's a CPU bottleneck for live video!
-            // glupload can handle format conversion directly with GPU acceleration
+            // Create glupload for hardware-accelerated upload to GL memory
             let upload_id = format!("{}:glupload_{}", instance_id, i);
             let upload = gst::ElementFactory::make("glupload")
                 .name(&upload_id)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("glupload_{}: {}", i, e)))?;
 
+            // Create glcolorconvert for GPU-based color space conversion (e.g., NV12 -> RGBA)
+            let colorconvert_id = format!("{}:glcolorconvert_{}", instance_id, i);
+            let colorconvert = gst::ElementFactory::make("glcolorconvert")
+                .name(&colorconvert_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("glcolorconvert_{}: {}", i, e))
+                })?;
+
             elements.push((upload_id.clone(), upload));
+            elements.push((colorconvert_id.clone(), colorconvert));
 
             let mixer_pad_name = sink_pad.name().to_string();
 
@@ -359,19 +367,27 @@ impl BlockBuilder for GLCompositorBuilder {
 
                 elements.push((queue_id.clone(), queue));
 
-                // Link queue -> glupload -> mixer
+                // Link queue -> glupload -> glcolorconvert -> mixer
                 internal_links.push((
                     ElementPadRef::pad(&queue_id, "src"),
                     ElementPadRef::pad(&upload_id, "sink"),
                 ));
                 internal_links.push((
                     ElementPadRef::pad(&upload_id, "src"),
+                    ElementPadRef::pad(&colorconvert_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::pad(&colorconvert_id, "src"),
                     ElementPadRef::pad(&mixer_id, &mixer_pad_name),
                 ));
             } else {
-                // Link glupload -> mixer directly (no queue for lower latency)
+                // Link glupload -> glcolorconvert -> mixer directly (no queue for lower latency)
                 internal_links.push((
                     ElementPadRef::pad(&upload_id, "src"),
+                    ElementPadRef::pad(&colorconvert_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::pad(&colorconvert_id, "src"),
                     ElementPadRef::pad(&mixer_id, &mixer_pad_name),
                 ));
             }
