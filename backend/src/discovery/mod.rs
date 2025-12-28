@@ -205,10 +205,25 @@ impl DiscoveryService {
         streams.get(id).cloned()
     }
 
-    /// Get the raw SDP for a discovered stream.
+    /// Get the raw SDP for a discovered or announced stream.
     pub async fn get_stream_sdp(&self, id: &str) -> Option<String> {
-        let streams = self.inner.discovered_streams.read().await;
-        streams.get(id).map(|s| s.sdp.clone())
+        // First check discovered streams
+        {
+            let streams = self.inner.discovered_streams.read().await;
+            if let Some(stream) = streams.get(id) {
+                return Some(stream.sdp.clone());
+            }
+        }
+
+        // Then check announced streams (for RTSP server serving our own streams)
+        {
+            let announced = self.inner.announced_streams.read().await;
+            if let Some(stream) = announced.get(id) {
+                return Some(stream.sdp.clone());
+            }
+        }
+
+        None
     }
 
     /// Register a stream for SAP and mDNS announcement.
