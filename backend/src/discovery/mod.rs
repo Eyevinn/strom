@@ -737,6 +737,7 @@ impl DiscoveryService {
                             let path = info.txt_properties.get("path")
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| "/".to_string());
+                            debug!("mDNS TXT property 'path': {:?}", path);
 
                             // Spawn a task to handle it (async RTSP fetch)
                             let inner_clone = inner.clone();
@@ -795,7 +796,12 @@ impl DiscoveryService {
                 }
             };
 
-            // Build RTSP URL
+            // Build RTSP URL - ensure path starts with /
+            let path = if path.starts_with('/') {
+                path
+            } else {
+                format!("/{}", path)
+            };
             let rtsp_url = format!("rtsp://{}:{}{}", ip, port, path);
 
             debug!("Fetching SDP from RTSP URL: {}", rtsp_url);
