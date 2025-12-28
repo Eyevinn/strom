@@ -1,4 +1,4 @@
-//! Discovery page for browsing SAP/AES67 streams.
+//! Discovery page for browsing SAP/mDNS/AES67 streams.
 
 use egui::{Color32, Context, Ui};
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ pub struct AnnouncedStream {
 /// Type of selected stream
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectedStream {
-    /// A discovered stream (from SAP announcements)
+    /// A discovered stream (from SAP/mDNS announcements)
     Discovered(String),
     /// An announced stream (flow_id, block_id)
     Announced(String, String),
@@ -50,7 +50,7 @@ pub enum StreamTab {
 
 /// Discovery page state.
 pub struct DiscoveryPage {
-    /// Discovered streams from SAP
+    /// Discovered streams from SAP/mDNS
     pub discovered_streams: Vec<DiscoveredStream>,
     /// Streams we're announcing
     pub announced_streams: Vec<AnnouncedStream>,
@@ -193,7 +193,7 @@ impl DiscoveryPage {
         match self.selected_tab {
             StreamTab::Discovered => {
                 if self.discovered_streams.is_empty() {
-                    ui.label("No streams discovered yet. Waiting for SAP announcements...");
+                    ui.label("No streams discovered yet. Waiting for SAP/mDNS announcements...");
                 } else {
                     // Build list items data
                     let items_data: Vec<_> = self
