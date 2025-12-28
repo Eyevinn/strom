@@ -29,6 +29,7 @@ pub mod network;
 pub mod openapi;
 pub mod paths;
 pub mod ptp_monitor;
+pub mod rtsp_server;
 pub mod sharing;
 pub mod state;
 pub mod stats;

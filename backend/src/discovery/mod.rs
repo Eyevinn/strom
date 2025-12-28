@@ -1,9 +1,13 @@
-//! AES67 stream discovery via SAP (Session Announcement Protocol).
+//! Network stream discovery via SAP and mDNS.
 //!
 //! This module provides:
 //! - SAP listener to discover Dante/AES67 streams on the network
 //! - SAP announcer to advertise Strom's AES67 output streams
+//! - mDNS discovery for RAVENNA, NDI, and other network protocols
+//! - RTSP client for fetching SDP from RAVENNA sources
 
+pub mod mdns;
+pub mod rtsp_client;
 pub mod sap;
 pub mod types;
 
@@ -11,6 +15,7 @@ use crate::events::EventBroadcaster;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom_types::{FlowId, StromEvent};
@@ -23,6 +28,8 @@ pub use types::{
     SdpStreamInfo, DEFAULT_STREAM_TTL, SAP_ANNOUNCE_INTERVAL, SAP_MULTICAST_ADDR, SAP_PORT,
 };
 
+use mdns::MdnsDiscovery;
+use mdns_sd::ServiceEvent;
 use sap::{SapError, SapPacket};
 
 /// Discovery service for AES67 streams.
@@ -44,6 +51,8 @@ struct DiscoveryServiceInner {
     send_socket: RwLock<Option<Arc<UdpSocket>>>,
     /// Local IP address for announcements.
     local_ip: RwLock<Option<IpAddr>>,
+    /// mDNS discovery service.
+    mdns_discovery: RwLock<Option<Arc<MdnsDiscovery>>>,
 }
 
 impl DiscoveryService {
@@ -57,6 +66,7 @@ impl DiscoveryService {
                 shutdown_tx: RwLock::new(None),
                 send_socket: RwLock::new(None),
                 local_ip: RwLock::new(None),
+                mdns_discovery: RwLock::new(None),
             }),
         }
     }
@@ -133,7 +143,12 @@ impl DiscoveryService {
             Self::run_cleanup(cleanup_inner, cleanup_shutdown).await;
         });
 
-        info!("SAP discovery service started");
+        // Start mDNS discovery
+        if let Err(e) = self.start_mdns_discovery(shutdown_tx.clone()).await {
+            warn!("Failed to start mDNS discovery: {}", e);
+        }
+
+        info!("Discovery service started (SAP + mDNS)");
         Ok(())
     }
 
@@ -160,7 +175,17 @@ impl DiscoveryService {
             *sock = None;
         }
 
-        info!("SAP discovery service stopped");
+        // Shutdown mDNS
+        {
+            let mdns_lock = self.inner.mdns_discovery.write().await;
+            if let Some(mdns) = mdns_lock.as_ref() {
+                if let Err(e) = mdns.shutdown().await {
+                    warn!("Failed to shutdown mDNS: {}", e);
+                }
+            }
+        }
+
+        info!("Discovery service stopped (SAP + mDNS)");
     }
 
     /// Get all discovered streams.
@@ -609,6 +634,196 @@ impl DiscoveryService {
                 inner.events.broadcast(StromEvent::StreamRemoved {
                     stream_id: stream_id.clone(),
                 });
+            }
+        }
+    }
+
+    // --- mDNS methods ---
+
+    /// Start mDNS discovery for RAVENNA streams.
+    async fn start_mdns_discovery(&self, shutdown_tx: broadcast::Sender<()>) -> anyhow::Result<()> {
+        info!("Starting mDNS discovery for RAVENNA streams");
+
+        // Create mDNS discovery instance
+        let mdns = match MdnsDiscovery::new() {
+            Ok(m) => Arc::new(m),
+            Err(e) => {
+                error!("Failed to create mDNS discovery: {}", e);
+                return Err(e);
+            }
+        };
+
+        // Store for later use
+        {
+            let mut mdns_lock = self.inner.mdns_discovery.write().await;
+            *mdns_lock = Some(mdns.clone());
+        }
+
+        // Start browsing for RAVENNA streams (_rtsp._tcp.local)
+        let receiver = mdns.browse("_rtsp._tcp.local.")?;
+
+        // Spawn task to handle mDNS events
+        let inner = self.inner.clone();
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            Self::run_mdns_listener(receiver, inner, shutdown_rx).await;
+        });
+
+        info!("mDNS discovery started");
+        Ok(())
+    }
+
+    /// Run the mDNS listener loop.
+    async fn run_mdns_listener(
+        receiver: flume::Receiver<ServiceEvent>,
+        inner: Arc<DiscoveryServiceInner>,
+        mut shutdown: broadcast::Receiver<()>,
+    ) {
+        loop {
+            tokio::select! {
+                _ = shutdown.recv() => {
+                    debug!("mDNS listener shutting down");
+                    break;
+                }
+                event = async { receiver.recv_async().await } => {
+                    match event {
+                        Ok(ServiceEvent::ServiceResolved(info)) => {
+                            // ResolvedService has public fields
+                            let service_type = info.ty_domain.clone();
+                            let instance_name = info.fullname.clone();
+                            let hostname = info.host.clone();
+                            let port = info.port;
+                            let addresses: Vec<_> = info.addresses.iter()
+                                .filter_map(|a| IpAddr::from_str(&a.to_string()).ok())
+                                .collect();
+                            let path = info.txt_properties.get("path")
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "/".to_string());
+
+                            // Spawn a task to handle it (async RTSP fetch)
+                            let inner_clone = inner.clone();
+                            tokio::spawn(async move {
+                                Self::handle_mdns_service_data(
+                                    service_type,
+                                    instance_name,
+                                    hostname,
+                                    port,
+                                    addresses,
+                                    path,
+                                    inner_clone,
+                                ).await;
+                            });
+                        }
+                        Ok(ServiceEvent::ServiceRemoved(service_type, fullname)) => {
+                            debug!("mDNS service removed: {} ({})", fullname, service_type);
+                            // Handle service removal if needed
+                        }
+                        Ok(_) => {
+                            // Other events (SearchStarted, SearchStopped) - ignore
+                        }
+                        Err(e) => {
+                            warn!("mDNS receiver error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle a resolved mDNS service (RAVENNA stream).
+    async fn handle_mdns_service_data(
+        service_type: String,
+        instance_name: String,
+        hostname: String,
+        port: u16,
+        addresses: Vec<IpAddr>,
+        path: String,
+        inner: Arc<DiscoveryServiceInner>,
+    ) {
+        info!(
+            "Discovered mDNS service: {} at {}:{}",
+            instance_name, hostname, port
+        );
+
+        // For RAVENNA, fetch SDP via RTSP DESCRIBE
+        if service_type.starts_with("_rtsp._tcp.") {
+            // Get first IP address
+            let ip = match addresses.first() {
+                Some(addr) => *addr,
+                None => {
+                    warn!("No IP address for mDNS service: {}", instance_name);
+                    return;
+                }
+            };
+
+            // Build RTSP URL
+            let rtsp_url = format!("rtsp://{}:{}{}", ip, port, path);
+
+            debug!("Fetching SDP from RTSP URL: {}", rtsp_url);
+
+            // Fetch SDP
+            match rtsp_client::rtsp_describe(&rtsp_url).await {
+                Ok(sdp) => {
+                    // Parse SDP to extract stream info
+                    if let Some(sdp_info) = SdpStreamInfo::parse(&sdp) {
+                        let stream_id = sdp_info.generate_id(&ip);
+                        let now = Instant::now();
+
+                        let mut streams = inner.discovered_streams.write().await;
+                        let is_new = !streams.contains_key(&stream_id);
+
+                        let stream = DiscoveredStream {
+                            id: stream_id.clone(),
+                            name: sdp_info.name.clone(),
+                            source: DiscoverySource::Mdns {
+                                service_type,
+                                instance_name: instance_name.clone(),
+                                hostname,
+                                port,
+                            },
+                            sdp: sdp.clone(),
+                            multicast_address: sdp_info
+                                .connection_address
+                                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                            port: sdp_info.port.unwrap_or(5004),
+                            channels: sdp_info.channels.unwrap_or(2),
+                            sample_rate: sdp_info.sample_rate.unwrap_or(48000),
+                            encoding: sdp_info.encoding,
+                            origin_host: sdp_info.origin_address.clone(),
+                            first_seen: streams
+                                .get(&stream_id)
+                                .map(|s| s.first_seen)
+                                .unwrap_or(now),
+                            last_seen: now,
+                            ttl: DEFAULT_STREAM_TTL,
+                        };
+
+                        streams.insert(stream_id.clone(), stream);
+
+                        if is_new {
+                            info!(
+                                "Discovered new RAVENNA stream via mDNS: {} ({})",
+                                sdp_info.name, stream_id
+                            );
+                            inner.events.broadcast(StromEvent::StreamDiscovered {
+                                stream_id: stream_id.clone(),
+                                name: sdp_info.name,
+                                source: "mDNS (RAVENNA)".to_string(),
+                            });
+                        } else {
+                            debug!("Updated existing mDNS stream: {}", stream_id);
+                            inner.events.broadcast(StromEvent::StreamUpdated {
+                                stream_id: stream_id.clone(),
+                            });
+                        }
+                    } else {
+                        warn!("Failed to parse SDP from RTSP URL: {}", rtsp_url);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to fetch SDP from {}: {}", rtsp_url, e);
+                }
             }
         }
     }

@@ -96,9 +96,11 @@ reqwest.workspace = true
 # Terminal UI for test harness
 crossterm = "0.28"
 
-# SAP/AES67 discovery
-socket2 = "0.6"      # Multicast socket options
+# Network discovery
+socket2 = "0.6"      # Multicast socket options for SAP
 flate2 = "1.0"       # Zlib decompression for SAP
+mdns-sd = "0.15"     # mDNS service discovery (RAVENNA, NDI, etc.)
+flume = "0.11"       # Channel used by mdns-sd
 
 # GUI (native frontend) - use --features no-gui to disable
 strom-frontend = { path = "../frontend" }
