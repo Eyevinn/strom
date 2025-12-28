@@ -735,7 +735,11 @@ impl DiscoveryService {
                                 .filter_map(|a| IpAddr::from_str(&a.to_string()).ok())
                                 .collect();
                             let path = info.txt_properties.get("path")
-                                .map(|s| s.to_string())
+                                .map(|s| {
+                                    let s = s.to_string();
+                                    // Strip "path=" prefix if present (some mDNS libs include it)
+                                    s.strip_prefix("path=").unwrap_or(&s).to_string()
+                                })
                                 .unwrap_or_else(|| "/".to_string());
                             debug!("mDNS TXT property 'path': {:?}", path);
 
