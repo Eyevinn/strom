@@ -148,7 +148,12 @@ impl DiscoveryService {
             warn!("Failed to start mDNS discovery: {}", e);
         }
 
-        info!("Discovery service started (SAP + mDNS)");
+        // Start RTSP server for mDNS/RAVENNA announcements
+        if let Err(e) = self.start_rtsp_server(shutdown_tx.clone()).await {
+            warn!("Failed to start RTSP server: {}", e);
+        }
+
+        info!("Discovery service started (SAP + mDNS + RTSP)");
         Ok(())
     }
 
@@ -206,7 +211,7 @@ impl DiscoveryService {
         streams.get(id).map(|s| s.sdp.clone())
     }
 
-    /// Register a stream for SAP announcement.
+    /// Register a stream for SAP and mDNS announcement.
     pub async fn announce_stream(&self, flow_id: FlowId, block_id: &str, sdp: &str) {
         let key = AnnouncedStream::key(&flow_id, block_id);
         let msg_id_hash = types::generate_msg_id_hash(&flow_id, block_id);
@@ -216,13 +221,19 @@ impl DiscoveryService {
             ip.unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))
         };
 
-        let stream = AnnouncedStream {
+        // Parse SDP to get stream name for mDNS instance name
+        let stream_name = SdpStreamInfo::parse(sdp)
+            .map(|info| info.name)
+            .unwrap_or_else(|| format!("strom-{}-{}", flow_id, block_id));
+
+        let mut stream = AnnouncedStream {
             flow_id,
             block_id: block_id.to_string(),
             msg_id_hash,
             sdp: sdp.to_string(),
             origin_ip: local_ip,
             last_announced: Instant::now() - SAP_ANNOUNCE_INTERVAL, // Force immediate announcement
+            mdns_fullname: None,
         };
 
         info!(
@@ -230,16 +241,32 @@ impl DiscoveryService {
             key, msg_id_hash
         );
 
-        // Send initial announcement immediately
+        // Send initial SAP announcement immediately
         if let Err(e) = self.send_announcement(&stream).await {
             warn!("Failed to send initial SAP announcement: {}", e);
+        }
+
+        // Register with mDNS if available
+        if let Some(mdns) = self.inner.mdns_discovery.read().await.as_ref() {
+            match self
+                .register_mdns_service(&key, &stream_name, local_ip, mdns)
+                .await
+            {
+                Ok(fullname) => {
+                    stream.mdns_fullname = Some(fullname.clone());
+                    info!("Registered mDNS service: {}", fullname);
+                }
+                Err(e) => {
+                    warn!("Failed to register mDNS service: {}", e);
+                }
+            }
         }
 
         let mut announced = self.inner.announced_streams.write().await;
         announced.insert(key, stream);
     }
 
-    /// Remove a stream from SAP announcements.
+    /// Remove a stream from SAP and mDNS announcements.
     pub async fn remove_announcement(&self, flow_id: FlowId, block_id: &str) {
         let key = AnnouncedStream::key(&flow_id, block_id);
 
@@ -249,11 +276,22 @@ impl DiscoveryService {
         };
 
         if let Some(stream) = stream {
-            info!("Removing SAP announcement: {}", key);
+            info!("Removing announcement: {}", key);
 
-            // Send deletion message
+            // Send SAP deletion message
             if let Err(e) = self.send_deletion(&stream).await {
                 warn!("Failed to send SAP deletion: {}", e);
+            }
+
+            // Unregister mDNS service if it was registered
+            if let Some(fullname) = &stream.mdns_fullname {
+                if let Some(mdns) = self.inner.mdns_discovery.read().await.as_ref() {
+                    if let Err(e) = mdns.unregister(fullname).await {
+                        warn!("Failed to unregister mDNS service {}: {}", fullname, e);
+                    } else {
+                        info!("Unregistered mDNS service: {}", fullname);
+                    }
+                }
             }
         }
     }
@@ -826,6 +864,67 @@ impl DiscoveryService {
                 }
             }
         }
+    }
+
+    /// Register a stream as an mDNS service.
+    async fn register_mdns_service(
+        &self,
+        stream_key: &str,
+        instance_name: &str,
+        local_ip: IpAddr,
+        mdns: &MdnsDiscovery,
+    ) -> anyhow::Result<String> {
+        use mdns_sd::ServiceInfo;
+
+        let service_type = "_rtsp._tcp.local.";
+        let hostname = format!("{}.local.", local_ip);
+        let ip_str = local_ip.to_string();
+        let port = types::RTSP_PORT;
+
+        // TXT record with path to stream
+        let path = format!("/{}", stream_key);
+        let properties = [("path", path.as_str())];
+
+        debug!(
+            "Creating mDNS service: type={}, instance={}, host={}, ip={}, port={}",
+            service_type, instance_name, hostname, ip_str, port
+        );
+
+        let service_info = ServiceInfo::new(
+            service_type,
+            instance_name,
+            &hostname,
+            &ip_str,
+            port,
+            &properties[..],
+        )?;
+
+        let fullname = service_info.get_fullname().to_string();
+        mdns.register(service_info)?;
+
+        Ok(fullname)
+    }
+
+    /// Start the RTSP server for serving SDP to announced streams.
+    async fn start_rtsp_server(&self, _shutdown_tx: broadcast::Sender<()>) -> anyhow::Result<()> {
+        use crate::rtsp_server::{run_rtsp_server, RtspServerConfig};
+
+        info!("Starting RTSP server on port {}", types::RTSP_PORT);
+
+        let config = RtspServerConfig {
+            bind_addr: format!("0.0.0.0:{}", types::RTSP_PORT),
+        };
+
+        let discovery = self.clone();
+
+        // Spawn RTSP server task
+        tokio::spawn(async move {
+            if let Err(e) = run_rtsp_server(config, discovery).await {
+                error!("RTSP server error: {}", e);
+            }
+        });
+
+        Ok(())
     }
 }
 

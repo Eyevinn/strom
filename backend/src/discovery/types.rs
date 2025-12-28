@@ -18,6 +18,9 @@ pub const SAP_MULTICAST_ADDR: &str = "224.2.127.254";
 /// SAP port.
 pub const SAP_PORT: u16 = 9875;
 
+/// RTSP server port for mDNS/RAVENNA announcements.
+pub const RTSP_PORT: u16 = 8554;
+
 /// A discovered AES67 stream from SAP or mDNS.
 #[derive(Debug, Clone)]
 pub struct DiscoveredStream {
@@ -186,6 +189,8 @@ pub struct AnnouncedStream {
     pub origin_ip: IpAddr,
     /// When this was last announced.
     pub last_announced: Instant,
+    /// mDNS service fullname (if announced via mDNS).
+    pub mdns_fullname: Option<String>,
 }
 
 impl AnnouncedStream {
