@@ -877,7 +877,20 @@ impl DiscoveryService {
         use mdns_sd::ServiceInfo;
 
         let service_type = "_rtsp._tcp.local.";
-        let hostname = format!("{}.local.", local_ip);
+
+        // Get system hostname (cross-platform), fallback to "strom"
+        let hostname = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "strom".to_string());
+        let hostname = if hostname.ends_with(".local.") {
+            hostname
+        } else if hostname.ends_with(".local") {
+            format!("{}.", hostname)
+        } else {
+            format!("{}.local.", hostname)
+        };
+
         let ip_str = local_ip.to_string();
         let port = types::RTSP_PORT;
 
