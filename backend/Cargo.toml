@@ -74,7 +74,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 directories = "6.0"
 
 # Temporary files for DOT/SVG conversion
-tempfile = "3.8"
+tempfile = "3.24"
 uuid.workspace = true
 
 # MIME type detection for static assets
@@ -112,7 +112,7 @@ chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile = "3.24"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3.0"
