@@ -770,6 +770,7 @@ impl DiscoveryService {
                                     path,
                                     inner_clone,
                                 ).await;
+                                debug!("mDNS service data handling completed");
                             });
                         }
                         Ok(ServiceEvent::ServiceRemoved(service_type, fullname)) => {
@@ -806,6 +807,8 @@ impl DiscoveryService {
 
         // For RAVENNA, fetch SDP via RTSP DESCRIBE
         if service_type.starts_with("_rtsp._tcp.") {
+            info!("Processing RTSP service type: {}", service_type);
+
             // Get first IP address
             let ip = match addresses.first() {
                 Some(addr) => *addr,
@@ -814,6 +817,7 @@ impl DiscoveryService {
                     return;
                 }
             };
+            info!("Using IP address: {}", ip);
 
             // Build RTSP URL - ensure path starts with /
             let path = if path.starts_with('/') {
@@ -823,18 +827,34 @@ impl DiscoveryService {
             };
             let rtsp_url = format!("rtsp://{}:{}{}", ip, port, path);
 
-            debug!("Fetching SDP from RTSP URL: {}", rtsp_url);
+            info!("Fetching SDP from RTSP URL: {}", rtsp_url);
 
             // Fetch SDP
             match rtsp_client::rtsp_describe(&rtsp_url).await {
                 Ok(sdp) => {
+                    info!(
+                        "Successfully fetched SDP ({} bytes) from {}",
+                        sdp.len(),
+                        rtsp_url
+                    );
                     // Parse SDP to extract stream info
                     if let Some(sdp_info) = SdpStreamInfo::parse(&sdp) {
-                        let stream_id = sdp_info.generate_id(&ip);
+                        // Generate stream ID with mDNS suffix to differentiate from SAP
+                        let base_id = sdp_info.generate_id(&ip);
+                        let stream_id = format!("{}-mdns", base_id);
+                        info!(
+                            "Parsed SDP, stream_id: {}, name: {}",
+                            stream_id, sdp_info.name
+                        );
                         let now = Instant::now();
 
                         let mut streams = inner.discovered_streams.write().await;
                         let is_new = !streams.contains_key(&stream_id);
+                        info!(
+                            "Stream is_new: {}, total_streams: {}",
+                            is_new,
+                            streams.len()
+                        );
 
                         let stream = DiscoveredStream {
                             id: stream_id.clone(),
@@ -881,13 +901,18 @@ impl DiscoveryService {
                             });
                         }
                     } else {
-                        warn!("Failed to parse SDP from RTSP URL: {}", rtsp_url);
+                        warn!(
+                            "Failed to parse SDP from RTSP URL: {}, SDP content: {}",
+                            rtsp_url, sdp
+                        );
                     }
                 }
                 Err(e) => {
                     warn!("Failed to fetch SDP from {}: {}", rtsp_url, e);
                 }
             }
+        } else {
+            info!("Ignoring non-RTSP mDNS service type: {}", service_type);
         }
     }
 
