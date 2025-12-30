@@ -1,8 +1,3 @@
-[[hooks]]
-stage = "build"
-command = "echo"
-command_arguments = ["Building Strom frontend..."]
-
 [build]
 target = "index.html"
 # Build output goes to backend/dist for embedding
