@@ -3,7 +3,7 @@
 //! This module exposes the application builder for use in tests.
 
 use axum::extract::DefaultBodyLimit;
-use axum::http::{header, HeaderValue, Method};
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::{
     middleware,
     routing::{delete, get, patch, post, put},
@@ -25,6 +25,7 @@ pub mod events;
 pub mod gst;
 pub mod gui;
 pub mod layout;
+pub mod mcp;
 pub mod network;
 pub mod openapi;
 pub mod paths;
@@ -204,13 +205,21 @@ pub async fn create_app_with_state_and_auth(
     let public_api_router = Router::new()
         .route("/login", post(auth::login_handler))
         .route("/logout", post(auth::logout_handler))
-        .route("/auth/status", get(auth::auth_status_handler));
+        .route("/auth/status", get(auth::auth_status_handler))
+        // MCP Streamable HTTP endpoint (has its own session management)
+        .route("/mcp", post(api::mcp::mcp_post))
+        .route("/mcp", get(api::mcp::mcp_get))
+        .route("/mcp", delete(api::mcp::mcp_delete));
 
-    // Combine routers with auth config extension
+    // Create MCP session manager
+    let mcp_sessions = mcp::McpSessionManager::new();
+
+    // Combine routers with auth config and MCP session manager extensions
     let api_router = Router::new()
         .merge(public_api_router)
         .merge(protected_api_router)
-        .layer(Extension(auth_config));
+        .layer(Extension(auth_config))
+        .layer(Extension(mcp_sessions));
 
     // Build main router with Swagger UI
     Router::new()
@@ -236,7 +245,9 @@ pub async fn create_app_with_state_and_auth(
                     header::AUTHORIZATION,
                     header::ACCEPT,
                     header::COOKIE,
+                    HeaderName::from_static("mcp-session-id"),
                 ])
+                .expose_headers([HeaderName::from_static("mcp-session-id")])
                 .allow_credentials(true),
         )
         .with_state(state)
