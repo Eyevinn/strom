@@ -50,9 +50,9 @@ struct McpServer {
 }
 
 impl McpServer {
-    fn new(api_url: String) -> Self {
+    fn new(api_url: String, api_key: Option<String>) -> Self {
         Self {
-            client: StromClient::new(api_url),
+            client: StromClient::new(api_url, api_key),
         }
     }
 
@@ -528,10 +528,16 @@ async fn main() -> Result<()> {
     let api_url = std::env::var("STROM_API_URL")
         .unwrap_or_else(|_| format!("http://localhost:{}", strom_types::DEFAULT_PORT));
 
+    // Get optional API key for authentication
+    let api_key = std::env::var("STROM_API_KEY").ok();
+
     info!("Starting Strom MCP Server");
     info!("Connecting to Strom API at: {}", api_url);
+    if api_key.is_some() {
+        info!("Using API key authentication");
+    }
 
-    let server = McpServer::new(api_url);
+    let server = McpServer::new(api_url, api_key);
 
     // Read from stdin and write to stdout
     let stdin = io::stdin();

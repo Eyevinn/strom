@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use reqwest::Client;
+use reqwest::{header::HeaderValue, Client, RequestBuilder};
 use serde::Deserialize;
 use std::collections::HashMap;
 use strom_types::{
@@ -27,21 +27,34 @@ struct ElementResponse {
 pub struct StromClient {
     base_url: String,
     client: Client,
+    api_key: Option<String>,
 }
 
 impl StromClient {
-    pub fn new(base_url: String) -> Self {
+    pub fn new(base_url: String, api_key: Option<String>) -> Self {
         Self {
             base_url,
             client: Client::new(),
+            api_key,
+        }
+    }
+
+    /// Add authentication header if API key is configured
+    fn with_auth(&self, request: RequestBuilder) -> RequestBuilder {
+        match &self.api_key {
+            Some(key) => {
+                let header_value = HeaderValue::from_str(key)
+                    .unwrap_or_else(|_| HeaderValue::from_static("invalid-api-key"));
+                request.header("X-API-Key", header_value)
+            }
+            None => request,
         }
     }
 
     /// List all flows
     pub async fn list_flows(&self) -> Result<FlowListResponse> {
         let url = format!("{}/api/flows", self.base_url);
-        self.client
-            .get(&url)
+        self.with_auth(self.client.get(&url))
             .send()
             .await
             .context("Failed to send request")?
@@ -53,8 +66,7 @@ impl StromClient {
     /// Get a specific flow
     pub async fn get_flow(&self, flow_id: &str) -> Result<FlowResponse> {
         let url = format!("{}/api/flows/{}", self.base_url, flow_id);
-        self.client
-            .get(&url)
+        self.with_auth(self.client.get(&url))
             .send()
             .await
             .context("Failed to send request")?
@@ -66,8 +78,7 @@ impl StromClient {
     /// Create a new flow
     pub async fn create_flow(&self, request: CreateFlowRequest) -> Result<FlowResponse> {
         let url = format!("{}/api/flows", self.base_url);
-        self.client
-            .post(&url)
+        self.with_auth(self.client.post(&url))
             .json(&request)
             .send()
             .await
@@ -80,8 +91,7 @@ impl StromClient {
     /// Update a flow
     pub async fn update_flow(&self, flow_id: &str, flow: Flow) -> Result<FlowResponse> {
         let url = format!("{}/api/flows/{}", self.base_url, flow_id);
-        self.client
-            .post(&url)
+        self.with_auth(self.client.post(&url))
             .json(&flow)
             .send()
             .await
@@ -94,8 +104,7 @@ impl StromClient {
     /// Delete a flow
     pub async fn delete_flow(&self, flow_id: &str) -> Result<()> {
         let url = format!("{}/api/flows/{}", self.base_url, flow_id);
-        self.client
-            .delete(&url)
+        self.with_auth(self.client.delete(&url))
             .send()
             .await
             .context("Failed to send request")?;
@@ -105,8 +114,7 @@ impl StromClient {
     /// Start a flow
     pub async fn start_flow(&self, flow_id: &str) -> Result<()> {
         let url = format!("{}/api/flows/{}/start", self.base_url, flow_id);
-        self.client
-            .post(&url)
+        self.with_auth(self.client.post(&url))
             .send()
             .await
             .context("Failed to send request")?;
@@ -116,8 +124,7 @@ impl StromClient {
     /// Stop a flow
     pub async fn stop_flow(&self, flow_id: &str) -> Result<()> {
         let url = format!("{}/api/flows/{}/stop", self.base_url, flow_id);
-        self.client
-            .post(&url)
+        self.with_auth(self.client.post(&url))
             .send()
             .await
             .context("Failed to send request")?;
@@ -128,8 +135,7 @@ impl StromClient {
     pub async fn list_elements(&self) -> Result<Vec<ElementInfo>> {
         let url = format!("{}/api/elements", self.base_url);
         let response: ElementListResponse = self
-            .client
-            .get(&url)
+            .with_auth(self.client.get(&url))
             .send()
             .await
             .context("Failed to send request")?
@@ -143,8 +149,7 @@ impl StromClient {
     pub async fn get_element_info(&self, element_name: &str) -> Result<ElementInfo> {
         let url = format!("{}/api/elements/{}", self.base_url, element_name);
         let response: ElementResponse = self
-            .client
-            .get(&url)
+            .with_auth(self.client.get(&url))
             .send()
             .await
             .context("Failed to send request")?
@@ -165,8 +170,7 @@ impl StromClient {
             self.base_url, flow_id, element_id
         );
         let response: ElementPropertiesResponse = self
-            .client
-            .get(&url)
+            .with_auth(self.client.get(&url))
             .send()
             .await
             .context("Failed to send request")?
@@ -193,8 +197,7 @@ impl StromClient {
             value,
         };
         let response: ElementPropertiesResponse = self
-            .client
-            .patch(&url)
+            .with_auth(self.client.patch(&url))
             .json(&request)
             .send()
             .await
@@ -213,8 +216,7 @@ impl StromClient {
     ) -> Result<FlowResponse> {
         let url = format!("{}/api/flows/{}/properties", self.base_url, flow_id);
         let request = UpdateFlowPropertiesRequest { properties };
-        self.client
-            .patch(&url)
+        self.with_auth(self.client.patch(&url))
             .json(&request)
             .send()
             .await
@@ -237,8 +239,7 @@ impl StromClient {
             self.base_url, flow_id, element_id, pad_name
         );
         let response: PadPropertiesResponse = self
-            .client
-            .get(&url)
+            .with_auth(self.client.get(&url))
             .send()
             .await
             .context("Failed to send request")?
@@ -267,8 +268,7 @@ impl StromClient {
             value,
         };
         let response: PadPropertiesResponse = self
-            .client
-            .patch(&url)
+            .with_auth(self.client.patch(&url))
             .json(&request)
             .send()
             .await

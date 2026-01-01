@@ -40,7 +40,7 @@ Sessions are managed via the `Mcp-Session-Id` header:
 ### Example: Initialize
 
 ```bash
-curl -X POST http://localhost:8081/api/mcp \
+curl -X POST http://localhost:8080/api/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}'
@@ -67,7 +67,7 @@ Mcp-Session-Id: <uuid>
 ### Example: List Tools
 
 ```bash
-curl -X POST http://localhost:8081/api/mcp \
+curl -X POST http://localhost:8080/api/mcp \
   -H "Content-Type: application/json" \
   -H "Mcp-Session-Id: <session-id>" \
   -d '{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}'
@@ -76,7 +76,7 @@ curl -X POST http://localhost:8081/api/mcp \
 ### Example: Call a Tool
 
 ```bash
-curl -X POST http://localhost:8081/api/mcp \
+curl -X POST http://localhost:8080/api/mcp \
   -H "Content-Type: application/json" \
   -H "Mcp-Session-Id: <session-id>" \
   -d '{
@@ -95,7 +95,7 @@ curl -X POST http://localhost:8081/api/mcp \
 Connect to receive real-time notifications:
 
 ```bash
-curl -N http://localhost:8081/api/mcp \
+curl -N http://localhost:8080/api/mcp \
   -H "Accept: text/event-stream" \
   -H "Mcp-Session-Id: <session-id>"
 ```
@@ -112,13 +112,26 @@ Events include:
 ### Terminate Session
 
 ```bash
-curl -X DELETE http://localhost:8081/api/mcp \
+curl -X DELETE http://localhost:8080/api/mcp \
   -H "Mcp-Session-Id: <session-id>"
 ```
 
 ## stdio Transport
 
-The standalone `strom-mcp-server` binary provides stdio transport for local CLI tools.
+The standalone `strom-mcp-server` binary provides stdio transport for local CLI tools like Claude Code.
+
+### How It Works
+
+The stdio server acts as a proxy between the MCP client and Strom's REST API:
+
+```
+Claude Code <--stdio--> strom-mcp-server <--HTTP REST API--> Strom Backend
+```
+
+This architecture enables **remote communication**: while the MCP server runs locally alongside Claude Code, it can connect to a Strom instance running anywhere accessible via HTTP. This is useful for:
+- Controlling remote Strom instances from your local machine
+- Managing multiple Strom deployments from a single Claude Code session
+- Accessing Strom servers in Docker containers, VMs, or cloud instances
 
 ### Configuration
 
@@ -130,19 +143,36 @@ Add to your Claude Code MCP configuration (`.mcp.json`):
     "strom": {
       "command": "/path/to/strom-mcp-server",
       "env": {
-        "STROM_API_URL": "http://localhost:8081"
+        "STROM_API_URL": "http://localhost:8080"
       }
     }
   }
 }
 ```
 
-### How It Works
+#### Environment Variables
 
-The stdio server acts as a proxy:
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `STROM_API_URL` | URL of the Strom server | `http://localhost:8080` |
+| `STROM_API_KEY` | API key for authentication (if enabled on server) | None |
 
-```
-Claude Code <--stdio--> strom-mcp-server <--HTTP--> Strom Backend
+#### Remote Connection Example
+
+To connect to a remote Strom server:
+
+```json
+{
+  "mcpServers": {
+    "strom-production": {
+      "command": "/path/to/strom-mcp-server",
+      "env": {
+        "STROM_API_URL": "https://strom.example.com:8080",
+        "STROM_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
 ```
 
 ## Comparison
@@ -151,11 +181,12 @@ Claude Code <--stdio--> strom-mcp-server <--HTTP--> Strom Backend
 |---------|-----------------|-------|
 | **Latency** | Direct (< 1ms) | HTTP round-trip (~5ms) |
 | **Deployment** | Single binary | Requires separate binary |
-| **Remote access** | Yes | No (local only) |
+| **Remote Strom access** | Yes | Yes (via HTTP proxy) |
 | **Multiple clients** | Yes | One per process |
 | **Real-time events** | SSE streaming | Not supported |
 | **Session management** | Built-in | N/A |
 | **Browser support** | Yes | No |
+| **Authentication** | API key header | API key via env var |
 
 ### When to Use Each
 
@@ -167,8 +198,8 @@ Claude Code <--stdio--> strom-mcp-server <--HTTP--> Strom Backend
 
 **Use stdio when:**
 - Using Claude Code CLI
-- Need simplest possible local setup
-- Running in environments where HTTP isn't practical
+- Controlling local or remote Strom instances from your development machine
+- Need simplest possible setup for CLI tools
 
 ## Available Tools
 
@@ -199,8 +230,10 @@ Both transports provide the same 12 tools:
 
 ### stdio
 
-- **Local only**: Only accessible from the local machine
+- **Local process**: The MCP server binary runs locally alongside Claude Code
 - **Process isolation**: Each invocation is independent
+- **Remote authentication**: When connecting to a remote Strom server with authentication enabled, the `STROM_API_KEY` environment variable must be set
+- **Inherits server security**: All API key validation is performed by the Strom server, so security policies are enforced regardless of transport
 
 ## Architecture
 
