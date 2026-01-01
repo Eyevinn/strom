@@ -20,11 +20,13 @@ use axum::{
 use futures::stream::Stream;
 use serde_json::json;
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
 
+use crate::auth::AuthConfig;
 use crate::mcp::{
     handler::{JsonRpcRequest, McpHandler},
     session::McpEvent,
@@ -66,6 +68,49 @@ fn get_session_id(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Validate MCP authentication.
+///
+/// Checks for API key in:
+/// 1. `X-API-Key` header (preferred for MCP)
+/// 2. `Authorization: Bearer <token>` header (standard HTTP auth)
+///
+/// Returns Ok(()) if authenticated or auth is disabled, Err(Response) otherwise.
+#[allow(clippy::result_large_err)]
+fn validate_mcp_auth(auth_config: &AuthConfig, headers: &HeaderMap) -> Result<(), Response> {
+    // If authentication is disabled, allow all requests
+    if !auth_config.enabled {
+        return Ok(());
+    }
+
+    // Check X-API-Key header (preferred for MCP clients)
+    if let Some(api_key_header) = headers.get("x-api-key") {
+        if let Ok(key) = api_key_header.to_str() {
+            if auth_config.verify_api_key(key) {
+                return Ok(());
+            }
+        }
+    }
+
+    // Check Authorization: Bearer header
+    if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                if auth_config.verify_api_key(token) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // No valid authentication found
+    warn!("MCP: Authentication failed - no valid API key provided");
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": "Authentication required. Provide X-API-Key header or Authorization: Bearer <api-key>"})),
+    )
+        .into_response())
+}
+
 /// POST /api/mcp - Handle JSON-RPC requests.
 ///
 /// Accepts JSON-RPC requests and returns either:
@@ -76,9 +121,15 @@ fn get_session_id(headers: &HeaderMap) -> Option<String> {
 pub async fn mcp_post(
     State(state): State<AppState>,
     Extension(sessions): Extension<McpSessionManager>,
+    Extension(auth_config): Extension<Arc<AuthConfig>>,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Response {
+    // Validate authentication
+    if let Err(response) = validate_mcp_auth(&auth_config, &headers) {
+        return response;
+    }
+
     // Validate origin for DNS rebinding protection
     if !validate_origin(&headers) {
         return (
@@ -159,8 +210,14 @@ pub async fn mcp_post(
 pub async fn mcp_get(
     State(state): State<AppState>,
     Extension(sessions): Extension<McpSessionManager>,
+    Extension(auth_config): Extension<Arc<AuthConfig>>,
     headers: HeaderMap,
 ) -> Response {
+    // Validate authentication
+    if let Err(response) = validate_mcp_auth(&auth_config, &headers) {
+        return response;
+    }
+
     // Validate origin
     if !validate_origin(&headers) {
         return (
@@ -309,22 +366,28 @@ fn create_sse_stream(
 /// Terminates the session identified by the `Mcp-Session-Id` header.
 pub async fn mcp_delete(
     Extension(sessions): Extension<McpSessionManager>,
+    Extension(auth_config): Extension<Arc<AuthConfig>>,
     headers: HeaderMap,
-) -> StatusCode {
+) -> Response {
+    // Validate authentication
+    if let Err(response) = validate_mcp_auth(&auth_config, &headers) {
+        return response;
+    }
+
     // Validate origin
     if !validate_origin(&headers) {
-        return StatusCode::FORBIDDEN;
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     let session_id = match get_session_id(&headers) {
         Some(id) => id,
-        None => return StatusCode::BAD_REQUEST,
+        None => return StatusCode::BAD_REQUEST.into_response(),
     };
 
     if sessions.terminate(&session_id).await {
         info!("MCP: Session terminated: {}", session_id);
-        StatusCode::NO_CONTENT
+        StatusCode::NO_CONTENT.into_response()
     } else {
-        StatusCode::NOT_FOUND
+        StatusCode::NOT_FOUND.into_response()
     }
 }

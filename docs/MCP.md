@@ -257,7 +257,9 @@ Both transports provide the same 12 tools:
 
 - **Origin validation**: Requests are validated against allowed origins (localhost by default)
 - **Session isolation**: Each session has independent state
-- **No authentication bypass**: MCP endpoint respects server authentication settings
+- **API key authentication**: When `STROM_API_KEY` is set on the server, requests must include either:
+  - `X-API-Key: <key>` header (recommended)
+  - `Authorization: Bearer <key>` header
 
 ### stdio
 
