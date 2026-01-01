@@ -116,6 +116,37 @@ curl -X DELETE http://localhost:8080/api/mcp \
   -H "Mcp-Session-Id: <session-id>"
 ```
 
+### Claude Code Configuration
+
+Add to your Claude Code MCP configuration (`.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "strom": {
+      "type": "http",
+      "url": "http://localhost:8080/api/mcp"
+    }
+  }
+}
+```
+
+For remote servers with authentication:
+
+```json
+{
+  "mcpServers": {
+    "strom": {
+      "type": "http",
+      "url": "https://strom.example.com/api/mcp",
+      "headers": {
+        "X-API-Key": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
 ## stdio Transport
 
 The standalone `strom-mcp-server` binary provides stdio transport for local CLI tools like Claude Code.
