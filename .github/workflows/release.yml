@@ -64,14 +64,15 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            platform: linux
+            platform: linux-x86_64
             target: x86_64-unknown-linux-gnu
+            glibc: "2.31"
             binary_ext: ""
-          - os: ubuntu-24.04
-            platform: linux
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
             target: aarch64-unknown-linux-gnu
+            glibc: "2.31"
             binary_ext: ""
-            cross: true
           - os: windows-latest
             platform: windows
             target: x86_64-pc-windows-msvc
@@ -91,73 +92,40 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
-      - name: Install Rust stable with WASM target and build target
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown,${{ matrix.target }}
+          targets: ${{ matrix.target }}
 
-      # Linux: Install Zig for glibc-targeted builds
-      - name: Install Zig (Linux)
-        if: matrix.platform == 'linux'
+      # Linux: Install Zig and cargo-zigbuild for glibc 2.31 compatibility
+      - name: Install Zig and cargo-zigbuild (Linux)
+        if: startsWith(matrix.platform, 'linux')
+        shell: bash
         run: |
           ZIG_VERSION="0.13.0"
-          ZIG_TARBALL="zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
-          curl -L "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o "/tmp/${ZIG_TARBALL}"
-          sudo tar -xf "/tmp/${ZIG_TARBALL}" -C /usr/local
-          sudo mv /usr/local/zig-linux-x86_64-${ZIG_VERSION} /usr/local/zig
-          sudo ln -s /usr/local/zig/zig /usr/local/bin/zig
-          rm "/tmp/${ZIG_TARBALL}"
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "aarch64" ]; then
+            ZIG_ARCH="aarch64"
+          else
+            ZIG_ARCH="x86_64"
+          fi
+          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /usr/local
+          sudo ln -sf /usr/local/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
           zig version
+          cargo install --locked cargo-zigbuild
 
-      # Linux: Install cargo-zigbuild for glibc-targeted compilation
-      - name: Install cargo-zigbuild (Linux)
-        if: matrix.platform == 'linux'
-        run: cargo install --locked cargo-zigbuild
-
-      # Linux x86_64: Install GStreamer via apt (ubuntu-24.04 has 1.24+)
-      - name: Cache apt packages (Linux x86_64)
-        if: matrix.platform == 'linux' && matrix.target == 'x86_64-unknown-linux-gnu'
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: libssl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools
-          version: 1.2
-
-      # Linux x86_64: Set up environment for zigbuild
-      - name: Set up zigbuild environment (Linux x86_64)
-        if: matrix.platform == 'linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+      # Linux: Install GStreamer dev packages
+      - name: Install GStreamer (Linux)
+        if: startsWith(matrix.platform, 'linux')
         run: |
-          # Tell zig linker where to find x86_64 libraries
-          echo "RUSTFLAGS=-L /usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-
-      # Linux ARM64: Install cross-compilation tools and ARM64 GStreamer (ubuntu-24.04 has 1.24+)
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.platform == 'linux' && matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo dpkg --add-architecture arm64
-          # Backup and disable original sources
-          sudo mv /etc/apt/sources.list /etc/apt/sources.list.disabled
-          sudo mv /etc/apt/sources.list.d /etc/apt/sources.list.d.disabled || true
-          sudo mkdir -p /etc/apt/sources.list.d
-          # Create explicit amd64 sources
-          cat <<EOF | sudo tee /etc/apt/sources.list
-          deb [arch=amd64] http://archive.ubuntu.com/ubuntu $(lsb_release -sc) main universe
-          deb [arch=amd64] http://archive.ubuntu.com/ubuntu $(lsb_release -sc)-updates main universe
-          deb [arch=amd64] http://archive.ubuntu.com/ubuntu $(lsb_release -sc)-security main universe
-          EOF
-          # Create ARM64 sources from Ubuntu ports
-          cat <<EOF | sudo tee /etc/apt/sources.list.d/arm64.list
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc) main universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-updates main universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -sc)-security main universe
-          EOF
           sudo apt-get update
-          sudo apt-get install -y libssl-dev:arm64 pkg-config:arm64 libunwind-dev:arm64
-          sudo apt-get install -y libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64 libgstreamer-plugins-bad1.0-dev:arm64
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
-          echo "AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
-          # Tell zig linker where to find ARM64 libraries
-          echo "RUSTFLAGS=-L /usr/lib/aarch64-linux-gnu" >> $GITHUB_ENV
+          sudo apt-get install -y \
+            libunwind-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libssl-dev \
+            pkg-config
 
       # Windows: Install Strawberry Perl (needed for OpenSSL build)
       - name: Install Strawberry Perl (Windows)
@@ -212,30 +180,24 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-${{ matrix.platform }}-${{ matrix.os }}
+          shared-key: release-${{ matrix.platform }}
           cache-on-failure: true
 
-      - name: Build backend (with embedded frontend)
-        shell: bash
+      # Linux: Build with zigbuild for glibc compatibility
+      - name: Build backend (Linux - glibc ${{ matrix.glibc }})
+        if: startsWith(matrix.platform, 'linux')
+        env:
+          RUSTFLAGS: "-L /usr/lib/${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu' || 'x86_64-linux-gnu' }}"
         run: |
-          if [ "${{ matrix.platform }}" = "linux" ]; then
-            # Use cargo-zigbuild for Linux to target glibc 2.31 (Ubuntu 20.04+)
-            cargo zigbuild --release --package strom --target ${{ matrix.target }}.2.31
-          else
-            # Use standard cargo build for non-Linux platforms
-            cargo build --release --package strom --target ${{ matrix.target }}
-          fi
+          cargo zigbuild --release --package strom --target ${{ matrix.target }}.${{ matrix.glibc }}
+          cargo zigbuild --release --package strom-mcp-server --target ${{ matrix.target }}.${{ matrix.glibc }}
 
-      - name: Build MCP server
-        shell: bash
+      # Non-Linux: Build with regular cargo
+      - name: Build backend (non-Linux)
+        if: ${{ !startsWith(matrix.platform, 'linux') }}
         run: |
-          if [ "${{ matrix.platform }}" = "linux" ]; then
-            # Use cargo-zigbuild for Linux to target glibc 2.31 (Ubuntu 20.04+)
-            cargo zigbuild --release --package strom-mcp-server --target ${{ matrix.target }}.2.31
-          else
-            # Use standard cargo build for non-Linux platforms
-            cargo build --release --package strom-mcp-server --target ${{ matrix.target }}
-          fi
+          cargo build --release --package strom --target ${{ matrix.target }}
+          cargo build --release --package strom-mcp-server --target ${{ matrix.target }}
 
       - name: Upload backend binary
         uses: actions/upload-artifact@v4
@@ -276,10 +238,10 @@ jobs:
           mkdir -p release-assets
 
           # Rename binaries with platform suffixes
-          mv artifacts/strom-v${{ steps.version.outputs.version }}-linux-x86_64-unknown-linux-gnu/strom \
+          mv artifacts/strom-v${{ steps.version.outputs.version }}-linux-x86_64-x86_64-unknown-linux-gnu/strom \
              release-assets/strom-v${{ steps.version.outputs.version }}-linux-x86_64
 
-          mv artifacts/strom-v${{ steps.version.outputs.version }}-linux-aarch64-unknown-linux-gnu/strom \
+          mv artifacts/strom-v${{ steps.version.outputs.version }}-linux-arm64-aarch64-unknown-linux-gnu/strom \
              release-assets/strom-v${{ steps.version.outputs.version }}-linux-aarch64
 
           mv artifacts/strom-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin/strom \
@@ -288,10 +250,10 @@ jobs:
           mv artifacts/strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc/strom.exe \
              release-assets/strom-v${{ steps.version.outputs.version }}-windows-x86_64.exe
 
-          mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64-unknown-linux-gnu/strom-mcp-server \
+          mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64-x86_64-unknown-linux-gnu/strom-mcp-server \
              release-assets/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64
 
-          mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-aarch64-unknown-linux-gnu/strom-mcp-server \
+          mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-arm64-aarch64-unknown-linux-gnu/strom-mcp-server \
              release-assets/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-aarch64
 
           mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin/strom-mcp-server \
