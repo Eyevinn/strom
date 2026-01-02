@@ -57,6 +57,9 @@ jobs:
             pkg-config
 
       - name: Build backend (native ARM64, targeting glibc ${{ inputs.glibc_version }})
+        env:
+          # Tell Zig linker where to find system libraries (GStreamer, etc.)
+          RUSTFLAGS: "-L /usr/lib/aarch64-linux-gnu"
         run: |
           echo "==> Building strom natively on ARM64, targeting glibc ${{ inputs.glibc_version }}"
           cargo zigbuild --release --package strom --features no-gui \
@@ -66,6 +69,8 @@ jobs:
           file target/aarch64-unknown-linux-gnu/release/strom
 
       - name: Build MCP server
+        env:
+          RUSTFLAGS: "-L /usr/lib/aarch64-linux-gnu"
         run: |
           cargo zigbuild --release --package strom-mcp-server \
             --target aarch64-unknown-linux-gnu.${{ inputs.glibc_version }}
