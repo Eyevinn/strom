@@ -1,5 +1,8 @@
 //! OpenGL video compositor block for combining multiple video inputs.
 //!
+//! **DEPRECATED**: Use `builtin.compositor` (Video Compositor) instead, which supports
+//! both GPU and CPU backends with automatic fallback.
+//!
 //! This block uses GStreamer's `glvideomixerelement` to composite multiple video streams
 //! with hardware-accelerated OpenGL rendering. Each input can be positioned, sized, and
 //! blended independently with configurable properties.
@@ -773,9 +776,9 @@ fn glcompositor_definition() -> BlockDefinition {
 
     BlockDefinition {
         id: "builtin.glcompositor".to_string(),
-        name: "OpenGL Video Compositor".to_string(),
-        description: "Hardware-accelerated OpenGL video compositor. Note: Consider using the new 'Video Compositor' block instead, which supports both GPU and CPU backends with automatic fallback.".to_string(),
-        category: "Video".to_string(),
+        name: "[Deprecated] OpenGL Compositor".to_string(),
+        description: "DEPRECATED: Use 'Video Compositor' instead, which supports both GPU and CPU backends with automatic fallback. This block will be removed in a future release.".to_string(),
+        category: "Deprecated".to_string(),
         exposed_properties,
         // External pads are computed dynamically based on num_inputs
         external_pads: ExternalPads {

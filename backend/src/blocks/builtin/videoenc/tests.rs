@@ -534,7 +534,7 @@ fn test_build_video_encoder_block() {
             assert_eq!(
                 block_result.elements.len(),
                 4,
-                "Should create 4 elements (videoconvert, encoder, parser, capsfilter)"
+                "Should create 4 elements (autovideoconvert, encoder, parser, capsfilter)"
             );
             assert_eq!(
                 block_result.internal_links.len(),
