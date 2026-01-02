@@ -11,8 +11,8 @@ on:
 
 jobs:
   test-arm64-native:
-    name: Test native ARM64 build on Ubuntu 22.04
-    runs-on: ubuntu-22.04-arm
+    name: Test native ARM64 build
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
       - name: System info
@@ -37,6 +37,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libunwind-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev \
@@ -62,7 +63,7 @@ jobs:
       - name: Upload ARM64 binaries
         uses: actions/upload-artifact@v4
         with:
-          name: strom-arm64-native-ubuntu2204
+          name: strom-arm64-native-ubuntu2404
           path: |
             target/release/strom
             target/release/strom-mcp-server
