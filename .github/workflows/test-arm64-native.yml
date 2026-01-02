@@ -1,0 +1,76 @@
+name: Test ARM64 Native Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_docker:
+        description: 'Also build Docker image (slower)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  test-arm64-native:
+    name: Test native ARM64 build on Ubuntu 22.04
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: System info
+        run: |
+          echo "==> Architecture"
+          uname -m
+          echo "==> OS Release"
+          cat /etc/os-release
+          echo "==> glibc version"
+          ldd --version | head -1
+          echo "==> CPU info"
+          nproc
+          cat /proc/cpuinfo | grep "model name" | head -1 || true
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Install GStreamer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Build backend (native ARM64)
+        run: |
+          echo "==> Building strom backend natively on ARM64"
+          cargo build --release --package strom --features no-gui
+          echo "==> Build complete!"
+          ls -la target/release/strom
+          file target/release/strom
+          echo "==> Checking linked libraries"
+          ldd target/release/strom | head -20
+
+      - name: Build MCP server
+        run: |
+          cargo build --release --package strom-mcp-server
+          ls -la target/release/strom-mcp-server
+          file target/release/strom-mcp-server
+
+      - name: Upload ARM64 binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: strom-arm64-native-ubuntu2204
+          path: |
+            target/release/strom
+            target/release/strom-mcp-server
+
+      - name: Build Docker image (ARM64 only)
+        if: ${{ inputs.build_docker }}
+        run: |
+          echo "==> Building Docker image natively on ARM64"
+          docker build --platform linux/arm64 -t strom-arm64-test .
+          echo "==> Docker build complete!"
+          docker images strom-arm64-test
