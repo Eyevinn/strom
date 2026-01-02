@@ -3,15 +3,15 @@ name: Test ARM64 Native Build
 on:
   workflow_dispatch:
     inputs:
-      build_docker:
-        description: 'Also build Docker image (slower)'
+      glibc_version:
+        description: 'Target glibc version (e.g., 2.31 for Ubuntu 20.04)'
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: '2.31'
 
 jobs:
   test-arm64-native:
-    name: Test native ARM64 build
+    name: Test native ARM64 build (glibc ${{ inputs.glibc_version }})
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
@@ -21,17 +21,29 @@ jobs:
           uname -m
           echo "==> OS Release"
           cat /etc/os-release
-          echo "==> glibc version"
+          echo "==> Host glibc version"
           ldd --version | head -1
+          echo "==> Target glibc version: ${{ inputs.glibc_version }}"
           echo "==> CPU info"
           nproc
-          cat /proc/cpuinfo | grep "model name" | head -1 || true
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install Zig and cargo-zigbuild
+        run: |
+          # Install Zig
+          ZIG_VERSION="0.13.0"
+          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-aarch64-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /usr/local
+          sudo ln -s /usr/local/zig-linux-aarch64-${ZIG_VERSION}/zig /usr/local/bin/zig
+          zig version
+          # Install cargo-zigbuild
+          cargo install --locked cargo-zigbuild
 
       - name: Install GStreamer dependencies
         run: |
@@ -44,34 +56,35 @@ jobs:
             libssl-dev \
             pkg-config
 
-      - name: Build backend (native ARM64)
+      - name: Build backend (native ARM64, targeting glibc ${{ inputs.glibc_version }})
         run: |
-          echo "==> Building strom backend natively on ARM64"
-          cargo build --release --package strom --features no-gui
+          echo "==> Building strom natively on ARM64, targeting glibc ${{ inputs.glibc_version }}"
+          cargo zigbuild --release --package strom --features no-gui \
+            --target aarch64-unknown-linux-gnu.${{ inputs.glibc_version }}
           echo "==> Build complete!"
-          ls -la target/release/strom
-          file target/release/strom
-          echo "==> Checking linked libraries"
-          ldd target/release/strom | head -20
+          ls -la target/aarch64-unknown-linux-gnu/release/strom
+          file target/aarch64-unknown-linux-gnu/release/strom
 
       - name: Build MCP server
         run: |
-          cargo build --release --package strom-mcp-server
-          ls -la target/release/strom-mcp-server
-          file target/release/strom-mcp-server
+          cargo zigbuild --release --package strom-mcp-server \
+            --target aarch64-unknown-linux-gnu.${{ inputs.glibc_version }}
+          ls -la target/aarch64-unknown-linux-gnu/release/strom-mcp-server
+          file target/aarch64-unknown-linux-gnu/release/strom-mcp-server
+
+      - name: Verify glibc symbols
+        run: |
+          echo "==> Checking glibc symbol versions in binary"
+          objdump -T target/aarch64-unknown-linux-gnu/release/strom | grep GLIBC | \
+            sed 's/.*GLIBC_/GLIBC_/' | cut -d' ' -f1 | sort -u
+          echo "==> Highest glibc version required:"
+          objdump -T target/aarch64-unknown-linux-gnu/release/strom | grep GLIBC | \
+            sed 's/.*GLIBC_//' | cut -d' ' -f1 | sort -V | tail -1
 
       - name: Upload ARM64 binaries
         uses: actions/upload-artifact@v4
         with:
-          name: strom-arm64-native-ubuntu2404
+          name: strom-arm64-glibc${{ inputs.glibc_version }}
           path: |
-            target/release/strom
-            target/release/strom-mcp-server
-
-      - name: Build Docker image (ARM64 only)
-        if: ${{ inputs.build_docker }}
-        run: |
-          echo "==> Building Docker image natively on ARM64"
-          docker build --platform linux/arm64 -t strom-arm64-test .
-          echo "==> Docker build complete!"
-          docker images strom-arm64-test
+            target/aarch64-unknown-linux-gnu/release/strom
+            target/aarch64-unknown-linux-gnu/release/strom-mcp-server
