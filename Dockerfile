@@ -121,8 +121,11 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     export AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu && \
     # Use C17 standard to avoid glibc 2.38+ C23 symbols (__isoc23_sscanf, __isoc23_strtol) \
     # that aws-lc-sys would otherwise use when built on Ubuntu 25.04 (glibc 2.41) \
+    # CFLAGS/CXXFLAGS for regular builds, CMAKE_C_FLAGS/CMAKE_CXX_FLAGS for CMake (aws-lc-sys) \
     export CFLAGS="-std=gnu17 -I/usr/include -I/usr/include/aarch64-linux-gnu" && \
     export CXXFLAGS="-std=gnu++17" && \
+    export CMAKE_C_FLAGS="-std=gnu17" && \
+    export CMAKE_CXX_FLAGS="-std=gnu++17" && \
     export RUSTFLAGS="-L /usr/lib/aarch64-linux-gnu" && \
     cargo zigbuild --release --package strom --no-default-features --features no-gui --target aarch64-unknown-linux-gnu.2.36 && \
     cargo zigbuild --release --package strom-mcp-server --target aarch64-unknown-linux-gnu.2.36 && \

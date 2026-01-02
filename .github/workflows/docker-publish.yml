@@ -74,8 +74,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Use GitHub Actions cache (much faster than registry cache)
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Cache key v2: bust cache after C17 fix for aws-lc-sys glibc 2.38+ symbols
+          cache-from: type=gha,scope=docker-v2
+          cache-to: type=gha,mode=max,scope=docker-v2
           # Multi-platform build: amd64 (native) + arm64 (Zig cross-compilation)
           platforms: linux/amd64,linux/arm64
           # Disable provenance and SBOM to prevent build hangs
