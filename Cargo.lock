@@ -3310,9 +3310,9 @@ dependencies = [
 
 [[package]]
 name = "network-interface"
-version = "2.0.4"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e79101e6efcffacab279462884a7eebf65ea5f4ac2cc727b60c715a9aa04722"
+checksum = "4ddcb8865ad3d9950f22f42ffa0ef0aecbfbf191867b3122413602b0a360b2a6"
 dependencies = [
  "cc",
  "libc",
@@ -5314,7 +5314,7 @@ dependencies = [
 
 [[package]]
 name = "strom"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5370,7 +5370,7 @@ dependencies = [
 
 [[package]]
 name = "strom-frontend"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -5399,7 +5399,7 @@ dependencies = [
 
 [[package]]
 name = "strom-mcp-server"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "reqwest 0.13.1",
@@ -5413,7 +5413,7 @@ dependencies = [
 
 [[package]]
 name = "strom-types"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "serde",
  "serde_json",
