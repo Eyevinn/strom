@@ -95,9 +95,11 @@ impl BlockBuilder for VideoFormatBuilder {
         // Elements will just pass through if their respective properties aren't set
         let scale_id = format!("{}:videoscale", instance_id);
         // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
+        // Note: We always use "videoconvert" as the element ID for consistent external pad references,
+        // even when the actual GStreamer element is "autovideoconvert"
         let convert_mode = video_convert_mode();
         let convert_element_name = convert_mode.element_name();
-        let convert_id = format!("{}:{}", instance_id, convert_element_name);
+        let convert_id = format!("{}:videoconvert", instance_id);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
 
         let videoscale = gst::ElementFactory::make("videoscale")
