@@ -6,7 +6,7 @@
 //! - Color format (pixel format) - enforced by caps
 //!
 //! All properties are optional. The block creates a fixed chain of elements:
-//! videoscale -> autovideoconvert -> capsfilter
+//! videoscale -> videoconvert -> capsfilter
 //!
 //! TEMPORARY: videorate element removed to avoid frame duplication issues.
 //!
@@ -14,6 +14,7 @@
 //! Unspecified properties allow passthrough - elements will not modify those aspects.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gpu::video_convert_mode;
 use gstreamer as gst;
 use std::collections::HashMap;
 use strom_types::{
@@ -93,7 +94,10 @@ impl BlockBuilder for VideoFormatBuilder {
         // Always create all elements for consistent external pad references
         // Elements will just pass through if their respective properties aren't set
         let scale_id = format!("{}:videoscale", instance_id);
-        let convert_id = format!("{}:autovideoconvert", instance_id);
+        // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
+        let convert_mode = video_convert_mode();
+        let convert_element_name = convert_mode.element_name();
+        let convert_id = format!("{}:{}", instance_id, convert_element_name);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
 
         let videoscale = gst::ElementFactory::make("videoscale")
@@ -107,10 +111,12 @@ impl BlockBuilder for VideoFormatBuilder {
         //     .build()
         //     .map_err(|e| BlockBuildError::ElementCreation(format!("videorate: {}", e)))?;
 
-        let videoconvert = gst::ElementFactory::make("autovideoconvert")
+        let videoconvert = gst::ElementFactory::make(convert_element_name)
             .name(&convert_id)
             .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("autovideoconvert: {}", e)))?;
+            .map_err(|e| {
+                BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
+            })?;
 
         // capsfilter with caps (only constraints specified properties)
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
@@ -123,9 +129,9 @@ impl BlockBuilder for VideoFormatBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
-        info!("🎬 VideoFormat block created (chain: videoscale -> autovideoconvert -> capsfilter) [videorate TEMPORARILY REMOVED]");
+        info!("🎬 VideoFormat block created (chain: videoscale -> {} -> capsfilter) [videorate TEMPORARILY REMOVED]", convert_element_name);
 
-        // Chain: videoscale -> autovideoconvert -> capsfilter (videorate temporarily removed)
+        // Chain: videoscale -> videoconvert/autovideoconvert -> capsfilter (videorate temporarily removed)
         let internal_links = vec![
             (
                 ElementPadRef::pad(&scale_id, "src"),
@@ -207,7 +213,7 @@ fn videoformat_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "format".to_string(),
                 label: "Pixel Format".to_string(),
-                description: "Pixel format/color space - creates autovideoconvert element. Leave empty to pass through.".to_string(),
+                description: "Pixel format/color space - creates videoconvert element. Leave empty to pass through.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue { value: "".to_string(), label: Some("-".to_string()) },

@@ -5,6 +5,7 @@
 //! Requires the NDI SDK from NewTek/Vizrt to be installed.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gpu::video_convert_mode;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -200,15 +201,17 @@ impl BlockBuilder for NDIInputBuilder {
         // Build pipeline based on mode
         match mode.as_str() {
             "combined" => {
-                // Video path
-                let videoconvert_id = format!("{}:autovideoconvert", instance_id);
+                // Video path - use detected video convert mode
+                let convert_mode = video_convert_mode();
+                let convert_element_name = convert_mode.element_name();
+                let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
                 let videocaps_id = format!("{}:videocapsfilter", instance_id);
 
-                let videoconvert = gst::ElementFactory::make("autovideoconvert")
+                let videoconvert = gst::ElementFactory::make(convert_element_name)
                     .name(&videoconvert_id)
                     .build()
                     .map_err(|e| {
-                        BlockBuildError::ElementCreation(format!("autovideoconvert: {}", e))
+                        BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
                     })?;
 
                 let video_caps = gst::Caps::builder("video/x-raw").build();
@@ -285,14 +288,17 @@ impl BlockBuilder for NDIInputBuilder {
                 );
             }
             "video" => {
-                let videoconvert_id = format!("{}:autovideoconvert", instance_id);
+                // Use detected video convert mode
+                let convert_mode = video_convert_mode();
+                let convert_element_name = convert_mode.element_name();
+                let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
                 let capsfilter_id = format!("{}:capsfilter", instance_id);
 
-                let videoconvert = gst::ElementFactory::make("autovideoconvert")
+                let videoconvert = gst::ElementFactory::make(convert_element_name)
                     .name(&videoconvert_id)
                     .build()
                     .map_err(|e| {
-                        BlockBuildError::ElementCreation(format!("autovideoconvert: {}", e))
+                        BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
                     })?;
 
                 let caps = gst::Caps::builder("video/x-raw").build();
@@ -413,7 +419,7 @@ impl BlockBuilder for NDIOutputBuilder {
                 ExternalPad {
                     name: "video_in".to_string(),
                     media_type: MediaType::Video,
-                    internal_element_id: "autovideoconvert".to_string(),
+                    internal_element_id: "videoconvert".to_string(),
                     internal_pad_name: "sink".to_string(),
                 },
                 ExternalPad {
@@ -426,7 +432,7 @@ impl BlockBuilder for NDIOutputBuilder {
             "video" => vec![ExternalPad {
                 name: "video_in".to_string(),
                 media_type: MediaType::Video,
-                internal_element_id: "autovideoconvert".to_string(),
+                internal_element_id: "videoconvert".to_string(),
                 internal_pad_name: "sink".to_string(),
             }],
             "audio" => vec![ExternalPad {
@@ -475,13 +481,15 @@ impl BlockBuilder for NDIOutputBuilder {
         // Build pipeline based on mode
         match mode.as_str() {
             "combined" => {
-                // Video path
-                let videoconvert_id = format!("{}:autovideoconvert", instance_id);
-                let videoconvert = gst::ElementFactory::make("autovideoconvert")
+                // Video path - use detected video convert mode
+                let convert_mode = video_convert_mode();
+                let convert_element_name = convert_mode.element_name();
+                let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
+                let videoconvert = gst::ElementFactory::make(convert_element_name)
                     .name(&videoconvert_id)
                     .build()
                     .map_err(|e| {
-                        BlockBuildError::ElementCreation(format!("autovideoconvert: {}", e))
+                        BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
                     })?;
 
                 // Audio path
@@ -557,14 +565,17 @@ impl BlockBuilder for NDIOutputBuilder {
                 info!("NDI Output (combined) configured: ndi_name={}", ndi_name);
             }
             "video" => {
-                let videoconvert_id = format!("{}:autovideoconvert", instance_id);
+                // Use detected video convert mode
+                let convert_mode = video_convert_mode();
+                let convert_element_name = convert_mode.element_name();
+                let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
                 let ndisink_id = format!("{}:ndisink", instance_id);
 
-                let videoconvert = gst::ElementFactory::make("autovideoconvert")
+                let videoconvert = gst::ElementFactory::make(convert_element_name)
                     .name(&videoconvert_id)
                     .build()
                     .map_err(|e| {
-                        BlockBuildError::ElementCreation(format!("autovideoconvert: {}", e))
+                        BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
                     })?;
 
                 let ndisink = gst::ElementFactory::make("ndisink")
@@ -841,7 +852,7 @@ fn ndi_output_definition() -> BlockDefinition {
                 ExternalPad {
                     name: "video_in".to_string(),
                     media_type: MediaType::Video,
-                    internal_element_id: "autovideoconvert".to_string(),
+                    internal_element_id: "videoconvert".to_string(),
                     internal_pad_name: "sink".to_string(),
                 },
                 ExternalPad {

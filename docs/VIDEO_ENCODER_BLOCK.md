@@ -23,7 +23,7 @@ The Video Encoder block (`builtin.videoenc`) provides automatic hardware-acceler
 
 ```
 ┌──────────────────┐    ┌─────────┐    ┌────────────┐
-│ autovideoconvert │───▶│ encoder │───▶│ capsfilter │
+│ videoconvert │───▶│ encoder │───▶│ capsfilter │
 └──────────────────┘    └─────────┘    └────────────┘
         ▲                                    │
         │                                    ▼
@@ -31,7 +31,7 @@ The Video Encoder block (`builtin.videoenc`) provides automatic hardware-acceler
 ```
 
 **Elements:**
-1. **autovideoconvert**: Auto-selects best converter (GPU-accelerated when available)
+1. **videoconvert**: Ensures compatible pixel format for the encoder
 2. **encoder**: Dynamically selected hardware or software encoder element
 3. **capsfilter**: Sets output caps for proper codec negotiation
 
@@ -384,7 +384,7 @@ The block logs encoder selection and configuration:
 🎞️ Building VideoEncoder block instance: block_id
 🎞️ Selected encoder 'nvh264enc' for codec H264 with preference Auto
 🎞️ Set encoder properties: bitrate=4000 kbps, preset=medium, rate_control=Vbr, gop=60
-🎞️ VideoEncoder block created (chain: autovideoconvert -> nvh264enc -> capsfilter [video/x-h264])
+🎞️ VideoEncoder block created (chain: videoconvert -> nvh264enc -> capsfilter [video/x-h264])
 ```
 
 ## Testing

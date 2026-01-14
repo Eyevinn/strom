@@ -4,6 +4,7 @@
 //! Uses GStreamer's DeckLink plugin (gst-plugins-bad) for hardware integration.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gpu::video_convert_mode;
 use gstreamer as gst;
 use std::collections::HashMap;
 use strom_types::{block::*, element::ElementPadRef, EnumValue, PropertyValue, *};
@@ -48,8 +49,11 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             .unwrap_or("sdi");
 
         // Create elements with namespaced IDs
+        // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
+        let convert_mode = video_convert_mode();
+        let convert_element_name = convert_mode.element_name();
         let videosrc_id = format!("{}:decklinkvideosrc", instance_id);
-        let videoconvert_id = format!("{}:autovideoconvert", instance_id);
+        let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
 
         let videosrc = gst::ElementFactory::make("decklinkvideosrc")
@@ -60,10 +64,12 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkvideosrc: {}", e)))?;
 
-        let videoconvert = gst::ElementFactory::make("autovideoconvert")
+        let videoconvert = gst::ElementFactory::make(convert_element_name)
             .name(&videoconvert_id)
             .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("autovideoconvert: {}", e)))?;
+            .map_err(|e| {
+                BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
+            })?;
 
         // Capsfilter with generic video/x-raw caps (no specific format restriction)
         let caps = gst::Caps::builder("video/x-raw").build();
@@ -78,7 +84,7 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             device_number, mode, connection
         );
 
-        // Chain: decklinkvideosrc -> autovideoconvert -> capsfilter
+        // Chain: decklinkvideosrc -> videoconvert -> capsfilter
         let internal_links = vec![
             (
                 ElementPadRef::pad(&videosrc_id, "src"),
@@ -241,13 +247,18 @@ impl BlockBuilder for DeckLinkVideoOutputBuilder {
             .unwrap_or("auto");
 
         // Create elements with namespaced IDs
-        let videoconvert_id = format!("{}:autovideoconvert", instance_id);
+        // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
+        let convert_mode = video_convert_mode();
+        let convert_element_name = convert_mode.element_name();
+        let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
         let videosink_id = format!("{}:decklinkvideosink", instance_id);
 
-        let videoconvert = gst::ElementFactory::make("autovideoconvert")
+        let videoconvert = gst::ElementFactory::make(convert_element_name)
             .name(&videoconvert_id)
             .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("autovideoconvert: {}", e)))?;
+            .map_err(|e| {
+                BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
+            })?;
 
         let videosink = gst::ElementFactory::make("decklinkvideosink")
             .name(&videosink_id)
@@ -261,7 +272,7 @@ impl BlockBuilder for DeckLinkVideoOutputBuilder {
             device_number, mode
         );
 
-        // Chain: autovideoconvert -> decklinkvideosink
+        // Chain: videoconvert -> decklinkvideosink
         let internal_links = vec![(
             ElementPadRef::pad(&videoconvert_id, "src"),
             ElementPadRef::pad(&videosink_id, "sink"),
@@ -697,7 +708,7 @@ fn decklink_video_output_definition() -> BlockDefinition {
             inputs: vec![ExternalPad {
                 name: "video_in".to_string(),
                 media_type: MediaType::Video,
-                internal_element_id: "autovideoconvert".to_string(),
+                internal_element_id: "videoconvert".to_string(),
                 internal_pad_name: "sink".to_string(),
             }],
             outputs: vec![],

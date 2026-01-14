@@ -22,6 +22,7 @@ pub mod blocks;
 pub mod config;
 pub mod discovery;
 pub mod events;
+pub mod gpu;
 pub mod gst;
 pub mod gui;
 pub mod layout;

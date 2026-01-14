@@ -10,9 +10,11 @@
 use super::*;
 use gstreamer as gst;
 
-/// Initialize GStreamer for tests
+/// Initialize GStreamer and GPU detection for tests
 fn init_gst() {
     let _ = gst::init();
+    // Initialize GPU detection (required for video conversion mode)
+    crate::gpu::detect_gpu_capabilities();
 }
 
 /// Check if an encoder is available on the system
@@ -535,7 +537,7 @@ fn test_build_video_encoder_block() {
             assert_eq!(
                 block_result.elements.len(),
                 4,
-                "Should create 4 elements (autovideoconvert, encoder, parser, capsfilter)"
+                "Should create 4 elements (videoconvert, encoder, parser, capsfilter)"
             );
             assert_eq!(
                 block_result.internal_links.len(),

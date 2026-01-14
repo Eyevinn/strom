@@ -362,6 +362,10 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
         gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
         gstrsinter::plugin_register_static().expect("Could not register inter plugins");
 
+        // Detect GPU capabilities for video conversion mode selection
+        // This tests CUDA-GL interop to determine if autovideoconvert works
+        strom::gpu::detect_gpu_capabilities();
+
         // Start GLib main loop in background thread for bus watch callbacks
         start_glib_main_loop();
         info!("GLib main loop started in background thread");
@@ -506,6 +510,10 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
     gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
     gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
     gstrsinter::plugin_register_static().expect("Could not register inter plugins");
+
+    // Detect GPU capabilities for video conversion mode selection
+    // This tests CUDA-GL interop to determine if autovideoconvert works
+    strom::gpu::detect_gpu_capabilities();
 
     // Start GLib main loop in background thread for bus watch callbacks
     start_glib_main_loop();
