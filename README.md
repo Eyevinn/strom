@@ -163,7 +163,7 @@ Pre-built multi-architecture Docker images are available (amd64 and arm64):
 
 ```bash
 docker pull eyevinntechnology/strom:latest
-docker pull eyevinntechnology/strom:0.2.6  # Specific version
+docker pull eyevinntechnology/strom:0.3.5  # Specific version
 ```
 
 ## Architecture
@@ -415,6 +415,7 @@ Create reusable components from element groups:
 - **AES67 Input** - Receives AES67/Ravenna audio via RTP multicast using SDP
 - **WHEP Input** - Receives audio/video via WebRTC WHEP protocol
 - **DeckLink Video/Audio Input** - Captures from Blackmagic DeckLink SDI/HDMI cards
+- **NDI Input** - Receives video/audio via NewTek NDI protocol
 - **Inter Input** - Subscribes to streams from other flows (inter-pipeline routing)
 
 **Outputs:**
@@ -423,6 +424,7 @@ Create reusable components from element groups:
 - **WHEP Output** - Serves audio/video streams via WebRTC WHEP with built-in player pages
 - **MPEG-TS/SRT Output** - Muxes audio/video to MPEG Transport Stream over SRT
 - **DeckLink Video/Audio Output** - Outputs to Blackmagic DeckLink SDI/HDMI cards
+- **NDI Output** - Sends video/audio via NewTek NDI protocol
 - **Inter Output** - Publishes streams for other flows to consume
 
 **Processing:**
@@ -608,7 +610,7 @@ strom/
 └── docs/           # Documentation
     ├── BLOCKS_IMPLEMENTATION.md
     ├── CONTRIBUTING.md
-    └── TODO.md
+    └── CHANGELOG.md
 ```
 
 ## Known Issues
