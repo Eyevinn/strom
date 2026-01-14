@@ -4,8 +4,96 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ## [Unreleased]
 
+---
+
+## [0.3.8] - 2026-01-14
+
+### Added
+- Runtime GPU interop detection for headless Docker support (#215)
+- WHEP Output block with video support, proxy system, and built-in player pages (#210)
+- Dynamic video codec detection for WHEP output
+- H.264 profile matching workarounds for pre-encoded video WebRTC streaming
+- Links page in frontend for quick access to WHEP player URLs
+- Display host address in WHEP page headers and titles
+- Blackmagic DeckLink setup documentation (#217)
+
+### Fixed
+- Disable FEC and RTX in WHEP output to prevent bandwidth doubling (#216)
+- Use autovideoconvert for GPU-accelerated color conversion (#208)
+- Show audio indicator for all streams with audio in WHEP player
+- Restore audio transceiver in WHEP player
+
+---
+
+## [0.3.7] - 2026-01-06
+
+### Changed
+- Use native ARM64 runners for Docker builds (#205)
+- Use cargo-zigbuild on native ARM64 for older glibc targeting (#201-204)
+
+---
+
+## [0.3.6] - 2025-12-30
+
+### Added
+- NDI video and audio input/output blocks with mode enum and dynamic pads (#139)
+- MCP Streamable HTTP transport for AI assistant integration (#190)
+- NDI installation and testing scripts
+
+### Changed
+- Reorganize setup scripts into common folder structure
+
+### Fixed
+- Remove Windows-incompatible echo hook from Trunk.toml (#189)
+- Make NDI SDK license acceptance manual
+- Hide NDI blocks from palette when plugins unavailable
+- Various ARM64 cross-compilation fixes (#195-200)
+
+---
+
+## [0.3.5] - 2025-12-18
+
+### Added
+- mDNS/RAVENNA discovery support for AES67 streams (#182)
+
+### Fixed
+- Skip installing GStreamer/Graphviz if already present (#176)
+
+---
+
+## [0.3.4] - 2025-12-15
+
+### Added
+- Auto-reload frontend when backend is rebuilt (#174)
+- Uptime tracking for process, system, and flows (#172)
+
+### Fixed
+- Use 127.0.0.1 instead of localhost for VLC playlists (#173)
+- Add glcolorconvert to GPU compositor pipelines (#171)
+- Add STROM_MEDIA_PATH env var and fix default media path (#170)
+
+---
+
+## [0.3.2] - 2025-12-10
+
+### Added
+- Signal handling for graceful shutdown (#167)
+- VLC playlist button for easy stream playback (#167)
+
+### Fixed
+- Only apply nvcodec fix for amd64 architecture (#165)
+- Miscellaneous fixes and documentation updates (#163-166)
+
+---
+
+## [0.3.0] - 2025-12-06
+
 ### Added
 - V4L2 encoder support for Raspberry Pi hardware encoding (#115)
+- Resolution dropdown with common presets (#116)
+
+### Fixed
+- gst-launch import link parsing (#117)
 
 ---
 
