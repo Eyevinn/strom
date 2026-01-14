@@ -113,10 +113,29 @@ pub fn detect_gpu_capabilities() -> VideoConvertMode {
 fn test_cuda_gl_interop() -> Result<(), String> {
     use std::process::Command;
 
+    // Get GL window/platform from environment (for headless Docker with egl-device)
+    let gl_window = std::env::var("GST_GL_WINDOW").unwrap_or_default();
+    let gl_platform = std::env::var("GST_GL_PLATFORM").unwrap_or_default();
+
+    debug!(
+        "Testing CUDA-GL interop with GST_GL_WINDOW={:?}, GST_GL_PLATFORM={:?}",
+        gl_window, gl_platform
+    );
+
     // Run gst-launch-1.0 with GST_DEBUG to capture warnings
     // Pipeline: videotestsrc ! glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! nvh264enc ! fakesink
-    let output = Command::new("gst-launch-1.0")
-        .env("GST_DEBUG", "nvenc:3,nvencoder:3,cudautils:3")
+    let mut cmd = Command::new("gst-launch-1.0");
+    cmd.env("GST_DEBUG", "nvenc:3,nvencoder:3,cudautils:3");
+
+    // Pass through GL environment variables for headless support
+    if !gl_window.is_empty() {
+        cmd.env("GST_GL_WINDOW", &gl_window);
+    }
+    if !gl_platform.is_empty() {
+        cmd.env("GST_GL_PLATFORM", &gl_platform);
+    }
+
+    let output = cmd
         .arg("videotestsrc")
         .arg("num-buffers=1")
         .arg("!")
