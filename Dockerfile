@@ -150,6 +150,12 @@ ARG TARGETARCH
 # For amd64: Use plucky-proposed to get gstreamer1.0-plugins-bad 1.26.0-1ubuntu2.2+
 # which fixes the nvcodec plugin (Bug #2109413 - was accidentally disabled on amd64)
 # For arm64: Use standard packages (nvcodec was incorrectly enabled there, but harmless)
+#
+# IMPORTANT: gstreamer1.0-gl and EGL/GBM libraries are required for CUDA-GL interop:
+# - gstreamer1.0-gl: GL plugins (glupload, gldownload, glcolorconvert)
+# - libegl1, libegl-mesa0, libgbm1: Headless EGL/GBM rendering (no X11 required)
+# - libgl1-mesa-dri: Mesa DRI drivers for software fallback
+# The nvidia-container-toolkit mounts NVIDIA GL libraries at runtime via --gpus all
 ENV DEBIAN_FRONTEND=noninteractive
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
         echo "deb http://archive.ubuntu.com/ubuntu plucky-proposed main universe" > /etc/apt/sources.list.d/proposed.list && \
@@ -164,6 +170,11 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
             gstreamer1.0-libav \
             gstreamer1.0-nice \
             gstreamer1.0-tools \
+            gstreamer1.0-gl \
+            libegl1 \
+            libegl-mesa0 \
+            libgbm1 \
+            libgl1-mesa-dri \
             graphviz \
             ca-certificates && \
         rm /etc/apt/sources.list.d/proposed.list; \
@@ -178,6 +189,11 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
             gstreamer1.0-libav \
             gstreamer1.0-nice \
             gstreamer1.0-tools \
+            gstreamer1.0-gl \
+            libegl1 \
+            libegl-mesa0 \
+            libgbm1 \
+            libgl1-mesa-dri \
             graphviz \
             ca-certificates; \
     fi && rm -rf /var/lib/apt/lists/*
@@ -196,6 +212,20 @@ ENV STROM_DATA_DIR=/data
 
 # Enable all NVIDIA driver capabilities (needed for NVENC/NVDEC video encoding/decoding)
 ENV NVIDIA_DRIVER_CAPABILITIES=all
+
+# Headless GStreamer GL configuration for CUDA-GL interop
+# GST_GL_WINDOW=egl-device: Use EGL device extension - direct GPU access without display server
+# GST_GL_PLATFORM=egl: Use EGL platform (not GLX which requires X11)
+# This enables true zero-copy CUDA-GL interop for glupload/gldownload/glcolorconvert
+# The nvidia-container-toolkit mounts NVIDIA's EGL libraries at runtime via --gpus all
+ENV GST_GL_WINDOW=egl-device
+ENV GST_GL_PLATFORM=egl
+
+# Add NVIDIA EGL vendor config (nvidia-container-toolkit mounts libEGL_nvidia.so but not the ICD file)
+# This tells libglvnd to use NVIDIA's EGL implementation for CUDA-GL interop
+RUN mkdir -p /usr/share/glvnd/egl_vendor.d && \
+    echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
+    > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
 
 # Create data directory for persistent storage
 RUN mkdir -p /data
