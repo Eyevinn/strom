@@ -752,6 +752,14 @@ fn build_whepserversink(
     // Set STUN server property
     whepserversink.set_property("stun-server", &stun_server);
 
+    // Disable FEC and RTX (retransmission) to avoid bandwidth overhead
+    // These are enabled by default in webrtcsink and can significantly increase bandwidth:
+    // - FEC adds redundancy packets (can add ~50% overhead)
+    // - RTX sends duplicate packets for retransmission
+    // For pre-encoded video at high bitrates, these can cause near-double bandwidth usage
+    whepserversink.set_property("do-fec", false);
+    whepserversink.set_property("do-retransmission", false);
+
     // Access the signaller child and set its properties
     // Bind to localhost only - axum will proxy external requests
     let signaller = whepserversink.property::<gst::glib::Object>("signaller");
@@ -846,13 +854,22 @@ fn build_whepserversink(
 
             if needs_modification {
                 // Create new caps without profile constraints
+                // IMPORTANT: Only keep ONE entry per codec type to avoid duplicate streams.
+                // Browser may offer multiple H.264 profiles (baseline, main, high) - if we
+                // accept all of them after relaxing profile matching, webrtcsink sends the
+                // same data on multiple payloads, doubling bandwidth.
                 let mut new_caps = gst::Caps::new_empty();
+                let mut seen_codecs = std::collections::HashSet::new();
                 for i in 0..codec_prefs.size() {
                     if let Some(structure) = codec_prefs.structure(i) {
-                        let mut new_structure = structure.to_owned();
-                        new_structure.remove_field("profile-level-id");
-                        new_structure.remove_field("profile");
-                        new_caps.get_mut().unwrap().append_structure(new_structure);
+                        let codec_name = structure.name().as_str();
+                        // Only add first occurrence of each codec type
+                        if seen_codecs.insert(codec_name.to_string()) {
+                            let mut new_structure = structure.to_owned();
+                            new_structure.remove_field("profile-level-id");
+                            new_structure.remove_field("profile");
+                            new_caps.get_mut().unwrap().append_structure(new_structure);
+                        }
                     }
                 }
                 info!(
@@ -904,6 +921,7 @@ fn build_whepserversink(
                         if let Some(s) = caps.structure(0) {
                             if s.has_field("profile-level-id") || s.has_field("profile") {
                                 // Create new caps without profile constraints
+                                // Use merge_structure to deduplicate identical caps
                                 let mut new_caps = gst::Caps::new_empty();
                                 for i in 0..caps.size() {
                                     if let Some(structure) = caps.structure(i) {
@@ -911,10 +929,7 @@ fn build_whepserversink(
                                             structure.to_owned();
                                         new_structure.remove_field("profile-level-id");
                                         new_structure.remove_field("profile");
-                                        new_caps
-                                            .get_mut()
-                                            .unwrap()
-                                            .append_structure(new_structure);
+                                        new_caps.merge_structure(new_structure);
                                     }
                                 }
                                 info!(
