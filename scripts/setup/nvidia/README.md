@@ -68,9 +68,7 @@ docker run -d \
   eyevinntechnology/strom:latest
 ```
 
-### Full Production Setup
-
-For production deployments with Decklink capture cards:
+### Production Setup
 
 ```bash
 docker run -d \
@@ -79,9 +77,6 @@ docker run -d \
   -e STROM_MEDIA_PATH=/media \
   -v ./media:/media \
   -v ./data:/data \
-  --privileged \
-  -v /dev/blackmagic:/dev/blackmagic \
-  -v /usr/lib/libDeckLinkAPI.so:/lib/libDeckLinkAPI.so:ro \
   --network host \
   --name strom \
   eyevinntechnology/strom:latest
