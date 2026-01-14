@@ -204,7 +204,7 @@ impl BlockBuilder for NDIInputBuilder {
                 // Video path - use detected video convert mode
                 let convert_mode = video_convert_mode();
                 let convert_element_name = convert_mode.element_name();
-                let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
+                let videoconvert_id = format!("{}:videoconvert", instance_id);
                 let videocaps_id = format!("{}:videocapsfilter", instance_id);
 
                 let videoconvert = gst::ElementFactory::make(convert_element_name)
@@ -291,7 +291,7 @@ impl BlockBuilder for NDIInputBuilder {
                 // Use detected video convert mode
                 let convert_mode = video_convert_mode();
                 let convert_element_name = convert_mode.element_name();
-                let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
+                let videoconvert_id = format!("{}:videoconvert", instance_id);
                 let capsfilter_id = format!("{}:capsfilter", instance_id);
 
                 let videoconvert = gst::ElementFactory::make(convert_element_name)
@@ -484,7 +484,7 @@ impl BlockBuilder for NDIOutputBuilder {
                 // Video path - use detected video convert mode
                 let convert_mode = video_convert_mode();
                 let convert_element_name = convert_mode.element_name();
-                let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
+                let videoconvert_id = format!("{}:videoconvert", instance_id);
                 let videoconvert = gst::ElementFactory::make(convert_element_name)
                     .name(&videoconvert_id)
                     .build()
@@ -568,7 +568,7 @@ impl BlockBuilder for NDIOutputBuilder {
                 // Use detected video convert mode
                 let convert_mode = video_convert_mode();
                 let convert_element_name = convert_mode.element_name();
-                let videoconvert_id = format!("{}:{}", instance_id, convert_element_name);
+                let videoconvert_id = format!("{}:videoconvert", instance_id);
                 let ndisink_id = format!("{}:ndisink", instance_id);
 
                 let videoconvert = gst::ElementFactory::make(convert_element_name)
