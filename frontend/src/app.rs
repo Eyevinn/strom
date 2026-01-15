@@ -187,7 +187,9 @@ pub fn generate_vlc_playlist(srt_uri: &str, latency_ms: i32, stream_name: &str) 
         .replace('"', "&quot;")
         .replace('\'', "&apos;");
 
-    let escaped_name = stream_name
+    // Include SRT URL in the track title for easy identification
+    let title_with_url = format!("{} ({})", stream_name, vlc_uri);
+    let escaped_title = title_with_url
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -209,7 +211,7 @@ pub fn generate_vlc_playlist(srt_uri: &str, latency_ms: i32, stream_name: &str) 
   </trackList>
 </playlist>
 "#,
-        escaped_uri, escaped_name, latency_ms
+        escaped_uri, escaped_title, latency_ms
     )
 }
 
@@ -3125,6 +3127,39 @@ impl StromApp {
                             let filename = format!("{}.xspf", safe_name);
 
                             download_file(&filename, &playlist_content, "application/xspf+xml");
+                        }
+
+                        // Handle VLC playlist download-only request (native mode)
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some((srt_uri, latency_ms)) = result.vlc_playlist_download_only {
+                            let stream_name = self
+                                .current_flow()
+                                .map(|f| f.name.clone())
+                                .unwrap_or_else(|| "SRT Stream".to_string());
+
+                            let playlist_content =
+                                generate_vlc_playlist(&srt_uri, latency_ms, &stream_name);
+
+                            let safe_name: String = stream_name
+                                .chars()
+                                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                                .collect();
+                            let filename = format!("{}.xspf", safe_name);
+
+                            // Save to current directory (download only, don't open)
+                            let path = std::path::PathBuf::from(&filename);
+                            match std::fs::write(&path, &playlist_content) {
+                                Ok(_) => {
+                                    let abs_path = std::fs::canonicalize(&path)
+                                        .unwrap_or(path.clone());
+                                    self.status = format!("Saved: {}", abs_path.display());
+                                    tracing::info!("Saved VLC playlist to: {}", abs_path.display());
+                                }
+                                Err(e) => {
+                                    self.status = format!("Failed to save: {}", e);
+                                    tracing::error!("Failed to save VLC playlist: {}", e);
+                                }
+                            }
                         }
 
                         // Handle WHEP player request (for WHEP Output)

@@ -17,6 +17,8 @@ pub struct BlockInspectorResult {
     pub browse_streams_requested: bool,
     /// VLC playlist download requested (for MPEG-TS/SRT blocks) - contains (srt_uri, latency_ms)
     pub vlc_playlist_requested: Option<(String, i32)>,
+    /// VLC playlist download-only requested (native mode) - contains (srt_uri, latency_ms)
+    pub vlc_playlist_download_only: Option<(String, i32)>,
     /// WHEP player endpoint_id (for WHEP Output blocks) - used to construct full player URL
     pub whep_player_url: Option<String>,
     /// Copy WHEP player URL to clipboard - contains endpoint_id
@@ -392,14 +394,9 @@ impl PropertyInspector {
                 crate::app::set_local_storage("open_playlist_editor", &block.id);
             }
 
-            // Download VLC Playlist button for MPEG-TS/SRT output blocks
-            if definition.id == "builtin.mpegtssrt_output"
-                && ui
-                    .button("📺 Open in VLC")
-                    .on_hover_text("Download XSPF playlist and open in VLC")
-                    .clicked()
-            {
-                // Get SRT URI from block properties or default
+            // Download VLC Playlist button for MPEG-TS/SRT output blocks (only in listener mode)
+            if definition.id == "builtin.mpegtssrt_output" {
+                // Get SRT URI from block properties
                 let srt_uri = block
                     .properties
                     .get("srt_uri")
@@ -407,20 +404,38 @@ impl PropertyInspector {
                         PropertyValue::String(s) => Some(s.clone()),
                         _ => None,
                     })
-                    .unwrap_or_else(|| "srt://:5000?mode=listener".to_string());
+                    .unwrap_or_default();
 
-                // Get latency from block properties or default (125ms)
-                let latency = block
-                    .properties
-                    .get("latency")
-                    .and_then(|v| match v {
-                        PropertyValue::Int(i) => Some(*i as i32),
-                        PropertyValue::UInt(u) => Some(*u as i32),
-                        _ => None,
-                    })
-                    .unwrap_or(125);
+                // Only show buttons if in listener mode (VLC can connect to us)
+                // Default SRT mode is caller, so we need explicit mode=listener
+                if srt_uri.contains("mode=listener") {
+                    // Use fixed network-caching for VLC (not tied to SRT buffer latency)
+                    // 1000ms is a reasonable default for smooth playback
+                    let network_caching_ms = 1000;
 
-                result.vlc_playlist_requested = Some((srt_uri, latency));
+                    ui.horizontal(|ui| {
+                        // Open in VLC button (saves and opens automatically in native mode)
+                        if ui
+                            .button("📺 Open in VLC")
+                            .on_hover_text("Download XSPF playlist and open in VLC")
+                            .clicked()
+                        {
+                            result.vlc_playlist_requested =
+                                Some((srt_uri.clone(), network_caching_ms));
+                        }
+
+                        // Download-only button (native mode only - lets user save to specific location)
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui
+                            .button("💾 Download")
+                            .on_hover_text("Download XSPF playlist file")
+                            .clicked()
+                        {
+                            result.vlc_playlist_download_only =
+                                Some((srt_uri.clone(), network_caching_ms));
+                        }
+                    });
+                }
             }
 
             // Open WHEP Player button for WHEP Output blocks
