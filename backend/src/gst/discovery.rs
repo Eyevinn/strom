@@ -1262,6 +1262,19 @@ impl ElementDiscovery {
             });
         }
 
+        // Override default for is-live on test sources to be true
+        // This makes test sources behave like live sources by default
+        let factory_name = factory.name();
+        if factory_name == "videotestsrc" || factory_name == "audiotestsrc" {
+            for prop in &mut properties {
+                if prop.name == "is-live" {
+                    prop.default_value = Some(PropertyValue::Bool(true));
+                    debug!("Overriding is-live default to true for {}", factory_name);
+                    break;
+                }
+            }
+        }
+
         Ok(properties)
     }
 }

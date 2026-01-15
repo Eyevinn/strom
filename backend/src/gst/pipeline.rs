@@ -699,6 +699,15 @@ impl PipelineManager {
             debug!("Enabled QoS on element {}", element_def.id);
         }
 
+        // Default is-live=true for test sources (unless explicitly set by user)
+        if (element_def.element_type == "videotestsrc"
+            || element_def.element_type == "audiotestsrc")
+            && !element_def.properties.contains_key("is-live")
+        {
+            element.set_property("is-live", true);
+            debug!("Enabled is-live on test source {}", element_def.id);
+        }
+
         // Set properties
         if !element_def.properties.is_empty() {
             debug!(
