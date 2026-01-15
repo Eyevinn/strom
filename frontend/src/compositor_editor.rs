@@ -1449,27 +1449,31 @@ impl CompositorEditor {
             }
 
             ui.label("Sizing:");
-            let mut sizing_index = if sizing_policy == "none" { 0 } else { 1 };
-            let sizing_changed = egui::ComboBox::from_id_salt("sizing_policy")
-                .selected_text(if sizing_index == 0 {
+            let mut sizing_changed = false;
+            egui::ComboBox::from_id_salt("sizing_policy")
+                .selected_text(if sizing_policy == "none" {
                     "Stretch"
                 } else {
                     "Keep Aspect"
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut sizing_index, 0, "Stretch");
-                    ui.selectable_value(&mut sizing_index, 1, "Keep Aspect");
-                })
-                .response
-                .changed();
+                    if ui
+                        .selectable_label(sizing_policy == "none", "Stretch")
+                        .clicked()
+                    {
+                        sizing_policy = "none".to_string();
+                        sizing_changed = true;
+                    }
+                    if ui
+                        .selectable_label(sizing_policy != "none", "Keep Aspect")
+                        .clicked()
+                    {
+                        sizing_policy = "keep-aspect-ratio".to_string();
+                        sizing_changed = true;
+                    }
+                });
 
             if sizing_changed {
-                sizing_policy = if sizing_index == 0 {
-                    "none"
-                } else {
-                    "keep-aspect-ratio"
-                }
-                .to_string();
                 self.inputs[selected_idx].sizing_policy = sizing_policy.clone();
                 self.update_pad_property(
                     ui.ctx(),
