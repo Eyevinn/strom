@@ -106,10 +106,10 @@ fn build_whipclientsink(
 
     // Set ICE server properties
     // Note: webrtcsink-based elements use "turn-servers" (plural, array) not "turn-server"
-    if let Some(stun) = stun_server {
+    if let Some(ref stun) = stun_server {
         whipclientsink.set_property("stun-server", stun);
     }
-    if let Some(turn) = turn_server {
+    if let Some(ref turn) = turn_server {
         let turn_servers = gst::Array::new([turn]);
         whipclientsink.set_property("turn-servers", turn_servers);
     }
@@ -232,10 +232,10 @@ fn build_whipsink(
 
     // Set properties directly on whipsink (no signaller child)
     whipsink.set_property("whip-endpoint", &whip_endpoint);
-    if let Some(stun) = stun_server {
+    if let Some(ref stun) = stun_server {
         whipsink.set_property("stun-server", stun);
     }
-    if let Some(turn) = turn_server {
+    if let Some(ref turn) = turn_server {
         whipsink.set_property("turn-server", turn);
     }
 

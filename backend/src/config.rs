@@ -32,6 +32,28 @@ fn default_ice_servers() -> Vec<String> {
     vec!["stun:stun.l.google.com:19302".to_string()]
 }
 
+/// Normalize an ICE server URL to RFC 7064/7065 format.
+/// Converts GStreamer-style URLs (stun://, turn://) to standard format (stun:, turn:).
+fn normalize_ice_server_url(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("stun://") {
+        format!("stun:{}", rest)
+    } else if let Some(rest) = url.strip_prefix("turn://") {
+        format!("turn:{}", rest)
+    } else if let Some(rest) = url.strip_prefix("turns://") {
+        format!("turns:{}", rest)
+    } else {
+        url.to_string()
+    }
+}
+
+/// Normalize a list of ICE server URLs to RFC format.
+fn normalize_ice_servers(servers: Vec<String>) -> Vec<String> {
+    servers
+        .into_iter()
+        .map(|s| normalize_ice_server_url(&s))
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StorageConfig {
     database_url: Option<String>,
@@ -188,7 +210,7 @@ impl Config {
             database_url: config_file.storage.database_url,
             log_file: config_file.logging.log_file,
             log_level: config_file.logging.log_level,
-            ice_servers: config_file.server.ice_servers,
+            ice_servers: normalize_ice_servers(config_file.server.ice_servers),
         })
     }
 
@@ -495,6 +517,32 @@ data_dir = "{}"
         assert_eq!(config.ice_servers[0], "stun:stun.example.com:3478");
         assert_eq!(
             config.ice_servers[1],
+            "turn:user:pass@turn.example.com:3478"
+        );
+    }
+
+    #[test]
+    fn test_ice_servers_normalization() {
+        // Test that URLs with :// are normalized to RFC format (without //)
+        assert_eq!(
+            normalize_ice_server_url("stun://stun.example.com:3478"),
+            "stun:stun.example.com:3478"
+        );
+        assert_eq!(
+            normalize_ice_server_url("turn://user:pass@turn.example.com:3478"),
+            "turn:user:pass@turn.example.com:3478"
+        );
+        assert_eq!(
+            normalize_ice_server_url("turns://user:pass@turn.example.com:5349"),
+            "turns:user:pass@turn.example.com:5349"
+        );
+        // Already RFC format should remain unchanged
+        assert_eq!(
+            normalize_ice_server_url("stun:stun.example.com:3478"),
+            "stun:stun.example.com:3478"
+        );
+        assert_eq!(
+            normalize_ice_server_url("turn:user:pass@turn.example.com:3478"),
             "turn:user:pass@turn.example.com:3478"
         );
     }

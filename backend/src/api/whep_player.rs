@@ -358,18 +358,34 @@ pub struct IceServer {
 /// Parse an ICE server URL into the browser-compatible format.
 /// TURN URLs with embedded credentials (turn:user:pass@host:port) are parsed
 /// into separate urls, username, and credential fields.
+///
+/// Handles both standard URI format (turn:user:pass@host) and
+/// GStreamer format (turn://user:pass@host).
 fn parse_ice_server(url: &str) -> IceServer {
     // Check if it's a TURN URL with credentials
     if url.starts_with("turn:") || url.starts_with("turns:") {
-        // Format: turn:username:password@host:port or turns:username:password@host:port
-        let scheme_end = url.find(':').unwrap_or(0) + 1;
-        let rest = &url[scheme_end..];
+        // Determine scheme and strip optional // after scheme
+        let (scheme, rest) = if let Some(rest) = url.strip_prefix("turns://") {
+            ("turns:", rest)
+        } else if let Some(rest) = url.strip_prefix("turn://") {
+            ("turn:", rest)
+        } else if let Some(rest) = url.strip_prefix("turns:") {
+            ("turns:", rest)
+        } else if let Some(rest) = url.strip_prefix("turn:") {
+            ("turn:", rest)
+        } else {
+            // Shouldn't happen given the outer if, but be safe
+            return IceServer {
+                urls: url.to_string(),
+                username: None,
+                credential: None,
+            };
+        };
 
         if let Some(at_pos) = rest.rfind('@') {
-            // Has credentials
+            // Has credentials: user:pass@host:port
             let credentials = &rest[..at_pos];
             let host_port = &rest[at_pos + 1..];
-            let scheme = &url[..scheme_end];
 
             // Split credentials on first ':' (username:password)
             if let Some(colon_pos) = credentials.find(':') {
@@ -386,8 +402,27 @@ fn parse_ice_server(url: &str) -> IceServer {
     }
 
     // STUN server or TURN without embedded credentials
+    // Normalize stun:// to stun: for browser compatibility
+    let normalized_url = if let Some(rest) = url.strip_prefix("stun://") {
+        format!("stun:{}", rest)
+    } else if let Some(rest) = url.strip_prefix("turn://") {
+        if !url.contains('@') {
+            format!("turn:{}", rest)
+        } else {
+            url.to_string()
+        }
+    } else if let Some(rest) = url.strip_prefix("turns://") {
+        if !url.contains('@') {
+            format!("turns:{}", rest)
+        } else {
+            url.to_string()
+        }
+    } else {
+        url.to_string()
+    };
+
     IceServer {
-        urls: url.to_string(),
+        urls: normalized_url,
         username: None,
         credential: None,
     }
@@ -435,6 +470,40 @@ mod tests {
     #[test]
     fn test_parse_turn_server_without_credentials() {
         let server = parse_ice_server("turn:turn.example.com:3478");
+        assert_eq!(server.urls, "turn:turn.example.com:3478");
+        assert!(server.username.is_none());
+        assert!(server.credential.is_none());
+    }
+
+    // Tests for GStreamer-style URLs with ://
+
+    #[test]
+    fn test_parse_stun_server_with_slashes() {
+        let server = parse_ice_server("stun://stun.l.google.com:19302");
+        assert_eq!(server.urls, "stun:stun.l.google.com:19302");
+        assert!(server.username.is_none());
+        assert!(server.credential.is_none());
+    }
+
+    #[test]
+    fn test_parse_turn_server_with_slashes_and_credentials() {
+        let server = parse_ice_server("turn://myuser:mypassword@turn.example.com:3478");
+        assert_eq!(server.urls, "turn:turn.example.com:3478");
+        assert_eq!(server.username, Some("myuser".to_string()));
+        assert_eq!(server.credential, Some("mypassword".to_string()));
+    }
+
+    #[test]
+    fn test_parse_turns_server_with_slashes_and_credentials() {
+        let server = parse_ice_server("turns://user:pass@turn.example.com:5349");
+        assert_eq!(server.urls, "turns:turn.example.com:5349");
+        assert_eq!(server.username, Some("user".to_string()));
+        assert_eq!(server.credential, Some("pass".to_string()));
+    }
+
+    #[test]
+    fn test_parse_turn_server_with_slashes_without_credentials() {
+        let server = parse_ice_server("turn://turn.example.com:3478");
         assert_eq!(server.urls, "turn:turn.example.com:3478");
         assert!(server.username.is_none());
         assert!(server.credential.is_none());

@@ -120,21 +120,45 @@ impl BlockBuildContext {
     }
 
     /// Get the first STUN server URL (for GStreamer elements).
-    /// Returns the default Google STUN server if no STUN server configured.
-    pub fn stun_server(&self) -> Option<&str> {
+    /// Returns None if no STUN server configured.
+    ///
+    /// Note: GStreamer expects `stun://host:port` format (with double slashes),
+    /// but standard STUN URIs use `stun:host`. This method normalizes the format.
+    pub fn stun_server(&self) -> Option<String> {
         self.ice_servers
             .iter()
             .find(|s| s.starts_with("stun:"))
-            .map(|s| s.as_str())
+            .map(|s| {
+                // GStreamer expects stun://host:port format
+                // Convert stun:host:port to stun://host:port
+                if !s.starts_with("stun://") {
+                    format!("stun://{}", &s[5..])
+                } else {
+                    s.clone()
+                }
+            })
     }
 
     /// Get the first TURN server URL (for GStreamer elements).
     /// Returns None if no TURN server configured.
-    pub fn turn_server(&self) -> Option<&str> {
+    ///
+    /// Note: GStreamer expects `turn://user:pass@host` format (with double slashes),
+    /// but standard TURN URIs use `turn:host`. This method normalizes the format.
+    pub fn turn_server(&self) -> Option<String> {
         self.ice_servers
             .iter()
             .find(|s| s.starts_with("turn:") || s.starts_with("turns:"))
-            .map(|s| s.as_str())
+            .map(|s| {
+                // GStreamer expects turn://user:pass@host format
+                // Convert turn:user:pass@host to turn://user:pass@host
+                if s.starts_with("turn:") && !s.starts_with("turn://") {
+                    format!("turn://{}", &s[5..])
+                } else if s.starts_with("turns:") && !s.starts_with("turns://") {
+                    format!("turns://{}", &s[6..])
+                } else {
+                    s.clone()
+                }
+            })
     }
 
     /// Register a WHEP endpoint (called by WHEP Output blocks during build).

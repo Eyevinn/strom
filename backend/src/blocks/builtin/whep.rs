@@ -179,10 +179,10 @@ fn build_whepsrc(
 
     // Set properties directly on whepsrc (no signaller child)
     whepsrc.set_property("whep-endpoint", &whep_endpoint);
-    if let Some(stun) = stun_server {
+    if let Some(ref stun) = stun_server {
         whepsrc.set_property("stun-server", stun);
     }
-    if let Some(turn) = turn_server {
+    if let Some(ref turn) = turn_server {
         whepsrc.set_property("turn-server", turn);
     }
 
@@ -364,10 +364,10 @@ fn build_whepclientsrc(
         .map_err(|e| BlockBuildError::ElementCreation(format!("whepclientsrc: {}", e)))?;
 
     // Set ICE server properties on the source
-    if let Some(stun) = stun_server {
+    if let Some(ref stun) = stun_server {
         whepclientsrc.set_property("stun-server", stun);
     }
-    if let Some(turn) = turn_server {
+    if let Some(ref turn) = turn_server {
         whepclientsrc.set_property("turn-server", turn);
     }
 
@@ -727,10 +727,10 @@ fn build_whepserversink(
 
     // Set ICE server properties
     // Note: webrtcsink-based elements use "turn-servers" (plural, array) not "turn-server"
-    if let Some(stun) = stun_server {
+    if let Some(ref stun) = stun_server {
         whepserversink.set_property("stun-server", stun);
     }
-    if let Some(turn) = turn_server {
+    if let Some(ref turn) = turn_server {
         let turn_servers = gst::Array::new([turn]);
         whepserversink.set_property("turn-servers", turn_servers);
     }

@@ -122,14 +122,6 @@ Unique identifier for the WHEP endpoint. Used in the URL path.
 - Must be unique across all running flows
 - URL-safe characters recommended
 
-### `stun_server` (String, Optional)
-
-STUN server URL for NAT traversal.
-
-**Default:** `stun://stun.l.google.com:19302`
-
-**Format:** `stun://hostname:port` or `turn://hostname:port`
-
 ### `auth_token` (String, Optional)
 
 Bearer token for WHEP authentication (passed to whepserversink).
@@ -268,17 +260,19 @@ The frontend includes a Links page accessible from the navigation menu that prov
 
 Connect audio source to `audio_in` pad. Stream available at `/whep/radio-stream`.
 
-### Example 2: Video Stream with Custom STUN
+### Example 2: Video-Only Stream
 
 ```json
 {
   "block_type": "builtin.whep_output",
   "properties": {
-    "endpoint_id": "camera-feed",
-    "stun_server": "stun://stun.example.com:3478"
+    "endpoint_id": "camera-feed"
   }
 }
 ```
+
+**Note:** STUN/TURN servers are configured server-wide via `ice_servers` in `.strom.toml` or
+the `STROM_SERVER_ICE_SERVERS` environment variable. See configuration documentation.
 
 ### Example 3: Full Audio+Video Stream
 
