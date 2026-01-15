@@ -51,6 +51,8 @@ struct AppStateInner {
     media_path: PathBuf,
     /// WHEP endpoint registry (maps endpoint IDs to internal ports)
     whep_registry: WhepRegistry,
+    /// ICE servers for WebRTC NAT traversal (STUN/TURN URLs)
+    ice_servers: Vec<String>,
 }
 
 impl AppState {
@@ -59,6 +61,7 @@ impl AppState {
         storage: impl Storage + 'static,
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
+        ice_servers: Vec<String>,
     ) -> Self {
         let events = EventBroadcaster::default();
         Self {
@@ -76,6 +79,7 @@ impl AppState {
                 ptp_monitor: PtpMonitor::new(),
                 media_path: media_path.into(),
                 whep_registry: WhepRegistry::new(),
+                ice_servers,
             }),
         }
     }
@@ -115,6 +119,11 @@ impl AppState {
         &self.inner.media_path
     }
 
+    /// Get the configured ICE servers for WebRTC.
+    pub fn ice_servers(&self) -> &[String] {
+        &self.inner.ice_servers
+    }
+
     /// Start background services (SAP discovery, etc).
     pub async fn start_services(&self) {
         info!("Starting discovery service (SAP listener and announcer)...");
@@ -128,8 +137,14 @@ impl AppState {
         flows_path: impl AsRef<std::path::Path>,
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
+        ice_servers: Vec<String>,
     ) -> Self {
-        Self::new(JsonFileStorage::new(flows_path), blocks_path, media_path)
+        Self::new(
+            JsonFileStorage::new(flows_path),
+            blocks_path,
+            media_path,
+            ice_servers,
+        )
     }
 
     /// Create new application state with PostgreSQL storage.
@@ -140,13 +155,14 @@ impl AppState {
         database_url: &str,
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
+        ice_servers: Vec<String>,
     ) -> anyhow::Result<Self> {
         use crate::storage::PostgresStorage;
 
         let storage = PostgresStorage::new(database_url).await?;
         storage.run_migrations().await?;
 
-        Ok(Self::new(storage, blocks_path, media_path))
+        Ok(Self::new(storage, blocks_path, media_path, ice_servers))
     }
 
     /// Load flows from storage into memory.
@@ -508,8 +524,12 @@ impl AppState {
 
         // Create pipeline with event broadcaster and block registry
         info!("Creating PipelineManager (this may block)...");
-        let mut manager =
-            PipelineManager::new(&flow, self.inner.events.clone(), &self.inner.block_registry)?;
+        let mut manager = PipelineManager::new(
+            &flow,
+            self.inner.events.clone(),
+            &self.inner.block_registry,
+            self.inner.ice_servers.clone(),
+        )?;
         info!("PipelineManager created successfully");
 
         // Start pipeline
@@ -1079,6 +1099,11 @@ impl AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::with_json_storage("flows.json", "blocks.json", "media")
+        Self::with_json_storage(
+            "flows.json",
+            "blocks.json",
+            "media",
+            vec!["stun:stun.l.google.com:19302".to_string()],
+        )
     }
 }

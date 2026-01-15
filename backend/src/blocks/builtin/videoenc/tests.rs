@@ -529,7 +529,7 @@ fn test_build_video_encoder_block() {
     );
     properties.insert("bitrate".to_string(), PropertyValue::UInt(5000));
 
-    let ctx = BlockBuildContext::new();
+    let ctx = BlockBuildContext::new(vec!["stun:stun.l.google.com:19302".to_string()]);
     let result = builder.build("test_block", &properties, &ctx);
 
     match result {
@@ -582,7 +582,7 @@ fn test_block_encoder_preference() {
         PropertyValue::String("software".to_string()),
     );
 
-    let ctx = BlockBuildContext::new();
+    let ctx = BlockBuildContext::new(vec!["stun:stun.l.google.com:19302".to_string()]);
     let result = builder.build("test_software", &properties, &ctx);
     assert!(
         result.is_ok(),

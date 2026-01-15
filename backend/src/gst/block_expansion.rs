@@ -38,6 +38,7 @@ pub async fn expand_blocks(
     blocks: &[BlockInstance],
     regular_links: &[Link],
     flow_id: &strom_types::FlowId,
+    ice_servers: Vec<String>,
 ) -> Result<ExpandedPipeline, PipelineError> {
     let mut gst_elements = Vec::new();
     let mut all_links = Vec::new();
@@ -46,7 +47,7 @@ pub async fn expand_blocks(
         HashMap::new();
 
     // Create build context for blocks to register services
-    let ctx = BlockBuildContext::new();
+    let ctx = BlockBuildContext::new(ice_servers);
 
     debug!("Expanding {} block instance(s)", blocks.len());
 
@@ -269,7 +270,8 @@ mod tests {
     #[tokio::test]
     async fn test_expand_no_blocks() {
         let flow_id = FlowId::new_v4();
-        let result = expand_blocks(&[], &[], &flow_id).await;
+        let ice_servers = vec!["stun:stun.l.google.com:19302".to_string()];
+        let result = expand_blocks(&[], &[], &flow_id, ice_servers).await;
         assert!(result.is_ok());
 
         let expanded = result.unwrap();

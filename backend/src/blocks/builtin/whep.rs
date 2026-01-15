@@ -84,7 +84,7 @@ impl BlockBuilder for WHEPInputBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         debug!("Building WHEP Input block instance: {}", instance_id);
 
@@ -101,9 +101,9 @@ impl BlockBuilder for WHEPInputBuilder {
             .unwrap_or(false);
 
         if use_new {
-            build_whepclientsrc(instance_id, properties)
+            build_whepclientsrc(instance_id, properties, ctx)
         } else {
-            build_whepsrc(instance_id, properties)
+            build_whepsrc(instance_id, properties, ctx)
         }
     }
 }
@@ -112,6 +112,7 @@ impl BlockBuilder for WHEPInputBuilder {
 fn build_whepsrc(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
+    ctx: &BlockBuildContext,
 ) -> Result<BlockBuildResult, BlockBuildError> {
     info!("Building WHEP Input using whepsrc (stable)");
 
@@ -146,21 +147,9 @@ fn build_whepsrc(
         }
     });
 
-    // Get STUN server (optional)
-    let stun_server = properties
-        .get("stun_server")
-        .and_then(|v| {
-            if let PropertyValue::String(s) = v {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.clone())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
+    // Get ICE servers from application config
+    let stun_server = ctx.stun_server();
+    let turn_server = ctx.turn_server();
 
     // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
     let mixer_latency_ms = properties
@@ -190,7 +179,12 @@ fn build_whepsrc(
 
     // Set properties directly on whepsrc (no signaller child)
     whepsrc.set_property("whep-endpoint", &whep_endpoint);
-    whepsrc.set_property("stun-server", &stun_server);
+    if let Some(stun) = stun_server {
+        whepsrc.set_property("stun-server", stun);
+    }
+    if let Some(turn) = turn_server {
+        whepsrc.set_property("turn-server", turn);
+    }
 
     if let Some(token) = &auth_token {
         whepsrc.set_property("auth-token", token);
@@ -264,8 +258,8 @@ fn build_whepsrc(
     });
 
     debug!(
-        "WHEP Input (whepsrc stable) configured: endpoint={}, stun={}",
-        whep_endpoint, stun_server
+        "WHEP Input (whepsrc stable) configured: endpoint={}, stun={:?}, turn={:?}",
+        whep_endpoint, stun_server, turn_server
     );
 
     // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
@@ -304,6 +298,7 @@ fn build_whepsrc(
 fn build_whepclientsrc(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
+    ctx: &BlockBuildContext,
 ) -> Result<BlockBuildResult, BlockBuildError> {
     info!("Building WHEP Input using whepclientsrc (new implementation)");
 
@@ -338,21 +333,9 @@ fn build_whepclientsrc(
         }
     });
 
-    // Get STUN server (optional)
-    let stun_server = properties
-        .get("stun_server")
-        .and_then(|v| {
-            if let PropertyValue::String(s) = v {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.clone())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
+    // Get ICE servers from application config
+    let stun_server = ctx.stun_server();
+    let turn_server = ctx.turn_server();
 
     // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
     let mixer_latency_ms = properties
@@ -380,8 +363,13 @@ fn build_whepclientsrc(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("whepclientsrc: {}", e)))?;
 
-    // Set STUN server property on the source
-    whepclientsrc.set_property("stun-server", &stun_server);
+    // Set ICE server properties on the source
+    if let Some(stun) = stun_server {
+        whepclientsrc.set_property("stun-server", stun);
+    }
+    if let Some(turn) = turn_server {
+        whepclientsrc.set_property("turn-server", turn);
+    }
 
     // Access the signaller child and set its properties
     let signaller = whepclientsrc.property::<gst::glib::Object>("signaller");
@@ -627,8 +615,8 @@ fn build_whepclientsrc(
     }
 
     debug!(
-        "WHEP Input configured: endpoint={}, stun={}",
-        whep_endpoint, stun_server
+        "WHEP Input configured: endpoint={}, stun={:?}, turn={:?}",
+        whep_endpoint, stun_server, turn_server
     );
 
     // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
@@ -725,21 +713,9 @@ fn build_whepserversink(
         internal_port, endpoint_id
     );
 
-    // Get STUN server (optional)
-    let stun_server = properties
-        .get("stun_server")
-        .and_then(|v| {
-            if let PropertyValue::String(s) = v {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.clone())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
+    // Get ICE servers from application config
+    let stun_server = ctx.stun_server();
+    let turn_server = ctx.turn_server();
 
     // Create whepserversink element
     // This is based on webrtcsink and handles encoding internally
@@ -749,8 +725,13 @@ fn build_whepserversink(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("whepserversink: {}", e)))?;
 
-    // Set STUN server property
-    whepserversink.set_property("stun-server", &stun_server);
+    // Set ICE server properties
+    if let Some(stun) = stun_server {
+        whepserversink.set_property("stun-server", stun);
+    }
+    if let Some(turn) = turn_server {
+        whepserversink.set_property("turn-server", turn);
+    }
 
     // Disable FEC and RTX (retransmission) to avoid bandwidth overhead
     // These are enabled by default in webrtcsink and can significantly increase bandwidth:
@@ -1129,8 +1110,8 @@ fn build_whepserversink(
     elements.push((whepserversink_id.clone(), whepserversink));
 
     info!(
-        "WHEP Output configured: endpoint_id='{}', internal_host={}, stun={}, mode={:?}",
-        endpoint_id, host_addr, stun_server, mode
+        "WHEP Output configured: endpoint_id='{}', internal_host={}, stun={:?}, turn={:?}, mode={:?}",
+        endpoint_id, host_addr, stun_server, turn_server, mode
     );
 
     // Register WHEP endpoint with the build context
@@ -1600,20 +1581,6 @@ fn whep_input_definition() -> BlockDefinition {
                 },
             },
             ExposedProperty {
-                name: "stun_server".to_string(),
-                label: "STUN Server".to_string(),
-                description: "STUN server URL for NAT traversal".to_string(),
-                property_type: PropertyType::String,
-                default_value: Some(PropertyValue::String(
-                    "stun://stun.l.google.com:19302".to_string(),
-                )),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "stun_server".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
                 name: "mixer_latency_ms".to_string(),
                 label: "Mixer Latency (ms)".to_string(),
                 description: "Latency of the audio mixer in milliseconds (default 30ms, lower = less delay but may cause glitches)".to_string(),
@@ -1689,20 +1656,6 @@ fn whep_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "endpoint_id".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
-                name: "stun_server".to_string(),
-                label: "STUN Server".to_string(),
-                description: "STUN server URL for NAT traversal".to_string(),
-                property_type: PropertyType::String,
-                default_value: Some(PropertyValue::String(
-                    "stun://stun.l.google.com:19302".to_string(),
-                )),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "stun_server".to_string(),
                     transform: None,
                 },
             },

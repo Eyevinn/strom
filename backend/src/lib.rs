@@ -210,6 +210,8 @@ pub async fn create_app_with_state_and_auth(
         .route("/auth/status", get(auth::auth_status_handler))
         // WHEP streams list API (JSON)
         .route("/whep-streams", get(api::whep_player::list_whep_streams))
+        // ICE servers for WebRTC connections
+        .route("/ice-servers", get(api::whep_player::get_ice_servers))
         // MCP Streamable HTTP endpoint (has its own session management)
         .route("/mcp", post(api::mcp::mcp_post))
         .route("/mcp", get(api::mcp::mcp_get))

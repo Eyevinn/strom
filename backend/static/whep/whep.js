@@ -15,9 +15,21 @@ class WhepConnection {
         this.hasVideo = false;
 
         try {
-            this.peerConnection = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-            });
+            // Fetch ICE servers from the server configuration
+            let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]; // fallback
+            try {
+                const response = await fetch('/api/ice-servers');
+                if (response.ok) {
+                    const config = await response.json();
+                    if (config.ice_servers && config.ice_servers.length > 0) {
+                        iceServers = config.ice_servers;
+                    }
+                }
+            } catch (e) {
+                console.warn('Failed to fetch ICE servers, using default:', e);
+            }
+
+            this.peerConnection = new RTCPeerConnection({ iceServers });
 
             this.peerConnection.ontrack = (event) => {
                 if (event.track.kind === 'audio') {

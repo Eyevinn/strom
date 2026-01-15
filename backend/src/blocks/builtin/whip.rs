@@ -19,7 +19,7 @@ impl BlockBuilder for WHIPOutputBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         debug!("Building WHIP Output block instance: {}", instance_id);
 
@@ -36,9 +36,9 @@ impl BlockBuilder for WHIPOutputBuilder {
             .unwrap_or(false);
 
         if use_new {
-            build_whipclientsink(instance_id, properties)
+            build_whipclientsink(instance_id, properties, ctx)
         } else {
-            build_whipsink(instance_id, properties)
+            build_whipsink(instance_id, properties, ctx)
         }
     }
 }
@@ -47,6 +47,7 @@ impl BlockBuilder for WHIPOutputBuilder {
 fn build_whipclientsink(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
+    ctx: &BlockBuildContext,
 ) -> Result<BlockBuildResult, BlockBuildError> {
     info!("Building WHIP Output using whipclientsink (new implementation)");
 
@@ -77,21 +78,9 @@ fn build_whipclientsink(
         }
     });
 
-    // Get STUN server (optional)
-    let stun_server = properties
-        .get("stun_server")
-        .and_then(|v| {
-            if let PropertyValue::String(s) = v {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.clone())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
+    // Get ICE servers from application config
+    let stun_server = ctx.stun_server();
+    let turn_server = ctx.turn_server();
 
     // Create namespaced element IDs
     let whipclientsink_id = format!("{}:whipclientsink", instance_id);
@@ -115,8 +104,13 @@ fn build_whipclientsink(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("whipclientsink: {}", e)))?;
 
-    // Set signaller properties using the child proxy interface
-    whipclientsink.set_property("stun-server", &stun_server);
+    // Set ICE server properties
+    if let Some(stun) = stun_server {
+        whipclientsink.set_property("stun-server", stun);
+    }
+    if let Some(turn) = turn_server {
+        whipclientsink.set_property("turn-server", turn);
+    }
 
     // Disable video codecs by setting video-caps to empty
     whipclientsink.set_property("video-caps", gst::Caps::new_empty());
@@ -130,8 +124,8 @@ fn build_whipclientsink(
     }
 
     debug!(
-        "WHIP Output (whipclientsink) configured: endpoint={}, stun={}",
-        whip_endpoint, stun_server
+        "WHIP Output (whipclientsink) configured: endpoint={}, stun={:?}, turn={:?}",
+        whip_endpoint, stun_server, turn_server
     );
 
     // Define internal links
@@ -163,6 +157,7 @@ fn build_whipclientsink(
 fn build_whipsink(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
+    ctx: &BlockBuildContext,
 ) -> Result<BlockBuildResult, BlockBuildError> {
     info!("Building WHIP Output using whipsink (stable)");
 
@@ -193,21 +188,9 @@ fn build_whipsink(
         }
     });
 
-    // Get STUN server (optional)
-    let stun_server = properties
-        .get("stun_server")
-        .and_then(|v| {
-            if let PropertyValue::String(s) = v {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.clone())
-                }
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string());
+    // Get ICE servers from application config
+    let stun_server = ctx.stun_server();
+    let turn_server = ctx.turn_server();
 
     // Create namespaced element IDs
     let whipsink_id = format!("{}:whipsink", instance_id);
@@ -247,15 +230,20 @@ fn build_whipsink(
 
     // Set properties directly on whipsink (no signaller child)
     whipsink.set_property("whip-endpoint", &whip_endpoint);
-    whipsink.set_property("stun-server", &stun_server);
+    if let Some(stun) = stun_server {
+        whipsink.set_property("stun-server", stun);
+    }
+    if let Some(turn) = turn_server {
+        whipsink.set_property("turn-server", turn);
+    }
 
     if let Some(token) = &auth_token {
         whipsink.set_property("auth-token", token);
     }
 
     debug!(
-        "WHIP Output (whipsink legacy) configured: endpoint={}, stun={}",
-        whip_endpoint, stun_server
+        "WHIP Output (whipsink legacy) configured: endpoint={}, stun={:?}, turn={:?}",
+        whip_endpoint, stun_server, turn_server
     );
 
     // Define internal links
@@ -351,20 +339,6 @@ fn whip_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "auth_token".to_string(),
-                    transform: None,
-                },
-            },
-            ExposedProperty {
-                name: "stun_server".to_string(),
-                label: "STUN Server".to_string(),
-                description: "STUN server URL for NAT traversal".to_string(),
-                property_type: PropertyType::String,
-                default_value: Some(PropertyValue::String(
-                    "stun://stun.l.google.com:19302".to_string(),
-                )),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "stun_server".to_string(),
                     transform: None,
                 },
             },

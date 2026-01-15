@@ -24,6 +24,12 @@ struct ConfigFile {
 struct ServerConfig {
     #[serde(default = "default_port")]
     port: u16,
+    #[serde(default = "default_ice_servers")]
+    ice_servers: Vec<String>,
+}
+
+fn default_ice_servers() -> Vec<String> {
+    vec!["stun:stun.l.google.com:19302".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -66,6 +72,9 @@ pub struct Config {
     pub log_file: Option<PathBuf>,
     /// Log level (if set, overrides RUST_LOG environment variable)
     pub log_level: Option<String>,
+    /// ICE servers for WebRTC NAT traversal (STUN/TURN)
+    /// Format: stun:host:port or turn:user:pass@host:port
+    pub ice_servers: Vec<String>,
 }
 
 impl Config {
@@ -95,6 +104,7 @@ impl Config {
         figment = figment.merge(Serialized::defaults(ConfigFile {
             server: ServerConfig {
                 port: strom_types::DEFAULT_PORT,
+                ice_servers: default_ice_servers(),
             },
             storage: StorageConfig::default(),
             logging: LoggingConfig::default(),
@@ -161,6 +171,7 @@ impl Config {
             database_url: config_file.storage.database_url,
             log_file: config_file.logging.log_file,
             log_level: config_file.logging.log_level,
+            ice_servers: config_file.server.ice_servers,
         })
     }
 
@@ -192,6 +203,7 @@ impl Config {
             database_url,
             log_file: None,
             log_level: None,
+            ice_servers: default_ice_servers(),
         })
     }
 
@@ -235,6 +247,7 @@ impl Default for Config {
                 database_url: None,
                 log_file: None,
                 log_level: None,
+                ice_servers: default_ice_servers(),
             }
         })
     }

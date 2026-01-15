@@ -20,6 +20,16 @@
 # Env: STROM_SERVER_PORT=8080
 port = 8080
 
+# ICE servers for WebRTC NAT traversal (STUN/TURN)
+# Used by WHEP/WHIP blocks and the WHEP player
+# Format: Array of URLs like "stun:host:port" or "turn:user:pass@host:port"
+# Default: ["stun:stun.l.google.com:19302"]
+# Env: STROM_SERVER_ICE_SERVERS (comma-separated)
+# ice_servers = [
+#     "stun:stun.l.google.com:19302",
+#     "turn:username:password@turn.example.com:3478"
+# ]
+
 # ============================================================================
 # Storage Configuration
 # ============================================================================

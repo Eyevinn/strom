@@ -332,3 +332,31 @@ pub async fn list_whep_streams(State(state): State<AppState>) -> axum::Json<Whep
 
     axum::Json(WhepStreamsResponse { streams })
 }
+
+// ============================================================================
+// ICE Servers API
+// ============================================================================
+
+/// Response structure for ICE servers endpoint.
+#[derive(serde::Serialize)]
+pub struct IceServersResponse {
+    /// List of ICE server URLs (STUN/TURN)
+    pub ice_servers: Vec<IceServer>,
+}
+
+/// ICE server configuration for WebRTC.
+#[derive(serde::Serialize)]
+pub struct IceServer {
+    pub urls: String,
+}
+
+/// GET /api/ice-servers - Get configured ICE servers for WebRTC connections.
+pub async fn get_ice_servers(State(state): State<AppState>) -> axum::Json<IceServersResponse> {
+    let ice_servers = state
+        .ice_servers()
+        .iter()
+        .map(|url| IceServer { urls: url.clone() })
+        .collect();
+
+    axum::Json(IceServersResponse { ice_servers })
+}

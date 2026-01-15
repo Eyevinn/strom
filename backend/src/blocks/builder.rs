@@ -98,16 +98,43 @@ pub struct WhepEndpointInfo {
 /// resources that need to be set up after the pipeline is created.
 /// This allows blocks to interact with the broader system without
 /// coupling BlockBuildResult to specific block types.
-#[derive(Default)]
 pub struct BlockBuildContext {
     /// WHEP endpoints queued for registration
     whep_endpoints: RefCell<Vec<WhepEndpointInfo>>,
+    /// ICE servers for WebRTC NAT traversal (STUN/TURN URLs)
+    ice_servers: Vec<String>,
 }
 
 impl BlockBuildContext {
-    /// Create a new empty build context.
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new build context with the given ICE servers.
+    pub fn new(ice_servers: Vec<String>) -> Self {
+        Self {
+            whep_endpoints: RefCell::new(Vec::new()),
+            ice_servers,
+        }
+    }
+
+    /// Get the configured ICE servers.
+    pub fn ice_servers(&self) -> &[String] {
+        &self.ice_servers
+    }
+
+    /// Get the first STUN server URL (for GStreamer elements).
+    /// Returns the default Google STUN server if no STUN server configured.
+    pub fn stun_server(&self) -> Option<&str> {
+        self.ice_servers
+            .iter()
+            .find(|s| s.starts_with("stun:"))
+            .map(|s| s.as_str())
+    }
+
+    /// Get the first TURN server URL (for GStreamer elements).
+    /// Returns None if no TURN server configured.
+    pub fn turn_server(&self) -> Option<&str> {
+        self.ice_servers
+            .iter()
+            .find(|s| s.starts_with("turn:") || s.starts_with("turns:"))
+            .map(|s| s.as_str())
     }
 
     /// Register a WHEP endpoint (called by WHEP Output blocks during build).
