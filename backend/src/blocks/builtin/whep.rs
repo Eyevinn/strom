@@ -726,11 +726,13 @@ fn build_whepserversink(
         .map_err(|e| BlockBuildError::ElementCreation(format!("whepserversink: {}", e)))?;
 
     // Set ICE server properties
+    // Note: webrtcsink-based elements use "turn-servers" (plural, array) not "turn-server"
     if let Some(stun) = stun_server {
         whepserversink.set_property("stun-server", stun);
     }
     if let Some(turn) = turn_server {
-        whepserversink.set_property("turn-server", turn);
+        let turn_servers = gst::Array::new([turn]);
+        whepserversink.set_property("turn-servers", turn_servers);
     }
 
     // Disable FEC and RTX (retransmission) to avoid bandwidth overhead

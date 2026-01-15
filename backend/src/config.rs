@@ -125,11 +125,28 @@ impl Config {
         }
 
         // 4. Merge environment variables (STROM_* prefix)
+        // Note: Single underscore splits nested keys (e.g., STROM_SERVER_PORT -> server.port)
+        // This means field names with underscores can't be set via env vars using this method
         figment = figment.merge(
             Env::prefixed("STROM_")
                 .map(|key| key.as_str().replace("__", ".").into())
                 .split("_"),
         );
+
+        // 4b. Handle STROM_SERVER_ICE_SERVERS specially (comma-separated array)
+        // This needs special handling because:
+        // - The split("_") above would turn ICE_SERVERS into ice.servers (wrong)
+        // - Figment doesn't parse comma-separated values into arrays
+        if let Ok(ice_servers_str) = env::var("STROM_SERVER_ICE_SERVERS") {
+            let ice_servers: Vec<String> = ice_servers_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !ice_servers.is_empty() {
+                figment = figment.merge(Serialized::default("server.ice_servers", ice_servers));
+            }
+        }
 
         // 5. Merge CLI arguments (highest priority)
         if let Some(p) = port {
@@ -346,7 +363,6 @@ database_url = "postgresql://localhost/test"
     fn test_from_figment_env_vars_override_config_file() {
         // Save and clear any existing env vars
         let original_server_port = std::env::var("STROM_SERVER_PORT").ok();
-        let original_port = std::env::var("STROM_PORT").ok();
 
         let temp_dir = TempDir::new().unwrap();
         let config_file = temp_dir.path().join(".strom.toml");
@@ -354,7 +370,7 @@ database_url = "postgresql://localhost/test"
         // Create a test config file with port 7777
         fs::write(&config_file, "[server]\nport = 7777").unwrap();
 
-        // Set environment variable to override (use STROM_SERVER_PORT to match figment's split logic)
+        // Set environment variable to override (STROM_SERVER_PORT -> server.port)
         std::env::set_var("STROM_SERVER_PORT", "8888");
 
         // Change to temp directory
@@ -372,11 +388,6 @@ database_url = "postgresql://localhost/test"
         } else {
             std::env::remove_var("STROM_SERVER_PORT");
         }
-        if let Some(port) = original_port {
-            std::env::set_var("STROM_PORT", port);
-        } else {
-            std::env::remove_var("STROM_PORT");
-        }
 
         // Env var should override config file
         assert_eq!(config.port, 8888);
@@ -387,7 +398,6 @@ database_url = "postgresql://localhost/test"
     fn test_from_figment_cli_overrides_env_and_config() {
         // Save any existing env vars
         let original_server_port = std::env::var("STROM_SERVER_PORT").ok();
-        let original_port = std::env::var("STROM_PORT").ok();
 
         let temp_dir = TempDir::new().unwrap();
         let config_file = temp_dir.path().join(".strom.toml");
@@ -413,11 +423,6 @@ database_url = "postgresql://localhost/test"
             std::env::set_var("STROM_SERVER_PORT", port);
         } else {
             std::env::remove_var("STROM_SERVER_PORT");
-        }
-        if let Some(port) = original_port {
-            std::env::set_var("STROM_PORT", port);
-        } else {
-            std::env::remove_var("STROM_PORT");
         }
 
         // CLI should have highest priority
@@ -458,6 +463,40 @@ data_dir = "{}"
 
         assert!(config.flows_path.starts_with(&data_dir));
         assert!(config.blocks_path.starts_with(&data_dir));
+    }
+
+    #[test]
+    #[serial]
+    fn test_ice_servers_env_var() {
+        // Save any existing env vars
+        let original_ice_servers = std::env::var("STROM_SERVER_ICE_SERVERS").ok();
+
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // Set ICE servers env var (comma-separated)
+        std::env::set_var(
+            "STROM_SERVER_ICE_SERVERS",
+            "stun:stun.example.com:3478,turn:user:pass@turn.example.com:3478",
+        );
+
+        let config = Config::from_figment(None, None, None, None, None, None).unwrap();
+
+        // Restore
+        let _ = std::env::set_current_dir(&original_dir);
+        if let Some(ice) = original_ice_servers {
+            std::env::set_var("STROM_SERVER_ICE_SERVERS", ice);
+        } else {
+            std::env::remove_var("STROM_SERVER_ICE_SERVERS");
+        }
+
+        assert_eq!(config.ice_servers.len(), 2);
+        assert_eq!(config.ice_servers[0], "stun:stun.example.com:3478");
+        assert_eq!(
+            config.ice_servers[1],
+            "turn:user:pass@turn.example.com:3478"
+        );
     }
 
     #[test]

@@ -105,11 +105,13 @@ fn build_whipclientsink(
         .map_err(|e| BlockBuildError::ElementCreation(format!("whipclientsink: {}", e)))?;
 
     // Set ICE server properties
+    // Note: webrtcsink-based elements use "turn-servers" (plural, array) not "turn-server"
     if let Some(stun) = stun_server {
         whipclientsink.set_property("stun-server", stun);
     }
     if let Some(turn) = turn_server {
-        whipclientsink.set_property("turn-server", turn);
+        let turn_servers = gst::Array::new([turn]);
+        whipclientsink.set_property("turn-servers", turn_servers);
     }
 
     // Disable video codecs by setting video-caps to empty

@@ -340,14 +340,57 @@ pub async fn list_whep_streams(State(state): State<AppState>) -> axum::Json<Whep
 /// Response structure for ICE servers endpoint.
 #[derive(serde::Serialize)]
 pub struct IceServersResponse {
-    /// List of ICE server URLs (STUN/TURN)
+    /// List of ICE server configurations (STUN/TURN)
     pub ice_servers: Vec<IceServer>,
 }
 
 /// ICE server configuration for WebRTC.
+/// For TURN servers, username and credential are extracted from the URL.
 #[derive(serde::Serialize)]
 pub struct IceServer {
     pub urls: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+}
+
+/// Parse an ICE server URL into the browser-compatible format.
+/// TURN URLs with embedded credentials (turn:user:pass@host:port) are parsed
+/// into separate urls, username, and credential fields.
+fn parse_ice_server(url: &str) -> IceServer {
+    // Check if it's a TURN URL with credentials
+    if url.starts_with("turn:") || url.starts_with("turns:") {
+        // Format: turn:username:password@host:port or turns:username:password@host:port
+        let scheme_end = url.find(':').unwrap_or(0) + 1;
+        let rest = &url[scheme_end..];
+
+        if let Some(at_pos) = rest.rfind('@') {
+            // Has credentials
+            let credentials = &rest[..at_pos];
+            let host_port = &rest[at_pos + 1..];
+            let scheme = &url[..scheme_end];
+
+            // Split credentials on first ':' (username:password)
+            if let Some(colon_pos) = credentials.find(':') {
+                let username = &credentials[..colon_pos];
+                let password = &credentials[colon_pos + 1..];
+
+                return IceServer {
+                    urls: format!("{}{}", scheme, host_port),
+                    username: Some(username.to_string()),
+                    credential: Some(password.to_string()),
+                };
+            }
+        }
+    }
+
+    // STUN server or TURN without embedded credentials
+    IceServer {
+        urls: url.to_string(),
+        username: None,
+        credential: None,
+    }
 }
 
 /// GET /api/ice-servers - Get configured ICE servers for WebRTC connections.
@@ -355,8 +398,45 @@ pub async fn get_ice_servers(State(state): State<AppState>) -> axum::Json<IceSer
     let ice_servers = state
         .ice_servers()
         .iter()
-        .map(|url| IceServer { urls: url.clone() })
+        .map(|url| parse_ice_server(url))
         .collect();
 
     axum::Json(IceServersResponse { ice_servers })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_stun_server() {
+        let server = parse_ice_server("stun:stun.l.google.com:19302");
+        assert_eq!(server.urls, "stun:stun.l.google.com:19302");
+        assert!(server.username.is_none());
+        assert!(server.credential.is_none());
+    }
+
+    #[test]
+    fn test_parse_turn_server_with_credentials() {
+        let server = parse_ice_server("turn:myuser:mypassword@turn.example.com:3478");
+        assert_eq!(server.urls, "turn:turn.example.com:3478");
+        assert_eq!(server.username, Some("myuser".to_string()));
+        assert_eq!(server.credential, Some("mypassword".to_string()));
+    }
+
+    #[test]
+    fn test_parse_turns_server_with_credentials() {
+        let server = parse_ice_server("turns:user:pass@turn.example.com:5349");
+        assert_eq!(server.urls, "turns:turn.example.com:5349");
+        assert_eq!(server.username, Some("user".to_string()));
+        assert_eq!(server.credential, Some("pass".to_string()));
+    }
+
+    #[test]
+    fn test_parse_turn_server_without_credentials() {
+        let server = parse_ice_server("turn:turn.example.com:3478");
+        assert_eq!(server.urls, "turn:turn.example.com:3478");
+        assert!(server.username.is_none());
+        assert!(server.credential.is_none());
+    }
 }
