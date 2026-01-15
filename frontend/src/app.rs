@@ -2036,6 +2036,20 @@ impl StromApp {
                     {
                         ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
                     }
+
+                    // Open Web GUI button (native mode only)
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if ui
+                            .button("Open Web GUI")
+                            .on_hover_text("Open the web interface in your browser")
+                            .clicked()
+                        {
+                            let url = format!("http://localhost:{}", self.port);
+                            ctx.open_url(egui::OpenUrl::new_tab(&url));
+                        }
+                    }
+
                     ui.separator();
 
                     // Navigation tabs (bigger text)
