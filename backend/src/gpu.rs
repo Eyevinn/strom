@@ -124,7 +124,12 @@ fn test_cuda_gl_interop() -> Result<(), String> {
 
     // Run gst-launch-1.0 with GST_DEBUG to capture warnings
     // Pipeline: videotestsrc ! glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12 ! nvh264enc ! fakesink
-    let mut cmd = Command::new("gst-launch-1.0");
+    let gst_launch = if cfg!(windows) {
+        "gst-launch-1.0.exe"
+    } else {
+        "gst-launch-1.0"
+    };
+    let mut cmd = Command::new(gst_launch);
     cmd.env("GST_DEBUG", "nvenc:3,nvencoder:3,cudautils:3");
 
     // Pass through GL environment variables for headless support
