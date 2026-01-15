@@ -222,7 +222,7 @@ pub fn generate_vlc_playlist(srt_uri: &str, latency_ms: i32, stream_name: &str) 
 /// 1. Detects listener mode URIs (e.g., `srt://:5000?mode=listener`)
 /// 2. Replaces empty host with the Strom server's hostname
 /// 3. Changes mode from listener to caller
-fn transform_srt_uri_for_vlc(srt_uri: &str) -> String {
+pub fn transform_srt_uri_for_vlc(srt_uri: &str) -> String {
     // Check if this is a listener mode URI (empty host or mode=listener)
     let is_listener = srt_uri.contains("mode=listener");
     let has_empty_host = srt_uri.starts_with("srt://:") || srt_uri.starts_with("srt://:");
@@ -5958,7 +5958,7 @@ impl eframe::App for StromApp {
             }
             AppPage::Links => {
                 CentralPanel::default().show(ctx, |ui| {
-                    self.links_page.render(ui, &self.api, ctx);
+                    self.links_page.render(ui, &self.api, ctx, &self.flows);
                 });
             }
         }
