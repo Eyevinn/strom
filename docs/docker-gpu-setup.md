@@ -64,7 +64,6 @@ docker run --gpus 2 <image>
 ```bash
 docker run -d \
   --gpus all \
-  -e NVIDIA_DRIVER_CAPABILITIES=all \
   -p 8080:8080 \
   --name strom \
   eyevinntechnology/strom:latest
@@ -75,7 +74,6 @@ docker run -d \
 ```bash
 docker run -d \
   --gpus all \
-  -e NVIDIA_DRIVER_CAPABILITIES=all \
   -e STROM_MEDIA_PATH=/media \
   -v ./media:/media \
   -v ./data:/data \
@@ -238,13 +236,11 @@ docker run --rm --gpus all ubuntu nvidia-smi
 
 # Test GStreamer NVENC
 docker run --rm --gpus all \
-  -e NVIDIA_DRIVER_CAPABILITIES=all \
   eyevinntechnology/strom:latest \
   gst-inspect-1.0 nvh264enc
 
 # Test full pipeline
 docker run --rm --gpus all \
-  -e NVIDIA_DRIVER_CAPABILITIES=all \
   eyevinntechnology/strom:latest \
   gst-launch-1.0 videotestsrc num-buffers=30 ! \
     video/x-raw,width=1920,height=1080 ! \
