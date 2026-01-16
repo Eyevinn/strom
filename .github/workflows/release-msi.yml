@@ -1,0 +1,237 @@
+name: Build Windows MSI Installer
+
+on:
+  # Trigger after the main release workflow completes
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
+  # Allow manual triggering for testing
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 0.3.10)'
+        required: true
+        type: string
+
+env:
+  GSTREAMER_VERSION: "1.24.13"
+  GRAPHVIZ_VERSION: "12.2.1"
+
+jobs:
+  build-msi:
+    name: Build MSI Installer
+    runs-on: windows-latest
+    # Only run if release was successful (or manual trigger)
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            # Get version from the triggering workflow's tag
+            VERSION=$(echo "${{ github.event.workflow_run.head_branch }}" | sed 's/^v//')
+            if [ -z "$VERSION" ] || [ "$VERSION" == "main" ]; then
+              # Fallback: get latest tag
+              VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')
+            fi
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building MSI for version: $VERSION"
+
+      - name: Download Strom binaries from release
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $baseUrl = "https://github.com/${{ github.repository }}/releases/download/v$version"
+
+          New-Item -ItemType Directory -Path "binaries" -Force | Out-Null
+
+          Write-Host "Downloading strom-v$version-windows-x86_64.exe..."
+          Invoke-WebRequest -Uri "$baseUrl/strom-v$version-windows-x86_64.exe" -OutFile "binaries/strom.exe"
+
+          Write-Host "Downloading strom-mcp-server-v$version-windows-x86_64.exe..."
+          Invoke-WebRequest -Uri "$baseUrl/strom-mcp-server-v$version-windows-x86_64.exe" -OutFile "binaries/strom-mcp-server.exe"
+
+          Write-Host "Downloaded binaries:"
+          Get-ChildItem binaries/
+
+      - name: Download GStreamer runtime
+        shell: pwsh
+        run: |
+          $version = "${{ env.GSTREAMER_VERSION }}"
+          $baseUrl = "https://github.com/${{ github.repository }}/releases/download/gstreamer-deps"
+
+          Write-Host "Downloading GStreamer $version runtime MSI..."
+          Invoke-WebRequest -Uri "$baseUrl/gstreamer-1.0-msvc-x86_64-$version.msi" -OutFile "gstreamer.msi"
+
+          Write-Host "Download complete: $((Get-Item gstreamer.msi).Length / 1MB) MB"
+
+      - name: Download Graphviz
+        shell: pwsh
+        run: |
+          $version = "${{ env.GRAPHVIZ_VERSION }}"
+          $zipFile = "windows_10_cmake_Release_graphviz-install-$version-win64.zip"
+          $url = "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/$version/$zipFile"
+
+          Write-Host "Downloading Graphviz $version..."
+          Invoke-WebRequest -Uri $url -OutFile "graphviz.zip"
+
+          Write-Host "Download complete: $((Get-Item graphviz.zip).Length / 1MB) MB"
+
+      - name: Prepare GStreamer bundle
+        shell: pwsh
+        run: |
+          $buildDir = "installer/windows/build"
+          New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
+
+          # Extract GStreamer MSI
+          Write-Host "Extracting GStreamer MSI..."
+          $installArgs = "/a `"$((Get-Location).Path)\gstreamer.msi`" /qn TARGETDIR=`"$((Get-Location).Path)\gst-temp`""
+          Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow
+
+          $gstRoot = "gst-temp\gstreamer\1.0\msvc_x86_64"
+
+          # Create bundle directories
+          $bundleDir = "$buildDir\gstreamer-bundle"
+          New-Item -ItemType Directory -Path "$bundleDir\bin" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$bundleDir\lib\gstreamer-1.0" -Force | Out-Null
+
+          # Copy all bin files (DLLs and tools)
+          Write-Host "Copying GStreamer bin files..."
+          Copy-Item "$gstRoot\bin\*" "$bundleDir\bin\" -Force
+
+          # Copy all plugins
+          Write-Host "Copying GStreamer plugins..."
+          Copy-Item "$gstRoot\lib\gstreamer-1.0\*.dll" "$bundleDir\lib\gstreamer-1.0\" -Force
+
+          # Copy share files if they exist
+          if (Test-Path "$gstRoot\share") {
+            New-Item -ItemType Directory -Path "$bundleDir\share" -Force | Out-Null
+            Copy-Item "$gstRoot\share\*" "$bundleDir\share\" -Recurse -Force
+          }
+
+          $size = (Get-ChildItem -Recurse "$bundleDir" | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "GStreamer bundle size: $([math]::Round($size, 2)) MB"
+
+      - name: Prepare Graphviz bundle
+        shell: pwsh
+        run: |
+          $buildDir = "installer/windows/build"
+
+          # Extract Graphviz
+          Write-Host "Extracting Graphviz..."
+          Expand-Archive -Path "graphviz.zip" -DestinationPath "gv-temp" -Force
+
+          $gvRoot = Get-ChildItem "gv-temp" -Directory | Select-Object -First 1
+
+          # Create bundle directory
+          $bundleDir = "$buildDir\graphviz-bundle"
+          New-Item -ItemType Directory -Path "$bundleDir\bin" -Force | Out-Null
+
+          # Copy bin files
+          Write-Host "Copying Graphviz files..."
+          Copy-Item "$($gvRoot.FullName)\bin\*" "$bundleDir\bin\" -Force
+
+          $size = (Get-ChildItem -Recurse "$bundleDir" | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "Graphviz bundle size: $([math]::Round($size, 2)) MB"
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.1
+          wix extension add WixToolset.UI.wixext/5.0.1 -g
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $buildDir = "installer/windows/build"
+
+          # Copy WiX source files
+          Copy-Item "installer/windows/Product.wxs" "$buildDir/" -Force
+          Copy-Item "installer/windows/License.rtf" "$buildDir/" -Force
+
+          # Create banner image (493x58)
+          Add-Type -AssemblyName System.Drawing
+          $banner = New-Object System.Drawing.Bitmap(493, 58)
+          $g = [System.Drawing.Graphics]::FromImage($banner)
+          $g.Clear([System.Drawing.Color]::FromArgb(45, 45, 48))
+          $font = New-Object System.Drawing.Font("Segoe UI", 18, [System.Drawing.FontStyle]::Bold)
+          $brush = [System.Drawing.Brushes]::White
+          $g.DrawString("Strom", $font, $brush, 340, 14)
+          $font.Dispose()
+          $g.Dispose()
+          $banner.Save("$buildDir\banner.bmp", [System.Drawing.Imaging.ImageFormat]::Bmp)
+          $banner.Dispose()
+
+          # Create dialog image (493x312)
+          $dialog = New-Object System.Drawing.Bitmap(493, 312)
+          $g = [System.Drawing.Graphics]::FromImage($dialog)
+          $g.Clear([System.Drawing.Color]::FromArgb(45, 45, 48))
+          $font = New-Object System.Drawing.Font("Segoe UI", 32, [System.Drawing.FontStyle]::Bold)
+          $brush = [System.Drawing.Brushes]::White
+          $g.DrawString("Strom", $font, $brush, 30, 80)
+          $font2 = New-Object System.Drawing.Font("Segoe UI", 11)
+          $g.DrawString("GStreamer Flow Engine", $font2, $brush, 30, 130)
+          $g.DrawString("Visual pipeline management", $font2, $brush, 30, 155)
+          $font.Dispose()
+          $font2.Dispose()
+          $g.Dispose()
+          $dialog.Save("$buildDir\dialog.bmp", [System.Drawing.Imaging.ImageFormat]::Bmp)
+          $dialog.Dispose()
+
+          # Get absolute paths
+          $absStromExe = (Resolve-Path "binaries/strom.exe").Path
+          $absStromMcpServerExe = (Resolve-Path "binaries/strom-mcp-server.exe").Path
+          $absGstDir = (Resolve-Path "$buildDir/gstreamer-bundle").Path
+          $absGvDir = (Resolve-Path "$buildDir/graphviz-bundle").Path
+
+          # Build MSI
+          Push-Location $buildDir
+
+          Write-Host "Building MSI with WiX..."
+          Write-Host "  ProductVersion: $version"
+          Write-Host "  StromExe: $absStromExe"
+          Write-Host "  GStreamerDir: $absGstDir"
+          Write-Host "  GraphvizDir: $absGvDir"
+
+          wix build `
+            -d ProductVersion="$version" `
+            -d StromExe="$absStromExe" `
+            -d StromMcpServerExe="$absStromMcpServerExe" `
+            -d GStreamerDir="$absGstDir" `
+            -d GraphvizDir="$absGvDir" `
+            -ext WixToolset.UI.wixext `
+            -o "strom-$version-windows-x86_64.msi" `
+            Product.wxs
+
+          Pop-Location
+
+          # Report results
+          $msiPath = "$buildDir/strom-$version-windows-x86_64.msi"
+          $msiSize = (Get-Item $msiPath).Length / 1MB
+          Write-Host "MSI built successfully: $([math]::Round($msiSize, 2)) MB"
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: strom-msi-${{ steps.version.outputs.version }}
+          path: installer/windows/build/strom-${{ steps.version.outputs.version }}-windows-x86_64.msi
+          retention-days: 90
+
+      - name: Upload MSI to release
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.upload_to_release == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: installer/windows/build/strom-${{ steps.version.outputs.version }}-windows-x86_64.msi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

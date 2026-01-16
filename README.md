@@ -71,10 +71,11 @@ chmod +x strom-v*-linux-x86_64
 
 # macOS
 # Download and run the macOS binary
-
-# Windows
-# Download and run the .exe file
 ```
+
+**Windows:** Download the MSI installer (`strom-*-windows-x86_64.msi`) for a one-click installation that bundles GStreamer and Graphviz. After installation, launch "Strom" from the Start Menu.
+
+Alternatively, download the standalone `.exe` and install [GStreamer](https://gstreamer.freedesktop.org/download/) manually.
 
 Open your browser to `http://localhost:8080` to access the web UI.
 
