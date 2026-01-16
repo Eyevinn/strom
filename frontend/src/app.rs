@@ -3324,7 +3324,7 @@ impl StromApp {
             let panel_rect = ui.max_rect();
 
             // Left panel toggle (flow list)
-            let left_toggle_pos = egui::pos2(panel_rect.left() + 4.0, panel_rect.top() + 4.0);
+            let left_toggle_pos = egui::pos2(panel_rect.left(), panel_rect.top() + 4.0);
             egui::Area::new(egui::Id::new("left_panel_toggle"))
                 .fixed_pos(left_toggle_pos)
                 .order(egui::Order::Middle)
@@ -3351,7 +3351,7 @@ impl StromApp {
             // Right panel toggle (palette) - only show when a flow is selected
             if self.current_flow().is_some() {
                 let right_toggle_pos =
-                    egui::pos2(panel_rect.right() - 38.0, panel_rect.top() + 4.0);
+                    egui::pos2(panel_rect.right() - 34.0, panel_rect.top() + 4.0);
                 egui::Area::new(egui::Id::new("right_panel_toggle"))
                     .fixed_pos(right_toggle_pos)
                     .order(egui::Order::Middle)
