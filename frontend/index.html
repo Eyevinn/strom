@@ -3,8 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, minimum-scale=0.5, maximum-scale=3.0">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#1a1a2e">
+    <link rel="manifest" href="/manifest.json">
     <title>Strom | ${location.host}</title>
     <script>document.title = `Strom | ${location.host}`;</script>
+    <link data-trunk rel="copy-file" href="manifest.json" />
     <link data-trunk rel="rust" data-bin="strom-frontend" data-wasm-opt="z" />
     <style>
         html, body {
