@@ -135,13 +135,12 @@ impl<'a> Widget for CompactSystemMonitor<'a> {
 
             if let Some(stats) = self.store.latest() {
                 let has_gpu = !stats.gpu_stats.is_empty();
-                let num_rows = if has_gpu { 3.0 } else { 2.0 };
-                let row_height = rect.height() / num_rows;
-                let graph_width = rect.width() * 0.68;
-                let _label_width = rect.width() * 0.32;
+                let num_cols = if has_gpu { 3.0 } else { 2.0 };
+                let col_width = rect.width() / num_cols;
+                let graph_height = rect.height();
 
                 // Draw CPU graph
-                let cpu_rect = Rect::from_min_size(rect.min, Vec2::new(graph_width, row_height));
+                let cpu_rect = Rect::from_min_size(rect.min, Vec2::new(col_width, graph_height));
                 draw_mini_graph(
                     painter,
                     cpu_rect,
@@ -151,8 +150,8 @@ impl<'a> Widget for CompactSystemMonitor<'a> {
 
                 // Draw memory graph
                 let mem_rect = Rect::from_min_size(
-                    Pos2::new(rect.min.x, rect.min.y + row_height),
-                    Vec2::new(graph_width, row_height),
+                    Pos2::new(rect.min.x + col_width, rect.min.y),
+                    Vec2::new(col_width, graph_height),
                 );
                 draw_mini_graph(
                     painter,
@@ -165,56 +164,14 @@ impl<'a> Widget for CompactSystemMonitor<'a> {
                 if has_gpu {
                     if let Some(gpu_hist) = self.store.gpu_history(0) {
                         let gpu_rect = Rect::from_min_size(
-                            Pos2::new(rect.min.x, rect.min.y + row_height * 2.0),
-                            Vec2::new(graph_width, row_height),
+                            Pos2::new(rect.min.x + col_width * 2.0, rect.min.y),
+                            Vec2::new(col_width, graph_height),
                         );
                         draw_mini_graph(
                             painter,
                             gpu_rect,
                             gpu_hist,
                             Color32::from_rgb(255, 150, 100),
-                        );
-                    }
-                }
-
-                // Draw labels
-                let label_pos = Pos2::new(rect.min.x + graph_width + 4.0, rect.min.y + 1.0);
-                let font_size = if has_gpu { 9.0 } else { 10.0 };
-                let line_height = if has_gpu { 8.0 } else { 12.0 };
-
-                let cpu_text = format!("CPU:{:.0}%", stats.cpu_usage);
-                painter.text(
-                    label_pos,
-                    egui::Align2::LEFT_TOP,
-                    cpu_text,
-                    egui::FontId::proportional(font_size),
-                    Color32::from_rgb(200, 200, 200),
-                );
-
-                let mem_percent = if stats.total_memory > 0 {
-                    (stats.used_memory as f32 / stats.total_memory as f32) * 100.0
-                } else {
-                    0.0
-                };
-                let mem_text = format!("MEM:{:.0}%", mem_percent);
-                painter.text(
-                    Pos2::new(label_pos.x, label_pos.y + line_height),
-                    egui::Align2::LEFT_TOP,
-                    mem_text,
-                    egui::FontId::proportional(font_size),
-                    Color32::from_rgb(200, 200, 200),
-                );
-
-                // Draw GPU label if available
-                if has_gpu {
-                    if let Some(gpu) = stats.gpu_stats.first() {
-                        let gpu_text = format!("GPU:{:.0}%", gpu.utilization);
-                        painter.text(
-                            Pos2::new(label_pos.x, label_pos.y + line_height * 2.0),
-                            egui::Align2::LEFT_TOP,
-                            gpu_text,
-                            egui::FontId::proportional(font_size),
-                            Color32::from_rgb(200, 200, 200),
                         );
                     }
                 }
