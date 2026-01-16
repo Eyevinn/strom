@@ -121,7 +121,7 @@ impl BlockBuilder for DeckLinkAudioInputBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("🎵 Building DeckLink Audio Input block: {}", instance_id);
+        info!("Building DeckLink Audio Input block: {}", instance_id);
 
         // Parse properties
         let device_number = properties
@@ -301,7 +301,7 @@ impl BlockBuilder for DeckLinkAudioOutputBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("🎵 Building DeckLink Audio Output block: {}", instance_id);
+        info!("Building DeckLink Audio Output block: {}", instance_id);
 
         // Parse properties
         let device_number = properties

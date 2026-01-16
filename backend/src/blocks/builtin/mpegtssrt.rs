@@ -182,7 +182,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             mux.set_property("bitrate", 0u64); // 0 = auto-detect from streams
         }
 
-        info!("📡 MPEG-TS muxer configured: alignment=7, pcr-interval=40ms");
+        info!("MPEG-TS muxer configured: alignment=7, pcr-interval=40ms");
 
         // Create srtsink
         let sink_id = format!("{}:srtsink", instance_id);

@@ -117,7 +117,7 @@ impl BlockBuilder for CompositorBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("🎬 Building Compositor block instance: {}", instance_id);
+        info!("Building Compositor block instance: {}", instance_id);
 
         // Parse compositor preference and select backend
         let preference = parse_compositor_preference(properties);
@@ -187,7 +187,7 @@ fn select_compositor(
     match preference {
         CompositorPreference::GPUOnly => {
             if has_gl {
-                info!("🎬 Using GPU (OpenGL) compositor as requested");
+                info!("Using GPU (OpenGL) compositor as requested");
                 Ok(CompositorBackend::OpenGL)
             } else {
                 Err(BlockBuildError::InvalidConfiguration(
@@ -197,7 +197,7 @@ fn select_compositor(
         }
         CompositorPreference::CPUOnly => {
             if has_software {
-                info!("🎬 Using CPU (software) compositor as requested");
+                info!("Using CPU (software) compositor as requested");
                 Ok(CompositorBackend::Software)
             } else {
                 Err(BlockBuildError::InvalidConfiguration(
@@ -207,10 +207,10 @@ fn select_compositor(
         }
         CompositorPreference::Auto => {
             if has_gl {
-                info!("🎬 Auto-selected GPU (OpenGL) compositor");
+                info!("Auto-selected GPU (OpenGL) compositor");
                 Ok(CompositorBackend::OpenGL)
             } else if has_software {
-                warn!("🎬 GPU compositor unavailable, falling back to CPU compositor");
+                warn!("GPU compositor unavailable, falling back to CPU compositor");
                 Ok(CompositorBackend::Software)
             } else {
                 Err(BlockBuildError::InvalidConfiguration(
@@ -243,7 +243,7 @@ fn build_opengl_compositor(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("glvideomixerelement: {}", e)))?;
 
-    info!("🎬 GL mixer created with force-live={}", force_live);
+    info!("GL mixer created with force-live={}", force_live);
 
     // Set mixer properties in NULL state
     mixer.set_property_from_str("background", background);
@@ -302,7 +302,7 @@ fn build_opengl_compositor(
         )
     };
 
-    info!("🎬 GL output caps: {}", caps_str);
+    info!("GL output caps: {}", caps_str);
 
     let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
         BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
@@ -402,7 +402,7 @@ fn build_opengl_compositor(
             ElementPadRef::pad(&capsfilter_id, "sink"),
         ));
 
-        info!("🎬 GL output chain: mixer -> gldownload -> capsfilter");
+        info!("GL output chain: mixer -> gldownload -> capsfilter");
     } else {
         elements.push((capsfilter_id.clone(), capsfilter));
 
@@ -411,10 +411,10 @@ fn build_opengl_compositor(
             ElementPadRef::pad(&capsfilter_id, "sink"),
         ));
 
-        info!("🎬 GL output chain: mixer -> capsfilter (GL memory)");
+        info!("GL output chain: mixer -> capsfilter (GL memory)");
     }
 
-    info!("🎬 OpenGL compositor created: {} inputs", num_inputs);
+    info!("OpenGL compositor created: {} inputs", num_inputs);
 
     Ok(BlockBuildResult {
         elements,
@@ -443,7 +443,7 @@ fn build_software_compositor(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("compositor: {}", e)))?;
 
-    info!("🎬 CPU mixer created");
+    info!("CPU mixer created");
 
     // Set mixer properties
     // Note: compositor element uses different property names than glvideomixerelement
@@ -459,7 +459,7 @@ fn build_software_compositor(
     set_mixer_latency_properties(&mixer, properties);
 
     // Request pads and set their properties
-    info!("🎬 Requesting {} CPU mixer sink pads", num_inputs);
+    info!("Requesting {} CPU mixer sink pads", num_inputs);
 
     let mut mixer_sink_pads = Vec::new();
     for i in 0..num_inputs {
@@ -473,7 +473,7 @@ fn build_software_compositor(
         // Set common pad properties
         set_common_pad_properties(&sink_pad, i, properties, output_width, output_height);
 
-        info!("🎬 CPU pad {} configured", sink_pad.name());
+        info!("CPU pad {} configured", sink_pad.name());
 
         mixer_sink_pads.push(sink_pad);
     }
@@ -541,9 +541,9 @@ fn build_software_compositor(
         ElementPadRef::pad(&capsfilter_id, "sink"),
     ));
 
-    info!("🎬 CPU output chain: mixer -> capsfilter");
+    info!("CPU output chain: mixer -> capsfilter");
 
-    info!("🎬 Software compositor created: {} inputs", num_inputs);
+    info!("Software compositor created: {} inputs", num_inputs);
 
     Ok(BlockBuildResult {
         elements,
