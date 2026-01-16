@@ -302,10 +302,7 @@ mod tests {
         let flow_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let name = ChannelRegistry::generate_channel_name(&flow_id, "output:0");
         // Colons should be replaced with underscores
-        assert_eq!(
-            name,
-            "strom_550e8400-e29b-41d4-a716-446655440000_output_0"
-        );
+        assert_eq!(name, "strom_550e8400-e29b-41d4-a716-446655440000_output_0");
     }
 
     #[test]

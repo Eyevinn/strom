@@ -447,7 +447,8 @@ a=rtpmap:97 L16/48000/8
 
     #[test]
     fn test_announced_stream_key() {
-        let flow_id = FlowId::from(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap());
+        let flow_id =
+            FlowId::from(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap());
         let block_id = "aes67_output_0";
 
         let key = AnnouncedStream::key(&flow_id, block_id);
@@ -489,7 +490,10 @@ c=IN IP4 192.168.1.100
 m=audio 5004 RTP/AVP 96
 "#;
         let info = SdpStreamInfo::parse(sdp).unwrap();
-        assert_eq!(info.connection_address, Some("192.168.1.100".parse().unwrap()));
+        assert_eq!(
+            info.connection_address,
+            Some("192.168.1.100".parse().unwrap())
+        );
     }
 
     #[test]

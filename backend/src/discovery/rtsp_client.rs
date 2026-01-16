@@ -87,6 +87,7 @@ pub async fn rtsp_describe(url: &str) -> Result<String> {
 }
 
 /// Parsed RTSP URL components.
+#[derive(Debug)]
 struct RtspUrl {
     host: String,
     port: u16,
