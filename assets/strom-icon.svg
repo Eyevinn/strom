@@ -1,68 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#1a2744"/>
-      <stop offset="100%" stop-color="#0a1628"/>
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
     </linearGradient>
-    <linearGradient id="stream1" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#00e5ff"/>
-      <stop offset="100%" stop-color="#536dfe"/>
-    </linearGradient>
-    <linearGradient id="stream2" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#536dfe"/>
-      <stop offset="100%" stop-color="#7c4dff"/>
-    </linearGradient>
-    <linearGradient id="stream3" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#00e5ff"/>
-      <stop offset="50%" stop-color="#536dfe"/>
-      <stop offset="100%" stop-color="#7c4dff"/>
+    <linearGradient id="s" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c084fc"/>
     </linearGradient>
   </defs>
 
   <!-- Background -->
   <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bg)"/>
 
-  <!-- Three flowing streams forming an S-shape - representing data/media streams -->
-  <!-- Also suggests electric current flowing through wires -->
-
-  <!-- Stream 1 (top) -->
-  <path d="M 120 140
-           C 200 140, 240 140, 280 180
-           C 320 220, 340 240, 390 240"
-        stroke="url(#stream1)"
-        stroke-width="36"
+  <!-- Stylized S - combines wave/stream flow with electric current shape -->
+  <path d="M 340 120
+           C 200 120, 140 160, 140 210
+           C 140 270, 220 280, 256 280
+           C 292 280, 372 290, 372 350
+           C 372 400, 312 440, 172 440"
+        stroke="url(#s)"
+        stroke-width="56"
         stroke-linecap="round"
         fill="none"/>
-
-  <!-- Stream 2 (middle - main) -->
-  <path d="M 120 256
-           C 180 256, 220 220, 256 220
-           C 292 220, 320 292, 256 292
-           C 220 292, 180 256, 390 256"
-        stroke="url(#stream3)"
-        stroke-width="44"
-        stroke-linecap="round"
-        fill="none"/>
-
-  <!-- Stream 3 (bottom) -->
-  <path d="M 120 272
-           C 180 272, 200 320, 256 340
-           C 312 360, 360 372, 390 372"
-        stroke="url(#stream2)"
-        stroke-width="36"
-        stroke-linecap="round"
-        fill="none"/>
-
-  <!-- Input node (source) -->
-  <circle cx="120" cy="256" r="28" fill="#00e5ff"/>
-  <circle cx="120" cy="256" r="14" fill="#0a1628"/>
-
-  <!-- Output node (destination) -->
-  <circle cx="390" cy="256" r="28" fill="#7c4dff"/>
-  <circle cx="390" cy="256" r="14" fill="#0a1628"/>
-
-  <!-- Electric spark accents -->
-  <circle cx="200" cy="200" r="6" fill="#00e5ff" opacity="0.8"/>
-  <circle cx="310" cy="310" r="8" fill="#7c4dff" opacity="0.8"/>
-  <circle cx="256" cy="256" r="5" fill="#ffffff" opacity="0.6"/>
 </svg>
