@@ -13,6 +13,11 @@ on:
         description: 'Version to build (e.g., 0.3.10)'
         required: true
         type: string
+      upload_to_release:
+        description: 'Upload MSI to GitHub release'
+        required: false
+        type: boolean
+        default: true
 
 env:
   GSTREAMER_VERSION: "1.24.13"
@@ -226,7 +231,7 @@ jobs:
           retention-days: 90
 
       - name: Upload MSI to release
-        if: github.event_name != 'workflow_dispatch' || github.event.inputs.upload_to_release == 'true'
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.upload_to_release != 'false'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.version.outputs.version }}
