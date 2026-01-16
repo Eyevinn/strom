@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- Gradient for the flowing stream effect -->
+    <linearGradient id="streamGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A90D9;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#7B68EE;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#9B59B6;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Gradient for nodes -->
+    <linearGradient id="nodeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#5DADE2;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3498DB;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle (optional, can be removed for transparent) -->
+  <circle cx="256" cy="256" r="240" fill="#1a1a2e" />
+
+  <!-- Flowing S-shaped stream path representing data flow -->
+  <path d="M 120 140
+           C 180 140, 220 180, 256 220
+           C 292 260, 332 300, 392 300
+           M 120 212
+           C 180 212, 220 252, 256 292
+           C 292 332, 332 372, 392 372"
+        stroke="url(#streamGradient)"
+        stroke-width="28"
+        stroke-linecap="round"
+        fill="none"
+        opacity="0.6"/>
+
+  <!-- Main flowing S-curve (center stream) -->
+  <path d="M 100 176
+           C 170 176, 210 216, 256 256
+           C 302 296, 342 336, 412 336"
+        stroke="url(#streamGradient)"
+        stroke-width="32"
+        stroke-linecap="round"
+        fill="none"/>
+
+  <!-- Input node (left) -->
+  <circle cx="100" cy="176" r="44" fill="url(#nodeGradient)" />
+  <circle cx="100" cy="176" r="28" fill="#1a1a2e" />
+  <polygon points="92,164 92,188 112,176" fill="#5DADE2" />
+
+  <!-- Center processing node -->
+  <circle cx="256" cy="256" r="52" fill="url(#nodeGradient)" />
+  <circle cx="256" cy="256" r="36" fill="#1a1a2e" />
+  <!-- Gear-like symbol for processing -->
+  <g fill="#7B68EE">
+    <rect x="248" y="232" width="16" height="48" rx="3" />
+    <rect x="232" y="248" width="48" height="16" rx="3" />
+  </g>
+
+  <!-- Output node (right) -->
+  <circle cx="412" cy="336" r="44" fill="url(#nodeGradient)" />
+  <circle cx="412" cy="336" r="28" fill="#1a1a2e" />
+  <!-- Broadcast/output waves -->
+  <g stroke="#5DADE2" stroke-width="4" fill="none" stroke-linecap="round">
+    <path d="M 406 324 Q 418 336 406 348" />
+    <path d="M 414 318 Q 430 336 414 354" />
+  </g>
+</svg>
