@@ -3320,8 +3320,8 @@ impl StromApp {
     /// Render the main canvas area.
     fn render_canvas(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
-            // Panel toggle buttons at the edges
-            let panel_rect = ui.max_rect();
+            // Panel toggle buttons at the edges (use clip_rect for full area including margins)
+            let panel_rect = ui.clip_rect();
 
             // Left panel toggle (flow list)
             let left_toggle_pos = egui::pos2(panel_rect.left(), panel_rect.top() + 4.0);
@@ -3339,11 +3339,17 @@ impl StromApp {
                     } else {
                         "Show flow list"
                     };
-                    if ui
-                        .button(egui::RichText::new(icon).size(24.0))
-                        .on_hover_text(tooltip)
-                        .clicked()
-                    {
+                    // No rounding on left side (flush with edge)
+                    let corner_radius = egui::CornerRadius {
+                        nw: 0,
+                        sw: 0,
+                        ne: 4,
+                        se: 4,
+                    };
+                    let button = egui::Button::new(egui::RichText::new(icon).size(24.0))
+                        .corner_radius(corner_radius)
+                        .min_size(egui::vec2(32.0, 32.0));
+                    if ui.add(button).on_hover_text(tooltip).clicked() {
                         self.show_flow_list_panel = !self.show_flow_list_panel;
                     }
                 });
@@ -3351,7 +3357,7 @@ impl StromApp {
             // Right panel toggle (palette) - only show when a flow is selected
             if self.current_flow().is_some() {
                 let right_toggle_pos =
-                    egui::pos2(panel_rect.right() - 34.0, panel_rect.top() + 4.0);
+                    egui::pos2(panel_rect.right() - 32.0, panel_rect.top() + 4.0);
                 egui::Area::new(egui::Id::new("right_panel_toggle"))
                     .fixed_pos(right_toggle_pos)
                     .order(egui::Order::Middle)
@@ -3366,11 +3372,17 @@ impl StromApp {
                         } else {
                             "Show palette"
                         };
-                        if ui
-                            .button(egui::RichText::new(icon).size(24.0))
-                            .on_hover_text(tooltip)
-                            .clicked()
-                        {
+                        // No rounding on right side (flush with edge)
+                        let corner_radius = egui::CornerRadius {
+                            nw: 4,
+                            sw: 4,
+                            ne: 0,
+                            se: 0,
+                        };
+                        let button = egui::Button::new(egui::RichText::new(icon).size(24.0))
+                            .corner_radius(corner_radius)
+                            .min_size(egui::vec2(32.0, 32.0));
+                        if ui.add(button).on_hover_text(tooltip).clicked() {
                             self.show_palette_panel = !self.show_palette_panel;
                         }
                     });
