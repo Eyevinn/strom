@@ -287,4 +287,199 @@ mod tests {
         assert!(!config.has_api_key_auth());
         assert!(!config.enabled);
     }
+
+    #[test]
+    fn test_verify_api_key_valid() {
+        let config = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: Some("secret-api-key".to_string()),
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        assert!(config.verify_api_key("secret-api-key"));
+    }
+
+    #[test]
+    fn test_verify_api_key_invalid() {
+        let config = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: Some("secret-api-key".to_string()),
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        assert!(!config.verify_api_key("wrong-key"));
+    }
+
+    #[test]
+    fn test_verify_api_key_not_configured() {
+        let config = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: None,
+            native_gui_token: None,
+            enabled: false,
+        };
+
+        assert!(!config.verify_api_key("any-key"));
+    }
+
+    #[test]
+    fn test_native_gui_token_generate_and_verify() {
+        let mut config = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        let token = config.generate_native_gui_token();
+        assert!(token.starts_with("native-gui-"));
+        assert!(config.verify_native_gui_token(&token));
+    }
+
+    #[test]
+    fn test_native_gui_token_verify_wrong_token() {
+        let mut config = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        let _token = config.generate_native_gui_token();
+        assert!(!config.verify_native_gui_token("wrong-token"));
+    }
+
+    #[test]
+    fn test_native_gui_token_verify_not_generated() {
+        let config = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        assert!(!config.verify_native_gui_token("any-token"));
+    }
+
+    #[test]
+    fn test_verify_credentials_valid() {
+        let password = "correct_password";
+        let hash = hash_password(password).unwrap();
+
+        let config = AuthConfig {
+            admin_user: Some("admin".to_string()),
+            admin_password_hash: Some(hash),
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        assert!(config.verify_credentials("admin", password));
+    }
+
+    #[test]
+    fn test_verify_credentials_wrong_password() {
+        let password = "correct_password";
+        let hash = hash_password(password).unwrap();
+
+        let config = AuthConfig {
+            admin_user: Some("admin".to_string()),
+            admin_password_hash: Some(hash),
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        assert!(!config.verify_credentials("admin", "wrong_password"));
+    }
+
+    #[test]
+    fn test_verify_credentials_wrong_username() {
+        let password = "correct_password";
+        let hash = hash_password(password).unwrap();
+
+        let config = AuthConfig {
+            admin_user: Some("admin".to_string()),
+            admin_password_hash: Some(hash),
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        assert!(!config.verify_credentials("wrong_user", password));
+    }
+
+    #[test]
+    fn test_verify_credentials_not_configured() {
+        let config = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: None,
+            native_gui_token: None,
+            enabled: false,
+        };
+
+        assert!(!config.verify_credentials("admin", "password"));
+    }
+
+    #[test]
+    fn test_has_session_auth() {
+        let hash = hash_password("password").unwrap();
+
+        let config_with_session = AuthConfig {
+            admin_user: Some("admin".to_string()),
+            admin_password_hash: Some(hash),
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+        assert!(config_with_session.has_session_auth());
+
+        let config_without_hash = AuthConfig {
+            admin_user: Some("admin".to_string()),
+            admin_password_hash: None,
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+        assert!(!config_without_hash.has_session_auth());
+
+        let config_without_user = AuthConfig {
+            admin_user: None,
+            admin_password_hash: Some("hash".to_string()),
+            api_key: None,
+            native_gui_token: None,
+            enabled: true,
+        };
+        assert!(!config_without_user.has_session_auth());
+    }
+
+    #[test]
+    fn test_has_api_key_auth() {
+        let config_with_key = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: Some("key".to_string()),
+            native_gui_token: None,
+            enabled: true,
+        };
+        assert!(config_with_key.has_api_key_auth());
+
+        let config_without_key = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: None,
+            native_gui_token: None,
+            enabled: false,
+        };
+        assert!(!config_without_key.has_api_key_auth());
+    }
 }
