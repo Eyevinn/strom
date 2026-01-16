@@ -597,6 +597,21 @@ main() {
         exit 1
     fi
 
+    # Check for Homebrew on macOS (required for GStreamer/Graphviz installation)
+    if [ "$os" = "macos" ] && ! command -v brew >/dev/null 2>&1; then
+        log_error "Homebrew is required but not installed."
+        echo ""
+        log_info "Strom requires GStreamer, which is installed via Homebrew on macOS."
+        log_info "Install Homebrew first by running:"
+        echo ""
+        echo '    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+        echo ""
+        log_info "Then re-run this installer."
+        log_info "For more info, visit: https://brew.sh"
+        echo ""
+        exit 1
+    fi
+
     # Show interactive configuration menu if running in a terminal
     show_config_menu
 
