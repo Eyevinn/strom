@@ -3,14 +3,16 @@
 //! This module exposes the application builder for use in tests.
 
 use axum::extract::DefaultBodyLimit;
-use axum::http::{header, HeaderName, HeaderValue, Method};
+#[cfg(not(debug_assertions))]
+use axum::http::HeaderValue;
+use axum::http::{header, HeaderName, Method};
 use axum::{
     middleware,
     routing::{delete, get, patch, post, put},
     Extension, Router,
 };
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_sessions::{cookie::time::Duration, Expiry, MemoryStore, SessionManagerLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -272,9 +274,8 @@ pub async fn create_app_with_state_and_auth(
         .nest("/whep", whep_router)
         .nest("/static", static_router)
         .layer(session_layer)
-        .layer(
-            CorsLayer::new()
-                .allow_origin("http://localhost:8080".parse::<HeaderValue>().unwrap())
+        .layer({
+            let cors = CorsLayer::new()
                 .allow_methods([
                     Method::GET,
                     Method::POST,
@@ -290,9 +291,20 @@ pub async fn create_app_with_state_and_auth(
                     header::COOKIE,
                     HeaderName::from_static("mcp-session-id"),
                 ])
-                .expose_headers([HeaderName::from_static("mcp-session-id")])
-                .allow_credentials(true),
-        )
+                .expose_headers([HeaderName::from_static("mcp-session-id")]);
+
+            // Debug builds: allow any origin for trunk serve and mobile testing
+            #[cfg(debug_assertions)]
+            let cors = cors.allow_origin(Any);
+
+            // Release builds: restrict to same origin
+            #[cfg(not(debug_assertions))]
+            let cors = cors
+                .allow_origin("http://localhost:8080".parse::<HeaderValue>().unwrap())
+                .allow_credentials(true);
+
+            cors
+        })
         .with_state(state)
         // Serve embedded frontend for all other routes
         .fallback(assets::serve_static)
