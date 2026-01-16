@@ -4,24 +4,50 @@
       <stop offset="0%" stop-color="#0f172a"/>
       <stop offset="100%" stop-color="#020617"/>
     </linearGradient>
-    <linearGradient id="s" x1="0%" y1="0%" x2="0%" y2="100%">
+    <linearGradient id="main" x1="0%" y1="0%" x2="0%" y2="100%">
       <stop offset="0%" stop-color="#38bdf8"/>
-      <stop offset="50%" stop-color="#818cf8"/>
-      <stop offset="100%" stop-color="#c084fc"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#f97316"/>
     </linearGradient>
   </defs>
 
   <!-- Background -->
   <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bg)"/>
 
-  <!-- Stylized S - combines wave/stream flow with electric current shape -->
-  <path d="M 340 120
-           C 200 120, 140 160, 140 210
-           C 140 270, 220 280, 256 280
-           C 292 280, 372 290, 372 350
-           C 372 400, 312 440, 172 440"
-        stroke="url(#s)"
-        stroke-width="56"
+  <!-- Thick S-curve (the stream) -->
+  <path d="M 330 95
+           C 170 95, 95 150, 95 210
+           C 95 280, 200 290, 256 290
+           C 312 290, 417 300, 417 370
+           C 417 430, 342 465, 182 465"
+        stroke="url(#main)"
+        stroke-width="70"
         stroke-linecap="round"
         fill="none"/>
+
+  <!-- Lightning bolt cutting through (the electric current) -->
+  <path d="M 295 135
+           L 220 265
+           L 280 265
+           L 205 400"
+        stroke="url(#accent)"
+        stroke-width="32"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        fill="none"/>
+
+  <!-- Bright core of lightning -->
+  <path d="M 295 135
+           L 220 265
+           L 280 265
+           L 205 400"
+        stroke="#fff"
+        stroke-width="10"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        fill="none"
+        opacity="0.8"/>
 </svg>
