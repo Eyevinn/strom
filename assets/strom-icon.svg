@@ -1,104 +1,39 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
-    <!-- Electric blue gradient for the flowing current -->
-    <linearGradient id="stromGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#00D4FF;stop-opacity:1" />
-      <stop offset="50%" style="stop-color:#7B68EE;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#FF6B35;stop-opacity:1" />
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a5f"/>
+      <stop offset="100%" stop-color="#0d1b2a"/>
     </linearGradient>
-
-    <!-- Electric glow effect -->
-    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
-      <feMerge>
-        <feMergeNode in="coloredBlur"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-
-    <!-- Gradient for nodes -->
-    <linearGradient id="nodeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#5DADE2;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#3498DB;stop-opacity:1" />
-    </linearGradient>
-
-    <!-- Electric spark gradient -->
-    <linearGradient id="sparkGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#FFE066;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#FF6B35;stop-opacity:1" />
+    <linearGradient id="bolt" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00d4ff"/>
+      <stop offset="100%" stop-color="#7b68ee"/>
     </linearGradient>
   </defs>
 
-  <!-- Background circle -->
-  <circle cx="256" cy="256" r="240" fill="#1a1a2e" />
+  <!-- Background rounded square for app icon compatibility -->
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bg)"/>
 
-  <!-- Flowing electric current paths (stream + electricity) -->
-  <path d="M 120 150
-           C 170 150, 200 190, 230 220
-           L 250 200
-           C 280 230, 320 280, 392 290"
-        stroke="url(#stromGradient)"
-        stroke-width="24"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        fill="none"
-        opacity="0.5"
-        filter="url(#glow)"/>
-
-  <!-- Main lightning-stream path - combines flow with electric bolt shape -->
-  <path d="M 100 176
-           L 180 176
-           L 220 220
-           L 240 200
+  <!-- Stylized S-lightning bolt combining stream + electric current -->
+  <!-- Simple, bold shape that reads well at any size -->
+  <path d="M 310 100
+           L 180 240
            L 270 240
-           L 256 256
-           L 290 290
-           L 310 270
-           L 340 310
-           L 412 336"
-        stroke="url(#stromGradient)"
-        stroke-width="28"
+           L 160 412
+           L 340 260
+           L 250 260
+           L 360 100
+           Z"
+        fill="url(#bolt)"/>
+
+  <!-- Electric highlight accent -->
+  <path d="M 295 120
+           L 195 235
+           L 260 235
+           L 200 340"
+        stroke="#ffffff"
+        stroke-width="16"
         stroke-linecap="round"
         stroke-linejoin="round"
         fill="none"
-        filter="url(#glow)"/>
-
-  <!-- Secondary flow line -->
-  <path d="M 120 212
-           C 180 220, 220 270, 256 300
-           C 300 340, 350 370, 392 370"
-        stroke="url(#stromGradient)"
-        stroke-width="20"
-        stroke-linecap="round"
-        fill="none"
-        opacity="0.4"/>
-
-  <!-- Input node (left) - power source -->
-  <circle cx="100" cy="176" r="44" fill="url(#nodeGradient)" />
-  <circle cx="100" cy="176" r="28" fill="#1a1a2e" />
-  <!-- Power/play symbol -->
-  <polygon points="92,164 92,188 112,176" fill="#00D4FF" />
-
-  <!-- Center processing node with lightning bolt -->
-  <circle cx="256" cy="256" r="52" fill="url(#nodeGradient)" />
-  <circle cx="256" cy="256" r="36" fill="#1a1a2e" />
-  <!-- Lightning bolt symbol (ström = electric current) -->
-  <path d="M 262 234 L 250 254 L 258 254 L 250 278 L 268 250 L 260 250 Z"
-        fill="url(#sparkGradient)" />
-
-  <!-- Output node (right) -->
-  <circle cx="412" cy="336" r="44" fill="url(#nodeGradient)" />
-  <circle cx="412" cy="336" r="28" fill="#1a1a2e" />
-  <!-- Broadcast/output waves with electric feel -->
-  <g stroke="#00D4FF" stroke-width="4" fill="none" stroke-linecap="round">
-    <path d="M 406 324 Q 420 336 406 348" />
-    <path d="M 416 316 Q 434 336 416 356" />
-  </g>
-
-  <!-- Electric sparks around the flow -->
-  <g fill="url(#sparkGradient)" opacity="0.8">
-    <circle cx="180" cy="172" r="4" />
-    <circle cx="320" cy="285" r="5" />
-    <circle cx="370" cy="340" r="3" />
-  </g>
+        opacity="0.3"/>
 </svg>
