@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="Strom"
+           Manufacturer="Eyevinn Technology"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="E8A3B5C7-9D2F-4E1A-8C6B-5F7D9E3A2B1C"
+           Language="1033"
+           Codepage="1252"
+           InstallerVersion="500"
+           Compressed="yes"
+           Scope="perMachine">
+
+    <SummaryInformation Description="Strom - GStreamer Flow Engine"
+                        Manufacturer="Eyevinn Technology" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+                  AllowSameVersionUpgrades="yes" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Custom icons -->
+    <Icon Id="StromIcon.exe" SourceFile="$(var.StromExe)" />
+    <Property Id="ARPPRODUCTICON" Value="StromIcon.exe" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/Eyevinn/strom" />
+    <Property Id="ARPURLINFOABOUT" Value="https://www.eyevinntechnology.se" />
+
+    <!-- Installation directory structure -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Strom">
+        <Directory Id="BinFolder" Name="bin" />
+        <Directory Id="GStreamerFolder" Name="gstreamer">
+          <Directory Id="GstBinFolder" Name="bin" />
+          <Directory Id="GstLibFolder" Name="lib">
+            <Directory Id="GstPluginsFolder" Name="gstreamer-1.0" />
+          </Directory>
+        </Directory>
+        <Directory Id="GraphvizFolder" Name="graphviz">
+          <Directory Id="GvBinFolder" Name="bin" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Start Menu shortcuts -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Strom" />
+    </StandardDirectory>
+
+    <!-- Main Strom executables -->
+    <Component Id="StromExe" Directory="BinFolder" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+      <File Id="strom.exe" Source="$(var.StromExe)" KeyPath="yes" />
+    </Component>
+
+    <Component Id="StromMcpServerExe" Directory="BinFolder" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+      <File Id="strom_mcp_server.exe" Source="$(var.StromMcpServerExe)" KeyPath="yes" />
+    </Component>
+
+    <!-- Environment variables -->
+    <Component Id="PathEnvironment" Directory="INSTALLFOLDER" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+      <Environment Id="PATH_BIN" Name="PATH" Value="[BinFolder]" Permanent="no" Part="last" Action="set" System="yes" />
+      <Environment Id="PATH_GST" Name="PATH" Value="[GstBinFolder]" Permanent="no" Part="last" Action="set" System="yes" />
+      <Environment Id="PATH_GV" Name="PATH" Value="[GvBinFolder]" Permanent="no" Part="last" Action="set" System="yes" />
+      <Environment Id="GST_PLUGIN_PATH" Name="GST_PLUGIN_PATH" Value="[GstPluginsFolder]" Permanent="no" Part="all" Action="set" System="yes" />
+      <CreateFolder />
+    </Component>
+
+    <!-- Start Menu shortcuts -->
+    <Component Id="ApplicationShortcut" Directory="ApplicationProgramsFolder" Guid="D4E5F6A7-B8C9-0123-DEF0-234567890123">
+      <Shortcut Id="ApplicationStartMenuShortcut"
+                Name="Strom"
+                Description="GStreamer Flow Engine"
+                Target="[BinFolder]strom.exe"
+                WorkingDirectory="BinFolder"
+                Icon="StromIcon.exe" />
+      <Shortcut Id="ApplicationStartMenuShortcutHeadless"
+                Name="Strom (Web UI)"
+                Description="GStreamer Flow Engine - Web UI mode"
+                Target="[BinFolder]strom.exe"
+                Arguments="--headless"
+                WorkingDirectory="BinFolder"
+                Icon="StromIcon.exe" />
+      <RemoveFolder Id="CleanUpShortCut" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\Eyevinn\Strom" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- GStreamer bin directory files -->
+    <Component Id="GStreamerBinFiles" Directory="GstBinFolder" Guid="E5F6A7B8-C9D0-1234-EF01-345678901234">
+      <Files Include="$(var.GStreamerDir)\bin\*.*" />
+    </Component>
+
+    <!-- GStreamer plugins -->
+    <Component Id="GStreamerPluginFiles" Directory="GstPluginsFolder" Guid="F6A7B8C9-D0E1-2345-F012-456789012345">
+      <Files Include="$(var.GStreamerDir)\lib\gstreamer-1.0\*.dll" />
+    </Component>
+
+    <!-- Graphviz bin directory files -->
+    <Component Id="GraphvizBinFiles" Directory="GvBinFolder" Guid="A7B8C9D0-E1F2-3456-0123-567890123456">
+      <Files Include="$(var.GraphvizDir)\bin\*.*" />
+    </Component>
+
+    <!-- Main Feature -->
+    <Feature Id="MainFeature" Title="Strom" Description="GStreamer Flow Engine - visual pipeline management" Level="1" ConfigurableDirectory="INSTALLFOLDER">
+      <ComponentRef Id="StromExe" />
+      <ComponentRef Id="StromMcpServerExe" />
+      <ComponentRef Id="PathEnvironment" />
+      <ComponentRef Id="ApplicationShortcut" />
+
+      <Feature Id="GStreamerFeature" Title="GStreamer Runtime" Description="GStreamer multimedia framework (required for Strom to function)" Level="1" Absent="disallow">
+        <ComponentRef Id="GStreamerBinFiles" />
+        <ComponentRef Id="GStreamerPluginFiles" />
+      </Feature>
+
+      <Feature Id="GraphvizFeature" Title="Graphviz" Description="Graph visualization tools for debug pipeline graphs (recommended)" Level="1">
+        <ComponentRef Id="GraphvizBinFiles" />
+      </Feature>
+    </Feature>
+
+    <!-- UI configuration -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="dialog.bmp" />
+
+  </Package>
+</Wix>
