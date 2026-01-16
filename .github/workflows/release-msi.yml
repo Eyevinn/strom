@@ -13,10 +13,14 @@ on:
         description: 'Version to build (e.g., 0.3.10)'
         required: true
         type: string
+      upload_to_release:
+        description: 'Upload MSI to GitHub release'
+        required: false
+        type: boolean
+        default: true
 
 env:
   GSTREAMER_VERSION: "1.24.13"
-  GRAPHVIZ_VERSION: "12.2.1"
 
 jobs:
   build-msi:
@@ -74,17 +78,21 @@ jobs:
 
           Write-Host "Download complete: $((Get-Item gstreamer.msi).Length / 1MB) MB"
 
-      - name: Download Graphviz
+      - name: Install Graphviz via Chocolatey
         shell: pwsh
         run: |
-          $version = "${{ env.GRAPHVIZ_VERSION }}"
-          $zipFile = "windows_10_cmake_Release_graphviz-install-$version-win64.zip"
-          $url = "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/$version/$zipFile"
+          Write-Host "Installing Graphviz via Chocolatey..."
+          choco install graphviz --yes --no-progress
 
-          Write-Host "Downloading Graphviz $version..."
-          Invoke-WebRequest -Uri $url -OutFile "graphviz.zip"
-
-          Write-Host "Download complete: $((Get-Item graphviz.zip).Length / 1MB) MB"
+          # Verify installation
+          $gvPath = "C:\Program Files\Graphviz"
+          if (Test-Path $gvPath) {
+            Write-Host "Graphviz installed at: $gvPath"
+            Get-ChildItem "$gvPath\bin" | Select-Object Name | Format-Table
+          } else {
+            Write-Error "Graphviz installation not found!"
+            exit 1
+          }
 
       - name: Prepare GStreamer bundle
         shell: pwsh
@@ -125,20 +133,15 @@ jobs:
         shell: pwsh
         run: |
           $buildDir = "installer/windows/build"
-
-          # Extract Graphviz
-          Write-Host "Extracting Graphviz..."
-          Expand-Archive -Path "graphviz.zip" -DestinationPath "gv-temp" -Force
-
-          $gvRoot = Get-ChildItem "gv-temp" -Directory | Select-Object -First 1
+          $gvPath = "C:\Program Files\Graphviz"
 
           # Create bundle directory
           $bundleDir = "$buildDir\graphviz-bundle"
           New-Item -ItemType Directory -Path "$bundleDir\bin" -Force | Out-Null
 
-          # Copy bin files
-          Write-Host "Copying Graphviz files..."
-          Copy-Item "$($gvRoot.FullName)\bin\*" "$bundleDir\bin\" -Force
+          # Copy bin files from Chocolatey installation
+          Write-Host "Copying Graphviz files from $gvPath..."
+          Copy-Item "$gvPath\bin\*" "$bundleDir\bin\" -Force
 
           $size = (Get-ChildItem -Recurse "$bundleDir" | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host "Graphviz bundle size: $([math]::Round($size, 2)) MB"
@@ -228,7 +231,7 @@ jobs:
           retention-days: 90
 
       - name: Upload MSI to release
-        if: github.event_name != 'workflow_dispatch' || github.event.inputs.upload_to_release == 'true'
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.upload_to_release != 'false'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ steps.version.outputs.version }}
