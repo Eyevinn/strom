@@ -369,4 +369,100 @@ mod tests {
         let result = SapPacket::parse(&data);
         assert!(matches!(result, Err(SapError::InvalidVersion(0))));
     }
+
+    #[test]
+    fn test_encryption_not_supported() {
+        // Version 1, encrypted bit set (0x22 = version 1, encrypted flag)
+        let data = [
+            0x22, 0x00, 0x12, 0x34, 0x01, 0x02, 0x03, 0x04, b'v', b'=', b'0',
+        ];
+        let result = SapPacket::parse(&data);
+        assert!(matches!(result, Err(SapError::EncryptionNotSupported)));
+    }
+
+    #[test]
+    fn test_flags_ipv6() {
+        let flags = SapFlags {
+            version: 1,
+            ipv6: true,
+            reserved: false,
+            deletion: false,
+            encrypted: false,
+            compressed: false,
+        };
+
+        let byte = flags.to_byte();
+        let parsed = SapFlags::from_byte(byte);
+
+        assert!(parsed.ipv6);
+        assert!(!parsed.deletion);
+    }
+
+    #[test]
+    fn test_flags_compressed() {
+        let flags = SapFlags {
+            version: 1,
+            ipv6: false,
+            reserved: false,
+            deletion: false,
+            encrypted: false,
+            compressed: true,
+        };
+
+        let byte = flags.to_byte();
+        let parsed = SapFlags::from_byte(byte);
+
+        assert!(parsed.compressed);
+    }
+
+    #[test]
+    fn test_flags_all_set() {
+        let flags = SapFlags {
+            version: 1,
+            ipv6: true,
+            reserved: true,
+            deletion: true,
+            encrypted: true,
+            compressed: true,
+        };
+
+        let byte = flags.to_byte();
+        let parsed = SapFlags::from_byte(byte);
+
+        assert_eq!(parsed.version, 1);
+        assert!(parsed.ipv6);
+        assert!(parsed.reserved);
+        assert!(parsed.deletion);
+        assert!(parsed.encrypted);
+        assert!(parsed.compressed);
+    }
+
+    #[test]
+    fn test_is_deletion() {
+        let origin = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let msg_id_hash = 0x1234;
+        let sdp = "v=0\r\ns=Test\r\n";
+
+        // Build announcement (not deletion)
+        let packet = SapPacket::build(origin, msg_id_hash, sdp, false);
+        let parsed = SapPacket::parse(&packet).unwrap();
+        assert!(!parsed.is_deletion());
+
+        // Build deletion
+        let packet_del = SapPacket::build(origin, msg_id_hash, sdp, true);
+        let parsed_del = SapPacket::parse(&packet_del).unwrap();
+        assert!(parsed_del.is_deletion());
+    }
+
+    #[test]
+    fn test_sap_error_display() {
+        let err = SapError::PacketTooShort(5);
+        assert!(err.to_string().contains("5 bytes"));
+
+        let err = SapError::InvalidVersion(2);
+        assert!(err.to_string().contains("2"));
+
+        let err = SapError::EncryptionNotSupported;
+        assert!(err.to_string().contains("Encryption"));
+    }
 }

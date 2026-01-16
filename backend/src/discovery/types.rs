@@ -388,4 +388,183 @@ a=rtpmap:97 L16/48000/8
         let hash3 = generate_msg_id_hash(&flow_id, "block_1");
         assert_ne!(hash1, hash3);
     }
+
+    #[test]
+    fn test_discovery_source_display_sap() {
+        let source = DiscoverySource::Sap {
+            origin_ip: "192.168.1.1".parse().unwrap(),
+            msg_id_hash: 12345,
+        };
+        assert_eq!(source.to_string(), "SAP");
+    }
+
+    #[test]
+    fn test_discovery_source_display_mdns_ravenna() {
+        let source = DiscoverySource::Mdns {
+            service_type: "_rtsp._tcp.local".to_string(),
+            instance_name: "Test Stream".to_string(),
+            hostname: "device.local".to_string(),
+            port: 8554,
+        };
+        assert_eq!(source.to_string(), "mDNS (RAVENNA)");
+    }
+
+    #[test]
+    fn test_discovery_source_display_mdns_ndi() {
+        let source = DiscoverySource::Mdns {
+            service_type: "_ndi._tcp.local".to_string(),
+            instance_name: "NDI Source".to_string(),
+            hostname: "ndi-device.local".to_string(),
+            port: 5960,
+        };
+        assert_eq!(source.to_string(), "mDNS (NDI)");
+    }
+
+    #[test]
+    fn test_discovery_source_display_mdns_generic() {
+        let source = DiscoverySource::Mdns {
+            service_type: "_http._tcp.local".to_string(),
+            instance_name: "Web Server".to_string(),
+            hostname: "server.local".to_string(),
+            port: 80,
+        };
+        assert_eq!(source.to_string(), "mDNS");
+    }
+
+    #[test]
+    fn test_discovery_source_display_manual() {
+        let source = DiscoverySource::Manual;
+        assert_eq!(source.to_string(), "Manual");
+    }
+
+    #[test]
+    fn test_audio_encoding_display() {
+        assert_eq!(AudioEncoding::L16.to_string(), "L16");
+        assert_eq!(AudioEncoding::L24.to_string(), "L24");
+        assert_eq!(AudioEncoding::AM824.to_string(), "AM824");
+        assert_eq!(AudioEncoding::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn test_announced_stream_key() {
+        let flow_id =
+            FlowId::from(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap());
+        let block_id = "aes67_output_0";
+
+        let key = AnnouncedStream::key(&flow_id, block_id);
+        assert_eq!(key, "550e8400-e29b-41d4-a716-446655440000:aes67_output_0");
+    }
+
+    #[test]
+    fn test_parse_sdp_missing_name() {
+        // SDP without session name should fail
+        let sdp = r#"v=0
+o=- 1234567890 1 IN IP4 192.168.1.100
+c=IN IP4 239.69.1.1/32
+m=audio 5004 RTP/AVP 96
+"#;
+        assert!(SdpStreamInfo::parse(sdp).is_none());
+    }
+
+    #[test]
+    fn test_parse_sdp_empty() {
+        assert!(SdpStreamInfo::parse("").is_none());
+    }
+
+    #[test]
+    fn test_parse_sdp_minimal() {
+        // Minimal valid SDP with just session name
+        let sdp = "s=Minimal Stream\n";
+        let info = SdpStreamInfo::parse(sdp).unwrap();
+        assert_eq!(info.name, "Minimal Stream");
+        assert!(info.connection_address.is_none());
+        assert!(info.port.is_none());
+        assert_eq!(info.encoding, AudioEncoding::Unknown);
+    }
+
+    #[test]
+    fn test_parse_sdp_connection_without_ttl() {
+        let sdp = r#"v=0
+s=Unicast Stream
+c=IN IP4 192.168.1.100
+m=audio 5004 RTP/AVP 96
+"#;
+        let info = SdpStreamInfo::parse(sdp).unwrap();
+        assert_eq!(
+            info.connection_address,
+            Some("192.168.1.100".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_parse_sdp_am824_encoding() {
+        let sdp = r#"v=0
+o=- 1 1 IN IP4 10.0.0.1
+s=AES3 Stream
+c=IN IP4 239.1.2.3/32
+m=audio 5004 RTP/AVP 96
+a=rtpmap:96 AM824/48000/2
+"#;
+        let info = SdpStreamInfo::parse(sdp).unwrap();
+        assert_eq!(info.encoding, AudioEncoding::AM824);
+    }
+
+    #[test]
+    fn test_parse_sdp_case_insensitive_encoding() {
+        let sdp = r#"v=0
+s=Test Stream
+a=rtpmap:96 l24/48000/2
+"#;
+        let info = SdpStreamInfo::parse(sdp).unwrap();
+        // Should handle lowercase encoding names
+        assert_eq!(info.encoding, AudioEncoding::L24);
+    }
+
+    #[test]
+    fn test_sdp_stream_info_generate_id_consistent() {
+        let info = SdpStreamInfo {
+            name: "Test".to_string(),
+            origin_username: "-".to_string(),
+            origin_session_id: "12345".to_string(),
+            origin_address: "192.168.1.1".to_string(),
+            connection_address: None,
+            port: None,
+            encoding: AudioEncoding::Unknown,
+            sample_rate: None,
+            channels: None,
+        };
+
+        let origin_ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let id1 = info.generate_id(&origin_ip);
+        let id2 = info.generate_id(&origin_ip);
+
+        // Should generate consistent IDs
+        assert_eq!(id1, id2);
+        // ID should be 16 hex characters
+        assert_eq!(id1.len(), 16);
+    }
+
+    #[test]
+    fn test_sdp_stream_info_generate_id_different_origins() {
+        let info = SdpStreamInfo {
+            name: "Test".to_string(),
+            origin_username: "-".to_string(),
+            origin_session_id: "12345".to_string(),
+            origin_address: "192.168.1.1".to_string(),
+            connection_address: None,
+            port: None,
+            encoding: AudioEncoding::Unknown,
+            sample_rate: None,
+            channels: None,
+        };
+
+        let origin_ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let origin_ip2: IpAddr = "10.0.0.2".parse().unwrap();
+
+        let id1 = info.generate_id(&origin_ip1);
+        let id2 = info.generate_id(&origin_ip2);
+
+        // Different origin IPs should produce different IDs
+        assert_ne!(id1, id2);
+    }
 }
