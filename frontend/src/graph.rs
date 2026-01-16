@@ -382,6 +382,11 @@ impl GraphEditor {
         self.qos_marker_clicked.get()
     }
 
+    /// Get the last known canvas rect (for hit testing pinch gestures).
+    pub fn canvas_rect(&self) -> Option<egui::Rect> {
+        self.last_canvas_rect
+    }
+
     /// Select a node (element) by its ID.
     pub fn select_node(&mut self, id: ElementId) {
         self.selected = Some(id);

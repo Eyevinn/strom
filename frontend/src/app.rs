@@ -4854,6 +4854,7 @@ impl eframe::App for StromApp {
         }
 
         // Handle pinch-to-zoom from JavaScript (iOS/mobile)
+        // Only apply browser zoom if NOT over the graph editor (graph has its own zoom)
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsValue;
@@ -4867,12 +4868,63 @@ impl eframe::App for StromApp {
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);
 
-                            if changed {
-                                if let Some(scale) = js_sys::Reflect::get(obj, &"scale".into())
+                            // Check if new pinch started - determine if over graph
+                            let new_pinch = js_sys::Reflect::get(obj, &"newPinch".into())
+                                .ok()
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+
+                            if new_pinch {
+                                let start_x = js_sys::Reflect::get(obj, &"startX".into())
                                     .ok()
                                     .and_then(|v| v.as_f64())
-                                {
-                                    ctx.set_pixels_per_point(scale as f32);
+                                    .unwrap_or(0.0)
+                                    as f32;
+                                let start_y = js_sys::Reflect::get(obj, &"startY".into())
+                                    .ok()
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0)
+                                    as f32;
+
+                                // JS coordinates are in CSS pixels, egui rect is in screen coords
+                                // Don't divide by ppp - egui rects are already in screen space
+                                let pinch_pos = egui::pos2(start_x, start_y);
+
+                                let over_graph = self
+                                    .graph
+                                    .canvas_rect()
+                                    .map(|rect: egui::Rect| rect.contains(pinch_pos))
+                                    .unwrap_or(false);
+
+                                let _ = js_sys::Reflect::set(
+                                    obj,
+                                    &"isGraphPinch".into(),
+                                    &JsValue::from_bool(over_graph),
+                                );
+                                let _ =
+                                    js_sys::Reflect::set(obj, &"newPinch".into(), &JsValue::FALSE);
+                            }
+
+                            if changed {
+                                let is_graph_pinch =
+                                    js_sys::Reflect::get(obj, &"isGraphPinch".into())
+                                        .ok()
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+
+                                if !is_graph_pinch {
+                                    if let Some(scale) = js_sys::Reflect::get(obj, &"scale".into())
+                                        .ok()
+                                        .and_then(|v| v.as_f64())
+                                    {
+                                        let scale_f32 = scale as f32;
+                                        if scale_f32.is_finite()
+                                            && scale_f32 > 0.1
+                                            && scale_f32 < 10.0
+                                        {
+                                            ctx.set_pixels_per_point(scale_f32);
+                                        }
+                                    }
                                 }
                                 // Reset the changed flag
                                 let _ =
