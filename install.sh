@@ -585,6 +585,33 @@ main() {
     local arch=$(detect_arch)
     log_info "Detected: $os-$arch"
 
+    # Check for unsupported macOS on Intel
+    if [ "$os" = "macos" ] && [ "$arch" = "x86_64" ]; then
+        log_error "Intel-based Macs (x86_64) are not currently supported."
+        echo ""
+        log_info "Strom currently only provides macOS binaries for Apple Silicon (ARM64)."
+        log_info "If you need Intel Mac support, please open an issue at:"
+        echo ""
+        echo "    https://github.com/Eyevinn/strom/issues"
+        echo ""
+        exit 1
+    fi
+
+    # Check for Homebrew on macOS (required for GStreamer/Graphviz installation)
+    if [ "$os" = "macos" ] && ! command -v brew >/dev/null 2>&1; then
+        log_error "Homebrew is required but not installed."
+        echo ""
+        log_info "Strom requires GStreamer, which is installed via Homebrew on macOS."
+        log_info "Install Homebrew first by running:"
+        echo ""
+        echo '    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+        echo ""
+        log_info "Then re-run this installer."
+        log_info "For more info, visit: https://brew.sh"
+        echo ""
+        exit 1
+    fi
+
     # Show interactive configuration menu if running in a terminal
     show_config_menu
 
