@@ -189,4 +189,129 @@ mod tests {
 
         assert_eq!(registry.list_all().await.len(), 0);
     }
+
+    #[tokio::test]
+    async fn test_is_active() {
+        let registry = ChannelRegistry::new();
+        let flow_id = Uuid::new_v4();
+        let channel_name = ChannelRegistry::generate_channel_name(&flow_id, "video");
+
+        // Should be inactive before registration
+        assert!(!registry.is_active(&channel_name).await);
+
+        registry
+            .register(ChannelInfo {
+                source_flow_id: flow_id,
+                output_name: "video".to_string(),
+                channel_name: channel_name.clone(),
+                media_type: MediaType::Video,
+            })
+            .await;
+
+        // Should be active after registration
+        assert!(registry.is_active(&channel_name).await);
+
+        registry.unregister(&channel_name).await;
+
+        // Should be inactive after unregistration
+        assert!(!registry.is_active(&channel_name).await);
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent() {
+        let registry = ChannelRegistry::new();
+        assert!(registry.get("nonexistent_channel").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_by_flow() {
+        let registry = ChannelRegistry::new();
+        let flow_id_1 = Uuid::new_v4();
+        let flow_id_2 = Uuid::new_v4();
+
+        // Register channels for flow 1
+        for name in ["video", "audio"] {
+            let channel_name = ChannelRegistry::generate_channel_name(&flow_id_1, name);
+            registry
+                .register(ChannelInfo {
+                    source_flow_id: flow_id_1,
+                    output_name: name.to_string(),
+                    channel_name,
+                    media_type: MediaType::Generic,
+                })
+                .await;
+        }
+
+        // Register one channel for flow 2
+        let channel_name = ChannelRegistry::generate_channel_name(&flow_id_2, "data");
+        registry
+            .register(ChannelInfo {
+                source_flow_id: flow_id_2,
+                output_name: "data".to_string(),
+                channel_name,
+                media_type: MediaType::Generic,
+            })
+            .await;
+
+        // list_by_flow should return only channels for the specified flow
+        let flow_1_channels = registry.list_by_flow(&flow_id_1).await;
+        assert_eq!(flow_1_channels.len(), 2);
+
+        let flow_2_channels = registry.list_by_flow(&flow_id_2).await;
+        assert_eq!(flow_2_channels.len(), 1);
+        assert_eq!(flow_2_channels[0].output_name, "data");
+    }
+
+    #[tokio::test]
+    async fn test_unregister_single_channel() {
+        let registry = ChannelRegistry::new();
+        let flow_id = Uuid::new_v4();
+        let channel_name_1 = ChannelRegistry::generate_channel_name(&flow_id, "video");
+        let channel_name_2 = ChannelRegistry::generate_channel_name(&flow_id, "audio");
+
+        registry
+            .register(ChannelInfo {
+                source_flow_id: flow_id,
+                output_name: "video".to_string(),
+                channel_name: channel_name_1.clone(),
+                media_type: MediaType::Video,
+            })
+            .await;
+
+        registry
+            .register(ChannelInfo {
+                source_flow_id: flow_id,
+                output_name: "audio".to_string(),
+                channel_name: channel_name_2.clone(),
+                media_type: MediaType::Audio,
+            })
+            .await;
+
+        assert_eq!(registry.list_all().await.len(), 2);
+
+        // Unregister only video channel
+        registry.unregister(&channel_name_1).await;
+
+        assert_eq!(registry.list_all().await.len(), 1);
+        assert!(registry.get(&channel_name_2).await.is_some());
+        assert!(registry.get(&channel_name_1).await.is_none());
+    }
+
+    #[test]
+    fn test_generate_channel_name_with_colons() {
+        let flow_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let name = ChannelRegistry::generate_channel_name(&flow_id, "output:0");
+        // Colons should be replaced with underscores
+        assert_eq!(
+            name,
+            "strom_550e8400-e29b-41d4-a716-446655440000_output_0"
+        );
+    }
+
+    #[test]
+    fn test_default() {
+        let registry = ChannelRegistry::default();
+        // Default should create an empty registry
+        assert!(std::sync::Arc::strong_count(&registry.channels) == 1);
+    }
 }

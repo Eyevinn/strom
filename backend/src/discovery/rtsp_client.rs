@@ -154,4 +154,45 @@ mod tests {
         assert_eq!(parsed.port, 554);
         assert_eq!(parsed.path, "/");
     }
+
+    #[test]
+    fn test_parse_rtsp_url_invalid_scheme() {
+        let url = "http://192.168.1.100:8554/stream";
+        let result = parse_rtsp_url(url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("rtsp://"));
+    }
+
+    #[test]
+    fn test_parse_rtsp_url_no_scheme() {
+        let url = "192.168.1.100:8554/stream";
+        let result = parse_rtsp_url(url);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_rtsp_url_invalid_port() {
+        let url = "rtsp://192.168.1.100:notaport/stream";
+        let result = parse_rtsp_url(url);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("port"));
+    }
+
+    #[test]
+    fn test_parse_rtsp_url_with_nested_path() {
+        let url = "rtsp://192.168.1.100:8554/by-name/stream1";
+        let parsed = parse_rtsp_url(url).unwrap();
+        assert_eq!(parsed.host, "192.168.1.100");
+        assert_eq!(parsed.port, 8554);
+        assert_eq!(parsed.path, "/by-name/stream1");
+    }
+
+    #[test]
+    fn test_parse_rtsp_url_hostname() {
+        let url = "rtsp://ravenna-device.local:8554/stream";
+        let parsed = parse_rtsp_url(url).unwrap();
+        assert_eq!(parsed.host, "ravenna-device.local");
+        assert_eq!(parsed.port, 8554);
+        assert_eq!(parsed.path, "/stream");
+    }
 }
