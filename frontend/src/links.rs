@@ -121,7 +121,7 @@ impl LinksPage {
 
         ui.separator();
 
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(16.0);
@@ -155,7 +155,12 @@ impl LinksPage {
                     if ui.small_button("Copy").clicked() {
                         ctx.copy_text(streams_url.clone());
                     }
-                    ui.label(egui::RichText::new(&streams_url).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&streams_url).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&streams_url));
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -181,7 +186,12 @@ impl LinksPage {
                     if ui.small_button("Copy").clicked() {
                         ctx.copy_text(player_base.clone());
                     }
-                    ui.label(egui::RichText::new(&player_base).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&player_base).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&player_base));
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -223,20 +233,18 @@ impl LinksPage {
                             if listeners.len() == 1 { "" } else { "s" }
                         ));
 
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .button("Download All (VLC)")
-                                .on_hover_text("Download a VLC playlist containing all SRT streams")
-                                .clicked()
-                            {
-                                let content = Self::generate_combined_playlist(&listeners);
-                                download_file(
-                                    "strom-srt-streams.xspf",
-                                    &content,
-                                    "application/xspf+xml",
-                                );
-                            }
-                        });
+                        if ui
+                            .button("Download All (VLC)")
+                            .on_hover_text("Download a VLC playlist containing all SRT streams")
+                            .clicked()
+                        {
+                            let content = Self::generate_combined_playlist(&listeners);
+                            download_file(
+                                "strom-srt-streams.xspf",
+                                &content,
+                                "application/xspf+xml",
+                            );
+                        }
                     });
 
                     ui.add_space(8.0);
@@ -315,7 +323,12 @@ impl LinksPage {
                         ctx.copy_text(swagger_url.clone());
                     }
                     ui.label("Swagger UI");
-                    ui.label(egui::RichText::new(&swagger_url).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&swagger_url).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&swagger_url));
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -330,7 +343,12 @@ impl LinksPage {
                         ctx.copy_text(openapi_url.clone());
                     }
                     ui.label("OpenAPI Spec");
-                    ui.label(egui::RichText::new(&openapi_url).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&openapi_url).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&openapi_url));
+                    }
                 });
             });
 
@@ -353,7 +371,12 @@ impl LinksPage {
                         ctx.copy_text(flows_api.clone());
                     }
                     ui.label("Flows");
-                    ui.label(egui::RichText::new(&flows_api).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&flows_api).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&flows_api));
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -368,7 +391,12 @@ impl LinksPage {
                         ctx.copy_text(streams_api.clone());
                     }
                     ui.label("WHEP Streams");
-                    ui.label(egui::RichText::new(&streams_api).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&streams_api).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&streams_api));
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -383,7 +411,12 @@ impl LinksPage {
                         ctx.copy_text(version_api.clone());
                     }
                     ui.label("Version");
-                    ui.label(egui::RichText::new(&version_api).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&version_api).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&version_api));
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -398,7 +431,12 @@ impl LinksPage {
                         ctx.copy_text(blocks_api.clone());
                     }
                     ui.label("Blocks");
-                    ui.label(egui::RichText::new(&blocks_api).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&blocks_api).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&blocks_api));
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -413,7 +451,12 @@ impl LinksPage {
                         ctx.copy_text(elements_api.clone());
                     }
                     ui.label("Elements");
-                    ui.label(egui::RichText::new(&elements_api).monospace().weak());
+                    if ui
+                        .link(egui::RichText::new(&elements_api).monospace())
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&elements_api));
+                    }
                 });
             });
     }
