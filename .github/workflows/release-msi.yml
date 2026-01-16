@@ -166,7 +166,7 @@ jobs:
           Add-Type -AssemblyName System.Drawing
           $banner = New-Object System.Drawing.Bitmap(493, 58)
           $g = [System.Drawing.Graphics]::FromImage($banner)
-          $g.Clear([System.Drawing.Color]::FromArgb(45, 45, 48))
+          $g.Clear([System.Drawing.Color]::FromArgb(110, 110, 115))
           $font = New-Object System.Drawing.Font("Segoe UI", 18, [System.Drawing.FontStyle]::Bold)
           $brush = [System.Drawing.Brushes]::White
           $g.DrawString("Strom", $font, $brush, 340, 14)
@@ -178,7 +178,7 @@ jobs:
           # Create dialog image (493x312)
           $dialog = New-Object System.Drawing.Bitmap(493, 312)
           $g = [System.Drawing.Graphics]::FromImage($dialog)
-          $g.Clear([System.Drawing.Color]::FromArgb(45, 45, 48))
+          $g.Clear([System.Drawing.Color]::FromArgb(110, 110, 115))
           $font = New-Object System.Drawing.Font("Segoe UI", 32, [System.Drawing.FontStyle]::Bold)
           $brush = [System.Drawing.Brushes]::White
           $g.DrawString("Strom", $font, $brush, 30, 80)
