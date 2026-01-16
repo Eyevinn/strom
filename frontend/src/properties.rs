@@ -78,75 +78,95 @@ impl PropertyInspector {
         let mut delete_requested = false;
 
         ui.push_id(&element_id, |ui| {
-            // Element type (read-only)
-            ui.horizontal(|ui| {
-                ui.label("Type:");
-                ui.monospace(&element.element_type);
-            });
+            // Outer scroll area for entire inspector
+            ScrollArea::both()
+                .id_salt("property_inspector_outer_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Delete button at top
+                    if ui.button("🗑 Delete Element").clicked() {
+                        delete_requested = true;
+                    }
+                    ui.separator();
 
-            // Element ID (read-only)
-            ui.horizontal(|ui| {
-                ui.label("ID:");
-                ui.monospace(&element.id);
-            });
+                    // Element info in collapsible section
+                    egui::CollapsingHeader::new(&element.element_type)
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            // Element ID (read-only)
+                            ui.horizontal(|ui| {
+                                ui.label("ID:");
+                                ui.monospace(&element.id);
+                            });
 
-            ui.separator();
+                            // Element description from element info
+                            if let Some(info) = element_info {
+                                if !info.description.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label("Description:");
+                                        ui.label(&info.description);
+                                    });
+                                }
+                                if !info.category.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label("Category:");
+                                        ui.label(&info.category);
+                                    });
+                                }
+                            }
+                        });
 
-            // Delete button
-            if ui.button("🗑 Delete Element").clicked() {
-                delete_requested = true;
-            }
+                    // Tab buttons (wrap on small screens)
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .selectable_label(new_tab == PropertyTab::Element, "Element Properties")
+                            .clicked()
+                        {
+                            new_tab = PropertyTab::Element;
+                        }
+                        if ui
+                            .selectable_label(new_tab == PropertyTab::InputPads, "Input Pads")
+                            .clicked()
+                        {
+                            new_tab = PropertyTab::InputPads;
+                        }
+                        if ui
+                            .selectable_label(new_tab == PropertyTab::OutputPads, "Output Pads")
+                            .clicked()
+                        {
+                            new_tab = PropertyTab::OutputPads;
+                        }
+                    });
 
-            ui.separator();
+                    ui.separator();
 
-            // Tab buttons
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(new_tab == PropertyTab::Element, "Element Properties")
-                    .clicked()
-                {
-                    new_tab = PropertyTab::Element;
-                }
-                if ui
-                    .selectable_label(new_tab == PropertyTab::InputPads, "Input Pads")
-                    .clicked()
-                {
-                    new_tab = PropertyTab::InputPads;
-                }
-                if ui
-                    .selectable_label(new_tab == PropertyTab::OutputPads, "Output Pads")
-                    .clicked()
-                {
-                    new_tab = PropertyTab::OutputPads;
-                }
-            });
-
-            ui.separator();
-
-            // Tab content
-            match new_tab {
-                PropertyTab::Element => {
-                    Self::show_element_properties_tab(ui, element, element_info);
-                }
-                PropertyTab::InputPads => {
-                    Self::show_input_pads_tab(
-                        ui,
-                        element,
-                        element_info,
-                        &input_pads,
-                        focused_pad.as_deref(),
-                    );
-                }
-                PropertyTab::OutputPads => {
-                    Self::show_output_pads_tab(
-                        ui,
-                        element,
-                        element_info,
-                        &output_pads,
-                        focused_pad.as_deref(),
-                    );
-                }
-            }
+                    // Tab content
+                    match new_tab {
+                        PropertyTab::Element => {
+                            Self::show_element_properties_tab(ui, element, element_info);
+                        }
+                        PropertyTab::InputPads => {
+                            Self::show_input_pads_tab(
+                                ui,
+                                element,
+                                element_info,
+                                &input_pads,
+                                focused_pad.as_deref(),
+                            );
+                        }
+                        PropertyTab::OutputPads => {
+                            Self::show_output_pads_tab(
+                                ui,
+                                element,
+                                element_info,
+                                &output_pads,
+                                focused_pad.as_deref(),
+                            );
+                        }
+                    }
+                }); // outer ScrollArea
         });
 
         (new_tab, delete_requested)
@@ -326,32 +346,36 @@ impl PropertyInspector {
         let mut result = BlockInspectorResult::default();
 
         ui.push_id(&block_id, |ui| {
+            // Outer scroll area for entire block inspector
+            ScrollArea::both()
+                .id_salt("block_inspector_outer_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
             // Delete button at top, away from action buttons
             if ui.button("🗑 Delete Block").clicked() {
                 result.delete_requested = true;
             }
             ui.separator();
 
-            // Block name (read-only)
-            ui.horizontal(|ui| {
-                ui.label("Block:");
-                ui.monospace(&definition.name);
-            });
+            // Block info in collapsible section
+            egui::CollapsingHeader::new(&definition.name)
+                .default_open(false)
+                .show(ui, |ui| {
+                    // Block ID (read-only)
+                    ui.horizontal(|ui| {
+                        ui.label("ID:");
+                        ui.monospace(&block.id);
+                    });
 
-            // Block ID (read-only)
-            ui.horizontal(|ui| {
-                ui.label("ID:");
-                ui.monospace(&block.id);
-            });
-
-            // Block description
-            if !definition.description.is_empty() {
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Description:");
-                    ui.label(&definition.description);
+                    // Block description
+                    if !definition.description.is_empty() {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Description:");
+                            ui.label(&definition.description);
+                        });
+                    }
                 });
-            }
 
             // Check if this block type has action buttons
             let has_action_buttons = matches!(
@@ -645,6 +669,7 @@ impl PropertyInspector {
                         }
                     }
                 });
+            }); // outer ScrollArea
         });
 
         result
