@@ -105,7 +105,7 @@
       <ComponentRef Id="PathEnvironment" />
       <ComponentRef Id="ApplicationShortcut" />
 
-      <Feature Id="GStreamerFeature" Title="GStreamer Runtime" Description="GStreamer multimedia framework (required for Strom to function)" Level="1" Absent="disallow">
+      <Feature Id="GStreamerFeature" Title="GStreamer Runtime" Description="GStreamer multimedia framework (required for Strom to function)" Level="1" AllowAbsent="no">
         <ComponentGroupRef Id="GStreamerBinFiles" />
         <ComponentGroupRef Id="GStreamerPluginFiles" />
       </Feature>
