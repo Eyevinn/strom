@@ -84,20 +84,19 @@
       <RegistryValue Root="HKCU" Key="Software\Eyevinn\Strom" Name="installed" Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
-    <!-- GStreamer bin directory files -->
-    <Component Id="GStreamerBinFiles" Directory="GstBinFolder" Guid="E5F6A7B8-C9D0-1234-EF01-345678901234">
-      <Files Include="$(var.GStreamerDir)\bin\*.*" />
-    </Component>
+    <!-- GStreamer files - using ComponentGroup with Files for auto-harvesting -->
+    <ComponentGroup Id="GStreamerBinFiles" Directory="GstBinFolder">
+      <Files Include="$(var.GStreamerDir)\bin\**\*.*" />
+    </ComponentGroup>
 
-    <!-- GStreamer plugins -->
-    <Component Id="GStreamerPluginFiles" Directory="GstPluginsFolder" Guid="F6A7B8C9-D0E1-2345-F012-456789012345">
-      <Files Include="$(var.GStreamerDir)\lib\gstreamer-1.0\*.dll" />
-    </Component>
+    <ComponentGroup Id="GStreamerPluginFiles" Directory="GstPluginsFolder">
+      <Files Include="$(var.GStreamerDir)\lib\gstreamer-1.0\**\*.dll" />
+    </ComponentGroup>
 
-    <!-- Graphviz bin directory files -->
-    <Component Id="GraphvizBinFiles" Directory="GvBinFolder" Guid="A7B8C9D0-E1F2-3456-0123-567890123456">
-      <Files Include="$(var.GraphvizDir)\bin\*.*" />
-    </Component>
+    <!-- Graphviz files -->
+    <ComponentGroup Id="GraphvizBinFiles" Directory="GvBinFolder">
+      <Files Include="$(var.GraphvizDir)\bin\**\*.*" />
+    </ComponentGroup>
 
     <!-- Main Feature -->
     <Feature Id="MainFeature" Title="Strom" Description="GStreamer Flow Engine - visual pipeline management" Level="1" ConfigurableDirectory="INSTALLFOLDER">
@@ -107,12 +106,12 @@
       <ComponentRef Id="ApplicationShortcut" />
 
       <Feature Id="GStreamerFeature" Title="GStreamer Runtime" Description="GStreamer multimedia framework (required for Strom to function)" Level="1" Absent="disallow">
-        <ComponentRef Id="GStreamerBinFiles" />
-        <ComponentRef Id="GStreamerPluginFiles" />
+        <ComponentGroupRef Id="GStreamerBinFiles" />
+        <ComponentGroupRef Id="GStreamerPluginFiles" />
       </Feature>
 
       <Feature Id="GraphvizFeature" Title="Graphviz" Description="Graph visualization tools for debug pipeline graphs (recommended)" Level="1">
-        <ComponentRef Id="GraphvizBinFiles" />
+        <ComponentGroupRef Id="GraphvizBinFiles" />
       </Feature>
     </Feature>
 
