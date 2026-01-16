@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, minimum-scale=0.5, maximum-scale=3.0">
     <title>Strom | ${location.host}</title>
     <script>document.title = `Strom | ${location.host}`;</script>
     <link data-trunk rel="rust" data-bin="strom-frontend" data-wasm-opt="z" />
@@ -21,6 +21,7 @@
         canvas {
             width: 100%;
             height: 100%;
+            touch-action: auto;
         }
 
         /* Login form styles */
@@ -172,10 +173,15 @@
                 const response = await fetch('/api/auth/status', {
                     credentials: 'include'
                 });
+                // Check if response is JSON before parsing
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    // Not JSON, likely auth not configured
+                    return { auth_required: false, authenticated: true };
+                }
                 const data = await response.json();
                 return data;
             } catch (e) {
-                console.error('Failed to check auth status:', e);
                 // If we can't check auth, assume it's not required
                 return { auth_required: false, authenticated: true };
             }
@@ -250,6 +256,67 @@
         }
 
         init();
+
+        // Pinch-to-zoom for iOS - stores zoom level for Rust/egui to read
+        (function() {
+            // Get native pixel ratio (device default)
+            const nativePixelRatio = window.devicePixelRatio || 1.0;
+
+            // Initialize global zoom state that Rust can read
+            window.stromPinchZoom = {
+                scale: nativePixelRatio,
+                baseScale: nativePixelRatio,  // The scale when pinch started
+                nativeScale: nativePixelRatio,  // For reset
+                changed: false
+            };
+
+            let lastDist = 0;
+            let pinching = false;
+
+            function getDistance(touches) {
+                const dx = touches[0].clientX - touches[1].clientX;
+                const dy = touches[0].clientY - touches[1].clientY;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            document.addEventListener('touchstart', (e) => {
+                if (e.touches.length >= 2) {
+                    pinching = true;
+                    lastDist = getDistance(e.touches);
+                    window.stromPinchZoom.baseScale = window.stromPinchZoom.scale;
+                }
+            }, { capture: true, passive: true });
+
+            document.addEventListener('touchmove', (e) => {
+                if (pinching && e.touches.length >= 2) {
+                    const dist = getDistance(e.touches);
+                    const pinchScale = dist / lastDist;
+                    // Apply relative to base scale, clamped to 0.5-5.0
+                    window.stromPinchZoom.scale = Math.min(5.0, Math.max(0.5,
+                        window.stromPinchZoom.baseScale * pinchScale));
+                    window.stromPinchZoom.changed = true;
+                }
+            }, { capture: true, passive: true });
+
+            document.addEventListener('touchend', (e) => {
+                if (e.touches.length < 2) {
+                    pinching = false;
+                }
+            }, { capture: true, passive: true });
+
+            // Double-tap to reset zoom
+            let lastTap = 0;
+            document.addEventListener('touchend', (e) => {
+                if (e.touches.length === 0) {
+                    const now = Date.now();
+                    if (now - lastTap < 300) {
+                        window.stromPinchZoom.scale = window.stromPinchZoom.nativeScale;
+                        window.stromPinchZoom.changed = true;
+                    }
+                    lastTap = now;
+                }
+            }, { passive: true });
+        })();
     </script>
 </body>
 </html>
