@@ -2505,8 +2505,12 @@ impl StromApp {
         if !self.show_flow_list_panel {
             return;
         }
+        // Max width is 40% of screen width
+        #[allow(deprecated)]
+        let max_width = ctx.screen_rect().width() * 0.4;
         SidePanel::left("flow_list")
             .default_width(200.0)
+            .max_width(max_width)
             .resizable(true)
             .show(ctx, |ui| {
                 // Filter input at top
@@ -3088,10 +3092,15 @@ impl StromApp {
         if !self.show_palette_panel {
             return;
         }
+        // Max width is 40% of screen width
+        #[allow(deprecated)]
+        let max_width = ctx.screen_rect().width() * 0.4;
         SidePanel::right("palette")
             .default_width(250.0)
+            .max_width(max_width)
             .resizable(true)
             .show(ctx, |ui| {
+            egui::ScrollArea::both().show(ui, |ui| {
                 // Check if an element is selected and trigger property loading if needed
                 // Do this BEFORE getting mutable reference to avoid borrow checker issues
                 if let Some((selected_element_type, active_tab)) = self
@@ -3314,6 +3323,7 @@ impl StromApp {
                     // No element or block selected: show ONLY the palette
                     self.palette.show(ui);
                 }
+            }); // ScrollArea
             });
     }
 
