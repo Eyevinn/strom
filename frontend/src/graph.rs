@@ -648,7 +648,17 @@ impl GraphEditor {
                 let hover_pos = pointer_pos.unwrap();
                 let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
                 let pinch_zoom = ui.input(|i| i.zoom_delta());
-                let modifiers = ui.input(|i| i.modifiers);
+                // Check modifiers from raw scroll events for more accurate detection
+                // (i.modifiers may not update without mouse movement)
+                let scroll_modifiers = ui.input(|i| {
+                    for event in &i.events {
+                        if let egui::Event::MouseWheel { modifiers, .. } = event {
+                            return *modifiers;
+                        }
+                    }
+                    i.modifiers
+                });
+                let modifiers = scroll_modifiers;
 
                 // Pinch-to-zoom (trackpad) or Ctrl+Scroll or Alt+Scroll
                 if pinch_zoom != 1.0 {
@@ -660,7 +670,7 @@ impl GraphEditor {
                     let new_screen_pos = to_screen(world_pos);
                     self.pan_offset += hover_pos - new_screen_pos;
                 } else if (modifiers.ctrl || modifiers.alt) && scroll_delta.y != 0.0 {
-                    // Ctrl+Scroll or Alt+Scroll: Zoom
+                    // Ctrl+Scroll or Alt+Scroll: Zoom (using modifiers from raw event)
                     let zoom_delta = scroll_delta.y * 0.001;
                     self.zoom = (self.zoom + zoom_delta).clamp(0.1, 3.0);
 
