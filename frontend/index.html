@@ -124,6 +124,92 @@
     <!-- Loading indicator -->
     <div id="loading">Loading...</div>
 
+    <!-- Mobile debug console -->
+    <div id="debug-console" style="display:none; position:fixed; bottom:0; left:0; right:0; height:150px; background:rgba(0,0,0,0.9); color:#0f0; font-family:monospace; font-size:11px; z-index:9999;">
+        <div style="background:#222;padding:4px 8px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #444;">
+            <span style="font-weight:bold;">Console</span>
+            <button id="dbg-filter-all" onclick="setDebugFilter('all')" style="font-size:10px;padding:2px 6px;background:#555;color:#fff;border:none;border-radius:3px;">All</button>
+            <button id="dbg-filter-log" onclick="setDebugFilter('log')" style="font-size:10px;padding:2px 6px;background:#333;color:#0f0;border:none;border-radius:3px;">Log</button>
+            <button id="dbg-filter-warn" onclick="setDebugFilter('warn')" style="font-size:10px;padding:2px 6px;background:#333;color:#ff0;border:none;border-radius:3px;">Warn</button>
+            <button id="dbg-filter-error" onclick="setDebugFilter('error')" style="font-size:10px;padding:2px 6px;background:#333;color:#f44;border:none;border-radius:3px;">Error</button>
+            <button onclick="clearDebugLog()" style="font-size:10px;padding:2px 6px;background:#633;color:#fff;border:none;border-radius:3px;">Clear</button>
+            <button onclick="document.getElementById('debug-console').style.display='none'" style="font-size:10px;padding:2px 6px;background:#444;color:#fff;border:none;border-radius:3px;margin-left:auto;">X</button>
+        </div>
+        <div id="debug-log" style="height:calc(100% - 30px);overflow-y:auto;padding:5px;"></div>
+    </div>
+    <script>
+        // Debug console state
+        let debugFilter = 'all';
+        function setDebugFilter(level) {
+            debugFilter = level;
+            // Update button styles
+            ['all','log','warn','error'].forEach(l => {
+                const btn = document.getElementById('dbg-filter-' + l);
+                if (btn) btn.style.background = (l === level) ? '#555' : '#333';
+            });
+            // Filter existing lines
+            const log = document.getElementById('debug-log');
+            if (log) {
+                Array.from(log.children).forEach(line => {
+                    const lineLevel = line.dataset.level || 'log';
+                    line.style.display = (level === 'all' || lineLevel === level) ? 'block' : 'none';
+                });
+            }
+        }
+        function clearDebugLog() {
+            const log = document.getElementById('debug-log');
+            if (log) log.innerHTML = '';
+        }
+        // Triple-tap to toggle debug console
+        let tapCount = 0;
+        let tapTimer = null;
+        document.addEventListener('touchend', (e) => {
+            if (e.touches.length === 0) {
+                tapCount++;
+                clearTimeout(tapTimer);
+                tapTimer = setTimeout(() => { tapCount = 0; }, 500);
+                if (tapCount === 3) {
+                    const dc = document.getElementById('debug-console');
+                    dc.style.display = dc.style.display === 'none' ? 'block' : 'none';
+                    tapCount = 0;
+                }
+            }
+        });
+        // Override console methods
+        const origLog = console.log;
+        const origError = console.error;
+        const origWarn = console.warn;
+        function addDebugLine(msg, color, level) {
+            const log = document.getElementById('debug-log');
+            if (log) {
+                const line = document.createElement('div');
+                line.style.color = color || '#0f0';
+                line.dataset.level = level;
+                line.style.display = (debugFilter === 'all' || debugFilter === level) ? 'block' : 'none';
+                line.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+                log.appendChild(line);
+                log.scrollTop = log.scrollHeight;
+                // Keep only last 100 lines
+                while (log.children.length > 100) log.removeChild(log.firstChild);
+            }
+        }
+        console.log = function(...args) {
+            origLog.apply(console, args);
+            addDebugLine(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), '#0f0', 'log');
+        };
+        console.error = function(...args) {
+            origError.apply(console, args);
+            addDebugLine(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), '#f44', 'error');
+        };
+        console.warn = function(...args) {
+            origWarn.apply(console, args);
+            addDebugLine(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), '#ff0', 'warn');
+        };
+        window.onerror = function(msg, url, line, col, error) {
+            addDebugLine('ERROR: ' + msg + ' at ' + line + ':' + col, '#f44', 'error');
+        };
+    </script>
+
     <!-- Login form (hidden by default) -->
     <div id="login-container" class="hidden">
         <div id="login-box">
@@ -267,7 +353,14 @@
                 scale: nativePixelRatio,
                 baseScale: nativePixelRatio,  // The scale when pinch started
                 nativeScale: nativePixelRatio,  // For reset
-                changed: false
+                changed: false,
+                // Pinch start position (for graph detection)
+                startX: 0,
+                startY: 0,
+                // Set by Rust: true if pinch is over graph
+                isGraphPinch: false,
+                // Signal to Rust that a new pinch started
+                newPinch: false
             };
 
             let lastDist = 0;
@@ -284,11 +377,22 @@
                     pinching = true;
                     lastDist = getDistance(e.touches);
                     window.stromPinchZoom.baseScale = window.stromPinchZoom.scale;
+                    // Record pinch center for graph detection
+                    window.stromPinchZoom.startX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                    window.stromPinchZoom.startY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    window.stromPinchZoom.newPinch = true;
+                    window.stromPinchZoom.isGraphPinch = false;
                 }
             }, { capture: true, passive: true });
 
+            let lastUpdateTime = 0;
             document.addEventListener('touchmove', (e) => {
                 if (pinching && e.touches.length >= 2) {
+                    const now = Date.now();
+                    // Throttle updates to every 50ms to avoid overwhelming WASM
+                    if (now - lastUpdateTime < 50) return;
+                    lastUpdateTime = now;
+
                     const dist = getDistance(e.touches);
                     const pinchScale = dist / lastDist;
                     // Apply relative to base scale, clamped to 0.5-5.0
