@@ -5901,6 +5901,7 @@ dependencies = [
  "futures-util",
  "gloo-net",
  "gloo-timers",
+ "image",
  "instant",
  "js-sys",
  "reqwest 0.13.1",

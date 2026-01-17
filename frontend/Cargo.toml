@@ -54,3 +54,5 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 tokio-tungstenite = "0.28"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
+# Image decoding for app icon
+image = { version = "0.25", default-features = false, features = ["png"] }
