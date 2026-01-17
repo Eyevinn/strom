@@ -1,3 +1,5 @@
+<img src="assets/icon-128.png" alt="Strom" width="64" align="left" style="margin-right: 16px;">
+
 # Strom - GStreamer Flow Engine
 
 **Strom** (Swedish for "stream") is a visual, web-based interface for creating and managing GStreamer media pipelines. Design complex media flows without writing code.
