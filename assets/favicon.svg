@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- Ultra-simplified for 16-32px favicon use -->
-  <rect width="32" height="32" rx="6" fill="#0d1b2a"/>
-  <path d="M 19 4 L 10 15 L 16 15 L 9 28 L 22 16 L 16 16 L 23 4 Z" fill="#00d4ff"/>
-</svg>
