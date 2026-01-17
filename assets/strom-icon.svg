@@ -1,59 +1,47 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 256 256"
+     width="256"
+     height="256">
+
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0f172a"/>
-      <stop offset="100%" stop-color="#020617"/>
+    <!-- Glaslik vertikal gradient -->
+    <linearGradient id="blueGlass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8fe6ff"/>
+      <stop offset="40%" stop-color="#3bb6ff"/>
+      <stop offset="100%" stop-color="#0a4bff"/>
     </linearGradient>
-    <linearGradient id="frontFace" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#7dd3fc"/>
-      <stop offset="100%" stop-color="#0284c7"/>
-    </linearGradient>
-    <linearGradient id="sideFace" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0284c7"/>
-      <stop offset="100%" stop-color="#1e3a8a"/>
+
+    <!-- Subtil highlight -->
+    <linearGradient id="highlight" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="white" stop-opacity="0.45"/>
+      <stop offset="60%" stop-color="white" stop-opacity="0"/>
     </linearGradient>
   </defs>
 
-  <!-- Background -->
-  <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bg)"/>
+  <!-- Huvudblixt -->
+  <path
+    d="
+      M168 16
+      L72 120
+      H136
+      L104 240
+      L200 136
+      H136
+      Z
+    "
+    fill="url(#blueGlass)"
+  />
 
-  <!-- S-BOLT: Simple, clear S-shaped lightning -->
+  <!-- Highlight för slipat-glas-känsla -->
+  <path
+    d="
+      M160 24
+      L88 112
+      H132
+      L112 200
+      Z
+    "
+    fill="url(#highlight)"
+  />
 
-  <!-- Front face (lighter) -->
-  <path d="M 340 65
-           L 150 250
-           L 265 250
-           L 115 445
-           L 175 445
-           L 360 255
-           L 245 255
-           L 395 65
-           Z"
-        fill="url(#frontFace)"/>
-
-  <!-- Right edge / side face (darker) - gives 3D depth -->
-  <path d="M 395 65
-           L 340 65
-           L 245 175
-           L 265 250
-           L 360 255
-           L 400 200
-           Z"
-        fill="url(#sideFace)"/>
-
-  <path d="M 360 255
-           L 245 255
-           L 175 335
-           L 175 445
-           L 220 445
-           L 310 310
-           Z"
-        fill="url(#sideFace)"/>
-
-  <!-- Bright highlight streak -->
-  <path d="M 360 85 L 180 245"
-        stroke="white"
-        stroke-width="12"
-        stroke-linecap="round"
-        opacity="0.35"/>
 </svg>
