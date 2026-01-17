@@ -4,68 +4,74 @@
       <stop offset="0%" stop-color="#0f172a"/>
       <stop offset="100%" stop-color="#020617"/>
     </linearGradient>
-    <!-- Facet gradients for 3D crystal effect -->
-    <linearGradient id="light" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="boltMain" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#67e8f9"/>
-      <stop offset="100%" stop-color="#22d3ee"/>
-    </linearGradient>
-    <linearGradient id="mid" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#22d3ee"/>
-      <stop offset="100%" stop-color="#0891b2"/>
-    </linearGradient>
-    <linearGradient id="dark" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0891b2"/>
+      <stop offset="40%" stop-color="#22d3ee"/>
+      <stop offset="70%" stop-color="#0891b2"/>
       <stop offset="100%" stop-color="#1e40af"/>
     </linearGradient>
-    <linearGradient id="deep" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#1e40af"/>
+    <linearGradient id="boltDark" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0891b2"/>
       <stop offset="100%" stop-color="#1e3a8a"/>
+    </linearGradient>
+    <linearGradient id="highlight" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a5f3fc"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
     </linearGradient>
   </defs>
 
   <!-- Background -->
   <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bg)"/>
 
-  <!-- S-Lightning bolt with faceted 3D crystal appearance -->
+  <!-- S-Lightning bolt - main shape -->
+  <!-- Outer silhouette forming S + lightning -->
+  <path d="M 355 72
+           L 175 235
+           L 290 235
+           L 135 440
+           L 190 440
+           L 345 277
+           L 230 277
+           L 410 72
+           Z"
+        fill="url(#boltMain)"/>
 
-  <!-- Top section - upper arm of S pointing right -->
-  <!-- Light facet (top face) -->
-  <polygon points="320,70 380,130 256,180" fill="url(#light)"/>
-  <!-- Mid facet -->
-  <polygon points="320,70 256,180 200,120" fill="url(#mid)"/>
-  <!-- Dark facet (bottom face) -->
-  <polygon points="200,120 256,180 160,200" fill="url(#dark)"/>
+  <!-- Dark facet (right side depth) -->
+  <path d="M 355 72
+           L 290 160
+           L 290 235
+           L 345 277
+           L 345 200
+           L 410 72
+           Z"
+        fill="url(#boltDark)"
+        opacity="0.7"/>
 
-  <!-- Middle zigzag section -->
-  <!-- Light facet -->
-  <polygon points="256,180 380,130 340,240 280,220" fill="url(#mid)"/>
-  <!-- Connector piece -->
-  <polygon points="160,200 256,180 280,220 180,280" fill="url(#dark)"/>
-  <!-- Center bar light -->
-  <polygon points="280,220 340,240 320,280 260,260" fill="url(#light)"/>
-  <!-- Center bar dark -->
-  <polygon points="180,280 280,220 260,260 170,300" fill="url(#mid)"/>
+  <!-- Dark facet (bottom part) -->
+  <path d="M 230 277
+           L 290 340
+           L 190 440
+           L 135 440
+           Z"
+        fill="url(#boltDark)"
+        opacity="0.6"/>
 
-  <!-- Lower section - bottom arm of S pointing left -->
-  <!-- Mid facet -->
-  <polygon points="170,300 260,260 320,280 240,340" fill="url(#dark)"/>
-  <!-- Light facet -->
-  <polygon points="320,280 360,320 240,340" fill="url(#mid)"/>
-  <!-- Bottom point -->
-  <polygon points="240,340 360,320 310,380 200,440" fill="url(#dark)"/>
-  <polygon points="170,300 240,340 200,440 130,380" fill="url(#deep)"/>
+  <!-- Highlight facet (top left bright edge) -->
+  <path d="M 355 72
+           L 175 235
+           L 220 235
+           L 380 90
+           Z"
+        fill="url(#highlight)"
+        opacity="0.5"/>
 
-  <!-- Highlight edges for crystal effect -->
-  <path d="M 320 70 L 380 130 M 256 180 L 340 240 M 280 220 L 320 280 M 240 340 L 310 380"
-        stroke="rgba(255,255,255,0.6)"
-        stroke-width="3"
-        stroke-linecap="round"
-        fill="none"/>
-
-  <!-- Inner bright highlight -->
-  <path d="M 300 90 L 350 140 M 270 200 L 310 250"
+  <!-- Sharp highlight lines -->
+  <path d="M 340 90 L 200 230"
+        stroke="rgba(255,255,255,0.7)"
+        stroke-width="4"
+        stroke-linecap="round"/>
+  <path d="M 320 100 L 240 190"
         stroke="rgba(255,255,255,0.4)"
-        stroke-width="6"
-        stroke-linecap="round"
-        fill="none"/>
+        stroke-width="8"
+        stroke-linecap="round"/>
 </svg>
