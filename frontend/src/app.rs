@@ -2027,9 +2027,21 @@ impl StromApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    // Strom heading as clickable link to GitHub
+                    // Strom logo and heading as clickable link to GitHub
                     if ui
-                        .heading("⚡ Strom")
+                        .add(
+                            egui::Image::from_bytes("bytes://strom-icon", include_bytes!("icon.png"))
+                                .fit_to_exact_size(egui::vec2(24.0, 24.0))
+                                .corner_radius(4.0),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Visit Strom on GitHub")
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
+                    }
+                    if ui
+                        .heading("Strom")
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text("Visit Strom on GitHub")
                         .clicked()
