@@ -21,8 +21,8 @@
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <!-- Custom icons -->
-    <Icon Id="StromIcon.exe" SourceFile="$(var.StromExe)" />
-    <Property Id="ARPPRODUCTICON" Value="StromIcon.exe" />
+    <Icon Id="StromIcon.ico" SourceFile="$(var.StromIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="StromIcon.ico" />
     <Property Id="ARPHELPLINK" Value="https://github.com/Eyevinn/strom" />
     <Property Id="ARPURLINFOABOUT" Value="https://www.eyevinntechnology.se" />
 
@@ -72,14 +72,14 @@
                 Description="GStreamer Flow Engine"
                 Target="[BinFolder]strom.exe"
                 WorkingDirectory="BinFolder"
-                Icon="StromIcon.exe" />
+                Icon="StromIcon.ico" />
       <Shortcut Id="ApplicationStartMenuShortcutHeadless"
                 Name="Strom (Web UI)"
                 Description="GStreamer Flow Engine - Web UI mode"
                 Target="[BinFolder]strom.exe"
                 Arguments="--headless"
                 WorkingDirectory="BinFolder"
-                Icon="StromIcon.exe" />
+                Icon="StromIcon.ico" />
       <RemoveFolder Id="CleanUpShortCut" On="uninstall" />
       <RegistryValue Root="HKCU" Key="Software\Eyevinn\Strom" Name="installed" Type="integer" Value="1" KeyPath="yes" />
     </Component>
