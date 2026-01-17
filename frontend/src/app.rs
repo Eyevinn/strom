@@ -2030,9 +2030,12 @@ impl StromApp {
                     // Strom logo and heading as clickable link to GitHub
                     if ui
                         .add(
-                            egui::Image::from_bytes("bytes://strom-icon", include_bytes!("icon.png"))
-                                .fit_to_exact_size(egui::vec2(24.0, 24.0))
-                                .corner_radius(4.0),
+                            egui::Image::from_bytes(
+                                "bytes://strom-icon",
+                                include_bytes!("icon.png"),
+                            )
+                            .fit_to_exact_size(egui::vec2(24.0, 24.0))
+                            .corner_radius(4.0),
                         )
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text("Visit Strom on GitHub")
