@@ -21,7 +21,8 @@ The icon features:
 | `icon-64.png` | 64x64 | Desktop apps |
 | `favicon-32.png` | 32x32 | Browser tab |
 | `favicon-16.png` | 16x16 | Browser tab |
-| `favicon.ico` | 16/32/48 | Windows browser, legacy |
+| `favicon.ico` | 16/32/48 | Browser favicon, legacy |
+| `strom.ico` | 16-256 | Windows desktop app |
 
 ## HTML Usage
 
