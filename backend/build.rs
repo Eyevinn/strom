@@ -26,6 +26,8 @@ fn main() {
     println!("cargo:rerun-if-changed=dist");
     // Rerun if static assets change (WHEP player, etc.)
     println!("cargo:rerun-if-changed=static");
+    // Rerun if icon assets change (favicons, app icons)
+    println!("cargo:rerun-if-changed=../assets");
     // Rerun if .git/HEAD changes (new commits)
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs");
