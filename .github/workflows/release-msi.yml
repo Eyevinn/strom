@@ -118,7 +118,8 @@ jobs:
             exit 1
           }
 
-          $gstRoot = "gst-temp\gstreamer\1.0\msvc_x86_64"
+          # GStreamer MSI extracts to PFiles64/gstreamer/... structure
+          $gstRoot = "gst-temp\PFiles64\gstreamer\1.0\msvc_x86_64"
 
           # Verify extraction succeeded
           if (-not (Test-Path "$gstRoot\bin")) {
