@@ -266,21 +266,23 @@ fn build_opengl_compositor(
         // Set common pad properties
         set_common_pad_properties(&sink_pad, i, properties, output_width, output_height);
 
-        // Set GL-specific pad property: sizing-policy
-        let sizing_policy = properties
-            .get(&format!("input_{}_sizing_policy", i))
-            .and_then(|v| match v {
-                PropertyValue::String(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .unwrap_or("keep-aspect-ratio");
-        sink_pad.set_property_from_str("sizing-policy", sizing_policy);
+        // Set GL-specific pad property: sizing-policy (if available, added in GStreamer 1.24+)
+        if sink_pad.has_property("sizing-policy") {
+            let sizing_policy = properties
+                .get(&format!("input_{}_sizing_policy", i))
+                .and_then(|v| match v {
+                    PropertyValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("keep-aspect-ratio");
+            sink_pad.set_property_from_str("sizing-policy", sizing_policy);
 
-        info!(
-            "GL pad {} configured with sizing-policy={}",
-            sink_pad.name(),
-            sizing_policy
-        );
+            info!(
+                "GL pad {} configured with sizing-policy={}",
+                sink_pad.name(),
+                sizing_policy
+            );
+        }
 
         mixer_sink_pads.push(sink_pad);
     }

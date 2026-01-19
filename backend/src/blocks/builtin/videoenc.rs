@@ -383,6 +383,9 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             // VA-API (Intel/AMD on Linux)
             "vah264enc",
             "vah264lpenc", // Low power variant
+            // Apple VideoToolbox (macOS)
+            "vtenc_h264_hw", // Hardware-only variant
+            "vtenc_h264",    // May use software fallback
             // AMD AMF (Windows)
             "amfh264enc",
             // V4L2 (Raspberry Pi, embedded Linux)
@@ -398,6 +401,9 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             // VA-API
             "vah265enc",
             "vah265lpenc",
+            // Apple VideoToolbox (macOS)
+            "vtenc_h265_hw", // Hardware-only variant
+            "vtenc_h265",    // May use software fallback
             // AMD AMF
             "amfh265enc",
             // V4L2 (Raspberry Pi 4+, embedded Linux)
@@ -438,6 +444,9 @@ fn get_software_encoder_list(codec: Codec) -> Vec<&'static str> {
 }
 
 /// Set encoder properties based on the encoder type.
+///
+/// Uses `set_property_from_str` for all properties to avoid type mismatches.
+/// GStreamer parses the string value and converts to the correct type automatically.
 fn set_encoder_properties(
     encoder: &gst::Element,
     encoder_name: &str,
@@ -447,36 +456,37 @@ fn set_encoder_properties(
     rate_control: RateControl,
     keyframe_interval: u32,
 ) {
+    let bitrate_str = bitrate.to_string();
+    let keyframe_str = keyframe_interval.to_string();
+
     // Bitrate mapping (different encoders use different property names and units)
     if encoder_name.starts_with("x264") || encoder_name.starts_with("x265") {
         // x264/x265: bitrate in kbps
-        encoder.set_property("bitrate", bitrate);
-        // x264/x265: speed-preset (enum property) - use set_property_from_str for enum
+        encoder.set_property_from_str("bitrate", &bitrate_str);
+        // x264/x265: speed-preset
         let preset_nick = map_quality_preset_x264(quality_preset);
         encoder.set_property_from_str("speed-preset", preset_nick);
-        // x264/x265: tune (enum property) - optimize for specific use case
+        // x264/x265: tune - optimize for specific use case
         encoder.set_property_from_str("tune", tune);
     } else if encoder_name.starts_with("nv") {
         // NVENC encoders: bitrate in kbps
-        encoder.set_property("bitrate", bitrate);
+        encoder.set_property_from_str("bitrate", &bitrate_str);
 
-        // NVENC: preset (enum property) - different naming for nvautogpu* vs regular nv*
+        // NVENC: preset - different naming for nvautogpu* vs regular nv*
         // nvautogpu* uses p1-p7 (newer), regular nv* uses default/hp/hq (older)
         let preset_nick = if encoder_name.starts_with("nvautogpu") {
-            map_quality_preset_nvenc_new(quality_preset) // p1-p7 style
+            map_quality_preset_nvenc_new(quality_preset)
         } else {
-            map_quality_preset_nvenc_old(quality_preset) // default/hp/hq style
+            map_quality_preset_nvenc_old(quality_preset)
         };
         encoder.set_property_from_str("preset", preset_nick);
 
         // Rate control property name differs between nvautogpu* and regular nv* encoders
         let rc_property = if encoder_name.starts_with("nvautogpu") {
-            "rate-control" // nvautogpu* variants use this
+            "rate-control"
         } else {
-            "rc-mode" // regular nv* encoders use this
+            "rc-mode"
         };
-
-        // Rate control (enum property)
         let rc_nick = match rate_control {
             RateControl::CQP => "cqp",
             RateControl::VBR => "vbr",
@@ -486,47 +496,54 @@ fn set_encoder_properties(
 
         // NVENC: Disable adaptive I-frame insertion to respect gop-size
         if encoder.has_property("i-adapt") {
-            encoder.set_property("i-adapt", false);
+            encoder.set_property_from_str("i-adapt", "false");
         }
 
         // NVENC: Enable strict GOP mode for consistent keyframe intervals
         if encoder.has_property("strict-gop") {
-            encoder.set_property("strict-gop", true);
+            encoder.set_property_from_str("strict-gop", "true");
         }
 
         // NVENC: Disable B-frames for simpler GOP structure (helps with keyframe consistency)
         if encoder.has_property("b-frames") {
-            encoder.set_property("b-frames", 0u32);
+            encoder.set_property_from_str("b-frames", "0");
         }
     } else if encoder_name.starts_with("qsv") {
         // Intel QSV: bitrate in kbps
-        encoder.set_property("bitrate", bitrate);
+        encoder.set_property_from_str("bitrate", &bitrate_str);
         // QSV: target-usage for quality/speed tradeoff (1=best quality, 7=fastest)
         let target_usage = map_quality_preset_qsv(quality_preset);
-        encoder.set_property("target-usage", target_usage);
+        encoder.set_property_from_str("target-usage", &target_usage.to_string());
     } else if encoder_name.starts_with("va") {
         // VA-API: bitrate in kbps
-        encoder.set_property("bitrate", bitrate);
+        encoder.set_property_from_str("bitrate", &bitrate_str);
     } else if encoder_name.starts_with("amf") {
         // AMD AMF: bitrate in kbps
-        encoder.set_property("bitrate", bitrate);
-        // AMF: usage for quality preset (try setting, may not be available on all versions)
+        encoder.set_property_from_str("bitrate", &bitrate_str);
+        // AMF: usage for quality preset
         let usage = map_quality_preset_amf(quality_preset);
-        // AMF usage is a string enum, attempt to set it (may fail gracefully)
         if encoder.has_property("usage") {
-            // Note: AMF usage might be a string enum - this may fail, but won't crash
-            encoder.set_property("usage", usage);
+            encoder.set_property_from_str("usage", usage);
+        }
+    } else if encoder_name.starts_with("vtenc") {
+        // Apple VideoToolbox (macOS): bitrate in bits per second
+        let bitrate_bps = bitrate * 1000;
+        encoder.set_property_from_str("bitrate", &bitrate_bps.to_string());
+        // VideoToolbox: realtime mode for low-latency streaming
+        if encoder.has_property("realtime") {
+            let realtime = matches!(quality_preset, "ultrafast" | "fast");
+            encoder.set_property_from_str("realtime", if realtime { "true" } else { "false" });
+        }
+        // VideoToolbox: quality (0.0-1.0) for quality-based encoding
+        if encoder.has_property("quality") {
+            let quality = map_quality_preset_vtenc(quality_preset);
+            encoder.set_property_from_str("quality", &quality.to_string());
         }
     } else if encoder_name.starts_with("v4l2") {
         // V4L2 encoders (Raspberry Pi, embedded Linux)
-        // V4L2 encoders use extra-controls structure for bitrate
-        // The bitrate is in bits per second (not kbps)
+        // V4L2 encoders use extra-controls structure for bitrate (bits per second)
         let bitrate_bps = bitrate * 1000;
-
-        // Try to set extra-controls with video_bitrate
-        // This is the standard way for V4L2 stateful encoders
         if encoder.has_property("extra-controls") {
-            // Create a GStreamer structure with the video bitrate
             let controls = gst::Structure::builder("extra-controls")
                 .field("video_bitrate", bitrate_bps)
                 .build();
@@ -538,50 +555,35 @@ fn set_encoder_properties(
         }
     } else if encoder_name == "svtav1enc" {
         // SVT-AV1: target-bitrate in kbps
-        encoder.set_property("target-bitrate", bitrate);
+        encoder.set_property_from_str("target-bitrate", &bitrate_str);
         // SVT-AV1: preset (0=slowest/best, 13=fastest)
         let preset = map_quality_preset_svtav1(quality_preset);
-        encoder.set_property("preset", preset);
+        encoder.set_property_from_str("preset", &preset.to_string());
     } else if encoder_name == "av1enc" {
         // libaom AV1: target-bitrate in kbps
-        encoder.set_property("target-bitrate", bitrate);
+        encoder.set_property_from_str("target-bitrate", &bitrate_str);
         // libaom: cpu-used (0=slowest, 8=fastest)
         let cpu_used = map_quality_preset_av1enc(quality_preset);
-        encoder.set_property("cpu-used", cpu_used);
+        encoder.set_property_from_str("cpu-used", &cpu_used.to_string());
     } else if encoder_name == "vp9enc" {
-        // libvpx VP9: target-bitrate in kbps (expects i32, not u32!)
-        let bitrate_i32 = bitrate as i32;
-        encoder.set_property("target-bitrate", bitrate_i32);
+        // libvpx VP9: target-bitrate in kbps
+        encoder.set_property_from_str("target-bitrate", &bitrate_str);
         // VP9: cpu-used (0=slowest, 5=fastest for realtime)
         let cpu_used = map_quality_preset_vp9enc(quality_preset);
-        encoder.set_property("cpu-used", cpu_used);
+        encoder.set_property_from_str("cpu-used", &cpu_used.to_string());
     }
 
-    // Keyframe interval (GOP size)
+    // Keyframe interval (GOP size) - try different property names
     if keyframe_interval > 0 {
-        // Set GOP size - different encoders use different property names and types
-        // x264: key-int-max (guint/u32)
-        // x265: key-int-max (gint/i32) - yes, they're different!
-        // NVENC/others: gop-size (gint/i32)
         if encoder.has_property("key-int-max") {
-            // x264 expects u32, x265 expects i32
-            if encoder_name.contains("x264") {
-                encoder.set_property("key-int-max", keyframe_interval);
-            } else {
-                let gop_size = keyframe_interval as i32;
-                encoder.set_property("key-int-max", gop_size);
-            }
+            encoder.set_property_from_str("key-int-max", &keyframe_str);
         } else if encoder.has_property("gop-size") {
-            // QSV expects u32, most others expect i32 - try u32 first
-            if encoder_name.starts_with("qsv") {
-                encoder.set_property("gop-size", keyframe_interval);
-            } else {
-                let gop_size = keyframe_interval as i32;
-                encoder.set_property("gop-size", gop_size);
-            }
+            encoder.set_property_from_str("gop-size", &keyframe_str);
         } else if encoder.has_property("keyint-max") {
-            let gop_size = keyframe_interval as i32;
-            encoder.set_property("keyint-max", gop_size);
+            encoder.set_property_from_str("keyint-max", &keyframe_str);
+        } else if encoder.has_property("max-keyframe-interval") {
+            // Apple VideoToolbox
+            encoder.set_property_from_str("max-keyframe-interval", &keyframe_str);
         }
     }
 
@@ -703,6 +705,17 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
         "slow" => 1,
         "veryslow" => 0,
         _ => 3, // medium
+    }
+}
+
+/// Map quality preset to Apple VideoToolbox quality (0.0=worst, 1.0=best).
+fn map_quality_preset_vtenc(quality_preset: &str) -> f32 {
+    match quality_preset {
+        "ultrafast" => 0.25,
+        "fast" => 0.5,
+        "slow" => 0.85,
+        "veryslow" => 1.0,
+        _ => 0.65, // medium
     }
 }
 

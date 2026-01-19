@@ -267,17 +267,24 @@ impl BlockBuilder for GLCompositorBuilder {
             sink_pad.set_property_from_str("zorder", &zorder.to_string());
 
             // Get sizing policy (default: keep-aspect-ratio)
-            let sizing_policy = properties
-                .get(&format!("input_{}_sizing_policy", i))
-                .and_then(|v| match v {
-                    PropertyValue::String(s) => Some(s.as_str()),
-                    _ => None,
-                })
-                .unwrap_or("keep-aspect-ratio");
-            sink_pad.set_property_from_str("sizing-policy", sizing_policy);
+            // sizing-policy is only available in GStreamer 1.24+
+            let sizing_policy = if sink_pad.has_property("sizing-policy") {
+                let policy = properties
+                    .get(&format!("input_{}_sizing_policy", i))
+                    .and_then(|v| match v {
+                        PropertyValue::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("keep-aspect-ratio");
+                sink_pad.set_property_from_str("sizing-policy", policy);
+                Some(policy)
+            } else {
+                None
+            };
 
-            info!("Pad {} properties set: xpos={}, ypos={}, width={}, height={}, alpha={}, zorder={}, sizing-policy={}",
-                  sink_pad.name(), xpos, ypos, width, height, alpha, zorder, sizing_policy);
+            info!("Pad {} properties set: xpos={}, ypos={}, width={}, height={}, alpha={}, zorder={}{}",
+                  sink_pad.name(), xpos, ypos, width, height, alpha, zorder,
+                  sizing_policy.map(|p| format!(", sizing-policy={}", p)).unwrap_or_default());
 
             mixer_sink_pads.push(sink_pad);
         }
