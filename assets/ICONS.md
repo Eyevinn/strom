@@ -7,7 +7,7 @@ Icon assets for the Strom application across all platforms.
 The icon features:
 - **S** for Strom (Swedish: ström = stream / electric current)
 - **Circular arrows** representing streaming/flow
-- 3D metallic silver look on blue background
+- Metallic silver on dark blue gradient
 
 ## Icon Files
 
@@ -64,15 +64,20 @@ The icon features:
 
 ## Regenerating Icons
 
-If you need to regenerate icons from the source:
+To regenerate all icons from the master `strom-icon-1024.png`:
 
-```python
-from PIL import Image
-
-src = Image.open("strom-icon-1024.png")
-sizes = [16, 32, 64, 128, 180, 192, 512]
-
-for size in sizes:
-    resized = src.resize((size, size), Image.LANCZOS)
-    resized.save(f"icon-{size}.png")
+```bash
+cargo run --bin gen-icons
 ```
+
+This generates:
+- All PNG sizes (512, 192, 180, 128, 64, 32, 16)
+- ICO files (favicon.ico, strom.ico)
+- Frontend icon (frontend/src/icon.png)
+
+**Workflow for updating icons:**
+1. Replace `assets/strom-icon-1024.png` with new 1024x1024 source
+2. Run `cargo run --bin gen-icons`
+3. Commit all changed files
+
+Alternative icon designs are stored in `assets/other/` for reference.
