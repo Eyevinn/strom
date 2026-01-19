@@ -310,7 +310,11 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
                 info!("✗ Encoder disabled (rank=0): {}", encoder_name);
                 continue;
             }
-            info!("✓ Found available encoder: {} (rank={:?})", encoder_name, factory.rank());
+            info!(
+                "✓ Found available encoder: {} (rank={:?})",
+                encoder_name,
+                factory.rank()
+            );
             return Ok(encoder_name.to_string());
         } else {
             info!("✗ Encoder not available: {}", encoder_name);
