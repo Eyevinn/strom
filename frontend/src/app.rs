@@ -649,6 +649,9 @@ impl StromApp {
         api_base_url: String,
         _shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Self {
+        // Install image loaders for egui (required for Image::from_bytes)
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
         // Create channels for async communication
         let channels = AppStateChannels::new();
 
@@ -748,6 +751,9 @@ impl StromApp {
         port: u16,
         auth_token: Option<String>,
     ) -> Self {
+        // Install image loaders for egui (required for Image::from_bytes)
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
         // Create channels for async communication
         let channels = AppStateChannels::new();
 
@@ -2049,9 +2055,24 @@ impl StromApp {
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.y = 4.0; // Add some vertical spacing between wrapped rows
-                                                           // Strom heading as clickable link to GitHub
+                                                           // Strom logo and heading as clickable link to GitHub
                     if ui
-                        .heading("⚡ Strom")
+                        .add(
+                            egui::Image::from_bytes(
+                                "bytes://strom-icon",
+                                include_bytes!("icon.png"),
+                            )
+                            .fit_to_exact_size(egui::vec2(24.0, 24.0))
+                            .corner_radius(4.0),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Visit Strom on GitHub")
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
+                    }
+                    if ui
+                        .heading("Strom")
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text("Visit Strom on GitHub")
                         .clicked()

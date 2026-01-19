@@ -15,6 +15,7 @@ strom-types = { path = "../types" }
 # GUI - works on both WASM and native
 egui.workspace = true
 eframe.workspace = true
+egui_extras.workspace = true
 
 # HTTP client - works on both WASM and native
 reqwest = { workspace = true, features = ["json", "multipart"] }
@@ -54,3 +55,5 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 tokio-tungstenite = "0.28"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
+# Image decoding for app icon
+image = { version = "0.25", default-features = false, features = ["png"] }

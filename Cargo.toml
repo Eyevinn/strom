@@ -37,5 +37,6 @@ utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 # Frontend
 egui = "0.33"
 eframe = { version = "0.33", features = ["default_fonts", "glow", "persistence"] }
+egui_extras = { version = "0.33", features = ["image"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 gloo-net = { version = "0.6", features = ["websocket"] }

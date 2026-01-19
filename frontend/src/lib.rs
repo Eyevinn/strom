@@ -31,6 +31,19 @@ mod ws;
 // Re-export the app for use by the backend
 pub use app::StromApp;
 
+/// Load the app icon for native windows
+#[cfg(not(target_arch = "wasm32"))]
+fn load_icon() -> Option<egui::IconData> {
+    let icon_bytes = include_bytes!("icon.png");
+    let image = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 // Re-export the native entry point (without tracing init - parent should handle that)
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native_gui(port: u16) -> eframe::Result<()> {
@@ -39,10 +52,16 @@ pub fn run_native_gui(port: u16) -> eframe::Result<()> {
         port
     );
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 720.0])
+        .with_title("Strom");
+
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
-            .with_title("Strom"),
+        viewport,
         ..Default::default()
     };
 
@@ -68,10 +87,16 @@ pub fn run_native_gui_with_shutdown(
         port
     );
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 720.0])
+        .with_title("Strom");
+
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 720.0])
-            .with_title("Strom"),
+        viewport,
         ..Default::default()
     };
 

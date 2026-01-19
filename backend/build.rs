@@ -9,6 +9,10 @@ fn main() {
     // Set version and build information
     set_version_info();
 
+    // Embed Windows resources (icon, version info)
+    #[cfg(windows)]
+    embed_windows_resources();
+
     let frontend_dir = PathBuf::from("../frontend");
     let dist_dir = PathBuf::from("dist");
     let hash_file = PathBuf::from(".frontend-build-hash");
@@ -22,9 +26,13 @@ fn main() {
     println!("cargo:rerun-if-changed=dist");
     // Rerun if static assets change (WHEP player, etc.)
     println!("cargo:rerun-if-changed=static");
+    // Rerun if icon assets change (favicons, app icons)
+    println!("cargo:rerun-if-changed=../assets");
     // Rerun if .git/HEAD changes (new commits)
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs");
+    // Rerun if Windows icon changes
+    println!("cargo:rerun-if-changed=strom.ico");
 
     // Compute current hash of frontend sources
     let current_hash = compute_frontend_hash(&frontend_dir);
@@ -232,5 +240,29 @@ fn build_frontend(frontend_dir: &Path) {
 
     if !status.success() {
         panic!("trunk build failed");
+    }
+}
+
+/// Embed Windows resources (icon, version info) into the executable
+#[cfg(windows)]
+fn embed_windows_resources() {
+    use winresource::WindowsResource;
+
+    let mut res = WindowsResource::new();
+
+    // Set the application icon
+    res.set_icon("strom.ico");
+
+    // Set version information
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+    res.set("ProductName", "Strom");
+    res.set("FileDescription", "Strom - GStreamer Flow Engine");
+    res.set("CompanyName", "Eyevinn Technology");
+    res.set("LegalCopyright", "Copyright (c) Eyevinn Technology");
+    res.set("ProductVersion", &version);
+    res.set("FileVersion", &version);
+
+    if let Err(e) = res.compile() {
+        eprintln!("cargo:warning=Failed to compile Windows resources: {}", e);
     }
 }

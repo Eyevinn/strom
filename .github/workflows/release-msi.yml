@@ -158,9 +158,10 @@ jobs:
           $version = "${{ steps.version.outputs.version }}"
           $buildDir = "installer/windows/build"
 
-          # Copy WiX source files
+          # Copy WiX source files and assets
           Copy-Item "installer/windows/Product.wxs" "$buildDir/" -Force
           Copy-Item "installer/windows/License.rtf" "$buildDir/" -Force
+          Copy-Item "assets/strom.ico" "$buildDir/" -Force
 
           # Create banner image (493x58)
           Add-Type -AssemblyName System.Drawing
@@ -194,6 +195,7 @@ jobs:
           # Get absolute paths
           $absStromExe = (Resolve-Path "binaries/strom.exe").Path
           $absStromMcpServerExe = (Resolve-Path "binaries/strom-mcp-server.exe").Path
+          $absStromIcon = (Resolve-Path "$buildDir/strom.ico").Path
           $absGstDir = (Resolve-Path "$buildDir/gstreamer-bundle").Path
           $absGvDir = (Resolve-Path "$buildDir/graphviz-bundle").Path
 
@@ -203,6 +205,7 @@ jobs:
           Write-Host "Building MSI with WiX..."
           Write-Host "  ProductVersion: $version"
           Write-Host "  StromExe: $absStromExe"
+          Write-Host "  StromIcon: $absStromIcon"
           Write-Host "  GStreamerDir: $absGstDir"
           Write-Host "  GraphvizDir: $absGvDir"
 
@@ -210,6 +213,7 @@ jobs:
             -d ProductVersion="$version" `
             -d StromExe="$absStromExe" `
             -d StromMcpServerExe="$absStromMcpServerExe" `
+            -d StromIcon="$absStromIcon" `
             -d GStreamerDir="$absGstDir" `
             -d GraphvizDir="$absGvDir" `
             -ext WixToolset.UI.wixext `
