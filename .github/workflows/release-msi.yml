@@ -20,7 +20,7 @@ on:
         default: true
 
 env:
-  GSTREAMER_VERSION: "1.24.13"
+  GSTREAMER_VERSION: "1.26.10"
 
 jobs:
   build-msi:

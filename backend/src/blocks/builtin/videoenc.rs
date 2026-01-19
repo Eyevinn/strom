@@ -57,7 +57,7 @@ impl BlockBuilder for VideoEncBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("🎞️ Building VideoEncoder block instance: {}", instance_id);
+        info!("Building VideoEncoder block instance: {}", instance_id);
 
         // Parse codec (required)
         let codec = parse_codec(properties)?;
@@ -68,7 +68,7 @@ impl BlockBuilder for VideoEncBuilder {
         // Select best available encoder
         let encoder_name = select_encoder(codec, preference)?;
         info!(
-            "🎞️ Selected encoder '{}' for codec {:?} with preference {:?}",
+            "Selected encoder '{}' for codec {:?} with preference {:?}",
             encoder_name, codec, preference
         );
 
@@ -153,10 +153,7 @@ impl BlockBuilder for VideoEncBuilder {
         // Configure parser for streaming (insert SPS/PPS headers periodically)
         configure_parser(&parser, codec, keyframe_interval);
 
-        info!(
-            "🎞️ Added {} parser for proper stream formatting",
-            parser_name
-        );
+        info!("Added {} parser for proper stream formatting", parser_name);
 
         // Create capsfilter with codec-specific caps
         let caps_str = get_codec_caps_string(codec);
@@ -171,7 +168,7 @@ impl BlockBuilder for VideoEncBuilder {
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
         info!(
-            "🎞️ VideoEncoder block created (chain: {} -> {} -> {} -> capsfilter [{}])",
+            "VideoEncoder block created (chain: {} -> {} -> {} -> capsfilter [{}])",
             convert_element_name, encoder_name, parser_name, caps_str
         );
 
@@ -238,7 +235,7 @@ fn configure_parser(parser: &gst::Element, codec: Codec, _keyframe_interval: u32
                 // 2. No waiting for next config interval
                 // 3. Overhead is negligible (~50 bytes per second)
                 parser.set_property("config-interval", 1i32);
-                info!("🎞️ Parser configured: config-interval=1s (SPS/PPS at every keyframe for instant stream join)");
+                info!("Parser configured: config-interval=1s (SPS/PPS at every keyframe for instant stream join)");
             }
         }
         Codec::AV1 | Codec::VP9 => {
@@ -313,7 +310,11 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
                 info!("✗ Encoder disabled (rank=0): {}", encoder_name);
                 continue;
             }
-            info!("✓ Found available encoder: {} (rank={:?})", encoder_name, factory.rank());
+            info!(
+                "✓ Found available encoder: {} (rank={:?})",
+                encoder_name,
+                factory.rank()
+            );
             return Ok(encoder_name.to_string());
         } else {
             info!("✗ Encoder not available: {}", encoder_name);
@@ -531,7 +532,7 @@ fn set_encoder_properties(
                 .build();
             encoder.set_property("extra-controls", &controls);
             info!(
-                "🎞️ V4L2 encoder: set video_bitrate={} bps via extra-controls",
+                "V4L2 encoder: set video_bitrate={} bps via extra-controls",
                 bitrate_bps
             );
         }
@@ -585,7 +586,7 @@ fn set_encoder_properties(
     }
 
     info!(
-        "🎞️ Set encoder properties: bitrate={} kbps, preset={}, tune={}, rate_control={:?}, gop={}",
+        "Set encoder properties: bitrate={} kbps, preset={}, tune={}, rate_control={:?}, gop={}",
         bitrate, quality_preset, tune, rate_control, keyframe_interval
     );
 }
