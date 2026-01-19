@@ -357,6 +357,9 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
         gstreamer::init().expect("Failed to initialize GStreamer");
         info!("GStreamer initialized");
 
+        // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
+        promote_va_plugin_ranks();
+
         // Register GStreamer plugins statically
         gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
         gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
@@ -515,6 +518,9 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
     // Initialize GStreamer INSIDE tokio runtime
     gstreamer::init()?;
     info!("GStreamer initialized");
+
+    // Promote VA-API plugin ranks (gstva plugins have rank=0 by default)
+    promote_va_plugin_ranks();
 
     // Register GStreamer plugins statically
     gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
@@ -780,6 +786,63 @@ async fn restart_flows(state: &AppState) {
 
     if count > 0 {
         info!("Auto-restart complete: {} flow(s) restarted", count);
+    }
+}
+
+/// Promote VA-API element ranks from NONE to PRIMARY.
+///
+/// GStreamer sets rank=0 (NONE) for new "gstva" plugins to avoid conflicts with
+/// legacy vaapi plugins. Since we don't use legacy vaapi, we promote all gstva
+/// elements to PRIMARY rank so they're selected by auto-plugging and our encoder
+/// priority system.
+fn promote_va_plugin_ranks() {
+    use gstreamer as gst;
+    use gstreamer::prelude::PluginFeatureExtManual;
+
+    // All gstva plugin elements (decoders, encoders, processing)
+    let va_elements = [
+        // Decoders
+        "vaav1dec",
+        "vah264dec",
+        "vah265dec",
+        "vajpegdec",
+        "vampeg2dec",
+        "vavp8dec",
+        "vavp9dec",
+        // Encoders
+        "vaav1enc",
+        "vah264enc",
+        "vah264lpenc",
+        "vah265enc",
+        "vah265lpenc",
+        "vajpegenc",
+        // Processing
+        "vacompositor",
+        "vadeinterlace",
+        "vapostproc",
+    ];
+
+    let mut promoted_count = 0;
+    for element_name in &va_elements {
+        if let Some(factory) = gst::ElementFactory::find(element_name) {
+            let old_rank = factory.rank();
+            if old_rank == gst::Rank::NONE {
+                factory.set_rank(gst::Rank::PRIMARY);
+                promoted_count += 1;
+                info!(
+                    "Promoted {} rank: {:?} -> {:?}",
+                    element_name,
+                    old_rank,
+                    gst::Rank::PRIMARY
+                );
+            }
+        }
+    }
+    if promoted_count > 0 {
+        info!(
+            "Promoted {} VA-API element(s) to PRIMARY rank",
+            promoted_count
+        );
     }
 }
 
