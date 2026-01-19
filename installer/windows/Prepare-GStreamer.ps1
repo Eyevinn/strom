@@ -8,7 +8,7 @@
     excluding development files, documentation, and unused plugins.
 
 .PARAMETER Version
-    GStreamer version to download (default: 1.24.13)
+    GStreamer version to download (default: 1.26.10)
 
 .PARAMETER OutputDir
     Directory to extract files to (default: gstreamer-bundle)
@@ -19,7 +19,7 @@
 #>
 
 param(
-    [string]$Version = "1.24.13",
+    [string]$Version = "1.26.10",
     [string]$OutputDir = "gstreamer-bundle",
     [switch]$Full
 )
