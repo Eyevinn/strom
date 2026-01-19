@@ -1,8 +1,8 @@
-# Dockerfile for Strom - Ubuntu 25.04 (Plucky)-based multi-stage build with Zig cross-compilation
+# Dockerfile for Strom - Ubuntu 25.10 (Questing)-based multi-stage build with Zig cross-compilation
 
 # Stage 1: Frontend builder - Build WASM frontend on native platform
 # IMPORTANT: Always build on native platform - WASM output is platform-independent!
-FROM --platform=$BUILDPLATFORM ubuntu:plucky AS frontend-builder
+FROM --platform=$BUILDPLATFORM ubuntu:questing AS frontend-builder
 WORKDIR /app
 
 # Get native build platform architecture
@@ -35,7 +35,7 @@ RUN cd frontend && trunk build --release
 
 # Stage 2: Backend builder - Build backend with Zig cross-compilation support
 # IMPORTANT: Must run on BUILD platform for cross-compilation tools (Zig) to work
-FROM --platform=$BUILDPLATFORM ubuntu:plucky AS backend-builder
+FROM --platform=$BUILDPLATFORM ubuntu:questing AS backend-builder
 WORKDIR /app
 
 # Get build and target platform info for cross-compilation detection
@@ -79,10 +79,10 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     # Block ARM64 Python packages (critical - prevents apt from removing amd64 Python!)
     mkdir -p /etc/apt/preferences.d && \
     printf 'Package: python3*:arm64\nPin: release *\nPin-Priority: -1\n' > /etc/apt/preferences.d/block-arm64-python && \
-    # Add ARM64 package sources from Ubuntu ports (plucky = 25.04)
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
-    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports plucky-security main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
+    # Add ARM64 package sources from Ubuntu ports (questing = 25.10)
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports questing main universe" > /etc/apt/sources.list.d/arm64-cross.list && \
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports questing-updates main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
+    echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports questing-security main universe" >> /etc/apt/sources.list.d/arm64-cross.list && \
     apt-get update && \
     # Install ARM64 GStreamer development libraries
     apt-get install -y --no-install-recommends \
@@ -120,7 +120,7 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig && \
     export AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu && \
     # Use C17 standard to avoid glibc 2.38+ C23 symbols (__isoc23_sscanf, __isoc23_strtol) \
-    # that aws-lc-sys would otherwise use when built on Ubuntu 25.04 (glibc 2.41) \
+    # that aws-lc-sys would otherwise use when built on Ubuntu 25.10 \
     # CFLAGS/CXXFLAGS for regular builds, CMAKE_C_FLAGS/CMAKE_CXX_FLAGS for CMake (aws-lc-sys) \
     export CFLAGS="-std=gnu17 -I/usr/include -I/usr/include/aarch64-linux-gnu" && \
     export CXXFLAGS="-std=gnu++17" && \
@@ -139,17 +139,13 @@ else \
     cargo build --release --package strom-mcp-server; \
 fi
 
-# Stage 3: Runtime - Minimal runtime image with Ubuntu 25.04 (plucky) for GStreamer 1.26
-FROM ubuntu:plucky AS runtime
+# Stage 3: Runtime - Minimal runtime image with Ubuntu 25.10 (questing) for GStreamer 1.26
+FROM ubuntu:questing AS runtime
 WORKDIR /app
 
-# Get target architecture for conditional package installation
-ARG TARGETARCH
-
 # Install GStreamer runtime dependencies
-# For amd64: Use plucky-proposed to get gstreamer1.0-plugins-bad 1.26.0-1ubuntu2.2+
-# which fixes the nvcodec plugin (Bug #2109413 - was accidentally disabled on amd64)
-# For arm64: Use standard packages (nvcodec was incorrectly enabled there, but harmless)
+# Note: Ubuntu Plucky (25.04) reached EOL before the nvcodec fix (Bug #2109413) was released.
+# Ubuntu Questing (25.10) includes the fix in gstreamer1.0-plugins-bad 1.26.3+.
 #
 # IMPORTANT: gstreamer1.0-gl and EGL/GBM libraries are required for CUDA-GL interop:
 # - gstreamer1.0-gl: GL plugins (glupload, gldownload, glcolorconvert)
@@ -157,46 +153,25 @@ ARG TARGETARCH
 # - libgl1-mesa-dri: Mesa DRI drivers for software fallback
 # The nvidia-container-toolkit mounts NVIDIA GL libraries at runtime via --gpus all
 ENV DEBIAN_FRONTEND=noninteractive
-RUN if [ "$TARGETARCH" = "amd64" ]; then \
-        echo "deb http://archive.ubuntu.com/ubuntu plucky-proposed main universe" > /etc/apt/sources.list.d/proposed.list && \
-        apt-get update && apt-get install -y \
-            libgstreamer1.0-0 \
-            libgstreamer-plugins-base1.0-0 \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            libgstreamer-plugins-bad1.0-0=1.26.0-1ubuntu2.2 \
-            gstreamer1.0-plugins-bad=1.26.0-1ubuntu2.2 \
-            gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav \
-            gstreamer1.0-nice \
-            gstreamer1.0-tools \
-            gstreamer1.0-gl \
-            libegl1 \
-            libegl-mesa0 \
-            libgbm1 \
-            libgl1-mesa-dri \
-            graphviz \
-            ca-certificates && \
-        rm /etc/apt/sources.list.d/proposed.list; \
-    else \
-        apt-get update && apt-get install -y \
-            libgstreamer1.0-0 \
-            libgstreamer-plugins-base1.0-0 \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav \
-            gstreamer1.0-nice \
-            gstreamer1.0-tools \
-            gstreamer1.0-gl \
-            libegl1 \
-            libegl-mesa0 \
-            libgbm1 \
-            libgl1-mesa-dri \
-            graphviz \
-            ca-certificates; \
-    fi && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+        libgstreamer1.0-0 \
+        libgstreamer-plugins-base1.0-0 \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        libgstreamer-plugins-bad1.0-0 \
+        gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-ugly \
+        gstreamer1.0-libav \
+        gstreamer1.0-nice \
+        gstreamer1.0-tools \
+        gstreamer1.0-gl \
+        libegl1 \
+        libegl-mesa0 \
+        libgbm1 \
+        libgl1-mesa-dri \
+        graphviz \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binaries from backend-builder to /app
 COPY --from=backend-builder /app/target/release/strom /app/strom
