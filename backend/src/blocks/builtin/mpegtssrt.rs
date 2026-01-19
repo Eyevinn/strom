@@ -109,7 +109,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         info!(
-            "📡 Building MPEG-TS/SRT Output block instance: {}",
+            "Building MPEG-TS/SRT Output block instance: {}",
             instance_id
         );
 
@@ -236,12 +236,12 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
 
         if has_auto_reconnect {
             info!(
-                "📡 SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync={}, qos=true",
+                "SRT sink configured: uri={}, latency={}ms, wait={}, auto-reconnect={}, sync={}, qos=true",
                 srt_uri, latency, wait_for_connection, auto_reconnect, sync
             );
         } else {
             info!(
-                "📡 SRT sink configured: uri={}, latency={}ms, wait={}, sync={}, qos=true (auto-reconnect not available)",
+                "SRT sink configured: uri={}, latency={}ms, wait={}, sync={}, qos=true (auto-reconnect not available)",
                 srt_uri, latency, wait_for_connection, sync
             );
         }
@@ -472,7 +472,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             }
 
             info!(
-                "📡 Video input: dynamic parser insertion enabled (H.264/H.265 with config-interval=1)"
+                "Video input: dynamic parser insertion enabled (H.264/H.265 with config-interval=1)"
             );
 
             // NOTE: No internal_links for video - linking happens dynamically in the pad probe
@@ -653,7 +653,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             }
 
             info!(
-                "📡 Audio input {}: dynamic chain insertion enabled (raw->AAC, AAC, MP3, AC3, DTS, Opus)",
+                "Audio input {}: dynamic chain insertion enabled (raw->AAC, AAC, MP3, AC3, DTS, Opus)",
                 i
             );
 
@@ -668,7 +668,7 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         ));
 
         info!(
-            "📡 Created MPEG-TS/SRT block with {} video track(s) and {} audio chain(s)",
+            "Created MPEG-TS/SRT block with {} video track(s) and {} audio chain(s)",
             num_video_tracks, num_audio_tracks
         );
 

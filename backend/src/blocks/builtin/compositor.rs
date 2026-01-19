@@ -124,7 +124,7 @@ impl BlockBuilder for CompositorBuilder {
         let backend = select_compositor(preference)?;
 
         info!(
-            "🎬 Selected compositor backend: {:?} (preference: {:?})",
+            "Selected compositor backend: {:?} (preference: {:?})",
             backend, preference
         );
 
@@ -137,7 +137,7 @@ impl BlockBuilder for CompositorBuilder {
         let gl_output = parse_gl_output(properties);
 
         info!(
-            "🎬 Creating compositor: {} inputs, {}x{} output, background={:?}, backend={:?}",
+            "Creating compositor: {} inputs, {}x{} output, background={:?}, backend={:?}",
             num_inputs, output_width, output_height, background, backend
         );
 
@@ -252,10 +252,7 @@ fn build_opengl_compositor(
     set_mixer_latency_properties(&mixer, properties);
 
     // Request pads and set their properties in NULL state
-    info!(
-        "🎬 Requesting {} GL mixer sink pads in NULL state",
-        num_inputs
-    );
+    info!("Requesting {} GL mixer sink pads in NULL state", num_inputs);
 
     let mut mixer_sink_pads = Vec::new();
     for i in 0..num_inputs {
@@ -280,7 +277,7 @@ fn build_opengl_compositor(
         sink_pad.set_property_from_str("sizing-policy", sizing_policy);
 
         info!(
-            "🎬 GL pad {} configured with sizing-policy={}",
+            "GL pad {} configured with sizing-policy={}",
             sink_pad.name(),
             sizing_policy
         );
@@ -638,7 +635,7 @@ fn set_common_pad_properties(
     sink_pad.set_property_from_str("zorder", &zorder.to_string());
 
     info!(
-        "🎬 Pad {} properties: xpos={}, ypos={}, width={}, height={}, alpha={}, zorder={}",
+        "Pad {} properties: xpos={}, ypos={}, width={}, height={}, alpha={}, zorder={}",
         sink_pad.name(),
         xpos,
         ypos,
@@ -661,7 +658,7 @@ fn set_mixer_latency_properties(mixer: &gst::Element, properties: &HashMap<Strin
         if latency_ms > 0 {
             let latency_ns = latency_ms * 1_000_000;
             info!(
-                "🎬 Setting mixer latency to {}ms ({}ns)",
+                "Setting mixer latency to {}ms ({}ns)",
                 latency_ms, latency_ns
             );
             mixer.set_property_from_str("latency", &latency_ns.to_string());
@@ -678,7 +675,7 @@ fn set_mixer_latency_properties(mixer: &gst::Element, properties: &HashMap<Strin
         if min_upstream_latency_ms > 0 && mixer.has_property("min-upstream-latency") {
             let min_upstream_latency_ns = min_upstream_latency_ms * 1_000_000;
             info!(
-                "🎬 Setting mixer min-upstream-latency to {}ms ({}ns)",
+                "Setting mixer min-upstream-latency to {}ms ({}ns)",
                 min_upstream_latency_ms, min_upstream_latency_ns
             );
             mixer.set_property_from_str(

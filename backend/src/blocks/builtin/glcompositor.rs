@@ -116,11 +116,11 @@ impl BlockBuilder for GLCompositorBuilder {
             .unwrap_or(true); // Default to true (use queues)
 
         info!(
-            "🎬 Creating compositor: {} inputs, {}x{} output, background={:?}",
+            "Creating compositor: {} inputs, {}x{} output, background={:?}",
             num_inputs, output_width, output_height, background
         );
         info!(
-            "🎬 Block properties: {:?}",
+            "Block properties: {:?}",
             properties.keys().collect::<Vec<_>>()
         );
 
@@ -156,7 +156,7 @@ impl BlockBuilder for GLCompositorBuilder {
             };
             let latency_ns = latency_ms * 1_000_000; // Convert ms to nanoseconds
             info!(
-                "🎬 Setting mixer latency to {}ms ({}ns)",
+                "Setting mixer latency to {}ms ({}ns)",
                 latency_ms, latency_ns
             );
             mixer.set_property_from_str("latency", &latency_ns.to_string());
@@ -171,7 +171,7 @@ impl BlockBuilder for GLCompositorBuilder {
             };
             let min_upstream_latency_ns = min_upstream_latency_ms * 1_000_000; // Convert ms to nanoseconds
             info!(
-                "🎬 Setting mixer min-upstream-latency to {}ms ({}ns)",
+                "Setting mixer min-upstream-latency to {}ms ({}ns)",
                 min_upstream_latency_ms, min_upstream_latency_ns
             );
             mixer.set_property_from_str(
@@ -183,7 +183,7 @@ impl BlockBuilder for GLCompositorBuilder {
         // Request pads and set their properties in NULL state (before adding to pipeline)
         // This is the key insight from test-glvideomixer: configure everything in NULL state
         info!(
-            "🎬 Requesting {} mixer sink pads and setting properties in NULL state",
+            "Requesting {} mixer sink pads and setting properties in NULL state",
             num_inputs
         );
         info!("Mixer element state: {:?}", mixer.current_state());
@@ -193,7 +193,7 @@ impl BlockBuilder for GLCompositorBuilder {
         for i in 0..num_inputs {
             // Request pad in NULL state
             info!(
-                "🎬 Attempting to request pad {} using template 'sink_%u'...",
+                "Attempting to request pad {} using template 'sink_%u'...",
                 i
             );
             let sink_pad = mixer.request_pad_simple("sink_%u")
@@ -426,7 +426,7 @@ impl BlockBuilder for GLCompositorBuilder {
         }
 
         info!(
-            "🎬 GLCompositor block created: {} inputs with pads pre-configured in NULL state",
+            "GLCompositor block created: {} inputs with pads pre-configured in NULL state",
             num_inputs
         );
 
