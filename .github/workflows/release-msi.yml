@@ -47,6 +47,8 @@ jobs:
               VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')
             fi
           fi
+          # Trim whitespace from version
+          VERSION=$(echo "$VERSION" | xargs)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building MSI for version: $VERSION"
 
