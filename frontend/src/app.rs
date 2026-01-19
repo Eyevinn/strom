@@ -636,6 +636,9 @@ impl StromApp {
         api_base_url: String,
         _shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Self {
+        // Install image loaders for egui (required for Image::from_bytes)
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
         // Create channels for async communication
         let channels = AppStateChannels::new();
 
@@ -732,6 +735,9 @@ impl StromApp {
         port: u16,
         auth_token: Option<String>,
     ) -> Self {
+        // Install image loaders for egui (required for Image::from_bytes)
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
         // Create channels for async communication
         let channels = AppStateChannels::new();
 
