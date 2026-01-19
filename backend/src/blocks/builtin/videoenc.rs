@@ -302,18 +302,18 @@ fn parse_rate_control(properties: &HashMap<String, PropertyValue>) -> RateContro
 
 /// Select the best available encoder for the given codec and preference.
 fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String, BlockBuildError> {
-    let registry = gst::Registry::get();
-
     // Get priority list of encoders to try
     let encoder_list = get_encoder_priority_list(codec, preference);
 
     // Try each encoder in priority order
     for encoder_name in &encoder_list {
-        if registry
-            .find_feature(encoder_name, gst::ElementFactory::static_type())
-            .is_some()
-        {
-            info!("✓ Found available encoder: {}", encoder_name);
+        if let Some(factory) = gst::ElementFactory::find(encoder_name) {
+            // Check if element is disabled via GST_PLUGIN_FEATURE_RANK (rank = 0/NONE)
+            if factory.rank() == gst::Rank::NONE {
+                info!("✗ Encoder disabled (rank=0): {}", encoder_name);
+                continue;
+            }
+            info!("✓ Found available encoder: {} (rank={:?})", encoder_name, factory.rank());
             return Ok(encoder_name.to_string());
         } else {
             info!("✗ Encoder not available: {}", encoder_name);
@@ -340,10 +340,11 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
             // Try software encoders as fallback
             let software_list = get_software_encoder_list(codec);
             for encoder_name in &software_list {
-                if registry
-                    .find_feature(encoder_name, gst::ElementFactory::static_type())
-                    .is_some()
-                {
+                if let Some(factory) = gst::ElementFactory::find(encoder_name) {
+                    if factory.rank() == gst::Rank::NONE {
+                        info!("✗ Software encoder disabled (rank=0): {}", encoder_name);
+                        continue;
+                    }
                     warn!("Using software fallback encoder: {}", encoder_name);
                     return Ok(encoder_name.to_string());
                 }
@@ -570,9 +571,13 @@ fn set_encoder_properties(
                 encoder.set_property("key-int-max", gop_size);
             }
         } else if encoder.has_property("gop-size") {
-            // Most other encoders expect i32
-            let gop_size = keyframe_interval as i32;
-            encoder.set_property("gop-size", gop_size);
+            // QSV expects u32, most others expect i32 - try u32 first
+            if encoder_name.starts_with("qsv") {
+                encoder.set_property("gop-size", keyframe_interval);
+            } else {
+                let gop_size = keyframe_interval as i32;
+                encoder.set_property("gop-size", gop_size);
+            }
         } else if encoder.has_property("keyint-max") {
             let gop_size = keyframe_interval as i32;
             encoder.set_property("keyint-max", gop_size);
