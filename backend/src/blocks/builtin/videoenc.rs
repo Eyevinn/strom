@@ -383,6 +383,9 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             // VA-API (Intel/AMD on Linux)
             "vah264enc",
             "vah264lpenc", // Low power variant
+            // Apple VideoToolbox (macOS)
+            "vtenc_h264_hw", // Hardware-only variant
+            "vtenc_h264",    // May use software fallback
             // AMD AMF (Windows)
             "amfh264enc",
             // V4L2 (Raspberry Pi, embedded Linux)
@@ -398,6 +401,9 @@ fn get_hardware_encoder_list(codec: Codec) -> Vec<&'static str> {
             // VA-API
             "vah265enc",
             "vah265lpenc",
+            // Apple VideoToolbox (macOS)
+            "vtenc_h265_hw", // Hardware-only variant
+            "vtenc_h265",    // May use software fallback
             // AMD AMF
             "amfh265enc",
             // V4L2 (Raspberry Pi 4+, embedded Linux)
@@ -519,6 +525,20 @@ fn set_encoder_properties(
         if encoder.has_property("usage") {
             encoder.set_property_from_str("usage", usage);
         }
+    } else if encoder_name.starts_with("vtenc") {
+        // Apple VideoToolbox (macOS): bitrate in bits per second
+        let bitrate_bps = bitrate * 1000;
+        encoder.set_property_from_str("bitrate", &bitrate_bps.to_string());
+        // VideoToolbox: realtime mode for low-latency streaming
+        if encoder.has_property("realtime") {
+            let realtime = matches!(quality_preset, "ultrafast" | "fast");
+            encoder.set_property_from_str("realtime", if realtime { "true" } else { "false" });
+        }
+        // VideoToolbox: quality (0.0-1.0) for quality-based encoding
+        if encoder.has_property("quality") {
+            let quality = map_quality_preset_vtenc(quality_preset);
+            encoder.set_property_from_str("quality", &quality.to_string());
+        }
     } else if encoder_name.starts_with("v4l2") {
         // V4L2 encoders (Raspberry Pi, embedded Linux)
         // V4L2 encoders use extra-controls structure for bitrate (bits per second)
@@ -561,6 +581,9 @@ fn set_encoder_properties(
             encoder.set_property_from_str("gop-size", &keyframe_str);
         } else if encoder.has_property("keyint-max") {
             encoder.set_property_from_str("keyint-max", &keyframe_str);
+        } else if encoder.has_property("max-keyframe-interval") {
+            // Apple VideoToolbox
+            encoder.set_property_from_str("max-keyframe-interval", &keyframe_str);
         }
     }
 
@@ -682,6 +705,17 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
         "slow" => 1,
         "veryslow" => 0,
         _ => 3, // medium
+    }
+}
+
+/// Map quality preset to Apple VideoToolbox quality (0.0=worst, 1.0=best).
+fn map_quality_preset_vtenc(quality_preset: &str) -> f32 {
+    match quality_preset {
+        "ultrafast" => 0.25,
+        "fast" => 0.5,
+        "slow" => 0.85,
+        "veryslow" => 1.0,
+        _ => 0.65, // medium
     }
 }
 
