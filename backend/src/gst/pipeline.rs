@@ -291,16 +291,12 @@ impl PipelineManager {
 
         // Merge pad properties from blocks with existing pad properties
         info!(
-            "🎨 Merging {} element(s) with pad properties from blocks",
+            "Merging {} element(s) with pad properties from blocks",
             expanded.pad_properties.len()
         );
         if !expanded.pad_properties.is_empty() {
             for (elem_id, pads) in &expanded.pad_properties {
-                info!(
-                    "🎨   Element {}: {} pad(s) with properties",
-                    elem_id,
-                    pads.len()
-                );
+                info!("Element {}: {} pad(s) with properties", elem_id, pads.len());
             }
         }
         manager.pad_properties.extend(expanded.pad_properties);
@@ -1398,7 +1394,7 @@ impl PipelineManager {
                 })
                 .collect();
             info!(
-                "🎨 Element {} has {} pad(s): {:?}",
+                "Element {} has {} pad(s): {:?}",
                 element_id,
                 all_pads.len(),
                 all_pads
@@ -1435,7 +1431,7 @@ impl PipelineManager {
                 }
 
                 info!(
-                    "🎨 Applying {} properties to pad {}:{}: {:?}",
+                    "Applying {} properties to pad {}:{}: {:?}",
                     properties.len(),
                     element_id,
                     pad_name,
