@@ -35,6 +35,7 @@
           <Directory Id="GstLibFolder" Name="lib">
             <Directory Id="GstPluginsFolder" Name="gstreamer-1.0" />
           </Directory>
+          <Directory Id="GstLibexecFolder" Name="libexec" />
         </Directory>
         <Directory Id="GraphvizFolder" Name="graphviz">
           <Directory Id="GvBinFolder" Name="bin" />
@@ -93,6 +94,10 @@
       <Files Include="$(var.GStreamerDir)\lib\gstreamer-1.0\**\*.dll" />
     </ComponentGroup>
 
+    <ComponentGroup Id="GStreamerLibexecFiles" Directory="GstLibexecFolder">
+      <Files Include="$(var.GStreamerDir)\libexec\**\*.*" />
+    </ComponentGroup>
+
     <!-- Graphviz files -->
     <ComponentGroup Id="GraphvizBinFiles" Directory="GvBinFolder">
       <Files Include="$(var.GraphvizDir)\bin\**\*.*" />
@@ -108,6 +113,7 @@
       <Feature Id="GStreamerFeature" Title="GStreamer Runtime" Description="GStreamer multimedia framework (required for Strom to function)" Level="1" AllowAbsent="no">
         <ComponentGroupRef Id="GStreamerBinFiles" />
         <ComponentGroupRef Id="GStreamerPluginFiles" />
+        <ComponentGroupRef Id="GStreamerLibexecFiles" />
       </Feature>
 
       <Feature Id="GraphvizFeature" Title="Graphviz" Description="Graph visualization tools for debug pipeline graphs (recommended)" Level="1">

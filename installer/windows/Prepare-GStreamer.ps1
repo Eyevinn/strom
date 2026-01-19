@@ -303,6 +303,14 @@ if (Test-Path "$GstRoot\share\gstreamer-1.0") {
     Copy-Item "$GstRoot\share\gstreamer-1.0" "$OutputDir\share\" -Recurse -Force
 }
 
+# Copy libexec files (contains gst-ptp-helper.exe for PTP clock support)
+Write-Host "Copying libexec files..."
+if (Test-Path "$GstRoot\libexec") {
+    New-Item -ItemType Directory -Path "$OutputDir\libexec" -Force | Out-Null
+    Copy-Item "$GstRoot\libexec\*" "$OutputDir\libexec\" -Recurse -Force
+    Write-Host "  Copied libexec files (including gst-ptp-helper.exe)"
+}
+
 # Create registry initialization batch file
 $registryBat = @"
 @echo off
@@ -328,4 +336,5 @@ Write-Host ""
 Write-Host "Contents:"
 Write-Host "  bin/     - GStreamer tools and DLLs"
 Write-Host "  lib/     - GStreamer plugins"
+Write-Host "  libexec/ - GStreamer helper executables (gst-ptp-helper.exe)"
 Write-Host "  share/   - GStreamer data files"
