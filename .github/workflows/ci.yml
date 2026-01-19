@@ -233,7 +233,7 @@ jobs:
       - name: Install GStreamer (Windows)
         if: matrix.platform == 'windows'
         run: |
-          $GSTREAMER_VERSION = "1.24.13"
+          $GSTREAMER_VERSION = "1.26.10"
           $BASE_URL = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
 
           # Download and install runtime from our GitHub mirror
