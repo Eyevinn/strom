@@ -135,13 +135,12 @@ impl<'a> Widget for CompactSystemMonitor<'a> {
 
             if let Some(stats) = self.store.latest() {
                 let has_gpu = !stats.gpu_stats.is_empty();
-                let num_rows = if has_gpu { 3.0 } else { 2.0 };
-                let row_height = rect.height() / num_rows;
-                let graph_width = rect.width() * 0.68;
-                let _label_width = rect.width() * 0.32;
+                let num_cols = if has_gpu { 3.0 } else { 2.0 };
+                let col_width = rect.width() / num_cols;
+                let graph_height = rect.height();
 
                 // Draw CPU graph
-                let cpu_rect = Rect::from_min_size(rect.min, Vec2::new(graph_width, row_height));
+                let cpu_rect = Rect::from_min_size(rect.min, Vec2::new(col_width, graph_height));
                 draw_mini_graph(
                     painter,
                     cpu_rect,
@@ -151,8 +150,8 @@ impl<'a> Widget for CompactSystemMonitor<'a> {
 
                 // Draw memory graph
                 let mem_rect = Rect::from_min_size(
-                    Pos2::new(rect.min.x, rect.min.y + row_height),
-                    Vec2::new(graph_width, row_height),
+                    Pos2::new(rect.min.x + col_width, rect.min.y),
+                    Vec2::new(col_width, graph_height),
                 );
                 draw_mini_graph(
                     painter,
@@ -165,56 +164,14 @@ impl<'a> Widget for CompactSystemMonitor<'a> {
                 if has_gpu {
                     if let Some(gpu_hist) = self.store.gpu_history(0) {
                         let gpu_rect = Rect::from_min_size(
-                            Pos2::new(rect.min.x, rect.min.y + row_height * 2.0),
-                            Vec2::new(graph_width, row_height),
+                            Pos2::new(rect.min.x + col_width * 2.0, rect.min.y),
+                            Vec2::new(col_width, graph_height),
                         );
                         draw_mini_graph(
                             painter,
                             gpu_rect,
                             gpu_hist,
                             Color32::from_rgb(255, 150, 100),
-                        );
-                    }
-                }
-
-                // Draw labels
-                let label_pos = Pos2::new(rect.min.x + graph_width + 4.0, rect.min.y + 1.0);
-                let font_size = if has_gpu { 9.0 } else { 10.0 };
-                let line_height = if has_gpu { 8.0 } else { 12.0 };
-
-                let cpu_text = format!("CPU:{:.0}%", stats.cpu_usage);
-                painter.text(
-                    label_pos,
-                    egui::Align2::LEFT_TOP,
-                    cpu_text,
-                    egui::FontId::proportional(font_size),
-                    Color32::from_rgb(200, 200, 200),
-                );
-
-                let mem_percent = if stats.total_memory > 0 {
-                    (stats.used_memory as f32 / stats.total_memory as f32) * 100.0
-                } else {
-                    0.0
-                };
-                let mem_text = format!("MEM:{:.0}%", mem_percent);
-                painter.text(
-                    Pos2::new(label_pos.x, label_pos.y + line_height),
-                    egui::Align2::LEFT_TOP,
-                    mem_text,
-                    egui::FontId::proportional(font_size),
-                    Color32::from_rgb(200, 200, 200),
-                );
-
-                // Draw GPU label if available
-                if has_gpu {
-                    if let Some(gpu) = stats.gpu_stats.first() {
-                        let gpu_text = format!("GPU:{:.0}%", gpu.utilization);
-                        painter.text(
-                            Pos2::new(label_pos.x, label_pos.y + line_height * 2.0),
-                            egui::Align2::LEFT_TOP,
-                            gpu_text,
-                            egui::FontId::proportional(font_size),
-                            Color32::from_rgb(200, 200, 200),
                         );
                     }
                 }
@@ -282,12 +239,16 @@ impl<'a> DetailedSystemMonitor<'a> {
                 ui.vertical(|ui| {
                     ui.label("CPU Usage");
                     let cpu_rect = ui.allocate_space(Vec2::new(300.0, 100.0));
+                    let bg_color = ui.visuals().extreme_bg_color;
+                    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
                     draw_large_graph(
                         ui.painter(),
                         cpu_rect.1,
                         self.store.cpu_history(),
                         Color32::from_rgb(100, 200, 255),
                         "CPU %",
+                        bg_color,
+                        stroke_color,
                     );
                     ui.label(format!("Current: {:.1}%", stats.cpu_usage));
                 });
@@ -297,12 +258,16 @@ impl<'a> DetailedSystemMonitor<'a> {
                 ui.vertical(|ui| {
                     ui.label("Memory Usage");
                     let mem_rect = ui.allocate_space(Vec2::new(300.0, 100.0));
+                    let bg_color = ui.visuals().extreme_bg_color;
+                    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
                     draw_large_graph(
                         ui.painter(),
                         mem_rect.1,
                         self.store.memory_history(),
                         Color32::from_rgb(100, 255, 100),
                         "Memory %",
+                        bg_color,
+                        stroke_color,
                     );
                     let mem_percent = if stats.total_memory > 0 {
                         (stats.used_memory as f32 / stats.total_memory as f32) * 100.0
@@ -331,12 +296,17 @@ impl<'a> DetailedSystemMonitor<'a> {
                                 ui.label("GPU Utilization");
                                 if let Some(gpu_hist) = self.store.gpu_history(i) {
                                     let gpu_rect = ui.allocate_space(Vec2::new(250.0, 80.0));
+                                    let bg_color = ui.visuals().extreme_bg_color;
+                                    let stroke_color =
+                                        ui.visuals().widgets.noninteractive.bg_stroke.color;
                                     draw_large_graph(
                                         ui.painter(),
                                         gpu_rect.1,
                                         gpu_hist,
                                         Color32::from_rgb(255, 150, 100),
                                         "GPU %",
+                                        bg_color,
+                                        stroke_color,
                                     );
                                 }
                                 ui.label(format!("Current: {:.1}%", gpu.utilization));
@@ -378,16 +348,19 @@ fn draw_large_graph(
     data: &VecDeque<f32>,
     color: Color32,
     _label: &str,
+    bg_color: Color32,
+    stroke_color: Color32,
 ) {
     // Draw background
-    painter.rect_filled(rect, 2.0, Color32::from_gray(20));
+    painter.rect_filled(rect, 2.0, bg_color);
 
     // Draw grid lines
+    let grid_color = stroke_color.linear_multiply(0.5);
     for i in 0..=4 {
         let y = rect.min.y + (i as f32 / 4.0) * rect.height();
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(0.5, Color32::from_gray(60)),
+            Stroke::new(0.5, grid_color),
         );
     }
 
@@ -414,7 +387,7 @@ fn draw_large_graph(
     painter.rect_stroke(
         rect,
         2.0,
-        Stroke::new(1.0, Color32::from_gray(100)),
+        Stroke::new(1.0, stroke_color),
         egui::StrokeKind::Outside,
     );
 }

@@ -344,7 +344,7 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
                     .find_feature(encoder_name, gst::ElementFactory::static_type())
                     .is_some()
                 {
-                    warn!("⚠️ Using software fallback encoder: {}", encoder_name);
+                    warn!("Using software fallback encoder: {}", encoder_name);
                     return Ok(encoder_name.to_string());
                 }
             }

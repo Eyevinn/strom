@@ -33,7 +33,7 @@ impl BlockBuilder for VideoFormatBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("🎬 Building VideoFormat block instance: {}", instance_id);
+        info!("Building VideoFormat block instance: {}", instance_id);
 
         // Parse optional properties
         let resolution = properties.get("resolution").and_then(|v| match v {
@@ -89,7 +89,7 @@ impl BlockBuilder for VideoFormatBuilder {
         }
 
         let caps_str = caps_fields.join(",");
-        info!("🎬 VideoFormat block caps: {}", caps_str);
+        info!("VideoFormat block caps: {}", caps_str);
 
         // Always create all elements for consistent external pad references
         // Elements will just pass through if their respective properties aren't set
@@ -131,7 +131,7 @@ impl BlockBuilder for VideoFormatBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
-        info!("🎬 VideoFormat block created (chain: videoscale -> {} -> capsfilter) [videorate TEMPORARILY REMOVED]", convert_element_name);
+        info!("VideoFormat block created (chain: videoscale -> {} -> capsfilter) [videorate TEMPORARILY REMOVED]", convert_element_name);
 
         // Chain: videoscale -> videoconvert/autovideoconvert -> capsfilter (videorate temporarily removed)
         let internal_links = vec![

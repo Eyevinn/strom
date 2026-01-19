@@ -37,6 +37,7 @@ pub use app::StromApp;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
+    use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
 
     // Initialize panic handler for better error messages in browser console
@@ -49,7 +50,17 @@ fn main() {
             .build(),
     );
 
-    let web_options = eframe::WebOptions::default();
+    // Configure WebOptions to allow browser handling of pinch-zoom and Ctrl+scroll
+    let web_options = eframe::WebOptions {
+        // Allow multi-touch events to propagate to browser for pinch-zoom
+        should_stop_propagation: Box::new(|event| {
+            // Don't stop propagation for touch events (let browser handle pinch-zoom)
+            !matches!(event, egui::Event::Touch { .. })
+        }),
+        // Don't prevent default for touch events (let browser handle pinch-zoom)
+        should_prevent_default: Box::new(|event| !matches!(event, egui::Event::Touch { .. })),
+        ..Default::default()
+    };
 
     wasm_bindgen_futures::spawn_local(async {
         let document = web_sys::window()
@@ -62,12 +73,34 @@ fn main() {
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("strom_app_canvas is not a canvas");
 
+        // Add event listener to pass Ctrl+scroll through to browser for zoom
+        // This runs in capture phase to intercept before egui
+        let wheel_closure =
+            Closure::<dyn Fn(web_sys::WheelEvent)>::new(|event: web_sys::WheelEvent| {
+                if event.ctrl_key() {
+                    // Stop propagation so egui doesn't see it, let browser handle zoom
+                    event.stop_propagation();
+                }
+            });
+
+        let options = web_sys::AddEventListenerOptions::new();
+        options.set_capture(true);
+        canvas
+            .add_event_listener_with_callback_and_add_event_listener_options(
+                "wheel",
+                wheel_closure.as_ref().unchecked_ref(),
+                &options,
+            )
+            .expect("Failed to add wheel event listener");
+        wheel_closure.forget();
+
         eframe::WebRunner::new()
             .start(
                 canvas,
                 web_options,
                 Box::new(|cc| {
-                    // Theme is now set by the app based on user preference
+                    // Force dark theme immediately before app creation
+                    cc.egui_ctx.set_visuals(egui::Visuals::dark());
                     Ok(Box::new(StromApp::new(cc)))
                 }),
             )

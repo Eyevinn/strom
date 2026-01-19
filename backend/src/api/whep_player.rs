@@ -145,6 +145,15 @@ pub async fn whep_endpoint_proxy(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
 
+            // Collect all Link headers (WHEP spec: ICE servers sent via Link headers)
+            let link_headers: Vec<String> = response
+                .headers()
+                .get_all(header::LINK)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .collect();
+
             let body_bytes = response.bytes().await.unwrap_or_default();
 
             let mut builder = Response::builder()
@@ -156,7 +165,7 @@ pub async fn whep_endpoint_proxy(
                     "POST, DELETE, OPTIONS",
                 )
                 .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "Content-Type")
-                .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "Location");
+                .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "Location, Link");
 
             if let Some(loc) = location {
                 // Rewrite location from /whep/resource/{id} to /whep/{endpoint_id}/resource/{id}
@@ -167,6 +176,11 @@ pub async fn whep_endpoint_proxy(
                     format!("/whep/{}{}", endpoint_id, loc)
                 };
                 builder = builder.header(header::LOCATION, proxy_location);
+            }
+
+            // Relay all Link headers (for ICE server configuration per WHEP spec)
+            for link in link_headers {
+                builder = builder.header(header::LINK, link);
             }
 
             builder.body(Body::from(body_bytes)).unwrap()

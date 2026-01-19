@@ -18,7 +18,7 @@ impl BlockBuilder for MeterBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        tracing::info!("📊 Building Meter block instance: {}", instance_id);
+        tracing::info!("Building Meter block instance: {}", instance_id);
 
         // Get interval property (in milliseconds, convert to nanoseconds for GStreamer)
         let interval_ms = properties
@@ -41,8 +41,8 @@ impl BlockBuilder for MeterBuilder {
         // Create the level element
         let level_id = format!("{}:level", instance_id);
 
-        tracing::info!("📊 Creating level element: {}", level_id);
-        tracing::info!("📊 Setting post-messages=true on level element");
+        tracing::info!("Creating level element: {}", level_id);
+        tracing::info!("Setting post-messages=true on level element");
 
         let level = gst::ElementFactory::make("level")
             .name(&level_id)
@@ -51,7 +51,7 @@ impl BlockBuilder for MeterBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("level: {}", e)))?;
 
-        tracing::info!("📊 Level element created successfully: {}", level_id);
+        tracing::info!("Level element created successfully: {}", level_id);
 
         // Create a bus message handler that will be called when the pipeline starts
         let bus_message_handler = Some(Box::new(
@@ -93,7 +93,7 @@ fn connect_level_message_handler(
 ) -> gst::glib::SignalHandlerId {
     use gst::MessageView;
 
-    debug!("📊 Connecting level message handler via connect_message");
+    debug!("Connecting level message handler via connect_message");
 
     // First ensure signal watch is enabled (this is ref-counted, safe to call multiple times)
     bus.add_signal_watch();
@@ -106,12 +106,12 @@ fn connect_level_message_handler(
                 let structure_name = s.name();
 
                 if structure_name == "level" {
-                    trace!("📊 Received 'level' message from GStreamer bus!");
+                    trace!("Received 'level' message from GStreamer bus!");
 
                     // Extract element ID from the source
                     if let Some(source) = msg.src() {
                         let full_element_id = source.name().to_string();
-                        trace!("📊 Level message from element: {}", full_element_id);
+                        trace!("Level message from element: {}", full_element_id);
 
                         // Strip ":level" suffix to get the block ID
                         // Meter blocks create elements like "block_id:level", but UI looks up by "block_id"
@@ -121,7 +121,7 @@ fn connect_level_message_handler(
                             } else {
                                 full_element_id
                             };
-                        trace!("📊 Using block ID for lookup: {}", element_id);
+                        trace!("Using block ID for lookup: {}", element_id);
 
                         // Extract RMS, peak, and decay values from the message structure
                         // These are GValueArrays containing one f64 per channel
@@ -151,10 +151,10 @@ fn connect_level_message_handler(
                                 decay,
                             });
                         } else {
-                            warn!("📊 RMS array is empty, not broadcasting MeterData");
+                            warn!("RMS array is empty, not broadcasting MeterData");
                         }
                     } else {
-                        warn!("📊 Level message has no source element");
+                        warn!("Level message has no source element");
                     }
                 }
             }

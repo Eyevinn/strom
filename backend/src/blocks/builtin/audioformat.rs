@@ -31,7 +31,7 @@ impl BlockBuilder for AudioFormatBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("🎵 Building AudioFormat block instance: {}", instance_id);
+        info!("Building AudioFormat block instance: {}", instance_id);
 
         // Parse optional properties
         let sample_rate = properties.get("sample_rate").and_then(|v| match v {
@@ -92,7 +92,7 @@ impl BlockBuilder for AudioFormatBuilder {
         }
 
         let caps_str = caps_fields.join(",");
-        info!("🎵 AudioFormat block caps: {}", caps_str);
+        info!("AudioFormat block caps: {}", caps_str);
 
         // Always create all elements for consistent external pad references
         // Elements will just pass through if their respective properties aren't set
@@ -121,7 +121,7 @@ impl BlockBuilder for AudioFormatBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
-        info!("🎵 AudioFormat block created (chain: audioresample -> audioconvert -> capsfilter)");
+        info!("AudioFormat block created (chain: audioresample -> audioconvert -> capsfilter)");
 
         // Chain: audioresample -> audioconvert -> capsfilter
         let internal_links = vec![

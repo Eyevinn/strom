@@ -17,6 +17,8 @@ pub struct BlockInspectorResult {
     pub browse_streams_requested: bool,
     /// VLC playlist download requested (for MPEG-TS/SRT blocks) - contains (srt_uri, latency_ms)
     pub vlc_playlist_requested: Option<(String, i32)>,
+    /// VLC playlist download-only requested (native mode) - contains (srt_uri, latency_ms)
+    pub vlc_playlist_download_only: Option<(String, i32)>,
     /// WHEP player endpoint_id (for WHEP Output blocks) - used to construct full player URL
     pub whep_player_url: Option<String>,
     /// Copy WHEP player URL to clipboard - contains endpoint_id
@@ -76,75 +78,95 @@ impl PropertyInspector {
         let mut delete_requested = false;
 
         ui.push_id(&element_id, |ui| {
-            // Element type (read-only)
-            ui.horizontal(|ui| {
-                ui.label("Type:");
-                ui.monospace(&element.element_type);
-            });
+            // Outer scroll area for entire inspector
+            ScrollArea::both()
+                .id_salt("property_inspector_outer_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Delete button at top
+                    if ui.button("🗑 Delete Element").clicked() {
+                        delete_requested = true;
+                    }
+                    ui.separator();
 
-            // Element ID (read-only)
-            ui.horizontal(|ui| {
-                ui.label("ID:");
-                ui.monospace(&element.id);
-            });
+                    // Element info in collapsible section
+                    egui::CollapsingHeader::new(&element.element_type)
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            // Element ID (read-only)
+                            ui.horizontal(|ui| {
+                                ui.label("ID:");
+                                ui.monospace(&element.id);
+                            });
 
-            ui.separator();
+                            // Element description from element info
+                            if let Some(info) = element_info {
+                                if !info.description.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label("Description:");
+                                        ui.label(&info.description);
+                                    });
+                                }
+                                if !info.category.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label("Category:");
+                                        ui.label(&info.category);
+                                    });
+                                }
+                            }
+                        });
 
-            // Delete button
-            if ui.button("🗑 Delete Element").clicked() {
-                delete_requested = true;
-            }
+                    // Tab buttons (wrap on small screens)
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .selectable_label(new_tab == PropertyTab::Element, "Element Properties")
+                            .clicked()
+                        {
+                            new_tab = PropertyTab::Element;
+                        }
+                        if ui
+                            .selectable_label(new_tab == PropertyTab::InputPads, "Input Pads")
+                            .clicked()
+                        {
+                            new_tab = PropertyTab::InputPads;
+                        }
+                        if ui
+                            .selectable_label(new_tab == PropertyTab::OutputPads, "Output Pads")
+                            .clicked()
+                        {
+                            new_tab = PropertyTab::OutputPads;
+                        }
+                    });
 
-            ui.separator();
+                    ui.separator();
 
-            // Tab buttons
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(new_tab == PropertyTab::Element, "Element Properties")
-                    .clicked()
-                {
-                    new_tab = PropertyTab::Element;
-                }
-                if ui
-                    .selectable_label(new_tab == PropertyTab::InputPads, "Input Pads")
-                    .clicked()
-                {
-                    new_tab = PropertyTab::InputPads;
-                }
-                if ui
-                    .selectable_label(new_tab == PropertyTab::OutputPads, "Output Pads")
-                    .clicked()
-                {
-                    new_tab = PropertyTab::OutputPads;
-                }
-            });
-
-            ui.separator();
-
-            // Tab content
-            match new_tab {
-                PropertyTab::Element => {
-                    Self::show_element_properties_tab(ui, element, element_info);
-                }
-                PropertyTab::InputPads => {
-                    Self::show_input_pads_tab(
-                        ui,
-                        element,
-                        element_info,
-                        &input_pads,
-                        focused_pad.as_deref(),
-                    );
-                }
-                PropertyTab::OutputPads => {
-                    Self::show_output_pads_tab(
-                        ui,
-                        element,
-                        element_info,
-                        &output_pads,
-                        focused_pad.as_deref(),
-                    );
-                }
-            }
+                    // Tab content
+                    match new_tab {
+                        PropertyTab::Element => {
+                            Self::show_element_properties_tab(ui, element, element_info);
+                        }
+                        PropertyTab::InputPads => {
+                            Self::show_input_pads_tab(
+                                ui,
+                                element,
+                                element_info,
+                                &input_pads,
+                                focused_pad.as_deref(),
+                            );
+                        }
+                        PropertyTab::OutputPads => {
+                            Self::show_output_pads_tab(
+                                ui,
+                                element,
+                                element_info,
+                                &output_pads,
+                                focused_pad.as_deref(),
+                            );
+                        }
+                    }
+                }); // outer ScrollArea
         });
 
         (new_tab, delete_requested)
@@ -324,32 +346,36 @@ impl PropertyInspector {
         let mut result = BlockInspectorResult::default();
 
         ui.push_id(&block_id, |ui| {
+            // Outer scroll area for entire block inspector
+            ScrollArea::both()
+                .id_salt("block_inspector_outer_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
             // Delete button at top, away from action buttons
             if ui.button("🗑 Delete Block").clicked() {
                 result.delete_requested = true;
             }
             ui.separator();
 
-            // Block name (read-only)
-            ui.horizontal(|ui| {
-                ui.label("Block:");
-                ui.monospace(&definition.name);
-            });
+            // Block info in collapsible section
+            egui::CollapsingHeader::new(&definition.name)
+                .default_open(false)
+                .show(ui, |ui| {
+                    // Block ID (read-only)
+                    ui.horizontal(|ui| {
+                        ui.label("ID:");
+                        ui.monospace(&block.id);
+                    });
 
-            // Block ID (read-only)
-            ui.horizontal(|ui| {
-                ui.label("ID:");
-                ui.monospace(&block.id);
-            });
-
-            // Block description
-            if !definition.description.is_empty() {
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Description:");
-                    ui.label(&definition.description);
+                    // Block description
+                    if !definition.description.is_empty() {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Description:");
+                            ui.label(&definition.description);
+                        });
+                    }
                 });
-            }
 
             // Check if this block type has action buttons
             let has_action_buttons = matches!(
@@ -392,14 +418,9 @@ impl PropertyInspector {
                 crate::app::set_local_storage("open_playlist_editor", &block.id);
             }
 
-            // Download VLC Playlist button for MPEG-TS/SRT output blocks
-            if definition.id == "builtin.mpegtssrt_output"
-                && ui
-                    .button("📺 Open in VLC")
-                    .on_hover_text("Download XSPF playlist and open in VLC")
-                    .clicked()
-            {
-                // Get SRT URI from block properties or default
+            // Download VLC Playlist button for MPEG-TS/SRT output blocks (only in listener mode)
+            if definition.id == "builtin.mpegtssrt_output" {
+                // Get SRT URI from block properties
                 let srt_uri = block
                     .properties
                     .get("srt_uri")
@@ -407,20 +428,38 @@ impl PropertyInspector {
                         PropertyValue::String(s) => Some(s.clone()),
                         _ => None,
                     })
-                    .unwrap_or_else(|| "srt://:5000?mode=listener".to_string());
+                    .unwrap_or_default();
 
-                // Get latency from block properties or default (125ms)
-                let latency = block
-                    .properties
-                    .get("latency")
-                    .and_then(|v| match v {
-                        PropertyValue::Int(i) => Some(*i as i32),
-                        PropertyValue::UInt(u) => Some(*u as i32),
-                        _ => None,
-                    })
-                    .unwrap_or(125);
+                // Only show buttons if in listener mode (VLC can connect to us)
+                // Default SRT mode is caller, so we need explicit mode=listener
+                if srt_uri.contains("mode=listener") {
+                    // Use fixed network-caching for VLC (not tied to SRT buffer latency)
+                    // 1000ms is a reasonable default for smooth playback
+                    let network_caching_ms = 1000;
 
-                result.vlc_playlist_requested = Some((srt_uri, latency));
+                    ui.horizontal(|ui| {
+                        // Open in VLC button (saves and opens automatically in native mode)
+                        if ui
+                            .button("📺 Open in VLC")
+                            .on_hover_text("Download XSPF playlist and open in VLC")
+                            .clicked()
+                        {
+                            result.vlc_playlist_requested =
+                                Some((srt_uri.clone(), network_caching_ms));
+                        }
+
+                        // Download-only button (native mode only - lets user save to specific location)
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui
+                            .button("💾 Download")
+                            .on_hover_text("Download XSPF playlist file")
+                            .clicked()
+                        {
+                            result.vlc_playlist_download_only =
+                                Some((srt_uri.clone(), network_caching_ms));
+                        }
+                    });
+                }
             }
 
             // Open WHEP Player button for WHEP Output blocks
@@ -630,6 +669,7 @@ impl PropertyInspector {
                         }
                     }
                 });
+            }); // outer ScrollArea
         });
 
         result

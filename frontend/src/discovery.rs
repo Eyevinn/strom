@@ -123,13 +123,16 @@ impl DiscoveryPage {
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
                     let filter_id = egui::Id::new("discovery_search_filter");
-                    let response =
-                        ui.add(egui::TextEdit::singleline(&mut self.search_filter).id(filter_id));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.search_filter)
+                            .id(filter_id)
+                            .desired_width(150.0),
+                    );
                     if self.focus_search_requested {
                         self.focus_search_requested = false;
                         response.request_focus();
                     }
-                    if !self.search_filter.is_empty() && ui.small_button("✕").clicked() {
+                    if !self.search_filter.is_empty() && ui.small_button("x").clicked() {
                         self.search_filter.clear();
                     }
                 });
