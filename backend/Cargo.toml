@@ -86,6 +86,9 @@ mime_guess = "2.0"
 # Embed static assets (debug-embed forces embedding even in debug builds)
 rust-embed = { version = "8.0", features = ["debug-embed"] }
 
+# Image processing for icon generation
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # System monitoring
 sysinfo = "0.37"
 nvml-wrapper = { version = "0.11", optional = true }
@@ -125,3 +128,7 @@ serial_test = "3.0"
 [[bin]]
 name = "mediaplayer-test"
 path = "src/bin/mediaplayer_test/main.rs"
+
+[[bin]]
+name = "gen-icons"
+path = "src/bin/gen_icons.rs"

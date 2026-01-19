@@ -5953,6 +5953,7 @@ dependencies = [
  "gstreamer-net 0.24.4",
  "hostname",
  "http-body-util",
+ "image",
  "libc",
  "mdns-sd",
  "mime_guess",
