@@ -104,10 +104,30 @@ jobs:
 
           # Extract GStreamer MSI
           Write-Host "Extracting GStreamer MSI..."
+          Write-Host "MSI file size: $((Get-Item gstreamer.msi).Length / 1MB) MB"
           $installArgs = "/a `"$((Get-Location).Path)\gstreamer.msi`" /qn TARGETDIR=`"$((Get-Location).Path)\gst-temp`""
-          Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow
+          $process = Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow -PassThru
+          Write-Host "msiexec exit code: $($process.ExitCode)"
 
-          $gstRoot = "gst-temp\gstreamer\1.0\msvc_x86_64"
+          # Debug: List extracted contents
+          Write-Host "Listing gst-temp contents:"
+          if (Test-Path "gst-temp") {
+            Get-ChildItem -Path "gst-temp" -Recurse -Depth 3 | Select-Object FullName | Format-Table -AutoSize
+          } else {
+            Write-Host "ERROR: gst-temp directory does not exist!"
+            exit 1
+          }
+
+          # GStreamer MSI extracts to PFiles64/gstreamer/... structure
+          $gstRoot = "gst-temp\PFiles64\gstreamer\1.0\msvc_x86_64"
+
+          # Verify extraction succeeded
+          if (-not (Test-Path "$gstRoot\bin")) {
+            Write-Host "ERROR: Expected path $gstRoot\bin does not exist!"
+            Write-Host "Available directories in gst-temp:"
+            Get-ChildItem -Path "gst-temp" -Recurse -Directory | Select-Object FullName
+            exit 1
+          }
 
           # Create bundle directories
           $bundleDir = "$buildDir\gstreamer-bundle"
