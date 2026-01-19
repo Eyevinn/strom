@@ -375,11 +375,15 @@ impl InfoPage {
             // Graph width = box width minus inner margin on both sides
             let graph_width = box_width - 2.0 * BOX_INNER_MARGIN;
             let (_, rect) = ui.allocate_space(Vec2::new(graph_width, GRAPH_HEIGHT));
+            let bg_color = ui.visuals().extreme_bg_color;
+            let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
             draw_graph(
                 ui.painter(),
                 rect,
                 system_monitor.cpu_history(),
                 Color32::from_rgb(100, 200, 255),
+                bg_color,
+                stroke_color,
             );
         } else {
             ui.label("Waiting for data...");
@@ -409,11 +413,15 @@ impl InfoPage {
 
             let graph_width = box_width - 2.0 * BOX_INNER_MARGIN;
             let (_, rect) = ui.allocate_space(Vec2::new(graph_width, GRAPH_HEIGHT));
+            let bg_color = ui.visuals().extreme_bg_color;
+            let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
             draw_graph(
                 ui.painter(),
                 rect,
                 system_monitor.memory_history(),
                 Color32::from_rgb(100, 255, 100),
+                bg_color,
+                stroke_color,
             );
         } else {
             ui.label("Waiting for data...");
@@ -481,11 +489,15 @@ impl InfoPage {
                 let graph_width = box_width - 2.0 * BOX_INNER_MARGIN;
                 if let Some(gpu_hist) = system_monitor.gpu_history(i) {
                     let (_, rect) = ui.allocate_space(Vec2::new(graph_width, GRAPH_HEIGHT));
+                    let bg_color = ui.visuals().extreme_bg_color;
+                    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
                     draw_graph(
                         ui.painter(),
                         rect,
                         gpu_hist,
                         Color32::from_rgb(255, 150, 100),
+                        bg_color,
+                        stroke_color,
                     );
                 }
             }
@@ -554,10 +566,12 @@ impl Default for InfoPage {
 
 /// Render a box with header and content.
 fn render_box(ui: &mut Ui, title: &str, width: f32, content: impl FnOnce(&mut Ui)) {
+    let fill_color = ui.visuals().extreme_bg_color;
+    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
     egui::Frame::new()
-        .fill(Color32::from_gray(30))
+        .fill(fill_color)
         .corner_radius(8.0)
-        .stroke(Stroke::new(1.0, Color32::from_gray(60)))
+        .stroke(Stroke::new(1.0, stroke_color))
         .inner_margin(BOX_INNER_MARGIN)
         .show(ui, |ui| {
             ui.set_width(width);
@@ -571,16 +585,24 @@ fn render_box(ui: &mut Ui, title: &str, width: f32, content: impl FnOnce(&mut Ui
 }
 
 /// Draw a graph with background and grid lines.
-fn draw_graph(painter: &egui::Painter, rect: Rect, data: &VecDeque<f32>, color: Color32) {
+fn draw_graph(
+    painter: &egui::Painter,
+    rect: Rect,
+    data: &VecDeque<f32>,
+    color: Color32,
+    bg_color: Color32,
+    stroke_color: Color32,
+) {
     // Draw background
-    painter.rect_filled(rect, 4.0, Color32::from_gray(20));
+    painter.rect_filled(rect, 4.0, bg_color);
 
-    // Draw grid lines
+    // Draw grid lines - use a slightly different shade from bg
+    let grid_color = stroke_color.linear_multiply(0.5);
     for i in 0..=4 {
         let y = rect.min.y + (i as f32 / 4.0) * rect.height();
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(0.5, Color32::from_gray(40)),
+            Stroke::new(0.5, grid_color),
         );
     }
 
@@ -607,7 +629,7 @@ fn draw_graph(painter: &egui::Painter, rect: Rect, data: &VecDeque<f32>, color: 
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, Color32::from_gray(50)),
+        Stroke::new(1.0, stroke_color),
         egui::StrokeKind::Outside,
     );
 }

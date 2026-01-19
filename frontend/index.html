@@ -2,9 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes, minimum-scale=0.5, maximum-scale=3.0">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#1a1a2e">
+    <link rel="manifest" href="/manifest.json">
     <title>Strom | ${location.host}</title>
     <script>document.title = `Strom | ${location.host}`;</script>
+    <link data-trunk rel="copy-file" href="manifest.json" />
     <link data-trunk rel="rust" data-bin="strom-frontend" data-wasm-opt="z" />
     <style>
         html, body {
@@ -21,6 +26,7 @@
         canvas {
             width: 100%;
             height: 100%;
+            touch-action: auto;
         }
 
         /* Login form styles */
@@ -123,6 +129,92 @@
     <!-- Loading indicator -->
     <div id="loading">Loading...</div>
 
+    <!-- Mobile debug console -->
+    <div id="debug-console" style="display:none; position:fixed; bottom:0; left:0; right:0; height:150px; background:rgba(0,0,0,0.9); color:#0f0; font-family:monospace; font-size:11px; z-index:9999;">
+        <div style="background:#222;padding:4px 8px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #444;">
+            <span style="font-weight:bold;">Console</span>
+            <button id="dbg-filter-all" onclick="setDebugFilter('all')" style="font-size:10px;padding:2px 6px;background:#555;color:#fff;border:none;border-radius:3px;">All</button>
+            <button id="dbg-filter-log" onclick="setDebugFilter('log')" style="font-size:10px;padding:2px 6px;background:#333;color:#0f0;border:none;border-radius:3px;">Log</button>
+            <button id="dbg-filter-warn" onclick="setDebugFilter('warn')" style="font-size:10px;padding:2px 6px;background:#333;color:#ff0;border:none;border-radius:3px;">Warn</button>
+            <button id="dbg-filter-error" onclick="setDebugFilter('error')" style="font-size:10px;padding:2px 6px;background:#333;color:#f44;border:none;border-radius:3px;">Error</button>
+            <button onclick="clearDebugLog()" style="font-size:10px;padding:2px 6px;background:#633;color:#fff;border:none;border-radius:3px;">Clear</button>
+            <button onclick="document.getElementById('debug-console').style.display='none'" style="font-size:10px;padding:2px 6px;background:#444;color:#fff;border:none;border-radius:3px;margin-left:auto;">X</button>
+        </div>
+        <div id="debug-log" style="height:calc(100% - 30px);overflow-y:auto;padding:5px;"></div>
+    </div>
+    <script>
+        // Debug console state
+        let debugFilter = 'all';
+        function setDebugFilter(level) {
+            debugFilter = level;
+            // Update button styles
+            ['all','log','warn','error'].forEach(l => {
+                const btn = document.getElementById('dbg-filter-' + l);
+                if (btn) btn.style.background = (l === level) ? '#555' : '#333';
+            });
+            // Filter existing lines
+            const log = document.getElementById('debug-log');
+            if (log) {
+                Array.from(log.children).forEach(line => {
+                    const lineLevel = line.dataset.level || 'log';
+                    line.style.display = (level === 'all' || lineLevel === level) ? 'block' : 'none';
+                });
+            }
+        }
+        function clearDebugLog() {
+            const log = document.getElementById('debug-log');
+            if (log) log.innerHTML = '';
+        }
+        // Triple-tap to toggle debug console
+        let tapCount = 0;
+        let tapTimer = null;
+        document.addEventListener('touchend', (e) => {
+            if (e.touches.length === 0) {
+                tapCount++;
+                clearTimeout(tapTimer);
+                tapTimer = setTimeout(() => { tapCount = 0; }, 500);
+                if (tapCount === 3) {
+                    const dc = document.getElementById('debug-console');
+                    dc.style.display = dc.style.display === 'none' ? 'block' : 'none';
+                    tapCount = 0;
+                }
+            }
+        });
+        // Override console methods
+        const origLog = console.log;
+        const origError = console.error;
+        const origWarn = console.warn;
+        function addDebugLine(msg, color, level) {
+            const log = document.getElementById('debug-log');
+            if (log) {
+                const line = document.createElement('div');
+                line.style.color = color || '#0f0';
+                line.dataset.level = level;
+                line.style.display = (debugFilter === 'all' || debugFilter === level) ? 'block' : 'none';
+                line.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+                log.appendChild(line);
+                log.scrollTop = log.scrollHeight;
+                // Keep only last 100 lines
+                while (log.children.length > 100) log.removeChild(log.firstChild);
+            }
+        }
+        console.log = function(...args) {
+            origLog.apply(console, args);
+            addDebugLine(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), '#0f0', 'log');
+        };
+        console.error = function(...args) {
+            origError.apply(console, args);
+            addDebugLine(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), '#f44', 'error');
+        };
+        console.warn = function(...args) {
+            origWarn.apply(console, args);
+            addDebugLine(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), '#ff0', 'warn');
+        };
+        window.onerror = function(msg, url, line, col, error) {
+            addDebugLine('ERROR: ' + msg + ' at ' + line + ':' + col, '#f44', 'error');
+        };
+    </script>
+
     <!-- Login form (hidden by default) -->
     <div id="login-container" class="hidden">
         <div id="login-box">
@@ -172,10 +264,15 @@
                 const response = await fetch('/api/auth/status', {
                     credentials: 'include'
                 });
+                // Check if response is JSON before parsing
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    // Not JSON, likely auth not configured
+                    return { auth_required: false, authenticated: true };
+                }
                 const data = await response.json();
                 return data;
             } catch (e) {
-                console.error('Failed to check auth status:', e);
                 // If we can't check auth, assume it's not required
                 return { auth_required: false, authenticated: true };
             }
@@ -250,6 +347,85 @@
         }
 
         init();
+
+        // Pinch-to-zoom for iOS - stores zoom level for Rust/egui to read
+        (function() {
+            // Get native pixel ratio (device default)
+            const nativePixelRatio = window.devicePixelRatio || 1.0;
+
+            // Initialize global zoom state that Rust can read
+            window.stromPinchZoom = {
+                scale: nativePixelRatio,
+                baseScale: nativePixelRatio,  // The scale when pinch started
+                nativeScale: nativePixelRatio,  // For reset
+                changed: false,
+                // Pinch start position (for graph detection)
+                startX: 0,
+                startY: 0,
+                // Set by Rust: true if pinch is over graph
+                isGraphPinch: false,
+                // Signal to Rust that a new pinch started
+                newPinch: false
+            };
+
+            let lastDist = 0;
+            let pinching = false;
+
+            function getDistance(touches) {
+                const dx = touches[0].clientX - touches[1].clientX;
+                const dy = touches[0].clientY - touches[1].clientY;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            document.addEventListener('touchstart', (e) => {
+                if (e.touches.length >= 2) {
+                    pinching = true;
+                    lastDist = getDistance(e.touches);
+                    window.stromPinchZoom.baseScale = window.stromPinchZoom.scale;
+                    // Record pinch center for graph detection
+                    window.stromPinchZoom.startX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                    window.stromPinchZoom.startY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    window.stromPinchZoom.newPinch = true;
+                    window.stromPinchZoom.isGraphPinch = false;
+                }
+            }, { capture: true, passive: true });
+
+            let lastUpdateTime = 0;
+            document.addEventListener('touchmove', (e) => {
+                if (pinching && e.touches.length >= 2) {
+                    const now = Date.now();
+                    // Throttle updates to every 50ms to avoid overwhelming WASM
+                    if (now - lastUpdateTime < 50) return;
+                    lastUpdateTime = now;
+
+                    const dist = getDistance(e.touches);
+                    const pinchScale = dist / lastDist;
+                    // Apply relative to base scale, clamped to 0.5-5.0
+                    window.stromPinchZoom.scale = Math.min(5.0, Math.max(0.5,
+                        window.stromPinchZoom.baseScale * pinchScale));
+                    window.stromPinchZoom.changed = true;
+                }
+            }, { capture: true, passive: true });
+
+            document.addEventListener('touchend', (e) => {
+                if (e.touches.length < 2) {
+                    pinching = false;
+                }
+            }, { capture: true, passive: true });
+
+            // Double-tap to reset zoom
+            let lastTap = 0;
+            document.addEventListener('touchend', (e) => {
+                if (e.touches.length === 0) {
+                    const now = Date.now();
+                    if (now - lastTap < 300) {
+                        window.stromPinchZoom.scale = window.stromPinchZoom.nativeScale;
+                        window.stromPinchZoom.changed = true;
+                    }
+                    lastTap = now;
+                }
+            }, { passive: true });
+        })();
     </script>
 </body>
 </html>

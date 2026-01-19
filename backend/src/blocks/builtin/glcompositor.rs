@@ -90,7 +90,7 @@ impl BlockBuilder for GLCompositorBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("🎬 Building GLCompositor block instance: {}", instance_id);
+        info!("Building GLCompositor block instance: {}", instance_id);
 
         // Parse properties
         let num_inputs = parse_num_inputs(properties);
@@ -142,7 +142,7 @@ impl BlockBuilder for GLCompositorBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("glvideomixerelement: {}", e)))?;
 
-        info!("🎬 Mixer created with force-live={}", force_live);
+        info!("Mixer created with force-live={}", force_live);
 
         // Set mixer properties in NULL state
         mixer.set_property_from_str("background", background);
@@ -186,8 +186,8 @@ impl BlockBuilder for GLCompositorBuilder {
             "🎬 Requesting {} mixer sink pads and setting properties in NULL state",
             num_inputs
         );
-        info!("🎬 Mixer element state: {:?}", mixer.current_state());
-        info!("🎬 Mixer element name: {}", mixer.name());
+        info!("Mixer element state: {:?}", mixer.current_state());
+        info!("Mixer element name: {}", mixer.name());
 
         let mut mixer_sink_pads = Vec::new();
         for i in 0..num_inputs {
@@ -203,7 +203,7 @@ impl BlockBuilder for GLCompositorBuilder {
                     )
                 })?;
 
-            info!("🎬 Requested pad: {}", sink_pad.name());
+            info!("Requested pad: {}", sink_pad.name());
 
             // Set pad properties in NULL state
             // Get per-input properties from block properties, with computed defaults
@@ -276,7 +276,7 @@ impl BlockBuilder for GLCompositorBuilder {
                 .unwrap_or("keep-aspect-ratio");
             sink_pad.set_property_from_str("sizing-policy", sizing_policy);
 
-            info!("🎬 Pad {} properties set: xpos={}, ypos={}, width={}, height={}, alpha={}, zorder={}, sizing-policy={}",
+            info!("Pad {} properties set: xpos={}, ypos={}, width={}, height={}, alpha={}, zorder={}, sizing-policy={}",
                   sink_pad.name(), xpos, ypos, width, height, alpha, zorder, sizing_policy);
 
             mixer_sink_pads.push(sink_pad);
@@ -300,7 +300,7 @@ impl BlockBuilder for GLCompositorBuilder {
             )
         };
 
-        info!("🎬 Output caps: {}", caps_str);
+        info!("Output caps: {}", caps_str);
 
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
@@ -412,7 +412,7 @@ impl BlockBuilder for GLCompositorBuilder {
                 ElementPadRef::pad(&capsfilter_id, "sink"),
             ));
 
-            info!("🎬 Output chain: mixer -> gldownload -> capsfilter (system memory)");
+            info!("Output chain: mixer -> gldownload -> capsfilter (system memory)");
         } else {
             // gl_output=true: mixer -> capsfilter (stay in GL memory)
             elements.push((capsfilter_id.clone(), capsfilter));
@@ -422,7 +422,7 @@ impl BlockBuilder for GLCompositorBuilder {
                 ElementPadRef::pad(&capsfilter_id, "sink"),
             ));
 
-            info!("🎬 Output chain: mixer -> capsfilter (GL memory)");
+            info!("Output chain: mixer -> capsfilter (GL memory)");
         }
 
         info!(

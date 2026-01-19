@@ -4,6 +4,29 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ## [Unreleased]
 
+### Fixed
+- Relay Link headers in WHEP proxy for ICE server configuration
+
+---
+
+## [0.3.10] - 2026-01-15
+
+### Fixed
+- Normalize ICE server URLs for GStreamer and browser compatibility (#225)
+- Use gst-launch-1.0.exe on Windows for CUDA interop test (#224)
+
+---
+
+## [0.3.9] - 2026-01-15
+
+### Added
+- Server-wide ICE server configuration for STUN/TURN support (#220)
+- Open Web GUI button in native application (#221)
+
+### Fixed
+- Compositor sizing dropdown selection (#221)
+- Default is-live=true for videotestsrc and audiotestsrc (#222)
+
 ---
 
 ## [0.3.8] - 2026-01-14

@@ -187,7 +187,9 @@ pub fn generate_vlc_playlist(srt_uri: &str, latency_ms: i32, stream_name: &str) 
         .replace('"', "&quot;")
         .replace('\'', "&apos;");
 
-    let escaped_name = stream_name
+    // Include SRT URL in the track title for easy identification
+    let title_with_url = format!("{} ({})", stream_name, vlc_uri);
+    let escaped_title = title_with_url
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -209,7 +211,7 @@ pub fn generate_vlc_playlist(srt_uri: &str, latency_ms: i32, stream_name: &str) 
   </trackList>
 </playlist>
 "#,
-        escaped_uri, escaped_name, latency_ms
+        escaped_uri, escaped_title, latency_ms
     )
 }
 
@@ -220,7 +222,7 @@ pub fn generate_vlc_playlist(srt_uri: &str, latency_ms: i32, stream_name: &str) 
 /// 1. Detects listener mode URIs (e.g., `srt://:5000?mode=listener`)
 /// 2. Replaces empty host with the Strom server's hostname
 /// 3. Changes mode from listener to caller
-fn transform_srt_uri_for_vlc(srt_uri: &str) -> String {
+pub fn transform_srt_uri_for_vlc(srt_uri: &str) -> String {
     // Check if this is a listener mode URI (empty host or mode=listener)
     let is_listener = srt_uri.contains("mode=listener");
     let has_empty_host = srt_uri.starts_with("srt://:") || srt_uri.starts_with("srt://:");
@@ -564,6 +566,10 @@ pub struct StromApp {
     log_entries: Vec<LogEntry>,
     /// Whether to show the log panel
     show_log_panel: bool,
+    /// Whether to show the left flow list panel
+    show_flow_list_panel: bool,
+    /// Whether to show the right palette panel
+    show_palette_panel: bool,
     /// Maximum number of log entries to keep
     max_log_entries: usize,
     /// Current application page
@@ -586,6 +592,8 @@ pub struct StromApp {
     focus_target: FocusTarget,
     /// Request to focus the flow filter on next frame
     focus_flow_filter_requested: bool,
+    /// Native pixels per point (device pixel ratio at startup)
+    native_pixels_per_point: f32,
 }
 
 impl StromApp {
@@ -604,13 +612,18 @@ impl StromApp {
                         .protocol()
                         .unwrap_or_else(|_| "http:".to_string());
 
-                    // Exception: trunk serve runs on :8095, backend on :8080
-                    if host == "localhost:8095" || host == "127.0.0.1:8095" {
-                        "http://localhost:8080/api".to_string()
-                    } else {
-                        // Use current window location (works for Docker, production, etc.)
-                        format!("{}//{}/api", protocol, host)
+                    // Port 8095: trunk serve mode - rewrite to backend port 8080
+                    if protocol == "http:" && host.ends_with(":8095") {
+                        let hostname = host.trim_end_matches(":8095");
+                        let api_url = format!("http://{}:8080/api", hostname);
+                        tracing::info!("REST API URL (trunk serve mode): {}", api_url);
+                        return Self::new_internal(cc, api_url, None);
                     }
+
+                    // Use current window location (works for Docker, production, etc.)
+                    let api_url = format!("{}//{}/api", protocol, host);
+                    tracing::info!("REST API URL: {}", api_url);
+                    api_url
                 } else {
                     "http://localhost:8080/api".to_string()
                 }
@@ -698,6 +711,8 @@ impl StromApp {
             last_inter_input_refresh: None,
             log_entries: Vec::new(),
             show_log_panel: false,
+            show_flow_list_panel: true,
+            show_palette_panel: true,
             max_log_entries: 100,
             current_page: AppPage::default(),
             discovery_page: crate::discovery::DiscoveryPage::new(),
@@ -709,6 +724,7 @@ impl StromApp {
             show_stream_picker_for_block: None,
             focus_target: FocusTarget::None,
             focus_flow_filter_requested: false,
+            native_pixels_per_point: cc.egui_ctx.pixels_per_point(),
         };
 
         // Apply initial theme based on system preference
@@ -797,6 +813,8 @@ impl StromApp {
             last_inter_input_refresh: None,
             log_entries: Vec::new(),
             show_log_panel: false,
+            show_flow_list_panel: true,
+            show_palette_panel: true,
             max_log_entries: 100,
             current_page: AppPage::default(),
             discovery_page: crate::discovery::DiscoveryPage::new(),
@@ -808,6 +826,7 @@ impl StromApp {
             show_stream_picker_for_block: None,
             focus_target: FocusTarget::None,
             focus_flow_filter_requested: false,
+            native_pixels_per_point: cc.egui_ctx.pixels_per_point(),
         };
 
         // Apply initial theme based on system preference
@@ -891,18 +910,20 @@ impl StromApp {
         let ws_url = {
             if let Some(window) = web_sys::window() {
                 if let Ok(host) = window.location().host() {
-                    // Exception: trunk serve runs on :8095, backend on :8080
-                    if host == "localhost:8095" || host == "127.0.0.1:8095" {
-                        "ws://localhost:8080/api/ws".to_string()
+                    let protocol = window.location().protocol().ok();
+                    let is_https = protocol.as_deref() == Some("https:");
+
+                    // Port 8095: trunk serve mode - rewrite to backend port 8080
+                    if !is_https && host.ends_with(":8095") {
+                        let hostname = host.trim_end_matches(":8095");
+                        let url = format!("ws://{}:8080/api/ws", hostname);
+                        tracing::info!("WebSocket URL (trunk serve mode): {}", url);
+                        url
                     } else {
-                        // Use current window location - ws:// or wss:// based on protocol
-                        let ws_protocol =
-                            if window.location().protocol().ok().as_deref() == Some("https:") {
-                                "wss"
-                            } else {
-                                "ws"
-                            };
-                        format!("{}://{}/api/ws", ws_protocol, host)
+                        let ws_protocol = if is_https { "wss" } else { "ws" };
+                        let url = format!("{}://{}/api/ws", ws_protocol, host);
+                        tracing::info!("WebSocket URL: {}", url);
+                        url
                     }
                 } else {
                     "/api/ws".to_string()
@@ -2026,8 +2047,9 @@ impl StromApp {
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    // Strom heading as clickable link to GitHub
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0; // Add some vertical spacing between wrapped rows
+                                                           // Strom heading as clickable link to GitHub
                     if ui
                         .heading("⚡ Strom")
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -2035,6 +2057,27 @@ impl StromApp {
                         .clicked()
                     {
                         ctx.open_url(egui::OpenUrl::new_tab("https://github.com/Eyevinn/strom"));
+                    }
+
+                    // Zoom controls
+                    ui.separator();
+                    let current_zoom = ctx.pixels_per_point();
+                    let zoom_percent = (current_zoom * 100.0).round() as i32;
+
+                    if ui.small_button("-").on_hover_text("Zoom out").clicked() {
+                        ctx.set_pixels_per_point((current_zoom / 1.1).max(0.5));
+                    }
+
+                    if ui
+                        .small_button(format!("{}%", zoom_percent))
+                        .on_hover_text("Reset zoom")
+                        .clicked()
+                    {
+                        ctx.set_pixels_per_point(self.native_pixels_per_point);
+                    }
+
+                    if ui.small_button("+").on_hover_text("Zoom in").clicked() {
+                        ctx.set_pixels_per_point((current_zoom * 1.1).min(5.0));
                     }
 
                     // Open Web GUI button (native mode only)
@@ -2052,7 +2095,7 @@ impl StromApp {
 
                     ui.separator();
 
-                    // Navigation tabs (bigger text)
+                    // Navigation tabs
                     if ui
                         .selectable_label(
                             self.current_page == AppPage::Flows,
@@ -2119,59 +2162,49 @@ impl StromApp {
                         self.focus_target = FocusTarget::None;
                     }
 
-                    // Right-aligned system controls
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // System monitoring widget (rightmost)
-                        let has_gpu = self
-                            .system_monitor
-                            .latest()
-                            .map(|s| !s.gpu_stats.is_empty())
-                            .unwrap_or(false);
-                        let monitor_height = if has_gpu { 30.0 } else { 24.0 };
+                    ui.separator();
 
-                        let monitor_response = ui.add(
-                            crate::system_monitor::CompactSystemMonitor::new(&self.system_monitor)
-                                .width(180.0)
-                                .height(monitor_height),
-                        );
-                        if monitor_response.clicked() {
-                            self.show_system_monitor = !self.show_system_monitor;
-                        }
-                        monitor_response.on_hover_text("Click to show detailed system monitoring");
+                    // Theme switch button
+                    let theme_icon = match self.theme_preference {
+                        ThemePreference::System => "🖥",
+                        ThemePreference::Light => "☀",
+                        ThemePreference::Dark => "🌙",
+                    };
 
-                        ui.separator();
-
-                        // Logout button (only show if auth is enabled and user is authenticated)
-                        if let Some(ref status) = self.auth_status {
-                            if status.auth_required
-                                && status.authenticated
-                                && ui.button("🚪").on_hover_text("Logout").clicked()
-                            {
-                                self.handle_logout(ctx.clone());
-                            }
-                        }
-
-                        // Theme switch button (leftmost)
-                        let theme_icon = match self.theme_preference {
-                            ThemePreference::System => "🖥",
-                            ThemePreference::Light => "☀",
-                            ThemePreference::Dark => "🌙",
+                    if ui
+                        .button(theme_icon)
+                        .on_hover_text("Change theme")
+                        .clicked()
+                    {
+                        let new_theme = match self.theme_preference {
+                            ThemePreference::System => ThemePreference::Light,
+                            ThemePreference::Light => ThemePreference::Dark,
+                            ThemePreference::Dark => ThemePreference::System,
                         };
+                        self.theme_preference = new_theme;
+                        self.apply_theme(ctx.clone());
+                    }
 
-                        if ui
-                            .button(theme_icon)
-                            .on_hover_text("Change theme")
-                            .clicked()
+                    // Logout button (only show if auth is enabled and user is authenticated)
+                    if let Some(ref status) = self.auth_status {
+                        if status.auth_required
+                            && status.authenticated
+                            && ui.button("🚪").on_hover_text("Logout").clicked()
                         {
-                            let new_theme = match self.theme_preference {
-                                ThemePreference::System => ThemePreference::Light,
-                                ThemePreference::Light => ThemePreference::Dark,
-                                ThemePreference::Dark => ThemePreference::System,
-                            };
-                            self.theme_preference = new_theme;
-                            self.apply_theme(ctx.clone());
+                            self.handle_logout(ctx.clone());
                         }
-                    });
+                    }
+
+                    // System monitoring widget (graphs only, no text)
+                    let monitor_response = ui.add(
+                        crate::system_monitor::CompactSystemMonitor::new(&self.system_monitor)
+                            .width(80.0)
+                            .height(18.0),
+                    );
+                    if monitor_response.clicked() {
+                        self.show_system_monitor = !self.show_system_monitor;
+                    }
+                    monitor_response.on_hover_text("Click to show detailed system monitoring");
                 });
             });
 
@@ -2196,7 +2229,7 @@ impl StromApp {
         TopBottomPanel::top("page_toolbar")
             .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(8, 4)))
             .show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new("Flows").heading());
                 ui.separator();
 
@@ -2469,494 +2502,605 @@ impl StromApp {
 
     /// Render the flow list sidebar.
     fn render_flow_list(&mut self, ctx: &Context) {
+        if !self.show_flow_list_panel {
+            return;
+        }
+        // Max width is 40% of screen width
+        #[allow(deprecated)]
+        let max_width = ctx.screen_rect().width() * 0.4;
         SidePanel::left("flow_list")
             .default_width(200.0)
+            .max_width(max_width)
             .resizable(true)
             .show(ctx, |ui| {
                 // Filter input at top
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
                     let filter_id = egui::Id::new("flow_list_filter");
-                    let response =
-                        ui.add(egui::TextEdit::singleline(&mut self.flow_filter).id(filter_id));
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.flow_filter)
+                            .id(filter_id)
+                            .desired_width(100.0),
+                    );
                     if self.focus_flow_filter_requested {
                         self.focus_flow_filter_requested = false;
                         response.request_focus();
                     }
-                    if !self.flow_filter.is_empty() && ui.small_button("✕").clicked() {
+                    if !self.flow_filter.is_empty() && ui.small_button("x").clicked() {
                         self.flow_filter.clear();
                     }
                 });
                 ui.add_space(4.0);
 
-                if self.flows.is_empty() {
-                    ui.label("No flows yet");
-                    ui.label("Click 'New Flow' to get started");
-                } else {
-                    // Create sorted and filtered list of flows (by name)
-                    let filter_lower = self.flow_filter.to_lowercase();
-                    let mut sorted_flows: Vec<&Flow> = self
-                        .flows
-                        .iter()
-                        .filter(|f| {
-                            filter_lower.is_empty() || f.name.to_lowercase().contains(&filter_lower)
-                        })
-                        .collect();
-                    sorted_flows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-
-                    if sorted_flows.is_empty() {
-                        ui.label("No matching flows");
-                        return;
-                    }
-
-                    // Handle keyboard navigation
-                    let list_id = ui.id().with("flow_list_nav");
-                    let has_focus = ui.memory(|mem| mem.has_focus(list_id));
-
-                    if has_focus {
-                        let current_idx = self
-                            .selected_flow_id
-                            .and_then(|sel| sorted_flows.iter().position(|f| f.id == sel));
-
-                        ui.input(|input| {
-                            if input.key_pressed(egui::Key::ArrowDown) {
-                                if let Some(idx) = current_idx {
-                                    if idx + 1 < sorted_flows.len() {
-                                        let flow = sorted_flows[idx + 1];
-                                        self.selected_flow_id = Some(flow.id);
-                                        self.graph.deselect_all();
-                                        self.graph.clear_runtime_dynamic_pads();
-                                        self.graph.load(flow.elements.clone(), flow.links.clone());
-                                        self.graph.load_blocks(flow.blocks.clone());
-                                    }
-                                } else {
-                                    let flow = sorted_flows[0];
-                                    self.selected_flow_id = Some(flow.id);
-                                    self.graph.deselect_all();
-                                    self.graph.clear_runtime_dynamic_pads();
-                                    self.graph.load(flow.elements.clone(), flow.links.clone());
-                                    self.graph.load_blocks(flow.blocks.clone());
-                                }
-                            } else if input.key_pressed(egui::Key::ArrowUp) {
-                                if let Some(idx) = current_idx {
-                                    if idx > 0 {
-                                        let flow = sorted_flows[idx - 1];
-                                        self.selected_flow_id = Some(flow.id);
-                                        self.graph.deselect_all();
-                                        self.graph.clear_runtime_dynamic_pads();
-                                        self.graph.load(flow.elements.clone(), flow.links.clone());
-                                        self.graph.load_blocks(flow.blocks.clone());
-                                    }
-                                } else if !sorted_flows.is_empty() {
-                                    let flow = sorted_flows[sorted_flows.len() - 1];
-                                    self.selected_flow_id = Some(flow.id);
-                                    self.graph.deselect_all();
-                                    self.graph.clear_runtime_dynamic_pads();
-                                    self.graph.load(flow.elements.clone(), flow.links.clone());
-                                    self.graph.load_blocks(flow.blocks.clone());
-                                }
-                            }
-                        });
-                    }
-
-                    for flow in sorted_flows {
-                        let selected = self.selected_flow_id == Some(flow.id);
-
-                        // Create full-width selectable area
-                        let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 20.0),
-                            egui::Sense::click(),
-                        );
-
-                        if response.clicked() {
-                            // Select the flow by ID
-                            self.selected_flow_id = Some(flow.id);
-                            // Clear graph selection when switching flows
-                            self.graph.deselect_all();
-                            // Clear runtime dynamic pads (will be re-fetched if flow is running)
-                            self.graph.clear_runtime_dynamic_pads();
-                            // Load flow into graph editor
-                            self.graph.load(flow.elements.clone(), flow.links.clone());
-                            self.graph.load_blocks(flow.blocks.clone());
-                            // Request focus for keyboard navigation
-                            ui.memory_mut(|mem| mem.request_focus(list_id));
-                        }
-
-                        // Check for QoS issues to tint the background
-                        let qos_health = self.qos_stats.get_flow_health(&flow.id);
-                        let has_qos_issues = qos_health
-                            .map(|h| h != crate::qos_monitor::QoSHealth::Ok)
-                            .unwrap_or(false);
-
-                        // Draw background for selected/hovered item with QoS tint
-                        if selected {
-                            let mut bg_color = ui.visuals().selection.bg_fill;
-                            if has_qos_issues {
-                                // Blend selection color with warning/critical color
-                                let qos_color = qos_health.unwrap().color();
-                                bg_color = Color32::from_rgba_unmultiplied(
-                                    ((bg_color.r() as u16 + qos_color.r() as u16) / 2) as u8,
-                                    ((bg_color.g() as u16 + qos_color.g() as u16) / 2) as u8,
-                                    ((bg_color.b() as u16 + qos_color.b() as u16) / 2) as u8,
-                                    bg_color.a(),
-                                );
-                            }
-                            ui.painter().rect_filled(rect, 2.0, bg_color);
-                        } else if has_qos_issues {
-                            // Draw QoS warning/critical background
-                            let qos_color = qos_health.unwrap().color();
-                            let bg_color = Color32::from_rgba_unmultiplied(
-                                qos_color.r(),
-                                qos_color.g(),
-                                qos_color.b(),
-                                40, // Semi-transparent
-                            );
-                            ui.painter().rect_filled(rect, 2.0, bg_color);
-                            // Also draw a left border for emphasis
-                            let border_rect =
-                                egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height()));
-                            ui.painter().rect_filled(border_rect, 0.0, qos_color);
-                        } else if response.hovered() {
-                            ui.painter().rect_filled(
-                                rect,
-                                2.0,
-                                ui.visuals().widgets.hovered.bg_fill,
-                            );
-                        }
-
-                        // Draw flow name and buttons
-                        let mut child_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(rect)
-                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        );
-                        child_ui.add_space(4.0);
-
-                        let text_color = if selected {
-                            ui.visuals().selection.stroke.color
+                // Scroll area for the flow list
+                egui::ScrollArea::both()
+                    .id_salt("flow_list_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.flows.is_empty() {
+                            ui.label("No flows yet");
+                            ui.label("Click 'New Flow' to get started");
                         } else {
-                            ui.visuals().text_color()
-                        };
+                            // Create sorted and filtered list of flows (by name)
+                            let filter_lower = self.flow_filter.to_lowercase();
+                            let mut sorted_flows: Vec<&Flow> = self
+                                .flows
+                                .iter()
+                                .filter(|f| {
+                                    filter_lower.is_empty()
+                                        || f.name.to_lowercase().contains(&filter_lower)
+                                })
+                                .collect();
+                            sorted_flows
+                                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-                        // Show running state icon
-                        let state_icon = match flow.state {
-                            Some(PipelineState::Playing) => "▶",
-                            Some(PipelineState::Paused) => "⏸",
-                            Some(PipelineState::Ready) | Some(PipelineState::Null) | None => "⏹",
-                        };
-                        let state_color = match flow.state {
-                            Some(PipelineState::Playing) => Color32::from_rgb(0, 200, 0),
-                            Some(PipelineState::Paused) => Color32::from_rgb(255, 165, 0),
-                            Some(PipelineState::Ready) | Some(PipelineState::Null) | None => {
-                                Color32::GRAY
+                            if sorted_flows.is_empty() {
+                                ui.label("No matching flows");
+                                return;
                             }
-                        };
-                        child_ui.colored_label(state_color, state_icon);
 
-                        // Show QoS indicator if there are issues - make it clickable to open log
-                        if let Some(qos_health) = self.qos_stats.get_flow_health(&flow.id) {
-                            if qos_health != crate::qos_monitor::QoSHealth::Ok {
-                                let qos_label = child_ui
-                                    .colored_label(qos_health.color(), qos_health.icon())
-                                    .interact(egui::Sense::click());
+                            // Handle keyboard navigation
+                            let list_id = ui.id().with("flow_list_nav");
+                            let has_focus = ui.memory(|mem| mem.has_focus(list_id));
 
-                                // Click to open log panel
-                                if qos_label.clicked() {
-                                    self.show_log_panel = true;
+                            if has_focus {
+                                let current_idx = self
+                                    .selected_flow_id
+                                    .and_then(|sel| sorted_flows.iter().position(|f| f.id == sel));
+
+                                ui.input(|input| {
+                                    if input.key_pressed(egui::Key::ArrowDown) {
+                                        if let Some(idx) = current_idx {
+                                            if idx + 1 < sorted_flows.len() {
+                                                let flow = sorted_flows[idx + 1];
+                                                self.selected_flow_id = Some(flow.id);
+                                                self.graph.deselect_all();
+                                                self.graph.clear_runtime_dynamic_pads();
+                                                self.graph.load(
+                                                    flow.elements.clone(),
+                                                    flow.links.clone(),
+                                                );
+                                                self.graph.load_blocks(flow.blocks.clone());
+                                            }
+                                        } else {
+                                            let flow = sorted_flows[0];
+                                            self.selected_flow_id = Some(flow.id);
+                                            self.graph.deselect_all();
+                                            self.graph.clear_runtime_dynamic_pads();
+                                            self.graph
+                                                .load(flow.elements.clone(), flow.links.clone());
+                                            self.graph.load_blocks(flow.blocks.clone());
+                                        }
+                                    } else if input.key_pressed(egui::Key::ArrowUp) {
+                                        if let Some(idx) = current_idx {
+                                            if idx > 0 {
+                                                let flow = sorted_flows[idx - 1];
+                                                self.selected_flow_id = Some(flow.id);
+                                                self.graph.deselect_all();
+                                                self.graph.clear_runtime_dynamic_pads();
+                                                self.graph.load(
+                                                    flow.elements.clone(),
+                                                    flow.links.clone(),
+                                                );
+                                                self.graph.load_blocks(flow.blocks.clone());
+                                            }
+                                        } else if !sorted_flows.is_empty() {
+                                            let flow = sorted_flows[sorted_flows.len() - 1];
+                                            self.selected_flow_id = Some(flow.id);
+                                            self.graph.deselect_all();
+                                            self.graph.clear_runtime_dynamic_pads();
+                                            self.graph
+                                                .load(flow.elements.clone(), flow.links.clone());
+                                            self.graph.load_blocks(flow.blocks.clone());
+                                        }
+                                    }
+                                });
+                            }
+
+                            for flow in sorted_flows {
+                                let selected = self.selected_flow_id == Some(flow.id);
+
+                                // Create full-width selectable area
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), 20.0),
+                                    egui::Sense::click(),
+                                );
+
+                                if response.clicked() {
+                                    // Select the flow by ID
+                                    self.selected_flow_id = Some(flow.id);
+                                    // Clear graph selection when switching flows
+                                    self.graph.deselect_all();
+                                    // Clear runtime dynamic pads (will be re-fetched if flow is running)
+                                    self.graph.clear_runtime_dynamic_pads();
+                                    // Load flow into graph editor
+                                    self.graph.load(flow.elements.clone(), flow.links.clone());
+                                    self.graph.load_blocks(flow.blocks.clone());
+                                    // Request focus for keyboard navigation
+                                    ui.memory_mut(|mem| mem.request_focus(list_id));
                                 }
 
-                                // Show tooltip with problem elements
-                                let problem_elements =
-                                    self.qos_stats.get_problem_elements(&flow.id);
-                                if !problem_elements.is_empty() {
-                                    qos_label.on_hover_ui(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("QoS Issues (click to view log)")
-                                                .strong(),
+                                // Check for QoS issues to tint the background
+                                let qos_health = self.qos_stats.get_flow_health(&flow.id);
+                                let has_qos_issues = qos_health
+                                    .map(|h| h != crate::qos_monitor::QoSHealth::Ok)
+                                    .unwrap_or(false);
+
+                                // Draw background for selected/hovered item with QoS tint
+                                if selected {
+                                    let mut bg_color = ui.visuals().selection.bg_fill;
+                                    if has_qos_issues {
+                                        // Blend selection color with warning/critical color
+                                        let qos_color = qos_health.unwrap().color();
+                                        bg_color = Color32::from_rgba_unmultiplied(
+                                            ((bg_color.r() as u16 + qos_color.r() as u16) / 2)
+                                                as u8,
+                                            ((bg_color.g() as u16 + qos_color.g() as u16) / 2)
+                                                as u8,
+                                            ((bg_color.b() as u16 + qos_color.b() as u16) / 2)
+                                                as u8,
+                                            bg_color.a(),
                                         );
-                                        ui.separator();
-                                        for (element_id, data) in &problem_elements {
-                                            let health = data.health();
-                                            ui.horizontal(|ui| {
-                                                ui.colored_label(health.color(), health.icon());
-                                                ui.label(format!(
-                                                    "{}: {:.1}%",
-                                                    element_id,
-                                                    data.avg_proportion * 100.0
-                                                ));
+                                    }
+                                    ui.painter().rect_filled(rect, 2.0, bg_color);
+                                } else if has_qos_issues {
+                                    // Draw QoS warning/critical background
+                                    let qos_color = qos_health.unwrap().color();
+                                    let bg_color = Color32::from_rgba_unmultiplied(
+                                        qos_color.r(),
+                                        qos_color.g(),
+                                        qos_color.b(),
+                                        40, // Semi-transparent
+                                    );
+                                    ui.painter().rect_filled(rect, 2.0, bg_color);
+                                    // Also draw a left border for emphasis
+                                    let border_rect = egui::Rect::from_min_size(
+                                        rect.min,
+                                        egui::vec2(3.0, rect.height()),
+                                    );
+                                    ui.painter().rect_filled(border_rect, 0.0, qos_color);
+                                } else if response.hovered() {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        2.0,
+                                        ui.visuals().widgets.hovered.bg_fill,
+                                    );
+                                }
+
+                                // Draw flow name and buttons
+                                // Use a horizontal layout with the name truncating to fit
+                                let text_color = if selected {
+                                    ui.visuals().selection.stroke.color
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+
+                                // Calculate space for right-side elements dynamically
+                                let mut right_side_width = 18.0; // menu button "..."
+
+                                // Clock sync indicator shown for PTP/NTP
+                                if matches!(
+                                    flow.properties.clock_type,
+                                    strom_types::flow::GStreamerClockType::Ptp
+                                        | strom_types::flow::GStreamerClockType::Ntp
+                                ) {
+                                    right_side_width += 18.0;
+                                }
+
+                                // Thread priority warning indicator
+                                if flow
+                                    .properties
+                                    .thread_priority_status
+                                    .as_ref()
+                                    .map(|s| !s.achieved && s.error.is_some())
+                                    .unwrap_or(false)
+                                {
+                                    right_side_width += 18.0;
+                                }
+
+                                // Left side: state icon (always) + QoS indicator (conditional)
+                                let mut left_icons_width = 20.0; // state icon + spacing
+                                let has_qos_issues = self
+                                    .qos_stats
+                                    .get_flow_health(&flow.id)
+                                    .map(|h| h != crate::qos_monitor::QoSHealth::Ok)
+                                    .unwrap_or(false);
+                                if has_qos_issues {
+                                    left_icons_width += 18.0;
+                                }
+                                let available_name_width =
+                                    (rect.width() - right_side_width - left_icons_width).max(20.0);
+
+                                let mut child_ui = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(rect)
+                                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                                );
+                                child_ui.add_space(4.0);
+
+                                // Show running state icon
+                                let state_icon = match flow.state {
+                                    Some(PipelineState::Playing) => "▶",
+                                    Some(PipelineState::Paused) => "⏸",
+                                    Some(PipelineState::Ready)
+                                    | Some(PipelineState::Null)
+                                    | None => "⏹",
+                                };
+                                let state_color = match flow.state {
+                                    Some(PipelineState::Playing) => Color32::from_rgb(0, 200, 0),
+                                    Some(PipelineState::Paused) => Color32::from_rgb(255, 165, 0),
+                                    Some(PipelineState::Ready)
+                                    | Some(PipelineState::Null)
+                                    | None => Color32::GRAY,
+                                };
+                                child_ui.colored_label(state_color, state_icon);
+
+                                // Show QoS indicator if there are issues - make it clickable to open log
+                                if let Some(qos_health) = self.qos_stats.get_flow_health(&flow.id) {
+                                    if qos_health != crate::qos_monitor::QoSHealth::Ok {
+                                        let qos_label = child_ui
+                                            .colored_label(qos_health.color(), qos_health.icon())
+                                            .interact(egui::Sense::click());
+
+                                        // Click to open log panel
+                                        if qos_label.clicked() {
+                                            self.show_log_panel = true;
+                                        }
+
+                                        // Show tooltip with problem elements
+                                        let problem_elements =
+                                            self.qos_stats.get_problem_elements(&flow.id);
+                                        if !problem_elements.is_empty() {
+                                            qos_label.on_hover_ui(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        "QoS Issues (click to view log)",
+                                                    )
+                                                    .strong(),
+                                                );
+                                                ui.separator();
+                                                for (element_id, data) in &problem_elements {
+                                                    let health = data.health();
+                                                    ui.horizontal(|ui| {
+                                                        ui.colored_label(
+                                                            health.color(),
+                                                            health.icon(),
+                                                        );
+                                                        ui.label(format!(
+                                                            "{}: {:.1}%",
+                                                            element_id,
+                                                            data.avg_proportion * 100.0
+                                                        ));
+                                                    });
+                                                }
                                             });
                                         }
-                                    });
-                                }
-                            }
-                        }
-
-                        child_ui.add_space(4.0);
-
-                        // Show flow name with hover tooltip - make it clickable too
-                        let name_label = child_ui
-                            .colored_label(text_color, &flow.name)
-                            .interact(egui::Sense::click());
-
-                        // Handle click on the text itself (in addition to the background)
-                        if name_label.clicked() {
-                            self.selected_flow_id = Some(flow.id);
-                            // Clear graph selection when switching flows
-                            self.graph.deselect_all();
-                            self.graph.load(flow.elements.clone(), flow.links.clone());
-                            self.graph.load_blocks(flow.blocks.clone());
-                        }
-
-                        // Add hover tooltip with flow details
-                        name_label.on_hover_ui(|ui| {
-                            ui.label(egui::RichText::new(&flow.name).strong());
-                            ui.separator();
-
-                            if let Some(ref desc) = flow.properties.description {
-                                if !desc.is_empty() {
-                                    ui.label("Description:");
-                                    ui.label(desc);
-                                    ui.add_space(5.0);
-                                }
-                            }
-
-                            ui.label(format!("Clock: {:?}", flow.properties.clock_type));
-
-                            if let Some(domain) = flow.properties.ptp_domain {
-                                ui.label(format!("PTP Domain: {}", domain));
-                            }
-
-                            if let Some(sync_status) = flow.properties.clock_sync_status {
-                                use strom_types::flow::ClockSyncStatus;
-                                let status_text = match sync_status {
-                                    ClockSyncStatus::Synced => "Synced",
-                                    ClockSyncStatus::NotSynced => "Not Synced",
-                                    ClockSyncStatus::Unknown => "Unknown",
-                                };
-                                ui.label(format!("Sync Status: {}", status_text));
-                            }
-
-                            // Display PTP grandmaster info if available
-                            if let Some(ref ptp_info) = flow.properties.ptp_info {
-                                if let Some(ref gm) = ptp_info.grandmaster_clock_id {
-                                    ui.label(format!("Grandmaster: {}", gm));
-                                }
-                            }
-
-                            ui.add_space(5.0);
-                            let state_text = match flow.state {
-                                Some(PipelineState::Playing) => "Running",
-                                Some(PipelineState::Paused) => "Paused",
-                                Some(PipelineState::Ready) | Some(PipelineState::Null) | None => {
-                                    "Stopped"
-                                }
-                            };
-                            ui.label(format!("State: {}", state_text));
-
-                            // Show timestamps
-                            if flow.properties.started_at.is_some()
-                                || flow.properties.last_modified.is_some()
-                                || flow.properties.created_at.is_some()
-                            {
-                                ui.add_space(5.0);
-                                ui.separator();
-
-                                if let Some(ref started_at) = flow.properties.started_at {
-                                    ui.label(format!(
-                                        "Started: {}",
-                                        format_datetime_local(started_at)
-                                    ));
-                                    if let Some(started_millis) =
-                                        parse_iso8601_to_millis(started_at)
-                                    {
-                                        let uptime_millis = current_time_millis() - started_millis;
-                                        ui.label(format!(
-                                            "Uptime: {}",
-                                            format_uptime(uptime_millis)
-                                        ));
                                     }
                                 }
 
-                                if let Some(ref modified) = flow.properties.last_modified {
-                                    ui.label(format!(
-                                        "Last modified: {}",
-                                        format_datetime_local(modified)
-                                    ));
+                                child_ui.add_space(4.0);
+
+                                // Show flow name with truncation - constrain width first
+                                let name_label = child_ui
+                                    .allocate_ui_with_layout(
+                                        egui::vec2(available_name_width, rect.height()),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&flow.name)
+                                                        .color(text_color),
+                                                )
+                                                .truncate()
+                                                .sense(egui::Sense::click()),
+                                            )
+                                        },
+                                    )
+                                    .inner;
+
+                                // Handle click on the text itself (in addition to the background)
+                                if name_label.clicked() {
+                                    self.selected_flow_id = Some(flow.id);
+                                    // Clear graph selection when switching flows
+                                    self.graph.deselect_all();
+                                    self.graph.load(flow.elements.clone(), flow.links.clone());
+                                    self.graph.load_blocks(flow.blocks.clone());
                                 }
 
-                                if let Some(ref created) = flow.properties.created_at {
-                                    ui.label(format!(
-                                        "Created: {}",
-                                        format_datetime_local(created)
-                                    ));
-                                }
-                            }
-                        });
-
-                        // Buttons on the right
-                        child_ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.add_space(4.0);
-
-                                // Single menu button with dropdown
-                                ui.menu_button("...", |ui| {
-                                    ui.set_min_width(150.0);
-
-                                    // Properties
-                                    if ui.button("⚙  Properties").clicked() {
-                                        self.editing_properties_flow_id = Some(flow.id);
-                                        self.properties_name_buffer = flow.name.clone();
-                                        self.properties_description_buffer =
-                                            flow.properties.description.clone().unwrap_or_default();
-                                        self.properties_clock_type_buffer =
-                                            flow.properties.clock_type;
-                                        self.properties_ptp_domain_buffer = flow
-                                            .properties
-                                            .ptp_domain
-                                            .map(|d| d.to_string())
-                                            .unwrap_or_else(|| "0".to_string());
-                                        self.properties_thread_priority_buffer =
-                                            flow.properties.thread_priority;
-                                        ui.close();
-                                    }
-
+                                // Add hover tooltip with flow details (shows full name)
+                                name_label.on_hover_ui(|ui| {
+                                    ui.label(egui::RichText::new(&flow.name).strong());
                                     ui.separator();
 
-                                    // Export as JSON
-                                    if ui.button("📤  Export as JSON").clicked() {
-                                        match serde_json::to_string_pretty(flow) {
-                                            Ok(json) => {
-                                                ui.ctx().copy_text(json);
-                                                self.status = format!(
-                                                    "Flow '{}' exported to clipboard as JSON",
-                                                    flow.name
-                                                );
-                                            }
-                                            Err(e) => {
-                                                self.error =
-                                                    Some(format!("Failed to export flow: {}", e));
+                                    if let Some(ref desc) = flow.properties.description {
+                                        if !desc.is_empty() {
+                                            ui.label("Description:");
+                                            ui.label(desc);
+                                            ui.add_space(5.0);
+                                        }
+                                    }
+
+                                    ui.label(format!("Clock: {:?}", flow.properties.clock_type));
+
+                                    if let Some(domain) = flow.properties.ptp_domain {
+                                        ui.label(format!("PTP Domain: {}", domain));
+                                    }
+
+                                    if let Some(sync_status) = flow.properties.clock_sync_status {
+                                        use strom_types::flow::ClockSyncStatus;
+                                        let status_text = match sync_status {
+                                            ClockSyncStatus::Synced => "Synced",
+                                            ClockSyncStatus::NotSynced => "Not Synced",
+                                            ClockSyncStatus::Unknown => "Unknown",
+                                        };
+                                        ui.label(format!("Sync Status: {}", status_text));
+                                    }
+
+                                    // Display PTP grandmaster info if available
+                                    if let Some(ref ptp_info) = flow.properties.ptp_info {
+                                        if let Some(ref gm) = ptp_info.grandmaster_clock_id {
+                                            ui.label(format!("Grandmaster: {}", gm));
+                                        }
+                                    }
+
+                                    ui.add_space(5.0);
+                                    let state_text = match flow.state {
+                                        Some(PipelineState::Playing) => "Running",
+                                        Some(PipelineState::Paused) => "Paused",
+                                        Some(PipelineState::Ready)
+                                        | Some(PipelineState::Null)
+                                        | None => "Stopped",
+                                    };
+                                    ui.label(format!("State: {}", state_text));
+
+                                    // Show timestamps
+                                    if flow.properties.started_at.is_some()
+                                        || flow.properties.last_modified.is_some()
+                                        || flow.properties.created_at.is_some()
+                                    {
+                                        ui.add_space(5.0);
+                                        ui.separator();
+
+                                        if let Some(ref started_at) = flow.properties.started_at {
+                                            ui.label(format!(
+                                                "Started: {}",
+                                                format_datetime_local(started_at)
+                                            ));
+                                            if let Some(started_millis) =
+                                                parse_iso8601_to_millis(started_at)
+                                            {
+                                                let uptime_millis =
+                                                    current_time_millis() - started_millis;
+                                                ui.label(format!(
+                                                    "Uptime: {}",
+                                                    format_uptime(uptime_millis)
+                                                ));
                                             }
                                         }
-                                        ui.close();
-                                    }
 
-                                    // Export to gst-launch (only if flow has elements, not blocks)
-                                    let has_only_elements =
-                                        !flow.elements.is_empty() && flow.blocks.is_empty();
-                                    let tooltip = if has_only_elements {
-                                        "Export as gst-launch-1.0 pipeline"
-                                    } else {
-                                        "Only available for flows with elements, not blocks"
-                                    };
-                                    if ui
-                                        .add_enabled(
-                                            has_only_elements,
-                                            egui::Button::new("🖥  Export as gst-launch"),
-                                        )
-                                        .on_hover_text(tooltip)
-                                        .clicked()
-                                        && has_only_elements
-                                    {
-                                        self.pending_gst_launch_export = Some((
-                                            flow.elements.clone(),
-                                            flow.links.clone(),
-                                            flow.name.clone(),
-                                        ));
-                                        ui.close();
-                                    }
+                                        if let Some(ref modified) = flow.properties.last_modified {
+                                            ui.label(format!(
+                                                "Last modified: {}",
+                                                format_datetime_local(modified)
+                                            ));
+                                        }
 
-                                    ui.separator();
-
-                                    // Copy flow
-                                    if ui.button("📋  Copy").clicked() {
-                                        self.flow_pending_copy = Some(flow.clone());
-                                        ui.close();
-                                    }
-
-                                    // Delete flow
-                                    if ui.button("🗑  Delete").clicked() {
-                                        self.flow_pending_deletion =
-                                            Some((flow.id, flow.name.clone()));
-                                        ui.close();
+                                        if let Some(ref created) = flow.properties.created_at {
+                                            ui.label(format!(
+                                                "Created: {}",
+                                                format_datetime_local(created)
+                                            ));
+                                        }
                                     }
                                 });
 
-                                // Show clock sync indicator for PTP/NTP (small colored dot)
-                                use strom_types::flow::{ClockSyncStatus, GStreamerClockType};
-                                if matches!(
-                                    flow.properties.clock_type,
-                                    GStreamerClockType::Ptp | GStreamerClockType::Ntp
-                                ) {
-                                    let (text_color, tooltip) = match flow
-                                        .properties
-                                        .clock_sync_status
-                                    {
-                                        Some(ClockSyncStatus::Synced) => (
-                                            Color32::from_rgb(0, 200, 0),
-                                            format!(
-                                                "{:?} - Synchronized",
-                                                flow.properties.clock_type
-                                            ),
-                                        ),
-                                        Some(ClockSyncStatus::NotSynced) => (
-                                            Color32::from_rgb(200, 0, 0),
-                                            format!(
-                                                "{:?} - Not Synchronized",
-                                                flow.properties.clock_type
-                                            ),
-                                        ),
-                                        Some(ClockSyncStatus::Unknown) | None => (
-                                            Color32::GRAY,
-                                            format!("{:?} - Unknown", flow.properties.clock_type),
-                                        ),
-                                    };
+                                // Buttons on the right
+                                child_ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.add_space(4.0);
 
-                                    // Small colored dot indicator
-                                    ui.add_space(4.0);
-                                    ui.add(egui::Label::new(
-                                        egui::RichText::new("*").size(12.0).color(text_color),
-                                    ))
-                                    .on_hover_text(tooltip);
-                                }
+                                        // Single menu button with dropdown
+                                        ui.menu_button("...", |ui| {
+                                            ui.set_min_width(150.0);
 
-                                // Show thread priority warning indicator if priority not achieved
-                                if let Some(ref status) = flow.properties.thread_priority_status {
-                                    if !status.achieved && status.error.is_some() {
-                                        let warning_color = Color32::from_rgb(255, 165, 0);
-                                        let tooltip = status
-                                            .error
-                                            .as_ref()
-                                            .map(|e| format!("Thread priority not set: {}", e))
-                                            .unwrap_or_else(|| {
-                                                "Thread priority warning".to_string()
-                                            });
+                                            // Properties
+                                            if ui.button("⚙  Properties").clicked() {
+                                                self.editing_properties_flow_id = Some(flow.id);
+                                                self.properties_name_buffer = flow.name.clone();
+                                                self.properties_description_buffer = flow
+                                                    .properties
+                                                    .description
+                                                    .clone()
+                                                    .unwrap_or_default();
+                                                self.properties_clock_type_buffer =
+                                                    flow.properties.clock_type;
+                                                self.properties_ptp_domain_buffer = flow
+                                                    .properties
+                                                    .ptp_domain
+                                                    .map(|d| d.to_string())
+                                                    .unwrap_or_else(|| "0".to_string());
+                                                self.properties_thread_priority_buffer =
+                                                    flow.properties.thread_priority;
+                                                ui.close();
+                                            }
 
-                                        ui.add_space(2.0);
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new("⚠")
+                                            ui.separator();
+
+                                            // Export as JSON
+                                            if ui.button("📤  Export as JSON").clicked() {
+                                                match serde_json::to_string_pretty(flow) {
+                                                    Ok(json) => {
+                                                        ui.ctx().copy_text(json);
+                                                        self.status = format!(
+                                                    "Flow '{}' exported to clipboard as JSON",
+                                                    flow.name
+                                                );
+                                                    }
+                                                    Err(e) => {
+                                                        self.error = Some(format!(
+                                                            "Failed to export flow: {}",
+                                                            e
+                                                        ));
+                                                    }
+                                                }
+                                                ui.close();
+                                            }
+
+                                            // Export to gst-launch (only if flow has elements, not blocks)
+                                            let has_only_elements =
+                                                !flow.elements.is_empty() && flow.blocks.is_empty();
+                                            let tooltip = if has_only_elements {
+                                                "Export as gst-launch-1.0 pipeline"
+                                            } else {
+                                                "Only available for flows with elements, not blocks"
+                                            };
+                                            if ui
+                                                .add_enabled(
+                                                    has_only_elements,
+                                                    egui::Button::new("🖥  Export as gst-launch"),
+                                                )
+                                                .on_hover_text(tooltip)
+                                                .clicked()
+                                                && has_only_elements
+                                            {
+                                                self.pending_gst_launch_export = Some((
+                                                    flow.elements.clone(),
+                                                    flow.links.clone(),
+                                                    flow.name.clone(),
+                                                ));
+                                                ui.close();
+                                            }
+
+                                            ui.separator();
+
+                                            // Copy flow
+                                            if ui.button("📋  Copy").clicked() {
+                                                self.flow_pending_copy = Some(flow.clone());
+                                                ui.close();
+                                            }
+
+                                            // Delete flow
+                                            if ui.button("🗑  Delete").clicked() {
+                                                self.flow_pending_deletion =
+                                                    Some((flow.id, flow.name.clone()));
+                                                ui.close();
+                                            }
+                                        });
+
+                                        // Show clock sync indicator for PTP/NTP (small colored dot)
+                                        use strom_types::flow::{
+                                            ClockSyncStatus, GStreamerClockType,
+                                        };
+                                        if matches!(
+                                            flow.properties.clock_type,
+                                            GStreamerClockType::Ptp | GStreamerClockType::Ntp
+                                        ) {
+                                            let (text_color, tooltip) =
+                                                match flow.properties.clock_sync_status {
+                                                    Some(ClockSyncStatus::Synced) => (
+                                                        Color32::from_rgb(0, 200, 0),
+                                                        format!(
+                                                            "{:?} - Synchronized",
+                                                            flow.properties.clock_type
+                                                        ),
+                                                    ),
+                                                    Some(ClockSyncStatus::NotSynced) => (
+                                                        Color32::from_rgb(200, 0, 0),
+                                                        format!(
+                                                            "{:?} - Not Synchronized",
+                                                            flow.properties.clock_type
+                                                        ),
+                                                    ),
+                                                    Some(ClockSyncStatus::Unknown) | None => (
+                                                        Color32::GRAY,
+                                                        format!(
+                                                            "{:?} - Unknown",
+                                                            flow.properties.clock_type
+                                                        ),
+                                                    ),
+                                                };
+
+                                            // Small colored dot indicator
+                                            ui.add_space(4.0);
+                                            ui.add(egui::Label::new(
+                                                egui::RichText::new("*")
                                                     .size(12.0)
-                                                    .color(warning_color),
-                                            )
-                                            .sense(egui::Sense::hover()),
-                                        )
-                                        .on_hover_text(tooltip);
-                                    }
-                                }
-                            },
-                        );
-                    }
-                }
+                                                    .color(text_color),
+                                            ))
+                                            .on_hover_text(tooltip);
+                                        }
+
+                                        // Show thread priority warning indicator if priority not achieved
+                                        if let Some(ref status) =
+                                            flow.properties.thread_priority_status
+                                        {
+                                            if !status.achieved && status.error.is_some() {
+                                                let warning_color = Color32::from_rgb(255, 165, 0);
+                                                let tooltip = status
+                                                    .error
+                                                    .as_ref()
+                                                    .map(|e| {
+                                                        format!("Thread priority not set: {}", e)
+                                                    })
+                                                    .unwrap_or_else(|| {
+                                                        "Thread priority warning".to_string()
+                                                    });
+
+                                                ui.add_space(2.0);
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new("⚠")
+                                                            .size(12.0)
+                                                            .color(warning_color),
+                                                    )
+                                                    .sense(egui::Sense::hover()),
+                                                )
+                                                .on_hover_text(tooltip);
+                                            }
+                                        }
+                                    },
+                                );
+                            }
+                        }
+                    }); // ScrollArea
             });
     }
 
     /// Render the element palette sidebar.
     fn render_palette(&mut self, ctx: &Context) {
+        if !self.show_palette_panel {
+            return;
+        }
+        // Max width is 40% of screen width
+        #[allow(deprecated)]
+        let max_width = ctx.screen_rect().width() * 0.4;
         SidePanel::right("palette")
             .default_width(250.0)
+            .max_width(max_width)
             .resizable(true)
             .show(ctx, |ui| {
+            egui::ScrollArea::both().show(ui, |ui| {
                 // Check if an element is selected and trigger property loading if needed
                 // Do this BEFORE getting mutable reference to avoid borrow checker issues
                 if let Some((selected_element_type, active_tab)) = self
@@ -3127,6 +3271,39 @@ impl StromApp {
                             download_file(&filename, &playlist_content, "application/xspf+xml");
                         }
 
+                        // Handle VLC playlist download-only request (native mode)
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some((srt_uri, latency_ms)) = result.vlc_playlist_download_only {
+                            let stream_name = self
+                                .current_flow()
+                                .map(|f| f.name.clone())
+                                .unwrap_or_else(|| "SRT Stream".to_string());
+
+                            let playlist_content =
+                                generate_vlc_playlist(&srt_uri, latency_ms, &stream_name);
+
+                            let safe_name: String = stream_name
+                                .chars()
+                                .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                                .collect();
+                            let filename = format!("{}.xspf", safe_name);
+
+                            // Save to current directory (download only, don't open)
+                            let path = std::path::PathBuf::from(&filename);
+                            match std::fs::write(&path, &playlist_content) {
+                                Ok(_) => {
+                                    let abs_path = std::fs::canonicalize(&path)
+                                        .unwrap_or(path.clone());
+                                    self.status = format!("Saved: {}", abs_path.display());
+                                    tracing::info!("Saved VLC playlist to: {}", abs_path.display());
+                                }
+                                Err(e) => {
+                                    self.status = format!("Failed to save: {}", e);
+                                    tracing::error!("Failed to save VLC playlist: {}", e);
+                                }
+                            }
+                        }
+
                         // Handle WHEP player request (for WHEP Output)
                         if let Some(endpoint_id) = result.whep_player_url {
                             let player_url = self.api.get_whep_player_url(&endpoint_id);
@@ -3146,53 +3323,81 @@ impl StromApp {
                     // No element or block selected: show ONLY the palette
                     self.palette.show(ui);
                 }
+            }); // ScrollArea
             });
     }
 
     /// Render the main canvas area.
     fn render_canvas(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
+            // Panel toggle buttons at the edges (use clip_rect for full area including margins)
+            let panel_rect = ui.clip_rect();
+
+            // Left panel toggle (flow list)
+            let left_toggle_pos = egui::pos2(panel_rect.left(), panel_rect.top() + 4.0);
+            egui::Area::new(egui::Id::new("left_panel_toggle"))
+                .fixed_pos(left_toggle_pos)
+                .order(egui::Order::Middle)
+                .show(ctx, |ui| {
+                    let icon = if self.show_flow_list_panel {
+                        "◀"
+                    } else {
+                        "▶"
+                    };
+                    let tooltip = if self.show_flow_list_panel {
+                        "Hide flow list"
+                    } else {
+                        "Show flow list"
+                    };
+                    // No rounding on left side (flush with edge)
+                    let corner_radius = egui::CornerRadius {
+                        nw: 0,
+                        sw: 0,
+                        ne: 4,
+                        se: 4,
+                    };
+                    let button = egui::Button::new(egui::RichText::new(icon).size(24.0))
+                        .corner_radius(corner_radius)
+                        .min_size(egui::vec2(32.0, 32.0));
+                    if ui.add(button).on_hover_text(tooltip).clicked() {
+                        self.show_flow_list_panel = !self.show_flow_list_panel;
+                    }
+                });
+
+            // Right panel toggle (palette) - only show when a flow is selected
             if self.current_flow().is_some() {
-                // Show compact instructions banner at the top
-                let legend_bg = if ui.visuals().dark_mode {
-                    Color32::from_rgb(40, 40, 50) // Dark theme: dark background
-                } else {
-                    Color32::from_rgb(230, 230, 240) // Light theme: light background
-                };
-
-                let legend_text_color = if ui.visuals().dark_mode {
-                    Color32::from_rgb(200, 200, 200) // Dark theme: lighter text
-                } else {
-                    Color32::from_rgb(60, 60, 70) // Light theme: dark text
-                };
-
-                egui::Frame::new()
-                    .fill(legend_bg)
-                    .inner_margin(4.0)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("💡");
-                            ui.small(
-                                egui::RichText::new("Search & click +Add to add elements/blocks")
-                                    .color(legend_text_color),
-                            );
-                            ui.separator();
-                            ui.small(
-                                egui::RichText::new("Drag output→input ports to link")
-                                    .color(legend_text_color),
-                            );
-                            ui.separator();
-                            ui.small(
-                                egui::RichText::new(
-                                    "Drag nodes (snaps to grid) | Scroll=pan | Ctrl+Scroll=zoom | Del=delete",
-                                )
-                                .color(legend_text_color),
-                            );
-                        });
+                let right_toggle_pos =
+                    egui::pos2(panel_rect.right() - 32.0, panel_rect.top() + 4.0);
+                egui::Area::new(egui::Id::new("right_panel_toggle"))
+                    .fixed_pos(right_toggle_pos)
+                    .order(egui::Order::Middle)
+                    .show(ctx, |ui| {
+                        let icon = if self.show_palette_panel {
+                            "▶"
+                        } else {
+                            "◀"
+                        };
+                        let tooltip = if self.show_palette_panel {
+                            "Hide palette"
+                        } else {
+                            "Show palette"
+                        };
+                        // No rounding on right side (flush with edge)
+                        let corner_radius = egui::CornerRadius {
+                            nw: 4,
+                            sw: 4,
+                            ne: 0,
+                            se: 0,
+                        };
+                        let button = egui::Button::new(egui::RichText::new(icon).size(24.0))
+                            .corner_radius(corner_radius)
+                            .min_size(egui::vec2(32.0, 32.0));
+                        if ui.add(button).on_hover_text(tooltip).clicked() {
+                            self.show_palette_panel = !self.show_palette_panel;
+                        }
                     });
-
-                ui.add_space(2.0);
-
+            }
+            if self.current_flow().is_some() {
                 // Setup dynamic content for meter blocks before rendering
                 self.graph.clear_block_content();
                 if let Some(flow_id) = self.current_flow().map(|f| f.id) {
@@ -3304,6 +3509,11 @@ impl StromApp {
                 // Show graph editor
                 let response = self.graph.show(ui);
 
+                // Open palette panel when something is selected
+                if self.graph.has_selection() && !self.show_palette_panel {
+                    self.show_palette_panel = true;
+                }
+
                 // Check if a QoS marker in the graph was clicked - open log panel
                 if self.graph.was_qos_marker_clicked() {
                     self.show_log_panel = true;
@@ -3361,7 +3571,6 @@ impl StromApp {
                     self.graph.remove_selected(); // Remove selected element (if any)
                     self.graph.remove_selected_link(); // Remove selected link (if any)
                 }
-
             } else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(100.0);
@@ -4644,6 +4853,89 @@ impl eframe::App for StromApp {
             }
         }
 
+        // Handle pinch-to-zoom from JavaScript (iOS/mobile)
+        // Only apply browser zoom if NOT over the graph editor (graph has its own zoom)
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsValue;
+
+            if let Some(window) = web_sys::window() {
+                if let Ok(pinch_zoom) = js_sys::Reflect::get(&window, &"stromPinchZoom".into()) {
+                    if !pinch_zoom.is_undefined() {
+                        if let Some(obj) = js_sys::Object::try_from(&pinch_zoom) {
+                            let changed = js_sys::Reflect::get(obj, &"changed".into())
+                                .ok()
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+
+                            // Check if new pinch started - determine if over graph
+                            let new_pinch = js_sys::Reflect::get(obj, &"newPinch".into())
+                                .ok()
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+
+                            if new_pinch {
+                                let start_x = js_sys::Reflect::get(obj, &"startX".into())
+                                    .ok()
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0)
+                                    as f32;
+                                let start_y = js_sys::Reflect::get(obj, &"startY".into())
+                                    .ok()
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(0.0)
+                                    as f32;
+
+                                // JS coordinates are in CSS pixels, egui rect is in screen coords
+                                // Don't divide by ppp - egui rects are already in screen space
+                                let pinch_pos = egui::pos2(start_x, start_y);
+
+                                let over_graph = self
+                                    .graph
+                                    .canvas_rect()
+                                    .map(|rect: egui::Rect| rect.contains(pinch_pos))
+                                    .unwrap_or(false);
+
+                                let _ = js_sys::Reflect::set(
+                                    obj,
+                                    &"isGraphPinch".into(),
+                                    &JsValue::from_bool(over_graph),
+                                );
+                                let _ =
+                                    js_sys::Reflect::set(obj, &"newPinch".into(), &JsValue::FALSE);
+                            }
+
+                            if changed {
+                                let is_graph_pinch =
+                                    js_sys::Reflect::get(obj, &"isGraphPinch".into())
+                                        .ok()
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+
+                                if !is_graph_pinch {
+                                    if let Some(scale) = js_sys::Reflect::get(obj, &"scale".into())
+                                        .ok()
+                                        .and_then(|v| v.as_f64())
+                                    {
+                                        let scale_f32 = scale as f32;
+                                        if scale_f32.is_finite()
+                                            && scale_f32 > 0.1
+                                            && scale_f32 < 10.0
+                                        {
+                                            ctx.set_pixels_per_point(scale_f32);
+                                        }
+                                    }
+                                }
+                                // Reset the changed flag
+                                let _ =
+                                    js_sys::Reflect::set(obj, &"changed".into(), &JsValue::FALSE);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Process all pending channel messages
         while let Ok(msg) = self.channels.rx.try_recv() {
             match msg {
@@ -5859,19 +6151,9 @@ impl eframe::App for StromApp {
             AppPage::Flows => {
                 self.render_flow_list(ctx);
 
-                // Always show palette, even if no flow selected
+                // Only show palette when a flow is selected
                 if self.current_flow().is_some() {
                     self.render_palette(ctx);
-                } else {
-                    // Show simplified palette when no flow is selected
-                    SidePanel::right("palette")
-                        .default_width(250.0)
-                        .resizable(true)
-                        .show(ctx, |ui| {
-                            ui.heading("Elements");
-                            ui.separator();
-                            ui.label("Select or create a flow to see the element palette");
-                        });
                 }
 
                 self.render_canvas(ctx);
@@ -5923,7 +6205,7 @@ impl eframe::App for StromApp {
             }
             AppPage::Links => {
                 CentralPanel::default().show(ctx, |ui| {
-                    self.links_page.render(ui, &self.api, ctx);
+                    self.links_page.render(ui, &self.api, ctx, &self.flows);
                 });
             }
         }
