@@ -153,7 +153,8 @@ jobs:
           Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /qn INSTALLDIR=D:\gstreamer'
 
           # Install pkg-config via Chocolatey (still needed)
-          choco install pkgconfiglite --yes --no-progress
+          # --allow-empty-checksums needed because pkgconfiglite downloads from HTTP
+          choco install pkgconfiglite --yes --no-progress --allow-empty-checksums
 
           # Set environment variables
           echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=D:\gstreamer\1.0\msvc_x86_64\" >> $env:GITHUB_ENV
