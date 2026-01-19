@@ -151,7 +151,7 @@ impl Default for GraphEditor {
             selected: None,
             dragging: None,
             pan_offset: Vec2::ZERO,
-            zoom: 1.0,
+            zoom: 0.8,
             creating_link: None,
             hovered_pad: None,
             hovered_element: None,

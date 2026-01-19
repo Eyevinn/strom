@@ -1642,7 +1642,7 @@ fn whep_output_definition() -> BlockDefinition {
                         },
                     ],
                 },
-                default_value: Some(PropertyValue::String("audio".to_string())),
+                default_value: Some(PropertyValue::String("audio_video".to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "mode".to_string(),

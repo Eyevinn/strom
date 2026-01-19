@@ -128,9 +128,9 @@ pub fn list_navigator<'a>(
 
         // Create a clickable button-like area
         let bg_color = if is_selected {
-            Color32::from_gray(50)
+            ui.visuals().widgets.active.bg_fill
         } else {
-            Color32::from_gray(30)
+            ui.visuals().extreme_bg_color
         };
 
         let frame = egui::Frame::group(ui.style())

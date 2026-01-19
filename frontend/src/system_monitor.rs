@@ -239,12 +239,16 @@ impl<'a> DetailedSystemMonitor<'a> {
                 ui.vertical(|ui| {
                     ui.label("CPU Usage");
                     let cpu_rect = ui.allocate_space(Vec2::new(300.0, 100.0));
+                    let bg_color = ui.visuals().extreme_bg_color;
+                    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
                     draw_large_graph(
                         ui.painter(),
                         cpu_rect.1,
                         self.store.cpu_history(),
                         Color32::from_rgb(100, 200, 255),
                         "CPU %",
+                        bg_color,
+                        stroke_color,
                     );
                     ui.label(format!("Current: {:.1}%", stats.cpu_usage));
                 });
@@ -254,12 +258,16 @@ impl<'a> DetailedSystemMonitor<'a> {
                 ui.vertical(|ui| {
                     ui.label("Memory Usage");
                     let mem_rect = ui.allocate_space(Vec2::new(300.0, 100.0));
+                    let bg_color = ui.visuals().extreme_bg_color;
+                    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
                     draw_large_graph(
                         ui.painter(),
                         mem_rect.1,
                         self.store.memory_history(),
                         Color32::from_rgb(100, 255, 100),
                         "Memory %",
+                        bg_color,
+                        stroke_color,
                     );
                     let mem_percent = if stats.total_memory > 0 {
                         (stats.used_memory as f32 / stats.total_memory as f32) * 100.0
@@ -288,12 +296,17 @@ impl<'a> DetailedSystemMonitor<'a> {
                                 ui.label("GPU Utilization");
                                 if let Some(gpu_hist) = self.store.gpu_history(i) {
                                     let gpu_rect = ui.allocate_space(Vec2::new(250.0, 80.0));
+                                    let bg_color = ui.visuals().extreme_bg_color;
+                                    let stroke_color =
+                                        ui.visuals().widgets.noninteractive.bg_stroke.color;
                                     draw_large_graph(
                                         ui.painter(),
                                         gpu_rect.1,
                                         gpu_hist,
                                         Color32::from_rgb(255, 150, 100),
                                         "GPU %",
+                                        bg_color,
+                                        stroke_color,
                                     );
                                 }
                                 ui.label(format!("Current: {:.1}%", gpu.utilization));
@@ -335,16 +348,19 @@ fn draw_large_graph(
     data: &VecDeque<f32>,
     color: Color32,
     _label: &str,
+    bg_color: Color32,
+    stroke_color: Color32,
 ) {
     // Draw background
-    painter.rect_filled(rect, 2.0, Color32::from_gray(20));
+    painter.rect_filled(rect, 2.0, bg_color);
 
     // Draw grid lines
+    let grid_color = stroke_color.linear_multiply(0.5);
     for i in 0..=4 {
         let y = rect.min.y + (i as f32 / 4.0) * rect.height();
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(0.5, Color32::from_gray(60)),
+            Stroke::new(0.5, grid_color),
         );
     }
 
@@ -371,7 +387,7 @@ fn draw_large_graph(
     painter.rect_stroke(
         rect,
         2.0,
-        Stroke::new(1.0, Color32::from_gray(100)),
+        Stroke::new(1.0, stroke_color),
         egui::StrokeKind::Outside,
     );
 }
