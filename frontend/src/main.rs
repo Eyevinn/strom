@@ -99,7 +99,8 @@ fn main() {
                 canvas,
                 web_options,
                 Box::new(|cc| {
-                    // Theme is now set by the app based on user preference
+                    // Force dark theme immediately before app creation
+                    cc.egui_ctx.set_visuals(egui::Visuals::dark());
                     Ok(Box::new(StromApp::new(cc)))
                 }),
             )
