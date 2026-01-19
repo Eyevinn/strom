@@ -126,6 +126,13 @@ jobs:
             Copy-Item "$gstRoot\share\*" "$bundleDir\share\" -Recurse -Force
           }
 
+          # Copy libexec files (contains gst-ptp-helper.exe for PTP clock support)
+          if (Test-Path "$gstRoot\libexec") {
+            New-Item -ItemType Directory -Path "$bundleDir\libexec" -Force | Out-Null
+            Copy-Item "$gstRoot\libexec\*" "$bundleDir\libexec\" -Recurse -Force
+            Write-Host "Copied GStreamer libexec files (including gst-ptp-helper.exe)"
+          }
+
           $size = (Get-ChildItem -Recurse "$bundleDir" | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host "GStreamer bundle size: $([math]::Round($size, 2)) MB"
 
