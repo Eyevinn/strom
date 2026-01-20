@@ -64,7 +64,7 @@ thread-priority = "3.0.0"
 libc = "0.2"
 
 # Authentication
-bcrypt = "0.17.1"
+bcrypt = "0.18.0"
 tower-sessions = "0.14"
 
 # CLI argument parsing
