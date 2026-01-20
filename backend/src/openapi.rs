@@ -4,9 +4,9 @@ use crate::version::VersionInfo;
 use strom_types::api::{
     CreateDirectoryRequest, CreateFlowRequest, ElementInfoResponse, ElementListResponse,
     ElementPropertiesResponse, ErrorResponse, ExportGstLaunchRequest, ExportGstLaunchResponse,
-    FlowListResponse, FlowResponse, FlowStatsResponse, ListMediaResponse, MediaFileEntry,
-    MediaOperationResponse, ParseGstLaunchRequest, ParseGstLaunchResponse, RenameMediaRequest,
-    UpdateFlowPropertiesRequest, UpdatePropertyRequest,
+    FlowDebugInfo, FlowListResponse, FlowResponse, FlowStatsResponse, ListMediaResponse,
+    MediaFileEntry, MediaOperationResponse, ParseGstLaunchRequest, ParseGstLaunchResponse,
+    RenameMediaRequest, UpdateFlowPropertiesRequest, UpdatePropertyRequest,
 };
 use strom_types::block::{
     BlockCategoriesResponse, BlockDefinition, BlockInstance, BlockListResponse, BlockResponse,
@@ -32,6 +32,7 @@ use utoipa::OpenApi;
         crate::api::flows::stop_flow,
         crate::api::flows::update_flow_properties,
         crate::api::flows::get_flow_stats,
+        crate::api::flows::get_flow_debug_info,
         crate::api::flows::get_element_properties,
         crate::api::flows::update_element_property,
         crate::api::elements::list_elements,
@@ -69,6 +70,7 @@ use utoipa::OpenApi;
             UpdatePropertyRequest,
             ErrorResponse,
             FlowStatsResponse,
+            FlowDebugInfo,
             BlockStats,
             Statistic,
             StatValue,

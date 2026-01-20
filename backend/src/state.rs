@@ -1082,6 +1082,17 @@ impl AppState {
         ))
     }
 
+    /// Get debug information for a running flow.
+    /// Returns pipeline timing info (base_time, clock_time, running_time).
+    /// Useful for debugging AES67/RFC 7273 RTP timestamp issues.
+    pub async fn get_flow_debug_info(
+        &self,
+        flow_id: &FlowId,
+    ) -> Option<strom_types::api::FlowDebugInfo> {
+        let pipelines = self.inner.pipelines.read().await;
+        pipelines.get(flow_id).map(|p| p.get_debug_info())
+    }
+
     /// Get current system monitoring statistics (CPU and GPU).
     pub async fn get_system_stats(&self) -> strom_types::SystemStats {
         self.inner.system_monitor.collect_stats().await

@@ -12,8 +12,8 @@ use std::process::{Command, Stdio};
 use strom_types::{
     api::{
         AvailableOutput, AvailableSourcesResponse, CreateFlowRequest, ElementPropertiesResponse,
-        ErrorResponse, FlowListResponse, FlowResponse, FlowStatsResponse, LatencyResponse,
-        PadPropertiesResponse, SourceFlowInfo, UpdateFlowPropertiesRequest,
+        ErrorResponse, FlowDebugInfo, FlowListResponse, FlowResponse, FlowStatsResponse,
+        LatencyResponse, PadPropertiesResponse, SourceFlowInfo, UpdateFlowPropertiesRequest,
         UpdatePadPropertyRequest, UpdatePropertyRequest, WebRtcStatsResponse,
     },
     Flow, FlowId,
@@ -1218,6 +1218,49 @@ pub async fn get_flow_stats(
         blocks: stats.block_stats,
         collected_at: stats.collected_at,
     }))
+}
+
+/// Get debug information for a running flow.
+///
+/// Returns pipeline timing information including base_time, clock_time, and
+/// running_time. This is useful for debugging AES67/RFC 7273 RTP timestamp
+/// issues where precise clock synchronization is critical.
+#[utoipa::path(
+    get,
+    path = "/api/flows/{id}/debug",
+    tag = "flows",
+    params(
+        ("id" = String, Path, description = "Flow ID (UUID)")
+    ),
+    responses(
+        (status = 200, description = "Debug information retrieved successfully", body = FlowDebugInfo),
+        (status = 404, description = "Flow not running", body = ErrorResponse)
+    )
+)]
+pub async fn get_flow_debug_info(
+    State(state): State<AppState>,
+    Path(id): Path<FlowId>,
+) -> Result<Json<FlowDebugInfo>, (StatusCode, Json<ErrorResponse>)> {
+    trace!("Getting debug info for flow {}", id);
+
+    let debug_info = state.get_flow_debug_info(&id).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(
+                "Flow not running. Start the flow first.",
+            )),
+        )
+    })?;
+
+    trace!(
+        "Flow {} debug: base_time={:?}ns, clock_time={:?}ns, running_time={:?}ns",
+        id,
+        debug_info.base_time_ns,
+        debug_info.clock_time_ns,
+        debug_info.running_time_ns
+    );
+
+    Ok(Json(debug_info))
 }
 
 #[cfg(test)]
