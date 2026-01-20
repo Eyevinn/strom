@@ -16,6 +16,7 @@ const AES67_INPUT_DEFAULT_TIMEOUT_MS: i64 = 0;
 
 // AES67 Output defaults
 const AES67_OUTPUT_DEFAULT_TTL: i64 = 32;
+const AES67_OUTPUT_DEFAULT_QOS_DSCP: i64 = 46; // DSCP EF (Expedited Forwarding) per AES67 standard
 
 /// AES67 Input block builder.
 pub struct AES67InputBuilder;
@@ -502,6 +503,17 @@ impl BlockBuilder for AES67OutputBuilder {
             })
             .unwrap_or(AES67_OUTPUT_DEFAULT_TTL as i32);
 
+        let qos_dscp = properties
+            .get("qos_dscp")
+            .and_then(|v| {
+                if let PropertyValue::Int(i) = v {
+                    Some(*i as i32)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(AES67_OUTPUT_DEFAULT_QOS_DSCP as i32);
+
         // Validate packet size fits within AES67/Ethernet MTU constraints
         // RTP payload must fit in ~1440 bytes (1500 MTU - 20 IP - 8 UDP - 12 RTP - ~20 safety margin)
         // Payload size = framecount × channels × bytes_per_sample
@@ -585,6 +597,7 @@ impl BlockBuilder for AES67OutputBuilder {
             .property("async", false)
             .property("sync", true)
             .property("ttl-mc", ttl)
+            .property("qos-dscp", qos_dscp)
             .property(
                 "processing-deadline",
                 gst::ClockTime::from_nseconds(processing_deadline_ns),
@@ -600,8 +613,8 @@ impl BlockBuilder for AES67OutputBuilder {
         }
 
         debug!(
-            "AES67 Output [{}]: Multicast TTL set to {}",
-            instance_id, ttl
+            "AES67 Output [{}]: Multicast TTL={}, QoS DSCP={}",
+            instance_id, ttl, qos_dscp
         );
 
         let udpsink = udpsink_builder
@@ -875,6 +888,18 @@ fn aes67_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "ttl".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
+                name: "qos_dscp".to_string(),
+                label: "QoS DSCP".to_string(),
+                description: "DSCP value for QoS marking. Default 46 (EF - Expedited Forwarding) per AES67/Dante/Ravenna standards. Set to -1 to disable.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(AES67_OUTPUT_DEFAULT_QOS_DSCP)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "qos_dscp".to_string(),
                     transform: None,
                 },
             },
