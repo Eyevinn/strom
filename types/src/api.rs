@@ -348,6 +348,54 @@ pub struct FlowStatsResponse {
 }
 
 // ============================================================================
+// Debug Info API Types
+// ============================================================================
+
+/// Debug information for a running flow's pipeline.
+/// Provides detailed timing, clock, and state information for troubleshooting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct FlowDebugInfo {
+    /// The flow ID
+    #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+    pub flow_id: FlowId,
+    /// The flow name
+    pub flow_name: String,
+    /// Pipeline state (Playing, Paused, etc.)
+    pub pipeline_state: Option<String>,
+    /// Whether this is a live pipeline
+    pub is_live: Option<bool>,
+
+    // -- Timing information --
+    /// Pipeline base_time in nanoseconds (reference point for running_time calculation)
+    pub base_time_ns: Option<u64>,
+    /// Current clock time in nanoseconds
+    pub clock_time_ns: Option<u64>,
+    /// Current running time in nanoseconds (clock_time - base_time)
+    pub running_time_ns: Option<u64>,
+    /// Human-readable running_time (how long the pipeline has been playing)
+    pub running_time_formatted: Option<String>,
+
+    // -- Clock information --
+    /// Clock type being used (e.g., "PTP", "Monotonic", "Realtime")
+    pub clock_type: Option<String>,
+    /// PTP grandmaster clock ID (only if using PTP clock)
+    pub ptp_grandmaster: Option<String>,
+
+    // -- Latency information --
+    /// Minimum pipeline latency in nanoseconds
+    pub latency_min_ns: Option<u64>,
+    /// Maximum pipeline latency in nanoseconds
+    pub latency_max_ns: Option<u64>,
+    /// Human-readable latency
+    pub latency_formatted: Option<String>,
+
+    // -- Pipeline structure --
+    /// Number of elements in the pipeline
+    pub element_count: Option<u32>,
+}
+
+// ============================================================================
 // gst-launch API Types
 // ============================================================================
 

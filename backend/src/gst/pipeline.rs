@@ -1592,10 +1592,11 @@ impl PipelineManager {
                     PipelineError::StateChange(format!("Failed to create PTP clock: {}", e))
                 })?;
 
-                // Set the PTP clock as the pipeline's clock
-                self.pipeline.set_clock(Some(&ptp_clock)).map_err(|e| {
-                    PipelineError::StateChange(format!("Failed to set PTP clock: {}", e))
-                })?;
+                // Force the pipeline to use the PTP clock (use_clock, not set_clock!)
+                // use_clock() forces the pipeline to always use this clock, even if
+                // other clock providers are added. set_clock() would allow the pipeline
+                // to auto-select a different clock during state changes.
+                self.pipeline.use_clock(Some(&ptp_clock));
 
                 // Log initial PTP state
                 let synced = ptp_clock.is_synced();
@@ -1698,20 +1699,15 @@ impl PipelineManager {
             }
             GStreamerClockType::Monotonic => {
                 info!("Using Monotonic clock for pipeline '{}'", self.flow_name);
-                // Create a system monotonic clock
                 let clock = gst::SystemClock::obtain();
-                self.pipeline.set_clock(Some(&clock)).map_err(|e| {
-                    PipelineError::StateChange(format!("Failed to set monotonic clock: {}", e))
-                })?;
+                self.pipeline.use_clock(Some(&clock));
             }
             GStreamerClockType::Realtime => {
                 info!("Using Realtime clock for pipeline '{}'", self.flow_name);
                 // For realtime, we'd need a custom clock implementation
                 // For now, use the system clock which is close to realtime
                 let clock = gst::SystemClock::obtain();
-                self.pipeline.set_clock(Some(&clock)).map_err(|e| {
-                    PipelineError::StateChange(format!("Failed to set realtime clock: {}", e))
-                })?;
+                self.pipeline.use_clock(Some(&clock));
             }
             GStreamerClockType::Ntp => {
                 info!(
@@ -1721,9 +1717,7 @@ impl PipelineManager {
                 // NTP clock implementation would require additional setup
                 // For now, fall back to system clock
                 let clock = gst::SystemClock::obtain();
-                self.pipeline.set_clock(Some(&clock)).map_err(|e| {
-                    PipelineError::StateChange(format!("Failed to set clock: {}", e))
-                })?;
+                self.pipeline.use_clock(Some(&clock));
                 warn!("NTP clock not yet fully implemented, using system clock");
             }
         }
@@ -2055,6 +2049,100 @@ impl PipelineManager {
             .debug_to_dot_data(gst::DebugGraphDetails::all());
 
         dot.to_string()
+    }
+
+    /// Get debug information about the pipeline.
+    /// Provides timing, clock, latency, and state information for troubleshooting.
+    pub fn get_debug_info(&self) -> strom_types::api::FlowDebugInfo {
+        use gst::prelude::*;
+        use strom_types::api::FlowDebugInfo;
+        use strom_types::flow::GStreamerClockType;
+
+        // Get pipeline clock
+        let clock = self.pipeline.clock();
+
+        // Get base_time and clock_time
+        let base_time = self.pipeline.base_time();
+        let clock_time: Option<gst::ClockTime> = clock.as_ref().map(|c| c.time());
+
+        // Calculate running_time = clock_time - base_time
+        let running_time: Option<gst::ClockTime> = match (clock_time, base_time) {
+            (Some(ct), Some(bt)) if ct >= bt => Some(ct - bt),
+            _ => None,
+        };
+
+        // Get clock type description
+        let clock_type = match self.properties.clock_type {
+            GStreamerClockType::Ptp => Some("PTP".to_string()),
+            GStreamerClockType::Monotonic => Some("Monotonic".to_string()),
+            GStreamerClockType::Realtime => Some("Realtime".to_string()),
+            GStreamerClockType::Ntp => Some("NTP".to_string()),
+        };
+
+        // Get PTP grandmaster if using PTP clock
+        let ptp_grandmaster = self.ptp_clock.as_ref().and_then(|ptp| {
+            let gm_id = ptp.grandmaster_clock_id();
+            if gm_id != 0 {
+                Some(strom_types::flow::PtpInfo::format_clock_id(gm_id))
+            } else {
+                None
+            }
+        });
+
+        // Get pipeline state
+        let (_, state, _) = self.pipeline.state(gst::ClockTime::ZERO);
+        let pipeline_state = Some(format!("{:?}", state));
+
+        // Query latency
+        let (latency_min_ns, latency_max_ns, is_live) = self
+            .query_latency()
+            .map(|(min, max, live)| (Some(min), Some(max), Some(live)))
+            .unwrap_or((None, None, None));
+
+        // Count elements
+        let element_count = Some(self.elements.len() as u32);
+
+        // Helper to format nanoseconds as duration
+        fn format_duration(ns: u64) -> String {
+            let secs = ns as f64 / 1_000_000_000.0;
+            if secs < 1.0 {
+                format!("{:.2} ms", secs * 1000.0)
+            } else if secs < 60.0 {
+                format!("{:.3} s", secs)
+            } else if secs < 3600.0 {
+                format!("{:.1} min", secs / 60.0)
+            } else {
+                format!("{:.2} h", secs / 3600.0)
+            }
+        }
+
+        // Format latency
+        let latency_formatted = match (latency_min_ns, latency_max_ns) {
+            (Some(min), Some(max)) if min == max => Some(format_duration(min)),
+            (Some(min), Some(max)) => Some(format!(
+                "{} - {}",
+                format_duration(min),
+                format_duration(max)
+            )),
+            _ => None,
+        };
+
+        FlowDebugInfo {
+            flow_id: self.flow_id,
+            flow_name: self.flow_name.clone(),
+            pipeline_state,
+            is_live,
+            base_time_ns: base_time.map(|t| t.nseconds()),
+            clock_time_ns: clock_time.map(|t| t.nseconds()),
+            running_time_ns: running_time.map(|t| t.nseconds()),
+            running_time_formatted: running_time.map(|t| format_duration(t.nseconds())),
+            clock_type,
+            ptp_grandmaster,
+            latency_min_ns,
+            latency_max_ns,
+            latency_formatted,
+            element_count,
+        }
     }
 
     /// Update a property on a live element in the pipeline.
