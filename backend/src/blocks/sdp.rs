@@ -277,22 +277,28 @@ pub fn generate_aes67_output_sdp(
 
     // Generate RAVENNA extensions if enabled
     // Session-level: clock-domain (before m= line)
-    // Media-level: framecount, sync-time (after m= line, with repeated ts-refclk/mediaclk)
-    let (session_ravenna, media_ravenna) = if ravenna_extensions {
+    // Media-level: framecount, sync-time (after m= line)
+    //
+    // Note: ts-refclk and mediaclk are ALWAYS included at media level per RFC 7273,
+    // as many AES67 devices (including Lawo/RAVENNA) expect them there.
+    let session_ravenna = if ravenna_extensions {
         let ptp_domain = flow_properties.and_then(|p| p.ptp_domain).unwrap_or(0);
+        format!("a=clock-domain:PTPv2 {}\r\n", ptp_domain)
+    } else {
+        String::new()
+    };
 
+    // Always include ts-refclk and mediaclk at media level for AES67 interoperability
+    let media_clock_attrs = format!("{}\r\n{}\r\n", ts_refclk, mediaclk);
+
+    // Additional RAVENNA-specific media attributes
+    let media_ravenna = if ravenna_extensions {
         // Calculate framecount from ptime and sample rate
         // framecount = ptime_ms * sample_rate / 1000
         let framecount = (ptime * sample_rate as f64 / 1000.0).round() as i32;
-
-        let session = format!("a=clock-domain:PTPv2 {}\r\n", ptp_domain);
-        let media = format!(
-            "{}\r\n{}\r\na=sync-time:0\r\na=framecount:{}\r\n",
-            ts_refclk, mediaclk, framecount
-        );
-        (session, media)
+        format!("a=sync-time:0\r\na=framecount:{}\r\n", framecount)
     } else {
-        (String::new(), String::new())
+        String::new()
     };
 
     // Generate SDP
@@ -316,7 +322,8 @@ t=0 0\r
 {}m=audio {} RTP/AVP {}\r
 {}a=rtpmap:{} {}/{}/{}\r
 a=ptime:{}\r
-{}",
+a=recvonly\r
+{}{}",
         session_id,
         session_id,
         origin_ip,
@@ -333,6 +340,7 @@ a=ptime:{}\r
         sample_rate,
         channels,
         ptime,
+        media_clock_attrs,
         media_ravenna
     )
 }
