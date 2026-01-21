@@ -772,11 +772,22 @@ pub async fn get_block_sdp(
         .map(|v| matches!(v, strom_types::PropertyValue::Bool(true)))
         .unwrap_or(false);
 
+    // Get session name: use custom if set, otherwise fall back to flow name
+    let session_name = block
+        .properties
+        .get("session_name")
+        .and_then(|v| match v {
+            strom_types::PropertyValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| flow.name.clone());
+    let session_name = crate::blocks::sdp::sanitize_session_name(&session_name);
+
     // Generate SDP (using default sample rate and channels since we can't query caps here)
     // Pass flow properties for correct clock signaling (RFC 7273)
     let sdp = crate::blocks::sdp::generate_aes67_output_sdp(
         block,
-        &flow.name,
+        &session_name,
         None,
         None,
         Some(&flow.properties),

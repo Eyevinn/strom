@@ -655,11 +655,22 @@ impl AppState {
                     .map(|v| matches!(v, PropertyValue::Bool(true)))
                     .unwrap_or(false);
 
+                // Get session name: use custom if set, otherwise fall back to flow name
+                let session_name = block
+                    .properties
+                    .get("session_name")
+                    .and_then(|v| match v {
+                        PropertyValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| flow.name.clone());
+                let session_name = crate::blocks::sdp::sanitize_session_name(&session_name);
+
                 // Generate SDP with flow properties for correct clock signaling (RFC 7273)
                 // Include PTP clock identity if available for accurate ts-refclk attribute
                 let sdp = crate::blocks::sdp::generate_aes67_output_sdp(
                     block,
-                    &flow.name,
+                    &session_name,
                     sample_rate,
                     channels,
                     Some(&flow.properties),

@@ -798,6 +798,18 @@ fn aes67_output_definition() -> BlockDefinition {
         category: "Outputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
+                name: "session_name".to_string(),
+                label: "Session Name".to_string(),
+                description: "Custom SDP session name (s= field). Leave empty to use flow name.".to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "session_name".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
                 name: "bit_depth".to_string(),
                 label: "Bit Depth".to_string(),
                 description: "Audio sample bit depth (16 or 24 bit PCM)".to_string(),
