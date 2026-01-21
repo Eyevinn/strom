@@ -15,6 +15,27 @@ pub fn convert_clock_id_to_sdp_format(clock_id: &str) -> String {
     clock_id.replace(':', "-").to_lowercase()
 }
 
+/// Sanitize a session name for use in SDP s= field per RFC 4566.
+///
+/// RFC 4566 requirements:
+/// - MUST NOT be empty (returns " " if empty)
+/// - MUST NOT contain NUL (0x00), CR (0x0D), or LF (0x0A)
+/// - Should be UTF-8 encoded (ISO-10646)
+pub fn sanitize_session_name(name: &str) -> String {
+    // Remove forbidden characters: NUL, CR, LF
+    let sanitized: String = name
+        .chars()
+        .filter(|c| *c != '\0' && *c != '\r' && *c != '\n')
+        .collect();
+
+    // MUST NOT be empty - use single space if empty
+    if sanitized.trim().is_empty() {
+        " ".to_string()
+    } else {
+        sanitized
+    }
+}
+
 /// Extract audio format details from GStreamer caps.
 /// Returns (sample_rate, channels) or None if the caps don't contain audio info.
 pub fn parse_audio_caps(caps: &gst::Caps) -> Option<(i32, i32)> {
@@ -277,22 +298,28 @@ pub fn generate_aes67_output_sdp(
 
     // Generate RAVENNA extensions if enabled
     // Session-level: clock-domain (before m= line)
-    // Media-level: framecount, sync-time (after m= line, with repeated ts-refclk/mediaclk)
-    let (session_ravenna, media_ravenna) = if ravenna_extensions {
+    // Media-level: framecount, sync-time (after m= line)
+    //
+    // Note: ts-refclk and mediaclk are ALWAYS included at media level per RFC 7273,
+    // as many AES67 devices (including Lawo/RAVENNA) expect them there.
+    let session_ravenna = if ravenna_extensions {
         let ptp_domain = flow_properties.and_then(|p| p.ptp_domain).unwrap_or(0);
+        format!("a=clock-domain:PTPv2 {}\r\n", ptp_domain)
+    } else {
+        String::new()
+    };
 
+    // Always include ts-refclk and mediaclk at media level for AES67 interoperability
+    let media_clock_attrs = format!("{}\r\n{}\r\n", ts_refclk, mediaclk);
+
+    // Additional RAVENNA-specific media attributes
+    let media_ravenna = if ravenna_extensions {
         // Calculate framecount from ptime and sample rate
         // framecount = ptime_ms * sample_rate / 1000
         let framecount = (ptime * sample_rate as f64 / 1000.0).round() as i32;
-
-        let session = format!("a=clock-domain:PTPv2 {}\r\n", ptp_domain);
-        let media = format!(
-            "{}\r\n{}\r\na=sync-time:0\r\na=framecount:{}\r\n",
-            ts_refclk, mediaclk, framecount
-        );
-        (session, media)
+        format!("a=sync-time:0\r\na=framecount:{}\r\n", framecount)
     } else {
-        (String::new(), String::new())
+        String::new()
     };
 
     // Generate SDP
@@ -316,7 +343,8 @@ t=0 0\r
 {}m=audio {} RTP/AVP {}\r
 {}a=rtpmap:{} {}/{}/{}\r
 a=ptime:{}\r
-{}",
+a=recvonly\r
+{}{}",
         session_id,
         session_id,
         origin_ip,
@@ -333,6 +361,7 @@ a=ptime:{}\r
         sample_rate,
         channels,
         ptime,
+        media_clock_attrs,
         media_ravenna
     )
 }
@@ -1051,5 +1080,34 @@ mod tests {
             convert_clock_id_to_sdp_format("00:00:00:FF:FE:00:00:00"),
             "00-00-00-ff-fe-00-00-00"
         );
+    }
+
+    #[test]
+    fn test_sanitize_session_name_normal() {
+        assert_eq!(sanitize_session_name("My Stream"), "My Stream");
+        assert_eq!(sanitize_session_name("AES67 Output 1"), "AES67 Output 1");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_removes_forbidden_chars() {
+        // Remove NUL, CR, LF
+        assert_eq!(sanitize_session_name("Test\0Name"), "TestName");
+        assert_eq!(sanitize_session_name("Test\rName"), "TestName");
+        assert_eq!(sanitize_session_name("Test\nName"), "TestName");
+        assert_eq!(sanitize_session_name("Test\r\nName"), "TestName");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_empty_returns_space() {
+        // RFC 4566: s= MUST NOT be empty
+        assert_eq!(sanitize_session_name(""), " ");
+        assert_eq!(sanitize_session_name("   "), " ");
+        assert_eq!(sanitize_session_name("\n\r"), " ");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_preserves_unicode() {
+        assert_eq!(sanitize_session_name("Ström Audio"), "Ström Audio");
+        assert_eq!(sanitize_session_name("日本語"), "日本語");
     }
 }

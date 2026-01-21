@@ -62,6 +62,7 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        sap_multicast_addresses: Vec<String>,
     ) -> Self {
         let events = EventBroadcaster::default();
         Self {
@@ -75,7 +76,7 @@ impl AppState {
                 block_registry: BlockRegistry::new(blocks_path),
                 system_monitor: SystemMonitor::new(),
                 channel_registry: ChannelRegistry::new(),
-                discovery: DiscoveryService::new(events),
+                discovery: DiscoveryService::new(events, sap_multicast_addresses.clone()),
                 ptp_monitor: PtpMonitor::new(),
                 media_path: media_path.into(),
                 whep_registry: WhepRegistry::new(),
@@ -138,12 +139,14 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        sap_multicast_addresses: Vec<String>,
     ) -> Self {
         Self::new(
             JsonFileStorage::new(flows_path),
             blocks_path,
             media_path,
             ice_servers,
+            sap_multicast_addresses,
         )
     }
 
@@ -156,13 +159,20 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        sap_multicast_addresses: Vec<String>,
     ) -> anyhow::Result<Self> {
         use crate::storage::PostgresStorage;
 
         let storage = PostgresStorage::new(database_url).await?;
         storage.run_migrations().await?;
 
-        Ok(Self::new(storage, blocks_path, media_path, ice_servers))
+        Ok(Self::new(
+            storage,
+            blocks_path,
+            media_path,
+            ice_servers,
+            sap_multicast_addresses,
+        ))
     }
 
     /// Load flows from storage into memory.
@@ -655,11 +665,22 @@ impl AppState {
                     .map(|v| matches!(v, PropertyValue::Bool(true)))
                     .unwrap_or(false);
 
+                // Get session name: use custom if set, otherwise fall back to flow name
+                let session_name = block
+                    .properties
+                    .get("session_name")
+                    .and_then(|v| match v {
+                        PropertyValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| flow.name.clone());
+                let session_name = crate::blocks::sdp::sanitize_session_name(&session_name);
+
                 // Generate SDP with flow properties for correct clock signaling (RFC 7273)
                 // Include PTP clock identity if available for accurate ts-refclk attribute
                 let sdp = crate::blocks::sdp::generate_aes67_output_sdp(
                     block,
-                    &flow.name,
+                    &session_name,
                     sample_rate,
                     channels,
                     Some(&flow.properties),
@@ -679,10 +700,30 @@ impl AppState {
                     info!("Stored SDP for block {}: {} bytes", block.id, sdp.len());
                 }
 
+                // Get interface from block properties for SAP announcement filtering
+                let announce_interface = block.properties.get("interface").and_then(|v| {
+                    if let PropertyValue::String(s) = v {
+                        if !s.is_empty() {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(iface) = announce_interface {
+                    info!(
+                        "AES67 output block {} will announce SAP only on interface {}",
+                        block.id, iface
+                    );
+                }
+
                 // Register stream for SAP announcement
                 self.inner
                     .discovery
-                    .announce_stream(*id, &block.id, &sdp)
+                    .announce_stream(*id, &block.id, &sdp, announce_interface)
                     .await;
             }
 
@@ -1115,6 +1156,7 @@ impl Default for AppState {
             "blocks.json",
             "media",
             vec!["stun:stun.l.google.com:19302".to_string()],
+            vec!["239.255.255.255".to_string(), "224.2.127.254".to_string()],
         )
     }
 }

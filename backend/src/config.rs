@@ -18,6 +18,8 @@ struct ConfigFile {
     storage: StorageConfig,
     #[serde(default)]
     logging: LoggingConfig,
+    #[serde(default)]
+    discovery: DiscoveryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -72,6 +74,29 @@ struct LoggingConfig {
     log_level: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DiscoveryConfig {
+    /// SAP multicast addresses to listen on and announce to.
+    /// Default: ["239.255.255.255", "224.2.127.254"] (AES67 + global scope)
+    #[serde(default = "default_sap_multicast_addresses")]
+    sap_multicast_addresses: Vec<String>,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            sap_multicast_addresses: default_sap_multicast_addresses(),
+        }
+    }
+}
+
+fn default_sap_multicast_addresses() -> Vec<String> {
+    vec![
+        "239.255.255.255".to_string(), // AES67/Dante (admin-scoped)
+        "224.2.127.254".to_string(),   // Global scope (broadcast)
+    ]
+}
+
 fn default_port() -> u16 {
     strom_types::DEFAULT_PORT
 }
@@ -97,6 +122,9 @@ pub struct Config {
     /// ICE servers for WebRTC NAT traversal (STUN/TURN)
     /// Format: stun:host:port or turn:user:pass@host:port
     pub ice_servers: Vec<String>,
+    /// SAP multicast addresses to listen on and announce to.
+    /// Default: ["239.255.255.255", "224.2.127.254"] (AES67 + global scope)
+    pub sap_multicast_addresses: Vec<String>,
 }
 
 impl Config {
@@ -130,6 +158,7 @@ impl Config {
             },
             storage: StorageConfig::default(),
             logging: LoggingConfig::default(),
+            discovery: DiscoveryConfig::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -211,6 +240,7 @@ impl Config {
             log_file: config_file.logging.log_file,
             log_level: config_file.logging.log_level,
             ice_servers: normalize_ice_servers(config_file.server.ice_servers),
+            sap_multicast_addresses: config_file.discovery.sap_multicast_addresses,
         })
     }
 
@@ -243,6 +273,7 @@ impl Config {
             log_file: None,
             log_level: None,
             ice_servers: default_ice_servers(),
+            sap_multicast_addresses: default_sap_multicast_addresses(),
         })
     }
 
@@ -287,6 +318,7 @@ impl Default for Config {
                 log_file: None,
                 log_level: None,
                 ice_servers: default_ice_servers(),
+                sap_multicast_addresses: default_sap_multicast_addresses(),
             }
         })
     }

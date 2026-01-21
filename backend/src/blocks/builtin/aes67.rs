@@ -16,7 +16,45 @@ const AES67_INPUT_DEFAULT_TIMEOUT_MS: i64 = 0;
 
 // AES67 Output defaults
 const AES67_OUTPUT_DEFAULT_TTL: i64 = 32;
-const AES67_OUTPUT_DEFAULT_QOS_DSCP: i64 = 46; // DSCP EF (Expedited Forwarding) per AES67 standard
+const AES67_OUTPUT_DEFAULT_QOS_DSCP: &str = "0x2E"; // DSCP EF (Expedited Forwarding) per AES67 standard
+
+/// Parse DSCP value from string (hex like "0x2E" or "disabled")
+/// Returns the integer value for udpsink qos-dscp property
+fn parse_dscp_value(s: &str) -> i32 {
+    match s.trim() {
+        "disabled" => -1,
+        s if s.starts_with("0x") || s.starts_with("0X") => {
+            i32::from_str_radix(&s[2..], 16).unwrap_or(-1)
+        }
+        s => s.parse().unwrap_or(-1),
+    }
+}
+
+/// Get DSCP enum values for the block property dropdown
+fn dscp_enum_values() -> Vec<EnumValue> {
+    vec![
+        EnumValue {
+            value: "0x2E".to_string(),
+            label: Some("EF (0x2E) - Expedited Forwarding".to_string()),
+        },
+        EnumValue {
+            value: "0x22".to_string(),
+            label: Some("AF41 (0x22) - Multimedia Streaming".to_string()),
+        },
+        EnumValue {
+            value: "0x1A".to_string(),
+            label: Some("AF31 (0x1A) - Multimedia Conferencing".to_string()),
+        },
+        EnumValue {
+            value: "0x00".to_string(),
+            label: Some("Best Effort (0x00)".to_string()),
+        },
+        EnumValue {
+            value: "disabled".to_string(),
+            label: Some("Disabled".to_string()),
+        },
+    ]
+}
 
 /// AES67 Input block builder.
 pub struct AES67InputBuilder;
@@ -505,14 +543,12 @@ impl BlockBuilder for AES67OutputBuilder {
 
         let qos_dscp = properties
             .get("qos_dscp")
-            .and_then(|v| {
-                if let PropertyValue::Int(i) = v {
-                    Some(*i as i32)
-                } else {
-                    None
-                }
+            .map(|v| match v {
+                PropertyValue::String(s) => parse_dscp_value(s),
+                PropertyValue::Int(i) => *i as i32, // Backwards compatibility
+                _ => parse_dscp_value(AES67_OUTPUT_DEFAULT_QOS_DSCP),
             })
-            .unwrap_or(AES67_OUTPUT_DEFAULT_QOS_DSCP as i32);
+            .unwrap_or_else(|| parse_dscp_value(AES67_OUTPUT_DEFAULT_QOS_DSCP));
 
         // Validate packet size fits within AES67/Ethernet MTU constraints
         // RTP payload must fit in ~1440 bytes (1500 MTU - 20 IP - 8 UDP - 12 RTP - ~20 safety margin)
@@ -762,6 +798,18 @@ fn aes67_output_definition() -> BlockDefinition {
         category: "Outputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
+                name: "session_name".to_string(),
+                label: "Session Name".to_string(),
+                description: "Custom SDP session name (s= field). Leave empty to use flow name.".to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "session_name".to_string(),
+                    transform: None,
+                },
+            },
+            ExposedProperty {
                 name: "bit_depth".to_string(),
                 label: "Bit Depth".to_string(),
                 description: "Audio sample bit depth (16 or 24 bit PCM)".to_string(),
@@ -894,9 +942,11 @@ fn aes67_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "qos_dscp".to_string(),
                 label: "QoS DSCP".to_string(),
-                description: "DSCP value for QoS marking. Default 46 (EF - Expedited Forwarding) per AES67/Dante/Ravenna standards. Set to -1 to disable.".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(AES67_OUTPUT_DEFAULT_QOS_DSCP)),
+                description: "DSCP value for QoS marking. EF (Expedited Forwarding) is recommended for AES67/Dante/Ravenna.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: dscp_enum_values(),
+                },
+                default_value: Some(PropertyValue::String(AES67_OUTPUT_DEFAULT_QOS_DSCP.to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "qos_dscp".to_string(),
@@ -963,6 +1013,43 @@ fn write_temp_file(content: &str) -> Result<String, BlockBuildError> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_dscp_value_hex() {
+        // Standard DSCP values in hex
+        assert_eq!(parse_dscp_value("0x2E"), 46); // EF
+        assert_eq!(parse_dscp_value("0x22"), 34); // AF41
+        assert_eq!(parse_dscp_value("0x1A"), 26); // AF31
+        assert_eq!(parse_dscp_value("0x00"), 0); // Best Effort
+    }
+
+    #[test]
+    fn test_parse_dscp_value_hex_uppercase() {
+        assert_eq!(parse_dscp_value("0X2E"), 46);
+        assert_eq!(parse_dscp_value("0X22"), 34);
+    }
+
+    #[test]
+    fn test_parse_dscp_value_disabled() {
+        assert_eq!(parse_dscp_value("disabled"), -1);
+        assert_eq!(parse_dscp_value(" disabled "), -1); // with whitespace
+    }
+
+    #[test]
+    fn test_parse_dscp_value_decimal_fallback() {
+        assert_eq!(parse_dscp_value("46"), 46);
+        assert_eq!(parse_dscp_value("34"), 34);
+        assert_eq!(parse_dscp_value("0"), 0);
+    }
+
+    #[test]
+    fn test_parse_dscp_value_invalid() {
+        assert_eq!(parse_dscp_value("invalid"), -1);
+        assert_eq!(parse_dscp_value("0xZZ"), -1);
+        assert_eq!(parse_dscp_value(""), -1);
+    }
+
     /// Helper to calculate max ptime for given configuration
     fn max_ptime_ms(channels: i64, bit_depth: i64, sample_rate: i64) -> f64 {
         const MAX_RTP_PAYLOAD_BYTES: i64 = 1440;

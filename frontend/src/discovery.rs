@@ -20,6 +20,9 @@ pub struct DiscoveredStream {
     pub first_seen_secs_ago: u64,
     pub last_seen_secs_ago: u64,
     pub ttl_secs: u64,
+    /// Network interface the stream was discovered on (for SAP).
+    #[serde(default)]
+    pub received_on_interface: Option<String>,
 }
 
 /// Response from the discovery API for an announced stream.
@@ -29,6 +32,9 @@ pub struct AnnouncedStream {
     pub block_id: String,
     pub origin_ip: String,
     pub sdp: String,
+    /// Network interface the stream is announced on (None = all interfaces).
+    #[serde(default)]
+    pub announce_interface: Option<String>,
 }
 
 /// Type of selected stream
@@ -58,8 +64,10 @@ pub struct DiscoveryPage {
     pub last_fetch: instant::Instant,
     /// Whether we're currently loading
     pub loading: bool,
-    /// Pending SDP for creating a new flow (set when "Create Flow" is clicked)
-    pub pending_create_flow_sdp: Option<String>,
+    /// Pending data for creating a new flow (SDP, interface) (set when "Create Flow" is clicked)
+    pub pending_create_flow: Option<(String, Option<String>)>,
+    /// Pending flow ID to navigate to (set when "Go to Flow" is clicked)
+    pub pending_go_to_flow: Option<String>,
     /// Error message if any
     pub error: Option<String>,
     /// Search filter
@@ -72,6 +80,8 @@ pub struct DiscoveryPage {
     pub selected_tab: StreamTab,
     /// Request to focus the search box on next frame
     focus_search_requested: bool,
+    /// Whether to show our own announced streams in the discovered list
+    pub show_own_streams: bool,
 }
 
 impl DiscoveryPage {
@@ -81,13 +91,15 @@ impl DiscoveryPage {
             announced_streams: Vec::new(),
             last_fetch: instant::Instant::now(),
             loading: false,
-            pending_create_flow_sdp: None,
+            pending_create_flow: None,
+            pending_go_to_flow: None,
             error: None,
             search_filter: String::new(),
             selected_stream: None,
             selected_stream_sdp: None,
             selected_tab: StreamTab::default(),
             focus_search_requested: false,
+            show_own_streams: false,
         }
     }
 
@@ -155,16 +167,52 @@ impl DiscoveryPage {
     ) {
         let filter = self.search_filter.to_lowercase();
 
+        // Build set of our own multicast addresses for filtering
+        let own_multicast_addrs: std::collections::HashSet<String> = self
+            .announced_streams
+            .iter()
+            .filter_map(|s| {
+                // Parse multicast address from SDP c= line
+                s.sdp
+                    .lines()
+                    .find(|l| l.starts_with("c="))
+                    .and_then(|l| l.split_whitespace().last())
+                    .map(|addr| addr.split('/').next().unwrap_or(addr).to_string())
+            })
+            .collect();
+
+        // Build set of our own origin IPs for filtering
+        let own_origin_ips: std::collections::HashSet<String> = self
+            .announced_streams
+            .iter()
+            .map(|s| s.origin_ip.clone())
+            .collect();
+
+        // Helper to check if a stream is our own
+        let is_own_stream = |stream: &DiscoveredStream| -> bool {
+            own_multicast_addrs.contains(&stream.multicast_address)
+                || own_origin_ips.contains(&stream.origin_host)
+        };
+
+        // Count discovered streams (respecting "show own" filter)
+        let discovered_count = self
+            .discovered_streams
+            .iter()
+            .filter(|stream| self.show_own_streams || !is_own_stream(stream))
+            .count();
+
         // Tabs for Discovered / Announced
         ui.horizontal(|ui| {
             if ui
                 .selectable_label(
                     self.selected_tab == StreamTab::Discovered,
-                    format!("Discovered ({})", self.discovered_streams.len()),
+                    format!("Discovered ({})", discovered_count),
                 )
                 .clicked()
             {
                 self.selected_tab = StreamTab::Discovered;
+                self.selected_stream = None;
+                self.selected_stream_sdp = None;
             }
             if ui
                 .selectable_label(
@@ -174,6 +222,13 @@ impl DiscoveryPage {
                 .clicked()
             {
                 self.selected_tab = StreamTab::Announced;
+                self.selected_stream = None;
+                self.selected_stream_sdp = None;
+            }
+            // Only show "Show own" checkbox on Discovered tab
+            if self.selected_tab == StreamTab::Discovered {
+                ui.separator();
+                ui.checkbox(&mut self.show_own_streams, "Show own");
             }
         });
 
@@ -203,10 +258,16 @@ impl DiscoveryPage {
                         .discovered_streams
                         .iter()
                         .filter(|stream| {
-                            filter.is_empty()
+                            // Filter by search text
+                            let matches_filter = filter.is_empty()
                                 || stream.name.to_lowercase().contains(&filter)
                                 || stream.origin_host.to_lowercase().contains(&filter)
-                                || stream.multicast_address.contains(&filter)
+                                || stream.multicast_address.contains(&filter);
+
+                            // Filter out own streams if checkbox is unchecked
+                            let show_stream = self.show_own_streams || !is_own_stream(stream);
+
+                            matches_filter && show_stream
                         })
                         .map(|stream| {
                             (
@@ -337,151 +398,181 @@ impl DiscoveryPage {
             return;
         };
 
-        match selected {
-            SelectedStream::Discovered(stream_id) => {
-                let Some(stream) = self.discovered_streams.iter().find(|s| &s.id == stream_id)
-                else {
-                    ui.label("Stream not found");
-                    return;
-                };
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                match selected {
+                    SelectedStream::Discovered(stream_id) => {
+                        let Some(stream) =
+                            self.discovered_streams.iter().find(|s| &s.id == stream_id)
+                        else {
+                            ui.label("Stream not found");
+                            return;
+                        };
 
-                // Clone the data we need to avoid borrow issues
-                let stream = stream.clone();
+                        // Clone the data we need to avoid borrow issues
+                        let stream = stream.clone();
 
-                egui::Grid::new("stream_details_grid")
-                    .num_columns(2)
-                    .spacing([10.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Type:");
-                        ui.colored_label(Color32::from_rgb(100, 150, 255), "[RX] Discovered");
-                        ui.end_row();
+                        egui::Grid::new("stream_details_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Type:");
+                                ui.colored_label(
+                                    Color32::from_rgb(100, 150, 255),
+                                    "[RX] Discovered",
+                                );
+                                ui.end_row();
 
-                        ui.label("Name:");
-                        ui.label(&stream.name);
-                        ui.end_row();
+                                ui.label("Name:");
+                                ui.label(&stream.name);
+                                ui.end_row();
 
-                        ui.label("Source:");
-                        ui.label(&stream.source);
-                        ui.end_row();
+                                ui.label("Source:");
+                                ui.label(&stream.source);
+                                ui.end_row();
 
-                        ui.label("Multicast:");
-                        ui.label(format!("{}:{}", stream.multicast_address, stream.port));
-                        ui.end_row();
+                                ui.label("Multicast:");
+                                ui.label(format!("{}:{}", stream.multicast_address, stream.port));
+                                ui.end_row();
 
-                        ui.label("Format:");
-                        ui.label(format!(
-                            "{}ch {}Hz {}",
-                            stream.channels, stream.sample_rate, stream.encoding
-                        ));
-                        ui.end_row();
+                                ui.label("Format:");
+                                ui.label(format!(
+                                    "{}ch {}Hz {}",
+                                    stream.channels, stream.sample_rate, stream.encoding
+                                ));
+                                ui.end_row();
 
-                        ui.label("Origin:");
-                        ui.label(&stream.origin_host);
-                        ui.end_row();
+                                ui.label("Origin:");
+                                ui.label(&stream.origin_host);
+                                ui.end_row();
 
-                        ui.label("First seen:");
-                        ui.label(format!("{}s ago", stream.first_seen_secs_ago));
-                        ui.end_row();
+                                if let Some(iface) = &stream.received_on_interface {
+                                    ui.label("Interface:");
+                                    ui.label(iface);
+                                    ui.end_row();
+                                }
 
-                        ui.label("Last seen:");
-                        ui.label(format!("{}s ago", stream.last_seen_secs_ago));
-                        ui.end_row();
+                                ui.label("First seen:");
+                                ui.label(format!("{}s ago", stream.first_seen_secs_ago));
+                                ui.end_row();
 
-                        ui.label("TTL:");
-                        ui.label(format!("{}s", stream.ttl_secs));
-                        ui.end_row();
-                    });
-            }
-            SelectedStream::Announced(flow_id, block_id) => {
-                let Some(stream) = self
-                    .announced_streams
-                    .iter()
-                    .find(|s| &s.flow_id == flow_id && &s.block_id == block_id)
-                else {
-                    ui.label("Stream not found");
-                    return;
-                };
+                                ui.label("Last seen:");
+                                ui.label(format!("{}s ago", stream.last_seen_secs_ago));
+                                ui.end_row();
 
-                // Parse details from SDP
-                let stream_name = stream
-                    .sdp
-                    .lines()
-                    .find(|l| l.starts_with("s="))
-                    .map(|l| l.trim_start_matches("s="))
-                    .unwrap_or("Unknown");
+                                ui.label("TTL:");
+                                ui.label(format!("{}s", stream.ttl_secs));
+                                ui.end_row();
+                            });
+                    }
+                    SelectedStream::Announced(flow_id, block_id) => {
+                        let Some(stream) = self
+                            .announced_streams
+                            .iter()
+                            .find(|s| &s.flow_id == flow_id && &s.block_id == block_id)
+                        else {
+                            ui.label("Stream not found");
+                            return;
+                        };
 
-                let multicast = stream
-                    .sdp
-                    .lines()
-                    .find(|l| l.starts_with("c="))
-                    .and_then(|l| l.split_whitespace().last())
-                    .map(|s| s.split('/').next().unwrap_or(s))
-                    .unwrap_or("?");
+                        // Parse details from SDP
+                        let stream_name = stream
+                            .sdp
+                            .lines()
+                            .find(|l| l.starts_with("s="))
+                            .map(|l| l.trim_start_matches("s="))
+                            .unwrap_or("Unknown");
 
-                let port = stream
-                    .sdp
-                    .lines()
-                    .find(|l| l.starts_with("m=audio"))
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .unwrap_or("?");
+                        let multicast = stream
+                            .sdp
+                            .lines()
+                            .find(|l| l.starts_with("c="))
+                            .and_then(|l| l.split_whitespace().last())
+                            .map(|s| s.split('/').next().unwrap_or(s))
+                            .unwrap_or("?");
 
-                egui::Grid::new("stream_details_grid")
-                    .num_columns(2)
-                    .spacing([10.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Type:");
-                        ui.colored_label(Color32::from_rgb(100, 200, 100), "[TX] Announced");
-                        ui.end_row();
+                        let port = stream
+                            .sdp
+                            .lines()
+                            .find(|l| l.starts_with("m=audio"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("?");
 
-                        ui.label("Name:");
-                        ui.label(stream_name);
-                        ui.end_row();
+                        egui::Grid::new("stream_details_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Type:");
+                                ui.colored_label(
+                                    Color32::from_rgb(100, 200, 100),
+                                    "[TX] Announced",
+                                );
+                                ui.end_row();
 
-                        ui.label("Multicast:");
-                        ui.label(format!("{}:{}", multicast, port));
-                        ui.end_row();
+                                ui.label("Name:");
+                                ui.label(stream_name);
+                                ui.end_row();
 
-                        ui.label("Origin:");
-                        ui.label(&stream.origin_ip);
-                        ui.end_row();
+                                ui.label("Multicast:");
+                                ui.label(format!("{}:{}", multicast, port));
+                                ui.end_row();
 
-                        ui.label("Flow ID:");
-                        ui.label(&stream.flow_id);
-                        ui.end_row();
+                                ui.label("Origin:");
+                                ui.label(&stream.origin_ip);
+                                ui.end_row();
 
-                        ui.label("Block ID:");
-                        ui.label(&stream.block_id);
-                        ui.end_row();
-                    });
-            }
-        }
+                                ui.label("Interface:");
+                                ui.label(stream.announce_interface.as_deref().unwrap_or("all"));
+                                ui.end_row();
 
-        ui.separator();
-        ui.label("SDP:");
+                                ui.label("Flow ID:");
+                                ui.horizontal(|ui| {
+                                    ui.label(&stream.flow_id);
+                                    if ui.small_button("Go to flow").clicked() {
+                                        self.pending_go_to_flow = Some(stream.flow_id.clone());
+                                    }
+                                });
+                                ui.end_row();
 
-        if let Some(sdp) = &self.selected_stream_sdp {
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
+                                ui.label("Block ID:");
+                                ui.label(&stream.block_id);
+                                ui.end_row();
+                            });
+                    }
+                }
+
+                ui.separator();
+                ui.label("SDP:");
+
+                if let Some(sdp) = &self.selected_stream_sdp {
                     ui.add(
                         egui::TextEdit::multiline(&mut sdp.as_str())
                             .font(egui::TextStyle::Monospace)
                             .desired_width(f32::INFINITY),
                     );
-                });
 
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("📋 Copy SDP").clicked() {
-                    ui.ctx().copy_text(sdp.clone());
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("📋 Copy SDP").clicked() {
+                            ui.ctx().copy_text(sdp.clone());
+                        }
+                        // Only show "Create Flow" for discovered streams (not announced)
+                        if let SelectedStream::Discovered(stream_id) = selected {
+                            if ui.button("➕ Create Flow").clicked() {
+                                let interface = self
+                                    .discovered_streams
+                                    .iter()
+                                    .find(|s| &s.id == stream_id)
+                                    .and_then(|s| s.received_on_interface.clone());
+                                self.pending_create_flow = Some((sdp.clone(), interface));
+                            }
+                        }
+                    });
+                } else {
+                    ui.label("Loading SDP...");
                 }
-                if ui.button("➕ Create Flow").clicked() {
-                    self.pending_create_flow_sdp = Some(sdp.clone());
-                }
-            });
-        } else {
-            ui.label("Loading SDP...");
-        }
+            }); // ScrollArea
     }
 
     /// Refresh streams from API.
@@ -576,9 +667,14 @@ impl DiscoveryPage {
         }
     }
 
-    /// Take pending create flow SDP if set.
-    pub fn take_pending_create_flow_sdp(&mut self) -> Option<String> {
-        self.pending_create_flow_sdp.take()
+    /// Take pending create flow data (SDP, interface) if set.
+    pub fn take_pending_create_flow(&mut self) -> Option<(String, Option<String>)> {
+        self.pending_create_flow.take()
+    }
+
+    /// Take pending go to flow ID if set.
+    pub fn take_pending_go_to_flow(&mut self) -> Option<String> {
+        self.pending_go_to_flow.take()
     }
 }
 

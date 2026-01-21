@@ -12,11 +12,35 @@ pub const DEFAULT_STREAM_TTL: Duration = Duration::from_secs(300);
 /// SAP announcement interval (30 seconds - good balance per RFC 2974).
 pub const SAP_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// SAP multicast address.
-pub const SAP_MULTICAST_ADDR: &str = "224.2.127.254";
+/// SAP multicast address for AES67/Dante (admin-scoped 239.x.x.x sessions).
+pub const SAP_MULTICAST_ADDR_AES67: &str = "239.255.255.255";
+
+/// SAP multicast address for global scope (224.2.128.0 - 224.2.255.255 sessions).
+pub const SAP_MULTICAST_ADDR_GLOBAL: &str = "224.2.127.254";
+
+/// All SAP multicast addresses to listen on.
+pub const SAP_MULTICAST_ADDRS: &[&str] = &[SAP_MULTICAST_ADDR_AES67, SAP_MULTICAST_ADDR_GLOBAL];
 
 /// SAP port.
 pub const SAP_PORT: u16 = 9875;
+
+/// Determine the correct SAP multicast address for announcing a stream
+/// based on the stream's multicast address (per RFC 2974).
+pub fn sap_address_for_stream(stream_multicast_addr: &std::net::IpAddr) -> &'static str {
+    if let std::net::IpAddr::V4(addr) = stream_multicast_addr {
+        let octets = addr.octets();
+        // Admin-scoped: 239.0.0.0/8 -> use 239.255.255.255
+        if octets[0] == 239 {
+            return SAP_MULTICAST_ADDR_AES67;
+        }
+        // Global scope: 224.2.128.0 - 224.2.255.255 -> use 224.2.127.254
+        if octets[0] == 224 && octets[1] == 2 && octets[2] >= 128 {
+            return SAP_MULTICAST_ADDR_GLOBAL;
+        }
+    }
+    // Default to AES67 address (most common in pro audio)
+    SAP_MULTICAST_ADDR_AES67
+}
 
 /// RTSP server port for mDNS/RAVENNA announcements.
 pub const RTSP_PORT: u16 = 8554;
@@ -50,6 +74,8 @@ pub struct DiscoveredStream {
     pub last_seen: Instant,
     /// Time-to-live for this stream.
     pub ttl: Duration,
+    /// Network interface the announcement was received on (for SAP).
+    pub received_on_interface: Option<String>,
 }
 
 impl DiscoveredStream {
@@ -73,6 +99,7 @@ impl DiscoveredStream {
             first_seen_secs_ago: self.first_seen.elapsed().as_secs(),
             last_seen_secs_ago: self.last_seen.elapsed().as_secs(),
             ttl_secs: self.ttl.as_secs(),
+            received_on_interface: self.received_on_interface.clone(),
         }
     }
 }
@@ -92,6 +119,9 @@ pub struct DiscoveredStreamResponse {
     pub first_seen_secs_ago: u64,
     pub last_seen_secs_ago: u64,
     pub ttl_secs: u64,
+    /// Network interface the stream was discovered on (for SAP).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_on_interface: Option<String>,
 }
 
 /// How a stream was discovered.
@@ -187,10 +217,14 @@ pub struct AnnouncedStream {
     pub sdp: String,
     /// Local IP address for origin field.
     pub origin_ip: IpAddr,
+    /// Stream's multicast address (from SDP c= line), used to determine SAP announce address.
+    pub multicast_address: IpAddr,
     /// When this was last announced.
     pub last_announced: Instant,
     /// mDNS service fullname (if announced via mDNS).
     pub mdns_fullname: Option<String>,
+    /// Network interface to announce on (None = all interfaces).
+    pub announce_interface: Option<String>,
 }
 
 impl AnnouncedStream {

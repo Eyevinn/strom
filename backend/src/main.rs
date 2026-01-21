@@ -385,6 +385,7 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
                 &config.blocks_path,
                 &config.media_path,
                 config.ice_servers.clone(),
+                config.sap_multicast_addresses.clone(),
             )
             .await
             .expect("Failed to initialize PostgreSQL storage")
@@ -395,6 +396,7 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
                 &config.blocks_path,
                 &config.media_path,
                 config.ice_servers.clone(),
+                config.sap_multicast_addresses.clone(),
             )
         };
         state
@@ -545,6 +547,7 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
             &config.blocks_path,
             &config.media_path,
             config.ice_servers.clone(),
+            config.sap_multicast_addresses.clone(),
         )
         .await?
     } else {
@@ -554,6 +557,7 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
             &config.blocks_path,
             &config.media_path,
             config.ice_servers.clone(),
+            config.sap_multicast_addresses.clone(),
         )
     };
     state.load_from_storage().await?;

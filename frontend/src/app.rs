@@ -1599,30 +1599,41 @@ impl StromApp {
     }
 
     /// Create a new flow from an SDP (from discovered stream).
-    fn create_flow_from_sdp(&mut self, sdp: String, ctx: &Context) {
+    /// If interface is provided, it will be set on the AES67 Input block.
+    fn create_flow_from_sdp(&mut self, sdp: String, interface: Option<String>, ctx: &Context) {
         use strom_types::{block::Position, BlockInstance, PropertyValue};
 
-        // Parse stream name from SDP
+        // Parse stream name from SDP (before moving sdp)
         let stream_name = sdp
             .lines()
             .find(|l| l.starts_with("s="))
-            .map(|l| l.trim_start_matches("s=").trim())
-            .unwrap_or("Discovered Stream");
+            .map(|l| l.trim_start_matches("s=").trim().to_string())
+            .unwrap_or_else(|| "Discovered Stream".to_string());
 
         let flow_name = format!("AES67 - {}", stream_name);
 
         // Create flow with AES67 Input block
         let mut new_flow = Flow::new(flow_name.clone());
 
+        // Build properties - SDP and optionally interface
+        let mut properties =
+            std::collections::HashMap::from([("SDP".to_string(), PropertyValue::String(sdp))]);
+
+        // Add interface if discovered
+        if let Some(iface) = interface {
+            tracing::info!(
+                "Setting interface '{}' on AES67 Input block (discovered from SAP)",
+                iface
+            );
+            properties.insert("interface".to_string(), PropertyValue::String(iface));
+        }
+
         // Create AES67 Input block instance
         let block = BlockInstance {
             id: uuid::Uuid::new_v4().to_string(),
             block_definition_id: "builtin.aes67_input".to_string(),
-            name: Some(stream_name.to_string()),
-            properties: std::collections::HashMap::from([(
-                "SDP".to_string(),
-                PropertyValue::String(sdp),
-            )]),
+            name: Some(stream_name.clone()),
+            properties,
             position: Position { x: 100.0, y: 100.0 },
             runtime_data: None,
             computed_external_pads: None,
@@ -6192,8 +6203,17 @@ impl eframe::App for StromApp {
                 });
 
                 // Handle pending create flow from discovery
-                if let Some(sdp) = self.discovery_page.take_pending_create_flow_sdp() {
-                    self.create_flow_from_sdp(sdp, ctx);
+                if let Some((sdp, interface)) = self.discovery_page.take_pending_create_flow() {
+                    self.create_flow_from_sdp(sdp, interface, ctx);
+                }
+
+                // Handle pending go to flow from discovery
+                if let Some(flow_id_str) = self.discovery_page.take_pending_go_to_flow() {
+                    if let Ok(uuid) = uuid::Uuid::parse_str(&flow_id_str) {
+                        let flow_id = strom_types::FlowId::from(uuid);
+                        self.select_flow(flow_id);
+                        self.current_page = AppPage::Flows;
+                    }
                 }
             }
             AppPage::Clocks => {
