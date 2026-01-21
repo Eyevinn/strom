@@ -1,0 +1,124 @@
+name: Build gstcefsrc Plugin
+
+# Manual workflow to build the gstcefsrc GStreamer plugin for HTML overlay rendering.
+# Builds CEF-based plugin for multiple platforms and uploads to GitHub releases.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cef_version:
+        description: 'CEF version (e.g., 138.0.56+gd28ed8a+chromium-138.0.7204.301)'
+        required: true
+        default: '138.0.56+gd28ed8a+chromium-138.0.7204.301'
+        type: string
+      upload_to_release:
+        description: 'Upload artifacts to GitHub release'
+        required: false
+        type: boolean
+        default: true
+      release_tag:
+        description: 'Release tag for artifacts (default: gstcefsrc-deps)'
+        required: false
+        type: string
+        default: 'gstcefsrc-deps'
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    name: Build gstcefsrc (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+            docker_platform: linux/amd64
+            arch: amd64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            docker_platform: linux/arm64
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract CEF short version
+        id: cef
+        run: |
+          # Extract just the version number (e.g., 138.0.56)
+          CEF_SHORT=$(echo "${{ inputs.cef_version }}" | cut -d'+' -f1)
+          echo "short_version=$CEF_SHORT" >> $GITHUB_OUTPUT
+          echo "CEF short version: $CEF_SHORT"
+
+      - name: Build gstcefsrc Docker image
+        run: |
+          docker build \
+            --platform ${{ matrix.docker_platform }} \
+            --build-arg CEF_VERSION="${{ inputs.cef_version }}" \
+            -t gstcefsrc-builder:${{ matrix.arch }} \
+            -f docker/gstcefsrc/Dockerfile \
+            docker/gstcefsrc/
+
+      - name: Extract built artifacts
+        run: |
+          mkdir -p output
+          docker run --rm \
+            -v $(pwd)/output:/export \
+            gstcefsrc-builder:${{ matrix.arch }}
+
+          echo "=== Built artifacts ==="
+          find output -type f -name "*.so" -o -name "gstcefsubprocess" | head -10
+          du -sh output/
+
+      - name: Create artifact archive
+        run: |
+          cd output
+          ARCHIVE_NAME="gstcefsrc-${{ steps.cef.outputs.short_version }}-${{ matrix.platform }}.tar.gz"
+          tar -czvf "../$ARCHIVE_NAME" .
+          cd ..
+          ls -lh "$ARCHIVE_NAME"
+          echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
+        id: archive
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gstcefsrc-${{ steps.cef.outputs.short_version }}-${{ matrix.platform }}
+          path: ${{ steps.archive.outputs.archive_name }}
+          retention-days: 30
+
+      - name: Upload to GitHub Release
+        if: inputs.upload_to_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: "gstcefsrc Dependencies"
+          # Don't update body on subsequent uploads (append_body not supported, so we skip body after first)
+          files: ${{ steps.archive.outputs.archive_name }}
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  summary:
+    name: Build Summary
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "## gstcefsrc Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**CEF Version:** \`${{ inputs.cef_version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| linux-amd64 | ${{ needs.build.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| linux-arm64 | ${{ needs.build.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
