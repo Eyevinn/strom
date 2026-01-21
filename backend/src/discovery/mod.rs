@@ -248,7 +248,16 @@ impl DiscoveryService {
     }
 
     /// Register a stream for SAP and mDNS announcement.
-    pub async fn announce_stream(&self, flow_id: FlowId, block_id: &str, sdp: &str) {
+    ///
+    /// If `interface` is Some, SAP announcements will only be sent on the
+    /// interface with a matching IP address. If None, SAP is sent on all interfaces.
+    pub async fn announce_stream(
+        &self,
+        flow_id: FlowId,
+        block_id: &str,
+        sdp: &str,
+        interface: Option<&str>,
+    ) {
         let key = AnnouncedStream::key(&flow_id, block_id);
         let msg_id_hash = types::generate_msg_id_hash(&flow_id, block_id);
 
@@ -262,6 +271,9 @@ impl DiscoveryService {
             .map(|info| info.name)
             .unwrap_or_else(|| format!("strom-{}-{}", flow_id, block_id));
 
+        // Resolve interface name to IP address for filtering
+        let announce_interface = interface.map(|s| s.to_string());
+
         let mut stream = AnnouncedStream {
             flow_id,
             block_id: block_id.to_string(),
@@ -270,6 +282,7 @@ impl DiscoveryService {
             origin_ip: local_ip,
             last_announced: Instant::now() - SAP_ANNOUNCE_INTERVAL, // Force immediate announcement
             mdns_fullname: None,
+            announce_interface: announce_interface.clone(),
         };
 
         info!(
@@ -367,6 +380,28 @@ impl DiscoveryService {
         }
 
         ips
+    }
+
+    /// Get the IPv4 address for a specific network interface.
+    fn get_interface_ip(interface_name: &str) -> Option<Ipv4Addr> {
+        use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+
+        if let Ok(interfaces) = NetworkInterface::show() {
+            for iface in interfaces {
+                if iface.name == interface_name {
+                    for addr in iface.addr {
+                        if let network_interface::Addr::V4(v4) = addr {
+                            let ip = v4.ip;
+                            if !ip.is_loopback() && !ip.is_link_local() {
+                                return Some(ip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Create a multicast socket for receiving SAP announcements.
@@ -495,17 +530,77 @@ impl DiscoveryService {
 
         let session_id = packet.session_id();
 
+        // Try to determine which interface the packet was received on
+        // by matching the source address to local interface subnets
+        let received_interface = Self::find_interface_for_address(&addr);
+
         if packet.is_deletion() {
             // Handle deletion
             Self::handle_deletion(&session_id, inner).await;
         } else {
             // Handle announcement
-            Self::handle_announcement(packet, inner).await;
+            Self::handle_announcement(packet, received_interface, inner).await;
         }
     }
 
+    /// Find which local interface would be used to reach a given address.
+    /// Returns the interface name if found.
+    fn find_interface_for_address(addr: &SocketAddr) -> Option<String> {
+        use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+
+        let target_ip = match addr.ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => return None, // IPv6 not supported yet
+        };
+
+        if let Ok(interfaces) = NetworkInterface::show() {
+            for iface in interfaces {
+                // Skip loopback
+                if iface.name.starts_with("lo") {
+                    continue;
+                }
+
+                for net_addr in &iface.addr {
+                    if let network_interface::Addr::V4(v4) = net_addr {
+                        let ip = v4.ip;
+                        let netmask = v4.netmask.unwrap_or(Ipv4Addr::new(255, 255, 255, 0));
+
+                        // Check if target IP is in the same subnet as this interface
+                        if Self::is_same_subnet(&target_ip, &ip, &netmask) {
+                            debug!(
+                                "SAP packet from {} matched to interface {} ({})",
+                                addr, iface.name, ip
+                            );
+                            return Some(iface.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Check if two IPs are in the same subnet given a netmask.
+    fn is_same_subnet(ip1: &Ipv4Addr, ip2: &Ipv4Addr, netmask: &Ipv4Addr) -> bool {
+        let ip1_octets = ip1.octets();
+        let ip2_octets = ip2.octets();
+        let mask_octets = netmask.octets();
+
+        for i in 0..4 {
+            if (ip1_octets[i] & mask_octets[i]) != (ip2_octets[i] & mask_octets[i]) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Handle a SAP announcement.
-    async fn handle_announcement(packet: SapPacket, inner: &Arc<DiscoveryServiceInner>) {
+    async fn handle_announcement(
+        packet: SapPacket,
+        received_interface: Option<String>,
+        inner: &Arc<DiscoveryServiceInner>,
+    ) {
         // Parse SDP
         let sdp_info = match SdpStreamInfo::parse(&packet.payload) {
             Some(info) => info,
@@ -521,6 +616,13 @@ impl DiscoveryService {
         let mut streams = inner.discovered_streams.write().await;
 
         let is_new = !streams.contains_key(&stream_id);
+
+        // Preserve existing interface if updating, or use newly detected one
+        let interface = received_interface.or_else(|| {
+            streams
+                .get(&stream_id)
+                .and_then(|s| s.received_on_interface.clone())
+        });
 
         let stream = DiscoveredStream {
             id: stream_id.clone(),
@@ -541,6 +643,7 @@ impl DiscoveryService {
             first_seen: streams.get(&stream_id).map(|s| s.first_seen).unwrap_or(now),
             last_seen: now,
             ttl: DEFAULT_STREAM_TTL,
+            received_on_interface: interface,
         };
 
         streams.insert(stream_id.clone(), stream);
@@ -616,7 +719,9 @@ impl DiscoveryService {
         }
     }
 
-    /// Send announcements for streams that are due (on ALL interfaces).
+    /// Send announcements for streams that are due.
+    /// If a stream has announce_interface set, only sends on that interface.
+    /// Otherwise sends on all interfaces.
     async fn send_pending_announcements(inner: &Arc<DiscoveryServiceInner>) {
         let sockets = inner.send_sockets.read().await;
         if sockets.is_empty() {
@@ -631,9 +736,22 @@ impl DiscoveryService {
                 let packet =
                     SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, false);
 
-                // Send on ALL interfaces
+                // Resolve interface name to IP if specified
+                let target_ip = stream
+                    .announce_interface
+                    .as_ref()
+                    .and_then(|iface| Self::get_interface_ip(iface));
+
+                // Send on matching interface(s)
                 let mut any_success = false;
                 for (ip, socket) in sockets.iter() {
+                    // Skip if interface is specified and doesn't match
+                    if let Some(target) = target_ip {
+                        if *ip != target {
+                            continue;
+                        }
+                    }
+
                     match socket.send_to(&packet, dest).await {
                         Ok(_) => {
                             debug!(
@@ -653,12 +771,19 @@ impl DiscoveryService {
 
                 if any_success {
                     stream.last_announced = Instant::now();
+                } else if target_ip.is_some() {
+                    warn!(
+                        "No matching socket found for interface {:?} when announcing {}:{}",
+                        stream.announce_interface, stream.flow_id, stream.block_id
+                    );
                 }
             }
         }
     }
 
-    /// Send a single announcement on ALL interfaces.
+    /// Send a single announcement.
+    /// If stream has announce_interface set, only sends on that interface.
+    /// Otherwise sends on all interfaces.
     async fn send_announcement(&self, stream: &AnnouncedStream) -> Result<(), SapError> {
         let sockets = self.inner.send_sockets.read().await;
 
@@ -669,8 +794,28 @@ impl DiscoveryService {
         let dest = SocketAddr::new(IpAddr::V4(SAP_MULTICAST_ADDR.parse().unwrap()), SAP_PORT);
         let packet = SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, false);
 
+        // Resolve interface name to IP if specified
+        let target_ip = stream
+            .announce_interface
+            .as_ref()
+            .and_then(|iface| Self::get_interface_ip(iface));
+
+        if let Some(iface) = &stream.announce_interface {
+            info!(
+                "SAP announcement for {}:{} will be sent on interface {} (IP: {:?})",
+                stream.flow_id, stream.block_id, iface, target_ip
+            );
+        }
+
         let mut any_success = false;
         for (ip, socket) in sockets.iter() {
+            // Skip if interface is specified and doesn't match
+            if let Some(target) = target_ip {
+                if *ip != target {
+                    continue;
+                }
+            }
+
             match socket.send_to(&packet, dest).await {
                 Ok(_) => {
                     debug!(
@@ -691,11 +836,19 @@ impl DiscoveryService {
         if any_success {
             Ok(())
         } else {
+            if target_ip.is_some() {
+                warn!(
+                    "No matching socket found for interface {:?}",
+                    stream.announce_interface
+                );
+            }
             Err(SapError::InvalidPayload)
         }
     }
 
-    /// Send a deletion message for a stream on ALL interfaces.
+    /// Send a deletion message for a stream.
+    /// If stream has announce_interface set, only sends on that interface.
+    /// Otherwise sends on all interfaces.
     async fn send_deletion(&self, stream: &AnnouncedStream) -> Result<(), SapError> {
         let sockets = self.inner.send_sockets.read().await;
 
@@ -706,8 +859,21 @@ impl DiscoveryService {
         let dest = SocketAddr::new(IpAddr::V4(SAP_MULTICAST_ADDR.parse().unwrap()), SAP_PORT);
         let packet = SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, true);
 
+        // Resolve interface name to IP if specified
+        let target_ip = stream
+            .announce_interface
+            .as_ref()
+            .and_then(|iface| Self::get_interface_ip(iface));
+
         let mut any_success = false;
         for (ip, socket) in sockets.iter() {
+            // Skip if interface is specified and doesn't match
+            if let Some(target) = target_ip {
+                if *ip != target {
+                    continue;
+                }
+            }
+
             match socket.send_to(&packet, dest).await {
                 Ok(_) => {
                     info!(
@@ -950,6 +1116,10 @@ impl DiscoveryService {
                             streams.len()
                         );
 
+                        // Try to determine interface from source IP
+                        let received_interface =
+                            Self::find_interface_for_address(&SocketAddr::new(ip, port));
+
                         let stream = DiscoveredStream {
                             id: stream_id.clone(),
                             name: sdp_info.name.clone(),
@@ -974,6 +1144,7 @@ impl DiscoveryService {
                                 .unwrap_or(now),
                             last_seen: now,
                             ttl: DEFAULT_STREAM_TTL,
+                            received_on_interface: received_interface,
                         };
 
                         streams.insert(stream_id.clone(), stream);

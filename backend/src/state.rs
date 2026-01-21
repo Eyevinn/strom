@@ -690,10 +690,30 @@ impl AppState {
                     info!("Stored SDP for block {}: {} bytes", block.id, sdp.len());
                 }
 
+                // Get interface from block properties for SAP announcement filtering
+                let announce_interface = block.properties.get("interface").and_then(|v| {
+                    if let PropertyValue::String(s) = v {
+                        if !s.is_empty() {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(iface) = announce_interface {
+                    info!(
+                        "AES67 output block {} will announce SAP only on interface {}",
+                        block.id, iface
+                    );
+                }
+
                 // Register stream for SAP announcement
                 self.inner
                     .discovery
-                    .announce_stream(*id, &block.id, &sdp)
+                    .announce_stream(*id, &block.id, &sdp, announce_interface)
                     .await;
             }
 

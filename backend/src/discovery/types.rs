@@ -50,6 +50,8 @@ pub struct DiscoveredStream {
     pub last_seen: Instant,
     /// Time-to-live for this stream.
     pub ttl: Duration,
+    /// Network interface the announcement was received on (for SAP).
+    pub received_on_interface: Option<String>,
 }
 
 impl DiscoveredStream {
@@ -73,6 +75,7 @@ impl DiscoveredStream {
             first_seen_secs_ago: self.first_seen.elapsed().as_secs(),
             last_seen_secs_ago: self.last_seen.elapsed().as_secs(),
             ttl_secs: self.ttl.as_secs(),
+            received_on_interface: self.received_on_interface.clone(),
         }
     }
 }
@@ -92,6 +95,9 @@ pub struct DiscoveredStreamResponse {
     pub first_seen_secs_ago: u64,
     pub last_seen_secs_ago: u64,
     pub ttl_secs: u64,
+    /// Network interface the stream was discovered on (for SAP).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_on_interface: Option<String>,
 }
 
 /// How a stream was discovered.
@@ -191,6 +197,8 @@ pub struct AnnouncedStream {
     pub last_announced: Instant,
     /// mDNS service fullname (if announced via mDNS).
     pub mdns_fullname: Option<String>,
+    /// Network interface to announce on (None = all interfaces).
+    pub announce_interface: Option<String>,
 }
 
 impl AnnouncedStream {

@@ -81,6 +81,9 @@ pub struct AnnouncedStreamResponse {
     pub block_id: String,
     pub origin_ip: String,
     pub sdp: String,
+    /// Network interface the stream is announced on (None = all interfaces).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub announce_interface: Option<String>,
 }
 
 /// List streams being announced by this Strom instance.
@@ -101,6 +104,7 @@ pub async fn list_announced(State(state): State<AppState>) -> impl IntoResponse 
             block_id: s.block_id.clone(),
             origin_ip: s.origin_ip.to_string(),
             sdp: s.sdp.clone(),
+            announce_interface: s.announce_interface.clone(),
         })
         .collect();
     Json(responses)
