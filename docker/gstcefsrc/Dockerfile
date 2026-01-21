@@ -3,8 +3,8 @@
 # This builds the cefsrc/cefdemux/cefbin GStreamer elements for HTML overlay rendering.
 # Supports both amd64 and arm64 architectures.
 #
-# Uses Ubuntu 24.04 for build stability. GStreamer maintains backward ABI compatibility,
-# so plugins built against GStreamer 1.24 work with newer versions (1.26+).
+# Uses Ubuntu 25.10 (Questing) to match the strom base image. This ensures the CEF
+# binaries are compatible with the same glibc and system libraries.
 #
 # Usage:
 #   docker build --platform linux/amd64 -t gstcefsrc-builder:amd64 .
@@ -18,7 +18,7 @@ ARG TARGETARCH
 # Latest stable CEF version (as of 2025-01)
 ARG CEF_VERSION=138.0.56+gd28ed8a+chromium-138.0.7204.301
 
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:questing AS builder
 
 ARG TARGETARCH
 ARG CEF_VERSION
@@ -110,7 +110,7 @@ RUN mkdir -p /output/lib/gstreamer-1.0 && \
     find /output -type f -exec ls -lh {} \;
 
 # Final stage - minimal image for artifact extraction
-FROM ubuntu:24.04 AS export
+FROM ubuntu:questing AS export
 
 COPY --from=builder /output /output
 
