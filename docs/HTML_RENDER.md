@@ -54,6 +54,67 @@ curl -X POST http://localhost:8080/api/gst-launch/parse \
   -d '{"pipeline": "cefsrc url=https://example.com ! videoconvert ! fakesink"}'
 ```
 
+### Example: Transparent Overlay (Data URL)
+
+This example renders a bouncing ball on a transparent background, useful for overlays:
+
+```json
+{
+  "id": "00000000-0000-0000-0000-000000000002",
+  "name": "ball overlay",
+  "elements": [
+    {
+      "id": "cefsrc_0",
+      "element_type": "cefsrc",
+      "properties": {
+        "url": "data:text/html,<style>body{margin:0;background:transparent}</style><canvas id=c></canvas><script>const c=document.getElementById('c'),x=c.getContext('2d');c.width=1920;c.height=1080;let bx=100,by=100,dx=4,dy=3;function d(){x.clearRect(0,0,1920,1080);x.beginPath();x.arc(bx,by,60,0,Math.PI*2);x.fillStyle='%23ff6b6b';x.fill();x.strokeStyle='%23fff';x.lineWidth=4;x.stroke();bx+=dx;by+=dy;if(bx>1860||bx<60)dx=-dx;if(by>1020||by<60)dy=-dy;requestAnimationFrame(d)}d()</script>"
+      },
+      "position": [100.0, 200.0]
+    }
+  ],
+  "blocks": [],
+  "links": []
+}
+```
+
+### Example: Import Flow JSON
+
+Import this flow via the UI (Import → JSON) to render a live wind map with WHEP output:
+
+```json
+{
+  "id": "00000000-0000-0000-0000-000000000001",
+  "name": "html render",
+  "elements": [
+    {
+      "id": "cefsrc_0",
+      "element_type": "cefsrc",
+      "properties": {
+        "url": "https://earth.nullschool.net/#current/wind/surface/level/orthographic=13.01,61.06,1232"
+      },
+      "position": [100.0, 200.0]
+    }
+  ],
+  "blocks": [
+    {
+      "id": "whep_0",
+      "block_definition_id": "builtin.whep_output",
+      "properties": {
+        "mode": "video",
+        "endpoint_id": "html render"
+      },
+      "position": {"x": 400.0, "y": 200.0}
+    }
+  ],
+  "links": [
+    {
+      "from": "cefsrc_0:src",
+      "to": "whep_0:video_in"
+    }
+  ]
+}
+```
+
 ## How It Works
 
 The `strom-full` Docker image includes:
