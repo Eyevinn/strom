@@ -24,6 +24,7 @@
 - **Native or Web** - Run as desktop app or web service
 - **MCP Integration** - Control pipelines with AI assistants (Claude, etc.)
 - **CI/CD** - Automated testing, building, and releases for Linux, Windows, macOS, and ARM64
+- **HTML Rendering** - Render web pages as video sources using CEF (via `strom-full` Docker image)
 
 ### Advanced Capabilities
 
@@ -146,7 +147,12 @@ Pre-built multi-architecture images (amd64/arm64):
 ```bash
 docker pull eyevinntechnology/strom:latest
 docker pull eyevinntechnology/strom:0.3.8  # Specific version
+
+# Extended image with HTML rendering support (CEF/Chromium)
+docker pull eyevinntechnology/strom-full:latest
 ```
+
+The `strom-full` image includes gstcefsrc for rendering web pages as video sources. See [docs/HTML_RENDER.md](docs/HTML_RENDER.md) for details.
 
 CI/CD automatically runs tests, builds binaries for Linux/Windows/macOS, and publishes Docker images on release.
 
@@ -253,6 +259,7 @@ Create reusable components from element groups:
 - **DeckLink Video/Audio Input** - Captures from Blackmagic DeckLink SDI/HDMI cards
 - **NDI Input** - Receives video/audio via NewTek NDI protocol
 - **Inter Input** - Subscribes to streams from other flows (inter-pipeline routing)
+- **HTML Source** - Renders web pages as video using CEF/Chromium (`strom-full` image, see [docs/HTML_RENDER.md](docs/HTML_RENDER.md))
 
 **Outputs:**
 - **AES67 Output** - Sends AES67/Ravenna audio via RTP multicast with SDP generation
@@ -340,6 +347,7 @@ strom/
 ├── mcp-server/     # AI assistant integration
 └── docs/           # Documentation
     ├── BLOCKS_IMPLEMENTATION.md
+    ├── HTML_RENDER.md
     ├── CONTRIBUTING.md
     └── CHANGELOG.md
 ```
