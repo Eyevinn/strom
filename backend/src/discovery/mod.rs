@@ -24,8 +24,10 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
 pub use types::{
-    AnnouncedStream, AudioEncoding, DiscoveredStream, DiscoveredStreamResponse, DiscoverySource,
-    SdpStreamInfo, DEFAULT_STREAM_TTL, SAP_ANNOUNCE_INTERVAL, SAP_MULTICAST_ADDR, SAP_PORT,
+    sap_address_for_stream, AnnouncedStream, AudioEncoding, DiscoveredStream,
+    DiscoveredStreamResponse, DiscoverySource, SdpStreamInfo, DEFAULT_STREAM_TTL,
+    SAP_ANNOUNCE_INTERVAL, SAP_MULTICAST_ADDRS, SAP_MULTICAST_ADDR_AES67,
+    SAP_MULTICAST_ADDR_GLOBAL, SAP_PORT,
 };
 
 use mdns::MdnsDiscovery;
@@ -53,11 +55,23 @@ struct DiscoveryServiceInner {
     local_ip: RwLock<Option<IpAddr>>,
     /// mDNS discovery service.
     mdns_discovery: RwLock<Option<Arc<MdnsDiscovery>>>,
+    /// Configured SAP multicast addresses to listen on.
+    sap_multicast_addresses: Vec<String>,
 }
 
 impl DiscoveryService {
     /// Create a new discovery service.
-    pub fn new(events: EventBroadcaster) -> Self {
+    ///
+    /// `sap_multicast_addresses` specifies which SAP multicast groups to join.
+    /// Default is both AES67 (239.255.255.255) and global scope (224.2.127.254).
+    pub fn new(events: EventBroadcaster, sap_multicast_addresses: Vec<String>) -> Self {
+        // Use defaults if empty
+        let sap_addrs = if sap_multicast_addresses.is_empty() {
+            SAP_MULTICAST_ADDRS.iter().map(|s| s.to_string()).collect()
+        } else {
+            sap_multicast_addresses
+        };
+
         Self {
             inner: Arc::new(DiscoveryServiceInner {
                 discovered_streams: RwLock::new(HashMap::new()),
@@ -67,6 +81,7 @@ impl DiscoveryService {
                 send_sockets: RwLock::new(Vec::new()),
                 local_ip: RwLock::new(None),
                 mdns_discovery: RwLock::new(None),
+                sap_multicast_addresses: sap_addrs,
             }),
         }
     }
@@ -100,7 +115,9 @@ impl DiscoveryService {
         info!("Using local IP for SAP announcements: {}", local_ip);
 
         // Create multicast socket for receiving
-        let recv_socket = match Self::create_multicast_socket() {
+        let sap_addresses = self.inner.sap_multicast_addresses.clone();
+        info!("SAP multicast addresses configured: {:?}", sap_addresses);
+        let recv_socket = match Self::create_multicast_socket(&sap_addresses) {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to create multicast socket: {}", e);
@@ -266,10 +283,16 @@ impl DiscoveryService {
             ip.unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)))
         };
 
-        // Parse SDP to get stream name for mDNS instance name
-        let stream_name = SdpStreamInfo::parse(sdp)
-            .map(|info| info.name)
+        // Parse SDP to get stream name and multicast address
+        let sdp_info = SdpStreamInfo::parse(sdp);
+        let stream_name = sdp_info
+            .as_ref()
+            .map(|info| info.name.clone())
             .unwrap_or_else(|| format!("strom-{}-{}", flow_id, block_id));
+        let multicast_address = sdp_info
+            .as_ref()
+            .and_then(|info| info.connection_address)
+            .unwrap_or(IpAddr::V4(Ipv4Addr::new(239, 255, 255, 255)));
 
         // Resolve interface name to IP address for filtering
         let announce_interface = interface.map(|s| s.to_string());
@@ -280,6 +303,7 @@ impl DiscoveryService {
             msg_id_hash,
             sdp: sdp.to_string(),
             origin_ip: local_ip,
+            multicast_address,
             last_announced: Instant::now() - SAP_ANNOUNCE_INTERVAL, // Force immediate announcement
             mdns_fullname: None,
             announce_interface: announce_interface.clone(),
@@ -405,8 +429,8 @@ impl DiscoveryService {
     }
 
     /// Create a multicast socket for receiving SAP announcements.
-    /// Joins the multicast group on ALL interfaces.
-    fn create_multicast_socket() -> std::io::Result<UdpSocket> {
+    /// Joins configured SAP multicast groups on ALL interfaces.
+    fn create_multicast_socket(sap_addresses: &[String]) -> std::io::Result<UdpSocket> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
         // Allow address reuse
@@ -416,19 +440,37 @@ impl DiscoveryService {
         let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, SAP_PORT);
         socket.bind(&bind_addr.into())?;
 
-        // Join multicast group on ALL interfaces
-        let multicast_addr: Ipv4Addr = SAP_MULTICAST_ADDR.parse().unwrap();
+        // Join configured SAP multicast groups on ALL interfaces
         let interface_ips = Self::get_all_interface_ips();
 
-        if interface_ips.is_empty() {
-            // Fallback to UNSPECIFIED if no interfaces found
-            warn!("No interfaces found, joining SAP multicast on default interface");
-            socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
-        } else {
-            for ip in &interface_ips {
-                match socket.join_multicast_v4(&multicast_addr, ip) {
-                    Ok(_) => info!("Joined SAP multicast group on interface {}", ip),
-                    Err(e) => warn!("Failed to join SAP multicast on {}: {}", ip, e),
+        for sap_addr_str in sap_addresses {
+            let multicast_addr: Ipv4Addr = match sap_addr_str.parse() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    warn!("Invalid SAP multicast address '{}': {}", sap_addr_str, e);
+                    continue;
+                }
+            };
+
+            if interface_ips.is_empty() {
+                // Fallback to UNSPECIFIED if no interfaces found
+                warn!(
+                    "No interfaces found, joining SAP multicast {} on default interface",
+                    sap_addr_str
+                );
+                socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
+            } else {
+                for ip in &interface_ips {
+                    match socket.join_multicast_v4(&multicast_addr, ip) {
+                        Ok(_) => info!(
+                            "Joined SAP multicast group {} on interface {}",
+                            sap_addr_str, ip
+                        ),
+                        Err(e) => warn!(
+                            "Failed to join SAP multicast {} on {}: {}",
+                            sap_addr_str, ip, e
+                        ),
+                    }
                 }
             }
         }
@@ -722,6 +764,7 @@ impl DiscoveryService {
     /// Send announcements for streams that are due.
     /// If a stream has announce_interface set, only sends on that interface.
     /// Otherwise sends on all interfaces.
+    /// SAP destination address is chosen based on the stream's multicast scope.
     async fn send_pending_announcements(inner: &Arc<DiscoveryServiceInner>) {
         let sockets = inner.send_sockets.read().await;
         if sockets.is_empty() {
@@ -729,9 +772,11 @@ impl DiscoveryService {
         }
 
         let mut announced = inner.announced_streams.write().await;
-        let dest = SocketAddr::new(IpAddr::V4(SAP_MULTICAST_ADDR.parse().unwrap()), SAP_PORT);
 
         for stream in announced.values_mut() {
+            // Determine SAP address based on stream's multicast scope
+            let sap_addr = sap_address_for_stream(&stream.multicast_address);
+            let dest = SocketAddr::new(IpAddr::V4(sap_addr.parse().unwrap()), SAP_PORT);
             if stream.last_announced.elapsed() >= SAP_ANNOUNCE_INTERVAL {
                 let packet =
                     SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, false);
@@ -755,10 +800,11 @@ impl DiscoveryService {
                     match socket.send_to(&packet, dest).await {
                         Ok(_) => {
                             debug!(
-                                "Sent SAP announcement for {}:{} on {} ({} bytes)",
+                                "Sent SAP announcement for {}:{} on {} to {} ({} bytes)",
                                 stream.flow_id,
                                 stream.block_id,
                                 ip,
+                                sap_addr,
                                 packet.len()
                             );
                             any_success = true;
@@ -784,6 +830,7 @@ impl DiscoveryService {
     /// Send a single announcement.
     /// If stream has announce_interface set, only sends on that interface.
     /// Otherwise sends on all interfaces.
+    /// SAP destination address is chosen based on the stream's multicast scope.
     async fn send_announcement(&self, stream: &AnnouncedStream) -> Result<(), SapError> {
         let sockets = self.inner.send_sockets.read().await;
 
@@ -791,7 +838,9 @@ impl DiscoveryService {
             return Err(SapError::InvalidPayload);
         }
 
-        let dest = SocketAddr::new(IpAddr::V4(SAP_MULTICAST_ADDR.parse().unwrap()), SAP_PORT);
+        // Determine SAP address based on stream's multicast scope
+        let sap_addr = sap_address_for_stream(&stream.multicast_address);
+        let dest = SocketAddr::new(IpAddr::V4(sap_addr.parse().unwrap()), SAP_PORT);
         let packet = SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, false);
 
         // Resolve interface name to IP if specified
@@ -802,8 +851,8 @@ impl DiscoveryService {
 
         if let Some(iface) = &stream.announce_interface {
             info!(
-                "SAP announcement for {}:{} will be sent on interface {} (IP: {:?})",
-                stream.flow_id, stream.block_id, iface, target_ip
+                "SAP announcement for {}:{} will be sent on interface {} (IP: {:?}) to {}",
+                stream.flow_id, stream.block_id, iface, target_ip, sap_addr
             );
         }
 
@@ -819,10 +868,11 @@ impl DiscoveryService {
             match socket.send_to(&packet, dest).await {
                 Ok(_) => {
                     debug!(
-                        "Sent SAP announcement for {}:{} on {} ({} bytes)",
+                        "Sent SAP announcement for {}:{} on {} to {} ({} bytes)",
                         stream.flow_id,
                         stream.block_id,
                         ip,
+                        sap_addr,
                         packet.len()
                     );
                     any_success = true;
@@ -849,6 +899,7 @@ impl DiscoveryService {
     /// Send a deletion message for a stream.
     /// If stream has announce_interface set, only sends on that interface.
     /// Otherwise sends on all interfaces.
+    /// SAP destination address is chosen based on the stream's multicast scope.
     async fn send_deletion(&self, stream: &AnnouncedStream) -> Result<(), SapError> {
         let sockets = self.inner.send_sockets.read().await;
 
@@ -856,7 +907,9 @@ impl DiscoveryService {
             return Err(SapError::InvalidPayload);
         }
 
-        let dest = SocketAddr::new(IpAddr::V4(SAP_MULTICAST_ADDR.parse().unwrap()), SAP_PORT);
+        // Determine SAP address based on stream's multicast scope
+        let sap_addr = sap_address_for_stream(&stream.multicast_address);
+        let dest = SocketAddr::new(IpAddr::V4(sap_addr.parse().unwrap()), SAP_PORT);
         let packet = SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, true);
 
         // Resolve interface name to IP if specified
@@ -877,8 +930,8 @@ impl DiscoveryService {
             match socket.send_to(&packet, dest).await {
                 Ok(_) => {
                     info!(
-                        "Sent SAP deletion for {}:{} on {}",
-                        stream.flow_id, stream.block_id, ip
+                        "Sent SAP deletion for {}:{} on {} to {}",
+                        stream.flow_id, stream.block_id, ip, sap_addr
                     );
                     any_success = true;
                 }
@@ -1258,6 +1311,9 @@ impl DiscoveryService {
 
 impl Default for DiscoveryService {
     fn default() -> Self {
-        Self::new(EventBroadcaster::default())
+        Self::new(
+            EventBroadcaster::default(),
+            SAP_MULTICAST_ADDRS.iter().map(|s| s.to_string()).collect(),
+        )
     }
 }

@@ -62,6 +62,7 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        sap_multicast_addresses: Vec<String>,
     ) -> Self {
         let events = EventBroadcaster::default();
         Self {
@@ -75,7 +76,7 @@ impl AppState {
                 block_registry: BlockRegistry::new(blocks_path),
                 system_monitor: SystemMonitor::new(),
                 channel_registry: ChannelRegistry::new(),
-                discovery: DiscoveryService::new(events),
+                discovery: DiscoveryService::new(events, sap_multicast_addresses.clone()),
                 ptp_monitor: PtpMonitor::new(),
                 media_path: media_path.into(),
                 whep_registry: WhepRegistry::new(),
@@ -138,12 +139,14 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        sap_multicast_addresses: Vec<String>,
     ) -> Self {
         Self::new(
             JsonFileStorage::new(flows_path),
             blocks_path,
             media_path,
             ice_servers,
+            sap_multicast_addresses,
         )
     }
 
@@ -156,13 +159,20 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        sap_multicast_addresses: Vec<String>,
     ) -> anyhow::Result<Self> {
         use crate::storage::PostgresStorage;
 
         let storage = PostgresStorage::new(database_url).await?;
         storage.run_migrations().await?;
 
-        Ok(Self::new(storage, blocks_path, media_path, ice_servers))
+        Ok(Self::new(
+            storage,
+            blocks_path,
+            media_path,
+            ice_servers,
+            sap_multicast_addresses,
+        ))
     }
 
     /// Load flows from storage into memory.
@@ -1146,6 +1156,7 @@ impl Default for AppState {
             "blocks.json",
             "media",
             vec!["stun:stun.l.google.com:19302".to_string()],
+            vec!["239.255.255.255".to_string(), "224.2.127.254".to_string()],
         )
     }
 }
