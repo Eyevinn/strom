@@ -259,7 +259,6 @@ Create reusable components from element groups:
 - **DeckLink Video/Audio Input** - Captures from Blackmagic DeckLink SDI/HDMI cards
 - **NDI Input** - Receives video/audio via NewTek NDI protocol
 - **Inter Input** - Subscribes to streams from other flows (inter-pipeline routing)
-- **HTML Source** - Renders web pages as video using CEF/Chromium (`strom-full` image, see [docs/HTML_RENDER.md](docs/HTML_RENDER.md))
 
 **Outputs:**
 - **AES67 Output** - Sends AES67/Ravenna audio via RTP multicast with SDP generation
