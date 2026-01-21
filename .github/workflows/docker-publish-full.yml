@@ -1,0 +1,206 @@
+name: Docker Publish (strom-full)
+
+# Builds the extended strom-full image with HTML overlay support (gstcefsrc/CEF).
+# Triggered automatically after the main Docker Publish workflow completes,
+# or manually via workflow_dispatch.
+
+on:
+  workflow_run:
+    workflows: ["Docker Publish"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 0.3.12)'
+        required: true
+        type: string
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: eyevinntechnology/strom-full
+  BASE_IMAGE: eyevinntechnology/strom
+
+jobs:
+  # Build AMD64 image
+  build-amd64:
+    name: Build AMD64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.HUB_DOCKER_USERNAME }}
+          password: ${{ secrets.HUB_DOCKER_PASSWORD }}
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.workflow_run.head_branch }}" == v* ]]; then
+            # Extract version from tag (remove 'v' prefix)
+            VERSION="${{ github.event.workflow_run.head_branch }}"
+            echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=dev-$(echo ${{ github.event.workflow_run.head_sha }} | head -c7)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push AMD64 image
+        uses: docker/build-push-action@v5
+        with:
+          context: docker/strom-full
+          file: docker/strom-full/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-amd64
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            TARGETARCH=amd64
+          cache-from: type=gha,scope=docker-full-amd64
+          cache-to: type=gha,mode=max,scope=docker-full-amd64
+          provenance: false
+          sbom: false
+
+  # Build ARM64 image
+  build-arm64:
+    name: Build ARM64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.HUB_DOCKER_USERNAME }}
+          password: ${{ secrets.HUB_DOCKER_PASSWORD }}
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.workflow_run.head_branch }}" == v* ]]; then
+            VERSION="${{ github.event.workflow_run.head_branch }}"
+            echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=dev-$(echo ${{ github.event.workflow_run.head_sha }} | head -c7)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push ARM64 image
+        uses: docker/build-push-action@v5
+        with:
+          context: docker/strom-full
+          file: docker/strom-full/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-arm64
+          platforms: linux/arm64
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            TARGETARCH=arm64
+          cache-from: type=gha,scope=docker-full-arm64
+          cache-to: type=gha,mode=max,scope=docker-full-arm64
+          provenance: false
+          sbom: false
+
+  # Create multi-arch manifest
+  create-manifest:
+    name: Create Multi-arch Manifest
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.HUB_DOCKER_USERNAME }}
+          password: ${{ secrets.HUB_DOCKER_PASSWORD }}
+
+      - name: Determine version and tags
+        id: meta
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          elif [[ "${{ github.event.workflow_run.head_branch }}" == v* ]]; then
+            VERSION="${{ github.event.workflow_run.head_branch }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="dev-$(echo ${{ github.event.workflow_run.head_sha }} | head -c7)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Generate tag variations for releases (if version looks like semver)
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            MAJOR=$(echo $VERSION | cut -d. -f1)
+            MINOR=$(echo $VERSION | cut -d. -f2)
+            echo "tags=${{ env.IMAGE_NAME }}:${VERSION},${{ env.IMAGE_NAME }}:${MAJOR}.${MINOR},${{ env.IMAGE_NAME }}:${MAJOR},${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "tags=${{ env.IMAGE_NAME }}:${VERSION}" >> $GITHUB_OUTPUT
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create and push multi-arch manifest
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          # Create manifest from platform-specific images
+          docker buildx imagetools create \
+            --tag ${{ env.IMAGE_NAME }}:${VERSION} \
+            ${{ env.IMAGE_NAME }}:${VERSION}-amd64 \
+            ${{ env.IMAGE_NAME }}:${VERSION}-arm64
+
+          # Create additional tags for releases
+          if [[ "${{ steps.meta.outputs.is_release }}" == "true" ]]; then
+            IFS=',' read -ra TAGS <<< "${{ steps.meta.outputs.tags }}"
+            for TAG in "${TAGS[@]}"; do
+              if [[ "$TAG" != "${{ env.IMAGE_NAME }}:${VERSION}" ]]; then
+                docker buildx imagetools create \
+                  --tag "$TAG" \
+                  ${{ env.IMAGE_NAME }}:${VERSION}-amd64 \
+                  ${{ env.IMAGE_NAME }}:${VERSION}-arm64
+              fi
+            done
+          fi
+
+      - name: Verify manifest
+        run: |
+          echo "==> Inspecting multi-arch manifest"
+          docker buildx imagetools inspect ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+      - name: Summary
+        run: |
+          echo "## strom-full Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ steps.meta.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          IFS=',' read -ra TAGS <<< "${{ steps.meta.outputs.tags }}"
+          for TAG in "${TAGS[@]}"; do
+            echo "- \`$TAG\`" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
