@@ -47,8 +47,8 @@ struct DiscoveryServiceInner {
     events: EventBroadcaster,
     /// Shutdown signal sender.
     shutdown_tx: RwLock<Option<broadcast::Sender<()>>>,
-    /// Socket for sending SAP announcements.
-    send_socket: RwLock<Option<Arc<UdpSocket>>>,
+    /// Sockets for sending SAP announcements (one per interface).
+    send_sockets: RwLock<Vec<(Ipv4Addr, Arc<UdpSocket>)>>,
     /// Local IP address for announcements.
     local_ip: RwLock<Option<IpAddr>>,
     /// mDNS discovery service.
@@ -64,7 +64,7 @@ impl DiscoveryService {
                 announced_streams: RwLock::new(HashMap::new()),
                 events,
                 shutdown_tx: RwLock::new(None),
-                send_socket: RwLock::new(None),
+                send_sockets: RwLock::new(Vec::new()),
                 local_ip: RwLock::new(None),
                 mdns_discovery: RwLock::new(None),
             }),
@@ -108,18 +108,39 @@ impl DiscoveryService {
             }
         };
 
-        // Create socket for sending
-        let send_socket = match Self::create_send_socket() {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                error!("Failed to create send socket: {}", e);
-                return Err(e.into());
+        // Create send sockets for ALL interfaces
+        let interface_ips = Self::get_all_interface_ips();
+        let mut send_sockets = Vec::new();
+
+        for ip in &interface_ips {
+            match Self::create_send_socket_for_interface(*ip) {
+                Ok(s) => {
+                    info!("Created SAP send socket for interface {}", ip);
+                    send_sockets.push((*ip, Arc::new(s)));
+                }
+                Err(e) => {
+                    warn!("Failed to create SAP send socket for {}: {}", ip, e);
+                }
             }
-        };
+        }
+
+        if send_sockets.is_empty() {
+            // Fallback: create a default socket
+            match Self::create_send_socket_for_interface(Ipv4Addr::UNSPECIFIED) {
+                Ok(s) => {
+                    warn!("No interface sockets, using default SAP send socket");
+                    send_sockets.push((Ipv4Addr::UNSPECIFIED, Arc::new(s)));
+                }
+                Err(e) => {
+                    error!("Failed to create default send socket: {}", e);
+                    return Err(e.into());
+                }
+            }
+        }
 
         {
-            let mut sock = self.inner.send_socket.write().await;
-            *sock = Some(send_socket.clone());
+            let mut socks = self.inner.send_sockets.write().await;
+            *socks = send_sockets;
         }
 
         // Start listener task
@@ -133,7 +154,7 @@ impl DiscoveryService {
         let announcer_inner = self.inner.clone();
         let announcer_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            Self::run_announcer(send_socket, announcer_inner, announcer_shutdown).await;
+            Self::run_announcer(announcer_inner, announcer_shutdown).await;
         });
 
         // Start cleanup task
@@ -176,8 +197,8 @@ impl DiscoveryService {
 
         // Clear state
         {
-            let mut sock = self.inner.send_socket.write().await;
-            *sock = None;
+            let mut socks = self.inner.send_sockets.write().await;
+            socks.clear();
         }
 
         // Shutdown mDNS
@@ -319,7 +340,37 @@ impl DiscoveryService {
 
     // --- Internal methods ---
 
+    /// Get all IPv4 interface addresses (excluding loopback and link-local).
+    fn get_all_interface_ips() -> Vec<Ipv4Addr> {
+        use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+
+        let mut ips = Vec::new();
+
+        if let Ok(interfaces) = NetworkInterface::show() {
+            for iface in interfaces {
+                // Skip loopback
+                if iface.name.starts_with("lo") {
+                    continue;
+                }
+
+                for addr in iface.addr {
+                    if let network_interface::Addr::V4(v4) = addr {
+                        let ip = v4.ip;
+                        // Skip loopback and link-local addresses
+                        if !ip.is_loopback() && !ip.is_link_local() {
+                            debug!("Found interface {} with IP {}", iface.name, ip);
+                            ips.push(ip);
+                        }
+                    }
+                }
+            }
+        }
+
+        ips
+    }
+
     /// Create a multicast socket for receiving SAP announcements.
+    /// Joins the multicast group on ALL interfaces.
     fn create_multicast_socket() -> std::io::Result<UdpSocket> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
@@ -330,9 +381,22 @@ impl DiscoveryService {
         let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, SAP_PORT);
         socket.bind(&bind_addr.into())?;
 
-        // Join multicast group
+        // Join multicast group on ALL interfaces
         let multicast_addr: Ipv4Addr = SAP_MULTICAST_ADDR.parse().unwrap();
-        socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
+        let interface_ips = Self::get_all_interface_ips();
+
+        if interface_ips.is_empty() {
+            // Fallback to UNSPECIFIED if no interfaces found
+            warn!("No interfaces found, joining SAP multicast on default interface");
+            socket.join_multicast_v4(&multicast_addr, &Ipv4Addr::UNSPECIFIED)?;
+        } else {
+            for ip in &interface_ips {
+                match socket.join_multicast_v4(&multicast_addr, ip) {
+                    Ok(_) => info!("Joined SAP multicast group on interface {}", ip),
+                    Err(e) => warn!("Failed to join SAP multicast on {}: {}", ip, e),
+                }
+            }
+        }
 
         // Set non-blocking for tokio
         socket.set_nonblocking(true)?;
@@ -342,15 +406,20 @@ impl DiscoveryService {
         UdpSocket::from_std(std_socket)
     }
 
-    /// Create a socket for sending SAP announcements.
-    fn create_send_socket() -> std::io::Result<UdpSocket> {
+    /// Create a socket for sending SAP announcements on a specific interface.
+    fn create_send_socket_for_interface(interface_ip: Ipv4Addr) -> std::io::Result<UdpSocket> {
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
 
         // Set multicast TTL
         socket.set_multicast_ttl_v4(32)?;
 
-        // Bind to any port
-        let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
+        // Set the outgoing multicast interface
+        if interface_ip != Ipv4Addr::UNSPECIFIED {
+            socket.set_multicast_if_v4(&interface_ip)?;
+        }
+
+        // Bind to any port on this interface
+        let bind_addr = SocketAddrV4::new(interface_ip, 0);
         socket.bind(&bind_addr.into())?;
 
         // Set non-blocking
@@ -529,7 +598,6 @@ impl DiscoveryService {
 
     /// Run the SAP announcer loop.
     async fn run_announcer(
-        socket: Arc<UdpSocket>,
         inner: Arc<DiscoveryServiceInner>,
         mut shutdown: broadcast::Receiver<()>,
     ) {
@@ -542,16 +610,20 @@ impl DiscoveryService {
                     break;
                 }
                 _ = interval.tick() => {
-                    Self::send_pending_announcements(&socket, &inner).await;
+                    Self::send_pending_announcements(&inner).await;
                 }
             }
         }
     }
 
-    /// Send announcements for streams that are due.
-    async fn send_pending_announcements(socket: &UdpSocket, inner: &Arc<DiscoveryServiceInner>) {
-        let mut announced = inner.announced_streams.write().await;
+    /// Send announcements for streams that are due (on ALL interfaces).
+    async fn send_pending_announcements(inner: &Arc<DiscoveryServiceInner>) {
+        let sockets = inner.send_sockets.read().await;
+        if sockets.is_empty() {
+            return;
+        }
 
+        let mut announced = inner.announced_streams.write().await;
         let dest = SocketAddr::new(IpAddr::V4(SAP_MULTICAST_ADDR.parse().unwrap()), SAP_PORT);
 
         for stream in announced.values_mut() {
@@ -559,80 +631,102 @@ impl DiscoveryService {
                 let packet =
                     SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, false);
 
-                match socket.send_to(&packet, dest).await {
-                    Ok(_) => {
-                        debug!(
-                            "Sent SAP announcement for {}:{} ({} bytes)",
-                            stream.flow_id,
-                            stream.block_id,
-                            packet.len()
-                        );
-                        stream.last_announced = Instant::now();
+                // Send on ALL interfaces
+                let mut any_success = false;
+                for (ip, socket) in sockets.iter() {
+                    match socket.send_to(&packet, dest).await {
+                        Ok(_) => {
+                            debug!(
+                                "Sent SAP announcement for {}:{} on {} ({} bytes)",
+                                stream.flow_id,
+                                stream.block_id,
+                                ip,
+                                packet.len()
+                            );
+                            any_success = true;
+                        }
+                        Err(e) => {
+                            warn!("Failed to send SAP on {}: {}", ip, e);
+                        }
                     }
-                    Err(e) => {
-                        warn!("Failed to send SAP announcement: {}", e);
-                    }
+                }
+
+                if any_success {
+                    stream.last_announced = Instant::now();
                 }
             }
         }
     }
 
-    /// Send a single announcement.
+    /// Send a single announcement on ALL interfaces.
     async fn send_announcement(&self, stream: &AnnouncedStream) -> Result<(), SapError> {
-        let socket = {
-            let sock = self.inner.send_socket.read().await;
-            sock.clone()
-        };
+        let sockets = self.inner.send_sockets.read().await;
 
-        let Some(socket) = socket else {
+        if sockets.is_empty() {
             return Err(SapError::InvalidPayload);
-        };
+        }
 
         let dest = SocketAddr::new(IpAddr::V4(SAP_MULTICAST_ADDR.parse().unwrap()), SAP_PORT);
-
         let packet = SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, false);
 
-        socket
-            .send_to(&packet, dest)
-            .await
-            .map_err(|_| SapError::InvalidPayload)?;
+        let mut any_success = false;
+        for (ip, socket) in sockets.iter() {
+            match socket.send_to(&packet, dest).await {
+                Ok(_) => {
+                    debug!(
+                        "Sent SAP announcement for {}:{} on {} ({} bytes)",
+                        stream.flow_id,
+                        stream.block_id,
+                        ip,
+                        packet.len()
+                    );
+                    any_success = true;
+                }
+                Err(e) => {
+                    warn!("Failed to send SAP announcement on {}: {}", ip, e);
+                }
+            }
+        }
 
-        debug!(
-            "Sent SAP announcement for {}:{} ({} bytes)",
-            stream.flow_id,
-            stream.block_id,
-            packet.len()
-        );
-
-        Ok(())
+        if any_success {
+            Ok(())
+        } else {
+            Err(SapError::InvalidPayload)
+        }
     }
 
-    /// Send a deletion message for a stream.
+    /// Send a deletion message for a stream on ALL interfaces.
     async fn send_deletion(&self, stream: &AnnouncedStream) -> Result<(), SapError> {
-        let socket = {
-            let sock = self.inner.send_socket.read().await;
-            sock.clone()
-        };
+        let sockets = self.inner.send_sockets.read().await;
 
-        let Some(socket) = socket else {
+        if sockets.is_empty() {
             return Err(SapError::InvalidPayload);
-        };
+        }
 
         let dest = SocketAddr::new(IpAddr::V4(SAP_MULTICAST_ADDR.parse().unwrap()), SAP_PORT);
-
         let packet = SapPacket::build(stream.origin_ip, stream.msg_id_hash, &stream.sdp, true);
 
-        socket
-            .send_to(&packet, dest)
-            .await
-            .map_err(|_| SapError::InvalidPayload)?;
+        let mut any_success = false;
+        for (ip, socket) in sockets.iter() {
+            match socket.send_to(&packet, dest).await {
+                Ok(_) => {
+                    info!(
+                        "Sent SAP deletion for {}:{} on {}",
+                        stream.flow_id, stream.block_id, ip
+                    );
+                    any_success = true;
+                }
+                Err(e) => {
+                    warn!("Failed to send SAP deletion on {}: {}", ip, e);
+                }
+            }
+        }
 
-        info!(
-            "Sent SAP deletion for {}:{}",
-            stream.flow_id, stream.block_id
-        );
-
-        Ok(())
+        if any_success {
+            Ok(())
+        } else {
+            Err(SapError::InvalidPayload)
+        }
     }
 
     /// Send deletion messages for all announced streams.
