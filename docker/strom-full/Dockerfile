@@ -26,12 +26,19 @@ RUN apt-get update && apt-get install -y \
     | tar -xz -C /usr/local/ \
     && apt-get remove -y curl \
     && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # CEF plugin expects resources relative to the plugin directory
+    # Create symlinks so cefsrc can find locales, subprocess, and resource files
+    && ln -sf /usr/local/lib/cef/locales /usr/local/lib/gstreamer-1.0/locales \
+    && ln -sf /usr/local/lib/cef/gstcefsubprocess /usr/local/lib/gstreamer-1.0/gstcefsubprocess \
+    && ln -sf /usr/local/lib/cef/*.pak /usr/local/lib/gstreamer-1.0/ \
+    && ln -sf /usr/local/lib/cef/*.dat /usr/local/lib/gstreamer-1.0/ \
+    && ln -sf /usr/local/lib/cef/*.bin /usr/local/lib/gstreamer-1.0/
 
 # CEF environment variables
 ENV GST_PLUGIN_PATH=/usr/local/lib/gstreamer-1.0:$GST_PLUGIN_PATH
 ENV LD_LIBRARY_PATH=/usr/local/lib/cef:$LD_LIBRARY_PATH
-ENV GST_CEF_SUBPROCESS_PATH=/usr/local/lib/cef/gstcefsubprocess
+ENV GST_CEF_SUBPROCESS_PATH=/usr/local/lib/gstreamer-1.0/gstcefsubprocess
 
 # Copy entrypoint script that auto-starts Xvfb for headless CEF rendering
 COPY entrypoint.sh /entrypoint.sh
