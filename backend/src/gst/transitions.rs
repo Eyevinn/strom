@@ -498,7 +498,14 @@ impl TransitionController {
         Ok(())
     }
 
-    /// Set up alpha property animation on a pad.
+    /// Compute ease-in-out value using smoothstep (cubic Hermite interpolation).
+    /// t should be in range 0.0 to 1.0, returns value in same range.
+    fn ease_in_out(t: f64) -> f64 {
+        // Smoothstep: 3t² - 2t³
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Set up alpha property animation on a pad with ease-in-out curve.
     fn setup_alpha_animation(
         &self,
         pad: &gst::Pad,
@@ -508,19 +515,25 @@ impl TransitionController {
         end_value: f64,
     ) -> Result<InterpolationControlSource, TransitionError> {
         let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::Cubic);
+        cs.set_mode(InterpolationMode::Linear);
 
-        // Set keyframes
-        // Note: control source values are normalized 0.0-1.0 for the property range
-        if !cs.set(start_time, start_value) {
-            return Err(TransitionError::ControlSourceError(
-                "Failed to set start keyframe".to_string(),
-            ));
-        }
-        if !cs.set(end_time, end_value) {
-            return Err(TransitionError::ControlSourceError(
-                "Failed to set end keyframe".to_string(),
-            ));
+        let duration = (end_time - start_time).nseconds() as f64;
+        let value_range = end_value - start_value;
+
+        // Add keyframes along ease-in-out curve for smooth animation
+        let num_keyframes = 10;
+        for i in 0..=num_keyframes {
+            let t = i as f64 / num_keyframes as f64;
+            let eased_t = Self::ease_in_out(t);
+            let value = start_value + value_range * eased_t;
+            let time = start_time + gst::ClockTime::from_nseconds((duration * t) as u64);
+
+            if !cs.set(time, value) {
+                return Err(TransitionError::ControlSourceError(format!(
+                    "Failed to set keyframe at t={}",
+                    t
+                )));
+            }
         }
 
         // Create binding and attach to pad
@@ -530,7 +543,7 @@ impl TransitionController {
         })?;
 
         debug!(
-            "Alpha animation: {} -> {} on pad {}",
+            "Alpha animation (eased): {} -> {} on pad {}",
             start_value,
             end_value,
             pad.name()
@@ -539,7 +552,7 @@ impl TransitionController {
         Ok(cs)
     }
 
-    /// Set up integer property animation on a pad (for xpos, ypos).
+    /// Set up integer property animation on a pad (for xpos, ypos) with ease-in-out.
     fn setup_int_animation(
         &self,
         pad: &gst::Pad,
@@ -550,40 +563,38 @@ impl TransitionController {
         end_value: i32,
     ) -> Result<InterpolationControlSource, TransitionError> {
         let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::Cubic);
+        cs.set_mode(InterpolationMode::Linear);
 
-        // For integer properties, we need to normalize to 0.0-1.0 range
-        // DirectControlBinding will map this to the property's min-max range
-        // However, for xpos/ypos the range is typically very large, so we use absolute binding
-
-        // Actually, for position properties we should use the absolute binding
-        // Let's check if the pad supports these properties and their ranges
+        // Get property range for normalization
         let pspec = pad.find_property(property).ok_or_else(|| {
             TransitionError::ControlSourceError(format!("Property {} not found on pad", property))
         })?;
 
-        // Get property range
         let (min, max) = if let Some(pspec) = pspec.downcast_ref::<gst::glib::ParamSpecInt>() {
             (pspec.minimum() as f64, pspec.maximum() as f64)
         } else {
-            // Default range for position
             (i32::MIN as f64, i32::MAX as f64)
         };
 
-        // Normalize values to 0.0-1.0 range
-        let range = max - min;
-        let norm_start = (start_value as f64 - min) / range;
-        let norm_end = (end_value as f64 - min) / range;
+        let prop_range = max - min;
+        let duration = (end_time - start_time).nseconds() as f64;
+        let value_range = (end_value - start_value) as f64;
 
-        if !cs.set(start_time, norm_start) {
-            return Err(TransitionError::ControlSourceError(
-                "Failed to set start keyframe for position".to_string(),
-            ));
-        }
-        if !cs.set(end_time, norm_end) {
-            return Err(TransitionError::ControlSourceError(
-                "Failed to set end keyframe for position".to_string(),
-            ));
+        // Add keyframes along ease-in-out curve for smooth animation
+        let num_keyframes = 10;
+        for i in 0..=num_keyframes {
+            let t = i as f64 / num_keyframes as f64;
+            let eased_t = Self::ease_in_out(t);
+            let value = start_value as f64 + value_range * eased_t;
+            let norm_value = (value - min) / prop_range;
+            let time = start_time + gst::ClockTime::from_nseconds((duration * t) as u64);
+
+            if !cs.set(time, norm_value) {
+                return Err(TransitionError::ControlSourceError(format!(
+                    "Failed to set keyframe at t={}",
+                    t
+                )));
+            }
         }
 
         let binding = DirectControlBinding::new(pad, property, &cs);
@@ -592,13 +603,11 @@ impl TransitionController {
         })?;
 
         debug!(
-            "Int animation ({}): {} -> {} on pad {} (normalized: {} -> {})",
+            "Int animation (eased) ({}): {} -> {} on pad {}",
             property,
             start_value,
             end_value,
-            pad.name(),
-            norm_start,
-            norm_end
+            pad.name()
         );
 
         Ok(cs)
