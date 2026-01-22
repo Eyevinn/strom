@@ -282,7 +282,7 @@ impl CompositorEditor {
             // Transition settings
             transition_from: 0,
             transition_to: if num_inputs > 1 { 1 } else { 0 },
-            transition_type: "fade".to_string(),
+            transition_type: "dip_to_black".to_string(),
             transition_duration_ms: 300,
             transition_status: None,
         }
