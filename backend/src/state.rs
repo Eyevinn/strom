@@ -10,13 +10,13 @@ use crate::storage::{JsonFileStorage, Storage};
 use crate::system_monitor::SystemMonitor;
 use crate::whep_registry::WhepRegistry;
 use chrono::Local;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use strom_types::element::{ElementInfo, PropertyValue};
 use strom_types::{Flow, FlowId, PipelineState, StromEvent};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -53,6 +53,8 @@ struct AppStateInner {
     whep_registry: WhepRegistry,
     /// ICE servers for WebRTC NAT traversal (STUN/TURN URLs)
     ice_servers: Vec<String>,
+    /// Flows pending save (debounced to avoid excessive disk writes)
+    pending_saves: RwLock<HashSet<FlowId>>,
 }
 
 impl AppState {
@@ -81,6 +83,7 @@ impl AppState {
                 media_path: media_path.into(),
                 whep_registry: WhepRegistry::new(),
                 ice_servers,
+                pending_saves: RwLock::new(HashSet::new()),
             }),
         }
     }
@@ -230,6 +233,56 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    /// Mark a flow as needing to be saved (debounced).
+    /// The actual save will happen after a short delay to batch multiple changes.
+    pub async fn mark_flow_dirty(&self, flow_id: FlowId) {
+        let mut pending = self.inner.pending_saves.write().await;
+        pending.insert(flow_id);
+        trace!("Marked flow {} as dirty for save", flow_id);
+    }
+
+    /// Start the background task that periodically saves dirty flows.
+    /// Should be called once at startup.
+    pub fn start_debounced_save_task(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(1500));
+            loop {
+                interval.tick().await;
+                state.flush_pending_saves().await;
+            }
+        });
+        info!("Started debounced flow save task (1.5s interval)");
+    }
+
+    /// Flush all pending saves to storage.
+    async fn flush_pending_saves(&self) {
+        // Get and clear pending saves
+        let to_save: Vec<FlowId> = {
+            let mut pending = self.inner.pending_saves.write().await;
+            if pending.is_empty() {
+                return;
+            }
+            let ids: Vec<FlowId> = pending.drain().collect();
+            ids
+        };
+
+        // Save each dirty flow
+        let flows = self.inner.flows.read().await;
+        for flow_id in to_save {
+            if let Some(flow) = flows.get(&flow_id) {
+                if let Err(e) = self.inner.storage.save_flow(flow).await {
+                    error!("Failed to save flow {} to storage: {}", flow_id, e);
+                    // Re-add to pending saves to retry later
+                    let mut pending = self.inner.pending_saves.write().await;
+                    pending.insert(flow_id);
+                } else {
+                    debug!("Saved flow {} to storage (debounced)", flow_id);
+                }
+            }
+        }
     }
 
     /// Discover and cache all available GStreamer elements.
@@ -1019,6 +1072,7 @@ impl AppState {
     }
 
     /// Update a property on a pad in a running pipeline.
+    /// Also syncs the change back to the flow definition for persistence.
     pub async fn update_pad_property(
         &self,
         flow_id: &FlowId,
@@ -1032,13 +1086,50 @@ impl AppState {
             element_id, pad_name, property_name, flow_id
         );
 
-        let pipelines = self.inner.pipelines.read().await;
+        // Update the running pipeline
+        {
+            let pipelines = self.inner.pipelines.read().await;
+            let manager = pipelines.get(flow_id).ok_or_else(|| {
+                PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+            })?;
+            manager.update_pad_property(element_id, pad_name, property_name, &value)?;
+        }
 
-        let manager = pipelines.get(flow_id).ok_or_else(|| {
-            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-        })?;
+        // Sync change back to flow definition for persistence
+        // Element ID format: "block_id:element_name" (e.g., "b0:mixer")
+        // Pad name format: "sink_N" (e.g., "sink_0")
+        if let Some(block_id) = element_id.split(':').next() {
+            if let Some(input_index) = pad_name
+                .strip_prefix("sink_")
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                // Map pad property to block property name
+                // Note: GStreamer uses hyphens (sizing-policy) but block properties use underscores (sizing_policy)
+                let property_name_normalized = property_name.replace('-', "_");
+                let block_property_name =
+                    format!("input_{}_{}", input_index, property_name_normalized);
 
-        manager.update_pad_property(element_id, pad_name, property_name, &value)?;
+                let mut flows = self.inner.flows.write().await;
+                if let Some(flow) = flows.get_mut(flow_id) {
+                    if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_id) {
+                        // Update the block property
+                        block
+                            .properties
+                            .insert(block_property_name.clone(), value.clone());
+                        trace!(
+                            "Synced pad property to block: {} -> {}={:?}",
+                            pad_name,
+                            block_property_name,
+                            value
+                        );
+                    }
+                }
+                drop(flows);
+
+                // Mark flow for debounced save
+                self.mark_flow_dirty(*flow_id).await;
+            }
+        }
 
         // Broadcast pad property change event
         self.inner.events.broadcast(StromEvent::PadPropertyChanged {
