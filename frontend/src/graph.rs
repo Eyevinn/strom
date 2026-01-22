@@ -13,6 +13,21 @@ use crate::app::set_local_storage;
 /// Grid size for snapping (in world coordinates)
 const GRID_SIZE: f32 = 50.0;
 
+/// Default zoom level
+const DEFAULT_ZOOM: f32 = 0.8;
+
+/// Maximum zoom level for zoom-to-fit (to avoid excessive zoom on single elements)
+const MAX_ZOOM_TO_FIT: f32 = 1.0;
+
+/// Minimum zoom level for zoom-to-fit
+const MIN_ZOOM_TO_FIT: f32 = 0.1;
+
+/// Padding around all elements when using zoom-to-fit (in screen pixels)
+const ZOOM_TO_FIT_PADDING: f32 = 50.0;
+
+/// Node width (in world coordinates)
+const NODE_WIDTH: f32 = 200.0;
+
 /// Snap a value to the grid
 fn snap_to_grid(value: f32) -> f32 {
     (value / GRID_SIZE).round() * GRID_SIZE
@@ -94,6 +109,8 @@ pub struct GraphEditor {
     /// Flag indicating a QoS marker was clicked (to signal log panel should open)
     /// Uses Cell for interior mutability since draw_* functions take &self
     qos_marker_clicked: std::cell::Cell<bool>,
+    /// Flag indicating user double-clicked on background (to signal palette should open)
+    request_open_palette: std::cell::Cell<bool>,
     /// Clipboard for copy/paste operations
     clipboard: Option<ClipboardContent>,
 }
@@ -151,7 +168,7 @@ impl Default for GraphEditor {
             selected: None,
             dragging: None,
             pan_offset: Vec2::ZERO,
-            zoom: 0.8,
+            zoom: DEFAULT_ZOOM,
             creating_link: None,
             hovered_pad: None,
             hovered_element: None,
@@ -162,6 +179,7 @@ impl Default for GraphEditor {
             qos_health_map: HashMap::new(),
             last_canvas_rect: None,
             qos_marker_clicked: std::cell::Cell::new(false),
+            request_open_palette: std::cell::Cell::new(false),
             clipboard: None,
         }
     }
@@ -382,6 +400,11 @@ impl GraphEditor {
         self.qos_marker_clicked.get()
     }
 
+    /// Check if user requested to open the palette (double-click on background).
+    pub fn take_open_palette_request(&self) -> bool {
+        self.request_open_palette.replace(false)
+    }
+
     /// Get the last known canvas rect (for hit testing pinch gestures).
     pub fn canvas_rect(&self) -> Option<egui::Rect> {
         self.last_canvas_rect
@@ -427,6 +450,124 @@ impl GraphEditor {
                     canvas_center_offset - egui::vec2(pos.x * self.zoom, pos.y * self.zoom);
             }
         }
+    }
+
+    /// Calculate the height of an element node based on its pads.
+    fn calculate_element_height(&self, element: &Element) -> f32 {
+        let element_info = self.element_info_map.get(&element.element_type);
+        let (sink_pads, src_pads) = self.get_pads_to_render(element, element_info);
+        let pad_count = sink_pads.len().max(src_pads.len()).max(1);
+        (80.0 + (pad_count.saturating_sub(1) * 30) as f32).min(400.0)
+    }
+
+    /// Calculate the height of a block node based on its pads and content.
+    fn calculate_block_height(&self, block: &BlockInstance) -> f32 {
+        let block_definition = self.block_definition_map.get(&block.block_definition_id);
+        let pad_count = self
+            .get_block_external_pads(block, block_definition)
+            .map(|pads| pads.inputs.len().max(pads.outputs.len()))
+            .unwrap_or(1);
+        let base_height = 80.0 + (pad_count.saturating_sub(1) * 30) as f32;
+        let content_height = self
+            .block_content_map
+            .get(&block.id)
+            .map(|info| info.additional_height)
+            .unwrap_or(0.0);
+        (base_height + content_height).min(400.0)
+    }
+
+    /// Calculate the bounding box of all elements and blocks in world coordinates.
+    /// Returns None if there are no elements or blocks.
+    fn calculate_bounds(&self) -> Option<Rect> {
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+
+        // Include all elements
+        for element in &self.elements {
+            let (x, y) = element.position;
+            let height = self.calculate_element_height(element);
+
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x + NODE_WIDTH);
+            max_y = max_y.max(y + height);
+        }
+
+        // Include all blocks
+        for block in &self.blocks {
+            let x = block.position.x;
+            let y = block.position.y;
+            let height = self.calculate_block_height(block);
+
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x + NODE_WIDTH);
+            max_y = max_y.max(y + height);
+        }
+
+        if min_x == f32::MAX {
+            None // No elements or blocks
+        } else {
+            Some(Rect::from_min_max(pos2(min_x, min_y), pos2(max_x, max_y)))
+        }
+    }
+
+    /// Reset the view to the default zoom and pan offset.
+    pub fn reset_view(&mut self) {
+        self.pan_offset = Vec2::ZERO;
+        self.zoom = DEFAULT_ZOOM;
+    }
+
+    /// Zoom to fit all elements and blocks in the view.
+    /// If there are no elements or blocks, resets to default view.
+    pub fn zoom_to_fit(&mut self) {
+        let Some(bounds) = self.calculate_bounds() else {
+            self.reset_view();
+            return;
+        };
+
+        // Get canvas size (use stored rect or reasonable default)
+        let canvas_size = self
+            .last_canvas_rect
+            .map(|r| vec2(r.width(), r.height()))
+            .unwrap_or(vec2(800.0, 600.0));
+
+        // Calculate available space (canvas minus padding on all sides)
+        let available_width = (canvas_size.x - ZOOM_TO_FIT_PADDING * 2.0).max(100.0);
+        let available_height = (canvas_size.y - ZOOM_TO_FIT_PADDING * 2.0).max(100.0);
+
+        // Calculate bounds size
+        let bounds_width = bounds.width();
+        let bounds_height = bounds.height();
+
+        // Calculate zoom to fit both dimensions
+        let zoom_x = if bounds_width > 0.0 {
+            available_width / bounds_width
+        } else {
+            MAX_ZOOM_TO_FIT
+        };
+        let zoom_y = if bounds_height > 0.0 {
+            available_height / bounds_height
+        } else {
+            MAX_ZOOM_TO_FIT
+        };
+
+        // Use the smaller zoom to ensure everything fits, clamped to reasonable range
+        self.zoom = zoom_x.min(zoom_y).clamp(MIN_ZOOM_TO_FIT, MAX_ZOOM_TO_FIT);
+
+        // Center the view on the bounds center
+        let bounds_center = bounds.center();
+        let canvas_center = canvas_size / 2.0;
+
+        // pan_offset formula: to make world pos appear at screen center
+        // screen_pos = rect_min + (world_pos * zoom) + pan_offset
+        // For world_pos to appear at canvas_center (relative to rect_min):
+        // canvas_center = (world_pos * zoom) + pan_offset
+        // pan_offset = canvas_center - (world_pos * zoom)
+        self.pan_offset =
+            canvas_center - vec2(bounds_center.x * self.zoom, bounds_center.y * self.zoom);
     }
 
     /// Set element metadata for rendering ports.
@@ -925,6 +1066,24 @@ impl GraphEditor {
                 self.selected_link = None;
             }
 
+            // Ctrl+double-click on background: zoom to fit
+            if response.double_clicked()
+                && self.hovered_link.is_none()
+                && self.hovered_element.is_none()
+                && ui.input(|i| i.modifiers.ctrl)
+            {
+                self.zoom_to_fit();
+            }
+
+            // Double-click on background (without Ctrl): request to open palette
+            if response.double_clicked()
+                && self.hovered_link.is_none()
+                && self.hovered_element.is_none()
+                && !ui.input(|i| i.modifiers.ctrl)
+            {
+                self.request_open_palette.set(true);
+            }
+
             // Reset dragging state when mouse is released
             if !ui.input(|i| i.pointer.primary_down()) {
                 // Snap to grid when drag ends
@@ -1025,6 +1184,38 @@ impl GraphEditor {
                     Stroke::new(2.0, Color32::from_rgb(100, 150, 255)),
                 ));
             }
+
+            // Draw floating view control buttons at top center of canvas
+            let button_group_width = 85.0;
+            let button_pos = pos2(
+                response.rect.center().x - button_group_width / 2.0,
+                response.rect.min.y + 8.0,
+            );
+
+            egui::Area::new(egui::Id::new("graph_view_controls"))
+                .fixed_pos(button_pos)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.style_mut().spacing.item_spacing.x = 4.0;
+
+                        if ui
+                            .add(egui::Button::new("Fit").min_size(vec2(32.0, 24.0)))
+                            .on_hover_text("Zoom to fit all elements (Ctrl+double-click)")
+                            .clicked()
+                        {
+                            self.zoom_to_fit();
+                        }
+
+                        if ui
+                            .add(egui::Button::new("Reset").min_size(vec2(40.0, 24.0)))
+                            .on_hover_text("Reset view to default")
+                            .clicked()
+                        {
+                            self.reset_view();
+                        }
+                    });
+                });
 
             response
         })

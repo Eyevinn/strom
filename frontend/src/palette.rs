@@ -1,7 +1,7 @@
 //! Element palette for browsing and adding GStreamer elements and blocks.
 
 use egui::{ScrollArea, Ui};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use strom_types::element::ElementInfo;
 use strom_types::BlockDefinition;
 
@@ -25,6 +25,10 @@ pub struct ElementPalette {
     element_properties_cache: HashMap<String, ElementInfo>,
     /// Cached element info with pad properties (lazy loaded separately)
     element_pad_properties_cache: HashMap<String, ElementInfo>,
+    /// Element types that failed to load (to prevent retry loops)
+    failed_element_lookups: HashSet<String>,
+    /// Element types that failed to load pad properties (to prevent retry loops)
+    failed_pad_property_lookups: HashSet<String>,
     /// Search filter text
     search: String,
     /// Selected category filter (None = all categories)
@@ -462,14 +466,34 @@ impl ElementPalette {
         self.get_element_info(element_type)
     }
 
-    /// Check if we have properties cached for this element type.
+    /// Check if we have properties cached (or marked as failed) for this element type.
     pub fn has_properties_cached(&self, element_type: &str) -> bool {
         self.element_properties_cache.contains_key(element_type)
+            || self.failed_element_lookups.contains(element_type)
     }
 
-    /// Check if we have pad properties cached for this element type.
+    /// Check if we have pad properties cached (or marked as failed) for this element type.
     pub fn has_pad_properties_cached(&self, element_type: &str) -> bool {
         self.element_pad_properties_cache.contains_key(element_type)
+            || self.failed_pad_property_lookups.contains(element_type)
+    }
+
+    /// Mark an element type as failed to load (to prevent retry loops).
+    pub fn mark_element_lookup_failed(&mut self, element_type: String) {
+        tracing::warn!(
+            "Marking element '{}' as failed lookup (will not retry)",
+            element_type
+        );
+        self.failed_element_lookups.insert(element_type);
+    }
+
+    /// Mark an element type as failed to load pad properties (to prevent retry loops).
+    pub fn mark_pad_properties_lookup_failed(&mut self, element_type: String) {
+        tracing::warn!(
+            "Marking element '{}' pad properties as failed lookup (will not retry)",
+            element_type
+        );
+        self.failed_pad_property_lookups.insert(element_type);
     }
 
     /// Cache element info with properties.

@@ -1331,8 +1331,15 @@ impl StromApp {
                     let _ = tx.send(AppMessage::ElementPropertiesLoaded(element_info));
                 }
                 Err(e) => {
-                    tracing::error!("Failed to load element properties: {}", e);
-                    let _ = tx.send(AppMessage::ElementPropertiesError(e.to_string()));
+                    tracing::error!(
+                        "Failed to load element properties for '{}': {}",
+                        element_type,
+                        e
+                    );
+                    let _ = tx.send(AppMessage::ElementPropertiesError(
+                        element_type,
+                        e.to_string(),
+                    ));
                 }
             }
             ctx.request_repaint();
@@ -1363,8 +1370,15 @@ impl StromApp {
                     let _ = tx.send(AppMessage::ElementPadPropertiesLoaded(element_info));
                 }
                 Err(e) => {
-                    tracing::error!("Failed to load pad properties: {}", e);
-                    let _ = tx.send(AppMessage::ElementPadPropertiesError(e.to_string()));
+                    tracing::error!(
+                        "Failed to load pad properties for '{}': {}",
+                        element_type,
+                        e
+                    );
+                    let _ = tx.send(AppMessage::ElementPadPropertiesError(
+                        element_type,
+                        e.to_string(),
+                    ));
                 }
             }
             ctx.request_repaint();
@@ -3551,6 +3565,12 @@ impl StromApp {
                     self.show_log_panel = true;
                 }
 
+                // Check if user double-clicked on background - open palette and focus search
+                if self.graph.take_open_palette_request() {
+                    self.show_palette_panel = true;
+                    self.palette.focus_search();
+                }
+
                 // Handle adding elements from palette
                 if let Some(element_type) = self.palette.take_dragging_element() {
                     // Add element at center of visible area
@@ -5049,8 +5069,13 @@ impl eframe::App for StromApp {
                     );
                     self.palette.cache_element_properties(info);
                 }
-                AppMessage::ElementPropertiesError(error) => {
-                    tracing::error!("Received ElementPropertiesError: {}", error);
+                AppMessage::ElementPropertiesError(element_type, error) => {
+                    tracing::error!(
+                        "Received ElementPropertiesError for '{}': {}",
+                        element_type,
+                        error
+                    );
+                    self.palette.mark_element_lookup_failed(element_type);
                     self.error = Some(format!("Element properties: {}", error));
                 }
                 AppMessage::ElementPadPropertiesLoaded(info) => {
@@ -5064,8 +5089,13 @@ impl eframe::App for StromApp {
                     self.graph.set_element_info(info.name.clone(), info.clone());
                     self.palette.cache_element_pad_properties(info);
                 }
-                AppMessage::ElementPadPropertiesError(error) => {
-                    tracing::error!("Received ElementPadPropertiesError: {}", error);
+                AppMessage::ElementPadPropertiesError(element_type, error) => {
+                    tracing::error!(
+                        "Received ElementPadPropertiesError for '{}': {}",
+                        element_type,
+                        error
+                    );
+                    self.palette.mark_pad_properties_lookup_failed(element_type);
                     self.error = Some(format!("Pad properties: {}", error));
                 }
                 AppMessage::Event(event) => {

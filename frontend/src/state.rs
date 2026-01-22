@@ -24,13 +24,13 @@ pub enum AppMessage {
 
     /// Element properties loaded (lazy loading)
     ElementPropertiesLoaded(ElementInfo),
-    /// Element properties loading failed
-    ElementPropertiesError(String),
+    /// Element properties loading failed (element_type, error)
+    ElementPropertiesError(String, String),
 
     /// Element pad properties loaded (lazy loading)
     ElementPadPropertiesLoaded(ElementInfo),
-    /// Element pad properties loading failed
-    ElementPadPropertiesError(String),
+    /// Element pad properties loading failed (element_type, error)
+    ElementPadPropertiesError(String, String),
 
     /// SDP loaded for a block
     SdpLoaded {
