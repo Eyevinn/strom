@@ -883,6 +883,10 @@ impl CompositorEditor {
                         self.set_input_position(ui.ctx(), idx, 0, 0);
                         self.set_input_size(ui.ctx(), idx, out_w, out_h);
                     }
+                    // R = Reset input (position 0,0, full size, alpha 1.0)
+                    if ui.input(|i| i.key_pressed(egui::Key::R)) {
+                        self.reset_input(ui.ctx(), idx, out_w, out_h);
+                    }
                     // Home = Send to back (z=0)
                     if ui.input(|i| i.key_pressed(egui::Key::Home)) {
                         self.inputs[idx].zorder = 0;
@@ -1663,7 +1667,16 @@ impl CompositorEditor {
         let out_h = self.output_height as i32;
 
         ui.vertical(|ui| {
-            ui.heading(format!("Input {}", selected_idx));
+            ui.horizontal(|ui| {
+                ui.heading(format!("Input {}", selected_idx));
+                if ui
+                    .button("Reset")
+                    .on_hover_text("Reset position (0,0), full size, alpha 1.0 (R)")
+                    .clicked()
+                {
+                    self.reset_input(ui.ctx(), selected_idx, out_w, out_h);
+                }
+            });
             ui.separator();
 
             // Clone current values to avoid borrowing conflicts
@@ -2010,6 +2023,31 @@ impl CompositorEditor {
                 self.update_pad_property(ctx, idx, "width", PropertyValue::Int(w as i64));
                 self.update_pad_property(ctx, idx, "height", PropertyValue::Int(h as i64));
             }
+        }
+    }
+
+    /// Reset input to default: position (0,0), full size, alpha 1.0
+    fn reset_input(&mut self, ctx: &Context, idx: usize, out_w: i32, out_h: i32) {
+        // Update local state
+        self.inputs[idx].xpos = 0;
+        self.inputs[idx].ypos = 0;
+        self.inputs[idx].width = out_w;
+        self.inputs[idx].height = out_h;
+        self.inputs[idx].alpha = 1.0;
+
+        if self.live_updates {
+            if self.animate_moves {
+                // Animate position and size
+                self.animate_input_to(ctx, idx, Some(0), Some(0), Some(out_w), Some(out_h));
+            } else {
+                // Immediate update
+                self.update_pad_property(ctx, idx, "xpos", PropertyValue::Int(0));
+                self.update_pad_property(ctx, idx, "ypos", PropertyValue::Int(0));
+                self.update_pad_property(ctx, idx, "width", PropertyValue::Int(out_w as i64));
+                self.update_pad_property(ctx, idx, "height", PropertyValue::Int(out_h as i64));
+            }
+            // Alpha is always immediate (not animated)
+            self.update_pad_property(ctx, idx, "alpha", PropertyValue::Float(1.0));
         }
     }
 

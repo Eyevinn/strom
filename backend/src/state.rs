@@ -1069,6 +1069,35 @@ impl AppState {
             duration_ms,
         )?;
 
+        drop(pipelines);
+
+        // Sync final alpha values back to flow definition for persistence
+        // After transition: from_input alpha=0.0, to_input alpha=1.0
+        if let Some(block_id) = block_instance_id.split(':').next() {
+            let mut flows = self.inner.flows.write().await;
+            if let Some(flow) = flows.get_mut(flow_id) {
+                if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_id) {
+                    block.properties.insert(
+                        format!("input_{}_alpha", from_input),
+                        PropertyValue::Float(0.0),
+                    );
+                    block.properties.insert(
+                        format!("input_{}_alpha", to_input),
+                        PropertyValue::Float(1.0),
+                    );
+                    trace!(
+                        "Synced transition alpha values: input {} -> 0.0, input {} -> 1.0",
+                        from_input,
+                        to_input
+                    );
+                }
+            }
+            drop(flows);
+
+            // Mark flow for debounced save
+            self.mark_flow_dirty(*flow_id).await;
+        }
+
         // Broadcast transition event
         self.inner
             .events

@@ -425,22 +425,29 @@ impl TransitionController {
         // Calculate midpoint
         let duration = end_time - start_time;
         let mid_time = start_time + duration / 2;
+        let half_duration = duration / 2;
 
         // Ensure to_pad starts hidden
         to_pad.set_property("alpha", 0.0f64);
 
-        // First half: fade out from_pad (1.0 -> 0.0)
+        // First half: fade out from_pad (1.0 -> 0.0) with easing
         let cs_from = InterpolationControlSource::new();
-        cs_from.set_mode(InterpolationMode::Cubic);
-        if !cs_from.set(start_time, 1.0) {
-            return Err(TransitionError::ControlSourceError(
-                "Failed to set start keyframe".to_string(),
-            ));
-        }
-        if !cs_from.set(mid_time, 0.0) {
-            return Err(TransitionError::ControlSourceError(
-                "Failed to set mid keyframe".to_string(),
-            ));
+        cs_from.set_mode(InterpolationMode::Linear);
+
+        // Add eased keyframes for first half (fade out)
+        let num_keyframes = 10;
+        for i in 0..=num_keyframes {
+            let t = i as f64 / num_keyframes as f64;
+            let eased_t = Self::ease_in_out(t);
+            let value = 1.0 - eased_t; // 1.0 -> 0.0
+            let time = start_time
+                + gst::ClockTime::from_nseconds((half_duration.nseconds() as f64 * t) as u64);
+            if !cs_from.set(time, value) {
+                return Err(TransitionError::ControlSourceError(format!(
+                    "Failed to set keyframe at t={}",
+                    t
+                )));
+            }
         }
         // Keep at 0 for second half
         if !cs_from.set(end_time, 0.0) {
@@ -455,26 +462,30 @@ impl TransitionController {
         })?;
         control_sources.push(cs_from);
 
-        // Second half: fade in to_pad (0.0 -> 1.0)
+        // Second half: fade in to_pad (0.0 -> 1.0) with easing
         let cs_to = InterpolationControlSource::new();
-        cs_to.set_mode(InterpolationMode::Cubic);
-        // Start at 0
+        cs_to.set_mode(InterpolationMode::Linear);
+
+        // Stay at 0 until midpoint
         if !cs_to.set(start_time, 0.0) {
             return Err(TransitionError::ControlSourceError(
                 "Failed to set start keyframe".to_string(),
             ));
         }
-        // Stay at 0 until midpoint
-        if !cs_to.set(mid_time, 0.0) {
-            return Err(TransitionError::ControlSourceError(
-                "Failed to set mid keyframe".to_string(),
-            ));
-        }
-        // Fade in during second half
-        if !cs_to.set(end_time, 1.0) {
-            return Err(TransitionError::ControlSourceError(
-                "Failed to set end keyframe".to_string(),
-            ));
+
+        // Add eased keyframes for second half (fade in)
+        for i in 0..=num_keyframes {
+            let t = i as f64 / num_keyframes as f64;
+            let eased_t = Self::ease_in_out(t);
+            let value = eased_t; // 0.0 -> 1.0
+            let time = mid_time
+                + gst::ClockTime::from_nseconds((half_duration.nseconds() as f64 * t) as u64);
+            if !cs_to.set(time, value) {
+                return Err(TransitionError::ControlSourceError(format!(
+                    "Failed to set keyframe at t={}",
+                    t
+                )));
+            }
         }
 
         let binding = DirectControlBinding::new(&to_pad, "alpha", &cs_to);
@@ -498,11 +509,12 @@ impl TransitionController {
         Ok(())
     }
 
-    /// Compute ease-in-out value using smoothstep (cubic Hermite interpolation).
+    /// Compute ease-in-out value using cosine interpolation.
     /// t should be in range 0.0 to 1.0, returns value in same range.
+    /// This creates more noticeable acceleration/deceleration than smoothstep.
     fn ease_in_out(t: f64) -> f64 {
-        // Smoothstep: 3t² - 2t³
-        t * t * (3.0 - 2.0 * t)
+        // Cosine ease-in-out: more pronounced than smoothstep
+        (1.0 - (t * std::f64::consts::PI).cos()) / 2.0
     }
 
     /// Set up alpha property animation on a pad with ease-in-out curve.
