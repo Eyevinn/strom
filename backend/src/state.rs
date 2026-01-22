@@ -1118,6 +1118,52 @@ impl AppState {
             duration_ms,
         )?;
 
+        drop(pipelines);
+
+        // Sync final values back to flow definition for persistence
+        // block_instance_id format: "block_id:element_name" (e.g., "b0:mixer")
+        if let Some(block_id) = block_instance_id.split(':').next() {
+            let mut flows = self.inner.flows.write().await;
+            if let Some(flow) = flows.get_mut(flow_id) {
+                if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_id) {
+                    // Update the block properties with target values
+                    if let Some(x) = target_xpos {
+                        block.properties.insert(
+                            format!("input_{}_xpos", input_index),
+                            PropertyValue::Int(x as i64),
+                        );
+                    }
+                    if let Some(y) = target_ypos {
+                        block.properties.insert(
+                            format!("input_{}_ypos", input_index),
+                            PropertyValue::Int(y as i64),
+                        );
+                    }
+                    if let Some(w) = target_width {
+                        block.properties.insert(
+                            format!("input_{}_width", input_index),
+                            PropertyValue::Int(w as i64),
+                        );
+                    }
+                    if let Some(h) = target_height {
+                        block.properties.insert(
+                            format!("input_{}_height", input_index),
+                            PropertyValue::Int(h as i64),
+                        );
+                    }
+                    trace!(
+                        "Synced animated input {} properties to block {}",
+                        input_index,
+                        block_id
+                    );
+                }
+            }
+            drop(flows);
+
+            // Mark flow for debounced save
+            self.mark_flow_dirty(*flow_id).await;
+        }
+
         Ok(())
     }
 
