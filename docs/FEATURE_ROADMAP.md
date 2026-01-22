@@ -30,8 +30,9 @@ Pre-built templates that dramatically lower the barrier to entry and showcase St
 
 Real-time adjustments for running pipelines with immediate visual feedback.
 
-**Features:**
-- Slider-controlled live adjustments (brightness, contrast, volume, position)
+**Current status:** ✅ Basic live parameter editing works - properties can be changed on running pipelines. Audio level meter block (`builtin.meter`) available.
+
+**Remaining features:**
 - Real-time thumbnail previews embedded in graph nodes
 - Audio/video scopes: waveform, vectorscope, histogram overlays
 - Parameter interpolation for smooth transitions
@@ -44,7 +45,9 @@ Real-time adjustments for running pipelines with immediate visual feedback.
 
 Enable complex broadcast workflows by routing outputs between flows dynamically.
 
-**Features:**
+**Current status:** ✅ Compositor block with 11 layout templates (multiview, PIP, side-by-side, grids, etc.) and visual editor.
+
+**Remaining features:**
 - Visual routing matrix (audio mixer patchbay style)
 - Tally/program/preview bus concept for live switching
 - Cross-flow element references
@@ -84,7 +87,9 @@ Comprehensive monitoring for production deployments.
 
 Leverage the existing MCP infrastructure to provide intelligent assistance.
 
-**Capabilities:**
+**Current status:** ✅ Basic MCP server implemented with flow management tools.
+
+**Future capabilities:**
 - Natural language pipeline creation: *"Create a pipeline that takes RTSP, adds a logo overlay, and outputs to SRT"*
 - Error diagnosis: *"My pipeline is dropping frames"* → AI analyzes QoS data and suggests fixes
 - Auto-optimization based on hardware detection
@@ -133,9 +138,11 @@ Enable unattended operation and broadcast automation.
 
 Multi-viewer style monitoring for all running pipelines.
 
-**Features:**
+**Current status:** ✅ Audio level meter block (`builtin.meter`) available for per-flow monitoring.
+
+**Remaining features:**
 - Thumbnail grid of all active pipelines
-- Audio level meters in overview
+- Audio level meters in overview dashboard
 - Customizable multiviewer layout builder
 - Full-screen preview on click
 - Source labeling and status indicators
@@ -224,17 +231,17 @@ Essential for live production workflows.
 
 Low effort improvements with noticeable impact.
 
-| Feature | Effort | Impact | Notes |
-|---------|--------|--------|-------|
-| Dark/light theme toggle | 1 day | UX polish | User preference persistence |
-| Keyboard shortcuts | 2 days | Power users | Ctrl+S, Delete, Ctrl+Z, Ctrl+C/V |
-| Copy/paste elements between flows | 1 day | Workflow speed | Clipboard support |
-| Undo/redo | 3 days | Essential UX | Command pattern implementation |
-| Export flow as Docker Compose | 2 days | Deployment | Generate docker-compose.yml |
-| Drag-drop flow import | 1 day | Onboarding | Drop JSON file onto canvas |
-| Element search in graph | 1 day | Navigation | Ctrl+F to find elements |
-| Zoom to fit | 0.5 day | UX | Auto-frame all elements |
-| Connection validation hints | 2 days | Error prevention | Show compatible pads |
+| Feature | Effort | Impact | Status |
+|---------|--------|--------|--------|
+| ~~Dark/light theme toggle~~ | 1 day | UX polish | ✅ Done |
+| ~~Keyboard shortcuts~~ | 2 days | Power users | ✅ Done (Ctrl+F, Delete, copy/paste) |
+| ~~Copy/paste elements~~ | 1 day | Workflow speed | ✅ Done |
+| ~~Element search~~ | 1 day | Navigation | ✅ Done (Ctrl+F cycles filters) |
+| ~~Zoom to fit~~ | 0.5 day | UX | ✅ Done |
+| Undo/redo | 3 days | Essential UX | Not started |
+| Export flow as Docker Compose | 2 days | Deployment | Not started |
+| Drag-drop flow import | 1 day | Onboarding | Not started |
+| Connection validation hints | 2 days | Error prevention | Not started |
 
 ---
 
@@ -244,17 +251,19 @@ Low effort improvements with noticeable impact.
 - [ ] Templates Gallery
 - [ ] Undo/Redo system
 - [ ] Basic Health Dashboard
-- [ ] Keyboard shortcuts
+- [x] Keyboard shortcuts (Ctrl+F, Delete, copy/paste)
 
 ### Phase 2: Professional Tools
-- [ ] Live Parameter Tweaking
+- [x] Live Parameter Tweaking (basic - properties editable on running pipelines)
+- [x] Compositor with layout templates
 - [ ] Multi-Flow Routing Matrix
 - [ ] Scheduled Operations
 - [ ] Source Preview Grid
 
 ### Phase 3: Intelligence & Safety
 - [ ] Flow Version Control
-- [ ] Enhanced AI Assistant
+- [x] Basic MCP server (AI assistant foundation)
+- [ ] Enhanced AI Assistant (diagnostics, auto-optimization)
 - [ ] Advanced Alerting
 
 ### Phase 4: Scale & Community
@@ -306,4 +315,4 @@ Strom's unique position: **Professional broadcast capabilities with open-source 
 
 ---
 
-*Last updated: 2025-12-05*
+*Last updated: 2026-01-22*

@@ -4,7 +4,7 @@
 # - gstcefsrc GStreamer plugin (Chromium Embedded Framework)
 # - xvfb for headless X11 rendering
 #
-# CEF adds ~1.5GB to the image size, hence the separate "full" variant.
+# CEF adds ~400MB compressed (~800MB uncompressed) to the image, hence the separate "full" variant.
 #
 # Usage:
 #   docker run -p 8080:8080 eyevinntechnology/strom-full:latest

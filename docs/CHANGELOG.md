@@ -4,8 +4,54 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ## [Unreleased]
 
+### Added
+- HTML overlay support via `strom-full` Docker image with CEF/gstcefsrc (#254)
+- HTML rendering documentation with example flows (#257, #259)
+- gstcefsrc build workflow for CI (#253)
+
+### Changed
+- Improved AES67 SDP generation and QoS settings (#252)
+
 ### Fixed
-- Relay Link headers in WHEP proxy for ICE server configuration
+- CEF resource symlinks for strom-full Docker image (#256)
+- Build gstcefsrc for Ubuntu 25.10 and fix CEF runtime (#255)
+
+---
+
+## [0.3.12] - 2026-01-17
+
+### Added
+- QoS DSCP marking for AES67 output (#249)
+
+### Changed
+- Update GStreamer to 1.26.10 in installers and CI (#239)
+- Remove GStreamer version pinning from Dockerfile (#240)
+
+### Fixed
+- Use `use_clock()` to force PTP clock on pipeline (#250)
+- VA-API encoder improvements (#242)
+- Remove emojis from backend log output (#238)
+
+---
+
+## [0.3.11] - 2026-01-16
+
+### Added
+- Windows MSI installer with bundled GStreamer and Graphviz (#230)
+- Include GStreamer libexec in Windows installer (#234)
+- New Strom icon with platform-specific sizes (#234)
+- PWA manifest for iOS standalone mode (#228)
+- Mobile debug console with filter controls (#228)
+- Panel toggles, zoom controls, and pinch-to-zoom for iOS (#228)
+- Compact system monitor widget for top bar (#228)
+- Links page redesign with tabs and SRT stream support (#228)
+
+### Fixed
+- Respect GST_PLUGIN_FEATURE_RANK in video encoder selection (#237)
+- Force dark theme on WASM startup (#228)
+- Theme-aware colors and UI defaults (#228)
+- Relay Link headers in WHEP proxy for ICE server configuration (#228)
+- Improve VLC playlist functionality (#228)
 
 ---
 
@@ -420,7 +466,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ### Added
 - Project architecture design
 - Technology stack selection
-- Development roadmap (TODO.md)
+- Development roadmap
 - README with project overview
 
 ---

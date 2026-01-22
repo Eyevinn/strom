@@ -9,12 +9,16 @@ Strom supports rendering HTML content as video sources using the `cefsrc` GStrea
 
 ## Docker Image
 
-HTML rendering requires Chromium Embedded Framework (CEF), which adds ~1.5GB to the image size. To keep the base image lightweight, this functionality is available in a separate extended image:
+HTML rendering requires Chromium Embedded Framework (CEF), which adds significant size to the image. To keep the base image lightweight, this functionality is available in a separate extended image:
 
-| Image | Size | Use Case |
-|-------|------|----------|
-| `eyevinntechnology/strom:latest` | ~200MB | Standard pipelines (no HTML rendering) |
-| `eyevinntechnology/strom-full:latest` | ~1.7GB | Full functionality including HTML rendering |
+| Image | Arch | Compressed | Uncompressed | Use Case |
+|-------|------|------------|--------------|----------|
+| `strom` | amd64 | ~410 MB | ~1.1 GB | Standard pipelines (no HTML rendering) |
+| `strom` | arm64 | ~400 MB | ~1.1 GB | |
+| `strom-full` | amd64 | ~820 MB | ~2.7 GB | Full functionality including HTML rendering |
+| `strom-full` | arm64 | ~930 MB | ~3.5 GB | |
+
+*Note: Compressed size is what you download via `docker pull`. Uncompressed size is disk usage after extraction. Sizes measured from v0.3.12 (2026-01-22).*
 
 ### Quick Start
 
