@@ -237,10 +237,10 @@ Low effort improvements with noticeable impact.
 | ~~Keyboard shortcuts~~ | 2 days | Power users | ✅ Done (Ctrl+F, Delete, copy/paste) |
 | ~~Copy/paste elements~~ | 1 day | Workflow speed | ✅ Done |
 | ~~Element search~~ | 1 day | Navigation | ✅ Done (Ctrl+F cycles filters) |
+| ~~Zoom to fit~~ | 0.5 day | UX | ✅ Done |
 | Undo/redo | 3 days | Essential UX | Not started |
 | Export flow as Docker Compose | 2 days | Deployment | Not started |
 | Drag-drop flow import | 1 day | Onboarding | Not started |
-| Zoom to fit | 0.5 day | UX | Not started |
 | Connection validation hints | 2 days | Error prevention | Not started |
 
 ---
