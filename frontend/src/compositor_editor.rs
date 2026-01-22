@@ -808,32 +808,121 @@ impl CompositorEditor {
             .scroll(false)
             .open(&mut is_open)
             .show(ctx, |ui| {
-                // Toolbar
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "Output: {}×{}",
-                        self.output_width, self.output_height
-                    ));
-                    ui.separator();
+                // Keyboard shortcuts for input selection (0-9, plus § and ` for input 0)
+                // Pressing the same key again deselects
+                // Note: § (Swedish) and ` (US) are on the same physical key, so we check for
+                // the text event to avoid double-triggering on Swedish keyboards
+                for (key, idx) in [
+                    (egui::Key::Num0, 0),
+                    (egui::Key::Num1, 1),
+                    (egui::Key::Num2, 2),
+                    (egui::Key::Num3, 3),
+                    (egui::Key::Num4, 4),
+                    (egui::Key::Num5, 5),
+                    (egui::Key::Num6, 6),
+                    (egui::Key::Num7, 7),
+                    (egui::Key::Num8, 8),
+                    (egui::Key::Num9, 9),
+                ] {
+                    if ui.input(|i| i.key_pressed(key)) && idx < self.inputs.len() {
+                        self.toggle_input_selection(idx);
+                    }
+                }
+                // § on Swedish keyboard OR ` on US keyboard (left of 1) - check for character input
+                if ui.input(|i| {
+                    i.events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::Text(t) if t == "§" || t == "`"))
+                }) && !self.inputs.is_empty()
+                {
+                    self.toggle_input_selection(0);
+                }
 
-                    ui.checkbox(&mut self.snap_to_grid, "Snap to grid");
+                // Esc = Deselect
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.deselect_input();
+                }
+
+                // Keyboard shortcuts for layout actions (when input is selected)
+                if let Some(idx) = self.selected_input {
+                    let out_w = self.output_width as i32;
+                    let out_h = self.output_height as i32;
+
+                    // F = Fullscreen
+                    if ui.input(|i| i.key_pressed(egui::Key::F)) {
+                        self.set_input_position(ui.ctx(), idx, 0, 0);
+                        self.set_input_size(ui.ctx(), idx, out_w, out_h);
+                    }
+                    // Home = Send to back (z=0)
+                    if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+                        self.inputs[idx].zorder = 0;
+                        if self.live_updates {
+                            self.update_pad_property(
+                                ui.ctx(),
+                                idx,
+                                "zorder",
+                                PropertyValue::UInt(0),
+                            );
+                        }
+                    }
+                    // End = Bring to front
+                    if ui.input(|i| i.key_pressed(egui::Key::End)) {
+                        let max_z = self.inputs.iter().map(|i| i.zorder).max().unwrap_or(0);
+                        self.inputs[idx].zorder = max_z + 1;
+                        if self.live_updates {
+                            self.update_pad_property(
+                                ui.ctx(),
+                                idx,
+                                "zorder",
+                                PropertyValue::UInt(self.inputs[idx].zorder as u64),
+                            );
+                        }
+                    }
+                    // PageDown = Move down one layer
+                    if ui.input(|i| i.key_pressed(egui::Key::PageDown))
+                        && self.inputs[idx].zorder > 0
+                    {
+                        self.inputs[idx].zorder -= 1;
+                        if self.live_updates {
+                            self.update_pad_property(
+                                ui.ctx(),
+                                idx,
+                                "zorder",
+                                PropertyValue::UInt(self.inputs[idx].zorder as u64),
+                            );
+                        }
+                    }
+                    // PageUp = Move up one layer
+                    if ui.input(|i| i.key_pressed(egui::Key::PageUp)) {
+                        self.inputs[idx].zorder += 1;
+                        if self.live_updates {
+                            self.update_pad_property(
+                                ui.ctx(),
+                                idx,
+                                "zorder",
+                                PropertyValue::UInt(self.inputs[idx].zorder as u64),
+                            );
+                        }
+                    }
+                }
+
+                // Toolbar row - Settings, templates, and input selection
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.snap_to_grid, "Snap");
                     if self.snap_to_grid {
                         ui.add(
                             egui::DragValue::new(&mut self.grid_size)
-                                .prefix("Grid: ")
+                                .prefix("")
                                 .suffix("px"),
                         );
                     }
                     ui.separator();
 
-                    ui.checkbox(&mut self.live_updates, "Live updates");
+                    ui.checkbox(&mut self.live_updates, "Live");
 
                     // Show Apply button when live updates is off
-                    if !self.live_updates {
-                        ui.separator();
-                        if ui.button("Apply Layout").clicked() {
-                            self.apply_all_properties(ctx);
-                        }
+                    if !self.live_updates && ui.button("Apply").clicked() {
+                        self.apply_all_properties(ctx);
                     }
 
                     ui.separator();
@@ -896,6 +985,37 @@ impl CompositorEditor {
                     if template_applied && self.live_updates {
                         self.apply_all_properties(ctx);
                     }
+
+                    ui.separator();
+
+                    // Input selection buttons (click again to deselect)
+                    for idx in 0..self.inputs.len() {
+                        let is_selected = self.selected_input == Some(idx);
+                        let color = self.inputs[idx].color();
+                        let button = egui::Button::new(format!("{}", idx))
+                            .fill(if is_selected {
+                                color
+                            } else {
+                                Color32::from_gray(60)
+                            })
+                            .min_size(Vec2::new(24.0, 18.0));
+                        if ui.add(button).clicked() {
+                            self.toggle_input_selection(idx);
+                        }
+                    }
+
+                    // Deselect button
+                    if self.selected_input.is_some()
+                        && ui
+                            .add(egui::Button::new("×").min_size(Vec2::new(18.0, 18.0)))
+                            .on_hover_text("Deselect (Esc)")
+                            .clicked()
+                    {
+                        self.deselect_input();
+                    }
+
+                    ui.separator();
+                    ui.label(format!("{}×{}", self.output_width, self.output_height));
                 });
 
                 ui.separator();
@@ -1006,17 +1126,31 @@ impl CompositorEditor {
         sorted_indices.sort_by_key(|&i| self.inputs[i].zorder);
 
         // Draw input boxes
+        let has_selection = self.selected_input.is_some();
         for &idx in &sorted_indices {
             let input = &self.inputs[idx];
             let rect = input.rect();
             let screen_rect = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
 
-            // Draw box
-            painter.rect_filled(screen_rect, 0.0, input.color());
+            // When an input is selected, draw others at half opacity
+            let dimmed = has_selection && !input.selected;
+            let opacity_mult = if dimmed { 0.4 } else { 1.0 };
+
+            // Draw box with adjusted opacity
+            let mut color = input.color();
+            color = Color32::from_rgba_unmultiplied(
+                color.r(),
+                color.g(),
+                color.b(),
+                (color.a() as f32 * opacity_mult) as u8,
+            );
+            painter.rect_filled(screen_rect, 0.0, color);
 
             let border_width = if input.selected { 3.0 } else { 1.0 };
             let border_color = if input.selected {
                 Color32::WHITE
+            } else if dimmed {
+                Color32::from_rgba_unmultiplied(150, 150, 150, 100)
             } else {
                 Color32::from_gray(150)
             };
@@ -1027,14 +1161,19 @@ impl CompositorEditor {
                 StrokeKind::Inside,
             );
 
-            // Draw label
+            // Draw label with adjusted opacity
+            let text_color = if dimmed {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 100)
+            } else {
+                Color32::WHITE
+            };
             let label = format!("Input {}", input.input_index);
             painter.text(
                 screen_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 label,
                 egui::FontId::proportional(14.0),
-                Color32::WHITE,
+                text_color,
             );
 
             // Draw zorder indicator
@@ -1044,7 +1183,7 @@ impl CompositorEditor {
                 egui::Align2::LEFT_TOP,
                 zorder_label,
                 egui::FontId::proportional(10.0),
-                Color32::WHITE,
+                text_color,
             );
 
             // Draw resize handles if selected (in screen space for consistent size)
@@ -1310,36 +1449,62 @@ impl CompositorEditor {
             }
         }
 
-        // Check for input box click/drag start (reverse order for z-order)
-        for idx in (0..self.inputs.len()).rev() {
-            let input_rect = self.inputs[idx].rect();
-
+        // Check for input box click/drag start
+        // If an input is selected, only that input can be dragged (regardless of z-order)
+        // Clicking still works on any input to change selection
+        if let Some(selected_idx) = self.selected_input {
+            // Selected input - can be dragged
+            let input_rect = self.inputs[selected_idx].rect();
             if input_rect.contains(canvas_pos) {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
 
                 if response.clicked() {
-                    self.selected_input = Some(idx);
-                    for i in 0..self.inputs.len() {
-                        self.inputs[i].selected = i == idx;
-                    }
+                    self.toggle_input_selection(selected_idx);
                 }
 
                 if response.drag_started() {
-                    self.dragging_input = Some(idx);
+                    self.dragging_input = Some(selected_idx);
                     self.drag_start_pos = canvas_pos;
-                    self.drag_start_xpos = self.inputs[idx].xpos;
-                    self.drag_start_ypos = self.inputs[idx].ypos;
+                    self.drag_start_xpos = self.inputs[selected_idx].xpos;
+                    self.drag_start_ypos = self.inputs[selected_idx].ypos;
                 }
                 return;
+            }
+
+            // Check other inputs for click only (to change selection), no drag
+            for idx in (0..self.inputs.len()).rev() {
+                if idx == selected_idx {
+                    continue;
+                }
+                let input_rect = self.inputs[idx].rect();
+                if input_rect.contains(canvas_pos) {
+                    if response.clicked() {
+                        self.toggle_input_selection(idx);
+                    }
+                    return;
+                }
+            }
+        } else {
+            // No selection - check all inputs (reverse z-order), click to select
+            for idx in (0..self.inputs.len()).rev() {
+                let input_rect = self.inputs[idx].rect();
+
+                if input_rect.contains(canvas_pos) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+
+                    if response.clicked() {
+                        self.toggle_input_selection(idx);
+                    }
+
+                    // No drag without selection
+                    return;
+                }
             }
         }
 
         // Click on background deselects
         if response.clicked() {
-            self.selected_input = None;
-            for input in &mut self.inputs {
-                input.selected = false;
-            }
+            self.deselect_input();
         }
     }
 
@@ -1347,6 +1512,9 @@ impl CompositorEditor {
     fn show_properties_panel(&mut self, ui: &mut egui::Ui, selected_idx: usize) {
         // Force vertical layout and respect allocated width
         ui.set_max_width(250.0);
+
+        let out_w = self.output_width as i32;
+        let out_h = self.output_height as i32;
 
         ui.vertical(|ui| {
             ui.heading(format!("Input {}", selected_idx));
@@ -1361,6 +1529,7 @@ impl CompositorEditor {
             let mut zorder = self.inputs[selected_idx].zorder;
             let mut sizing_policy = self.inputs[selected_idx].sizing_policy.clone();
 
+            // Position section
             ui.label("Position:");
             ui.horizontal(|ui| {
                 ui.label("X:");
@@ -1391,6 +1560,50 @@ impl CompositorEditor {
                 }
             });
 
+            // Position quick buttons (quadrants)
+            ui.horizontal(|ui| {
+                let btn_size = Vec2::new(24.0, 18.0);
+                // Top-left quadrant
+                if ui
+                    .add(egui::Button::new("TL").min_size(btn_size))
+                    .on_hover_text("Top-left (0, 0)")
+                    .clicked()
+                {
+                    self.set_input_position(ui.ctx(), selected_idx, 0, 0);
+                }
+                // Top-right quadrant
+                if ui
+                    .add(egui::Button::new("TR").min_size(btn_size))
+                    .on_hover_text("Top-right")
+                    .clicked()
+                {
+                    let w = self.inputs[selected_idx].width;
+                    self.set_input_position(ui.ctx(), selected_idx, out_w - w, 0);
+                }
+                // Bottom-left quadrant
+                if ui
+                    .add(egui::Button::new("BL").min_size(btn_size))
+                    .on_hover_text("Bottom-left")
+                    .clicked()
+                {
+                    let h = self.inputs[selected_idx].height;
+                    self.set_input_position(ui.ctx(), selected_idx, 0, out_h - h);
+                }
+                // Bottom-right quadrant
+                if ui
+                    .add(egui::Button::new("BR").min_size(btn_size))
+                    .on_hover_text("Bottom-right")
+                    .clicked()
+                {
+                    let w = self.inputs[selected_idx].width;
+                    let h = self.inputs[selected_idx].height;
+                    self.set_input_position(ui.ctx(), selected_idx, out_w - w, out_h - h);
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // Size section
             ui.label("Size:");
             ui.horizontal(|ui| {
                 ui.label("W:");
@@ -1421,6 +1634,44 @@ impl CompositorEditor {
                 }
             });
 
+            // Size quick buttons
+            ui.horizontal(|ui| {
+                let btn_size = Vec2::new(28.0, 18.0);
+                // Full size (and position 0,0)
+                if ui
+                    .add(egui::Button::new("Full").min_size(btn_size))
+                    .on_hover_text("Full screen")
+                    .clicked()
+                {
+                    self.set_input_position(ui.ctx(), selected_idx, 0, 0);
+                    self.set_input_size(ui.ctx(), selected_idx, out_w, out_h);
+                }
+                // Half size
+                if ui
+                    .add(egui::Button::new("1/2").min_size(btn_size))
+                    .on_hover_text("Half size")
+                    .clicked()
+                {
+                    self.set_input_size(ui.ctx(), selected_idx, out_w / 2, out_h / 2);
+                }
+                // Third size
+                if ui
+                    .add(egui::Button::new("1/3").min_size(btn_size))
+                    .on_hover_text("Third size")
+                    .clicked()
+                {
+                    self.set_input_size(ui.ctx(), selected_idx, out_w / 3, out_h / 3);
+                }
+                // Quarter size
+                if ui
+                    .add(egui::Button::new("1/4").min_size(btn_size))
+                    .on_hover_text("Quarter size")
+                    .clicked()
+                {
+                    self.set_input_size(ui.ctx(), selected_idx, out_w / 4, out_h / 4);
+                }
+            });
+
             ui.separator();
 
             ui.label("Alpha:");
@@ -1434,19 +1685,95 @@ impl CompositorEditor {
                 );
             }
 
-            ui.label("Z-Order:");
-            if ui
-                .add(egui::DragValue::new(&mut zorder).range(0..=15))
-                .changed()
-            {
-                self.inputs[selected_idx].zorder = zorder;
-                self.update_pad_property(
-                    ui.ctx(),
-                    selected_idx,
-                    "zorder",
-                    PropertyValue::UInt(zorder as u64),
-                );
-            }
+            // Z-Order section with quick buttons
+            ui.horizontal(|ui| {
+                ui.label("Z-Order:");
+                if ui
+                    .add(egui::DragValue::new(&mut zorder).range(0..=15))
+                    .changed()
+                {
+                    self.inputs[selected_idx].zorder = zorder;
+                    self.update_pad_property(
+                        ui.ctx(),
+                        selected_idx,
+                        "zorder",
+                        PropertyValue::UInt(zorder as u64),
+                    );
+                }
+            });
+
+            // Z-order quick buttons
+            ui.horizontal(|ui| {
+                let btn_size = Vec2::new(24.0, 18.0);
+                // Send to back
+                if ui
+                    .add(egui::Button::new("<<").min_size(btn_size))
+                    .on_hover_text("Send to back (Home)")
+                    .clicked()
+                {
+                    self.inputs[selected_idx].zorder = 0;
+                    if self.live_updates {
+                        self.update_pad_property(
+                            ui.ctx(),
+                            selected_idx,
+                            "zorder",
+                            PropertyValue::UInt(0),
+                        );
+                    }
+                }
+                // Move down
+                if ui
+                    .add(egui::Button::new("<").min_size(btn_size))
+                    .on_hover_text("Move down (PgDn)")
+                    .clicked()
+                    && self.inputs[selected_idx].zorder > 0
+                {
+                    self.inputs[selected_idx].zorder -= 1;
+                    if self.live_updates {
+                        self.update_pad_property(
+                            ui.ctx(),
+                            selected_idx,
+                            "zorder",
+                            PropertyValue::UInt(self.inputs[selected_idx].zorder as u64),
+                        );
+                    }
+                }
+                // Move up
+                if ui
+                    .add(egui::Button::new(">").min_size(btn_size))
+                    .on_hover_text("Move up (PgUp)")
+                    .clicked()
+                {
+                    self.inputs[selected_idx].zorder += 1;
+                    if self.live_updates {
+                        self.update_pad_property(
+                            ui.ctx(),
+                            selected_idx,
+                            "zorder",
+                            PropertyValue::UInt(self.inputs[selected_idx].zorder as u64),
+                        );
+                    }
+                }
+                // Bring to front
+                if ui
+                    .add(egui::Button::new(">>").min_size(btn_size))
+                    .on_hover_text("Bring to front (End)")
+                    .clicked()
+                {
+                    let max_z = self.inputs.iter().map(|i| i.zorder).max().unwrap_or(0);
+                    self.inputs[selected_idx].zorder = max_z + 1;
+                    if self.live_updates {
+                        self.update_pad_property(
+                            ui.ctx(),
+                            selected_idx,
+                            "zorder",
+                            PropertyValue::UInt(self.inputs[selected_idx].zorder as u64),
+                        );
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
 
             ui.label("Sizing:");
             let mut sizing_changed = false;
@@ -1483,5 +1810,50 @@ impl CompositorEditor {
                 );
             }
         });
+    }
+
+    /// Toggle input selection (select if not selected, deselect if already selected).
+    fn toggle_input_selection(&mut self, idx: usize) {
+        if self.selected_input == Some(idx) {
+            // Deselect
+            self.selected_input = None;
+            for i in 0..self.inputs.len() {
+                self.inputs[i].selected = false;
+            }
+        } else {
+            // Select
+            self.selected_input = Some(idx);
+            for i in 0..self.inputs.len() {
+                self.inputs[i].selected = i == idx;
+            }
+        }
+    }
+
+    /// Deselect any selected input.
+    fn deselect_input(&mut self) {
+        self.selected_input = None;
+        for i in 0..self.inputs.len() {
+            self.inputs[i].selected = false;
+        }
+    }
+
+    /// Helper to set input position and send updates.
+    fn set_input_position(&mut self, ctx: &Context, idx: usize, x: i32, y: i32) {
+        self.inputs[idx].xpos = x;
+        self.inputs[idx].ypos = y;
+        if self.live_updates {
+            self.update_pad_property(ctx, idx, "xpos", PropertyValue::Int(x as i64));
+            self.update_pad_property(ctx, idx, "ypos", PropertyValue::Int(y as i64));
+        }
+    }
+
+    /// Helper to set input size and send updates.
+    fn set_input_size(&mut self, ctx: &Context, idx: usize, w: i32, h: i32) {
+        self.inputs[idx].width = w;
+        self.inputs[idx].height = h;
+        if self.live_updates {
+            self.update_pad_property(ctx, idx, "width", PropertyValue::Int(w as i64));
+            self.update_pad_property(ctx, idx, "height", PropertyValue::Int(h as i64));
+        }
     }
 }
