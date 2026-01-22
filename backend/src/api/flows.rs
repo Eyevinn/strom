@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 use strom_types::{
     api::{
-        AvailableOutput, AvailableSourcesResponse, CreateFlowRequest, ElementPropertiesResponse,
-        ErrorResponse, FlowDebugInfo, FlowListResponse, FlowResponse, FlowStatsResponse,
-        LatencyResponse, PadPropertiesResponse, SourceFlowInfo, UpdateFlowPropertiesRequest,
+        AnimateInputRequest, AvailableOutput, AvailableSourcesResponse, CreateFlowRequest,
+        ElementPropertiesResponse, ErrorResponse, FlowDebugInfo, FlowListResponse, FlowResponse,
+        FlowStatsResponse, LatencyResponse, PadPropertiesResponse, SourceFlowInfo,
+        TransitionResponse, TriggerTransitionRequest, UpdateFlowPropertiesRequest,
         UpdatePadPropertyRequest, UpdatePropertyRequest, WebRtcStatsResponse,
     },
     Flow, FlowId,
@@ -1272,6 +1273,131 @@ pub async fn get_flow_debug_info(
     );
 
     Ok(Json(debug_info))
+}
+
+/// Trigger a scene transition on a compositor block.
+///
+/// Animates the transition between two inputs on a compositor/mixer block.
+/// Supported transition types:
+/// - `cut`: Instant switch (no animation)
+/// - `fade`: Cross-fade via alpha blending
+/// - `slide_left`: New input slides in from the right
+/// - `slide_right`: New input slides in from the left
+/// - `slide_up`: New input slides in from the bottom
+/// - `slide_down`: New input slides in from the top
+#[utoipa::path(
+    post,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/transition",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Block instance ID (e.g., 'comp_1')")
+    ),
+    request_body = TriggerTransitionRequest,
+    responses(
+        (status = 200, description = "Transition triggered successfully", body = TransitionResponse),
+        (status = 400, description = "Invalid transition parameters", body = ErrorResponse),
+        (status = 404, description = "Flow not running or block not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn trigger_transition(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+    Json(req): Json<TriggerTransitionRequest>,
+) -> Result<Json<TransitionResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!(
+        "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
+        req.transition_type, block_id, flow_id, req.from_input, req.to_input, req.duration_ms
+    );
+
+    state
+        .trigger_transition(
+            &flow_id,
+            &block_id,
+            req.from_input,
+            req.to_input,
+            &req.transition_type,
+            req.duration_ms,
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to trigger transition: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_details(
+                    "Failed to trigger transition",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    Ok(Json(TransitionResponse {
+        message: format!(
+            "Transition {} started: input {} -> {}",
+            req.transition_type, req.from_input, req.to_input
+        ),
+        transition_type: req.transition_type,
+        duration_ms: req.duration_ms,
+    }))
+}
+
+/// Animate a single input's position and/or size.
+///
+/// Smoothly animates the specified input from its current position/size
+/// to the target values over the specified duration.
+#[utoipa::path(
+    post,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/animate",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Block instance ID (e.g., 'comp_1')")
+    ),
+    request_body = AnimateInputRequest,
+    responses(
+        (status = 200, description = "Animation started successfully"),
+        (status = 400, description = "Invalid parameters", body = ErrorResponse),
+        (status = 404, description = "Flow not running or block not found", body = ErrorResponse)
+    )
+)]
+pub async fn animate_input(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+    Json(req): Json<AnimateInputRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    info!(
+        "Animating input {} on block {} in flow {} to ({:?}, {:?}, {:?}, {:?}) over {}ms",
+        req.input, block_id, flow_id, req.xpos, req.ypos, req.width, req.height, req.duration_ms
+    );
+
+    state
+        .animate_input(
+            &flow_id,
+            &block_id,
+            req.input,
+            req.xpos,
+            req.ypos,
+            req.width,
+            req.height,
+            req.duration_ms,
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to animate input: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_details(
+                    "Failed to animate input",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "message": format!("Animation started for input {}", req.input),
+        "duration_ms": req.duration_ms
+    })))
 }
 
 #[cfg(test)]

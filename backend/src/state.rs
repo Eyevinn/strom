@@ -1040,6 +1040,87 @@ impl AppState {
         Ok(())
     }
 
+    /// Trigger a transition on a compositor/mixer block.
+    pub async fn trigger_transition(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        from_input: usize,
+        to_input: usize,
+        transition_type: &str,
+        duration_ms: u64,
+    ) -> Result<(), PipelineError> {
+        info!(
+            "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
+            transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
+        );
+
+        let pipelines = self.inner.pipelines.read().await;
+
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+
+        manager.trigger_transition(
+            block_instance_id,
+            from_input,
+            to_input,
+            transition_type,
+            duration_ms,
+        )?;
+
+        // Broadcast transition event
+        self.inner
+            .events
+            .broadcast(StromEvent::TransitionTriggered {
+                flow_id: *flow_id,
+                block_instance_id: block_instance_id.to_string(),
+                from_input,
+                to_input,
+                transition_type: transition_type.to_string(),
+                duration_ms,
+            });
+
+        Ok(())
+    }
+
+    /// Animate a single input's position/size on a compositor block.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn animate_input(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        input_index: usize,
+        target_xpos: Option<i32>,
+        target_ypos: Option<i32>,
+        target_width: Option<i32>,
+        target_height: Option<i32>,
+        duration_ms: u64,
+    ) -> Result<(), PipelineError> {
+        info!(
+            "Animating input {} on block {} in flow {}",
+            input_index, block_instance_id, flow_id
+        );
+
+        let pipelines = self.inner.pipelines.read().await;
+
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+
+        manager.animate_input(
+            block_instance_id,
+            input_index,
+            target_xpos,
+            target_ypos,
+            target_width,
+            target_height,
+            duration_ms,
+        )?;
+
+        Ok(())
+    }
+
     /// Get current property values from a running element.
     pub async fn get_element_properties(
         &self,

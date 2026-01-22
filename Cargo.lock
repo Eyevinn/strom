@@ -2676,6 +2676,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "gstreamer-controller"
+version = "0.24.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0545c2f3c68c186d6171e3d80f70506f292fb93f406da0738df0b93303e395fd"
+dependencies = [
+ "glib 0.21.5",
+ "gstreamer 0.24.4",
+ "gstreamer-controller-sys",
+]
+
+[[package]]
+name = "gstreamer-controller-sys"
+version = "0.24.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6ad6024d77df01ba42e725516c385793a3ec678c0e20eda3b5ef177bf8ad05d"
+dependencies = [
+ "glib-sys 0.21.5",
+ "gobject-sys 0.21.5",
+ "gstreamer-sys 0.24.4",
+ "libc",
+ "pkg-config",
+ "system-deps",
+]
+
+[[package]]
 name = "gstreamer-net"
 version = "0.24.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5950,6 +5975,7 @@ dependencies = [
  "gst-plugin-webrtchttp",
  "gstreamer 0.24.4",
  "gstreamer-app 0.24.4",
+ "gstreamer-controller",
  "gstreamer-net 0.24.4",
  "hostname",
  "http-body-util",

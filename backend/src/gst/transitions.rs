@@ -1,0 +1,566 @@
+//! Scene transitions using GStreamer Controller API.
+//!
+//! This module provides animated transitions between compositor inputs using
+//! GStreamer's interpolation control source to animate pad properties over time.
+
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_controller::prelude::*;
+use gstreamer_controller::{DirectControlBinding, InterpolationControlSource, InterpolationMode};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tracing::{debug, info};
+
+/// Transition type for scene switching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionType {
+    /// Instant cut (no animation).
+    Cut,
+    /// Cross-fade via alpha blending.
+    Fade,
+    /// Slide the new input in from the left.
+    SlideLeft,
+    /// Slide the new input in from the right.
+    SlideRight,
+    /// Slide the new input in from the top.
+    SlideUp,
+    /// Slide the new input in from the bottom.
+    SlideDown,
+}
+
+impl std::str::FromStr for TransitionType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cut" => Ok(Self::Cut),
+            "fade" | "dissolve" | "crossfade" => Ok(Self::Fade),
+            "slide_left" | "slideleft" | "wipe_left" => Ok(Self::SlideLeft),
+            "slide_right" | "slideright" | "wipe_right" => Ok(Self::SlideRight),
+            "slide_up" | "slideup" | "wipe_up" => Ok(Self::SlideUp),
+            "slide_down" | "slidedown" | "wipe_down" => Ok(Self::SlideDown),
+            _ => Err(format!("Unknown transition type: {}", s)),
+        }
+    }
+}
+
+/// Error type for transition operations.
+#[derive(Debug, thiserror::Error)]
+pub enum TransitionError {
+    #[error("Mixer element not found: {0}")]
+    MixerNotFound(String),
+    #[error("Pad not found: {0}")]
+    PadNotFound(String),
+    #[error("Invalid input index: {0}")]
+    InvalidInput(usize),
+    #[error("Pipeline not running")]
+    PipelineNotRunning,
+    #[error("Failed to query pipeline position")]
+    PositionQueryFailed,
+    #[error("Failed to create control source: {0}")]
+    ControlSourceError(String),
+    #[error("GStreamer error: {0}")]
+    GstError(String),
+}
+
+/// Manages transitions for a compositor element.
+pub struct TransitionController {
+    /// The compositor/mixer element.
+    mixer: gst::Element,
+    /// Canvas width for position calculations.
+    canvas_width: i32,
+    /// Canvas height for position calculations.
+    canvas_height: i32,
+    /// Active control sources for ongoing transitions (pad_name -> control_sources).
+    /// We keep references to prevent them from being dropped during animation.
+    active_transitions: Arc<Mutex<HashMap<String, Vec<InterpolationControlSource>>>>,
+}
+
+impl TransitionController {
+    /// Create a new transition controller for a mixer element.
+    pub fn new(mixer: gst::Element, canvas_width: i32, canvas_height: i32) -> Self {
+        Self {
+            mixer,
+            canvas_width,
+            canvas_height,
+            active_transitions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Get a sink pad by input index.
+    fn get_sink_pad(&self, input_index: usize) -> Result<gst::Pad, TransitionError> {
+        // Try sink_0, sink_1, etc.
+        let pad_name = format!("sink_{}", input_index);
+        self.mixer
+            .static_pad(&pad_name)
+            .ok_or(TransitionError::PadNotFound(pad_name))
+    }
+
+    /// Trigger a transition from one input to another.
+    ///
+    /// # Arguments
+    /// * `from_input` - The index of the currently active input.
+    /// * `to_input` - The index of the input to transition to.
+    /// * `transition_type` - The type of transition to perform.
+    /// * `duration_ms` - Duration of the transition in milliseconds.
+    /// * `pipeline` - The pipeline to query for current time.
+    pub fn transition(
+        &self,
+        from_input: usize,
+        to_input: usize,
+        transition_type: TransitionType,
+        duration_ms: u64,
+        pipeline: &gst::Pipeline,
+    ) -> Result<(), TransitionError> {
+        if from_input == to_input {
+            debug!("From and to inputs are the same, no transition needed");
+            return Ok(());
+        }
+
+        info!(
+            "Starting {:?} transition from input {} to {} over {}ms",
+            transition_type, from_input, to_input, duration_ms
+        );
+
+        // Clean up any previous transitions (they're no longer needed)
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.clear();
+        }
+
+        // Get current pipeline time
+        let current_time = pipeline
+            .query_position::<gst::ClockTime>()
+            .ok_or(TransitionError::PositionQueryFailed)?;
+
+        let end_time = current_time + gst::ClockTime::from_mseconds(duration_ms);
+
+        debug!(
+            "Transition from {:?} to {:?}",
+            current_time.display(),
+            end_time.display()
+        );
+
+        match transition_type {
+            TransitionType::Cut => self.transition_cut(from_input, to_input),
+            TransitionType::Fade => {
+                self.transition_fade(from_input, to_input, current_time, end_time)
+            }
+            TransitionType::SlideLeft => {
+                self.transition_slide(from_input, to_input, current_time, end_time, -1, 0)
+            }
+            TransitionType::SlideRight => {
+                self.transition_slide(from_input, to_input, current_time, end_time, 1, 0)
+            }
+            TransitionType::SlideUp => {
+                self.transition_slide(from_input, to_input, current_time, end_time, 0, -1)
+            }
+            TransitionType::SlideDown => {
+                self.transition_slide(from_input, to_input, current_time, end_time, 0, 1)
+            }
+        }
+    }
+
+    /// Perform an instant cut transition.
+    fn transition_cut(&self, from_input: usize, to_input: usize) -> Result<(), TransitionError> {
+        let from_pad = self.get_sink_pad(from_input)?;
+        let to_pad = self.get_sink_pad(to_input)?;
+
+        // Instant alpha change
+        from_pad.set_property("alpha", 0.0f64);
+        to_pad.set_property("alpha", 1.0f64);
+
+        info!("Cut transition complete: {} -> {}", from_input, to_input);
+        Ok(())
+    }
+
+    /// Perform a fade/dissolve transition using alpha interpolation.
+    fn transition_fade(
+        &self,
+        from_input: usize,
+        to_input: usize,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+    ) -> Result<(), TransitionError> {
+        let from_pad = self.get_sink_pad(from_input)?;
+        let to_pad = self.get_sink_pad(to_input)?;
+
+        // Clear any existing control bindings on these pads
+        self.clear_control_bindings(&from_pad);
+        self.clear_control_bindings(&to_pad);
+
+        let mut control_sources = Vec::new();
+
+        // Animate from_pad alpha: 1.0 -> 0.0
+        let cs_from = self.setup_alpha_animation(&from_pad, start_time, end_time, 1.0, 0.0)?;
+        control_sources.push(cs_from);
+
+        // Animate to_pad alpha: 0.0 -> 1.0
+        let cs_to = self.setup_alpha_animation(&to_pad, start_time, end_time, 0.0, 1.0)?;
+        control_sources.push(cs_to);
+
+        // Store control sources to keep them alive during animation
+        let key = format!("fade_{}_{}", from_input, to_input);
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.insert(key, control_sources);
+        }
+
+        info!(
+            "Fade transition started: {} -> {} ({}ms)",
+            from_input,
+            to_input,
+            (end_time - start_time).mseconds()
+        );
+
+        Ok(())
+    }
+
+    /// Perform a slide transition by animating xpos/ypos.
+    fn transition_slide(
+        &self,
+        from_input: usize,
+        to_input: usize,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        dx: i32, // -1 = left, 1 = right, 0 = no horizontal
+        dy: i32, // -1 = up, 1 = down, 0 = no vertical
+    ) -> Result<(), TransitionError> {
+        let from_pad = self.get_sink_pad(from_input)?;
+        let to_pad = self.get_sink_pad(to_input)?;
+
+        self.clear_control_bindings(&from_pad);
+        self.clear_control_bindings(&to_pad);
+
+        let mut control_sources = Vec::new();
+
+        // Current position of from_pad (assumed to be at origin 0,0 for simplicity)
+        let from_start_x = from_pad.property::<i32>("xpos");
+        let from_start_y = from_pad.property::<i32>("ypos");
+
+        // Calculate end positions
+        let from_end_x = from_start_x + dx * self.canvas_width;
+        let from_end_y = from_start_y + dy * self.canvas_height;
+
+        // To pad starts off-screen and slides in
+        let to_start_x = -dx * self.canvas_width;
+        let to_start_y = -dy * self.canvas_height;
+        let to_end_x = 0;
+        let to_end_y = 0;
+
+        // Set initial position for to_pad
+        to_pad.set_property("xpos", to_start_x);
+        to_pad.set_property("ypos", to_start_y);
+        to_pad.set_property("alpha", 1.0f64);
+
+        // Animate from_pad position
+        if dx != 0 {
+            let cs = self.setup_int_animation(
+                &from_pad,
+                "xpos",
+                start_time,
+                end_time,
+                from_start_x,
+                from_end_x,
+            )?;
+            control_sources.push(cs);
+
+            let cs = self
+                .setup_int_animation(&to_pad, "xpos", start_time, end_time, to_start_x, to_end_x)?;
+            control_sources.push(cs);
+        }
+
+        if dy != 0 {
+            let cs = self.setup_int_animation(
+                &from_pad,
+                "ypos",
+                start_time,
+                end_time,
+                from_start_y,
+                from_end_y,
+            )?;
+            control_sources.push(cs);
+
+            let cs = self
+                .setup_int_animation(&to_pad, "ypos", start_time, end_time, to_start_y, to_end_y)?;
+            control_sources.push(cs);
+        }
+
+        // After transition, hide from_pad
+        // We'll set alpha to 0 using animation too
+        let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
+        control_sources.push(cs);
+
+        let key = format!("slide_{}_{}", from_input, to_input);
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.insert(key, control_sources);
+        }
+
+        info!(
+            "Slide transition started: {} -> {} (dx={}, dy={}, {}ms)",
+            from_input,
+            to_input,
+            dx,
+            dy,
+            (end_time - start_time).mseconds()
+        );
+
+        Ok(())
+    }
+
+    /// Set up alpha property animation on a pad.
+    fn setup_alpha_animation(
+        &self,
+        pad: &gst::Pad,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        start_value: f64,
+        end_value: f64,
+    ) -> Result<InterpolationControlSource, TransitionError> {
+        let cs = InterpolationControlSource::new();
+        cs.set_mode(InterpolationMode::Linear);
+
+        // Set keyframes
+        // Note: control source values are normalized 0.0-1.0 for the property range
+        if !cs.set(start_time, start_value) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set start keyframe".to_string(),
+            ));
+        }
+        if !cs.set(end_time, end_value) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set end keyframe".to_string(),
+            ));
+        }
+
+        // Create binding and attach to pad
+        let binding = DirectControlBinding::new(pad, "alpha", &cs);
+        pad.add_control_binding(&binding).map_err(|e| {
+            TransitionError::GstError(format!("Failed to add control binding: {}", e))
+        })?;
+
+        debug!(
+            "Alpha animation: {} -> {} on pad {}",
+            start_value,
+            end_value,
+            pad.name()
+        );
+
+        Ok(cs)
+    }
+
+    /// Set up integer property animation on a pad (for xpos, ypos).
+    fn setup_int_animation(
+        &self,
+        pad: &gst::Pad,
+        property: &str,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        start_value: i32,
+        end_value: i32,
+    ) -> Result<InterpolationControlSource, TransitionError> {
+        let cs = InterpolationControlSource::new();
+        cs.set_mode(InterpolationMode::Linear);
+
+        // For integer properties, we need to normalize to 0.0-1.0 range
+        // DirectControlBinding will map this to the property's min-max range
+        // However, for xpos/ypos the range is typically very large, so we use absolute binding
+
+        // Actually, for position properties we should use the absolute binding
+        // Let's check if the pad supports these properties and their ranges
+        let pspec = pad.find_property(property).ok_or_else(|| {
+            TransitionError::ControlSourceError(format!("Property {} not found on pad", property))
+        })?;
+
+        // Get property range
+        let (min, max) = if let Some(pspec) = pspec.downcast_ref::<gst::glib::ParamSpecInt>() {
+            (pspec.minimum() as f64, pspec.maximum() as f64)
+        } else {
+            // Default range for position
+            (i32::MIN as f64, i32::MAX as f64)
+        };
+
+        // Normalize values to 0.0-1.0 range
+        let range = max - min;
+        let norm_start = (start_value as f64 - min) / range;
+        let norm_end = (end_value as f64 - min) / range;
+
+        if !cs.set(start_time, norm_start) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set start keyframe for position".to_string(),
+            ));
+        }
+        if !cs.set(end_time, norm_end) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set end keyframe for position".to_string(),
+            ));
+        }
+
+        let binding = DirectControlBinding::new(pad, property, &cs);
+        pad.add_control_binding(&binding).map_err(|e| {
+            TransitionError::GstError(format!("Failed to add control binding: {}", e))
+        })?;
+
+        debug!(
+            "Int animation ({}): {} -> {} on pad {} (normalized: {} -> {})",
+            property,
+            start_value,
+            end_value,
+            pad.name(),
+            norm_start,
+            norm_end
+        );
+
+        Ok(cs)
+    }
+
+    /// Remove all control bindings from a pad.
+    fn clear_control_bindings(&self, pad: &gst::Pad) {
+        for prop in ["alpha", "xpos", "ypos", "width", "height"] {
+            if let Some(binding) = pad.control_binding(prop) {
+                pad.remove_control_binding(&binding);
+                debug!("Removed {} control binding from pad {}", prop, pad.name());
+            }
+        }
+    }
+
+    /// Clean up completed transitions.
+    pub fn cleanup_old_transitions(&self) {
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.clear();
+        }
+    }
+
+    /// Animate a single input's properties to target values.
+    ///
+    /// Smoothly animates position (xpos, ypos) and size (width, height) from
+    /// current values to the specified targets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn animate_input(
+        &self,
+        input_index: usize,
+        target_xpos: Option<i32>,
+        target_ypos: Option<i32>,
+        target_width: Option<i32>,
+        target_height: Option<i32>,
+        duration_ms: u64,
+        pipeline: &gst::Pipeline,
+    ) -> Result<(), TransitionError> {
+        let pad = self.get_sink_pad(input_index)?;
+
+        // Clean up previous animations
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.clear();
+        }
+        self.clear_control_bindings(&pad);
+
+        // Get current pipeline time
+        let current_time = pipeline
+            .query_position::<gst::ClockTime>()
+            .ok_or(TransitionError::PositionQueryFailed)?;
+        let end_time = current_time + gst::ClockTime::from_mseconds(duration_ms);
+
+        let mut control_sources = Vec::new();
+
+        // Animate xpos if target provided
+        if let Some(target) = target_xpos {
+            let current = pad.property::<i32>("xpos");
+            if current != target {
+                let cs = self.setup_int_animation(
+                    &pad,
+                    "xpos",
+                    current_time,
+                    end_time,
+                    current,
+                    target,
+                )?;
+                control_sources.push(cs);
+            }
+        }
+
+        // Animate ypos if target provided
+        if let Some(target) = target_ypos {
+            let current = pad.property::<i32>("ypos");
+            if current != target {
+                let cs = self.setup_int_animation(
+                    &pad,
+                    "ypos",
+                    current_time,
+                    end_time,
+                    current,
+                    target,
+                )?;
+                control_sources.push(cs);
+            }
+        }
+
+        // Animate width if target provided
+        if let Some(target) = target_width {
+            let current = pad.property::<i32>("width");
+            if current != target {
+                let cs = self.setup_int_animation(
+                    &pad,
+                    "width",
+                    current_time,
+                    end_time,
+                    current,
+                    target,
+                )?;
+                control_sources.push(cs);
+            }
+        }
+
+        // Animate height if target provided
+        if let Some(target) = target_height {
+            let current = pad.property::<i32>("height");
+            if current != target {
+                let cs = self.setup_int_animation(
+                    &pad,
+                    "height",
+                    current_time,
+                    end_time,
+                    current,
+                    target,
+                )?;
+                control_sources.push(cs);
+            }
+        }
+
+        // Store control sources
+        let key = format!("animate_input_{}", input_index);
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.insert(key, control_sources);
+        }
+
+        info!(
+            "Animating input {} to xpos={:?}, ypos={:?}, width={:?}, height={:?} over {}ms",
+            input_index, target_xpos, target_ypos, target_width, target_height, duration_ms
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transition_type_from_str() {
+        assert_eq!(
+            "fade".parse::<TransitionType>().ok(),
+            Some(TransitionType::Fade)
+        );
+        assert_eq!(
+            "dissolve".parse::<TransitionType>().ok(),
+            Some(TransitionType::Fade)
+        );
+        assert_eq!(
+            "cut".parse::<TransitionType>().ok(),
+            Some(TransitionType::Cut)
+        );
+        assert_eq!(
+            "slide_left".parse::<TransitionType>().ok(),
+            Some(TransitionType::SlideLeft)
+        );
+        assert!("unknown".parse::<TransitionType>().is_err());
+    }
+}

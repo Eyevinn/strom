@@ -211,6 +211,8 @@ pub struct CompositorEditor {
     snap_to_grid: bool,
     grid_size: u32,
     live_updates: bool,
+    /// Animate position/size changes (instead of instant)
+    animate_moves: bool,
 
     /// API client
     api: ApiClient,
@@ -222,6 +224,18 @@ pub struct CompositorEditor {
 
     /// Last time we sent a live update (for throttling)
     last_live_update: instant::Instant,
+
+    // Transition settings
+    /// From input for transition
+    transition_from: usize,
+    /// To input for transition
+    transition_to: usize,
+    /// Transition type
+    transition_type: String,
+    /// Transition duration in milliseconds
+    transition_duration_ms: u64,
+    /// Last transition status message
+    transition_status: Option<String>,
 }
 
 impl CompositorEditor {
@@ -260,10 +274,17 @@ impl CompositorEditor {
             snap_to_grid: false,
             grid_size: 10,
             live_updates: true,
+            animate_moves: false,
             api,
             status: "Loading...".to_string(),
             error: None,
             last_live_update: instant::Instant::now(),
+            // Transition settings
+            transition_from: 0,
+            transition_to: if num_inputs > 1 { 1 } else { 0 },
+            transition_type: "fade".to_string(),
+            transition_duration_ms: 300,
+            transition_status: None,
         }
     }
 
@@ -788,9 +809,10 @@ impl CompositorEditor {
     /// Show the compositor editor UI as a window.
     /// Returns true if the window should stay open.
     pub fn show(&mut self, ctx: &Context) -> bool {
-        // Check for loaded properties
+        // Check for loaded properties and status updates
         self.check_loaded_properties();
         self.check_update_results();
+        self.check_transition_status();
 
         let mut is_open = true;
 
@@ -808,10 +830,9 @@ impl CompositorEditor {
             .scroll(false)
             .open(&mut is_open)
             .show(ctx, |ui| {
-                // Keyboard shortcuts for input selection (0-9, plus § and ` for input 0)
-                // Pressing the same key again deselects
-                // Note: § (Swedish) and ` (US) are on the same physical key, so we check for
-                // the text event to avoid double-triggering on Swedish keyboards
+                // Keyboard shortcuts for setting transition target (0-9)
+                // Number keys set the "To" input for transitions
+                // Note: § (Swedish) and ` (US) are on the same physical key
                 for (key, idx) in [
                     (egui::Key::Num0, 0),
                     (egui::Key::Num1, 1),
@@ -825,17 +846,26 @@ impl CompositorEditor {
                     (egui::Key::Num9, 9),
                 ] {
                     if ui.input(|i| i.key_pressed(key)) && idx < self.inputs.len() {
+                        // Set as transition target
+                        self.transition_to = idx;
+                        // Also select it visually
                         self.toggle_input_selection(idx);
                     }
                 }
-                // § on Swedish keyboard OR ` on US keyboard (left of 1) - check for character input
+                // § on Swedish keyboard OR ` on US keyboard (left of 1) - input 0
                 if ui.input(|i| {
                     i.events
                         .iter()
                         .any(|e| matches!(e, egui::Event::Text(t) if t == "§" || t == "`"))
                 }) && !self.inputs.is_empty()
                 {
+                    self.transition_to = 0;
                     self.toggle_input_selection(0);
+                }
+
+                // Space = Trigger transition (Go)
+                if ui.input(|i| i.key_pressed(egui::Key::Space)) {
+                    self.trigger_transition(ui.ctx());
                 }
 
                 // Esc = Deselect
@@ -919,6 +949,8 @@ impl CompositorEditor {
                     ui.separator();
 
                     ui.checkbox(&mut self.live_updates, "Live");
+                    ui.checkbox(&mut self.animate_moves, "Animate")
+                        .on_hover_text("Animate position/size changes");
 
                     // Show Apply button when live updates is off
                     if !self.live_updates && ui.button("Apply").clicked() {
@@ -1016,6 +1048,109 @@ impl CompositorEditor {
 
                     ui.separator();
                     ui.label(format!("{}×{}", self.output_width, self.output_height));
+                });
+
+                // Transitions row
+                ui.horizontal(|ui| {
+                    ui.label("Transition:");
+
+                    // From input selector
+                    egui::ComboBox::from_id_salt("transition_from")
+                        .selected_text(format!("From: {}", self.transition_from))
+                        .width(70.0)
+                        .show_ui(ui, |ui| {
+                            for i in 0..self.inputs.len() {
+                                if ui
+                                    .selectable_label(
+                                        self.transition_from == i,
+                                        format!("Input {}", i),
+                                    )
+                                    .clicked()
+                                {
+                                    self.transition_from = i;
+                                }
+                            }
+                        });
+
+                    // To input selector
+                    egui::ComboBox::from_id_salt("transition_to")
+                        .selected_text(format!("To: {}", self.transition_to))
+                        .width(70.0)
+                        .show_ui(ui, |ui| {
+                            for i in 0..self.inputs.len() {
+                                if ui
+                                    .selectable_label(
+                                        self.transition_to == i,
+                                        format!("Input {}", i),
+                                    )
+                                    .clicked()
+                                {
+                                    self.transition_to = i;
+                                }
+                            }
+                        });
+
+                    ui.separator();
+
+                    // Transition type selector
+                    egui::ComboBox::from_id_salt("transition_type")
+                        .selected_text(&self.transition_type)
+                        .width(90.0)
+                        .show_ui(ui, |ui| {
+                            for (value, label) in [
+                                ("cut", "Cut"),
+                                ("fade", "Fade"),
+                                ("slide_left", "Slide Left"),
+                                ("slide_right", "Slide Right"),
+                                ("slide_up", "Slide Up"),
+                                ("slide_down", "Slide Down"),
+                            ] {
+                                if ui
+                                    .selectable_label(self.transition_type == value, label)
+                                    .clicked()
+                                {
+                                    self.transition_type = value.to_string();
+                                }
+                            }
+                        });
+
+                    // Duration slider (disabled for cut)
+                    let is_cut = self.transition_type == "cut";
+                    ui.add_enabled_ui(!is_cut, |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut self.transition_duration_ms, 100..=3000)
+                                .suffix("ms")
+                                .logarithmic(true),
+                        );
+                    });
+
+                    // Trigger button
+                    let can_transition = self.transition_from != self.transition_to;
+                    if ui
+                        .add_enabled(can_transition, egui::Button::new("▶ Go"))
+                        .on_hover_text(if can_transition {
+                            format!(
+                                "Transition from input {} to {} using {} (Space)",
+                                self.transition_from, self.transition_to, self.transition_type
+                            )
+                        } else {
+                            "Select different from/to inputs".to_string()
+                        })
+                        .clicked()
+                    {
+                        let _ = self.trigger_transition(ctx);
+                    }
+
+                    // Swap button
+                    if ui.button("⇄").on_hover_text("Swap from/to").clicked() {
+                        std::mem::swap(&mut self.transition_from, &mut self.transition_to);
+                    }
+
+                    // Status message
+                    if let Some(status) = &self.transition_status {
+                        ui.separator();
+                        ui.label(status);
+                    }
                 });
 
                 ui.separator();
@@ -1842,8 +1977,12 @@ impl CompositorEditor {
         self.inputs[idx].xpos = x;
         self.inputs[idx].ypos = y;
         if self.live_updates {
-            self.update_pad_property(ctx, idx, "xpos", PropertyValue::Int(x as i64));
-            self.update_pad_property(ctx, idx, "ypos", PropertyValue::Int(y as i64));
+            if self.animate_moves {
+                self.animate_input_to(ctx, idx, Some(x), Some(y), None, None);
+            } else {
+                self.update_pad_property(ctx, idx, "xpos", PropertyValue::Int(x as i64));
+                self.update_pad_property(ctx, idx, "ypos", PropertyValue::Int(y as i64));
+            }
         }
     }
 
@@ -1852,8 +1991,150 @@ impl CompositorEditor {
         self.inputs[idx].width = w;
         self.inputs[idx].height = h;
         if self.live_updates {
-            self.update_pad_property(ctx, idx, "width", PropertyValue::Int(w as i64));
-            self.update_pad_property(ctx, idx, "height", PropertyValue::Int(h as i64));
+            if self.animate_moves {
+                self.animate_input_to(ctx, idx, None, None, Some(w), Some(h));
+            } else {
+                self.update_pad_property(ctx, idx, "width", PropertyValue::Int(w as i64));
+                self.update_pad_property(ctx, idx, "height", PropertyValue::Int(h as i64));
+            }
+        }
+    }
+
+    /// Animate an input to target position/size.
+    fn animate_input_to(
+        &mut self,
+        ctx: &Context,
+        idx: usize,
+        xpos: Option<i32>,
+        ypos: Option<i32>,
+        width: Option<i32>,
+        height: Option<i32>,
+    ) {
+        let flow_id = self.flow_id;
+        let block_id = self.block_id.clone();
+        let duration_ms = self.transition_duration_ms;
+        let api = self.api.clone();
+        let ctx = ctx.clone();
+
+        tracing::info!(
+            "🎬 Animating input {} to ({:?}, {:?}, {:?}, {:?}) over {}ms",
+            idx,
+            xpos,
+            ypos,
+            width,
+            height,
+            duration_ms
+        );
+
+        crate::app::spawn_task(async move {
+            match api
+                .animate_input(
+                    &flow_id.to_string(),
+                    &block_id,
+                    idx,
+                    xpos,
+                    ypos,
+                    width,
+                    height,
+                    duration_ms,
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("✅ Animation started");
+                }
+                Err(e) => {
+                    tracing::error!("❌ Animation failed: {}", e);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Trigger a transition between inputs.
+    /// Returns true if transition was triggered (for swapping from/to after).
+    fn trigger_transition(&mut self, ctx: &Context) -> bool {
+        if self.transition_from == self.transition_to {
+            return false;
+        }
+
+        let flow_id = self.flow_id;
+        let block_id = self.block_id.clone();
+        let from_input = self.transition_from;
+        let to_input = self.transition_to;
+        let transition_type = self.transition_type.clone();
+        let duration_ms = self.transition_duration_ms;
+        let api = self.api.clone();
+        let ctx = ctx.clone();
+
+        self.transition_status = Some(format!(
+            "{}...",
+            if transition_type == "cut" {
+                "Cutting"
+            } else {
+                "Transitioning"
+            }
+        ));
+
+        // Swap from/to immediately so "From" shows what's now live
+        self.transition_from = to_input;
+        self.transition_to = from_input;
+
+        // Invert slide direction for natural back-and-forth
+        self.transition_type = match self.transition_type.as_str() {
+            "slide_left" => "slide_right".to_string(),
+            "slide_right" => "slide_left".to_string(),
+            "slide_up" => "slide_down".to_string(),
+            "slide_down" => "slide_up".to_string(),
+            other => other.to_string(),
+        };
+
+        tracing::info!(
+            "🎬 Triggering {} transition: {} -> {} ({}ms)",
+            transition_type,
+            from_input,
+            to_input,
+            duration_ms
+        );
+
+        crate::app::spawn_task(async move {
+            match api
+                .trigger_transition(
+                    &flow_id.to_string(),
+                    &block_id,
+                    from_input,
+                    to_input,
+                    &transition_type,
+                    duration_ms,
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("✅ Transition triggered successfully");
+                    let key = format!("transition_status_{}", block_id);
+                    crate::app::set_local_storage(
+                        &key,
+                        &format!("✓ {} → {}", from_input, to_input),
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("❌ Transition failed: {}", e);
+                    let key = format!("transition_status_{}", block_id);
+                    crate::app::set_local_storage(&key, &format!("✗ {}", e));
+                }
+            }
+            ctx.request_repaint();
+        });
+
+        true
+    }
+
+    /// Check for transition status updates.
+    fn check_transition_status(&mut self) {
+        let key = format!("transition_status_{}", self.block_id);
+        if let Some(status) = crate::app::get_local_storage(&key) {
+            self.transition_status = Some(status);
+            crate::app::remove_local_storage(&key);
         }
     }
 }

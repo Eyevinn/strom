@@ -138,6 +138,9 @@ pub enum PipelineError {
 
     #[error("Pad not found: {element}:{pad}")]
     PadNotFound { element: String, pad: String },
+
+    #[error("Transition error: {0}")]
+    TransitionError(String),
 }
 
 /// Manages a single GStreamer pipeline for a flow.
@@ -2289,6 +2292,130 @@ impl PipelineManager {
         };
 
         Ok(value)
+    }
+
+    /// Trigger a transition on a compositor/mixer block.
+    ///
+    /// # Arguments
+    /// * `block_instance_id` - The instance ID of the compositor block (e.g., "comp_1").
+    /// * `from_input` - Index of the currently active input.
+    /// * `to_input` - Index of the input to transition to.
+    /// * `transition_type` - Type of transition ("fade", "cut", "slide_left", etc.).
+    /// * `duration_ms` - Duration of the transition in milliseconds.
+    pub fn trigger_transition(
+        &self,
+        block_instance_id: &str,
+        from_input: usize,
+        to_input: usize,
+        transition_type: &str,
+        duration_ms: u64,
+    ) -> Result<(), PipelineError> {
+        use crate::gst::transitions::{TransitionController, TransitionType};
+
+        info!(
+            "Triggering {} transition on {} from input {} to {} ({}ms)",
+            transition_type, block_instance_id, from_input, to_input, duration_ms
+        );
+
+        // Find the mixer element for this block
+        let mixer_id = format!("{}:mixer", block_instance_id);
+        let mixer = self
+            .elements
+            .get(&mixer_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
+
+        // Parse transition type
+        let trans_type = transition_type.parse::<TransitionType>().map_err(|_| {
+            PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "transition_type".to_string(),
+                reason: format!("Unknown transition type: {}", transition_type),
+            }
+        })?;
+
+        // Get canvas dimensions from the mixer's output caps or use defaults
+        // We'll try to get them from the capsfilter
+        let capsfilter_id = format!("{}:capsfilter", block_instance_id);
+        let (canvas_width, canvas_height) =
+            if let Some(capsfilter) = self.elements.get(&capsfilter_id) {
+                // Try to get dimensions from caps
+                if let Some(caps) = capsfilter.property::<Option<gst::Caps>>("caps") {
+                    if let Some(structure) = caps.structure(0) {
+                        let width = structure.get::<i32>("width").unwrap_or(1920);
+                        let height = structure.get::<i32>("height").unwrap_or(1080);
+                        (width, height)
+                    } else {
+                        (1920, 1080)
+                    }
+                } else {
+                    (1920, 1080)
+                }
+            } else {
+                (1920, 1080)
+            };
+
+        // Create transition controller and execute transition
+        let controller = TransitionController::new(mixer.clone(), canvas_width, canvas_height);
+        controller
+            .transition(
+                from_input,
+                to_input,
+                trans_type,
+                duration_ms,
+                &self.pipeline,
+            )
+            .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Animate a single input's position/size on a compositor block.
+    #[allow(clippy::too_many_arguments)]
+    pub fn animate_input(
+        &self,
+        block_instance_id: &str,
+        input_index: usize,
+        target_xpos: Option<i32>,
+        target_ypos: Option<i32>,
+        target_width: Option<i32>,
+        target_height: Option<i32>,
+        duration_ms: u64,
+    ) -> Result<(), PipelineError> {
+        use crate::gst::transitions::TransitionController;
+
+        info!(
+            "Animating input {} on {} to ({:?}, {:?}, {:?}, {:?}) over {}ms",
+            input_index,
+            block_instance_id,
+            target_xpos,
+            target_ypos,
+            target_width,
+            target_height,
+            duration_ms
+        );
+
+        // Find the mixer element for this block
+        let mixer_id = format!("{}:mixer", block_instance_id);
+        let mixer = self
+            .elements
+            .get(&mixer_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
+
+        // Create transition controller and animate
+        let controller = TransitionController::new(mixer.clone(), 1920, 1080);
+        controller
+            .animate_input(
+                input_index,
+                target_xpos,
+                target_ypos,
+                target_width,
+                target_height,
+                duration_ms,
+                &self.pipeline,
+            )
+            .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
+
+        Ok(())
     }
 
     /// Get all readable property values from a live element.
