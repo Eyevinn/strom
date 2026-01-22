@@ -18,14 +18,24 @@ pub enum TransitionType {
     Cut,
     /// Cross-fade via alpha blending.
     Fade,
-    /// Slide the new input in from the left.
+    /// Slide the new input in from the left (old stays in place).
     SlideLeft,
-    /// Slide the new input in from the right.
+    /// Slide the new input in from the right (old stays in place).
     SlideRight,
-    /// Slide the new input in from the top.
+    /// Slide the new input in from the top (old stays in place).
     SlideUp,
-    /// Slide the new input in from the bottom.
+    /// Slide the new input in from the bottom (old stays in place).
     SlideDown,
+    /// Push from the left (both move together).
+    PushLeft,
+    /// Push from the right (both move together).
+    PushRight,
+    /// Push from the top (both move together).
+    PushUp,
+    /// Push from the bottom (both move together).
+    PushDown,
+    /// Dip to black then reveal new source.
+    DipToBlack,
 }
 
 impl std::str::FromStr for TransitionType {
@@ -35,10 +45,15 @@ impl std::str::FromStr for TransitionType {
         match s.to_lowercase().as_str() {
             "cut" => Ok(Self::Cut),
             "fade" | "dissolve" | "crossfade" => Ok(Self::Fade),
-            "slide_left" | "slideleft" | "wipe_left" => Ok(Self::SlideLeft),
-            "slide_right" | "slideright" | "wipe_right" => Ok(Self::SlideRight),
-            "slide_up" | "slideup" | "wipe_up" => Ok(Self::SlideUp),
-            "slide_down" | "slidedown" | "wipe_down" => Ok(Self::SlideDown),
+            "slide_left" | "slideleft" => Ok(Self::SlideLeft),
+            "slide_right" | "slideright" => Ok(Self::SlideRight),
+            "slide_up" | "slideup" => Ok(Self::SlideUp),
+            "slide_down" | "slidedown" => Ok(Self::SlideDown),
+            "push_left" | "pushleft" => Ok(Self::PushLeft),
+            "push_right" | "pushright" => Ok(Self::PushRight),
+            "push_up" | "pushup" => Ok(Self::PushUp),
+            "push_down" | "pushdown" => Ok(Self::PushDown),
+            "dip_to_black" | "diptoblack" | "dip" => Ok(Self::DipToBlack),
             _ => Err(format!("Unknown transition type: {}", s)),
         }
     }
@@ -157,6 +172,21 @@ impl TransitionController {
             TransitionType::SlideDown => {
                 self.transition_slide(from_input, to_input, current_time, end_time, 0, 1)
             }
+            TransitionType::PushLeft => {
+                self.transition_push(from_input, to_input, current_time, end_time, -1, 0)
+            }
+            TransitionType::PushRight => {
+                self.transition_push(from_input, to_input, current_time, end_time, 1, 0)
+            }
+            TransitionType::PushUp => {
+                self.transition_push(from_input, to_input, current_time, end_time, 0, -1)
+            }
+            TransitionType::PushDown => {
+                self.transition_push(from_input, to_input, current_time, end_time, 0, 1)
+            }
+            TransitionType::DipToBlack => {
+                self.transition_dip_to_black(from_input, to_input, current_time, end_time)
+            }
         }
     }
 
@@ -214,7 +244,8 @@ impl TransitionController {
         Ok(())
     }
 
-    /// Perform a slide transition by animating xpos/ypos.
+    /// Perform a slide transition - new source slides over the old one.
+    /// The old source stays in place while the new one slides on top.
     fn transition_slide(
         &self,
         from_input: usize,
@@ -232,26 +263,96 @@ impl TransitionController {
 
         let mut control_sources = Vec::new();
 
-        // Current position of from_pad (assumed to be at origin 0,0 for simplicity)
+        // Get where the from_pad currently is (this is where to_pad should end up)
+        let target_x = from_pad.property::<i32>("xpos");
+        let target_y = from_pad.property::<i32>("ypos");
+
+        // To pad starts off-screen and slides over the from_pad
+        // Direction: slide_left means new content comes from the right
+        let to_start_x = target_x - dx * self.canvas_width;
+        let to_start_y = target_y - dy * self.canvas_height;
+
+        // Set initial position for to_pad (off-screen) and make it visible
+        to_pad.set_property("xpos", to_start_x);
+        to_pad.set_property("ypos", to_start_y);
+        to_pad.set_property("alpha", 1.0f64);
+
+        // Ensure to_pad renders on top by setting higher zorder
+        let from_zorder = from_pad.property::<u32>("zorder");
+        to_pad.set_property("zorder", from_zorder + 1);
+
+        // Animate to_pad sliding in (from_pad stays still)
+        if dx != 0 {
+            let cs = self
+                .setup_int_animation(&to_pad, "xpos", start_time, end_time, to_start_x, target_x)?;
+            control_sources.push(cs);
+        }
+
+        if dy != 0 {
+            let cs = self
+                .setup_int_animation(&to_pad, "ypos", start_time, end_time, to_start_y, target_y)?;
+            control_sources.push(cs);
+        }
+
+        // After transition completes, hide from_pad
+        let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
+        control_sources.push(cs);
+
+        let key = format!("slide_{}_{}", from_input, to_input);
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.insert(key, control_sources);
+        }
+
+        info!(
+            "Slide transition started: {} -> {} (dx={}, dy={}, {}ms)",
+            from_input,
+            to_input,
+            dx,
+            dy,
+            (end_time - start_time).mseconds()
+        );
+
+        Ok(())
+    }
+
+    /// Perform a push transition where both sources move together.
+    fn transition_push(
+        &self,
+        from_input: usize,
+        to_input: usize,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        dx: i32, // -1 = left, 1 = right
+        dy: i32, // -1 = up, 1 = down
+    ) -> Result<(), TransitionError> {
+        let from_pad = self.get_sink_pad(from_input)?;
+        let to_pad = self.get_sink_pad(to_input)?;
+
+        self.clear_control_bindings(&from_pad);
+        self.clear_control_bindings(&to_pad);
+
+        let mut control_sources = Vec::new();
+
+        // Current position of from_pad
         let from_start_x = from_pad.property::<i32>("xpos");
         let from_start_y = from_pad.property::<i32>("ypos");
 
-        // Calculate end positions
+        // From pad exits in the direction of the push
         let from_end_x = from_start_x + dx * self.canvas_width;
         let from_end_y = from_start_y + dy * self.canvas_height;
 
-        // To pad starts off-screen and slides in
-        let to_start_x = -dx * self.canvas_width;
-        let to_start_y = -dy * self.canvas_height;
-        let to_end_x = 0;
-        let to_end_y = 0;
+        // To pad enters from opposite side
+        let to_start_x = from_start_x - dx * self.canvas_width;
+        let to_start_y = from_start_y - dy * self.canvas_height;
+        let to_end_x = from_start_x; // Ends where from started
+        let to_end_y = from_start_y;
 
         // Set initial position for to_pad
         to_pad.set_property("xpos", to_start_x);
         to_pad.set_property("ypos", to_start_y);
         to_pad.set_property("alpha", 1.0f64);
 
-        // Animate from_pad position
+        // Animate from_pad position (exits)
         if dx != 0 {
             let cs = self.setup_int_animation(
                 &from_pad,
@@ -285,21 +386,112 @@ impl TransitionController {
         }
 
         // After transition, hide from_pad
-        // We'll set alpha to 0 using animation too
         let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
         control_sources.push(cs);
 
-        let key = format!("slide_{}_{}", from_input, to_input);
+        let key = format!("push_{}_{}", from_input, to_input);
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
 
         info!(
-            "Slide transition started: {} -> {} (dx={}, dy={}, {}ms)",
+            "Push transition started: {} -> {} (dx={}, dy={}, {}ms)",
             from_input,
             to_input,
             dx,
             dy,
+            (end_time - start_time).mseconds()
+        );
+
+        Ok(())
+    }
+
+    /// Perform a dip-to-black transition: fade out, then fade in.
+    fn transition_dip_to_black(
+        &self,
+        from_input: usize,
+        to_input: usize,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+    ) -> Result<(), TransitionError> {
+        let from_pad = self.get_sink_pad(from_input)?;
+        let to_pad = self.get_sink_pad(to_input)?;
+
+        self.clear_control_bindings(&from_pad);
+        self.clear_control_bindings(&to_pad);
+
+        let mut control_sources = Vec::new();
+
+        // Calculate midpoint
+        let duration = end_time - start_time;
+        let mid_time = start_time + duration / 2;
+
+        // Ensure to_pad starts hidden
+        to_pad.set_property("alpha", 0.0f64);
+
+        // First half: fade out from_pad (1.0 -> 0.0)
+        let cs_from = InterpolationControlSource::new();
+        cs_from.set_mode(InterpolationMode::Linear);
+        if !cs_from.set(start_time, 1.0) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set start keyframe".to_string(),
+            ));
+        }
+        if !cs_from.set(mid_time, 0.0) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set mid keyframe".to_string(),
+            ));
+        }
+        // Keep at 0 for second half
+        if !cs_from.set(end_time, 0.0) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set end keyframe".to_string(),
+            ));
+        }
+
+        let binding = DirectControlBinding::new(&from_pad, "alpha", &cs_from);
+        from_pad.add_control_binding(&binding).map_err(|e| {
+            TransitionError::GstError(format!("Failed to add control binding: {}", e))
+        })?;
+        control_sources.push(cs_from);
+
+        // Second half: fade in to_pad (0.0 -> 1.0)
+        let cs_to = InterpolationControlSource::new();
+        cs_to.set_mode(InterpolationMode::Linear);
+        // Start at 0
+        if !cs_to.set(start_time, 0.0) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set start keyframe".to_string(),
+            ));
+        }
+        // Stay at 0 until midpoint
+        if !cs_to.set(mid_time, 0.0) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set mid keyframe".to_string(),
+            ));
+        }
+        // Fade in during second half
+        if !cs_to.set(end_time, 1.0) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set end keyframe".to_string(),
+            ));
+        }
+
+        let binding = DirectControlBinding::new(&to_pad, "alpha", &cs_to);
+        to_pad.add_control_binding(&binding).map_err(|e| {
+            TransitionError::GstError(format!("Failed to add control binding: {}", e))
+        })?;
+        control_sources.push(cs_to);
+
+        let key = format!("dip_{}_{}", from_input, to_input);
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.insert(key, control_sources);
+        }
+
+        info!(
+            "Dip-to-black transition started: {} -> {} ({}ms)",
+            from_input,
+            to_input,
             (end_time - start_time).mseconds()
         );
 
@@ -560,6 +752,22 @@ mod tests {
         assert_eq!(
             "slide_left".parse::<TransitionType>().ok(),
             Some(TransitionType::SlideLeft)
+        );
+        assert_eq!(
+            "push_left".parse::<TransitionType>().ok(),
+            Some(TransitionType::PushLeft)
+        );
+        assert_eq!(
+            "push_right".parse::<TransitionType>().ok(),
+            Some(TransitionType::PushRight)
+        );
+        assert_eq!(
+            "dip_to_black".parse::<TransitionType>().ok(),
+            Some(TransitionType::DipToBlack)
+        );
+        assert_eq!(
+            "dip".parse::<TransitionType>().ok(),
+            Some(TransitionType::DipToBlack)
         );
         assert!("unknown".parse::<TransitionType>().is_err());
     }

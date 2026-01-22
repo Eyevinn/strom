@@ -274,7 +274,7 @@ impl CompositorEditor {
             snap_to_grid: false,
             grid_size: 10,
             live_updates: true,
-            animate_moves: false,
+            animate_moves: true,
             api,
             status: "Loading...".to_string(),
             error: None,
@@ -1039,7 +1039,7 @@ impl CompositorEditor {
                     // Deselect button
                     if self.selected_input.is_some()
                         && ui
-                            .add(egui::Button::new("×").min_size(Vec2::new(18.0, 18.0)))
+                            .add(egui::Button::new("x").min_size(Vec2::new(18.0, 18.0)))
                             .on_hover_text("Deselect (Esc)")
                             .clicked()
                     {
@@ -1047,7 +1047,7 @@ impl CompositorEditor {
                     }
 
                     ui.separator();
-                    ui.label(format!("{}×{}", self.output_width, self.output_height));
+                    ui.label(format!("{}x{}", self.output_width, self.output_height));
                 });
 
                 // Transitions row
@@ -1093,20 +1093,31 @@ impl CompositorEditor {
                     ui.separator();
 
                     // Transition type selector
+                    const TRANSITION_TYPES: &[(&str, &str)] = &[
+                        ("cut", "Cut"),
+                        ("fade", "Fade"),
+                        ("dip_to_black", "Dip to Black"),
+                        ("slide_left", "Slide Left"),
+                        ("slide_right", "Slide Right"),
+                        ("slide_up", "Slide Up"),
+                        ("slide_down", "Slide Down"),
+                        ("push_left", "Push Left"),
+                        ("push_right", "Push Right"),
+                        ("push_up", "Push Up"),
+                        ("push_down", "Push Down"),
+                    ];
+                    let selected_label = TRANSITION_TYPES
+                        .iter()
+                        .find(|(v, _)| *v == self.transition_type)
+                        .map(|(_, l)| *l)
+                        .unwrap_or(&self.transition_type);
                     egui::ComboBox::from_id_salt("transition_type")
-                        .selected_text(&self.transition_type)
+                        .selected_text(selected_label)
                         .width(90.0)
                         .show_ui(ui, |ui| {
-                            for (value, label) in [
-                                ("cut", "Cut"),
-                                ("fade", "Fade"),
-                                ("slide_left", "Slide Left"),
-                                ("slide_right", "Slide Right"),
-                                ("slide_up", "Slide Up"),
-                                ("slide_down", "Slide Down"),
-                            ] {
+                            for (value, label) in TRANSITION_TYPES {
                                 if ui
-                                    .selectable_label(self.transition_type == value, label)
+                                    .selectable_label(self.transition_type == *value, *label)
                                     .clicked()
                                 {
                                     self.transition_type = value.to_string();
@@ -1127,7 +1138,7 @@ impl CompositorEditor {
                     // Trigger button
                     let can_transition = self.transition_from != self.transition_to;
                     if ui
-                        .add_enabled(can_transition, egui::Button::new("▶ Go"))
+                        .add_enabled(can_transition, egui::Button::new("Go"))
                         .on_hover_text(if can_transition {
                             format!(
                                 "Transition from input {} to {} using {} (Space)",
@@ -1142,7 +1153,7 @@ impl CompositorEditor {
                     }
 
                     // Swap button
-                    if ui.button("⇄").on_hover_text("Swap from/to").clicked() {
+                    if ui.button("<>").on_hover_text("Swap from/to").clicked() {
                         std::mem::swap(&mut self.transition_from, &mut self.transition_to);
                     }
 
@@ -2080,12 +2091,16 @@ impl CompositorEditor {
         self.transition_from = to_input;
         self.transition_to = from_input;
 
-        // Invert slide direction for natural back-and-forth
+        // Invert slide/push direction for natural back-and-forth
         self.transition_type = match self.transition_type.as_str() {
             "slide_left" => "slide_right".to_string(),
             "slide_right" => "slide_left".to_string(),
             "slide_up" => "slide_down".to_string(),
             "slide_down" => "slide_up".to_string(),
+            "push_left" => "push_right".to_string(),
+            "push_right" => "push_left".to_string(),
+            "push_up" => "push_down".to_string(),
+            "push_down" => "push_up".to_string(),
             other => other.to_string(),
         };
 
