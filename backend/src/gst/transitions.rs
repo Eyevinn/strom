@@ -431,7 +431,7 @@ impl TransitionController {
 
         // First half: fade out from_pad (1.0 -> 0.0)
         let cs_from = InterpolationControlSource::new();
-        cs_from.set_mode(InterpolationMode::Linear);
+        cs_from.set_mode(InterpolationMode::Cubic);
         if !cs_from.set(start_time, 1.0) {
             return Err(TransitionError::ControlSourceError(
                 "Failed to set start keyframe".to_string(),
@@ -457,7 +457,7 @@ impl TransitionController {
 
         // Second half: fade in to_pad (0.0 -> 1.0)
         let cs_to = InterpolationControlSource::new();
-        cs_to.set_mode(InterpolationMode::Linear);
+        cs_to.set_mode(InterpolationMode::Cubic);
         // Start at 0
         if !cs_to.set(start_time, 0.0) {
             return Err(TransitionError::ControlSourceError(
@@ -508,7 +508,7 @@ impl TransitionController {
         end_value: f64,
     ) -> Result<InterpolationControlSource, TransitionError> {
         let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::Linear);
+        cs.set_mode(InterpolationMode::Cubic);
 
         // Set keyframes
         // Note: control source values are normalized 0.0-1.0 for the property range
@@ -550,7 +550,7 @@ impl TransitionController {
         end_value: i32,
     ) -> Result<InterpolationControlSource, TransitionError> {
         let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::Linear);
+        cs.set_mode(InterpolationMode::Cubic);
 
         // For integer properties, we need to normalize to 0.0-1.0 range
         // DirectControlBinding will map this to the property's min-max range
