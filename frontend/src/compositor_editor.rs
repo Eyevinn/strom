@@ -1747,6 +1747,8 @@ impl CompositorEditor {
                 }
             });
 
+            ui.add_space(8.0);
+            ui.separator();
             ui.add_space(4.0);
 
             // Size section
