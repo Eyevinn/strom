@@ -466,7 +466,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ### Added
 - Project architecture design
 - Technology stack selection
-- Development roadmap (TODO.md)
+- Development roadmap
 - README with project overview
 
 ---

@@ -200,8 +200,6 @@ Currently implemented:
 - ✅ egui frontend with color-coded ports
 - ✅ CORS enabled for local development
 
-See TODO.md for planned future enhancements.
-
 ## Troubleshooting
 
 ### GStreamer not found
