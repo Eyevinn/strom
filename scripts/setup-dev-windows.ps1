@@ -44,7 +44,7 @@ if (Test-CommandExists "rustup") {
     Write-Host "Rustup already installed, updating..." -ForegroundColor Yellow
     rustup update
 } else {
-    winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements
+    winget install --id Rustlang.Rustup -e --source winget --accept-source-agreements --accept-package-agreements
     # Refresh PATH for this session
     $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
 }
@@ -56,7 +56,7 @@ Write-Step "Installing Visual Studio 2022 Build Tools"
 
 $vsInstalled = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" -ErrorAction SilentlyContinue
 if (-not $vsInstalled) {
-    winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements `
+    winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget --accept-source-agreements --accept-package-agreements `
         --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
     Write-Host "Build Tools installed. You may need to restart your terminal." -ForegroundColor Yellow
 } else {
@@ -71,7 +71,7 @@ Write-Step "Installing CMake"
 if (Test-CommandExists "cmake") {
     Write-Host "CMake already installed" -ForegroundColor Yellow
 } else {
-    winget install --id Kitware.CMake -e --accept-source-agreements --accept-package-agreements
+    winget install --id Kitware.CMake -e --source winget --accept-source-agreements --accept-package-agreements
     Add-ToPath "C:\Program Files\CMake\bin"
 }
 
@@ -83,7 +83,7 @@ Write-Step "Installing NASM"
 if (Test-CommandExists "nasm") {
     Write-Host "NASM already installed" -ForegroundColor Yellow
 } else {
-    winget install --id NASM.NASM -e --accept-source-agreements --accept-package-agreements
+    winget install --id NASM.NASM -e --source winget --accept-source-agreements --accept-package-agreements
     Add-ToPath "C:\Program Files\NASM"
 }
 
@@ -92,8 +92,15 @@ if (Test-CommandExists "nasm") {
 # ============================================================================
 Write-Step "Setting up WASM toolchain"
 
-# Ensure rustup is available
+# Ensure rustup is available - refresh PATH and add cargo bin directory
 $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+Add-ToPath "$env:USERPROFILE\.cargo\bin"
+
+if (-not (Test-CommandExists "rustup")) {
+    Write-Host "rustup not found in PATH. Please restart your terminal and run this script again." -ForegroundColor Red
+    Write-Host "If the problem persists, install rustup manually from https://rustup.rs" -ForegroundColor Yellow
+    exit 1
+}
 
 rustup target add wasm32-unknown-unknown
 
