@@ -8,7 +8,23 @@
     Run this script as Administrator in PowerShell.
 
 .NOTES
-    For Windows Sandbox testing, run in an elevated PowerShell session.
+    EXECUTION POLICY:
+    If you get "running scripts is disabled on this system" error, run:
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+    Or run the script directly with:
+        powershell -ExecutionPolicy Bypass -File .\setup-dev-windows.ps1
+
+    WINDOWS SANDBOX:
+    Windows Sandbox doesn't have winget pre-installed. Run these commands first:
+
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri "https://aka.ms/getwinget" -OutFile "$env:TEMP\winget.msixbundle"
+        Invoke-WebRequest -Uri "https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe" -OutFile "$env:TEMP\appruntime.exe"
+        & "$env:TEMP\appruntime.exe" --quiet
+        Invoke-WebRequest -Uri "https://github.com/microsoft/winget-cli/releases/download/v1.9.25180/DesktopAppInstaller_Dependencies.zip" -OutFile "$env:TEMP\deps.zip"
+        Expand-Archive -Path "$env:TEMP\deps.zip" -DestinationPath "$env:TEMP\deps"
+        Add-AppxPackage -Path "$env:TEMP\deps\x64\Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx"
+        Add-AppxPackage -Path "$env:TEMP\winget.msixbundle"
 #>
 
 param(
@@ -35,6 +51,9 @@ function Add-ToPath {
     }
 }
 
+# Refresh PATH from system to detect previously installed tools
+$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+
 # ============================================================================
 # Rust
 # ============================================================================
@@ -44,7 +63,7 @@ if (Test-CommandExists "rustup") {
     Write-Host "Rustup already installed, updating..." -ForegroundColor Yellow
     rustup update
 } else {
-    winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements
+    winget install --id Rustlang.Rustup -e --source winget --accept-source-agreements --accept-package-agreements
     # Refresh PATH for this session
     $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
 }
@@ -56,7 +75,7 @@ Write-Step "Installing Visual Studio 2022 Build Tools"
 
 $vsInstalled = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" -ErrorAction SilentlyContinue
 if (-not $vsInstalled) {
-    winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements `
+    winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget --accept-source-agreements --accept-package-agreements `
         --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
     Write-Host "Build Tools installed. You may need to restart your terminal." -ForegroundColor Yellow
 } else {
@@ -71,7 +90,7 @@ Write-Step "Installing CMake"
 if (Test-CommandExists "cmake") {
     Write-Host "CMake already installed" -ForegroundColor Yellow
 } else {
-    winget install --id Kitware.CMake -e --accept-source-agreements --accept-package-agreements
+    winget install --id Kitware.CMake -e --source winget --accept-source-agreements --accept-package-agreements
     Add-ToPath "C:\Program Files\CMake\bin"
 }
 
@@ -83,7 +102,7 @@ Write-Step "Installing NASM"
 if (Test-CommandExists "nasm") {
     Write-Host "NASM already installed" -ForegroundColor Yellow
 } else {
-    winget install --id NASM.NASM -e --accept-source-agreements --accept-package-agreements
+    winget install --id NASM.NASM -e --source winget --accept-source-agreements --accept-package-agreements
     Add-ToPath "C:\Program Files\NASM"
 }
 
@@ -95,8 +114,20 @@ Write-Step "Installing Graphviz"
 if (Test-CommandExists "dot") {
     Write-Host "Graphviz already installed" -ForegroundColor Yellow
 } else {
-    winget install --id Graphviz.Graphviz -e --accept-source-agreements --accept-package-agreements
+    winget install --id Graphviz.Graphviz -e --source winget --accept-source-agreements --accept-package-agreements
     Add-ToPath "C:\Program Files\Graphviz\bin"
+}
+
+# ============================================================================
+# pkg-config (for native dependency discovery)
+# ============================================================================
+Write-Step "Installing pkg-config"
+
+if (Test-CommandExists "pkg-config") {
+    Write-Host "pkg-config already installed" -ForegroundColor Yellow
+} else {
+    winget install --id bloodrock.pkg-config-lite -e --source winget --accept-source-agreements --accept-package-agreements
+    Add-ToPath "C:\Program Files\pkg-config-lite\bin"
 }
 
 # ============================================================================
@@ -104,8 +135,15 @@ if (Test-CommandExists "dot") {
 # ============================================================================
 Write-Step "Setting up WASM toolchain"
 
-# Ensure rustup is available
+# Ensure rustup is available - refresh PATH and add cargo bin directory
 $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+Add-ToPath "$env:USERPROFILE\.cargo\bin"
+
+if (-not (Test-CommandExists "rustup")) {
+    Write-Host "rustup not found in PATH. Please restart your terminal and run this script again." -ForegroundColor Red
+    Write-Host "If the problem persists, install rustup manually from https://rustup.rs" -ForegroundColor Yellow
+    exit 1
+}
 
 rustup target add wasm32-unknown-unknown
 
@@ -157,8 +195,12 @@ if (-not $SkipGStreamer) {
     # Set environment variables permanently
     Write-Step "Configuring GStreamer environment variables"
 
+    # Convert to MSYS2-style path: C:\path -> /c/path (pkg-config treats ':' as path separator)
+    $pkgConfigPath = "$gstreamerRoot\lib\pkgconfig" -replace '\\', '/'
+    $pkgConfigPath = $pkgConfigPath -replace '^([A-Za-z]):', { '/' + $_.Groups[1].Value.ToLower() }
+
     [System.Environment]::SetEnvironmentVariable("GSTREAMER_1_0_ROOT_MSVC_X86_64", $gstreamerRoot, "Machine")
-    [System.Environment]::SetEnvironmentVariable("PKG_CONFIG_PATH", "$gstreamerRoot\lib\pkgconfig", "Machine")
+    [System.Environment]::SetEnvironmentVariable("PKG_CONFIG_PATH", $pkgConfigPath, "Machine")
 
     # Add to system PATH
     $machinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
@@ -168,7 +210,7 @@ if (-not $SkipGStreamer) {
 
     # Set for current session
     $env:GSTREAMER_1_0_ROOT_MSVC_X86_64 = $gstreamerRoot
-    $env:PKG_CONFIG_PATH = "$gstreamerRoot\lib\pkgconfig"
+    $env:PKG_CONFIG_PATH = $pkgConfigPath
     Add-ToPath "$gstreamerRoot\bin"
 }
 
@@ -184,7 +226,8 @@ $checks = @(
     @{ Name = "Trunk"; Command = "trunk --version" },
     @{ Name = "CMake"; Command = "cmake --version | Select-Object -First 1" },
     @{ Name = "NASM"; Command = "nasm --version" },
-    @{ Name = "Graphviz"; Command = "dot -V 2>&1" }
+    @{ Name = "Graphviz"; Command = "dot -V 2>&1" },
+    @{ Name = "pkg-config"; Command = "pkg-config --version" }
 )
 
 if (-not $SkipGStreamer) {
@@ -219,8 +262,7 @@ if ($allPassed) {
 Write-Host @"
 
 Next steps:
-  1. Restart your terminal to reload PATH
-  2. Clone the repository and run: cargo build
-  3. For WASM build: cd strom-frontend && trunk build
+  1. Restart your terminal to reload environment variables
+  2. Run: cargo run
 
 "@ -ForegroundColor Cyan
