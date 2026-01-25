@@ -88,6 +88,18 @@ if (Test-CommandExists "nasm") {
 }
 
 # ============================================================================
+# Graphviz (for pipeline visualization)
+# ============================================================================
+Write-Step "Installing Graphviz"
+
+if (Test-CommandExists "dot") {
+    Write-Host "Graphviz already installed" -ForegroundColor Yellow
+} else {
+    winget install --id Graphviz.Graphviz -e --accept-source-agreements --accept-package-agreements
+    Add-ToPath "C:\Program Files\Graphviz\bin"
+}
+
+# ============================================================================
 # WASM Toolchain
 # ============================================================================
 Write-Step "Setting up WASM toolchain"
@@ -166,7 +178,8 @@ $checks = @(
     @{ Name = "WASM target"; Command = "rustup target list --installed | Select-String wasm32" },
     @{ Name = "Trunk"; Command = "trunk --version" },
     @{ Name = "CMake"; Command = "cmake --version | Select-Object -First 1" },
-    @{ Name = "NASM"; Command = "nasm --version" }
+    @{ Name = "NASM"; Command = "nasm --version" },
+    @{ Name = "Graphviz"; Command = "dot -V 2>&1" }
 )
 
 if (-not $SkipGStreamer) {
