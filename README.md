@@ -317,19 +317,7 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
   gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
   gstreamer1.0-tools libnice-dev gstreamer1.0-nice graphviz
-```
 
-**Windows:** Setting up a development environment on Windows requires additional tools (Visual Studio Build Tools, GStreamer SDK, CMake, NASM, etc.). Run the automated setup script in an elevated PowerShell session:
-
-```powershell
-# Run as Administrator
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser  # Allow scripts (one-time)
-.\scripts\setup-dev-windows.ps1
-```
-
-The script installs Rust, Visual Studio Build Tools, GStreamer, CMake, NASM, Graphviz, and the WASM toolchain via winget.
-
-```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup target add wasm32-unknown-unknown
@@ -341,6 +329,18 @@ cargo test --workspace
 # Run development server
 cargo run
 ```
+
+### Windows Development Setup
+
+Setting up a development environment on Windows requires additional tools (Visual Studio Build Tools, GStreamer SDK, CMake, NASM, etc.). An automated setup script handles this:
+
+```powershell
+# Run as Administrator in PowerShell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser  # Allow scripts (one-time)
+.\scripts\setup-dev-windows.ps1
+```
+
+The script installs Rust, Visual Studio Build Tools, GStreamer, CMake, NASM, Graphviz, and the WASM toolchain via winget.
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed setup, testing, and contribution guidelines.
 
