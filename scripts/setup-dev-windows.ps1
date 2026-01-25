@@ -134,11 +134,16 @@ if (-not $SkipGStreamer) {
         $runtimeMsi = "gstreamer-1.0-msvc-x86_64-$GStreamerVersion.msi"
         $develMsi = "gstreamer-1.0-devel-msvc-x86_64-$GStreamerVersion.msi"
 
+        # Disable progress bar for much faster downloads
+        $ProgressPreference = 'SilentlyContinue'
+
         Write-Host "Downloading GStreamer runtime from GitHub mirror..."
         Invoke-WebRequest -Uri "$baseUrl/$runtimeMsi" -OutFile "$tempDir\$runtimeMsi"
 
         Write-Host "Downloading GStreamer development SDK from GitHub mirror..."
         Invoke-WebRequest -Uri "$baseUrl/$develMsi" -OutFile "$tempDir\$develMsi"
+
+        $ProgressPreference = 'Continue'
 
         Write-Host "Installing GStreamer runtime..."
         Start-Process msiexec.exe -ArgumentList "/i `"$tempDir\$runtimeMsi`" /quiet /norestart INSTALLDIR=C:\gstreamer" -Wait
