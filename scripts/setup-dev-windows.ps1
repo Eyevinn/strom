@@ -195,8 +195,11 @@ if (-not $SkipGStreamer) {
     # Set environment variables permanently
     Write-Step "Configuring GStreamer environment variables"
 
+    # Use forward slashes for PKG_CONFIG_PATH - pkg-config treats ':' as path separator
+    $pkgConfigPath = "$gstreamerRoot/lib/pkgconfig" -replace '\\', '/'
+
     [System.Environment]::SetEnvironmentVariable("GSTREAMER_1_0_ROOT_MSVC_X86_64", $gstreamerRoot, "Machine")
-    [System.Environment]::SetEnvironmentVariable("PKG_CONFIG_PATH", "$gstreamerRoot\lib\pkgconfig", "Machine")
+    [System.Environment]::SetEnvironmentVariable("PKG_CONFIG_PATH", $pkgConfigPath, "Machine")
 
     # Add to system PATH
     $machinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
@@ -206,7 +209,7 @@ if (-not $SkipGStreamer) {
 
     # Set for current session
     $env:GSTREAMER_1_0_ROOT_MSVC_X86_64 = $gstreamerRoot
-    $env:PKG_CONFIG_PATH = "$gstreamerRoot\lib\pkgconfig"
+    $env:PKG_CONFIG_PATH = $pkgConfigPath
     Add-ToPath "$gstreamerRoot\bin"
 }
 
