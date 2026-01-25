@@ -51,6 +51,9 @@ function Add-ToPath {
     }
 }
 
+# Refresh PATH from system to detect previously installed tools
+$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+
 # ============================================================================
 # Rust
 # ============================================================================
