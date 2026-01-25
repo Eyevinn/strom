@@ -330,6 +330,18 @@ cargo test --workspace
 cargo run
 ```
 
+### Windows Development Setup
+
+Setting up a development environment on Windows requires additional tools (Visual Studio Build Tools, GStreamer SDK, CMake, NASM, etc.). An automated setup script handles this:
+
+```powershell
+# Run as Administrator in PowerShell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser  # Allow scripts (one-time)
+.\scripts\setup-dev-windows.ps1
+```
+
+The script installs Rust, Visual Studio Build Tools, GStreamer, CMake, NASM, Graphviz, and the WASM toolchain via winget.
+
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed setup, testing, and contribution guidelines.
 
 ## Project Structure
