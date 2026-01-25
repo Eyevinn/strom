@@ -914,11 +914,11 @@ impl AppState {
             if let Some(flow) = flows.get_mut(id) {
                 info!("Clearing runtime_data from {} blocks", flow.blocks.len());
                 for block in &mut flow.blocks {
-                    if block.runtime_data.is_some() {
+                    if let Some(runtime_data) = &block.runtime_data {
                         info!(
                             "Clearing runtime_data for block {} (was {} entries)",
                             block.id,
-                            block.runtime_data.as_ref().unwrap().len()
+                            runtime_data.len()
                         );
                         block.runtime_data = None;
                     }
