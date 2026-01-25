@@ -13,7 +13,7 @@
 
 param(
     [switch]$SkipGStreamer,
-    [string]$GStreamerVersion = "1.24.12"
+    [string]$GStreamerVersion = "1.26.10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -117,14 +117,15 @@ if (-not $SkipGStreamer) {
         $tempDir = "$env:TEMP\gstreamer-install"
         New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
-        $baseUrl = "https://gstreamer.freedesktop.org/data/pkg/windows/$GStreamerVersion/msvc"
+        # Download from Strom GitHub releases mirror (freedesktop.org blocks automated downloads)
+        $baseUrl = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
         $runtimeMsi = "gstreamer-1.0-msvc-x86_64-$GStreamerVersion.msi"
         $develMsi = "gstreamer-1.0-devel-msvc-x86_64-$GStreamerVersion.msi"
 
-        Write-Host "Downloading GStreamer runtime..."
+        Write-Host "Downloading GStreamer runtime from GitHub mirror..."
         Invoke-WebRequest -Uri "$baseUrl/$runtimeMsi" -OutFile "$tempDir\$runtimeMsi"
 
-        Write-Host "Downloading GStreamer development SDK..."
+        Write-Host "Downloading GStreamer development SDK from GitHub mirror..."
         Invoke-WebRequest -Uri "$baseUrl/$develMsi" -OutFile "$tempDir\$develMsi"
 
         Write-Host "Installing GStreamer runtime..."
