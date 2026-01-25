@@ -4,7 +4,6 @@ pub mod aes67;
 pub mod audioformat;
 pub mod compositor;
 pub mod decklink;
-pub mod glcompositor;
 pub mod inter;
 pub mod mediaplayer;
 pub mod meter;
@@ -34,9 +33,6 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
 
     // Add DeckLink blocks
     blocks.extend(decklink::get_blocks());
-
-    // Add GLCompositor blocks (legacy, GPU-only)
-    blocks.extend(glcompositor::get_blocks());
 
     // Add Inter-pipeline blocks
     blocks.extend(inter::get_blocks());
@@ -83,7 +79,6 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.decklink_audio_input" => Some(Arc::new(decklink::DeckLinkAudioInputBuilder)),
         "builtin.decklink_video_output" => Some(Arc::new(decklink::DeckLinkVideoOutputBuilder)),
         "builtin.decklink_audio_output" => Some(Arc::new(decklink::DeckLinkAudioOutputBuilder)),
-        "builtin.glcompositor" => Some(Arc::new(glcompositor::GLCompositorBuilder)),
         "builtin.inter_output" => Some(Arc::new(inter::InterOutputBuilder)),
         "builtin.inter_input" => Some(Arc::new(inter::InterInputBuilder)),
         "builtin.media_player" => Some(Arc::new(mediaplayer::MediaPlayerBuilder)),

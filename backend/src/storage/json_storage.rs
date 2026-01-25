@@ -26,6 +26,21 @@ impl Default for StorageFormat {
     }
 }
 
+/// Migrate a flow to handle deprecated blocks.
+fn migrate_flow(mut flow: Flow) -> Flow {
+    for block in &mut flow.blocks {
+        // Migrate deprecated OpenGL Compositor to Video Compositor
+        if block.block_definition_id == "builtin.glcompositor" {
+            info!(
+                "Migrating deprecated glcompositor block '{}' to compositor in flow '{}'",
+                block.id, flow.name
+            );
+            block.block_definition_id = "builtin.compositor".to_string();
+        }
+    }
+    flow
+}
+
 /// Storage backend that persists flows to a JSON file.
 pub struct JsonFileStorage {
     path: PathBuf,
@@ -72,6 +87,7 @@ impl JsonFileStorage {
         let flows: HashMap<FlowId, Flow> = storage
             .flows
             .into_iter()
+            .map(|flow| migrate_flow(flow))
             .map(|flow| (flow.id, flow))
             .collect();
 
