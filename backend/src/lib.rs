@@ -168,6 +168,27 @@ pub async fn create_app_with_state_and_auth(
             get(api::discovery::get_stream_sdp),
         )
         .route("/discovery/announced", get(api::discovery::list_announced))
+        // Device Discovery (generic - audio, video, NDI, etc.)
+        .route(
+            "/discovery/devices/status",
+            get(api::discovery::device_status),
+        )
+        .route("/discovery/devices", get(api::discovery::list_devices))
+        .route("/discovery/devices/{id}", get(api::discovery::get_device))
+        .route(
+            "/discovery/devices/refresh",
+            post(api::discovery::refresh_devices),
+        )
+        // NDI Discovery (backward compatibility)
+        .route("/discovery/ndi/status", get(api::discovery::ndi_status))
+        .route(
+            "/discovery/ndi/sources",
+            get(api::discovery::list_ndi_sources),
+        )
+        .route(
+            "/discovery/ndi/refresh",
+            post(api::discovery::refresh_ndi_sources),
+        )
         // Media file management
         .route("/media", get(api::media::list_media))
         .route("/media/file/{*path}", get(api::media::download_file))

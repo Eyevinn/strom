@@ -116,6 +116,11 @@ pub enum AppMessage {
     DiscoveredStreamsLoaded(Vec<crate::discovery::DiscoveredStream>),
     /// Announced streams loaded from API
     AnnouncedStreamsLoaded(Vec<crate::discovery::AnnouncedStream>),
+    /// NDI sources loaded from API
+    NdiSourcesLoaded {
+        available: bool,
+        sources: Vec<crate::discovery::NdiSource>,
+    },
     /// SDP loaded for a discovered stream
     StreamSdpLoaded { stream_id: String, sdp: String },
     /// SDP loaded from stream picker (for updating AES67 Input block)
