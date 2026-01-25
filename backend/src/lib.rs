@@ -168,6 +168,20 @@ pub async fn create_app_with_state_and_auth(
             get(api::discovery::get_stream_sdp),
         )
         .route("/discovery/announced", get(api::discovery::list_announced))
+        // NDI Discovery
+        .route("/discovery/ndi/status", get(api::discovery::ndi_status))
+        .route(
+            "/discovery/ndi/sources",
+            get(api::discovery::list_ndi_sources),
+        )
+        .route(
+            "/discovery/ndi/sources/{id}",
+            get(api::discovery::get_ndi_source),
+        )
+        .route(
+            "/discovery/ndi/refresh",
+            post(api::discovery::refresh_ndi_sources),
+        )
         // Media file management
         .route("/media", get(api::media::list_media))
         .route("/media/file/{*path}", get(api::media::download_file))

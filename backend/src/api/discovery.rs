@@ -1,4 +1,4 @@
-//! API endpoints for AES67 stream discovery.
+//! API endpoints for AES67 stream discovery and NDI source discovery.
 
 use axum::{
     extract::{Path, State},
@@ -9,7 +9,7 @@ use axum::{
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use crate::discovery::DiscoveredStreamResponse;
+use crate::discovery::{DiscoveredStreamResponse, NdiSourceResponse};
 use crate::state::AppState;
 
 /// List all discovered AES67 streams.
@@ -108,4 +108,85 @@ pub async fn list_announced(State(state): State<AppState>) -> impl IntoResponse 
         })
         .collect();
     Json(responses)
+}
+
+// --- NDI Discovery Endpoints ---
+
+/// NDI discovery status response.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct NdiDiscoveryStatus {
+    /// Whether NDI discovery is available (plugin installed).
+    pub available: bool,
+    /// Number of discovered NDI sources.
+    pub source_count: usize,
+}
+
+/// Get NDI discovery status.
+#[utoipa::path(
+    get,
+    path = "/api/discovery/ndi/status",
+    responses(
+        (status = 200, description = "NDI discovery status", body = NdiDiscoveryStatus),
+    ),
+    tag = "discovery"
+)]
+pub async fn ndi_status(State(state): State<AppState>) -> impl IntoResponse {
+    let available = state.discovery().is_ndi_available().await;
+    let sources = state.discovery().get_ndi_sources().await;
+    Json(NdiDiscoveryStatus {
+        available,
+        source_count: sources.len(),
+    })
+}
+
+/// List all discovered NDI sources.
+#[utoipa::path(
+    get,
+    path = "/api/discovery/ndi/sources",
+    responses(
+        (status = 200, description = "List of discovered NDI sources", body = Vec<NdiSourceResponse>),
+    ),
+    tag = "discovery"
+)]
+pub async fn list_ndi_sources(State(state): State<AppState>) -> impl IntoResponse {
+    let sources = state.discovery().get_ndi_sources().await;
+    let responses: Vec<NdiSourceResponse> = sources.iter().map(|s| s.to_api_response()).collect();
+    Json(responses)
+}
+
+/// Get a specific NDI source by ID.
+#[utoipa::path(
+    get,
+    path = "/api/discovery/ndi/sources/{id}",
+    params(
+        ("id" = String, Path, description = "NDI Source ID")
+    ),
+    responses(
+        (status = 200, description = "NDI source details", body = NdiSourceResponse),
+        (status = 404, description = "NDI source not found"),
+    ),
+    tag = "discovery"
+)]
+pub async fn get_ndi_source(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.discovery().get_ndi_source(&id).await {
+        Some(source) => Ok(Json(source.to_api_response())),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Refresh NDI sources (trigger re-scan).
+#[utoipa::path(
+    post,
+    path = "/api/discovery/ndi/refresh",
+    responses(
+        (status = 200, description = "NDI sources refreshed"),
+    ),
+    tag = "discovery"
+)]
+pub async fn refresh_ndi_sources(State(state): State<AppState>) -> impl IntoResponse {
+    state.discovery().refresh_ndi_sources().await;
+    StatusCode::OK
 }

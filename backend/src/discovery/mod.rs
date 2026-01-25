@@ -1,12 +1,14 @@
-//! Network stream discovery via SAP and mDNS.
+//! Network stream discovery via SAP, mDNS, and GStreamer DeviceMonitor.
 //!
 //! This module provides:
 //! - SAP listener to discover Dante/AES67 streams on the network
 //! - SAP announcer to advertise Strom's AES67 output streams
-//! - mDNS discovery for RAVENNA, NDI, and other network protocols
+//! - mDNS discovery for RAVENNA and other network protocols
+//! - NDI discovery via GStreamer DeviceMonitor
 //! - RTSP client for fetching SDP from RAVENNA sources
 
 pub mod mdns;
+pub mod ndi;
 pub mod rtsp_client;
 pub mod sap;
 pub mod types;
@@ -23,6 +25,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
+pub use ndi::{NdiDiscovery, NdiSource, NdiSourceResponse};
 pub use types::{
     sap_address_for_stream, AnnouncedStream, AudioEncoding, DiscoveredStream,
     DiscoveredStreamResponse, DiscoverySource, SdpStreamInfo, DEFAULT_STREAM_TTL,
@@ -55,6 +58,8 @@ struct DiscoveryServiceInner {
     local_ip: RwLock<Option<IpAddr>>,
     /// mDNS discovery service.
     mdns_discovery: RwLock<Option<Arc<MdnsDiscovery>>>,
+    /// NDI discovery service.
+    ndi_discovery: RwLock<Option<Arc<RwLock<NdiDiscovery>>>>,
     /// Configured SAP multicast addresses to listen on.
     sap_multicast_addresses: Vec<String>,
 }
@@ -81,6 +86,7 @@ impl DiscoveryService {
                 send_sockets: RwLock::new(Vec::new()),
                 local_ip: RwLock::new(None),
                 mdns_discovery: RwLock::new(None),
+                ndi_discovery: RwLock::new(None),
                 sap_multicast_addresses: sap_addrs,
             }),
         }
@@ -186,12 +192,17 @@ impl DiscoveryService {
             warn!("Failed to start mDNS discovery: {}", e);
         }
 
+        // Start NDI discovery
+        if let Err(e) = self.start_ndi_discovery().await {
+            warn!("Failed to start NDI discovery: {}", e);
+        }
+
         // Start RTSP server for mDNS/RAVENNA announcements
         if let Err(e) = self.start_rtsp_server(shutdown_tx.clone()).await {
             warn!("Failed to start RTSP server: {}", e);
         }
 
-        info!("Discovery service started (SAP + mDNS + RTSP)");
+        info!("Discovery service started (SAP + mDNS + NDI + RTSP)");
         Ok(())
     }
 
@@ -228,7 +239,16 @@ impl DiscoveryService {
             }
         }
 
-        info!("Discovery service stopped (SAP + mDNS)");
+        // Shutdown NDI discovery
+        {
+            let ndi_lock = self.inner.ndi_discovery.write().await;
+            if let Some(ndi) = ndi_lock.as_ref() {
+                let mut ndi_guard = ndi.write().await;
+                ndi_guard.stop().await;
+            }
+        }
+
+        info!("Discovery service stopped (SAP + mDNS + NDI)");
     }
 
     /// Get all discovered streams.
@@ -1306,6 +1326,79 @@ impl DiscoveryService {
         });
 
         Ok(())
+    }
+
+    // --- NDI methods ---
+
+    /// Start NDI discovery using GStreamer DeviceMonitor.
+    async fn start_ndi_discovery(&self) -> anyhow::Result<()> {
+        info!("Starting NDI discovery");
+
+        let mut ndi = NdiDiscovery::new();
+
+        if !ndi.is_available() {
+            info!("NDI discovery not available - plugin not installed");
+            return Ok(());
+        }
+
+        ndi.start().await?;
+
+        // Store for later use
+        {
+            let mut ndi_lock = self.inner.ndi_discovery.write().await;
+            *ndi_lock = Some(Arc::new(RwLock::new(ndi)));
+        }
+
+        info!("NDI discovery started");
+        Ok(())
+    }
+
+    /// Get all discovered NDI sources.
+    pub async fn get_ndi_sources(&self) -> Vec<NdiSource> {
+        let ndi_lock = self.inner.ndi_discovery.read().await;
+        if let Some(ndi) = ndi_lock.as_ref() {
+            let ndi_guard = ndi.read().await;
+            ndi_guard.get_sources().await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get a specific NDI source by ID.
+    pub async fn get_ndi_source(&self, id: &str) -> Option<NdiSource> {
+        let ndi_lock = self.inner.ndi_discovery.read().await;
+        if let Some(ndi) = ndi_lock.as_ref() {
+            let ndi_guard = ndi.read().await;
+            ndi_guard.get_source(id).await
+        } else {
+            None
+        }
+    }
+
+    /// Get NDI source by name.
+    pub async fn get_ndi_source_by_name(&self, name: &str) -> Option<NdiSource> {
+        let ndi_lock = self.inner.ndi_discovery.read().await;
+        if let Some(ndi) = ndi_lock.as_ref() {
+            let ndi_guard = ndi.read().await;
+            ndi_guard.get_source_by_name(name).await
+        } else {
+            None
+        }
+    }
+
+    /// Check if NDI discovery is available.
+    pub async fn is_ndi_available(&self) -> bool {
+        let ndi_lock = self.inner.ndi_discovery.read().await;
+        ndi_lock.is_some()
+    }
+
+    /// Refresh NDI sources.
+    pub async fn refresh_ndi_sources(&self) {
+        let ndi_lock = self.inner.ndi_discovery.read().await;
+        if let Some(ndi) = ndi_lock.as_ref() {
+            let ndi_guard = ndi.read().await;
+            ndi_guard.refresh().await;
+        }
     }
 }
 
