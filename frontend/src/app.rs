@@ -469,6 +469,8 @@ pub struct StromApp {
     flow_pending_copy: Option<Flow>,
     /// Flow ID to navigate to after next refresh
     pending_flow_navigation: Option<strom_types::FlowId>,
+    /// Flow ID to select on next frame (deferred to avoid accesskit focus issues)
+    pending_flow_selection: Option<strom_types::FlowId>,
     /// WebSocket client for real-time updates
     ws_client: Option<WebSocketClient>,
     /// Connection state
@@ -672,6 +674,7 @@ impl StromApp {
             flow_pending_deletion: None,
             flow_pending_copy: None,
             pending_flow_navigation: None,
+            pending_flow_selection: None,
             ws_client: None,
             connection_state: ConnectionState::Disconnected,
             channels,
@@ -774,6 +777,7 @@ impl StromApp {
             flow_pending_deletion: None,
             flow_pending_copy: None,
             pending_flow_navigation: None,
+            pending_flow_selection: None,
             ws_client: None,
             connection_state: ConnectionState::Disconnected,
             channels,
@@ -2028,9 +2032,21 @@ impl StromApp {
 
         // Up/Down arrow keys - Navigate flow list
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            // Clear focus before changing graph structure to prevent accesskit panic
+            ctx.memory_mut(|mem| {
+                if let Some(focused_id) = mem.focused() {
+                    mem.surrender_focus(focused_id);
+                }
+            });
             self.navigate_flow_list_up();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            // Clear focus before changing graph structure to prevent accesskit panic
+            ctx.memory_mut(|mem| {
+                if let Some(focused_id) = mem.focused() {
+                    mem.surrender_focus(focused_id);
+                }
+            });
             self.navigate_flow_list_down();
         }
 
@@ -2673,17 +2689,9 @@ impl StromApp {
                                 );
 
                                 if response.clicked() {
-                                    // Select the flow by ID
-                                    self.selected_flow_id = Some(flow.id);
-                                    // Clear graph selection when switching flows
-                                    self.graph.deselect_all();
-                                    // Clear runtime dynamic pads (will be re-fetched if flow is running)
-                                    self.graph.clear_runtime_dynamic_pads();
-                                    // Load flow into graph editor
-                                    self.graph.load(flow.elements.clone(), flow.links.clone());
-                                    self.graph.load_blocks(flow.blocks.clone());
-                                    // Request focus for keyboard navigation
-                                    ui.memory_mut(|mem| mem.request_focus(list_id));
+                                    // Defer flow selection to next frame to avoid accesskit panic
+                                    // when focused node is removed during UI update
+                                    self.pending_flow_selection = Some(flow.id);
                                 }
 
                                 // Check for QoS issues to tint the background
@@ -2866,11 +2874,8 @@ impl StromApp {
 
                                 // Handle click on the text itself (in addition to the background)
                                 if name_label.clicked() {
-                                    self.selected_flow_id = Some(flow.id);
-                                    // Clear graph selection when switching flows
-                                    self.graph.deselect_all();
-                                    self.graph.load(flow.elements.clone(), flow.links.clone());
-                                    self.graph.load_blocks(flow.blocks.clone());
+                                    // Defer flow selection to next frame to avoid accesskit panic
+                                    self.pending_flow_selection = Some(flow.id);
                                 }
 
                                 // Add hover tooltip with flow details (shows full name)
@@ -3856,6 +3861,14 @@ impl StromApp {
         if let Some((flow_id, element_id)) = navigate_to {
             // Navigate to the flow
             self.selected_flow_id = Some(flow_id);
+
+            // Clear any existing focus before changing graph structure
+            // to prevent accesskit panic when focused node is removed
+            ctx.memory_mut(|mem| {
+                if let Some(focused_id) = mem.focused() {
+                    mem.surrender_focus(focused_id);
+                }
+            });
 
             // Find and load the flow
             if let Some(flow) = self.flows.iter().find(|f| f.id == flow_id).cloned() {
@@ -4905,6 +4918,26 @@ impl eframe::App for StromApp {
             }
         }
 
+        // Handle pending flow selection (deferred from previous frame to avoid accesskit panic)
+        // This MUST happen before any UI is drawn to prevent "Focused ID not in node list" errors
+        if let Some(flow_id) = self.pending_flow_selection.take() {
+            // Clear any existing focus before changing graph structure
+            ctx.memory_mut(|mem| {
+                if let Some(focused_id) = mem.focused() {
+                    mem.surrender_focus(focused_id);
+                }
+            });
+            // Now safely load the flow
+            if let Some(flow) = self.flows.iter().find(|f| f.id == flow_id).cloned() {
+                self.selected_flow_id = Some(flow_id);
+                self.graph.deselect_all();
+                self.graph.clear_runtime_dynamic_pads();
+                self.graph.load(flow.elements.clone(), flow.links.clone());
+                self.graph.load_blocks(flow.blocks.clone());
+                tracing::info!("Loaded deferred flow selection: {}", flow.name);
+            }
+        }
+
         // Handle pinch-to-zoom from JavaScript (iOS/mobile)
         // Only apply browser zoom if NOT over the graph editor (graph has its own zoom)
         #[cfg(target_arch = "wasm32")]
@@ -5009,6 +5042,13 @@ impl eframe::App for StromApp {
                         );
                         if let Some(flow) = self.flows.iter().find(|f| f.id == pending_flow_id) {
                             self.selected_flow_id = Some(pending_flow_id);
+                            // Clear any existing focus before changing graph structure
+                            // to prevent accesskit panic when focused node is removed
+                            ctx.memory_mut(|mem| {
+                                if let Some(focused_id) = mem.focused() {
+                                    mem.surrender_focus(focused_id);
+                                }
+                            });
                             // Clear graph selection and load the new flow
                             self.graph.deselect_all();
                             self.graph.load(flow.elements.clone(), flow.links.clone());
@@ -6241,6 +6281,13 @@ impl eframe::App for StromApp {
                 if let Some(flow_id_str) = self.discovery_page.take_pending_go_to_flow() {
                     if let Ok(uuid) = uuid::Uuid::parse_str(&flow_id_str) {
                         let flow_id = strom_types::FlowId::from(uuid);
+                        // Clear any existing focus before changing graph structure
+                        // to prevent accesskit panic when focused node is removed
+                        ctx.memory_mut(|mem| {
+                            if let Some(focused_id) = mem.focused() {
+                                mem.surrender_focus(focused_id);
+                            }
+                        });
                         self.select_flow(flow_id);
                         self.current_page = AppPage::Flows;
                     }
