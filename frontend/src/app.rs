@@ -6167,6 +6167,18 @@ impl eframe::App for StromApp {
         }
 
         // Check for playlist editor open signal
+        // Check for stream picker open signal (double-click on AES67 Input)
+        if let Some(block_id) = get_local_storage("open_stream_picker") {
+            remove_local_storage("open_stream_picker");
+            self.show_stream_picker_for_block = Some(block_id);
+        }
+
+        // Check for NDI picker open signal (double-click on NDI Input)
+        if let Some(block_id) = get_local_storage("open_ndi_picker") {
+            remove_local_storage("open_ndi_picker");
+            self.show_ndi_picker_for_block = Some(block_id);
+        }
+
         if let Some(block_id) = get_local_storage("open_playlist_editor") {
             remove_local_storage("open_playlist_editor");
 
