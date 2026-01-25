@@ -1365,6 +1365,71 @@ impl ApiClient {
         Ok(sdp)
     }
 
+    /// Get discovered NDI sources.
+    /// Returns (available, sources) where available indicates if NDI plugin is installed.
+    pub async fn get_ndi_sources(&self) -> ApiResult<(bool, Vec<crate::discovery::NdiSource>)> {
+        // First check status
+        let status_url = format!("{}/discovery/ndi/status", self.base_url);
+        tracing::debug!("Fetching NDI status from: {}", status_url);
+
+        let status_response = self
+            .with_auth(self.client.get(&status_url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error fetching NDI status: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !status_response.status().is_success() {
+            // NDI not available, return empty
+            return Ok((false, Vec::new()));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct NdiStatus {
+            available: bool,
+        }
+
+        let status: NdiStatus = status_response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse NDI status response: {}", e);
+            ApiError::Decode(e.to_string())
+        })?;
+
+        if !status.available {
+            return Ok((false, Vec::new()));
+        }
+
+        // Fetch sources
+        let sources_url = format!("{}/discovery/ndi/sources", self.base_url);
+        tracing::debug!("Fetching NDI sources from: {}", sources_url);
+
+        let sources_response = self
+            .with_auth(self.client.get(&sources_url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error fetching NDI sources: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !sources_response.status().is_success() {
+            let status = sources_response.status().as_u16();
+            let text = sources_response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        let sources: Vec<crate::discovery::NdiSource> =
+            sources_response.json().await.map_err(|e| {
+                tracing::error!("Failed to parse NDI sources response: {}", e);
+                ApiError::Decode(e.to_string())
+            })?;
+
+        tracing::debug!("Successfully loaded {} NDI sources", sources.len());
+        Ok((true, sources))
+    }
+
     // ========================================================================
     // Media File Management
     // ========================================================================

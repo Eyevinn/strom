@@ -15,6 +15,8 @@ pub struct BlockInspectorResult {
     pub delete_requested: bool,
     /// Whether browse streams was requested (for AES67 Input SDP)
     pub browse_streams_requested: bool,
+    /// Whether browse NDI sources was requested (for NDI Input)
+    pub browse_ndi_sources_requested: bool,
     /// VLC playlist download requested (for MPEG-TS/SRT blocks) - contains (srt_uri, latency_ms)
     pub vlc_playlist_requested: Option<(String, i32)>,
     /// VLC playlist download-only requested (native mode) - contains (srt_uri, latency_ms)
@@ -381,6 +383,7 @@ impl PropertyInspector {
             let has_action_buttons = matches!(
                 definition.id.as_str(),
                 "builtin.aes67_input"
+                    | "builtin.ndi_input"
                     | "builtin.glcompositor"
                     | "builtin.compositor"
                     | "builtin.media_player"
@@ -402,6 +405,16 @@ impl PropertyInspector {
                     .clicked()
             {
                 result.browse_streams_requested = true;
+            }
+
+            // Browse NDI Sources button for NDI Input blocks
+            if definition.id == "builtin.ndi_input"
+                && ui
+                    .button("🔍 Browse NDI Sources")
+                    .on_hover_text("Select from discovered NDI sources")
+                    .clicked()
+            {
+                result.browse_ndi_sources_requested = true;
             }
 
             // Edit Layout button for compositor blocks

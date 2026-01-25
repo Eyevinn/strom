@@ -590,6 +590,10 @@ pub struct StromApp {
     flow_filter: String,
     /// Show stream picker modal for this block ID (when browsing discovered streams for AES67 Input)
     show_stream_picker_for_block: Option<String>,
+    /// Show NDI picker modal for this block ID (when browsing NDI sources for NDI Input)
+    show_ndi_picker_for_block: Option<String>,
+    /// Search filter for NDI picker modal
+    ndi_search_filter: String,
     /// Current focus target for Ctrl+F cycling
     focus_target: FocusTarget,
     /// Request to focus the flow filter on next frame
@@ -728,6 +732,8 @@ impl StromApp {
             links_page: crate::links::LinksPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
+            show_ndi_picker_for_block: None,
+            ndi_search_filter: String::new(),
             focus_target: FocusTarget::None,
             focus_flow_filter_requested: false,
             native_pixels_per_point: cc.egui_ctx.pixels_per_point(),
@@ -834,6 +840,8 @@ impl StromApp {
             links_page: crate::links::LinksPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
+            show_ndi_picker_for_block: None,
+            ndi_search_filter: String::new(),
             focus_target: FocusTarget::None,
             focus_flow_filter_requested: false,
             native_pixels_per_point: cc.egui_ctx.pixels_per_point(),
@@ -3301,6 +3309,13 @@ impl StromApp {
                             self.discovery_page.refresh(&self.api, ctx, &self.channels.tx);
                         }
 
+                        // Handle browse NDI sources request (for NDI Input)
+                        if result.browse_ndi_sources_requested {
+                            self.show_ndi_picker_for_block = Some(block_id.clone());
+                            // Refresh NDI sources for the picker
+                            self.discovery_page.refresh(&self.api, ctx, &self.channels.tx);
+                        }
+
                         // Handle VLC playlist download request (for MPEG-TS/SRT Output)
                         if let Some((srt_uri, latency_ms)) = result.vlc_playlist_requested {
                             // Get flow name for the stream title
@@ -4291,10 +4306,11 @@ impl StromApp {
             return;
         };
 
-        let mut close_modal = false;
+        let mut is_open = true;
         let mut selected_sdp: Option<String> = None;
 
         egui::Window::new("Select Discovered Stream")
+            .open(&mut is_open)
             .collapsible(false)
             .resizable(true)
             .default_width(500.0)
@@ -4347,13 +4363,16 @@ impl StromApp {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        close_modal = true;
+                    let refresh_clicked = ui.button("🔄 Refresh").clicked();
+                    if refresh_clicked {
+                        self.discovery_page
+                            .refresh(&self.api, ctx, &self.channels.tx);
                     }
                 });
             });
 
-        if close_modal {
+        // Close modal if X button was clicked
+        if !is_open {
             self.show_stream_picker_for_block = None;
         }
 
@@ -4386,6 +4405,142 @@ impl StromApp {
                 }
                 ctx.request_repaint();
             });
+        }
+    }
+
+    /// Render the NDI picker modal for selecting discovered NDI sources.
+    fn render_ndi_picker_modal(&mut self, ctx: &Context) {
+        let Some(block_id) = self.show_ndi_picker_for_block.clone() else {
+            return;
+        };
+
+        let mut is_open = true;
+        let mut selected_ndi_name: Option<String> = None;
+
+        // Get data before window closure to avoid borrowing issues
+        let mut sources = self.discovery_page.get_ndi_sources().to_vec();
+        let is_loading = self.discovery_page.loading;
+        let ndi_available = self.discovery_page.ndi_available;
+
+        // Sort sources alphabetically by name
+        sources.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        // Filter sources based on search
+        let search_filter = self.ndi_search_filter.to_lowercase();
+        let filtered_sources: Vec<_> = if search_filter.is_empty() {
+            sources
+        } else {
+            sources
+                .into_iter()
+                .filter(|s| {
+                    s.name.to_lowercase().contains(&search_filter)
+                        || s.ip_address()
+                            .map(|ip| ip.contains(&search_filter))
+                            .unwrap_or(false)
+                        || s.url_address()
+                            .map(|url| url.to_lowercase().contains(&search_filter))
+                            .unwrap_or(false)
+                })
+                .collect()
+        };
+
+        egui::Window::new("Select NDI Source")
+            .open(&mut is_open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(500.0)
+            .default_height(400.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Select an NDI source:");
+                ui.add_space(8.0);
+
+                // Search filter input
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    ui.text_edit_singleline(&mut self.ndi_search_filter);
+                });
+                ui.add_space(8.0);
+
+                if !ndi_available {
+                    ui.label("NDI discovery is not available.");
+                    ui.label("Make sure the GStreamer NDI plugin is installed.");
+                } else if is_loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading NDI sources...");
+                    });
+                } else if filtered_sources.is_empty() {
+                    if search_filter.is_empty() {
+                        ui.label("No NDI sources discovered on the network.");
+                    } else {
+                        ui.label("No NDI sources match the search filter.");
+                    }
+                    ui.add_space(8.0);
+                    if ui.button("Refresh").clicked() {
+                        self.discovery_page
+                            .refresh(&self.api, ctx, &self.channels.tx);
+                    }
+                } else {
+                    // Scroll area for the source list
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(250.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            for source in &filtered_sources {
+                                let text = if let Some(ip) = source.ip_address() {
+                                    format!("{} ({})", source.name, ip)
+                                } else if let Some(url) = source.url_address() {
+                                    format!("{} ({})", source.name, url)
+                                } else {
+                                    source.name.clone()
+                                };
+
+                                let clicked = ui.selectable_label(false, &text).clicked();
+                                if clicked {
+                                    selected_ndi_name = Some(source.name.clone());
+                                }
+                            }
+                        });
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ndi_available {
+                        let refresh_clicked = ui.button("Refresh").clicked();
+                        if refresh_clicked {
+                            self.discovery_page
+                                .refresh(&self.api, ctx, &self.channels.tx);
+                        }
+                    }
+                });
+            });
+
+        // Close modal if X button was clicked
+        if !is_open {
+            self.show_ndi_picker_for_block = None;
+            self.ndi_search_filter.clear();
+        }
+
+        // If an NDI source was selected, update the block's ndi_name property
+        if let Some(ndi_name) = selected_ndi_name {
+            self.show_ndi_picker_for_block = None;
+            self.ndi_search_filter.clear();
+
+            // Update the block's ndi_name property
+            if let Some(block) = self.graph.get_block_by_id_mut(&block_id) {
+                block.properties.insert(
+                    "ndi_name".to_string(),
+                    strom_types::PropertyValue::String(ndi_name.clone()),
+                );
+                self.status = format!("NDI source set to: {}", ndi_name);
+                tracing::info!("NDI source '{}' selected for block {}", ndi_name, block_id);
+            } else {
+                tracing::warn!("Block {} not found when setting NDI source", block_id);
+            }
         }
     }
 
@@ -5818,6 +5973,14 @@ impl eframe::App for StromApp {
                     tracing::debug!("Announced streams loaded: {} streams", streams.len());
                     self.discovery_page.set_announced_streams(streams);
                 }
+                AppMessage::NdiSourcesLoaded { available, sources } => {
+                    tracing::debug!(
+                        "NDI sources loaded: available={}, {} sources",
+                        available,
+                        sources.len()
+                    );
+                    self.discovery_page.set_ndi_sources(available, sources);
+                }
                 AppMessage::StreamSdpLoaded { stream_id, sdp } => {
                     tracing::info!("Stream SDP loaded for: {}", stream_id);
                     self.discovery_page.set_stream_sdp(stream_id, sdp);
@@ -6004,6 +6167,18 @@ impl eframe::App for StromApp {
         }
 
         // Check for playlist editor open signal
+        // Check for stream picker open signal (double-click on AES67 Input)
+        if let Some(block_id) = get_local_storage("open_stream_picker") {
+            remove_local_storage("open_stream_picker");
+            self.show_stream_picker_for_block = Some(block_id);
+        }
+
+        // Check for NDI picker open signal (double-click on NDI Input)
+        if let Some(block_id) = get_local_storage("open_ndi_picker") {
+            remove_local_storage("open_ndi_picker");
+            self.show_ndi_picker_for_block = Some(block_id);
+        }
+
         if let Some(block_id) = get_local_storage("open_playlist_editor") {
             remove_local_storage("open_playlist_editor");
 
@@ -6265,6 +6440,7 @@ impl eframe::App for StromApp {
                 self.render_flow_properties_dialog(ctx);
                 self.render_import_dialog(ctx);
                 self.render_stream_picker_modal(ctx);
+                self.render_ndi_picker_modal(ctx);
             }
             AppPage::Discovery => {
                 CentralPanel::default().show(ctx, |ui| {
