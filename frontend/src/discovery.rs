@@ -37,21 +37,46 @@ pub struct AnnouncedStream {
     pub announce_interface: Option<String>,
 }
 
-/// Response from the NDI discovery API for a discovered NDI source.
+/// Response from the device discovery API for a discovered device.
+/// Used for NDI sources and other devices (audio, video, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NdiSource {
+pub struct DiscoveredDevice {
     pub id: String,
-    /// NDI source name (e.g., "HOSTNAME (Stream Name)").
+    /// Display name of the device.
     pub name: String,
-    /// IP address of the source (if available).
+    /// Device class (e.g., "Audio/Source", "Video/Source", "Source/Network").
+    pub device_class: String,
+    /// Device category.
+    pub category: String,
+    /// Provider that discovered this device (e.g., "pulsedeviceprovider", "ndideviceprovider").
+    pub provider: String,
+    /// Additional properties from the device.
     #[serde(default)]
-    pub ip_address: Option<String>,
-    /// URL address for direct connection (if available).
-    #[serde(default)]
-    pub url_address: Option<String>,
+    pub properties: std::collections::HashMap<String, String>,
     pub first_seen_secs_ago: u64,
     pub last_seen_secs_ago: u64,
 }
+
+impl DiscoveredDevice {
+    /// Get IP address from properties (for NDI devices).
+    pub fn ip_address(&self) -> Option<&str> {
+        self.properties.get("ip").map(|s| s.as_str())
+    }
+
+    /// Get URL address from properties (for NDI devices).
+    pub fn url_address(&self) -> Option<&str> {
+        self.properties.get("url-address").map(|s| s.as_str())
+    }
+
+    /// Check if this is an NDI device.
+    pub fn is_ndi(&self) -> bool {
+        // Check provider name or NDI-specific property
+        self.provider.contains("ndi") || self.properties.contains_key("ndi-name")
+    }
+}
+
+/// Alias for backward compatibility.
+pub type NdiSource = DiscoveredDevice;
 
 /// Type of selected stream
 #[derive(Debug, Clone, PartialEq)]
@@ -443,16 +468,17 @@ impl DiscoveryPage {
                             filter.is_empty()
                                 || source.name.to_lowercase().contains(&filter)
                                 || source
-                                    .ip_address
-                                    .as_ref()
+                                    .ip_address()
                                     .map(|ip| ip.contains(&filter))
                                     .unwrap_or(false)
                         })
                         .map(|source| {
+                            // Use ip_address if available, fall back to url_address
                             let secondary = source
-                                .ip_address
-                                .clone()
-                                .unwrap_or_else(|| "IP unknown".to_string());
+                                .ip_address()
+                                .or_else(|| source.url_address())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "Address unknown".to_string());
                             (source.id.clone(), source.name.clone(), secondary)
                         })
                         .collect();
@@ -651,17 +677,21 @@ impl DiscoveryPage {
                                 ui.label(&source.name);
                                 ui.end_row();
 
-                                if let Some(ip) = &source.ip_address {
+                                if let Some(ip) = source.ip_address() {
                                     ui.label("IP Address:");
                                     ui.label(ip);
                                     ui.end_row();
                                 }
 
-                                if let Some(url) = &source.url_address {
+                                if let Some(url) = source.url_address() {
                                     ui.label("URL:");
                                     ui.label(url);
                                     ui.end_row();
                                 }
+
+                                ui.label("Provider:");
+                                ui.label(&source.provider);
+                                ui.end_row();
 
                                 ui.label("First seen:");
                                 ui.label(format!("{}s ago", source.first_seen_secs_ago));
@@ -674,11 +704,14 @@ impl DiscoveryPage {
 
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("📋 Copy NDI Name").clicked() {
+                            if ui
+                                .button("📋 Copy NDI Name")
+                                .on_hover_text(
+                                    "Copy NDI name to clipboard. Paste into NDI Input block's ndi-name property.",
+                                )
+                                .clicked()
+                            {
                                 ui.ctx().copy_text(source.name.clone());
-                            }
-                            if ui.button("Use in NDI Input").clicked() {
-                                self.pending_ndi_source = Some(source.name.clone());
                             }
                         });
 
