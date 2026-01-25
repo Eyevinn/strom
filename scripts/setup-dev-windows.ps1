@@ -8,7 +8,10 @@
     Run this script as Administrator in PowerShell.
 
 .NOTES
-    For Windows Sandbox testing, run in an elevated PowerShell session.
+    If you get "running scripts is disabled on this system" error, run:
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+    Or run the script directly with:
+        powershell -ExecutionPolicy Bypass -File .\setup-dev-windows.ps1
 #>
 
 param(
@@ -97,6 +100,18 @@ if (Test-CommandExists "dot") {
 } else {
     winget install --id Graphviz.Graphviz -e --source winget --accept-source-agreements --accept-package-agreements
     Add-ToPath "C:\Program Files\Graphviz\bin"
+}
+
+# ============================================================================
+# pkg-config (for native dependency discovery)
+# ============================================================================
+Write-Step "Installing pkg-config"
+
+if (Test-CommandExists "pkg-config") {
+    Write-Host "pkg-config already installed" -ForegroundColor Yellow
+} else {
+    winget install --id bloodrock.pkg-config-lite -e --source winget --accept-source-agreements --accept-package-agreements
+    Add-ToPath "C:\Program Files\pkg-config-lite\bin"
 }
 
 # ============================================================================
@@ -191,7 +206,8 @@ $checks = @(
     @{ Name = "Trunk"; Command = "trunk --version" },
     @{ Name = "CMake"; Command = "cmake --version | Select-Object -First 1" },
     @{ Name = "NASM"; Command = "nasm --version" },
-    @{ Name = "Graphviz"; Command = "dot -V 2>&1" }
+    @{ Name = "Graphviz"; Command = "dot -V 2>&1" },
+    @{ Name = "pkg-config"; Command = "pkg-config --version" }
 )
 
 if (-not $SkipGStreamer) {
@@ -226,8 +242,7 @@ if ($allPassed) {
 Write-Host @"
 
 Next steps:
-  1. Restart your terminal to reload PATH
-  2. Clone the repository and run: cargo build
-  3. For WASM build: cd strom-frontend && trunk build
+  1. Restart your terminal to reload environment variables
+  2. Run: cargo run
 
 "@ -ForegroundColor Cyan
