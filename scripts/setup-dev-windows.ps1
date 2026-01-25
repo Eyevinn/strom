@@ -13,7 +13,7 @@
 
 param(
     [switch]$SkipGStreamer,
-    [string]$GStreamerVersion = "1.24.12"
+    [string]$GStreamerVersion = "1.26.10"
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,6 +88,18 @@ if (Test-CommandExists "nasm") {
 }
 
 # ============================================================================
+# Graphviz (for pipeline visualization)
+# ============================================================================
+Write-Step "Installing Graphviz"
+
+if (Test-CommandExists "dot") {
+    Write-Host "Graphviz already installed" -ForegroundColor Yellow
+} else {
+    winget install --id Graphviz.Graphviz -e --accept-source-agreements --accept-package-agreements
+    Add-ToPath "C:\Program Files\Graphviz\bin"
+}
+
+# ============================================================================
 # WASM Toolchain
 # ============================================================================
 Write-Step "Setting up WASM toolchain"
@@ -117,15 +129,21 @@ if (-not $SkipGStreamer) {
         $tempDir = "$env:TEMP\gstreamer-install"
         New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
-        $baseUrl = "https://gstreamer.freedesktop.org/data/pkg/windows/$GStreamerVersion/msvc"
+        # Download from Strom GitHub releases mirror (freedesktop.org blocks automated downloads)
+        $baseUrl = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
         $runtimeMsi = "gstreamer-1.0-msvc-x86_64-$GStreamerVersion.msi"
         $develMsi = "gstreamer-1.0-devel-msvc-x86_64-$GStreamerVersion.msi"
 
-        Write-Host "Downloading GStreamer runtime..."
+        # Disable progress bar for much faster downloads
+        $ProgressPreference = 'SilentlyContinue'
+
+        Write-Host "Downloading GStreamer runtime from GitHub mirror..."
         Invoke-WebRequest -Uri "$baseUrl/$runtimeMsi" -OutFile "$tempDir\$runtimeMsi"
 
-        Write-Host "Downloading GStreamer development SDK..."
+        Write-Host "Downloading GStreamer development SDK from GitHub mirror..."
         Invoke-WebRequest -Uri "$baseUrl/$develMsi" -OutFile "$tempDir\$develMsi"
+
+        $ProgressPreference = 'Continue'
 
         Write-Host "Installing GStreamer runtime..."
         Start-Process msiexec.exe -ArgumentList "/i `"$tempDir\$runtimeMsi`" /quiet /norestart INSTALLDIR=C:\gstreamer" -Wait
@@ -165,7 +183,8 @@ $checks = @(
     @{ Name = "WASM target"; Command = "rustup target list --installed | Select-String wasm32" },
     @{ Name = "Trunk"; Command = "trunk --version" },
     @{ Name = "CMake"; Command = "cmake --version | Select-Object -First 1" },
-    @{ Name = "NASM"; Command = "nasm --version" }
+    @{ Name = "NASM"; Command = "nasm --version" },
+    @{ Name = "Graphviz"; Command = "dot -V 2>&1" }
 )
 
 if (-not $SkipGStreamer) {
