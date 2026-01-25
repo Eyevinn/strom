@@ -1,6 +1,6 @@
 //! JSON file-based storage implementation.
 
-use super::{Result, Storage, StorageError};
+use super::{migrate_flow, Result, Storage, StorageError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -24,21 +24,6 @@ impl Default for StorageFormat {
             flows: Vec::new(),
         }
     }
-}
-
-/// Migrate a flow to handle deprecated blocks.
-fn migrate_flow(mut flow: Flow) -> Flow {
-    for block in &mut flow.blocks {
-        // Migrate deprecated OpenGL Compositor to Video Compositor
-        if block.block_definition_id == "builtin.glcompositor" {
-            info!(
-                "Migrating deprecated glcompositor block '{}' to compositor in flow '{}'",
-                block.id, flow.name
-            );
-            block.block_definition_id = "builtin.compositor".to_string();
-        }
-    }
-    flow
 }
 
 /// Storage backend that persists flows to a JSON file.

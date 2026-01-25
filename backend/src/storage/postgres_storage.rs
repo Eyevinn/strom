@@ -1,6 +1,6 @@
 //! PostgreSQL-based storage implementation.
 
-use super::{Result, Storage, StorageError};
+use super::{migrate_flow, Result, Storage, StorageError};
 use async_trait::async_trait;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
@@ -111,6 +111,7 @@ impl Storage for PostgresStorage {
         for row in rows {
             let data: serde_json::Value = row.get("data");
             let flow: Flow = serde_json::from_value(data)?;
+            let flow = migrate_flow(flow);
             flows.insert(flow.id, flow);
         }
 

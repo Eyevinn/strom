@@ -9,6 +9,22 @@ pub use postgres_storage::PostgresStorage;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use strom_types::{Flow, FlowId};
+use tracing::info;
+
+/// Migrate a flow to handle deprecated blocks.
+pub(crate) fn migrate_flow(mut flow: Flow) -> Flow {
+    for block in &mut flow.blocks {
+        // Migrate deprecated OpenGL Compositor to Video Compositor
+        if block.block_definition_id == "builtin.glcompositor" {
+            info!(
+                "Migrating deprecated glcompositor block '{}' to compositor in flow '{}'",
+                block.id, flow.name
+            );
+            block.block_definition_id = "builtin.compositor".to_string();
+        }
+    }
+    flow
+}
 
 /// Error type for storage operations.
 #[derive(Debug, thiserror::Error)]
