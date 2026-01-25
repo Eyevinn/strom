@@ -8,10 +8,23 @@
     Run this script as Administrator in PowerShell.
 
 .NOTES
+    EXECUTION POLICY:
     If you get "running scripts is disabled on this system" error, run:
         Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
     Or run the script directly with:
         powershell -ExecutionPolicy Bypass -File .\setup-dev-windows.ps1
+
+    WINDOWS SANDBOX:
+    Windows Sandbox doesn't have winget pre-installed. Run these commands first:
+
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri "https://aka.ms/getwinget" -OutFile "$env:TEMP\winget.msixbundle"
+        Invoke-WebRequest -Uri "https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe" -OutFile "$env:TEMP\appruntime.exe"
+        & "$env:TEMP\appruntime.exe" --quiet
+        Invoke-WebRequest -Uri "https://github.com/microsoft/winget-cli/releases/download/v1.9.25180/DesktopAppInstaller_Dependencies.zip" -OutFile "$env:TEMP\deps.zip"
+        Expand-Archive -Path "$env:TEMP\deps.zip" -DestinationPath "$env:TEMP\deps"
+        Add-AppxPackage -Path "$env:TEMP\deps\x64\Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx"
+        Add-AppxPackage -Path "$env:TEMP\winget.msixbundle"
 #>
 
 param(
