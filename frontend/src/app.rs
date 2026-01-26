@@ -3730,24 +3730,40 @@ impl StromApp {
                         .iter()
                         .filter(|b| {
                             b.block_definition_id == "builtin.whep_input"
+                                || b.block_definition_id == "builtin.whep_output"
                                 || b.block_definition_id == "builtin.whip_output"
                         })
                         .map(|b| b.id.clone())
                         .collect();
 
                     if let Some(stats) = self.webrtc_stats.get(&flow_id) {
-                        let stats_clone = stats.clone();
                         for block_id in webrtc_blocks {
-                            let stats_for_block = stats_clone.clone();
-                            self.graph.set_block_content(
-                                block_id,
-                                crate::graph::BlockContentInfo {
-                                    additional_height: 25.0,
-                                    render_callback: Some(Box::new(move |ui, _rect| {
-                                        crate::webrtc_stats::show_compact(ui, &stats_for_block);
-                                    })),
-                                },
-                            );
+                            // Filter connections to only those belonging to this block
+                            // Connection names are formatted as "block_id:element_name:..."
+                            let block_prefix = format!("{}:", block_id);
+                            let filtered_connections: std::collections::HashMap<_, _> = stats
+                                .connections
+                                .iter()
+                                .filter(|(name, _)| name.starts_with(&block_prefix))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+
+                            let stats_for_block = strom_types::api::WebRtcStats {
+                                connections: filtered_connections,
+                            };
+
+                            // Only show content if there are connections for this block
+                            if !stats_for_block.connections.is_empty() {
+                                self.graph.set_block_content(
+                                    block_id,
+                                    crate::graph::BlockContentInfo {
+                                        additional_height: 25.0,
+                                        render_callback: Some(Box::new(move |ui, _rect| {
+                                            crate::webrtc_stats::show_compact(ui, &stats_for_block);
+                                        })),
+                                    },
+                                );
+                            }
                         }
                     }
 

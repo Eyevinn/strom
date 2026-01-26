@@ -611,15 +611,32 @@ impl PropertyInspector {
                     }
 
                     // Show WebRTC statistics for WHIP/WHEP blocks
-                    if definition.id == "builtin.whep_input" || definition.id == "builtin.whip_output" {
+                    if definition.id == "builtin.whep_input"
+                        || definition.id == "builtin.whep_output"
+                        || definition.id == "builtin.whip_output"
+                    {
                         ui.separator();
                         ui.heading("📊 WebRTC Statistics");
                         ui.add_space(4.0);
 
                         if let Some(flow_id) = flow_id {
                             if let Some(stats) = webrtc_stats_store.get(&flow_id) {
-                                if !stats.connections.is_empty() {
-                                    crate::webrtc_stats::show_full(ui, stats);
+                                // Filter connections to only those belonging to this block
+                                // Connection names are formatted as "block_id:element_name:..."
+                                let block_prefix = format!("{}:", block.id);
+                                let filtered_connections: std::collections::HashMap<_, _> = stats
+                                    .connections
+                                    .iter()
+                                    .filter(|(name, _)| name.starts_with(&block_prefix))
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect();
+
+                                let block_stats = strom_types::api::WebRtcStats {
+                                    connections: filtered_connections,
+                                };
+
+                                if !block_stats.connections.is_empty() {
+                                    crate::webrtc_stats::show_full(ui, &block_stats);
                                 } else {
                                     ui.colored_label(
                                         Color32::from_rgb(200, 200, 100),
