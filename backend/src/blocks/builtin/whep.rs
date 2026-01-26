@@ -770,7 +770,7 @@ fn build_whepserversink(
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let webrtcbin = values[2].get::<gst::Element>().unwrap();
 
-        info!(
+        debug!(
             "WHEP Output: consumer-added for {}, modifying transceiver codec-preferences",
             consumer_id
         );
@@ -797,7 +797,7 @@ fn build_whepserversink(
 
             // Check if transceiver has codec-preferences property
             if !transceiver.has_property("codec-preferences") {
-                info!(
+                debug!(
                     "WHEP Output: Transceiver for pad {} has no codec-preferences property",
                     pad_name
                 );
@@ -812,14 +812,14 @@ fn build_whepserversink(
             };
 
             if codec_prefs.is_empty() {
-                info!(
+                debug!(
                     "WHEP Output: Transceiver for pad {} has empty codec-preferences",
                     pad_name
                 );
                 continue;
             }
 
-            info!(
+            debug!(
                 "WHEP Output: Transceiver for pad {} codec-preferences: {:?}",
                 pad_name, codec_prefs
             );
@@ -855,7 +855,7 @@ fn build_whepserversink(
                         }
                     }
                 }
-                info!(
+                debug!(
                     "WHEP Output: Relaxing transceiver for pad {} codec-preferences: {:?} -> {:?}",
                     pad_name, codec_prefs, new_caps
                 );
@@ -863,7 +863,7 @@ fn build_whepserversink(
             }
         }
 
-        info!(
+        debug!(
             "WHEP Output: Processed {} transceivers for consumer {}",
             transceiver_count, consumer_id
         );
@@ -915,7 +915,7 @@ fn build_whepserversink(
                                         new_caps.merge_structure(new_structure);
                                     }
                                 }
-                                info!(
+                                debug!(
                                     "WHEP Output: Relaxing capsfilter profile matching for {}: {:?} -> {:?}",
                                     consumer_id, caps, new_caps
                                 );
