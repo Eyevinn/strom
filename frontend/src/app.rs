@@ -6323,14 +6323,14 @@ impl eframe::App for StromApp {
             }
         }
 
-        // Periodically fetch latency for running flows (every 2 seconds)
-        if self.last_latency_fetch.elapsed() > std::time::Duration::from_secs(2) {
+        // Periodically fetch latency for selected flow (every second)
+        if self.last_latency_fetch.elapsed() > std::time::Duration::from_secs(1) {
             self.last_latency_fetch = instant::Instant::now();
             self.fetch_latency_for_running_flows(ctx);
         }
 
-        // Periodically fetch stats for running flows (every 2 seconds)
-        if self.last_rtp_stats_fetch.elapsed() > std::time::Duration::from_secs(2) {
+        // Periodically fetch RTP stats for selected flow (every second)
+        if self.last_rtp_stats_fetch.elapsed() > std::time::Duration::from_secs(1) {
             self.last_rtp_stats_fetch = instant::Instant::now();
             self.fetch_rtp_stats_for_selected_flow(ctx);
         }
