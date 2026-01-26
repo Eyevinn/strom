@@ -1,7 +1,9 @@
 //! Block expansion logic - converts block instances to GStreamer elements using BlockBuilder trait.
 
 use crate::blocks::builtin;
-use crate::blocks::{BlockBuildContext, BusMessageConnectFn, WhepEndpointInfo};
+use crate::blocks::{
+    BlockBuildContext, BusMessageConnectFn, DynamicWebrtcbinStore, WhepEndpointInfo,
+};
 use gstreamer as gst;
 use strom_types::{BlockInstance, Link};
 use tracing::{debug, info};
@@ -39,6 +41,7 @@ pub async fn expand_blocks(
     regular_links: &[Link],
     flow_id: &strom_types::FlowId,
     ice_servers: Vec<String>,
+    dynamic_webrtcbins: DynamicWebrtcbinStore,
 ) -> Result<ExpandedPipeline, PipelineError> {
     let mut gst_elements = Vec::new();
     let mut all_links = Vec::new();
@@ -46,8 +49,8 @@ pub async fn expand_blocks(
     let mut all_pad_properties: HashMap<String, HashMap<String, HashMap<String, PropertyValue>>> =
         HashMap::new();
 
-    // Create build context for blocks to register services
-    let ctx = BlockBuildContext::new(ice_servers);
+    // Create build context for blocks to register services (with shared webrtcbin store)
+    let ctx = BlockBuildContext::new_with_webrtcbin_store(ice_servers, dynamic_webrtcbins);
 
     debug!("Expanding {} block instance(s)", blocks.len());
 
@@ -271,7 +274,8 @@ mod tests {
     async fn test_expand_no_blocks() {
         let flow_id = FlowId::new_v4();
         let ice_servers = vec!["stun:stun.l.google.com:19302".to_string()];
-        let result = expand_blocks(&[], &[], &flow_id, ice_servers).await;
+        let dynamic_webrtcbins = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let result = expand_blocks(&[], &[], &flow_id, ice_servers, dynamic_webrtcbins).await;
         assert!(result.is_ok());
 
         let expanded = result.unwrap();

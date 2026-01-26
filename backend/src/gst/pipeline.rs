@@ -184,6 +184,9 @@ pub struct PipelineManager {
     dynamic_pad_tees: std::sync::Arc<std::sync::RwLock<HashMap<String, HashMap<String, String>>>>,
     /// WHEP endpoints registered by blocks
     whep_endpoints: Vec<crate::blocks::WhepEndpointInfo>,
+    /// Dynamically created webrtcbins (from webrtcsink/whepserversink consumer-added callbacks).
+    /// Maps block_id to list of (consumer_id, webrtcbin) pairs.
+    dynamic_webrtcbins: crate::blocks::DynamicWebrtcbinStore,
 }
 
 impl PipelineManager {
@@ -207,6 +210,10 @@ impl PipelineManager {
             .build();
         info!("Created GStreamer pipeline object");
 
+        // Create shared storage for dynamically created webrtcbins (from consumer-added callbacks)
+        let dynamic_webrtcbins: crate::blocks::DynamicWebrtcbinStore =
+            Arc::new(Mutex::new(HashMap::new()));
+
         let mut manager = Self {
             flow_id: flow.id,
             flow_name: flow.name.clone(),
@@ -227,6 +234,7 @@ impl PipelineManager {
             ptp_stats_callback: None,
             dynamic_pad_tees: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             whep_endpoints: Vec::new(),
+            dynamic_webrtcbins: Arc::clone(&dynamic_webrtcbins),
         };
 
         // Expand blocks into GStreamer elements
@@ -241,6 +249,7 @@ impl PipelineManager {
                     &flow.links,
                     &flow_id,
                     ice_servers,
+                    dynamic_webrtcbins,
                 )
                 .await;
                 info!("expand_blocks completed");
@@ -3235,6 +3244,7 @@ impl PipelineManager {
         }
 
         // Also search the pipeline directly in case elements were added dynamically
+        // This handles webrtcbins created by webrtcsink/whepserversink for each consumer
         debug!("find_webrtcbin_elements: Also searching pipeline directly");
         let pipeline_iter = self.pipeline.iterate_recurse();
         for elem in pipeline_iter.into_iter().flatten() {
@@ -3248,11 +3258,36 @@ impl PipelineManager {
                 // Check if we already have this element
                 let already_found = results.iter().any(|(_, e)| e.name() == elem.name());
                 if !already_found {
+                    // Try to find the block_id by traversing up the parent hierarchy
+                    // webrtcsink creates webrtcbin inside nested bins, so we need to
+                    // find which registered element this webrtcbin belongs to
+                    let qualified_name = self
+                        .find_block_prefix_for_element(&elem)
+                        .unwrap_or(elem_name.clone());
                     debug!(
-                        "find_webrtcbin_elements: Found webrtcbin in pipeline: {}",
-                        elem_name
+                        "find_webrtcbin_elements: Found webrtcbin in pipeline: {} (qualified: {})",
+                        elem_name, qualified_name
                     );
-                    results.push((elem_name, elem));
+                    results.push((qualified_name, elem));
+                }
+            }
+        }
+
+        // Also include dynamically registered webrtcbins (from webrtcsink/whepserversink consumer-added)
+        // These are stored separately because they're created in separate session pipelines
+        if let Ok(store) = self.dynamic_webrtcbins.lock() {
+            for (block_id, consumers) in store.iter() {
+                for (consumer_id, webrtcbin) in consumers {
+                    let qualified_name =
+                        format!("{}:session_{}:{}", block_id, consumer_id, webrtcbin.name());
+                    let already_found = results.iter().any(|(_, e)| e.name() == webrtcbin.name());
+                    if !already_found {
+                        debug!(
+                            "find_webrtcbin_elements: Found dynamic webrtcbin: {} (consumer: {})",
+                            qualified_name, consumer_id
+                        );
+                        results.push((qualified_name, webrtcbin.clone()));
+                    }
                 }
             }
         }
@@ -3262,6 +3297,57 @@ impl PipelineManager {
             results.len()
         );
         results
+    }
+
+    /// Find the block prefix (block_id:element_type) for a dynamically created element.
+    ///
+    /// This traverses up the parent hierarchy to find which registered element (block)
+    /// contains this element. Used to properly name webrtcbin elements created by
+    /// webrtcsink/whepserversink for frontend filtering.
+    ///
+    /// Returns the qualified name in format "block_id:parent_element:element_name"
+    /// or None if no registered parent is found.
+    fn find_block_prefix_for_element(&self, element: &gst::Element) -> Option<String> {
+        let elem_name = element.name().to_string();
+
+        // Walk up the parent chain to find a registered element
+        let mut current: Option<gst::Object> = element.parent();
+        let mut path_parts: Vec<String> = vec![elem_name.clone()];
+
+        while let Some(parent) = current {
+            // Check if parent is an Element
+            if let Ok(parent_elem) = parent.clone().downcast::<gst::Element>() {
+                let parent_name = parent_elem.name().to_string();
+
+                // Check if this parent is a registered element in our elements map
+                for (registered_name, registered_elem) in &self.elements {
+                    if registered_elem.name() == parent_elem.name() {
+                        // Found a match! Build the qualified name
+                        // Format: "registered_name:path_to_webrtcbin"
+                        path_parts.reverse();
+                        let qualified = format!("{}:{}", registered_name, path_parts.join(":"));
+                        debug!(
+                            "find_block_prefix_for_element: {} belongs to registered element {}, qualified name: {}",
+                            elem_name, registered_name, qualified
+                        );
+                        return Some(qualified);
+                    }
+                }
+
+                // Add this parent to the path and continue up
+                path_parts.push(parent_name);
+            }
+
+            // Move to the next parent
+            current = parent.parent();
+        }
+
+        // No registered parent found
+        debug!(
+            "find_block_prefix_for_element: No registered parent found for {}",
+            elem_name
+        );
+        None
     }
 
     /// Parse a GstStructure containing WebRTC stats into our typed format.
