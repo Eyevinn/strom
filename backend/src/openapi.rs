@@ -35,6 +35,8 @@ use utoipa::OpenApi;
         crate::api::flows::get_flow_debug_info,
         crate::api::flows::get_element_properties,
         crate::api::flows::update_element_property,
+        crate::api::flows::trigger_transition,
+        crate::api::flows::animate_input,
         crate::api::elements::list_elements,
         crate::api::elements::get_element_info,
         crate::api::elements::get_element_pad_properties,

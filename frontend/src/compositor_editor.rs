@@ -211,6 +211,8 @@ pub struct CompositorEditor {
     snap_to_grid: bool,
     grid_size: u32,
     live_updates: bool,
+    /// Animate position/size changes (instead of instant)
+    animate_moves: bool,
 
     /// API client
     api: ApiClient,
@@ -222,6 +224,30 @@ pub struct CompositorEditor {
 
     /// Last time we sent a live update (for throttling)
     last_live_update: instant::Instant,
+
+    // Transition settings
+    /// From input for transition
+    transition_from: usize,
+    /// To input for transition
+    transition_to: usize,
+    /// Transition type
+    transition_type: String,
+    /// Transition duration in milliseconds
+    transition_duration_ms: u64,
+    /// Last transition status message
+    transition_status: Option<String>,
+
+    // Thumbnail state
+    /// Cached thumbnail textures by input index
+    thumbnails: std::collections::HashMap<usize, egui::TextureHandle>,
+    /// Last thumbnail fetch time by input index
+    thumbnail_fetch_times: std::collections::HashMap<usize, instant::Instant>,
+    /// Inputs currently being fetched (to avoid duplicate requests)
+    thumbnail_loading: std::collections::HashSet<usize>,
+    /// Thumbnail refresh interval in milliseconds
+    thumbnail_refresh_ms: u64,
+    /// Whether thumbnails are enabled
+    thumbnails_enabled: bool,
 }
 
 impl CompositorEditor {
@@ -260,10 +286,23 @@ impl CompositorEditor {
             snap_to_grid: false,
             grid_size: 10,
             live_updates: true,
+            animate_moves: true,
             api,
             status: "Loading...".to_string(),
             error: None,
             last_live_update: instant::Instant::now(),
+            // Transition settings
+            transition_from: 0,
+            transition_to: if num_inputs > 1 { 1 } else { 0 },
+            transition_type: "dip_to_black".to_string(),
+            transition_duration_ms: 300,
+            transition_status: None,
+            // Thumbnail state
+            thumbnails: std::collections::HashMap::new(),
+            thumbnail_fetch_times: std::collections::HashMap::new(),
+            thumbnail_loading: std::collections::HashSet::new(),
+            thumbnail_refresh_ms: 1000, // 1 second default
+            thumbnails_enabled: true,
         }
     }
 
@@ -338,6 +377,156 @@ impl CompositorEditor {
 
                     self.status = "Properties loaded".to_string();
                 }
+            }
+        }
+    }
+
+    /// Refresh thumbnails for all inputs.
+    /// Called periodically to update the thumbnail images.
+    fn refresh_thumbnails(&mut self, ctx: &Context) {
+        if !self.thumbnails_enabled {
+            return;
+        }
+
+        let now = instant::Instant::now();
+        let refresh_interval = std::time::Duration::from_millis(self.thumbnail_refresh_ms);
+
+        for input in &self.inputs {
+            let idx = input.input_index;
+
+            // Skip if already loading
+            if self.thumbnail_loading.contains(&idx) {
+                continue;
+            }
+
+            // Skip if recently fetched
+            if let Some(last_fetch) = self.thumbnail_fetch_times.get(&idx) {
+                if now.duration_since(*last_fetch) < refresh_interval {
+                    continue;
+                }
+            }
+
+            // Mark as loading and update fetch time
+            self.thumbnail_loading.insert(idx);
+            self.thumbnail_fetch_times.insert(idx, now);
+
+            // Spawn async fetch
+            let flow_id = self.flow_id;
+            let block_id = self.block_id.clone();
+            let api = self.api.clone();
+            let ctx = ctx.clone();
+
+            tracing::debug!(
+                "🖼️ Fetching thumbnail for flow={} block={} input={}",
+                flow_id,
+                block_id,
+                idx
+            );
+
+            crate::app::spawn_task(async move {
+                match api
+                    .get_compositor_thumbnail(&flow_id.to_string(), &block_id, idx)
+                    .await
+                {
+                    Ok(jpeg_bytes) => {
+                        tracing::debug!(
+                            "🖼️ Got thumbnail {} bytes for input {}",
+                            jpeg_bytes.len(),
+                            idx
+                        );
+                        // Store bytes in local storage for the UI thread to pick up
+                        let key = format!("compositor_thumb_{}_{}", flow_id, idx);
+                        // Use base64 to store binary data
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+                        crate::app::set_local_storage(&key, &b64);
+                        ctx.request_repaint();
+                    }
+                    Err(e) => {
+                        tracing::warn!("🖼️ Failed to fetch thumbnail for input {}: {}", idx, e);
+                        // Store error marker so the loading flag gets cleared
+                        let key = format!("compositor_thumb_err_{}_{}", flow_id, idx);
+                        crate::app::set_local_storage(&key, "error");
+                        ctx.request_repaint();
+                    }
+                }
+            });
+        }
+    }
+
+    /// Check for loaded thumbnails and update textures.
+    fn check_loaded_thumbnails(&mut self, ctx: &Context) {
+        let num_inputs = self.inputs.len();
+        for idx in 0..num_inputs {
+            // Check for error marker first
+            let err_key = format!("compositor_thumb_err_{}_{}", self.flow_id, idx);
+            if crate::app::get_local_storage(&err_key).is_some() {
+                crate::app::remove_local_storage(&err_key);
+                self.thumbnail_loading.remove(&idx);
+                continue;
+            }
+
+            let key = format!("compositor_thumb_{}_{}", self.flow_id, idx);
+            if let Some(b64) = crate::app::get_local_storage(&key) {
+                tracing::debug!(
+                    "🖼️ Found thumbnail in storage for input {}, {} bytes b64",
+                    idx,
+                    b64.len()
+                );
+                // Clear the loading flag
+                self.thumbnail_loading.remove(&idx);
+
+                // Decode base64
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                    Ok(jpeg_bytes) => {
+                        tracing::debug!(
+                            "🖼️ Decoded {} JPEG bytes for input {}, header: {:02X} {:02X} {:02X}",
+                            jpeg_bytes.len(),
+                            idx,
+                            jpeg_bytes.first().copied().unwrap_or(0),
+                            jpeg_bytes.get(1).copied().unwrap_or(0),
+                            jpeg_bytes.get(2).copied().unwrap_or(0)
+                        );
+                        // Decode JPEG to image - use explicit format to avoid guess issues
+                        match image::load_from_memory_with_format(
+                            &jpeg_bytes,
+                            image::ImageFormat::Jpeg,
+                        ) {
+                            Ok(img) => {
+                                let rgba = img.to_rgba8();
+                                let size = [rgba.width() as usize, rgba.height() as usize];
+                                tracing::debug!(
+                                    "🖼️ Loaded image {}x{} for input {}",
+                                    size[0],
+                                    size[1],
+                                    idx
+                                );
+                                let color_image =
+                                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+
+                                // Create or update texture
+                                let texture_name = format!("compositor_thumb_{}", idx);
+                                let texture = ctx.load_texture(
+                                    texture_name,
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.thumbnails.insert(idx, texture);
+                                tracing::debug!("🖼️ Created texture for input {}", idx);
+                            }
+                            Err(e) => {
+                                tracing::warn!("🖼️ Failed to decode JPEG for input {}: {}", idx, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("🖼️ Failed to decode base64 for input {}: {}", idx, e);
+                    }
+                }
+
+                // Clear the storage key
+                crate::app::remove_local_storage(&key);
             }
         }
     }
@@ -788,9 +977,12 @@ impl CompositorEditor {
     /// Show the compositor editor UI as a window.
     /// Returns true if the window should stay open.
     pub fn show(&mut self, ctx: &Context) -> bool {
-        // Check for loaded properties
+        // Check for loaded properties and status updates
         self.check_loaded_properties();
         self.check_update_results();
+        self.check_transition_status();
+        self.check_loaded_thumbnails(ctx);
+        self.refresh_thumbnails(ctx);
 
         let mut is_open = true;
 
@@ -808,10 +1000,9 @@ impl CompositorEditor {
             .scroll(false)
             .open(&mut is_open)
             .show(ctx, |ui| {
-                // Keyboard shortcuts for input selection (0-9, plus § and ` for input 0)
-                // Pressing the same key again deselects
-                // Note: § (Swedish) and ` (US) are on the same physical key, so we check for
-                // the text event to avoid double-triggering on Swedish keyboards
+                // Keyboard shortcuts for setting transition target (0-9)
+                // Number keys set the "To" input for transitions
+                // Note: § (Swedish) and ` (US) are on the same physical key
                 for (key, idx) in [
                     (egui::Key::Num0, 0),
                     (egui::Key::Num1, 1),
@@ -825,17 +1016,26 @@ impl CompositorEditor {
                     (egui::Key::Num9, 9),
                 ] {
                     if ui.input(|i| i.key_pressed(key)) && idx < self.inputs.len() {
+                        // Set as transition target
+                        self.transition_to = idx;
+                        // Also select it visually
                         self.toggle_input_selection(idx);
                     }
                 }
-                // § on Swedish keyboard OR ` on US keyboard (left of 1) - check for character input
+                // § on Swedish keyboard OR ` on US keyboard (left of 1) - input 0
                 if ui.input(|i| {
                     i.events
                         .iter()
                         .any(|e| matches!(e, egui::Event::Text(t) if t == "§" || t == "`"))
                 }) && !self.inputs.is_empty()
                 {
+                    self.transition_to = 0;
                     self.toggle_input_selection(0);
+                }
+
+                // Space = Trigger transition (Go)
+                if ui.input(|i| i.key_pressed(egui::Key::Space)) {
+                    self.trigger_transition(ui.ctx());
                 }
 
                 // Esc = Deselect
@@ -852,6 +1052,10 @@ impl CompositorEditor {
                     if ui.input(|i| i.key_pressed(egui::Key::F)) {
                         self.set_input_position(ui.ctx(), idx, 0, 0);
                         self.set_input_size(ui.ctx(), idx, out_w, out_h);
+                    }
+                    // R = Reset input (position 0,0, full size, alpha 1.0)
+                    if ui.input(|i| i.key_pressed(egui::Key::R)) {
+                        self.reset_input(ui.ctx(), idx, out_w, out_h);
                     }
                     // Home = Send to back (z=0)
                     if ui.input(|i| i.key_pressed(egui::Key::Home)) {
@@ -919,6 +1123,8 @@ impl CompositorEditor {
                     ui.separator();
 
                     ui.checkbox(&mut self.live_updates, "Live");
+                    ui.checkbox(&mut self.animate_moves, "Animate")
+                        .on_hover_text("Animate position/size changes");
 
                     // Show Apply button when live updates is off
                     if !self.live_updates && ui.button("Apply").clicked() {
@@ -1007,7 +1213,7 @@ impl CompositorEditor {
                     // Deselect button
                     if self.selected_input.is_some()
                         && ui
-                            .add(egui::Button::new("×").min_size(Vec2::new(18.0, 18.0)))
+                            .add(egui::Button::new("x").min_size(Vec2::new(18.0, 18.0)))
                             .on_hover_text("Deselect (Esc)")
                             .clicked()
                     {
@@ -1015,7 +1221,121 @@ impl CompositorEditor {
                     }
 
                     ui.separator();
-                    ui.label(format!("{}×{}", self.output_width, self.output_height));
+                    ui.label(format!("{}x{}", self.output_width, self.output_height));
+                });
+
+                // Transitions row
+                ui.horizontal(|ui| {
+                    ui.label("Transition:");
+
+                    // From input selector
+                    egui::ComboBox::from_id_salt("transition_from")
+                        .selected_text(format!("From: {}", self.transition_from))
+                        .width(70.0)
+                        .show_ui(ui, |ui| {
+                            for i in 0..self.inputs.len() {
+                                if ui
+                                    .selectable_label(
+                                        self.transition_from == i,
+                                        format!("Input {}", i),
+                                    )
+                                    .clicked()
+                                {
+                                    self.transition_from = i;
+                                }
+                            }
+                        });
+
+                    // To input selector
+                    egui::ComboBox::from_id_salt("transition_to")
+                        .selected_text(format!("To: {}", self.transition_to))
+                        .width(70.0)
+                        .show_ui(ui, |ui| {
+                            for i in 0..self.inputs.len() {
+                                if ui
+                                    .selectable_label(
+                                        self.transition_to == i,
+                                        format!("Input {}", i),
+                                    )
+                                    .clicked()
+                                {
+                                    self.transition_to = i;
+                                }
+                            }
+                        });
+
+                    ui.separator();
+
+                    // Transition type selector
+                    const TRANSITION_TYPES: &[(&str, &str)] = &[
+                        ("cut", "Cut"),
+                        ("fade", "Fade"),
+                        ("dip_to_black", "Dip to Black"),
+                        ("slide_left", "Slide Left"),
+                        ("slide_right", "Slide Right"),
+                        ("slide_up", "Slide Up"),
+                        ("slide_down", "Slide Down"),
+                        ("push_left", "Push Left"),
+                        ("push_right", "Push Right"),
+                        ("push_up", "Push Up"),
+                        ("push_down", "Push Down"),
+                    ];
+                    let selected_label = TRANSITION_TYPES
+                        .iter()
+                        .find(|(v, _)| *v == self.transition_type)
+                        .map(|(_, l)| *l)
+                        .unwrap_or(&self.transition_type);
+                    egui::ComboBox::from_id_salt("transition_type")
+                        .selected_text(selected_label)
+                        .width(90.0)
+                        .show_ui(ui, |ui| {
+                            for (value, label) in TRANSITION_TYPES {
+                                if ui
+                                    .selectable_label(self.transition_type == *value, *label)
+                                    .clicked()
+                                {
+                                    self.transition_type = value.to_string();
+                                }
+                            }
+                        });
+
+                    // Duration slider (disabled for cut)
+                    let is_cut = self.transition_type == "cut";
+                    ui.add_enabled_ui(!is_cut, |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut self.transition_duration_ms, 100..=3000)
+                                .suffix("ms")
+                                .logarithmic(true),
+                        );
+                    });
+
+                    // Trigger button
+                    let can_transition = self.transition_from != self.transition_to;
+                    if ui
+                        .add_enabled(can_transition, egui::Button::new("Go"))
+                        .on_hover_text(if can_transition {
+                            format!(
+                                "Transition from input {} to {} using {} (Space)",
+                                self.transition_from, self.transition_to, self.transition_type
+                            )
+                        } else {
+                            "Select different from/to inputs".to_string()
+                        })
+                        .clicked()
+                    {
+                        let _ = self.trigger_transition(ctx);
+                    }
+
+                    // Swap button
+                    if ui.button("<>").on_hover_text("Swap from/to").clicked() {
+                        std::mem::swap(&mut self.transition_from, &mut self.transition_to);
+                    }
+
+                    // Status message
+                    if let Some(status) = &self.transition_status {
+                        ui.separator();
+                        ui.label(status);
+                    }
                 });
 
                 ui.separator();
@@ -1055,6 +1375,369 @@ impl CompositorEditor {
             });
 
         is_open
+    }
+
+    /// Show the compositor editor in fullscreen mode (for Live view).
+    /// Renders directly into the provided UI without a window frame.
+    pub fn show_fullscreen(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+        // Check for loaded properties and status updates
+        self.check_loaded_properties();
+        self.check_update_results();
+        self.check_transition_status();
+        self.check_loaded_thumbnails(ctx);
+        self.refresh_thumbnails(ctx);
+
+        // Keyboard shortcuts for setting transition target (0-9)
+        for (key, idx) in [
+            (egui::Key::Num0, 0),
+            (egui::Key::Num1, 1),
+            (egui::Key::Num2, 2),
+            (egui::Key::Num3, 3),
+            (egui::Key::Num4, 4),
+            (egui::Key::Num5, 5),
+            (egui::Key::Num6, 6),
+            (egui::Key::Num7, 7),
+            (egui::Key::Num8, 8),
+            (egui::Key::Num9, 9),
+        ] {
+            if ui.input(|i| i.key_pressed(key)) && idx < self.inputs.len() {
+                self.transition_to = idx;
+                self.toggle_input_selection(idx);
+            }
+        }
+        // § on Swedish keyboard OR ` on US keyboard (left of 1) - input 0
+        if ui.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Text(t) if t == "§" || t == "`"))
+        }) && !self.inputs.is_empty()
+        {
+            self.transition_to = 0;
+            self.toggle_input_selection(0);
+        }
+
+        // Space = Trigger transition (Go)
+        if ui.input(|i| i.key_pressed(egui::Key::Space)) {
+            self.trigger_transition(ctx);
+        }
+
+        // Esc = Deselect
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.deselect_input();
+        }
+
+        // Keyboard shortcuts for layout actions (when input is selected)
+        if let Some(idx) = self.selected_input {
+            let out_w = self.output_width as i32;
+            let out_h = self.output_height as i32;
+
+            // F = Fullscreen
+            if ui.input(|i| i.key_pressed(egui::Key::F)) {
+                self.set_input_position(ctx, idx, 0, 0);
+                self.set_input_size(ctx, idx, out_w, out_h);
+            }
+            // R = Reset input
+            if ui.input(|i| i.key_pressed(egui::Key::R)) {
+                self.reset_input(ctx, idx, out_w, out_h);
+            }
+            // Home = Send to back (z=0)
+            if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+                self.inputs[idx].zorder = 0;
+                if self.live_updates {
+                    self.update_pad_property(ctx, idx, "zorder", PropertyValue::UInt(0));
+                }
+            }
+            // End = Bring to front
+            if ui.input(|i| i.key_pressed(egui::Key::End)) {
+                let max_z = self.inputs.iter().map(|i| i.zorder).max().unwrap_or(0);
+                self.inputs[idx].zorder = max_z + 1;
+                if self.live_updates {
+                    self.update_pad_property(
+                        ctx,
+                        idx,
+                        "zorder",
+                        PropertyValue::UInt(self.inputs[idx].zorder as u64),
+                    );
+                }
+            }
+            // PageDown = Move down one layer
+            if ui.input(|i| i.key_pressed(egui::Key::PageDown)) && self.inputs[idx].zorder > 0 {
+                self.inputs[idx].zorder -= 1;
+                if self.live_updates {
+                    self.update_pad_property(
+                        ctx,
+                        idx,
+                        "zorder",
+                        PropertyValue::UInt(self.inputs[idx].zorder as u64),
+                    );
+                }
+            }
+            // PageUp = Move up one layer
+            if ui.input(|i| i.key_pressed(egui::Key::PageUp)) {
+                self.inputs[idx].zorder += 1;
+                if self.live_updates {
+                    self.update_pad_property(
+                        ctx,
+                        idx,
+                        "zorder",
+                        PropertyValue::UInt(self.inputs[idx].zorder as u64),
+                    );
+                }
+            }
+        }
+
+        // Toolbar row - Settings, templates, and input selection
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.snap_to_grid, "Snap");
+            if self.snap_to_grid {
+                ui.add(
+                    egui::DragValue::new(&mut self.grid_size)
+                        .prefix("")
+                        .suffix("px"),
+                );
+            }
+            ui.separator();
+
+            ui.checkbox(&mut self.live_updates, "Live");
+            ui.checkbox(&mut self.animate_moves, "Animate")
+                .on_hover_text("Animate position/size changes");
+
+            if !self.live_updates && ui.button("Apply").clicked() {
+                self.apply_all_properties(ctx);
+            }
+
+            ui.separator();
+
+            // Layout templates dropdown
+            let mut template_applied = false;
+            egui::ComboBox::from_id_salt("layout_templates_fullscreen")
+                .selected_text("Templates")
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(false, "Multiview (2+4+N)").clicked() {
+                        self.apply_template_multiview();
+                        template_applied = true;
+                    }
+                    if ui
+                        .selectable_label(false, "Full Screen (Input 0)")
+                        .clicked()
+                    {
+                        self.apply_template_fullscreen();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "Picture-in-Picture").clicked() {
+                        self.apply_template_pip();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "Side by Side").clicked() {
+                        self.apply_template_side_by_side();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "Top / Bottom").clicked() {
+                        self.apply_template_top_bottom();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "2x2 Grid").clicked() {
+                        self.apply_template_grid_2x2();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "3x3 Grid").clicked() {
+                        self.apply_template_grid_3x3();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "1 Large + 2 Small").clicked() {
+                        self.apply_template_1_large_2_small();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "1 Large + 3 Small").clicked() {
+                        self.apply_template_1_large_3_small();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "Vertical Stack").clicked() {
+                        self.apply_template_vertical_stack();
+                        template_applied = true;
+                    }
+                    if ui.selectable_label(false, "Horizontal Stack").clicked() {
+                        self.apply_template_horizontal_stack();
+                        template_applied = true;
+                    }
+                });
+
+            if template_applied && self.live_updates {
+                self.apply_all_properties(ctx);
+            }
+
+            ui.separator();
+
+            // Input selection buttons
+            for idx in 0..self.inputs.len() {
+                let is_selected = self.selected_input == Some(idx);
+                let color = self.inputs[idx].color();
+                let button = egui::Button::new(format!("{}", idx))
+                    .fill(if is_selected {
+                        color
+                    } else {
+                        Color32::from_gray(60)
+                    })
+                    .min_size(Vec2::new(24.0, 18.0));
+                if ui.add(button).clicked() {
+                    self.toggle_input_selection(idx);
+                }
+            }
+
+            // Deselect button
+            if self.selected_input.is_some()
+                && ui
+                    .add(egui::Button::new("x").min_size(Vec2::new(18.0, 18.0)))
+                    .on_hover_text("Deselect (Esc)")
+                    .clicked()
+            {
+                self.deselect_input();
+            }
+
+            ui.separator();
+            ui.label(format!("{}x{}", self.output_width, self.output_height));
+        });
+
+        // Transitions row
+        ui.horizontal(|ui| {
+            ui.label("Transition:");
+
+            // From input selector
+            egui::ComboBox::from_id_salt("transition_from_fullscreen")
+                .selected_text(format!("From: {}", self.transition_from))
+                .width(70.0)
+                .show_ui(ui, |ui| {
+                    for idx in 0..self.inputs.len() {
+                        if ui
+                            .selectable_label(self.transition_from == idx, format!("{}", idx))
+                            .clicked()
+                        {
+                            self.transition_from = idx;
+                        }
+                    }
+                });
+
+            // To input selector
+            egui::ComboBox::from_id_salt("transition_to_fullscreen")
+                .selected_text(format!("To: {}", self.transition_to))
+                .width(70.0)
+                .show_ui(ui, |ui| {
+                    for idx in 0..self.inputs.len() {
+                        if ui
+                            .selectable_label(self.transition_to == idx, format!("{}", idx))
+                            .clicked()
+                        {
+                            self.transition_to = idx;
+                        }
+                    }
+                });
+
+            // Transition type selector
+            const TRANSITION_TYPES: &[(&str, &str)] = &[
+                ("cut", "Cut"),
+                ("fade", "Fade"),
+                ("dip_to_black", "Dip to Black"),
+                ("slide_left", "Slide Left"),
+                ("slide_right", "Slide Right"),
+                ("slide_up", "Slide Up"),
+                ("slide_down", "Slide Down"),
+                ("push_left", "Push Left"),
+                ("push_right", "Push Right"),
+                ("push_up", "Push Up"),
+                ("push_down", "Push Down"),
+            ];
+            let selected_label = TRANSITION_TYPES
+                .iter()
+                .find(|(v, _)| *v == self.transition_type)
+                .map(|(_, l)| *l)
+                .unwrap_or(&self.transition_type);
+            egui::ComboBox::from_id_salt("transition_type_fullscreen")
+                .selected_text(selected_label)
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    for (value, label) in TRANSITION_TYPES {
+                        if ui
+                            .selectable_label(self.transition_type == *value, *label)
+                            .clicked()
+                        {
+                            self.transition_type = value.to_string();
+                        }
+                    }
+                });
+
+            // Duration slider
+            ui.add(
+                egui::Slider::new(&mut self.transition_duration_ms, 100..=3000)
+                    .suffix("ms")
+                    .logarithmic(true),
+            );
+
+            // Go button
+            let can_go = self.transition_from != self.transition_to;
+            if ui
+                .add_enabled(can_go, egui::Button::new("Go"))
+                .on_hover_text(if can_go {
+                    format!(
+                        "{} {} → {} ({}ms) [Space]",
+                        self.transition_type,
+                        self.transition_from,
+                        self.transition_to,
+                        self.transition_duration_ms
+                    )
+                } else {
+                    "Select different from/to inputs".to_string()
+                })
+                .clicked()
+            {
+                let _ = self.trigger_transition(ctx);
+            }
+
+            // Swap button
+            if ui.button("<>").on_hover_text("Swap from/to").clicked() {
+                std::mem::swap(&mut self.transition_from, &mut self.transition_to);
+            }
+
+            // Status message
+            if let Some(status) = &self.transition_status {
+                ui.separator();
+                ui.label(status);
+            }
+        });
+
+        ui.separator();
+
+        // Canvas and properties panel
+        let remaining = ui.available_size();
+        let properties_width = 200.0;
+        let spacing = 8.0;
+        let canvas_width = (remaining.x - properties_width - spacing).max(100.0);
+        let content_height = remaining.y.max(100.0);
+
+        ui.horizontal(|ui| {
+            // Canvas area
+            ui.group(|ui| {
+                ui.set_min_size(Vec2::new(canvas_width, content_height));
+                ui.set_max_size(Vec2::new(canvas_width, content_height));
+                self.show_canvas(ui);
+            });
+
+            // Properties panel
+            ui.group(|ui| {
+                ui.set_min_size(Vec2::new(properties_width, content_height));
+                ui.set_max_size(Vec2::new(properties_width, content_height));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if let Some(idx) = self.selected_input {
+                        self.show_properties_panel(ui, idx);
+                    } else {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(20.0);
+                            ui.label("Select an input");
+                            ui.label("to edit properties");
+                        });
+                    }
+                });
+            });
+        });
     }
 
     /// Show the canvas with input boxes.
@@ -1136,15 +1819,48 @@ impl CompositorEditor {
             let dimmed = has_selection && !input.selected;
             let opacity_mult = if dimmed { 0.4 } else { 1.0 };
 
-            // Draw box with adjusted opacity
-            let mut color = input.color();
-            color = Color32::from_rgba_unmultiplied(
-                color.r(),
-                color.g(),
-                color.b(),
-                (color.a() as f32 * opacity_mult) as u8,
-            );
-            painter.rect_filled(screen_rect, 0.0, color);
+            // Draw thumbnail or fallback to colored box
+            if let Some(texture) = self.thumbnails.get(&idx) {
+                // Apply input's alpha and selection dimming
+                let alpha = (input.alpha * opacity_mult).clamp(0.0, 1.0);
+                let tint = Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * alpha) as u8);
+
+                // Calculate UV rect based on sizing policy
+                // Thumbnail is 320x180 (16:9), input rect may have different aspect ratio
+                let thumb_aspect = 320.0 / 180.0; // 16:9
+                let input_aspect = rect.width() / rect.height();
+
+                let uv_rect = if input.sizing_policy == "none" {
+                    // Stretch: use full UV (0,0 to 1,1)
+                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+                } else {
+                    // keep-aspect-ratio: crop the thumbnail to match input's aspect ratio
+                    if input_aspect > thumb_aspect {
+                        // Input is wider - crop top/bottom of thumbnail
+                        let visible_height = thumb_aspect / input_aspect;
+                        let margin = (1.0 - visible_height) / 2.0;
+                        Rect::from_min_max(egui::pos2(0.0, margin), egui::pos2(1.0, 1.0 - margin))
+                    } else {
+                        // Input is taller - crop left/right of thumbnail
+                        let visible_width = input_aspect / thumb_aspect;
+                        let margin = (1.0 - visible_width) / 2.0;
+                        Rect::from_min_max(egui::pos2(margin, 0.0), egui::pos2(1.0 - margin, 1.0))
+                    }
+                };
+
+                painter.image(texture.id(), screen_rect, uv_rect, tint);
+            } else {
+                // Fallback to colored box - apply input alpha and selection dimming
+                let alpha = (input.alpha * opacity_mult).clamp(0.0, 1.0);
+                let mut color = input.color();
+                color = Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    (color.a() as f64 * alpha) as u8,
+                );
+                painter.rect_filled(screen_rect, 0.0, color);
+            }
 
             let border_width = if input.selected { 3.0 } else { 1.0 };
             let border_color = if input.selected {
@@ -1517,7 +2233,16 @@ impl CompositorEditor {
         let out_h = self.output_height as i32;
 
         ui.vertical(|ui| {
-            ui.heading(format!("Input {}", selected_idx));
+            ui.horizontal(|ui| {
+                ui.heading(format!("Input {}", selected_idx));
+                if ui
+                    .button("Reset")
+                    .on_hover_text("Reset position (0,0), full size, alpha 1.0 (R)")
+                    .clicked()
+                {
+                    self.reset_input(ui.ctx(), selected_idx, out_w, out_h);
+                }
+            });
             ui.separator();
 
             // Clone current values to avoid borrowing conflicts
@@ -1601,6 +2326,8 @@ impl CompositorEditor {
                 }
             });
 
+            ui.add_space(8.0);
+            ui.separator();
             ui.add_space(4.0);
 
             // Size section
@@ -1842,8 +2569,12 @@ impl CompositorEditor {
         self.inputs[idx].xpos = x;
         self.inputs[idx].ypos = y;
         if self.live_updates {
-            self.update_pad_property(ctx, idx, "xpos", PropertyValue::Int(x as i64));
-            self.update_pad_property(ctx, idx, "ypos", PropertyValue::Int(y as i64));
+            if self.animate_moves {
+                self.animate_input_to(ctx, idx, Some(x), Some(y), None, None);
+            } else {
+                self.update_pad_property(ctx, idx, "xpos", PropertyValue::Int(x as i64));
+                self.update_pad_property(ctx, idx, "ypos", PropertyValue::Int(y as i64));
+            }
         }
     }
 
@@ -1852,8 +2583,179 @@ impl CompositorEditor {
         self.inputs[idx].width = w;
         self.inputs[idx].height = h;
         if self.live_updates {
-            self.update_pad_property(ctx, idx, "width", PropertyValue::Int(w as i64));
-            self.update_pad_property(ctx, idx, "height", PropertyValue::Int(h as i64));
+            if self.animate_moves {
+                self.animate_input_to(ctx, idx, None, None, Some(w), Some(h));
+            } else {
+                self.update_pad_property(ctx, idx, "width", PropertyValue::Int(w as i64));
+                self.update_pad_property(ctx, idx, "height", PropertyValue::Int(h as i64));
+            }
+        }
+    }
+
+    /// Reset input to default: position (0,0), full size, alpha 1.0
+    fn reset_input(&mut self, ctx: &Context, idx: usize, out_w: i32, out_h: i32) {
+        // Update local state
+        self.inputs[idx].xpos = 0;
+        self.inputs[idx].ypos = 0;
+        self.inputs[idx].width = out_w;
+        self.inputs[idx].height = out_h;
+        self.inputs[idx].alpha = 1.0;
+
+        if self.live_updates {
+            if self.animate_moves {
+                // Animate position and size
+                self.animate_input_to(ctx, idx, Some(0), Some(0), Some(out_w), Some(out_h));
+            } else {
+                // Immediate update
+                self.update_pad_property(ctx, idx, "xpos", PropertyValue::Int(0));
+                self.update_pad_property(ctx, idx, "ypos", PropertyValue::Int(0));
+                self.update_pad_property(ctx, idx, "width", PropertyValue::Int(out_w as i64));
+                self.update_pad_property(ctx, idx, "height", PropertyValue::Int(out_h as i64));
+            }
+            // Alpha is always immediate (not animated)
+            self.update_pad_property(ctx, idx, "alpha", PropertyValue::Float(1.0));
+        }
+    }
+
+    /// Animate an input to target position/size.
+    fn animate_input_to(
+        &mut self,
+        ctx: &Context,
+        idx: usize,
+        xpos: Option<i32>,
+        ypos: Option<i32>,
+        width: Option<i32>,
+        height: Option<i32>,
+    ) {
+        let flow_id = self.flow_id;
+        let block_id = self.block_id.clone();
+        let duration_ms = self.transition_duration_ms;
+        let api = self.api.clone();
+        let ctx = ctx.clone();
+
+        tracing::info!(
+            "🎬 Animating input {} to ({:?}, {:?}, {:?}, {:?}) over {}ms",
+            idx,
+            xpos,
+            ypos,
+            width,
+            height,
+            duration_ms
+        );
+
+        crate::app::spawn_task(async move {
+            match api
+                .animate_input(
+                    &flow_id.to_string(),
+                    &block_id,
+                    idx,
+                    xpos,
+                    ypos,
+                    width,
+                    height,
+                    duration_ms,
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("✅ Animation started");
+                }
+                Err(e) => {
+                    tracing::error!("❌ Animation failed: {}", e);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Trigger a transition between inputs.
+    /// Returns true if transition was triggered (for swapping from/to after).
+    fn trigger_transition(&mut self, ctx: &Context) -> bool {
+        if self.transition_from == self.transition_to {
+            return false;
+        }
+
+        let flow_id = self.flow_id;
+        let block_id = self.block_id.clone();
+        let from_input = self.transition_from;
+        let to_input = self.transition_to;
+        let transition_type = self.transition_type.clone();
+        let duration_ms = self.transition_duration_ms;
+        let api = self.api.clone();
+        let ctx = ctx.clone();
+
+        self.transition_status = Some(format!(
+            "{}...",
+            if transition_type == "cut" {
+                "Cutting"
+            } else {
+                "Transitioning"
+            }
+        ));
+
+        // Swap from/to immediately so "From" shows what's now live
+        self.transition_from = to_input;
+        self.transition_to = from_input;
+
+        // Invert slide/push direction for natural back-and-forth
+        self.transition_type = match self.transition_type.as_str() {
+            "slide_left" => "slide_right".to_string(),
+            "slide_right" => "slide_left".to_string(),
+            "slide_up" => "slide_down".to_string(),
+            "slide_down" => "slide_up".to_string(),
+            "push_left" => "push_right".to_string(),
+            "push_right" => "push_left".to_string(),
+            "push_up" => "push_down".to_string(),
+            "push_down" => "push_up".to_string(),
+            other => other.to_string(),
+        };
+
+        tracing::info!(
+            "🎬 Triggering {} transition: {} -> {} ({}ms)",
+            transition_type,
+            from_input,
+            to_input,
+            duration_ms
+        );
+
+        crate::app::spawn_task(async move {
+            match api
+                .trigger_transition(
+                    &flow_id.to_string(),
+                    &block_id,
+                    from_input,
+                    to_input,
+                    &transition_type,
+                    duration_ms,
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!("✅ Transition triggered successfully");
+                    let key = format!("transition_status_{}", block_id);
+                    crate::app::set_local_storage(
+                        &key,
+                        &format!("✓ {} → {}", from_input, to_input),
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("❌ Transition failed: {}", e);
+                    let key = format!("transition_status_{}", block_id);
+                    crate::app::set_local_storage(&key, &format!("✗ {}", e));
+                }
+            }
+            ctx.request_repaint();
+        });
+
+        true
+    }
+
+    /// Check for transition status updates.
+    fn check_transition_status(&mut self) {
+        let key = format!("transition_status_{}", self.block_id);
+        if let Some(status) = crate::app::get_local_storage(&key) {
+            self.transition_status = Some(status);
+            crate::app::remove_local_storage(&key);
         }
     }
 }

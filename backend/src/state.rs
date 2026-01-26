@@ -1040,6 +1040,162 @@ impl AppState {
         Ok(())
     }
 
+    /// Trigger a transition on a compositor/mixer block.
+    pub async fn trigger_transition(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        from_input: usize,
+        to_input: usize,
+        transition_type: &str,
+        duration_ms: u64,
+    ) -> Result<(), PipelineError> {
+        info!(
+            "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
+            transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
+        );
+
+        let pipelines = self.inner.pipelines.read().await;
+
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+
+        manager.trigger_transition(
+            block_instance_id,
+            from_input,
+            to_input,
+            transition_type,
+            duration_ms,
+        )?;
+
+        drop(pipelines);
+
+        // Sync final alpha values back to flow definition for persistence
+        // After transition: from_input alpha=0.0, to_input alpha=1.0
+        if let Some(block_id) = block_instance_id.split(':').next() {
+            let mut flows = self.inner.flows.write().await;
+            if let Some(flow) = flows.get_mut(flow_id) {
+                if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_id) {
+                    block.properties.insert(
+                        format!("input_{}_alpha", from_input),
+                        PropertyValue::Float(0.0),
+                    );
+                    block.properties.insert(
+                        format!("input_{}_alpha", to_input),
+                        PropertyValue::Float(1.0),
+                    );
+                    trace!(
+                        "Synced transition alpha values: input {} -> 0.0, input {} -> 1.0",
+                        from_input,
+                        to_input
+                    );
+                }
+            }
+            drop(flows);
+
+            // Mark flow for debounced save
+            self.mark_flow_dirty(*flow_id).await;
+        }
+
+        // Broadcast transition event
+        self.inner
+            .events
+            .broadcast(StromEvent::TransitionTriggered {
+                flow_id: *flow_id,
+                block_instance_id: block_instance_id.to_string(),
+                from_input,
+                to_input,
+                transition_type: transition_type.to_string(),
+                duration_ms,
+            });
+
+        Ok(())
+    }
+
+    /// Animate a single input's position/size on a compositor block.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn animate_input(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        input_index: usize,
+        target_xpos: Option<i32>,
+        target_ypos: Option<i32>,
+        target_width: Option<i32>,
+        target_height: Option<i32>,
+        duration_ms: u64,
+    ) -> Result<(), PipelineError> {
+        info!(
+            "Animating input {} on block {} in flow {}",
+            input_index, block_instance_id, flow_id
+        );
+
+        let pipelines = self.inner.pipelines.read().await;
+
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+
+        manager.animate_input(
+            block_instance_id,
+            input_index,
+            target_xpos,
+            target_ypos,
+            target_width,
+            target_height,
+            duration_ms,
+        )?;
+
+        drop(pipelines);
+
+        // Sync final values back to flow definition for persistence
+        // block_instance_id format: "block_id:element_name" (e.g., "b0:mixer")
+        if let Some(block_id) = block_instance_id.split(':').next() {
+            let mut flows = self.inner.flows.write().await;
+            if let Some(flow) = flows.get_mut(flow_id) {
+                if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_id) {
+                    // Update the block properties with target values
+                    if let Some(x) = target_xpos {
+                        block.properties.insert(
+                            format!("input_{}_xpos", input_index),
+                            PropertyValue::Int(x as i64),
+                        );
+                    }
+                    if let Some(y) = target_ypos {
+                        block.properties.insert(
+                            format!("input_{}_ypos", input_index),
+                            PropertyValue::Int(y as i64),
+                        );
+                    }
+                    if let Some(w) = target_width {
+                        block.properties.insert(
+                            format!("input_{}_width", input_index),
+                            PropertyValue::Int(w as i64),
+                        );
+                    }
+                    if let Some(h) = target_height {
+                        block.properties.insert(
+                            format!("input_{}_height", input_index),
+                            PropertyValue::Int(h as i64),
+                        );
+                    }
+                    trace!(
+                        "Synced animated input {} properties to block {}",
+                        input_index,
+                        block_id
+                    );
+                }
+            }
+            drop(flows);
+
+            // Mark flow for debounced save
+            self.mark_flow_dirty(*flow_id).await;
+        }
+
+        Ok(())
+    }
+
     /// Get current property values from a running element.
     pub async fn get_element_properties(
         &self,
@@ -1237,6 +1393,26 @@ impl AppState {
     /// and sync status is available even when no pipeline is using them.
     pub async fn get_ptp_stats_events(&self) -> Vec<StromEvent> {
         self.inner.ptp_monitor.get_stats_events()
+    }
+
+    /// Capture a thumbnail from a compositor input.
+    ///
+    /// Returns JPEG-encoded image bytes for the specified compositor input.
+    pub async fn capture_compositor_thumbnail(
+        &self,
+        flow_id: &FlowId,
+        block_id: &str,
+        input_idx: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+
+        manager.capture_compositor_input_thumbnail(block_id, input_idx, width, height)
     }
 }
 

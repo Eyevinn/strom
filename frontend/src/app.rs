@@ -338,6 +338,19 @@ pub enum AppPage {
     Links,
 }
 
+/// Application mode - determines which UI is rendered
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AppMode {
+    /// Full admin interface with all features
+    #[default]
+    Admin,
+    /// Live view - just the compositor editor for a specific block
+    Live {
+        flow_id: strom_types::FlowId,
+        block_id: String,
+    },
+}
+
 /// Focus target for Ctrl+F cycling
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum FocusTarget {
@@ -576,6 +589,10 @@ pub struct StromApp {
     max_log_entries: usize,
     /// Current application page
     current_page: AppPage,
+    /// Application mode (Admin or Live)
+    app_mode: AppMode,
+    /// Whether the app started in live mode (via URL) - hides back button
+    started_in_live_mode: bool,
     /// Discovery page state
     discovery_page: crate::discovery::DiscoveryPage,
     /// Clocks page state (PTP monitoring)
@@ -725,6 +742,8 @@ impl StromApp {
             show_palette_panel: true,
             max_log_entries: 100,
             current_page: AppPage::default(),
+            app_mode: AppMode::default(),
+            started_in_live_mode: false,
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
             media_page: crate::media::MediaPage::new(),
@@ -747,6 +766,23 @@ impl StromApp {
 
         // Check authentication status first
         app.check_auth_status(cc.egui_ctx.clone());
+
+        app
+    }
+
+    /// Create a new application instance with a specific mode (WASM).
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_with_mode(cc: &eframe::CreationContext<'_>, app_mode: AppMode) -> Self {
+        let mut app = Self::new(cc);
+
+        // Set the app mode
+        let is_live = matches!(app_mode, AppMode::Live { .. });
+        if let AppMode::Live { ref flow_id, .. } = app_mode {
+            // In live mode, trigger navigation to the specific flow
+            app.pending_flow_navigation = Some(*flow_id);
+        }
+        app.app_mode = app_mode;
+        app.started_in_live_mode = is_live;
 
         app
     }
@@ -833,6 +869,8 @@ impl StromApp {
             show_palette_panel: true,
             max_log_entries: 100,
             current_page: AppPage::default(),
+            app_mode: AppMode::default(),
+            started_in_live_mode: false,
             discovery_page: crate::discovery::DiscoveryPage::new(),
             clocks_page: crate::clocks::ClocksPage::new(),
             media_page: crate::media::MediaPage::new(),
@@ -2090,6 +2128,164 @@ impl StromApp {
         // Ctrl+V - Paste element/block in graph
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::V)) {
             self.graph.paste_clipboard();
+        }
+    }
+
+    /// Enter Live mode for a specific compositor block.
+    fn enter_live_mode(&mut self, flow_id: strom_types::FlowId, block_id: String, ctx: &Context) {
+        // Find the flow and block to get compositor parameters
+        if let Some(flow) = self.flows.iter().find(|f| f.id == flow_id) {
+            if let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) {
+                // Extract resolution from output_resolution property
+                let (output_width, output_height) = block
+                    .properties
+                    .get("output_resolution")
+                    .and_then(|v| match v {
+                        strom_types::PropertyValue::String(s) if !s.is_empty() => {
+                            strom_types::parse_resolution_string(s)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or((1920, 1080));
+
+                let num_inputs = block
+                    .properties
+                    .get("num_inputs")
+                    .and_then(|v| match v {
+                        strom_types::PropertyValue::UInt(u) => Some(*u as usize),
+                        strom_types::PropertyValue::Int(i) if *i > 0 => Some(*i as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(2);
+
+                // Create editor
+                let mut editor = CompositorEditor::new(
+                    flow_id,
+                    block_id.clone(),
+                    output_width,
+                    output_height,
+                    num_inputs,
+                    self.api.clone(),
+                );
+
+                // Load current properties from backend
+                editor.load_properties(ctx);
+
+                self.compositor_editor = Some(editor);
+            }
+        }
+
+        // Switch to Live mode
+        self.app_mode = AppMode::Live { flow_id, block_id };
+        tracing::info!(
+            "Entered Live mode for flow {} block {:?}",
+            flow_id,
+            self.app_mode
+        );
+    }
+
+    /// Exit Live mode and return to Admin mode.
+    fn exit_live_mode(&mut self) {
+        self.app_mode = AppMode::Admin;
+        self.compositor_editor = None;
+        tracing::info!("Exited Live mode");
+    }
+
+    /// Render the Live UI (minimal top bar + full-screen compositor editor).
+    fn render_live_ui(&mut self, ctx: &Context, flow_id: strom_types::FlowId, block_id: &str) {
+        // Ensure compositor editor exists
+        if self.compositor_editor.is_none() {
+            self.enter_live_mode(flow_id, block_id.to_string(), ctx);
+        }
+
+        // Get flow and block names for display
+        let flow_name = self
+            .flows
+            .iter()
+            .find(|f| f.id == flow_id)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "Unknown Flow".to_string());
+
+        // Top bar with back button and info
+        TopBottomPanel::top("live_bar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    // Back button (only show if we didn't start in live mode via URL)
+                    if !self.started_in_live_mode {
+                        if ui
+                            .button("Back")
+                            .on_hover_text("Return to admin interface")
+                            .clicked()
+                        {
+                            self.exit_live_mode();
+                        }
+                        ui.separator();
+                    }
+
+                    // Title
+                    ui.label(egui::RichText::new("Live View").strong().size(16.0));
+
+                    ui.separator();
+
+                    // Flow and block info
+                    ui.label(&flow_name);
+                    ui.label("›");
+                    ui.label(block_id);
+
+                    // Right side: connection status and copy URL button
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Copy URL button (WASM only)
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            if ui
+                                .button("📋 Copy URL")
+                                .on_hover_text("Copy live URL to clipboard")
+                                .clicked()
+                            {
+                                if let Some(window) = web_sys::window() {
+                                    if let Ok(location) = window.location().origin() {
+                                        let url =
+                                            format!("{}/live/{}/{}", location, flow_id, block_id);
+                                        let clipboard = window.navigator().clipboard();
+                                        let _ = clipboard.write_text(&url);
+                                        tracing::info!("Copied live URL: {}", url);
+                                    }
+                                }
+                            }
+                        }
+
+                        ui.separator();
+
+                        // Connection status indicator
+                        let (status_color, status_text) = match self.connection_state {
+                            ConnectionState::Connected => (Color32::GREEN, "Connected"),
+                            ConnectionState::Reconnecting { .. } => {
+                                (Color32::YELLOW, "Reconnecting")
+                            }
+                            ConnectionState::Disconnected => (Color32::RED, "Disconnected"),
+                        };
+                        ui.label(egui::RichText::new(status_text).color(status_color).small());
+                    });
+                });
+            });
+
+        // Full-screen compositor editor
+        if let Some(ref mut editor) = self.compositor_editor {
+            CentralPanel::default().show(ctx, |ui| {
+                editor.show_fullscreen(ui, ctx);
+            });
+        } else {
+            // Show loading state
+            CentralPanel::default().show(ctx, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.spinner();
+                    ui.label("Loading compositor...");
+                });
+            });
         }
     }
 
@@ -6109,60 +6305,17 @@ impl eframe::App for StromApp {
         // Handle keyboard shortcuts
         self.handle_keyboard_shortcuts(ctx);
 
-        // Check for compositor editor open signal
+        // Check for compositor editor open signal - enters Live mode
         if let Some(block_id) = get_local_storage("open_compositor_editor") {
             remove_local_storage("open_compositor_editor");
 
             // Get current flow
             if let Some(flow) = self.current_flow() {
                 // Find the block
-                if let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) {
-                    // Extract resolution from output_resolution property
-                    // Default to 1920x1080 (Full HD) if not set or can't be parsed
-                    let (output_width, output_height) = block
-                        .properties
-                        .get("output_resolution")
-                        .and_then(|v| match v {
-                            strom_types::PropertyValue::String(s) if !s.is_empty() => {
-                                strom_types::parse_resolution_string(s)
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or((1920, 1080));
-
-                    let num_inputs = block
-                        .properties
-                        .get("num_inputs")
-                        .and_then(|v| match v {
-                            strom_types::PropertyValue::UInt(u) => Some(*u as usize),
-                            strom_types::PropertyValue::Int(i) if *i > 0 => Some(*i as usize),
-                            _ => None,
-                        })
-                        .unwrap_or(2);
-
-                    // Create editor
-                    let mut editor = CompositorEditor::new(
-                        flow.id,
-                        block_id.clone(),
-                        output_width,
-                        output_height,
-                        num_inputs,
-                        self.api.clone(),
-                    );
-
-                    // Load current properties from backend
-                    editor.load_properties(ctx);
-
-                    self.compositor_editor = Some(editor);
+                if let Some(_block) = flow.blocks.iter().find(|b| b.id == block_id) {
+                    // Enter Live mode for this compositor
+                    self.enter_live_mode(flow.id, block_id, ctx);
                 }
-            }
-        }
-
-        // Show compositor editor if open (as a window, doesn't block main UI)
-        if let Some(ref mut editor) = self.compositor_editor {
-            let is_open = editor.show(ctx);
-            if !is_open {
-                self.compositor_editor = None;
             }
         }
 
@@ -6421,91 +6574,103 @@ impl eframe::App for StromApp {
             }
         }
 
-        self.render_toolbar(ctx);
+        // Render based on app mode
+        match &self.app_mode {
+            AppMode::Admin => {
+                self.render_toolbar(ctx);
 
-        // Render page-specific content
-        match self.current_page {
-            AppPage::Flows => {
-                self.render_flow_list(ctx);
+                // Render page-specific content
+                match self.current_page {
+                    AppPage::Flows => {
+                        self.render_flow_list(ctx);
 
-                // Only show palette when a flow is selected
-                if self.current_flow().is_some() {
-                    self.render_palette(ctx);
-                }
+                        // Only show palette when a flow is selected
+                        if self.current_flow().is_some() {
+                            self.render_palette(ctx);
+                        }
 
-                self.render_canvas(ctx);
-                self.render_log_panel(ctx);
-                self.render_new_flow_dialog(ctx);
-                self.render_delete_confirmation_dialog(ctx);
-                self.render_flow_properties_dialog(ctx);
-                self.render_import_dialog(ctx);
-                self.render_stream_picker_modal(ctx);
-                self.render_ndi_picker_modal(ctx);
-            }
-            AppPage::Discovery => {
-                CentralPanel::default().show(ctx, |ui| {
-                    self.discovery_page
-                        .render(ui, &self.api, ctx, &self.channels.tx);
-                });
-
-                // Handle pending create flow from discovery
-                if let Some((sdp, interface)) = self.discovery_page.take_pending_create_flow() {
-                    self.create_flow_from_sdp(sdp, interface, ctx);
-                }
-
-                // Handle pending go to flow from discovery
-                if let Some(flow_id_str) = self.discovery_page.take_pending_go_to_flow() {
-                    if let Ok(uuid) = uuid::Uuid::parse_str(&flow_id_str) {
-                        let flow_id = strom_types::FlowId::from(uuid);
-                        // Clear any existing focus before changing graph structure
-                        // to prevent accesskit panic when focused node is removed
-                        ctx.memory_mut(|mem| {
-                            if let Some(focused_id) = mem.focused() {
-                                mem.surrender_focus(focused_id);
-                            }
+                        self.render_canvas(ctx);
+                        self.render_log_panel(ctx);
+                        self.render_new_flow_dialog(ctx);
+                        self.render_delete_confirmation_dialog(ctx);
+                        self.render_flow_properties_dialog(ctx);
+                        self.render_import_dialog(ctx);
+                        self.render_stream_picker_modal(ctx);
+                        self.render_ndi_picker_modal(ctx);
+                    }
+                    AppPage::Discovery => {
+                        CentralPanel::default().show(ctx, |ui| {
+                            self.discovery_page
+                                .render(ui, &self.api, ctx, &self.channels.tx);
                         });
-                        self.select_flow(flow_id);
-                        self.current_page = AppPage::Flows;
+
+                        // Handle pending create flow from discovery
+                        if let Some((sdp, interface)) =
+                            self.discovery_page.take_pending_create_flow()
+                        {
+                            self.create_flow_from_sdp(sdp, interface, ctx);
+                        }
+
+                        // Handle pending go to flow from discovery
+                        if let Some(flow_id_str) = self.discovery_page.take_pending_go_to_flow() {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(&flow_id_str) {
+                                let flow_id = strom_types::FlowId::from(uuid);
+                                // Clear any existing focus before changing graph structure
+                                // to prevent accesskit panic when focused node is removed
+                                ctx.memory_mut(|mem| {
+                                    if let Some(focused_id) = mem.focused() {
+                                        mem.surrender_focus(focused_id);
+                                    }
+                                });
+                                self.select_flow(flow_id);
+                                self.current_page = AppPage::Flows;
+                            }
+                        }
+                    }
+                    AppPage::Clocks => {
+                        CentralPanel::default().show(ctx, |ui| {
+                            self.clocks_page.render(ui, &self.ptp_stats, &self.flows);
+                        });
+                    }
+                    AppPage::Media => {
+                        CentralPanel::default().show(ctx, |ui| {
+                            self.media_page
+                                .render(ui, &self.api, ctx, &self.channels.sender());
+                        });
+                    }
+                    AppPage::Info => {
+                        // Auto-load network interfaces when Info page is shown
+                        if self.info_page.should_load_network() {
+                            self.network_interfaces_loaded = false;
+                            self.load_network_interfaces(ctx.clone());
+                        }
+
+                        CentralPanel::default().show(ctx, |ui| {
+                            self.info_page.render(
+                                ui,
+                                self.version_info.as_ref(),
+                                &self.system_monitor,
+                                &self.network_interfaces,
+                                &self.flows,
+                            );
+                        });
+                    }
+                    AppPage::Links => {
+                        CentralPanel::default().show(ctx, |ui| {
+                            self.links_page.render(ui, &self.api, ctx, &self.flows);
+                        });
                     }
                 }
-            }
-            AppPage::Clocks => {
-                CentralPanel::default().show(ctx, |ui| {
-                    self.clocks_page.render(ui, &self.ptp_stats, &self.flows);
-                });
-            }
-            AppPage::Media => {
-                CentralPanel::default().show(ctx, |ui| {
-                    self.media_page
-                        .render(ui, &self.api, ctx, &self.channels.sender());
-                });
-            }
-            AppPage::Info => {
-                // Auto-load network interfaces when Info page is shown
-                if self.info_page.should_load_network() {
-                    self.network_interfaces_loaded = false;
-                    self.load_network_interfaces(ctx.clone());
-                }
 
-                CentralPanel::default().show(ctx, |ui| {
-                    self.info_page.render(
-                        ui,
-                        self.version_info.as_ref(),
-                        &self.system_monitor,
-                        &self.network_interfaces,
-                        &self.flows,
-                    );
-                });
+                self.render_status_bar(ctx);
+                self.render_system_monitor_window(ctx);
             }
-            AppPage::Links => {
-                CentralPanel::default().show(ctx, |ui| {
-                    self.links_page.render(ui, &self.api, ctx, &self.flows);
-                });
+            AppMode::Live { flow_id, block_id } => {
+                let flow_id = *flow_id;
+                let block_id = block_id.clone();
+                self.render_live_ui(ctx, flow_id, &block_id);
             }
         }
-
-        self.render_status_bar(ctx);
-        self.render_system_monitor_window(ctx);
 
         // Process pending flow copy (after render to avoid borrow checker issues)
         if let Some(flow) = self.flow_pending_copy.take() {

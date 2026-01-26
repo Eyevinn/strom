@@ -59,6 +59,12 @@
     <script src="/static/whep.js"></script>
     <script>
         let connection = null;
+        let connectionId = 0;       // Incremented each connect to ignore stale callbacks
+        let wantConnected = false;  // User's intent: should we be connected?
+        let reconnectAttempt = 0;
+        let reconnectTimer = null;
+        const MAX_RECONNECT_ATTEMPTS = 15;
+        const RECONNECT_DELAYS = [1000, 2000, 3000, 5000, 5000, 10000, 15000, 30000]; // Backoff delays in ms
 
         function log(message, type = '') {
             const logEl = document.getElementById('log');
@@ -69,31 +75,99 @@
             logEl.scrollTop = logEl.scrollHeight;
         }
 
-        function doConnect() {
+        function getReconnectDelay() {
+            const idx = Math.min(reconnectAttempt, RECONNECT_DELAYS.length - 1);
+            return RECONNECT_DELAYS[idx];
+        }
+
+        function scheduleReconnect(reason) {
+            // Prevent double scheduling or scheduling when not wanted
+            if (!wantConnected || reconnectTimer) return;
+
+            // Check max attempts
+            if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+                log('Max reconnection attempts (' + MAX_RECONNECT_ATTEMPTS + ') reached. Giving up.', 'error');
+                setStatus('status', 'Connection failed - click Connect to retry', 'error');
+                wantConnected = false;
+                document.getElementById('connectBtn').disabled = false;
+                document.getElementById('disconnectBtn').disabled = true;
+                return;
+            }
+
+            const delay = getReconnectDelay();
+            reconnectAttempt++;
+            log('Reconnecting in ' + (delay/1000) + 's (attempt ' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
+            setStatus('status', 'Reconnecting in ' + (delay/1000) + 's (attempt ' + reconnectAttempt + ')...', 'connecting');
+
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                if (wantConnected) {
+                    doConnect(true); // true = is reconnect attempt
+                }
+            }, delay);
+        }
+
+        function cancelReconnect() {
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+        }
+
+        function doConnect(isReconnect = false) {
             const endpoint = document.getElementById('endpoint').value.trim();
             if (!endpoint) {
                 log('Please enter a WHEP endpoint URL', 'error');
                 return;
             }
 
+            cancelReconnect();
+            wantConnected = true;
+
+            // Increment connection ID - any callbacks from old connections will be ignored
+            connectionId++;
+            const myConnectionId = connectionId;
+
+            // Clean up existing connection without triggering our callbacks
+            if (connection) {
+                // Clear callbacks before disconnect to prevent them from firing
+                connection.callbacks = {};
+                connection.close();
+                connection = null;
+            }
+
             document.getElementById('connectBtn').disabled = true;
-            setStatus('status', 'Connecting...', 'connecting');
-            log('Connecting to ' + endpoint);
+            document.getElementById('disconnectBtn').disabled = false;
+            setStatus('status', isReconnect ? 'Reconnecting...' : 'Connecting...', 'connecting');
+            log(isReconnect ? 'Reconnecting to ' + endpoint : 'Connecting to ' + endpoint);
 
             connection = new WhepConnection(endpoint, {
                 onAudioTrack: (stream) => {
+                    if (myConnectionId !== connectionId) return; // Stale
                     document.getElementById('audio').srcObject = stream;
                 },
                 onVideoTrack: (stream) => {
-                    document.getElementById('video').srcObject = stream;
-                    document.getElementById('video').muted = false;
+                    if (myConnectionId !== connectionId) return; // Stale
+                    const video = document.getElementById('video');
+                    video.srcObject = stream;
                     setElementClass('videoContainer', 'active', true);
+                    // Start playback muted (allowed by browsers)
+                    // User can unmute via video controls
+                    video.muted = true;
+                    video.play().catch(e => {
+                        log('Autoplay blocked: ' + e.message, 'warning');
+                    });
                 },
                 onConnected: () => {
+                    if (myConnectionId !== connectionId) return; // Stale
+                    cancelReconnect(); // Cancel any pending reconnect timer!
+                    reconnectAttempt = 0; // Reset on successful connection
                     document.getElementById('disconnectBtn').disabled = false;
                     setStatus('status', 'Connected - Waiting for media...', 'connected');
+                    log('Connected successfully', 'success');
                 },
                 onMediaStatus: (hasAudio, hasVideo) => {
+                    if (myConnectionId !== connectionId) return; // Stale
                     let mediaTypes = [];
                     if (hasAudio) mediaTypes.push('audio');
                     if (hasVideo) mediaTypes.push('video');
@@ -107,24 +181,39 @@
                     setElementClass('audioControls', 'active', isAudioOnly);
                 },
                 onError: (msg) => {
+                    if (myConnectionId !== connectionId) return; // Stale
                     log('Error: ' + msg, 'error');
                     setStatus('status', 'Connection failed: ' + msg, 'error');
                     document.getElementById('connectBtn').disabled = false;
+                    // Schedule reconnect on error if user wants to be connected
+                    if (wantConnected) {
+                        scheduleReconnect('error: ' + msg);
+                    }
                 },
                 onDisconnected: () => {
-                    setStatus('status', 'Disconnected', 'disconnected');
+                    if (myConnectionId !== connectionId) return; // Stale
+
                     setElementClass('audioIndicator', 'active', false);
                     setElementClass('audioControls', 'active', false);
                     setElementClass('videoContainer', 'active', false);
                     document.getElementById('audio').srcObject = null;
                     document.getElementById('video').srcObject = null;
                     document.getElementById('connectBtn').disabled = false;
-                    document.getElementById('disconnectBtn').disabled = true;
+
+                    // Auto-reconnect if user wants to stay connected
+                    if (wantConnected) {
+                        scheduleReconnect('connection lost');
+                    } else {
+                        setStatus('status', 'Disconnected', 'disconnected');
+                        document.getElementById('disconnectBtn').disabled = true;
+                    }
                 },
                 onIceState: (state) => {
+                    if (myConnectionId !== connectionId) return; // Stale
                     log('ICE state: ' + state);
                 },
                 onLog: (msg, type) => {
+                    if (myConnectionId !== connectionId) return; // Stale
                     log(msg, type || '');
                 }
             });
@@ -133,11 +222,18 @@
         }
 
         function doDisconnect() {
+            wantConnected = false;
+            cancelReconnect();
+            reconnectAttempt = 0;
+            connectionId++; // Invalidate any pending callbacks
             log('Disconnecting...');
             if (connection) {
                 connection.disconnect();
                 connection = null;
             }
+            setStatus('status', 'Disconnected', 'disconnected');
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
             log('Disconnected', 'success');
         }
 
@@ -200,7 +296,8 @@
             updateFullUrl();
             const endpoint = document.getElementById('endpoint').value;
             if (endpoint) {
-                setTimeout(doConnect, 500);
+                wantConnected = true;
+                setTimeout(() => doConnect(false), 500);
             }
         };
     </script>

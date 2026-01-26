@@ -168,6 +168,15 @@ pub enum StromEvent {
         /// Current file path (if any)
         current_file: Option<String>,
     },
+    /// A transition was triggered on a compositor block
+    TransitionTriggered {
+        flow_id: FlowId,
+        block_instance_id: String,
+        from_input: usize,
+        to_input: usize,
+        transition_type: String,
+        duration_ms: u64,
+    },
 }
 
 impl StromEvent {
@@ -408,6 +417,19 @@ impl StromEvent {
                         block_id, flow_id, state
                     )
                 }
+            }
+            StromEvent::TransitionTriggered {
+                flow_id,
+                block_instance_id,
+                from_input,
+                to_input,
+                transition_type,
+                duration_ms,
+            } => {
+                format!(
+                    "Transition {} triggered on {} in flow {}: {} -> {} ({}ms)",
+                    transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
+                )
             }
         }
     }

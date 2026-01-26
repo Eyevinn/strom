@@ -1194,6 +1194,111 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Trigger a transition on a compositor block.
+    pub async fn trigger_transition(
+        &self,
+        flow_id: &str,
+        block_id: &str,
+        from_input: usize,
+        to_input: usize,
+        transition_type: &str,
+        duration_ms: u64,
+    ) -> ApiResult<()> {
+        use strom_types::api::TriggerTransitionRequest;
+        use tracing::info;
+
+        let url = format!(
+            "{}/flows/{}/blocks/{}/transition",
+            self.base_url, flow_id, block_id
+        );
+        info!(
+            "Triggering {} transition on {} ({} -> {}, {}ms): {}",
+            transition_type, block_id, from_input, to_input, duration_ms, url
+        );
+
+        let request = TriggerTransitionRequest {
+            from_input,
+            to_input,
+            transition_type: transition_type.to_string(),
+            duration_ms,
+        };
+
+        let response = self
+            .with_auth(self.client.post(&url))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network request failed: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        info!("Successfully triggered transition");
+        Ok(())
+    }
+
+    /// Animate a single input's position/size on a compositor block.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn animate_input(
+        &self,
+        flow_id: &str,
+        block_id: &str,
+        input: usize,
+        xpos: Option<i32>,
+        ypos: Option<i32>,
+        width: Option<i32>,
+        height: Option<i32>,
+        duration_ms: u64,
+    ) -> ApiResult<()> {
+        use strom_types::api::AnimateInputRequest;
+        use tracing::info;
+
+        let url = format!(
+            "{}/flows/{}/blocks/{}/animate",
+            self.base_url, flow_id, block_id
+        );
+        info!(
+            "Animating input {} on {} to ({:?}, {:?}, {:?}, {:?}) over {}ms: {}",
+            input, block_id, xpos, ypos, width, height, duration_ms, url
+        );
+
+        let request = AnimateInputRequest {
+            input,
+            xpos,
+            ypos,
+            width,
+            height,
+            duration_ms,
+        };
+
+        let response = self
+            .with_auth(self.client.post(&url))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network request failed: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+
+        info!("Successfully started animation");
+        Ok(())
+    }
+
     /// List available network interfaces.
     pub async fn list_network_interfaces(
         &self,
@@ -1851,5 +1956,63 @@ impl ApiClient {
             state.playlist.len()
         );
         Ok(state)
+    }
+
+    /// Get a thumbnail from a compositor input.
+    ///
+    /// Returns JPEG-encoded image bytes for the specified compositor input.
+    pub async fn get_compositor_thumbnail(
+        &self,
+        flow_id: &str,
+        block_id: &str,
+        input_idx: usize,
+    ) -> ApiResult<Vec<u8>> {
+        let url = format!(
+            "{}/flows/{}/compositor/{}/thumbnail/{}",
+            self.base_url, flow_id, block_id, input_idx
+        );
+
+        tracing::debug!(
+            "Fetching compositor thumbnail: url={} flow={}, block={}, input={}",
+            url,
+            flow_id,
+            block_id,
+            input_idx
+        );
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::debug!("Network error getting thumbnail: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        let status = response.status();
+        tracing::debug!("Thumbnail response status: {} for {}", status, url);
+
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::debug!("HTTP error {} getting thumbnail: {}", status_code, text);
+            return Err(ApiError::Http(status_code, text));
+        }
+
+        let bytes = response.bytes().await.map_err(|e| {
+            tracing::debug!("Failed to read thumbnail bytes: {}", e);
+            ApiError::Decode(e.to_string())
+        })?;
+
+        tracing::debug!(
+            "Got thumbnail {} bytes (header: {:02X} {:02X} {:02X}) for {}",
+            bytes.len(),
+            bytes.first().copied().unwrap_or(0),
+            bytes.get(1).copied().unwrap_or(0),
+            bytes.get(2).copied().unwrap_or(0),
+            url
+        );
+
+        Ok(bytes.to_vec())
     }
 }

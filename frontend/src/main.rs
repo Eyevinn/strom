@@ -28,12 +28,37 @@ mod system_monitor;
 mod webrtc_stats;
 mod ws;
 
-// Make StromApp public so it can be used by the backend
-pub use app::StromApp;
+// Make StromApp and AppMode public so they can be used by the backend
+pub use app::{AppMode, StromApp};
 
 // ============================================================================
 // WASM Entry Point
 // ============================================================================
+
+/// Parse the URL path to determine the application mode (WASM only).
+/// Returns Live mode for /live/{flow_id}/{block_id} URLs, Admin otherwise.
+#[cfg(target_arch = "wasm32")]
+fn parse_app_mode_from_url() -> AppMode {
+    if let Some(window) = web_sys::window() {
+        if let Ok(pathname) = window.location().pathname() {
+            // Check for /live/{flow_id}/{block_id} pattern
+            let parts: Vec<&str> = pathname.trim_start_matches('/').split('/').collect();
+            if parts.len() >= 3 && parts[0] == "live" {
+                if let Ok(uuid) = uuid::Uuid::parse_str(parts[1]) {
+                    let flow_id = strom_types::FlowId::from(uuid);
+                    let block_id = parts[2].to_string();
+                    tracing::info!(
+                        "Live mode detected from URL: flow={}, block={}",
+                        flow_id,
+                        block_id
+                    );
+                    return AppMode::Live { flow_id, block_id };
+                }
+            }
+        }
+    }
+    AppMode::Admin
+}
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
@@ -50,6 +75,9 @@ fn main() {
             .build(),
     );
 
+    // Parse app mode from URL before starting
+    let app_mode = parse_app_mode_from_url();
+
     // Configure WebOptions to allow browser handling of pinch-zoom and Ctrl+scroll
     let web_options = eframe::WebOptions {
         // Allow multi-touch events to propagate to browser for pinch-zoom
@@ -62,7 +90,7 @@ fn main() {
         ..Default::default()
     };
 
-    wasm_bindgen_futures::spawn_local(async {
+    wasm_bindgen_futures::spawn_local(async move {
         let document = web_sys::window()
             .expect("No window")
             .document()
@@ -98,10 +126,11 @@ fn main() {
             .start(
                 canvas,
                 web_options,
-                Box::new(|cc| {
+                Box::new(move |cc| {
                     // Force dark theme immediately before app creation
                     cc.egui_ctx.set_visuals(egui::Visuals::dark());
-                    Ok(Box::new(StromApp::new(cc)))
+                    // Create app with the parsed mode
+                    Ok(Box::new(StromApp::new_with_mode(cc, app_mode)))
                 }),
             )
             .await

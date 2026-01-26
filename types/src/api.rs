@@ -92,6 +92,65 @@ pub struct UpdatePropertyRequest {
     pub value: PropertyValue,
 }
 
+/// Request to trigger a transition on a compositor block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TriggerTransitionRequest {
+    /// Index of the currently active input (0-based)
+    pub from_input: usize,
+    /// Index of the input to transition to (0-based)
+    pub to_input: usize,
+    /// Type of transition: "cut", "fade", "slide_left", "slide_right", "slide_up", "slide_down"
+    #[serde(default = "default_transition_type")]
+    pub transition_type: String,
+    /// Duration of the transition in milliseconds (ignored for "cut")
+    #[serde(default = "default_transition_duration")]
+    pub duration_ms: u64,
+}
+
+fn default_transition_type() -> String {
+    "fade".to_string()
+}
+
+fn default_transition_duration() -> u64 {
+    300
+}
+
+/// Response after triggering a transition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct TransitionResponse {
+    /// Success message
+    pub message: String,
+    /// The type of transition that was triggered
+    pub transition_type: String,
+    /// Duration of the transition in milliseconds
+    pub duration_ms: u64,
+}
+
+/// Request to animate a single input's position/size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct AnimateInputRequest {
+    /// Input index (0-based)
+    pub input: usize,
+    /// Target X position (optional, keeps current if not specified)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xpos: Option<i32>,
+    /// Target Y position (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ypos: Option<i32>,
+    /// Target width (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<i32>,
+    /// Target height (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<i32>,
+    /// Animation duration in milliseconds
+    #[serde(default = "default_transition_duration")]
+    pub duration_ms: u64,
+}
+
 /// Response containing current property values from a running element.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]

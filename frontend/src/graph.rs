@@ -1208,7 +1208,7 @@ impl GraphEditor {
 
             egui::Area::new(egui::Id::new("graph_view_controls"))
                 .fixed_pos(button_pos)
-                .order(egui::Order::Foreground)
+                .order(egui::Order::Middle)
                 .show(ui.ctx(), |ui| {
                     ui.horizontal(|ui| {
                         ui.style_mut().spacing.item_spacing.x = 4.0;

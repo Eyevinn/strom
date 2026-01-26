@@ -34,6 +34,11 @@ urlencoding = "2.1"
 # Logging
 tracing.workspace = true
 
+# Image decoding for thumbnails (cross-platform)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Base64 encoding for thumbnail storage (cross-platform)
+base64 = "0.22"
+
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Cross-platform time - needs wasm-bindgen feature for WASM
@@ -55,5 +60,3 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 tokio-tungstenite = "0.28"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
-# Image decoding for app icon
-image = { version = "0.25", default-features = false, features = ["png"] }

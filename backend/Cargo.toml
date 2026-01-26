@@ -46,7 +46,9 @@ utoipa-swagger-ui.workspace = true
 # GStreamer
 gstreamer.workspace = true
 gstreamer-app.workspace = true
+gstreamer-controller.workspace = true
 gstreamer-net.workspace = true
+gstreamer-video.workspace = true
 gst-plugin-webrtc.workspace = true
 gst-plugin-webrtchttp.workspace = true
 gst-plugin-inter.workspace = true
@@ -86,8 +88,8 @@ mime_guess = "2.0"
 # Embed static assets (debug-embed forces embedding even in debug builds)
 rust-embed = { version = "8.0", features = ["debug-embed"] }
 
-# Image processing for icon generation
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Image processing for icon generation and thumbnail capture
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # System monitoring
 sysinfo = "0.37"
