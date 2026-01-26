@@ -1028,6 +1028,13 @@ impl GraphEditor {
                     set_local_storage("open_ndi_picker", &block.id);
                 }
 
+                // Handle double-click to open player for WHEP Output blocks
+                if node_response.double_clicked()
+                    && block.block_definition_id == "builtin.whep_output"
+                {
+                    set_local_storage("open_whep_player", &block.id);
+                }
+
                 // Note: Playlist editor for media player is opened via the + button in the compact UI
 
                 // Handle node dragging

@@ -6381,6 +6381,39 @@ impl eframe::App for StromApp {
             self.show_ndi_picker_for_block = Some(block_id);
         }
 
+        // Check for WHEP player open signal (double-click on WHEP Output)
+        if let Some(block_id) = get_local_storage("open_whep_player") {
+            remove_local_storage("open_whep_player");
+
+            if let Some(flow) = self.current_flow() {
+                if let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) {
+                    // Get endpoint_id from runtime_data or properties
+                    let endpoint_id = block
+                        .runtime_data
+                        .as_ref()
+                        .and_then(|rd| rd.get("whep_endpoint_id").cloned())
+                        .or_else(|| {
+                            block.properties.get("endpoint_id").and_then(|v| {
+                                if let strom_types::PropertyValue::String(s) = v {
+                                    if !s.is_empty() {
+                                        Some(s.clone())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+
+                    if let Some(endpoint_id) = endpoint_id {
+                        let player_url = self.api.get_whep_player_url(&endpoint_id);
+                        ctx.open_url(egui::OpenUrl::new_tab(&player_url));
+                    }
+                }
+            }
+        }
+
         if let Some(block_id) = get_local_storage("open_playlist_editor") {
             remove_local_storage("open_playlist_editor");
 
