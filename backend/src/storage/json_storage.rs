@@ -1,6 +1,6 @@
 //! JSON file-based storage implementation.
 
-use super::{Result, Storage, StorageError};
+use super::{migrate_flow, Result, Storage, StorageError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -72,6 +72,7 @@ impl JsonFileStorage {
         let flows: HashMap<FlowId, Flow> = storage
             .flows
             .into_iter()
+            .map(migrate_flow)
             .map(|flow| (flow.id, flow))
             .collect();
 
