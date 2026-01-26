@@ -1,5 +1,25 @@
 // WHEP Connection Library
 
+// Enable stereo for Opus codec in SDP
+// Chrome defaults to mono (stereo=0) which makes stereo audio play as mono
+function enableOpusStereo(sdp) {
+    // Find Opus payload type from rtpmap line (e.g., "a=rtpmap:111 opus/48000/2")
+    const opusMatch = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i);
+    if (!opusMatch) {
+        return sdp; // No Opus codec found
+    }
+    const opusPayloadType = opusMatch[1];
+
+    // Find and modify the corresponding fmtp line
+    const fmtpRegex = new RegExp(`(a=fmtp:${opusPayloadType} [^\\r\\n]+)`, 'g');
+    return sdp.replace(fmtpRegex, (match) => {
+        if (match.includes('stereo=')) {
+            return match; // Already has stereo setting
+        }
+        return match + ';stereo=1;sprop-stereo=1';
+    });
+}
+
 class WhepConnection {
     constructor(endpoint, callbacks = {}) {
         this.endpoint = endpoint;
@@ -69,10 +89,12 @@ class WhepConnection {
             this.peerConnection.addTransceiver('video', { direction: 'recvonly' });
 
             const offer = await this.peerConnection.createOffer();
+            // Enable Opus stereo - Chrome defaults to mono which breaks stereo audio
+            offer.sdp = enableOpusStereo(offer.sdp);
             await this.peerConnection.setLocalDescription(offer);
 
             if (this.callbacks.onLog) {
-                this.callbacks.onLog('Created SDP offer');
+                this.callbacks.onLog('Created SDP offer (stereo enabled)');
             }
 
             // Wait for ICE gathering
