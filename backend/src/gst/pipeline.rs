@@ -865,7 +865,20 @@ impl PipelineManager {
                 }
             }
             PropertyValue::Float(v) => {
-                element.set_property(prop_name, *v);
+                // Check property type to determine if we need f32 or f64
+                if let Some(pspec) = element.find_property(prop_name) {
+                    let type_name = pspec.value_type().name();
+                    if type_name == "gfloat" {
+                        // Property expects f32
+                        element.set_property(prop_name, *v as f32);
+                    } else {
+                        // Property expects f64 (gdouble) or unknown, use f64
+                        element.set_property(prop_name, *v);
+                    }
+                } else {
+                    // Property not found, try anyway with f64
+                    element.set_property(prop_name, *v);
+                }
             }
             PropertyValue::Bool(v) => {
                 element.set_property(prop_name, *v);
