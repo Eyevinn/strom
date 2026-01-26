@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       cef_version:
-        description: 'CEF version (e.g., 138.0.56+gd28ed8a+chromium-138.0.7204.301)'
+        description: 'CEF version (e.g., 144.0.11+ge135be2+chromium-144.0.7559.97)'
         required: true
-        default: '138.0.56+gd28ed8a+chromium-138.0.7204.301'
+        default: '144.0.11+ge135be2+chromium-144.0.7559.97'
         type: string
       upload_to_release:
         description: 'Upload artifacts to GitHub release'
