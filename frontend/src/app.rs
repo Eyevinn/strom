@@ -567,10 +567,10 @@ pub struct StromApp {
     latency_cache: std::collections::HashMap<String, crate::api::LatencyInfo>,
     /// Last time latency was fetched (for periodic refresh)
     last_latency_fetch: instant::Instant,
-    /// Cached stats info for flows (flow_id -> FlowStatsInfo)
-    stats_cache: std::collections::HashMap<String, crate::api::FlowStatsInfo>,
+    /// Cached RTP stats info for flows (flow_id -> FlowRtpStatsInfo)
+    rtp_stats_cache: std::collections::HashMap<String, crate::api::FlowRtpStatsInfo>,
     /// Last time stats was fetched (for periodic refresh)
-    last_stats_fetch: instant::Instant,
+    last_rtp_stats_fetch: instant::Instant,
     /// Whether to show the stats panel
     show_stats_panel: bool,
     /// Compositor layout editor (if open)
@@ -726,8 +726,8 @@ impl StromApp {
             pending_gst_launch_export: None,
             latency_cache: std::collections::HashMap::new(),
             last_latency_fetch: instant::Instant::now(),
-            stats_cache: std::collections::HashMap::new(),
-            last_stats_fetch: instant::Instant::now(),
+            rtp_stats_cache: std::collections::HashMap::new(),
+            last_rtp_stats_fetch: instant::Instant::now(),
             show_stats_panel: false,
             compositor_editor: None,
             playlist_editor: None,
@@ -853,8 +853,8 @@ impl StromApp {
             pending_gst_launch_export: None,
             latency_cache: std::collections::HashMap::new(),
             last_latency_fetch: instant::Instant::now(),
-            stats_cache: std::collections::HashMap::new(),
-            last_stats_fetch: instant::Instant::now(),
+            rtp_stats_cache: std::collections::HashMap::new(),
+            last_rtp_stats_fetch: instant::Instant::now(),
             show_stats_panel: false,
             compositor_editor: None,
             playlist_editor: None,
@@ -1231,42 +1231,64 @@ impl StromApp {
         &self.available_channels
     }
 
-    /// Poll WebRTC stats for running flows that have WebRTC elements.
+    /// Poll WebRTC stats for the currently selected flow (if running and has WebRTC blocks).
     /// Called periodically (every second).
     fn poll_webrtc_stats(&mut self, ctx: &Context) {
-        // Find running flows
-        let running_flows: Vec<_> = self
-            .flows
-            .iter()
-            .filter(|f| matches!(f.state, Some(PipelineState::Playing)))
-            .map(|f| f.id)
-            .collect();
+        // Only fetch for selected flow if it's running
+        let flow_id = match self.selected_flow_id {
+            Some(id) => id,
+            None => return,
+        };
 
-        for flow_id in running_flows {
-            let api = self.api.clone();
-            let tx = self.channels.sender();
-            let ctx = ctx.clone();
+        // Check if the selected flow is running and has WebRTC blocks
+        let flow = self.flows.iter().find(|f| f.id == flow_id);
+        let is_running = flow
+            .map(|f| matches!(f.state, Some(PipelineState::Playing)))
+            .unwrap_or(false);
 
-            spawn_task(async move {
-                match api.get_webrtc_stats(flow_id).await {
-                    Ok(stats) => {
-                        if !stats.connections.is_empty() {
-                            tracing::debug!(
-                                "Fetched WebRTC stats for flow {}: {} connections",
-                                flow_id,
-                                stats.connections.len()
-                            );
-                            let _ = tx.send(AppMessage::WebRtcStatsLoaded { flow_id, stats });
-                        }
-                    }
-                    Err(e) => {
-                        // Don't log errors for flows without WebRTC elements
-                        tracing::trace!("No WebRTC stats for flow {}: {}", flow_id, e);
+        if !is_running {
+            return;
+        }
+
+        // Only fetch WebRTC stats if the flow has WebRTC blocks
+        let has_webrtc_blocks = flow
+            .map(|f| {
+                f.blocks.iter().any(|b| {
+                    matches!(
+                        b.block_definition_id.as_str(),
+                        "builtin.whep_input" | "builtin.whep_output" | "builtin.whip_output"
+                    )
+                })
+            })
+            .unwrap_or(false);
+
+        if !has_webrtc_blocks {
+            return;
+        }
+
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+        let ctx = ctx.clone();
+
+        spawn_task(async move {
+            match api.get_webrtc_stats(flow_id).await {
+                Ok(stats) => {
+                    if !stats.connections.is_empty() {
+                        tracing::debug!(
+                            "Fetched WebRTC stats for flow {}: {} connections",
+                            flow_id,
+                            stats.connections.len()
+                        );
+                        let _ = tx.send(AppMessage::WebRtcStatsLoaded { flow_id, stats });
                     }
                 }
-                ctx.request_repaint();
-            });
-        }
+                Err(e) => {
+                    // Don't log errors for flows without WebRTC elements
+                    tracing::trace!("No WebRTC stats for flow {}: {}", flow_id, e);
+                }
+            }
+            ctx.request_repaint();
+        });
     }
 
     /// Check authentication status
@@ -1465,101 +1487,112 @@ impl StromApp {
         });
     }
 
-    /// Fetch latency for all running flows.
+    /// Fetch latency for the currently selected flow (if running).
     fn fetch_latency_for_running_flows(&self, ctx: &Context) {
         use strom_types::PipelineState;
 
-        // Find all flows that are currently playing
-        let running_flows: Vec<_> = self
+        // Only fetch for selected flow if it's running
+        let flow_id = match self.selected_flow_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Check if the selected flow is running
+        let is_running = self
             .flows
             .iter()
-            .filter(|f| f.state == Some(PipelineState::Playing))
-            .map(|f| f.id)
-            .collect();
+            .find(|f| f.id == flow_id)
+            .map(|f| f.state == Some(PipelineState::Playing))
+            .unwrap_or(false);
 
-        if running_flows.is_empty() {
+        if !is_running {
             return;
         }
 
-        // Fetch latency for each running flow
-        for flow_id in running_flows {
-            let api = self.api.clone();
-            let tx = self.channels.sender();
-            let ctx = ctx.clone();
-            let flow_id_str = flow_id.to_string();
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+        let ctx = ctx.clone();
+        let flow_id_str = flow_id.to_string();
 
-            spawn_task(async move {
-                match api.get_flow_latency(flow_id).await {
-                    Ok(latency) => {
-                        let _ = tx.send(AppMessage::LatencyLoaded {
-                            flow_id: flow_id_str,
-                            latency,
-                        });
-                    }
-                    Err(_) => {
-                        // Flow not running or latency not available - silently ignore
-                        let _ = tx.send(AppMessage::LatencyNotAvailable(flow_id_str));
-                    }
+        spawn_task(async move {
+            match api.get_flow_latency(flow_id).await {
+                Ok(latency) => {
+                    let _ = tx.send(AppMessage::LatencyLoaded {
+                        flow_id: flow_id_str,
+                        latency,
+                    });
                 }
-                ctx.request_repaint();
-            });
-        }
+                Err(_) => {
+                    // Flow not running or latency not available - silently ignore
+                    let _ = tx.send(AppMessage::LatencyNotAvailable(flow_id_str));
+                }
+            }
+            ctx.request_repaint();
+        });
     }
 
-    /// Fetch statistics for all running flows.
-    fn fetch_stats_for_running_flows(&self, ctx: &Context) {
+    /// Fetch RTP statistics and dynamic pads for the currently selected flow (if running).
+    /// RTP stats are only fetched if the flow has blocks that produce them (e.g., AES67 Input).
+    fn fetch_rtp_stats_for_selected_flow(&self, ctx: &Context) {
         use strom_types::PipelineState;
 
-        // Find all flows that are currently playing
-        let running_flows: Vec<_> = self
-            .flows
-            .iter()
-            .filter(|f| f.state == Some(PipelineState::Playing))
-            .map(|f| f.id)
-            .collect();
+        // Only fetch for selected flow if it's running
+        let flow_id = match self.selected_flow_id {
+            Some(id) => id,
+            None => return,
+        };
 
-        if running_flows.is_empty() {
+        // Check if the selected flow is running
+        let flow = self.flows.iter().find(|f| f.id == flow_id);
+        let is_running = flow
+            .map(|f| f.state == Some(PipelineState::Playing))
+            .unwrap_or(false);
+
+        if !is_running {
             return;
         }
 
-        // Get the currently selected flow ID for dynamic pads fetching
-        let selected_flow_id = self.current_flow().map(|f| f.id);
+        // Check if the flow has blocks that produce RTP stats
+        let has_rtp_stats_blocks = flow
+            .map(|f| {
+                f.blocks
+                    .iter()
+                    .any(|b| b.block_definition_id == "builtin.aes67_input")
+            })
+            .unwrap_or(false);
 
-        // Fetch stats for each running flow
-        for flow_id in running_flows {
-            let api = self.api.clone();
-            let tx = self.channels.sender();
-            let ctx = ctx.clone();
-            let flow_id_str = flow_id.to_string();
-            let fetch_dynamic_pads = selected_flow_id == Some(flow_id);
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+        let ctx = ctx.clone();
+        let flow_id_str = flow_id.to_string();
 
-            spawn_task(async move {
-                match api.get_flow_stats(flow_id).await {
-                    Ok(stats) => {
-                        let _ = tx.send(AppMessage::StatsLoaded {
+        spawn_task(async move {
+            // Only fetch RTP stats if the flow has blocks that produce them
+            if has_rtp_stats_blocks {
+                match api.get_flow_rtp_stats(flow_id).await {
+                    Ok(rtp_stats) => {
+                        let _ = tx.send(AppMessage::RtpStatsLoaded {
                             flow_id: flow_id_str.clone(),
-                            stats,
+                            rtp_stats,
                         });
                     }
                     Err(_) => {
-                        // Flow not running or stats not available - silently ignore
-                        let _ = tx.send(AppMessage::StatsNotAvailable(flow_id_str.clone()));
+                        // Flow not running or RTP stats not available - silently ignore
+                        let _ = tx.send(AppMessage::RtpStatsNotAvailable(flow_id_str.clone()));
                     }
                 }
+            }
 
-                // Also fetch dynamic pads for the selected flow
-                if fetch_dynamic_pads {
-                    if let Ok(pads) = api.get_dynamic_pads(flow_id).await {
-                        let _ = tx.send(AppMessage::DynamicPadsLoaded {
-                            flow_id: flow_id_str,
-                            pads,
-                        });
-                    }
-                }
+            // Always fetch dynamic pads for the selected flow
+            if let Ok(pads) = api.get_dynamic_pads(flow_id).await {
+                let _ = tx.send(AppMessage::DynamicPadsLoaded {
+                    flow_id: flow_id_str,
+                    pads,
+                });
+            }
 
-                ctx.request_repaint();
-            });
-        }
+            ctx.request_repaint();
+        });
     }
 
     /// Save the current flow to the backend.
@@ -3471,10 +3504,10 @@ impl StromApp {
                         }
                     }
 
-                    // Get stats for this flow if available
-                    let stats = flow_id
+                    // Get RTP stats for this flow if available
+                    let rtp_stats = flow_id
                         .map(|fid| fid.to_string())
-                        .and_then(|fid| self.stats_cache.get(&fid));
+                        .and_then(|fid| self.rtp_stats_cache.get(&fid));
 
                     // Then get mutable reference to block
                     if let (Some(block), Some(def)) =
@@ -3488,7 +3521,7 @@ impl StromApp {
                             flow_id,
                             &self.meter_data,
                             &self.webrtc_stats,
-                            stats,
+                            rtp_stats,
                             &self.network_interfaces,
                             &self.available_channels,
                         );
@@ -6106,17 +6139,17 @@ impl eframe::App for StromApp {
                 AppMessage::WebRtcStatsError(error) => {
                     tracing::trace!("WebRTC stats error: {}", error);
                 }
-                AppMessage::StatsLoaded { flow_id, stats } => {
+                AppMessage::RtpStatsLoaded { flow_id, rtp_stats } => {
                     tracing::debug!(
-                        "Stats loaded for flow {}: {} blocks",
+                        "RTP stats loaded for flow {}: {} blocks",
                         flow_id,
-                        stats.blocks.len()
+                        rtp_stats.blocks.len()
                     );
-                    self.stats_cache.insert(flow_id, stats);
+                    self.rtp_stats_cache.insert(flow_id, rtp_stats);
                 }
-                AppMessage::StatsNotAvailable(flow_id) => {
-                    tracing::debug!("Stats not available for flow {}", flow_id);
-                    self.stats_cache.remove(&flow_id);
+                AppMessage::RtpStatsNotAvailable(flow_id) => {
+                    tracing::debug!("RTP stats not available for flow {}", flow_id);
+                    self.rtp_stats_cache.remove(&flow_id);
                 }
                 AppMessage::DynamicPadsLoaded { flow_id, pads } => {
                     tracing::debug!(
@@ -6290,16 +6323,16 @@ impl eframe::App for StromApp {
             }
         }
 
-        // Periodically fetch latency for running flows (every 2 seconds)
-        if self.last_latency_fetch.elapsed() > std::time::Duration::from_secs(2) {
+        // Periodically fetch latency for selected flow (every second)
+        if self.last_latency_fetch.elapsed() > std::time::Duration::from_secs(1) {
             self.last_latency_fetch = instant::Instant::now();
             self.fetch_latency_for_running_flows(ctx);
         }
 
-        // Periodically fetch stats for running flows (every 2 seconds)
-        if self.last_stats_fetch.elapsed() > std::time::Duration::from_secs(2) {
-            self.last_stats_fetch = instant::Instant::now();
-            self.fetch_stats_for_running_flows(ctx);
+        // Periodically fetch RTP stats for selected flow (every second)
+        if self.last_rtp_stats_fetch.elapsed() > std::time::Duration::from_secs(1) {
+            self.last_rtp_stats_fetch = instant::Instant::now();
+            self.fetch_rtp_stats_for_selected_flow(ctx);
         }
 
         // Handle keyboard shortcuts

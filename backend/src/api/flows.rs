@@ -1188,47 +1188,47 @@ pub async fn get_flow_latency(
 
 /// Get runtime statistics for a flow's pipeline.
 ///
-/// Returns statistics from running pipeline elements, such as RTP jitterbuffer
+/// Returns RTP statistics from running pipeline elements, such as jitterbuffer
 /// statistics for AES67 input blocks. The flow must be started and running
 /// for statistics to be available.
 #[utoipa::path(
     get,
-    path = "/api/flows/{id}/stats",
+    path = "/api/flows/{id}/rtp-stats",
     tag = "flows",
     params(
         ("id" = String, Path, description = "Flow ID (UUID)")
     ),
     responses(
-        (status = 200, description = "Statistics retrieved successfully", body = FlowStatsResponse),
-        (status = 404, description = "Flow not running or no statistics available", body = ErrorResponse)
+        (status = 200, description = "RTP statistics retrieved successfully", body = FlowStatsResponse),
+        (status = 404, description = "Flow not running or no RTP statistics available", body = ErrorResponse)
     )
 )]
-pub async fn get_flow_stats(
+pub async fn get_flow_rtp_stats(
     State(state): State<AppState>,
     Path(id): Path<FlowId>,
 ) -> Result<Json<FlowStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
-    trace!("Getting statistics for flow {}", id);
+    trace!("Getting RTP statistics for flow {}", id);
 
-    let stats = state.get_flow_stats(&id).await.ok_or_else(|| {
+    let rtp_stats = state.get_flow_rtp_stats(&id).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new(
-                "Flow not running or no statistics available",
+                "Flow not running or no RTP statistics available",
             )),
         )
     })?;
 
     trace!(
-        "Flow {} stats: {} blocks with statistics",
+        "Flow {} RTP stats: {} blocks with statistics",
         id,
-        stats.block_stats.len()
+        rtp_stats.block_stats.len()
     );
 
     Ok(Json(FlowStatsResponse {
-        flow_id: stats.flow_id,
-        flow_name: stats.flow_name,
-        blocks: stats.block_stats,
-        collected_at: stats.collected_at,
+        flow_id: rtp_stats.flow_id,
+        flow_name: rtp_stats.flow_name,
+        blocks: rtp_stats.block_stats,
+        collected_at: rtp_stats.collected_at,
     }))
 }
 

@@ -1353,9 +1353,12 @@ impl AppState {
         pipelines.get(flow_id).and_then(|p| p.query_latency())
     }
 
-    /// Get statistics for a running flow.
-    /// Returns statistics from all blocks that support statistics collection.
-    pub async fn get_flow_stats(&self, flow_id: &FlowId) -> Option<strom_types::stats::FlowStats> {
+    /// Get RTP statistics for a running flow.
+    /// Returns jitterbuffer statistics from RTP-based blocks like AES67 Input.
+    pub async fn get_flow_rtp_stats(
+        &self,
+        flow_id: &FlowId,
+    ) -> Option<strom_types::stats::FlowStats> {
         use crate::stats::StatsCollector;
 
         let pipelines = self.inner.pipelines.read().await;
