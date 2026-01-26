@@ -72,7 +72,7 @@ impl JsonFileStorage {
         let flows: HashMap<FlowId, Flow> = storage
             .flows
             .into_iter()
-            .map(|flow| migrate_flow(flow))
+            .map(migrate_flow)
             .map(|flow| (flow.id, flow))
             .collect();
 
