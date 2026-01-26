@@ -766,7 +766,11 @@ fn build_whepserversink(
     //
     // Solution: Connect to consumer-added signal (fires BEFORE SDP offer is processed).
     // Modify all video transceivers' codec-preferences to remove profile constraints.
-    whepserversink.connect("consumer-added", false, |values| {
+    //
+    // Also register the webrtcbin for stats collection (since it's in a separate session pipeline).
+    let dynamic_webrtcbin_store = ctx.dynamic_webrtcbin_store();
+    let block_id_for_callback = instance_id.to_string();
+    whepserversink.connect("consumer-added", false, move |values| {
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let webrtcbin = values[2].get::<gst::Element>().unwrap();
 
@@ -774,6 +778,18 @@ fn build_whepserversink(
             "WHEP Output: consumer-added for {}, modifying transceiver codec-preferences",
             consumer_id
         );
+
+        // Register webrtcbin for stats collection
+        if let Ok(mut store) = dynamic_webrtcbin_store.lock() {
+            store
+                .entry(block_id_for_callback.clone())
+                .or_default()
+                .push((consumer_id.clone(), webrtcbin.clone()));
+            debug!(
+                "WHEP Output: Registered webrtcbin for block {} consumer {}",
+                block_id_for_callback, consumer_id
+            );
+        }
 
         // Access transceivers through webrtcbin's sink pads
         // Each sink pad has a "transceiver" property pointing to the associated transceiver
@@ -928,6 +944,26 @@ fn build_whepserversink(
         }
         // Return false to let default handler run as well
         Some(false.to_value())
+    });
+
+    // Handle consumer-removed to clean up webrtcbin from stats storage
+    let dynamic_webrtcbin_store_remove = ctx.dynamic_webrtcbin_store();
+    let block_id_for_remove = instance_id.to_string();
+    whepserversink.connect("consumer-removed", false, move |values| {
+        let consumer_id = values[1].get::<String>().unwrap_or_default();
+
+        // Remove webrtcbin from stats storage
+        if let Ok(mut store) = dynamic_webrtcbin_store_remove.lock() {
+            if let Some(consumers) = store.get_mut(&block_id_for_remove) {
+                consumers.retain(|(cid, _)| cid != &consumer_id);
+                debug!(
+                    "WHEP Output: Unregistered webrtcbin for block {} consumer {}",
+                    block_id_for_remove, consumer_id
+                );
+            }
+        }
+
+        None
     });
 
     // NOTE: Pre-encoded H.264 has a known limitation with webrtcsink:

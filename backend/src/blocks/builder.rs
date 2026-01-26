@@ -4,8 +4,13 @@ use crate::events::EventBroadcaster;
 use gstreamer as gst;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use strom_types::{block::ExternalPads, element::ElementPadRef, FlowId, PropertyValue};
 use thiserror::Error;
+
+/// Storage for dynamically created webrtcbin elements (e.g., from webrtcsink/whepserversink).
+/// Maps block_id to a list of (consumer_id, webrtcbin) pairs.
+pub type DynamicWebrtcbinStore = Arc<Mutex<HashMap<String, Vec<(String, gst::Element)>>>>;
 
 #[derive(Error, Debug)]
 pub enum BlockBuildError {
@@ -103,6 +108,9 @@ pub struct BlockBuildContext {
     whep_endpoints: RefCell<Vec<WhepEndpointInfo>>,
     /// ICE servers for WebRTC NAT traversal (STUN/TURN URLs)
     ice_servers: Vec<String>,
+    /// Storage for dynamically created webrtcbin elements (shared with PipelineManager).
+    /// Used by blocks like WHEP Output that create webrtcbins dynamically via consumer-added.
+    dynamic_webrtcbins: DynamicWebrtcbinStore,
 }
 
 impl BlockBuildContext {
@@ -111,7 +119,40 @@ impl BlockBuildContext {
         Self {
             whep_endpoints: RefCell::new(Vec::new()),
             ice_servers,
+            dynamic_webrtcbins: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Create a new build context with shared dynamic webrtcbin storage.
+    pub fn new_with_webrtcbin_store(
+        ice_servers: Vec<String>,
+        dynamic_webrtcbins: DynamicWebrtcbinStore,
+    ) -> Self {
+        Self {
+            whep_endpoints: RefCell::new(Vec::new()),
+            ice_servers,
+            dynamic_webrtcbins,
+        }
+    }
+
+    /// Get the shared dynamic webrtcbin store.
+    /// Use this to pass to callbacks that create webrtcbins dynamically.
+    pub fn dynamic_webrtcbin_store(&self) -> DynamicWebrtcbinStore {
+        Arc::clone(&self.dynamic_webrtcbins)
+    }
+
+    /// Register a dynamically created webrtcbin (called from consumer-added callbacks).
+    pub fn register_dynamic_webrtcbin(
+        &self,
+        block_id: &str,
+        consumer_id: &str,
+        webrtcbin: gst::Element,
+    ) {
+        let mut store = self.dynamic_webrtcbins.lock().unwrap();
+        store
+            .entry(block_id.to_string())
+            .or_default()
+            .push((consumer_id.to_string(), webrtcbin));
     }
 
     /// Get the configured ICE servers.

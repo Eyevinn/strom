@@ -87,43 +87,73 @@ fn format_bitrate(bitrate: u64) -> String {
     }
 }
 
-/// Render a compact WebRTC stats widget (for graph nodes).
+/// Render a minimal WebRTC stats widget (for graph nodes).
+/// Shows just session count and key metrics in a single line.
 pub fn show_compact(ui: &mut Ui, stats: &WebRtcStats) {
     if stats.connections.is_empty() {
-        ui.label("No WebRTC connections");
         return;
     }
 
-    for (name, conn) in &stats.connections {
-        ui.label(egui::RichText::new(name).small().strong());
+    let session_count = stats.connections.len();
 
-        // Show ICE state if available
-        if let Some(ref ice) = conn.ice_candidates {
-            if let Some(ref state) = ice.state {
-                let (icon, color) = match state.as_str() {
-                    "connected" | "completed" => ("*", Color32::from_rgb(0, 200, 0)),
-                    "checking" => ("~", Color32::from_rgb(255, 165, 0)),
-                    "failed" | "disconnected" => ("!", Color32::from_rgb(255, 0, 0)),
-                    _ => ("?", Color32::GRAY),
-                };
-                ui.horizontal(|ui| {
-                    ui.colored_label(color, icon);
-                    ui.small(state.as_str());
-                });
+    // Count connected sessions
+    let connected_count = stats
+        .connections
+        .values()
+        .filter(|c| {
+            c.ice_candidates
+                .as_ref()
+                .and_then(|ice| ice.state.as_ref())
+                .map(|s| s == "connected" || s == "completed")
+                .unwrap_or(false)
+        })
+        .count();
+
+    // Calculate average jitter across all inbound streams (in ms)
+    let jitters: Vec<f64> = stats
+        .connections
+        .values()
+        .flat_map(|c| c.inbound_rtp.iter())
+        .filter_map(|rtp| rtp.jitter)
+        .map(|j| j * 1000.0) // Convert to ms
+        .collect();
+    let avg_jitter_ms = if !jitters.is_empty() {
+        jitters.iter().sum::<f64>() / jitters.len() as f64
+    } else {
+        0.0
+    };
+
+    // Build compact status line (centered)
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        ui.horizontal(|ui| {
+            // Session count with color indicator
+            let color = if connected_count == session_count && session_count > 0 {
+                Color32::from_rgb(0, 180, 0)
+            } else if connected_count > 0 {
+                Color32::from_rgb(255, 165, 0)
+            } else {
+                Color32::GRAY
+            };
+
+            ui.colored_label(
+                color,
+                format!(
+                    "{} {}",
+                    session_count,
+                    if session_count == 1 {
+                        "session"
+                    } else {
+                        "sessions"
+                    }
+                ),
+            );
+
+            // Show jitter if significant
+            if avg_jitter_ms > 0.1 {
+                ui.label(format!("jitter: {:.0}ms", avg_jitter_ms));
             }
-        }
-
-        // Show total bitrate
-        let total_inbound: u64 = conn.inbound_rtp.iter().filter_map(|s| s.bitrate).sum();
-        let total_outbound: u64 = conn.outbound_rtp.iter().filter_map(|s| s.bitrate).sum();
-
-        if total_inbound > 0 {
-            ui.small(format!("In: {}", format_bitrate(total_inbound)));
-        }
-        if total_outbound > 0 {
-            ui.small(format!("Out: {}", format_bitrate(total_outbound)));
-        }
-    }
+        });
+    });
 }
 
 /// Render RTP stream stats.
@@ -422,7 +452,11 @@ pub fn show_full(ui: &mut Ui, stats: &WebRtcStats) {
     ui.label(format!("{} connection(s)", stats.connections.len()));
     ui.add_space(5.0);
 
-    for (name, conn) in &stats.connections {
+    // Sort connections by name for stable display order
+    let mut sorted_connections: Vec<_> = stats.connections.iter().collect();
+    sorted_connections.sort_by_key(|(name, _)| *name);
+
+    for (name, conn) in sorted_connections {
         show_connection_stats(ui, name, conn);
         ui.add_space(10.0);
     }
