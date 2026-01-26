@@ -1,11 +1,13 @@
-//! Network stream discovery via SAP and mDNS.
+//! Network stream discovery via SAP, mDNS, and GStreamer DeviceMonitor.
 //!
 //! This module provides:
 //! - SAP listener to discover Dante/AES67 streams on the network
 //! - SAP announcer to advertise Strom's AES67 output streams
-//! - mDNS discovery for RAVENNA, NDI, and other network protocols
+//! - mDNS discovery for RAVENNA and other network protocols
+//! - NDI discovery via GStreamer DeviceMonitor
 //! - RTSP client for fetching SDP from RAVENNA sources
 
+pub mod device;
 pub mod mdns;
 pub mod rtsp_client;
 pub mod sap;
@@ -23,6 +25,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
+pub use device::{DeviceCategory, DeviceDiscovery, DeviceResponse, DiscoveredDevice};
 pub use types::{
     sap_address_for_stream, AnnouncedStream, AudioEncoding, DiscoveredStream,
     DiscoveredStreamResponse, DiscoverySource, SdpStreamInfo, DEFAULT_STREAM_TTL,
@@ -55,6 +58,8 @@ struct DiscoveryServiceInner {
     local_ip: RwLock<Option<IpAddr>>,
     /// mDNS discovery service.
     mdns_discovery: RwLock<Option<Arc<MdnsDiscovery>>>,
+    /// Device discovery service (for NDI, audio devices, etc.).
+    device_discovery: RwLock<Option<Arc<RwLock<DeviceDiscovery>>>>,
     /// Configured SAP multicast addresses to listen on.
     sap_multicast_addresses: Vec<String>,
 }
@@ -81,6 +86,7 @@ impl DiscoveryService {
                 send_sockets: RwLock::new(Vec::new()),
                 local_ip: RwLock::new(None),
                 mdns_discovery: RwLock::new(None),
+                device_discovery: RwLock::new(None),
                 sap_multicast_addresses: sap_addrs,
             }),
         }
@@ -186,12 +192,17 @@ impl DiscoveryService {
             warn!("Failed to start mDNS discovery: {}", e);
         }
 
+        // Start device discovery (NDI, audio devices, etc.)
+        if let Err(e) = self.start_device_discovery().await {
+            warn!("Failed to start device discovery: {}", e);
+        }
+
         // Start RTSP server for mDNS/RAVENNA announcements
         if let Err(e) = self.start_rtsp_server(shutdown_tx.clone()).await {
             warn!("Failed to start RTSP server: {}", e);
         }
 
-        info!("Discovery service started (SAP + mDNS + RTSP)");
+        info!("Discovery service started (SAP + mDNS + devices + RTSP)");
         Ok(())
     }
 
@@ -228,7 +239,16 @@ impl DiscoveryService {
             }
         }
 
-        info!("Discovery service stopped (SAP + mDNS)");
+        // Shutdown device discovery
+        {
+            let device_lock = self.inner.device_discovery.write().await;
+            if let Some(device) = device_lock.as_ref() {
+                let mut device_guard = device.write().await;
+                device_guard.stop().await;
+            }
+        }
+
+        info!("Discovery service stopped (SAP + mDNS + devices)");
     }
 
     /// Get all discovered streams.
@@ -1306,6 +1326,83 @@ impl DiscoveryService {
         });
 
         Ok(())
+    }
+
+    // --- Device discovery methods ---
+
+    /// Start device discovery using GStreamer DeviceMonitor.
+    async fn start_device_discovery(&self) -> anyhow::Result<()> {
+        info!("Starting device discovery");
+
+        let mut device = DeviceDiscovery::new();
+        device.start().await?;
+
+        // Store for later use
+        {
+            let mut device_lock = self.inner.device_discovery.write().await;
+            *device_lock = Some(Arc::new(RwLock::new(device)));
+        }
+
+        info!("Device discovery started");
+        Ok(())
+    }
+
+    /// Get all discovered devices.
+    pub async fn get_devices(&self) -> Vec<DiscoveredDevice> {
+        let device_lock = self.inner.device_discovery.read().await;
+        if let Some(device) = device_lock.as_ref() {
+            let device_guard = device.read().await;
+            device_guard.get_devices().await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get devices by category.
+    pub async fn get_devices_by_category(&self, category: DeviceCategory) -> Vec<DiscoveredDevice> {
+        let device_lock = self.inner.device_discovery.read().await;
+        if let Some(device) = device_lock.as_ref() {
+            let device_guard = device.read().await;
+            device_guard.get_devices_by_category(category).await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get a specific device by ID.
+    pub async fn get_device(&self, id: &str) -> Option<DiscoveredDevice> {
+        let device_lock = self.inner.device_discovery.read().await;
+        if let Some(device) = device_lock.as_ref() {
+            let device_guard = device.read().await;
+            device_guard.get_device(id).await
+        } else {
+            None
+        }
+    }
+
+    /// Get all discovered NDI sources (convenience method).
+    pub async fn get_ndi_sources(&self) -> Vec<DiscoveredDevice> {
+        let device_lock = self.inner.device_discovery.read().await;
+        if let Some(device) = device_lock.as_ref() {
+            let device_guard = device.read().await;
+            device_guard.get_ndi_devices().await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Check if NDI discovery is available.
+    pub async fn is_ndi_available(&self) -> bool {
+        DeviceDiscovery::is_ndi_available()
+    }
+
+    /// Refresh discovered devices.
+    pub async fn refresh_devices(&self) {
+        let device_lock = self.inner.device_discovery.read().await;
+        if let Some(device) = device_lock.as_ref() {
+            let device_guard = device.read().await;
+            device_guard.refresh().await;
+        }
     }
 }
 

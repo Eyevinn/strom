@@ -1,4 +1,4 @@
-//! Discovery page for browsing SAP/mDNS/AES67 streams.
+//! Discovery page for browsing SAP/mDNS/AES67 streams and NDI sources.
 
 use egui::{Color32, Context, Ui};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,47 @@ pub struct AnnouncedStream {
     pub announce_interface: Option<String>,
 }
 
+/// Response from the device discovery API for a discovered device.
+/// Used for NDI sources and other devices (audio, video, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredDevice {
+    pub id: String,
+    /// Display name of the device.
+    pub name: String,
+    /// Device class (e.g., "Audio/Source", "Video/Source", "Source/Network").
+    pub device_class: String,
+    /// Device category.
+    pub category: String,
+    /// Provider that discovered this device (e.g., "pulsedeviceprovider", "ndideviceprovider").
+    pub provider: String,
+    /// Additional properties from the device.
+    #[serde(default)]
+    pub properties: std::collections::HashMap<String, String>,
+    pub first_seen_secs_ago: u64,
+    pub last_seen_secs_ago: u64,
+}
+
+impl DiscoveredDevice {
+    /// Get IP address from properties (for NDI devices).
+    pub fn ip_address(&self) -> Option<&str> {
+        self.properties.get("ip").map(|s| s.as_str())
+    }
+
+    /// Get URL address from properties (for NDI devices).
+    pub fn url_address(&self) -> Option<&str> {
+        self.properties.get("url-address").map(|s| s.as_str())
+    }
+
+    /// Check if this is an NDI device.
+    pub fn is_ndi(&self) -> bool {
+        // Check provider name or NDI-specific property
+        self.provider.contains("ndi") || self.properties.contains_key("ndi-name")
+    }
+}
+
+/// Alias for backward compatibility.
+pub type NdiSource = DiscoveredDevice;
+
 /// Type of selected stream
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectedStream {
@@ -44,6 +85,8 @@ pub enum SelectedStream {
     Discovered(String),
     /// An announced stream (flow_id, block_id)
     Announced(String, String),
+    /// An NDI source
+    Ndi(String),
 }
 
 /// Tab selection for stream list
@@ -52,6 +95,7 @@ pub enum StreamTab {
     #[default]
     Discovered,
     Announced,
+    Ndi,
 }
 
 /// Discovery page state.
@@ -60,6 +104,10 @@ pub struct DiscoveryPage {
     pub discovered_streams: Vec<DiscoveredStream>,
     /// Streams we're announcing
     pub announced_streams: Vec<AnnouncedStream>,
+    /// Discovered NDI sources
+    pub ndi_sources: Vec<NdiSource>,
+    /// Whether NDI discovery is available
+    pub ndi_available: bool,
     /// Last fetch time
     pub last_fetch: instant::Instant,
     /// Whether we're currently loading
@@ -68,6 +116,8 @@ pub struct DiscoveryPage {
     pub pending_create_flow: Option<(String, Option<String>)>,
     /// Pending flow ID to navigate to (set when "Go to Flow" is clicked)
     pub pending_go_to_flow: Option<String>,
+    /// Pending NDI source name to use (for NDI Input block)
+    pub pending_ndi_source: Option<String>,
     /// Error message if any
     pub error: Option<String>,
     /// Search filter
@@ -89,10 +139,13 @@ impl DiscoveryPage {
         Self {
             discovered_streams: Vec::new(),
             announced_streams: Vec::new(),
+            ndi_sources: Vec::new(),
+            ndi_available: false,
             last_fetch: instant::Instant::now(),
             loading: false,
             pending_create_flow: None,
             pending_go_to_flow: None,
+            pending_ndi_source: None,
             error: None,
             search_filter: String::new(),
             selected_stream: None,
@@ -225,6 +278,20 @@ impl DiscoveryPage {
                 self.selected_stream = None;
                 self.selected_stream_sdp = None;
             }
+            // NDI tab (only show if available)
+            if self.ndi_available {
+                let ndi_clicked = ui
+                    .selectable_label(
+                        self.selected_tab == StreamTab::Ndi,
+                        format!("NDI ({})", self.ndi_sources.len()),
+                    )
+                    .clicked();
+                if ndi_clicked {
+                    self.selected_tab = StreamTab::Ndi;
+                    self.selected_stream = None;
+                    self.selected_stream_sdp = None;
+                }
+            }
             // Only show "Show own" checkbox on Discovered tab
             if self.selected_tab == StreamTab::Discovered {
                 ui.separator();
@@ -243,6 +310,9 @@ impl DiscoveryPage {
                 if self.selected_tab == StreamTab::Announced =>
             {
                 Some(format!("{}:{}", fid, bid))
+            }
+            Some(SelectedStream::Ndi(id)) if self.selected_tab == StreamTab::Ndi => {
+                Some(id.clone())
             }
             _ => None,
         };
@@ -383,6 +453,51 @@ impl DiscoveryPage {
                                 self.selected_stream_sdp = Some(sdp.clone());
                             }
                         }
+                    }
+                }
+            }
+            StreamTab::Ndi => {
+                if self.ndi_sources.is_empty() {
+                    ui.label("No NDI sources discovered. Make sure NDI sources are active on the network.");
+                } else {
+                    // Build list items for NDI sources
+                    let items_data: Vec<_> = self
+                        .ndi_sources
+                        .iter()
+                        .filter(|source| {
+                            filter.is_empty()
+                                || source.name.to_lowercase().contains(&filter)
+                                || source
+                                    .ip_address()
+                                    .map(|ip| ip.contains(&filter))
+                                    .unwrap_or(false)
+                        })
+                        .map(|source| {
+                            // Use ip_address if available, fall back to url_address
+                            let secondary = source
+                                .ip_address()
+                                .or_else(|| source.url_address())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "Address unknown".to_string());
+                            (source.id.clone(), source.name.clone(), secondary)
+                        })
+                        .collect();
+
+                    let result = egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let items = items_data.iter().map(|(id, name, secondary)| {
+                                ListItem::new(id, name)
+                                    .with_tag("[NDI]", Color32::from_rgb(200, 100, 200))
+                                    .with_secondary(secondary.clone())
+                            });
+
+                            list_navigator(ui, "ndi_sources", items, selected_id.as_deref())
+                        });
+
+                    if let Some(new_id) = result.inner.selected {
+                        self.selected_stream = Some(SelectedStream::Ndi(new_id.clone()));
+                        self.selected_stream_sdp = None; // NDI doesn't have SDP
                     }
                 }
             }
@@ -540,6 +655,69 @@ impl DiscoveryPage {
                                 ui.end_row();
                             });
                     }
+                    SelectedStream::Ndi(source_id) => {
+                        let Some(source) = self.ndi_sources.iter().find(|s| &s.id == source_id)
+                        else {
+                            ui.label("NDI source not found");
+                            return;
+                        };
+
+                        // Clone for borrow issues
+                        let source = source.clone();
+
+                        egui::Grid::new("ndi_details_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Type:");
+                                ui.colored_label(Color32::from_rgb(200, 100, 200), "[NDI] Source");
+                                ui.end_row();
+
+                                ui.label("Name:");
+                                ui.label(&source.name);
+                                ui.end_row();
+
+                                if let Some(ip) = source.ip_address() {
+                                    ui.label("IP Address:");
+                                    ui.label(ip);
+                                    ui.end_row();
+                                }
+
+                                if let Some(url) = source.url_address() {
+                                    ui.label("URL:");
+                                    ui.label(url);
+                                    ui.end_row();
+                                }
+
+                                ui.label("Provider:");
+                                ui.label(&source.provider);
+                                ui.end_row();
+
+                                ui.label("First seen:");
+                                ui.label(format!("{}s ago", source.first_seen_secs_ago));
+                                ui.end_row();
+
+                                ui.label("Last seen:");
+                                ui.label(format!("{}s ago", source.last_seen_secs_ago));
+                                ui.end_row();
+                            });
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("📋 Copy NDI Name")
+                                .on_hover_text(
+                                    "Copy NDI name to clipboard. Paste into NDI Input block's ndi-name property.",
+                                )
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(source.name.clone());
+                            }
+                        });
+
+                        // No SDP for NDI, so we skip the SDP section
+                        return;
+                    }
                 }
 
                 ui.separator();
@@ -611,6 +789,18 @@ impl DiscoveryPage {
                     tracing::error!("Failed to fetch announced streams: {}", e);
                 }
             }
+
+            // Fetch NDI sources
+            match api.get_ndi_sources().await {
+                Ok((available, sources)) => {
+                    let _ =
+                        tx.send(crate::state::AppMessage::NdiSourcesLoaded { available, sources });
+                    ctx.request_repaint();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch NDI sources: {}", e);
+                }
+            }
         });
     }
 
@@ -624,6 +814,12 @@ impl DiscoveryPage {
     /// Update announced streams (called from message handler).
     pub fn set_announced_streams(&mut self, streams: Vec<AnnouncedStream>) {
         self.announced_streams = streams;
+    }
+
+    /// Update NDI sources (called from message handler).
+    pub fn set_ndi_sources(&mut self, available: bool, sources: Vec<NdiSource>) {
+        self.ndi_available = available;
+        self.ndi_sources = sources;
     }
 
     /// Set error message.
@@ -675,6 +871,16 @@ impl DiscoveryPage {
     /// Take pending go to flow ID if set.
     pub fn take_pending_go_to_flow(&mut self) -> Option<String> {
         self.pending_go_to_flow.take()
+    }
+
+    /// Take pending NDI source name if set.
+    pub fn take_pending_ndi_source(&mut self) -> Option<String> {
+        self.pending_ndi_source.take()
+    }
+
+    /// Get all NDI sources (for use in NDI Input block dropdown).
+    pub fn get_ndi_sources(&self) -> &[NdiSource] {
+        &self.ndi_sources
     }
 }
 

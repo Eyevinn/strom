@@ -1014,6 +1014,20 @@ impl GraphEditor {
                     set_local_storage("open_compositor_editor", &block.id);
                 }
 
+                // Handle double-click to open stream picker for AES67 Input blocks
+                if node_response.double_clicked()
+                    && block.block_definition_id == "builtin.aes67_input"
+                {
+                    set_local_storage("open_stream_picker", &block.id);
+                }
+
+                // Handle double-click to open NDI picker for NDI Input blocks
+                if node_response.double_clicked()
+                    && block.block_definition_id == "builtin.ndi_input"
+                {
+                    set_local_storage("open_ndi_picker", &block.id);
+                }
+
                 // Note: Playlist editor for media player is opened via the + button in the compact UI
 
                 // Handle node dragging

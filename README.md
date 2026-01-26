@@ -2,7 +2,7 @@
 
 # Strom - GStreamer Flow Engine
 
-**Strom** (Swedish for "stream") is a visual, web-based interface for creating and managing GStreamer media pipelines. Design complex media flows without writing code.
+**Strom** ("Ström" - Swedish for "stream") is a visual, web-based interface for creating and managing GStreamer media pipelines. Design complex media flows without writing code.
 
 ![Strom Screenshot](docs/images/strom-demo-flow.png)
 *Visual pipeline editor showing a simple test flow*
@@ -329,6 +329,18 @@ cargo test --workspace
 # Run development server
 cargo run
 ```
+
+### Windows Development Setup
+
+Setting up a development environment on Windows requires additional tools (Visual Studio Build Tools, GStreamer SDK, CMake, NASM, etc.). An automated setup script handles this:
+
+```powershell
+# Run as Administrator in PowerShell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser  # Allow scripts (one-time)
+.\scripts\setup-dev-windows.ps1
+```
+
+The script installs Rust, Visual Studio Build Tools, GStreamer, CMake, NASM, Graphviz, and the WASM toolchain via winget.
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for detailed setup, testing, and contribution guidelines.
 

@@ -5,14 +5,22 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ## [Unreleased]
 
 ### Added
+- Generic device discovery using GStreamer DeviceMonitor (audio, video, NDI, etc.) (#268)
+- Double-click on AES67/NDI Input blocks to open stream/source picker (#268)
+- Close button (X) on NDI picker and stream picker modals (#268)
+- Windows development setup documentation in README (#273)
 - HTML overlay support via `strom-full` Docker image with CEF/gstcefsrc (#254)
 - HTML rendering documentation with example flows (#257, #259)
 - gstcefsrc build workflow for CI (#253)
 
 ### Changed
+- Windows setup script uses GStreamer 1.26 from GitHub releases mirror (#269)
+- Windows setup script installs Graphviz for pipeline visualization (#269)
+- Faster PowerShell downloads by disabling progress bar (#269)
 - Improved AES67 SDP generation and QoS settings (#252)
 
 ### Fixed
+- Prevent AccessKit crash on Windows when selecting flows (#266)
 - CEF resource symlinks for strom-full Docker image (#256)
 - Build gstcefsrc for Ubuntu 25.10 and fix CEF runtime (#255)
 

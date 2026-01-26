@@ -98,20 +98,22 @@ impl ElementDiscovery {
     /// These elements can still be used, but we don't create temporary instances during discovery.
     fn get_discovery_skip_list() -> Vec<&'static str> {
         vec![
-            // GES (GStreamer Editing Services) elements that trigger GES initialization
-            // GES init can crash with NULL pointer in gst_element_class_get_pad_template()
-            "gesdemux", // GES demuxer - triggers GES init which crashes in strcmp
-            "gessrc",   // GES source - triggers GES init
-            // HLS elements - crash with NULL pointer in gst_element_class_get_pad_template()
-            "hlssink2", // Crashes in strcmp during element creation
-            "hlssink3", // HLS sink variants - same crash pattern
-            "hlssink",
-            "hlsdemux", // HLS demuxer - crashes in strcmp
-            "hlsdemux2",
-            // Video mixer elements - crash with NULL pointer when requesting pads
-            "glvideomixer", // Crashes in strcmp when request_pad_simple() is called during linking
-            // Aggregator elements - creating temporary instances during discovery corrupts state
-            "mpegtsmux", // Creating this during discovery causes lockups when adding to pipeline later
+            // Testing: All previously skipped elements have been removed.
+            //
+            // The original crashes were caused by:
+            // 1. Unsafe factory.static_pad_templates() access - now fixed by using
+            //    element-instance access instead of factory-level access.
+            // 2. Creating temporary element instances during discovery - now fixed by
+            //    lazy-loading properties only when explicitly requested.
+            //
+            // Previously skipped:
+            // - mpegtsmux: deadlock when instantiated during discovery (now safe - no
+            //   instances created during discover_all, only metadata is read)
+            // - GES elements (gesdemux, gessrc): GES init crash
+            // - HLS elements (hlssink*, hlsdemux*): NULL pointer in pad template access
+            // - glvideomixer: NULL pointer when requesting pads
+            //
+            // See docs/MPEGTSMUX_DEADLOCK_FIX.md and docs/PAD_TEMPLATE_CRASH_FIX.md
         ]
     }
 
@@ -119,18 +121,10 @@ impl ElementDiscovery {
     /// This list is shared with pipeline creation to prevent creating these elements.
     pub fn get_element_blacklist() -> Vec<&'static str> {
         vec![
-            // GES (GStreamer Editing Services) elements that trigger GES initialization
-            // GES init can crash with NULL pointer in gst_element_class_get_pad_template()
-            "gesdemux", // GES demuxer - triggers GES init which crashes in strcmp
-            "gessrc",   // GES source - triggers GES init
-            // HLS elements - crash with NULL pointer in gst_element_class_get_pad_template()
-            "hlssink2", // Crashes in strcmp during element creation
-            "hlssink3", // HLS sink variants - same crash pattern
-            "hlssink",
-            "hlsdemux", // HLS demuxer - crashes in strcmp
-            "hlsdemux2",
-            // Video mixer elements - crash with NULL pointer when requesting pads
-            "glvideomixer", // Crashes in strcmp when request_pad_simple() is called during linking
+            // Testing: All previously blacklisted elements have been removed to test if
+            // they work after the pad template access fixes. The original crashes were in
+            // gst_element_class_get_pad_template() due to unsafe factory-level access.
+            // Previously blacklisted: gesdemux, gessrc, hlssink*, hlsdemux*, glvideomixer
         ]
     }
 
