@@ -308,6 +308,39 @@ enum ThemePreference {
     System,
     Light,
     Dark,
+    // Catppuccin themes
+    CatppuccinMocha,
+    CatppuccinMacchiato,
+    CatppuccinFrappe,
+    CatppuccinLatte,
+}
+
+impl ThemePreference {
+    /// Returns all available theme preferences
+    fn all() -> &'static [ThemePreference] {
+        &[
+            ThemePreference::System,
+            ThemePreference::Light,
+            ThemePreference::Dark,
+            ThemePreference::CatppuccinMocha,
+            ThemePreference::CatppuccinMacchiato,
+            ThemePreference::CatppuccinFrappe,
+            ThemePreference::CatppuccinLatte,
+        ]
+    }
+
+    /// Returns a display name for the theme
+    fn display_name(&self) -> &'static str {
+        match self {
+            ThemePreference::System => "System",
+            ThemePreference::Light => "Light",
+            ThemePreference::Dark => "Dark",
+            ThemePreference::CatppuccinMocha => "Catppuccin Mocha",
+            ThemePreference::CatppuccinMacchiato => "Catppuccin Macchiato",
+            ThemePreference::CatppuccinFrappe => "Catppuccin Frappé",
+            ThemePreference::CatppuccinLatte => "Catppuccin Latte",
+        }
+    }
 }
 
 /// Import format for flow import
@@ -925,36 +958,46 @@ impl StromApp {
 
     /// Apply the current theme preference to the UI context.
     fn apply_theme(&self, ctx: egui::Context) {
-        let visuals = match self.theme_preference {
+        match self.theme_preference {
             ThemePreference::System => {
                 // Detect system theme preference
                 #[cfg(target_arch = "wasm32")]
-                {
+                let prefers_dark = {
                     // In WASM, check browser's preferred color scheme
                     if let Some(window) = web_sys::window() {
                         if let Ok(Some(mql)) = window.match_media("(prefers-color-scheme: dark)") {
-                            if mql.matches() {
-                                egui::Visuals::dark()
-                            } else {
-                                egui::Visuals::light()
-                            }
+                            mql.matches()
                         } else {
-                            egui::Visuals::dark() // Default to dark if detection fails
+                            true // Default to dark if detection fails
                         }
                     } else {
-                        egui::Visuals::dark() // Default to dark if no window
+                        true // Default to dark if no window
                     }
-                }
+                };
                 #[cfg(not(target_arch = "wasm32"))]
-                {
-                    // In native mode, default to dark theme (could be enhanced to detect OS theme)
-                    egui::Visuals::dark()
+                let prefers_dark = true; // In native mode, default to dark theme
+
+                if prefers_dark {
+                    catppuccin_egui::set_theme(&ctx, catppuccin_egui::MOCHA);
+                } else {
+                    catppuccin_egui::set_theme(&ctx, catppuccin_egui::LATTE);
                 }
             }
-            ThemePreference::Light => egui::Visuals::light(),
-            ThemePreference::Dark => egui::Visuals::dark(),
-        };
-        ctx.set_visuals(visuals);
+            ThemePreference::Light => ctx.set_visuals(egui::Visuals::light()),
+            ThemePreference::Dark => ctx.set_visuals(egui::Visuals::dark()),
+            ThemePreference::CatppuccinMocha => {
+                catppuccin_egui::set_theme(&ctx, catppuccin_egui::MOCHA);
+            }
+            ThemePreference::CatppuccinMacchiato => {
+                catppuccin_egui::set_theme(&ctx, catppuccin_egui::MACCHIATO);
+            }
+            ThemePreference::CatppuccinFrappe => {
+                catppuccin_egui::set_theme(&ctx, catppuccin_egui::FRAPPE);
+            }
+            ThemePreference::CatppuccinLatte => {
+                catppuccin_egui::set_theme(&ctx, catppuccin_egui::LATTE);
+            }
+        }
     }
 
     /// Set up WebSocket connection for real-time updates.
@@ -2463,26 +2506,42 @@ impl StromApp {
 
                     ui.separator();
 
-                    // Theme switch button
+                    // Theme picker dropdown
                     let theme_icon = match self.theme_preference {
                         ThemePreference::System => "🖥",
                         ThemePreference::Light => "☀",
                         ThemePreference::Dark => "🌙",
+                        ThemePreference::CatppuccinMocha
+                        | ThemePreference::CatppuccinMacchiato
+                        | ThemePreference::CatppuccinFrappe
+                        | ThemePreference::CatppuccinLatte => "🐱",
                     };
 
-                    if ui
-                        .button(theme_icon)
-                        .on_hover_text("Change theme")
-                        .clicked()
-                    {
-                        let new_theme = match self.theme_preference {
-                            ThemePreference::System => ThemePreference::Light,
-                            ThemePreference::Light => ThemePreference::Dark,
-                            ThemePreference::Dark => ThemePreference::System,
-                        };
-                        self.theme_preference = new_theme;
-                        self.apply_theme(ctx.clone());
-                    }
+                    let selected_text =
+                        format!("{} {}", theme_icon, self.theme_preference.display_name());
+                    egui::ComboBox::from_id_salt("theme_picker")
+                        .selected_text(selected_text)
+                        .show_ui(ui, |ui| {
+                            for theme in ThemePreference::all() {
+                                let icon = match theme {
+                                    ThemePreference::System => "🖥",
+                                    ThemePreference::Light => "☀",
+                                    ThemePreference::Dark => "🌙",
+                                    ThemePreference::CatppuccinMocha
+                                    | ThemePreference::CatppuccinMacchiato
+                                    | ThemePreference::CatppuccinFrappe
+                                    | ThemePreference::CatppuccinLatte => "🐱",
+                                };
+                                let label = format!("{} {}", icon, theme.display_name());
+                                if ui
+                                    .selectable_label(self.theme_preference == *theme, label)
+                                    .clicked()
+                                {
+                                    self.theme_preference = *theme;
+                                    self.apply_theme(ctx.clone());
+                                }
+                            }
+                        });
 
                     // Logout button (only show if auth is enabled and user is authenticated)
                     if let Some(ref status) = self.auth_status {

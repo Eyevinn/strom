@@ -16,6 +16,7 @@ strom-types = { path = "../types" }
 egui.workspace = true
 eframe.workspace = true
 egui_extras.workspace = true
+catppuccin-egui = { version = "5.7", default-features = false, features = ["egui33"] }
 
 # HTTP client - works on both WASM and native
 reqwest = { workspace = true, features = ["json", "multipart"] }
