@@ -15,8 +15,8 @@
 
 ARG TARGETARCH
 
-# Latest stable CEF version (as of 2025-01)
-ARG CEF_VERSION=138.0.56+gd28ed8a+chromium-138.0.7204.301
+# Latest stable CEF version (as of 2026-01)
+ARG CEF_VERSION=144.0.11+ge135be2+chromium-144.0.7559.97
 
 FROM ubuntu:questing AS builder
 
