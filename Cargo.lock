@@ -5988,6 +5988,7 @@ dependencies = [
  "mime_guess",
  "network-interface",
  "nvml-wrapper",
+ "parking_lot",
  "reqwest 0.13.1",
  "rust-embed",
  "serde",
