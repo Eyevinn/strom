@@ -1394,6 +1394,26 @@ impl AppState {
     pub async fn get_ptp_stats_events(&self) -> Vec<StromEvent> {
         self.inner.ptp_monitor.get_stats_events()
     }
+
+    /// Capture a thumbnail from a compositor input.
+    ///
+    /// Returns JPEG-encoded image bytes for the specified compositor input.
+    pub async fn capture_compositor_thumbnail(
+        &self,
+        flow_id: &FlowId,
+        block_id: &str,
+        input_idx: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+
+        manager.capture_compositor_input_thumbnail(block_id, input_idx, width, height)
+    }
 }
 
 impl Default for AppState {

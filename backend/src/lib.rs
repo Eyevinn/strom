@@ -138,6 +138,10 @@ pub async fn create_app_with_state_and_auth(
             "/flows/{flow_id}/blocks/{block_id}/animate",
             post(api::flows::animate_input),
         )
+        .route(
+            "/flows/{id}/compositor/{block_id}/thumbnail/{input_idx}",
+            get(api::flows::get_compositor_thumbnail),
+        )
         .route("/elements", get(api::elements::list_elements))
         .route("/elements/{name}", get(api::elements::get_element_info))
         .route(

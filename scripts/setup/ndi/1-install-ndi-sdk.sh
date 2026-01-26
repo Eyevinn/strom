@@ -124,11 +124,19 @@ if [ -f "$INSTALLER_SCRIPT" ]; then
     # Install libraries
     log_info "Installing libraries to $INSTALL_PREFIX/lib/$LIB_DIR/..."
     if [ -d "$SDK_DIR/lib/$LIB_DIR" ]; then
+        # Find the actual library file (version may vary)
+        NDI_LIB=$(find "$SDK_DIR/lib/$LIB_DIR" -name "libndi.so.6.*" -type f | head -1)
+        if [ -z "$NDI_LIB" ]; then
+            log_error "Could not find libndi.so.6.* in $SDK_DIR/lib/$LIB_DIR"
+        fi
+        NDI_LIB_NAME=$(basename "$NDI_LIB")
+        log_info "Found library: $NDI_LIB_NAME"
+
         # Copy the actual library file
-        sudo cp -v "$SDK_DIR/lib/$LIB_DIR/libndi.so.6.2.1" "$INSTALL_PREFIX/lib/$LIB_DIR/"
+        sudo cp -v "$NDI_LIB" "$INSTALL_PREFIX/lib/$LIB_DIR/"
 
         # Create symlinks
-        sudo ln -sf libndi.so.6.2.1 "$INSTALL_PREFIX/lib/$LIB_DIR/libndi.so.6"
+        sudo ln -sf "$NDI_LIB_NAME" "$INSTALL_PREFIX/lib/$LIB_DIR/libndi.so.6"
         sudo ln -sf libndi.so.6 "$INSTALL_PREFIX/lib/$LIB_DIR/libndi.so"
 
         log_success "Libraries installed"

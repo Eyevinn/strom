@@ -141,6 +141,9 @@ pub enum PipelineError {
 
     #[error("Transition error: {0}")]
     TransitionError(String),
+
+    #[error("Thumbnail capture error: {0}")]
+    ThumbnailCapture(String),
 }
 
 /// Manages a single GStreamer pipeline for a flow.
@@ -3616,6 +3619,40 @@ impl PipelineManager {
             }
         }
         None
+    }
+
+    /// Capture a thumbnail from a compositor input.
+    ///
+    /// Captures a single frame from the queue element feeding the specified
+    /// compositor input, scales it to the specified dimensions, and encodes
+    /// it as JPEG.
+    ///
+    /// # Arguments
+    /// * `block_id` - The compositor block instance ID (e.g., "b0")
+    /// * `input_idx` - The input index (0-based)
+    /// * `width` - Target thumbnail width
+    /// * `height` - Target thumbnail height
+    ///
+    /// # Returns
+    /// JPEG-encoded image bytes on success
+    pub fn capture_compositor_input_thumbnail(
+        &self,
+        block_id: &str,
+        input_idx: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, PipelineError> {
+        // The queue element is named "{block_id}:queue_{input_idx}"
+        let element_name = format!("{}:queue_{}", block_id, input_idx);
+
+        let config = crate::gst::ThumbnailConfig {
+            width,
+            height,
+            quality: crate::gst::thumbnail::DEFAULT_JPEG_QUALITY,
+        };
+
+        crate::gst::capture_frame_as_jpeg(&self.pipeline, &element_name, "src", &config)
+            .map_err(|e| PipelineError::ThumbnailCapture(e.to_string()))
     }
 }
 

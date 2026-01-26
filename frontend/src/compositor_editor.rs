@@ -236,6 +236,18 @@ pub struct CompositorEditor {
     transition_duration_ms: u64,
     /// Last transition status message
     transition_status: Option<String>,
+
+    // Thumbnail state
+    /// Cached thumbnail textures by input index
+    thumbnails: std::collections::HashMap<usize, egui::TextureHandle>,
+    /// Last thumbnail fetch time by input index
+    thumbnail_fetch_times: std::collections::HashMap<usize, instant::Instant>,
+    /// Inputs currently being fetched (to avoid duplicate requests)
+    thumbnail_loading: std::collections::HashSet<usize>,
+    /// Thumbnail refresh interval in milliseconds
+    thumbnail_refresh_ms: u64,
+    /// Whether thumbnails are enabled
+    thumbnails_enabled: bool,
 }
 
 impl CompositorEditor {
@@ -285,6 +297,12 @@ impl CompositorEditor {
             transition_type: "dip_to_black".to_string(),
             transition_duration_ms: 300,
             transition_status: None,
+            // Thumbnail state
+            thumbnails: std::collections::HashMap::new(),
+            thumbnail_fetch_times: std::collections::HashMap::new(),
+            thumbnail_loading: std::collections::HashSet::new(),
+            thumbnail_refresh_ms: 1000, // 1 second default
+            thumbnails_enabled: true,
         }
     }
 
@@ -359,6 +377,156 @@ impl CompositorEditor {
 
                     self.status = "Properties loaded".to_string();
                 }
+            }
+        }
+    }
+
+    /// Refresh thumbnails for all inputs.
+    /// Called periodically to update the thumbnail images.
+    fn refresh_thumbnails(&mut self, ctx: &Context) {
+        if !self.thumbnails_enabled {
+            return;
+        }
+
+        let now = instant::Instant::now();
+        let refresh_interval = std::time::Duration::from_millis(self.thumbnail_refresh_ms);
+
+        for input in &self.inputs {
+            let idx = input.input_index;
+
+            // Skip if already loading
+            if self.thumbnail_loading.contains(&idx) {
+                continue;
+            }
+
+            // Skip if recently fetched
+            if let Some(last_fetch) = self.thumbnail_fetch_times.get(&idx) {
+                if now.duration_since(*last_fetch) < refresh_interval {
+                    continue;
+                }
+            }
+
+            // Mark as loading and update fetch time
+            self.thumbnail_loading.insert(idx);
+            self.thumbnail_fetch_times.insert(idx, now);
+
+            // Spawn async fetch
+            let flow_id = self.flow_id;
+            let block_id = self.block_id.clone();
+            let api = self.api.clone();
+            let ctx = ctx.clone();
+
+            tracing::debug!(
+                "🖼️ Fetching thumbnail for flow={} block={} input={}",
+                flow_id,
+                block_id,
+                idx
+            );
+
+            crate::app::spawn_task(async move {
+                match api
+                    .get_compositor_thumbnail(&flow_id.to_string(), &block_id, idx)
+                    .await
+                {
+                    Ok(jpeg_bytes) => {
+                        tracing::debug!(
+                            "🖼️ Got thumbnail {} bytes for input {}",
+                            jpeg_bytes.len(),
+                            idx
+                        );
+                        // Store bytes in local storage for the UI thread to pick up
+                        let key = format!("compositor_thumb_{}_{}", flow_id, idx);
+                        // Use base64 to store binary data
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+                        crate::app::set_local_storage(&key, &b64);
+                        ctx.request_repaint();
+                    }
+                    Err(e) => {
+                        tracing::warn!("🖼️ Failed to fetch thumbnail for input {}: {}", idx, e);
+                        // Store error marker so the loading flag gets cleared
+                        let key = format!("compositor_thumb_err_{}_{}", flow_id, idx);
+                        crate::app::set_local_storage(&key, "error");
+                        ctx.request_repaint();
+                    }
+                }
+            });
+        }
+    }
+
+    /// Check for loaded thumbnails and update textures.
+    fn check_loaded_thumbnails(&mut self, ctx: &Context) {
+        let num_inputs = self.inputs.len();
+        for idx in 0..num_inputs {
+            // Check for error marker first
+            let err_key = format!("compositor_thumb_err_{}_{}", self.flow_id, idx);
+            if crate::app::get_local_storage(&err_key).is_some() {
+                crate::app::remove_local_storage(&err_key);
+                self.thumbnail_loading.remove(&idx);
+                continue;
+            }
+
+            let key = format!("compositor_thumb_{}_{}", self.flow_id, idx);
+            if let Some(b64) = crate::app::get_local_storage(&key) {
+                tracing::debug!(
+                    "🖼️ Found thumbnail in storage for input {}, {} bytes b64",
+                    idx,
+                    b64.len()
+                );
+                // Clear the loading flag
+                self.thumbnail_loading.remove(&idx);
+
+                // Decode base64
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                    Ok(jpeg_bytes) => {
+                        tracing::debug!(
+                            "🖼️ Decoded {} JPEG bytes for input {}, header: {:02X} {:02X} {:02X}",
+                            jpeg_bytes.len(),
+                            idx,
+                            jpeg_bytes.first().copied().unwrap_or(0),
+                            jpeg_bytes.get(1).copied().unwrap_or(0),
+                            jpeg_bytes.get(2).copied().unwrap_or(0)
+                        );
+                        // Decode JPEG to image - use explicit format to avoid guess issues
+                        match image::load_from_memory_with_format(
+                            &jpeg_bytes,
+                            image::ImageFormat::Jpeg,
+                        ) {
+                            Ok(img) => {
+                                let rgba = img.to_rgba8();
+                                let size = [rgba.width() as usize, rgba.height() as usize];
+                                tracing::debug!(
+                                    "🖼️ Loaded image {}x{} for input {}",
+                                    size[0],
+                                    size[1],
+                                    idx
+                                );
+                                let color_image =
+                                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+
+                                // Create or update texture
+                                let texture_name = format!("compositor_thumb_{}", idx);
+                                let texture = ctx.load_texture(
+                                    texture_name,
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.thumbnails.insert(idx, texture);
+                                tracing::debug!("🖼️ Created texture for input {}", idx);
+                            }
+                            Err(e) => {
+                                tracing::warn!("🖼️ Failed to decode JPEG for input {}: {}", idx, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("🖼️ Failed to decode base64 for input {}: {}", idx, e);
+                    }
+                }
+
+                // Clear the storage key
+                crate::app::remove_local_storage(&key);
             }
         }
     }
@@ -813,6 +981,8 @@ impl CompositorEditor {
         self.check_loaded_properties();
         self.check_update_results();
         self.check_transition_status();
+        self.check_loaded_thumbnails(ctx);
+        self.refresh_thumbnails(ctx);
 
         let mut is_open = true;
 
@@ -1214,6 +1384,8 @@ impl CompositorEditor {
         self.check_loaded_properties();
         self.check_update_results();
         self.check_transition_status();
+        self.check_loaded_thumbnails(ctx);
+        self.refresh_thumbnails(ctx);
 
         // Keyboard shortcuts for setting transition target (0-9)
         for (key, idx) in [
@@ -1647,15 +1819,48 @@ impl CompositorEditor {
             let dimmed = has_selection && !input.selected;
             let opacity_mult = if dimmed { 0.4 } else { 1.0 };
 
-            // Draw box with adjusted opacity
-            let mut color = input.color();
-            color = Color32::from_rgba_unmultiplied(
-                color.r(),
-                color.g(),
-                color.b(),
-                (color.a() as f32 * opacity_mult) as u8,
-            );
-            painter.rect_filled(screen_rect, 0.0, color);
+            // Draw thumbnail or fallback to colored box
+            if let Some(texture) = self.thumbnails.get(&idx) {
+                // Apply input's alpha and selection dimming
+                let alpha = (input.alpha * opacity_mult).clamp(0.0, 1.0);
+                let tint = Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * alpha) as u8);
+
+                // Calculate UV rect based on sizing policy
+                // Thumbnail is 320x180 (16:9), input rect may have different aspect ratio
+                let thumb_aspect = 320.0 / 180.0; // 16:9
+                let input_aspect = rect.width() / rect.height();
+
+                let uv_rect = if input.sizing_policy == "none" {
+                    // Stretch: use full UV (0,0 to 1,1)
+                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+                } else {
+                    // keep-aspect-ratio: crop the thumbnail to match input's aspect ratio
+                    if input_aspect > thumb_aspect {
+                        // Input is wider - crop top/bottom of thumbnail
+                        let visible_height = thumb_aspect / input_aspect;
+                        let margin = (1.0 - visible_height) / 2.0;
+                        Rect::from_min_max(egui::pos2(0.0, margin), egui::pos2(1.0, 1.0 - margin))
+                    } else {
+                        // Input is taller - crop left/right of thumbnail
+                        let visible_width = input_aspect / thumb_aspect;
+                        let margin = (1.0 - visible_width) / 2.0;
+                        Rect::from_min_max(egui::pos2(margin, 0.0), egui::pos2(1.0 - margin, 1.0))
+                    }
+                };
+
+                painter.image(texture.id(), screen_rect, uv_rect, tint);
+            } else {
+                // Fallback to colored box - apply input alpha and selection dimming
+                let alpha = (input.alpha * opacity_mult).clamp(0.0, 1.0);
+                let mut color = input.color();
+                color = Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    (color.a() as f64 * alpha) as u8,
+                );
+                painter.rect_filled(screen_rect, 0.0, color);
+            }
 
             let border_width = if input.selected { 3.0 } else { 1.0 };
             let border_color = if input.selected {

@@ -1892,4 +1892,62 @@ impl ApiClient {
         );
         Ok(state)
     }
+
+    /// Get a thumbnail from a compositor input.
+    ///
+    /// Returns JPEG-encoded image bytes for the specified compositor input.
+    pub async fn get_compositor_thumbnail(
+        &self,
+        flow_id: &str,
+        block_id: &str,
+        input_idx: usize,
+    ) -> ApiResult<Vec<u8>> {
+        let url = format!(
+            "{}/flows/{}/compositor/{}/thumbnail/{}",
+            self.base_url, flow_id, block_id, input_idx
+        );
+
+        tracing::debug!(
+            "Fetching compositor thumbnail: url={} flow={}, block={}, input={}",
+            url,
+            flow_id,
+            block_id,
+            input_idx
+        );
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::debug!("Network error getting thumbnail: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        let status = response.status();
+        tracing::debug!("Thumbnail response status: {} for {}", status, url);
+
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::debug!("HTTP error {} getting thumbnail: {}", status_code, text);
+            return Err(ApiError::Http(status_code, text));
+        }
+
+        let bytes = response.bytes().await.map_err(|e| {
+            tracing::debug!("Failed to read thumbnail bytes: {}", e);
+            ApiError::Decode(e.to_string())
+        })?;
+
+        tracing::debug!(
+            "Got thumbnail {} bytes (header: {:02X} {:02X} {:02X}) for {}",
+            bytes.len(),
+            bytes.first().copied().unwrap_or(0),
+            bytes.get(1).copied().unwrap_or(0),
+            bytes.get(2).copied().unwrap_or(0),
+            url
+        );
+
+        Ok(bytes.to_vec())
+    }
 }
