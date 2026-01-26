@@ -340,7 +340,7 @@ impl PropertyInspector {
         flow_id: Option<strom_types::FlowId>,
         meter_data_store: &crate::meter::MeterDataStore,
         webrtc_stats_store: &crate::webrtc_stats::WebRtcStatsStore,
-        stats: Option<&crate::api::FlowStatsInfo>,
+        rtp_stats: Option<&crate::api::FlowRtpStatsInfo>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
     ) -> BlockInspectorResult {
@@ -650,8 +650,8 @@ impl PropertyInspector {
                         ui.heading("📊 RTP Statistics");
                         ui.add_space(4.0);
 
-                        // Find stats for this block
-                        let block_stats = stats.and_then(|s| {
+                        // Find RTP stats for this block
+                        let block_stats = rtp_stats.and_then(|s| {
                             s.blocks.iter().find(|bs| bs.block_instance_id == block.id)
                         });
 

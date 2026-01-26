@@ -782,9 +782,9 @@ impl ApiClient {
         Ok(stats_response.stats)
     }
 
-    /// Get statistics for a running flow.
-    pub async fn get_flow_stats(&self, id: FlowId) -> ApiResult<FlowStatsInfo> {
-        let url = format!("{}/flows/{}/stats", self.base_url, id);
+    /// Get RTP statistics for a running flow (jitterbuffer stats from AES67 Input blocks).
+    pub async fn get_flow_rtp_stats(&self, id: FlowId) -> ApiResult<FlowRtpStatsInfo> {
+        let url = format!("{}/flows/{}/rtp-stats", self.base_url, id);
         let response = self
             .with_auth(self.client.get(&url))
             .send()
@@ -797,12 +797,12 @@ impl ApiClient {
             return Err(ApiError::Http(status, text));
         }
 
-        let stats_info: FlowStatsInfo = response
+        let rtp_stats_info: FlowRtpStatsInfo = response
             .json()
             .await
             .map_err(|e| ApiError::Decode(e.to_string()))?;
 
-        Ok(stats_info)
+        Ok(rtp_stats_info)
     }
 
     /// Get dynamic pads for a running flow (pads created at runtime by elements like decodebin).
@@ -875,49 +875,49 @@ pub struct LatencyInfo {
     pub max_latency_formatted: String,
 }
 
-/// Flow statistics information
+/// Flow RTP statistics information (jitterbuffer stats from RTP-based blocks like AES67 Input)
 #[derive(Debug, Clone, Deserialize)]
-pub struct FlowStatsInfo {
+pub struct FlowRtpStatsInfo {
     /// The flow ID
     pub flow_id: FlowId,
     /// The flow name
     pub flow_name: String,
-    /// Statistics for each block in the flow
-    pub blocks: Vec<BlockStatsInfo>,
+    /// RTP statistics for each block in the flow
+    pub blocks: Vec<BlockRtpStatsInfo>,
     /// Timestamp when stats were collected (nanoseconds since UNIX epoch)
     pub collected_at: u64,
 }
 
-/// Statistics for a single block instance
+/// RTP statistics for a single block instance
 #[derive(Debug, Clone, Deserialize)]
-pub struct BlockStatsInfo {
+pub struct BlockRtpStatsInfo {
     /// The block instance ID
     pub block_instance_id: String,
     /// The block definition ID (e.g., "builtin.aes67_input")
     pub block_definition_id: String,
     /// Human-readable block name
     pub block_name: String,
-    /// Collection of statistics for this block
-    pub stats: Vec<StatisticInfo>,
+    /// Collection of RTP statistics for this block (jitterbuffer metrics)
+    pub stats: Vec<RtpStatisticInfo>,
     /// Timestamp when these stats were collected
     pub collected_at: u64,
 }
 
-/// A single statistic with its value and metadata
+/// A single RTP statistic with its value and metadata
 #[derive(Debug, Clone, Deserialize)]
-pub struct StatisticInfo {
+pub struct RtpStatisticInfo {
     /// Unique identifier for this statistic within the block
     pub id: String,
     /// Current value
-    pub value: StatValueInfo,
+    pub value: RtpStatValueInfo,
     /// Metadata about this statistic
-    pub metadata: StatMetadataInfo,
+    pub metadata: RtpStatMetadataInfo,
 }
 
-/// A statistic value
+/// An RTP statistic value
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", content = "value")]
-pub enum StatValueInfo {
+pub enum RtpStatValueInfo {
     /// Counter - monotonically increasing value (e.g., packets received)
     Counter(u64),
     /// Gauge - value that can go up or down (e.g., buffer level)
@@ -934,9 +934,9 @@ pub enum StatValueInfo {
     TimestampNs(u64),
 }
 
-/// Metadata about a statistic
+/// Metadata about an RTP statistic
 #[derive(Debug, Clone, Deserialize)]
-pub struct StatMetadataInfo {
+pub struct RtpStatMetadataInfo {
     /// Human-readable name for display
     pub display_name: String,
     /// Description of what this statistic measures
@@ -947,16 +947,16 @@ pub struct StatMetadataInfo {
     pub category: Option<String>,
 }
 
-impl StatValueInfo {
+impl RtpStatValueInfo {
     /// Format the value for display
     pub fn format(&self) -> String {
         match self {
-            StatValueInfo::Counter(v) => format!("{}", v),
-            StatValueInfo::Gauge(v) => format!("{}", v),
-            StatValueInfo::Float(v) => format!("{:.2}", v),
-            StatValueInfo::Bool(v) => if *v { "Yes" } else { "No" }.to_string(),
-            StatValueInfo::String(v) => v.clone(),
-            StatValueInfo::DurationNs(v) => {
+            RtpStatValueInfo::Counter(v) => format!("{}", v),
+            RtpStatValueInfo::Gauge(v) => format!("{}", v),
+            RtpStatValueInfo::Float(v) => format!("{:.2}", v),
+            RtpStatValueInfo::Bool(v) => if *v { "Yes" } else { "No" }.to_string(),
+            RtpStatValueInfo::String(v) => v.clone(),
+            RtpStatValueInfo::DurationNs(v) => {
                 if *v < 1_000 {
                     format!("{} ns", v)
                 } else if *v < 1_000_000 {
@@ -967,7 +967,7 @@ impl StatValueInfo {
                     format!("{:.2} s", *v as f64 / 1_000_000_000.0)
                 }
             }
-            StatValueInfo::TimestampNs(v) => format!("{}", v),
+            RtpStatValueInfo::TimestampNs(v) => format!("{}", v),
         }
     }
 }

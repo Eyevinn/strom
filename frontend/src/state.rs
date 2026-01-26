@@ -87,13 +87,13 @@ pub enum AppMessage {
     /// Latency loading failed (flow not running)
     LatencyNotAvailable(String),
 
-    /// Statistics loaded for a flow
-    StatsLoaded {
+    /// RTP statistics loaded for a flow (jitterbuffer stats from AES67 Input blocks)
+    RtpStatsLoaded {
         flow_id: String,
-        stats: crate::api::FlowStatsInfo,
+        rtp_stats: crate::api::FlowRtpStatsInfo,
     },
-    /// Statistics loading failed (flow not running)
-    StatsNotAvailable(String),
+    /// RTP statistics not available (flow not running or no RTP blocks)
+    RtpStatsNotAvailable(String),
 
     /// Dynamic pads loaded for a running flow (element_id -> pad_name -> tee_name)
     DynamicPadsLoaded {

@@ -31,7 +31,7 @@ use utoipa::OpenApi;
         crate::api::flows::start_flow,
         crate::api::flows::stop_flow,
         crate::api::flows::update_flow_properties,
-        crate::api::flows::get_flow_stats,
+        crate::api::flows::get_flow_rtp_stats,
         crate::api::flows::get_flow_debug_info,
         crate::api::flows::get_element_properties,
         crate::api::flows::update_element_property,
