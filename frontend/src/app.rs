@@ -5360,7 +5360,19 @@ impl StromApp {
                         .color(Color32::from_rgb(150, 150, 150))
                 );
 
-                ui.add_space(30.0);
+                ui.add_space(20.0);
+
+                // Reconnect now button - reloads the page to force fresh WebSocket connection
+                if ui.button(egui::RichText::new("Reconnect Now").size(18.0)).clicked() {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.location().reload();
+                        }
+                    }
+                }
+
+                ui.add_space(20.0);
                 ui.separator();
                 ui.add_space(10.0);
 
