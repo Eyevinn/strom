@@ -4,23 +4,45 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ## [Unreleased]
 
+---
+
+## [0.3.14] - 2026-01-26
+
 ### Added
-- Generic device discovery using GStreamer DeviceMonitor (audio, video, NDI, etc.) (#268)
+- WebRTC stats for WHEP Output blocks (#281)
+- Double-click WHEP Output block to open player (#280)
+- Compositor: Live View mode with scene transitions and thumbnails (#275)
+- Generic device discovery using GStreamer DeviceMonitor (#268)
 - Double-click on AES67/NDI Input blocks to open stream/source picker (#268)
-- Close button (X) on NDI picker and stream picker modals (#268)
 - Windows development setup documentation in README (#273)
+
+### Changed
+- Update CEF to 144.0.11 (Chromium 144 stable) (#279)
+- Optimize stats polling to only fetch for selected flow (#277)
+- Remove deprecated OpenGL Compositor block (#274)
+
+### Fixed
+- Move system stats collection to background thread (#283)
+- Filter WebRTC stats by block_id (#278)
+- Reduce WHEP output log verbosity (#276)
+- Windows dev setup scripts for pkg-config and GStreamer 1.26 (#269, #271, #272)
+- Prevent AccessKit crash on Windows when selecting flows (#266)
+
+---
+
+## [0.3.13] - 2026-01-22
+
+### Added
+- Compositor: improved layout editor with persistence (#262)
+- Zoom-to-fit and reset view in graph editor (#261)
 - HTML overlay support via `strom-full` Docker image with CEF/gstcefsrc (#254)
 - HTML rendering documentation with example flows (#257, #259)
 - gstcefsrc build workflow for CI (#253)
 
 ### Changed
-- Windows setup script uses GStreamer 1.26 from GitHub releases mirror (#269)
-- Windows setup script installs Graphviz for pipeline visualization (#269)
-- Faster PowerShell downloads by disabling progress bar (#269)
 - Improved AES67 SDP generation and QoS settings (#252)
 
 ### Fixed
-- Prevent AccessKit crash on Windows when selecting flows (#266)
 - CEF resource symlinks for strom-full Docker image (#256)
 - Build gstcefsrc for Ubuntu 25.10 and fix CEF runtime (#255)
 
