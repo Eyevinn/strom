@@ -303,11 +303,64 @@ fn get_current_hostname() -> String {
 }
 
 /// Theme preference for the application
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ThemePreference {
-    System,
-    Light,
-    Dark,
+    /// Standard egui dark theme
+    #[default]
+    EguiDark,
+    /// Standard egui light theme
+    EguiLight,
+    /// Nord Dark theme (arctic-inspired)
+    NordDark,
+    /// Nord Light theme (arctic-inspired)
+    NordLight,
+    /// Tokyo Night theme (VSCode-inspired)
+    TokyoNight,
+    /// Tokyo Night Storm variant (lighter dark)
+    TokyoNightStorm,
+    /// Tokyo Night Light theme
+    TokyoNightLight,
+}
+
+impl ThemePreference {
+    /// Convert to string for storage
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::EguiDark => "egui_dark",
+            Self::EguiLight => "egui_light",
+            Self::NordDark => "nord_dark",
+            Self::NordLight => "nord_light",
+            Self::TokyoNight => "tokyo_night",
+            Self::TokyoNightStorm => "tokyo_night_storm",
+            Self::TokyoNightLight => "tokyo_night_light",
+        }
+    }
+
+    /// Parse from string, defaults to EguiDark if unknown
+    fn from_str(s: &str) -> Self {
+        match s {
+            "egui_dark" => Self::EguiDark,
+            "egui_light" => Self::EguiLight,
+            "nord_dark" => Self::NordDark,
+            "nord_light" => Self::NordLight,
+            "tokyo_night" => Self::TokyoNight,
+            "tokyo_night_storm" => Self::TokyoNightStorm,
+            "tokyo_night_light" => Self::TokyoNightLight,
+            _ => Self::default(),
+        }
+    }
+
+    /// Load from local storage, defaults to EguiDark
+    fn load() -> Self {
+        get_local_storage("theme_preference")
+            .map(|s| Self::from_str(&s))
+            .unwrap_or_default()
+    }
+
+    /// Save to local storage
+    fn save(&self) {
+        set_local_storage("theme_preference", self.as_str());
+    }
 }
 
 /// Import format for flow import
@@ -714,7 +767,7 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::Dark,
+            theme_preference: ThemePreference::load(),
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -841,7 +894,7 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::Dark,
+            theme_preference: ThemePreference::load(),
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -925,34 +978,16 @@ impl StromApp {
 
     /// Apply the current theme preference to the UI context.
     fn apply_theme(&self, ctx: egui::Context) {
+        use crate::themes;
+
         let visuals = match self.theme_preference {
-            ThemePreference::System => {
-                // Detect system theme preference
-                #[cfg(target_arch = "wasm32")]
-                {
-                    // In WASM, check browser's preferred color scheme
-                    if let Some(window) = web_sys::window() {
-                        if let Ok(Some(mql)) = window.match_media("(prefers-color-scheme: dark)") {
-                            if mql.matches() {
-                                egui::Visuals::dark()
-                            } else {
-                                egui::Visuals::light()
-                            }
-                        } else {
-                            egui::Visuals::dark() // Default to dark if detection fails
-                        }
-                    } else {
-                        egui::Visuals::dark() // Default to dark if no window
-                    }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    // In native mode, default to dark theme (could be enhanced to detect OS theme)
-                    egui::Visuals::dark()
-                }
-            }
-            ThemePreference::Light => egui::Visuals::light(),
-            ThemePreference::Dark => egui::Visuals::dark(),
+            ThemePreference::EguiDark => egui::Visuals::dark(),
+            ThemePreference::EguiLight => egui::Visuals::light(),
+            ThemePreference::NordDark => themes::nord_dark(),
+            ThemePreference::NordLight => themes::nord_light(),
+            ThemePreference::TokyoNight => themes::tokyo_night(),
+            ThemePreference::TokyoNightStorm => themes::tokyo_night_storm(),
+            ThemePreference::TokyoNightLight => themes::tokyo_night_light(),
         };
         ctx.set_visuals(visuals);
     }
@@ -2269,7 +2304,7 @@ impl StromApp {
                     ui.label("›");
                     ui.label(block_id);
 
-                    // Right side: connection status and copy URL button
+                    // Right side: connection status, theme picker, and copy URL button
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Copy URL button (WASM only)
                         #[cfg(target_arch = "wasm32")]
@@ -2290,6 +2325,43 @@ impl StromApp {
                                 }
                             }
                         }
+
+                        ui.separator();
+
+                        // Theme picker
+                        let theme_name = match self.theme_preference {
+                            ThemePreference::EguiDark => "Dark",
+                            ThemePreference::EguiLight => "Light",
+                            ThemePreference::NordDark => "Nord Dark",
+                            ThemePreference::NordLight => "Nord Light",
+                            ThemePreference::TokyoNight => "Tokyo Night",
+                            ThemePreference::TokyoNightStorm => "Tokyo Storm",
+                            ThemePreference::TokyoNightLight => "Tokyo Light",
+                        };
+
+                        egui::ComboBox::from_id_salt("live_theme_selector")
+                            .selected_text(theme_name)
+                            .show_ui(ui, |ui| {
+                                let themes = [
+                                    (ThemePreference::EguiDark, "Dark (default)"),
+                                    (ThemePreference::EguiLight, "Light (default)"),
+                                    (ThemePreference::NordDark, "Nord Dark"),
+                                    (ThemePreference::NordLight, "Nord Light"),
+                                    (ThemePreference::TokyoNight, "Tokyo Night"),
+                                    (ThemePreference::TokyoNightStorm, "Tokyo Night Storm"),
+                                    (ThemePreference::TokyoNightLight, "Tokyo Night Light"),
+                                ];
+                                for (theme, label) in themes {
+                                    if ui
+                                        .selectable_label(self.theme_preference == theme, label)
+                                        .clicked()
+                                    {
+                                        self.theme_preference = theme;
+                                        self.theme_preference.save();
+                                        self.apply_theme(ctx.clone());
+                                    }
+                                }
+                            });
 
                         ui.separator();
 
@@ -2463,26 +2535,40 @@ impl StromApp {
 
                     ui.separator();
 
-                    // Theme switch button
-                    let theme_icon = match self.theme_preference {
-                        ThemePreference::System => "🖥",
-                        ThemePreference::Light => "☀",
-                        ThemePreference::Dark => "🌙",
+                    // Theme dropdown menu
+                    let theme_name = match self.theme_preference {
+                        ThemePreference::EguiDark => "Dark",
+                        ThemePreference::EguiLight => "Light",
+                        ThemePreference::NordDark => "Nord Dark",
+                        ThemePreference::NordLight => "Nord Light",
+                        ThemePreference::TokyoNight => "Tokyo Night",
+                        ThemePreference::TokyoNightStorm => "Tokyo Storm",
+                        ThemePreference::TokyoNightLight => "Tokyo Light",
                     };
 
-                    if ui
-                        .button(theme_icon)
-                        .on_hover_text("Change theme")
-                        .clicked()
-                    {
-                        let new_theme = match self.theme_preference {
-                            ThemePreference::System => ThemePreference::Light,
-                            ThemePreference::Light => ThemePreference::Dark,
-                            ThemePreference::Dark => ThemePreference::System,
-                        };
-                        self.theme_preference = new_theme;
-                        self.apply_theme(ctx.clone());
-                    }
+                    egui::ComboBox::from_id_salt("theme_selector")
+                        .selected_text(theme_name)
+                        .show_ui(ui, |ui| {
+                            let themes = [
+                                (ThemePreference::EguiDark, "Dark (default)"),
+                                (ThemePreference::EguiLight, "Light (default)"),
+                                (ThemePreference::NordDark, "Nord Dark"),
+                                (ThemePreference::NordLight, "Nord Light"),
+                                (ThemePreference::TokyoNight, "Tokyo Night"),
+                                (ThemePreference::TokyoNightStorm, "Tokyo Night Storm"),
+                                (ThemePreference::TokyoNightLight, "Tokyo Night Light"),
+                            ];
+                            for (theme, label) in themes {
+                                if ui
+                                    .selectable_label(self.theme_preference == theme, label)
+                                    .clicked()
+                                {
+                                    self.theme_preference = theme;
+                                    self.theme_preference.save();
+                                    self.apply_theme(ctx.clone());
+                                }
+                            }
+                        });
 
                     // Logout button (only show if auth is enabled and user is authenticated)
                     if let Some(ref status) = self.auth_status {
