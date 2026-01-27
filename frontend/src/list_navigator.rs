@@ -127,10 +127,16 @@ pub fn list_navigator<'a>(
         let item_id = ui.id().with(item.id);
 
         // Create a clickable button-like area
-        let bg_color = if is_selected {
-            ui.visuals().widgets.active.bg_fill
+        let (bg_color, text_color) = if is_selected {
+            (
+                ui.visuals().widgets.active.bg_fill,
+                ui.visuals().widgets.active.fg_stroke.color,
+            )
         } else {
-            ui.visuals().extreme_bg_color
+            (
+                ui.visuals().widgets.noninteractive.bg_fill,
+                ui.visuals().widgets.noninteractive.fg_stroke.color,
+            )
         };
 
         let frame = egui::Frame::group(ui.style())
@@ -144,20 +150,21 @@ pub fn list_navigator<'a>(
                     if let Some((tag, color)) = item.tag {
                         ui.colored_label(color, RichText::new(tag).strong());
                     }
-                    ui.label(RichText::new(item.label).strong());
+                    // Use explicit text color to ensure visibility across all themes
+                    ui.label(RichText::new(item.label).strong().color(text_color));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some((status, color)) = item.status {
                             ui.colored_label(color, RichText::new(status).strong());
                         } else if let Some(ref right) = item.right_text {
-                            ui.label(right);
+                            ui.label(RichText::new(right.as_str()).color(text_color));
                         }
                     });
                 });
 
                 // Second line: secondary text
                 if let Some(ref secondary) = item.secondary {
-                    ui.label(secondary);
+                    ui.label(RichText::new(secondary.as_str()).color(text_color));
                 }
             });
         });

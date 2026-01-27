@@ -566,8 +566,9 @@ impl Default for InfoPage {
 
 /// Render a box with header and content.
 fn render_box(ui: &mut Ui, title: &str, width: f32, content: impl FnOnce(&mut Ui)) {
-    let fill_color = ui.visuals().extreme_bg_color;
+    let fill_color = ui.visuals().widgets.noninteractive.bg_fill;
     let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let text_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
     egui::Frame::new()
         .fill(fill_color)
         .corner_radius(8.0)
@@ -577,7 +578,8 @@ fn render_box(ui: &mut Ui, title: &str, width: f32, content: impl FnOnce(&mut Ui
             ui.set_width(width);
 
             ui.vertical(|ui| {
-                ui.strong(title);
+                // Use explicit text color to ensure visibility across all themes
+                ui.label(egui::RichText::new(title).strong().color(text_color));
                 ui.add_space(8.0);
                 content(ui);
             });
