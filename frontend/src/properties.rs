@@ -673,22 +673,82 @@ impl PropertyInspector {
                         });
 
                         if let Some(block_stats) = block_stats {
-                            // Use a grid for clean alignment
-                            egui::Grid::new("rtp_stats_grid")
-                                .num_columns(2)
-                                .spacing([20.0, 4.0])
-                                .show(ui, |ui| {
-                                    for stat in &block_stats.stats {
-                                        // Stat name with description tooltip
-                                        let label = ui.label(&stat.metadata.display_name);
-                                        label.on_hover_text(&stat.metadata.description);
+                            // Group stats by jitterbuffer/SSRC
+                            // Stats are prefixed with jitterbuffer name like "rtpjitterbuffer0_num_pushed"
+                            // or have "(rtpjitterbuffer0)" in display_name
+                            use std::collections::BTreeMap;
+                            let mut grouped: BTreeMap<String, Vec<&crate::api::RtpStatisticInfo>> =
+                                BTreeMap::new();
 
-                                        // Stat value formatted appropriately
-                                        let formatted = stat.value.format();
-                                        ui.monospace(&formatted);
-                                        ui.end_row();
+                            for stat in &block_stats.stats {
+                                // Extract jitterbuffer name from display_name "(rtpjitterbuffer0)"
+                                // or from id prefix "rtpjitterbuffer0_"
+                                let jb_name = if let Some(start) = stat.metadata.display_name.rfind('(')
+                                {
+                                    if let Some(end) = stat.metadata.display_name.rfind(')') {
+                                        stat.metadata.display_name[start + 1..end].to_string()
+                                    } else {
+                                        "default".to_string()
                                     }
-                                });
+                                } else if let Some(underscore) = stat.id.find('_') {
+                                    // Check if prefix looks like a jitterbuffer name
+                                    let prefix = &stat.id[..underscore];
+                                    if prefix.starts_with("rtpjitterbuffer") {
+                                        prefix.to_string()
+                                    } else {
+                                        "default".to_string()
+                                    }
+                                } else {
+                                    "default".to_string()
+                                };
+
+                                grouped.entry(jb_name).or_default().push(stat);
+                            }
+
+                            if grouped.len() <= 1 {
+                                // Single jitterbuffer - show flat list
+                                egui::Grid::new("rtp_stats_grid")
+                                    .num_columns(2)
+                                    .spacing([20.0, 4.0])
+                                    .show(ui, |ui| {
+                                        for stat in &block_stats.stats {
+                                            let label = ui.label(&stat.metadata.display_name);
+                                            label.on_hover_text(&stat.metadata.description);
+                                            let formatted = stat.value.format();
+                                            ui.monospace(&formatted);
+                                            ui.end_row();
+                                        }
+                                    });
+                            } else {
+                                // Multiple jitterbuffers - show each in a collapsible (all open)
+                                // Reverse order so newest (highest number) appears first
+                                for (jb_name, stats) in grouped.iter().rev() {
+                                    egui::CollapsingHeader::new(jb_name)
+                                        .id_salt(format!("rtp_stats_{}", jb_name))
+                                        .default_open(true)
+                                        .show(ui, |ui| {
+                                            egui::Grid::new(format!("rtp_stats_grid_{}", jb_name))
+                                                .num_columns(2)
+                                                .spacing([20.0, 4.0])
+                                                .show(ui, |ui| {
+                                                    for stat in stats {
+                                                        // Remove jitterbuffer suffix from display name
+                                                        let display_name = stat
+                                                            .metadata
+                                                            .display_name
+                                                            .split(" (")
+                                                            .next()
+                                                            .unwrap_or(&stat.metadata.display_name);
+                                                        let label = ui.label(display_name);
+                                                        label.on_hover_text(&stat.metadata.description);
+                                                        let formatted = stat.value.format();
+                                                        ui.monospace(&formatted);
+                                                        ui.end_row();
+                                                    }
+                                                });
+                                        });
+                                }
+                            }
                         } else {
                             ui.colored_label(
                                 Color32::from_rgb(200, 200, 100),

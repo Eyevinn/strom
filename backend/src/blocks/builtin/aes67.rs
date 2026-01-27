@@ -338,8 +338,10 @@ impl BlockBuilder for AES67InputBuilder {
 
         // Build result depends on decode setting
         if decode {
-            // Create decode chain: decodebin -> audioconvert -> audioresample
+            // Decode chain: decodebin -> capssetter(0x0) -> audioconvert -> audioresample
+            // capssetter merges channel-mask=0x0 to fix rtpL24depay's incorrect surround layout
             let decodebin_id = format!("{}:decodebin", instance_id);
+            let capssetter_id = format!("{}:capssetter", instance_id);
             let audioconvert_id = format!("{}:audioconvert", instance_id);
             let audioresample_id = format!("{}:audioresample", instance_id);
 
@@ -347,6 +349,18 @@ impl BlockBuilder for AES67InputBuilder {
                 .name(&decodebin_id)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("decodebin: {}", e)))?;
+
+            // Use capssetter to MERGE channel-mask=0x0 into existing caps
+            // join=true (default) matches mime-type, replace=false (default) keeps other fields
+            // This fixes rtpL24depay's incorrect 7.1 surround layout assumption
+            let caps = gst::Caps::builder("audio/x-raw")
+                .field("channel-mask", gst::Bitmask::new(0x0))
+                .build();
+            let capssetter = gst::ElementFactory::make("capssetter")
+                .name(&capssetter_id)
+                .property("caps", &caps)
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("capssetter: {}", e)))?;
 
             let audioconvert = gst::ElementFactory::make("audioconvert")
                 .name(&audioconvert_id)
@@ -358,8 +372,8 @@ impl BlockBuilder for AES67InputBuilder {
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
 
-            // Set up pad-added handler on decodebin to link to audioconvert
-            let audioconvert_weak = audioconvert.downgrade();
+            // Set up pad-added handler on decodebin to link to capssetter
+            let capssetter_weak = capssetter.downgrade();
             let decodebin_id_clone = decodebin_id.clone();
             decodebin.connect_pad_added(move |_element, new_pad| {
                 let pad_name = new_pad.name();
@@ -374,11 +388,11 @@ impl BlockBuilder for AES67InputBuilder {
                     if let Some(s) = structure {
                         let name = s.name();
                         if name.starts_with("audio/") {
-                            if let Some(audioconvert) = audioconvert_weak.upgrade() {
-                                if let Some(sink_pad) = audioconvert.static_pad("sink") {
+                            if let Some(capssetter) = capssetter_weak.upgrade() {
+                                if let Some(sink_pad) = capssetter.static_pad("sink") {
                                     if !sink_pad.is_linked() && new_pad.link(&sink_pad).is_ok() {
                                         info!(
-                                            "AES67 Input decodebin [{}]: Linked {} to audioconvert",
+                                            "AES67 Input decodebin [{}]: Linked {} to capssetter",
                                             decodebin_id_clone, pad_name
                                         );
                                     }
@@ -394,6 +408,7 @@ impl BlockBuilder for AES67InputBuilder {
                     (filesrc_id.clone(), filesrc),
                     (sdpdemux_id.clone(), sdpdemux),
                     (decodebin_id.clone(), decodebin),
+                    (capssetter_id.clone(), capssetter),
                     (audioconvert_id.clone(), audioconvert),
                     (audioresample_id.clone(), audioresample),
                 ],
@@ -407,7 +422,11 @@ impl BlockBuilder for AES67InputBuilder {
                         ElementPadRef::pad(&sdpdemux_id, "stream_0"),
                         ElementPadRef::pad(&decodebin_id, "sink"),
                     ),
-                    // decodebin -> audioconvert is dynamic (handled by pad-added above)
+                    // decodebin -> capssetter is dynamic (handled by pad-added above)
+                    (
+                        ElementPadRef::pad(&capssetter_id, "src"),
+                        ElementPadRef::pad(&audioconvert_id, "sink"),
+                    ),
                     (
                         ElementPadRef::pad(&audioconvert_id, "src"),
                         ElementPadRef::pad(&audioresample_id, "sink"),
@@ -774,6 +793,7 @@ fn aes67_input_definition() -> BlockDefinition {
                 name: "audio_out".to_string(),
                 media_type: MediaType::Audio,
                 // When decode=true (default), output is from audioresample
+                // decodebin has caps set to channel-mask=0x0 for unpositioned mono channels
                 // When decode=false, pipeline builder will use sdpdemux:stream_0 directly
                 internal_element_id: "audioresample".to_string(),
                 internal_pad_name: "src".to_string(),
