@@ -338,8 +338,8 @@ impl BlockBuilder for AES67InputBuilder {
 
         // Build result depends on decode setting
         if decode {
-            // Decode chain: decodebin -> capssetter(0x0) -> audioconvert -> audioresample
-            // capssetter merges channel-mask=0x0 to fix rtpL24depay's incorrect surround layout
+            // Decode chain: decodebin -> capssetter -> audioconvert -> audioresample
+            // capssetter dynamically fixes channel-mask only when needed (8ch with wrong surround layout)
             let decodebin_id = format!("{}:decodebin", instance_id);
             let capssetter_id = format!("{}:capssetter", instance_id);
             let audioconvert_id = format!("{}:audioconvert", instance_id);
@@ -350,15 +350,10 @@ impl BlockBuilder for AES67InputBuilder {
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("decodebin: {}", e)))?;
 
-            // Use capssetter to MERGE channel-mask=0x0 into existing caps
-            // join=true (default) matches mime-type, replace=false (default) keeps other fields
-            // This fixes rtpL24depay's incorrect 7.1 surround layout assumption
-            let caps = gst::Caps::builder("audio/x-raw")
-                .field("channel-mask", gst::Bitmask::new(0x0))
-                .build();
+            // Create capssetter without initial caps - we'll configure it dynamically
+            // based on the actual audio format we receive
             let capssetter = gst::ElementFactory::make("capssetter")
                 .name(&capssetter_id)
-                .property("caps", &caps)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("capssetter: {}", e)))?;
 
@@ -373,6 +368,7 @@ impl BlockBuilder for AES67InputBuilder {
                 .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
 
             // Set up pad-added handler on decodebin to link to capssetter
+            // and dynamically configure channel-mask override if needed
             let capssetter_weak = capssetter.downgrade();
             let decodebin_id_clone = decodebin_id.clone();
             decodebin.connect_pad_added(move |_element, new_pad| {
@@ -389,6 +385,32 @@ impl BlockBuilder for AES67InputBuilder {
                         let name = s.name();
                         if name.starts_with("audio/") {
                             if let Some(capssetter) = capssetter_weak.upgrade() {
+                                // Check if we need to fix the channel-mask
+                                // For 1-2 channels, leave channel-mask as is (mono/stereo positioning is correct)
+                                // For 3+ channels, set to 0x0 (unpositioned) since RTP depayloaders often
+                                // incorrectly assume surround layouts for multi-channel AES67 streams
+                                let channels = s.get::<i32>("channels").unwrap_or(0);
+                                let channel_mask = s
+                                    .get::<gst::Bitmask>("channel-mask")
+                                    .map(|m| *m)
+                                    .unwrap_or(0);
+
+                                if channels > 2 {
+                                    info!(
+                                        "AES67 Input decodebin [{}]: Detected {}-channel audio with channel-mask 0x{:x}, overriding to 0x0 (unpositioned)",
+                                        decodebin_id_clone, channels, channel_mask
+                                    );
+                                    let fix_caps = gst::Caps::builder("audio/x-raw")
+                                        .field("channel-mask", gst::Bitmask::new(0x0))
+                                        .build();
+                                    capssetter.set_property("caps", &fix_caps);
+                                } else {
+                                    info!(
+                                        "AES67 Input decodebin [{}]: Audio has {} channels with channel-mask 0x{:x}, keeping as is",
+                                        decodebin_id_clone, channels, channel_mask
+                                    );
+                                }
+
                                 if let Some(sink_pad) = capssetter.static_pad("sink") {
                                     if !sink_pad.is_linked() && new_pad.link(&sink_pad).is_ok() {
                                         info!(
