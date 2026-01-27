@@ -564,13 +564,13 @@ impl PropertyInspector {
                     // Show meter visualization for meter blocks
                     if definition.id == "builtin.meter" {
                         ui.separator();
-                        tracing::debug!("📊 Checking for meter data: flow_id={:?}, block_id={}", flow_id, block.id);
+                        tracing::debug!("Checking for meter data: flow_id={:?}, block_id={}", flow_id, block.id);
                         if let Some(flow_id) = flow_id {
                             if let Some(meter_data) = meter_data_store.get(&flow_id, &block.id) {
-                                tracing::debug!("📊 Found meter data, calling show_full");
+                                tracing::debug!("Found meter data, calling show_full");
                                 crate::meter::show_full(ui, &block.id, meter_data);
                             } else {
-                                tracing::debug!("📊 No meter data found for this block");
+                                tracing::debug!("No meter data found for this block");
                                 ui.colored_label(
                                     Color32::from_rgb(200, 200, 100),
                                     "⚠ No audio level data available",
@@ -579,7 +579,7 @@ impl PropertyInspector {
                                 ui.small("Meter data will appear when audio is flowing through this block.");
                             }
                         } else {
-                            tracing::debug!("📊 No flow_id available");
+                            tracing::debug!("No flow_id available");
                             ui.colored_label(
                                 Color32::from_rgb(200, 200, 100),
                                 "⚠ No flow selected",

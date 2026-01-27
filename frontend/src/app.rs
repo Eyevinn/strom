@@ -5832,7 +5832,7 @@ impl eframe::App for StromApp {
                                 element_id.clone(),
                                 crate::meter::MeterData { rms, peak, decay },
                             );
-                            tracing::trace!("📊 Meter data stored for element {}", element_id);
+                            tracing::trace!("Meter data stored for element {}", element_id);
                         }
                         StromEvent::MediaPlayerPosition {
                             flow_id,

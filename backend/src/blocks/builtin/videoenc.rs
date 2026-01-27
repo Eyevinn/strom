@@ -307,7 +307,7 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
         if let Some(factory) = gst::ElementFactory::find(encoder_name) {
             // Check if element is disabled via GST_PLUGIN_FEATURE_RANK (rank = 0/NONE)
             if factory.rank() == gst::Rank::NONE {
-                info!("✗ Encoder disabled (rank=0): {}", encoder_name);
+                info!("Encoder disabled (rank=0): {}", encoder_name);
                 continue;
             }
             info!(
@@ -317,7 +317,7 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
             );
             return Ok(encoder_name.to_string());
         } else {
-            info!("✗ Encoder not available: {}", encoder_name);
+            info!("Encoder not available: {}", encoder_name);
         }
     }
 
@@ -343,7 +343,7 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
             for encoder_name in &software_list {
                 if let Some(factory) = gst::ElementFactory::find(encoder_name) {
                     if factory.rank() == gst::Rank::NONE {
-                        info!("✗ Software encoder disabled (rank=0): {}", encoder_name);
+                        info!("Software encoder disabled (rank=0): {}", encoder_name);
                         continue;
                     }
                     warn!("Using software fallback encoder: {}", encoder_name);

@@ -33,7 +33,7 @@ impl BlockBuilder for MeterBuilder {
         let interval_ns = interval_ms * 1_000_000; // Convert ms to ns
 
         tracing::info!(
-            "📊 Meter block properties: interval_ms={}, interval_ns={}",
+            "Meter block properties: interval_ms={}, interval_ns={}",
             interval_ms,
             interval_ns
         );
@@ -93,7 +93,7 @@ fn connect_level_message_handler(
 ) -> gst::glib::SignalHandlerId {
     use gst::MessageView;
 
-    info!("📊 Connecting level message handler for flow {}", flow_id);
+    info!("Connecting level message handler for flow {}", flow_id);
 
     // First ensure signal watch is enabled (this is ref-counted, safe to call multiple times)
     bus.add_signal_watch();
@@ -106,7 +106,7 @@ fn connect_level_message_handler(
                 let structure_name = s.name();
 
                 if structure_name == "level" {
-                    info!("📊 Received 'level' message from GStreamer bus!");
+                    info!("Received 'level' message from GStreamer bus!");
 
                     // Extract element ID from the source
                     if let Some(source) = msg.src() {
@@ -130,7 +130,7 @@ fn connect_level_message_handler(
                         let decay = extract_level_values(s, "decay");
 
                         trace!(
-                            "📊 Extracted values: rms={:?}, peak={:?}, decay={:?}",
+                            "Extracted values: rms={:?}, peak={:?}, decay={:?}",
                             rms,
                             peak,
                             decay
@@ -138,7 +138,7 @@ fn connect_level_message_handler(
 
                         if !rms.is_empty() {
                             trace!(
-                                "📊 Broadcasting MeterData event for flow {} element {}",
+                                "Broadcasting MeterData event for flow {} element {}",
                                 flow_id,
                                 element_id
                             );

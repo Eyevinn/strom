@@ -443,7 +443,7 @@ impl CompositorEditor {
                         ctx.request_repaint();
                     }
                     Err(e) => {
-                        tracing::warn!("🖼️ Failed to fetch thumbnail for input {}: {}", idx, e);
+                        tracing::warn!("Failed to fetch thumbnail for input {}: {}", idx, e);
                         // Store error marker so the loading flag gets cleared
                         let key = format!("compositor_thumb_err_{}_{}", flow_id, idx);
                         crate::app::set_local_storage(&key, "error");
@@ -513,15 +513,15 @@ impl CompositorEditor {
                                     egui::TextureOptions::LINEAR,
                                 );
                                 self.thumbnails.insert(idx, texture);
-                                tracing::debug!("🖼️ Created texture for input {}", idx);
+                                tracing::debug!("Created texture for input {}", idx);
                             }
                             Err(e) => {
-                                tracing::warn!("🖼️ Failed to decode JPEG for input {}: {}", idx, e);
+                                tracing::warn!("Failed to decode JPEG for input {}: {}", idx, e);
                             }
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("🖼️ Failed to decode base64 for input {}: {}", idx, e);
+                        tracing::warn!("Failed to decode base64 for input {}: {}", idx, e);
                     }
                 }
 
@@ -2658,10 +2658,10 @@ impl CompositorEditor {
                 .await
             {
                 Ok(_) => {
-                    tracing::info!("✅ Animation started");
+                    tracing::info!("Animation started");
                 }
                 Err(e) => {
-                    tracing::error!("❌ Animation failed: {}", e);
+                    tracing::error!("Animation failed: {}", e);
                 }
             }
             ctx.request_repaint();
@@ -2731,7 +2731,7 @@ impl CompositorEditor {
                 .await
             {
                 Ok(_) => {
-                    tracing::info!("✅ Transition triggered successfully");
+                    tracing::info!("Transition triggered successfully");
                     let key = format!("transition_status_{}", block_id);
                     crate::app::set_local_storage(
                         &key,
@@ -2739,7 +2739,7 @@ impl CompositorEditor {
                     );
                 }
                 Err(e) => {
-                    tracing::error!("❌ Transition failed: {}", e);
+                    tracing::error!("Transition failed: {}", e);
                     let key = format!("transition_status_{}", block_id);
                     crate::app::set_local_storage(&key, &format!("✗ {}", e));
                 }

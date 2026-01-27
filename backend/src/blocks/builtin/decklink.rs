@@ -20,7 +20,7 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("📹 Building DeckLink Video Input block: {}", instance_id);
+        info!("Building DeckLink Video Input block: {}", instance_id);
 
         // Parse properties
         let device_number = properties
@@ -228,7 +228,7 @@ impl BlockBuilder for DeckLinkVideoOutputBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("📹 Building DeckLink Video Output block: {}", instance_id);
+        info!("Building DeckLink Video Output block: {}", instance_id);
 
         // Parse properties
         let device_number = properties
