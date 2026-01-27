@@ -6,7 +6,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{block::*, EnumValue, PropertyValue, StromEvent, *};
-use tracing::{debug, trace, warn};
+use tracing::{info, trace, warn};
 
 /// Audio Meter block builder.
 pub struct MeterBuilder;
@@ -93,7 +93,7 @@ fn connect_level_message_handler(
 ) -> gst::glib::SignalHandlerId {
     use gst::MessageView;
 
-    debug!("Connecting level message handler via connect_message");
+    info!("📊 Connecting level message handler for flow {}", flow_id);
 
     // First ensure signal watch is enabled (this is ref-counted, safe to call multiple times)
     bus.add_signal_watch();
@@ -106,7 +106,7 @@ fn connect_level_message_handler(
                 let structure_name = s.name();
 
                 if structure_name == "level" {
-                    trace!("Received 'level' message from GStreamer bus!");
+                    info!("📊 Received 'level' message from GStreamer bus!");
 
                     // Extract element ID from the source
                     if let Some(source) = msg.src() {
