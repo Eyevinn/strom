@@ -48,7 +48,7 @@ pub fn remove_local_storage(key: &str) {
     }
 }
 
-// Stubs for native mode (use in-memory HashMap)
+// Stubs for native mode (in-memory only, used for transient state)
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
@@ -322,6 +322,8 @@ enum ThemePreference {
     TokyoNightLight,
 }
 
+const THEME_STORAGE_KEY: &str = "theme_preference";
+
 impl ThemePreference {
     /// Convert to string for storage
     fn as_str(&self) -> &'static str {
@@ -350,16 +352,12 @@ impl ThemePreference {
         }
     }
 
-    /// Load from local storage, defaults to EguiDark
-    fn load() -> Self {
-        get_local_storage("theme_preference")
+    /// Load from eframe storage, defaults to EguiDark
+    fn load(storage: Option<&dyn eframe::Storage>) -> Self {
+        storage
+            .and_then(|s| s.get_string(THEME_STORAGE_KEY))
             .map(|s| Self::from_str(&s))
             .unwrap_or_default()
-    }
-
-    /// Save to local storage
-    fn save(&self) {
-        set_local_storage("theme_preference", self.as_str());
     }
 }
 
@@ -767,7 +765,7 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::load(),
+            theme_preference: ThemePreference::load(cc.storage),
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -894,7 +892,7 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::load(),
+            theme_preference: ThemePreference::load(cc.storage),
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -2357,7 +2355,6 @@ impl StromApp {
                                         .clicked()
                                     {
                                         self.theme_preference = theme;
-                                        self.theme_preference.save();
                                         self.apply_theme(ctx.clone());
                                     }
                                 }
@@ -2564,7 +2561,6 @@ impl StromApp {
                                     .clicked()
                                 {
                                     self.theme_preference = theme;
-                                    self.theme_preference.save();
                                     self.apply_theme(ctx.clone());
                                 }
                             }
@@ -6844,5 +6840,13 @@ impl eframe::App for StromApp {
         if let Some(flow) = self.flow_pending_copy.take() {
             self.copy_flow(&flow, ctx);
         }
+    }
+
+    /// Save persistent state (called by eframe on shutdown)
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(
+            THEME_STORAGE_KEY,
+            self.theme_preference.as_str().to_string(),
+        );
     }
 }
