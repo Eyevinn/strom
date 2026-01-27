@@ -13,6 +13,7 @@ mod compositor_editor;
 mod discovery;
 mod graph;
 mod info_page;
+mod latency;
 mod links;
 mod list_navigator;
 mod login;
