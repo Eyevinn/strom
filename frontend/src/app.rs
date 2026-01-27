@@ -5868,7 +5868,7 @@ impl eframe::App for StromApp {
                             average_latency_us,
                         } => {
                             tracing::trace!(
-                                "⏱ LATENCY DATA RECEIVED: flow={}, element={}, last={}us, avg={}us",
+                                "Latency data received: flow={}, element={}, last={}us, avg={}us",
                                 flow_id,
                                 element_id,
                                 last_latency_us,
@@ -5883,7 +5883,7 @@ impl eframe::App for StromApp {
                                     average_latency_us,
                                 },
                             );
-                            tracing::trace!("⏱ Latency data stored for element {}", element_id);
+                            tracing::trace!("Latency data stored for element {}", element_id);
                         }
                         StromEvent::MediaPlayerPosition {
                             flow_id,

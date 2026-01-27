@@ -572,25 +572,25 @@ impl PropertyInspector {
                     // Show latency visualization for latency blocks
                     if definition.id == "builtin.latency" {
                         ui.separator();
-                        tracing::debug!("⏱ Checking for latency data: flow_id={:?}, block_id={}", flow_id, block.id);
+                        tracing::debug!("Checking for latency data: flow_id={:?}, block_id={}", flow_id, block.id);
                         if let Some(flow_id) = flow_id {
                             if let Some(latency_data) = latency_data_store.get(&flow_id, &block.id) {
-                                tracing::debug!("⏱ Found latency data, calling show_full");
+                                tracing::debug!("Found latency data, calling show_full");
                                 crate::latency::show_full(ui, &block.id, latency_data);
                             } else {
-                                tracing::debug!("⏱ No latency data found for this block");
+                                tracing::debug!("No latency data found for this block");
                                 ui.colored_label(
                                     Color32::from_rgb(200, 200, 100),
-                                    "⚠ No latency data available",
+                                    "No latency data available",
                                 );
                                 ui.add_space(4.0);
                                 ui.small("Latency measurements will appear when audio is flowing through this block. Note: The audiolatency element measures round-trip latency using periodic ticks (1 second intervals).");
                             }
                         } else {
-                            tracing::debug!("⏱ No flow_id available");
+                            tracing::debug!("No flow_id available for latency block");
                             ui.colored_label(
                                 Color32::from_rgb(200, 200, 100),
-                                "⚠ No flow selected",
+                                "No flow selected",
                             );
                         }
                     }
