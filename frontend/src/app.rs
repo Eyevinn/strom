@@ -320,6 +320,10 @@ enum ThemePreference {
     TokyoNightStorm,
     /// Tokyo Night Light theme
     TokyoNightLight,
+    /// Claude Dark theme (warm brown)
+    ClaudeDark,
+    /// Claude Light theme (warm cream)
+    ClaudeLight,
 }
 
 /// Persisted application settings (theme, zoom, etc.)
@@ -969,6 +973,8 @@ impl StromApp {
             ThemePreference::TokyoNight => themes::tokyo_night(),
             ThemePreference::TokyoNightStorm => themes::tokyo_night_storm(),
             ThemePreference::TokyoNightLight => themes::tokyo_night_light(),
+            ThemePreference::ClaudeDark => themes::claude_dark(),
+            ThemePreference::ClaudeLight => themes::claude_light(),
         };
         ctx.set_visuals(visuals);
     }
@@ -2318,6 +2324,8 @@ impl StromApp {
                             ThemePreference::TokyoNight => "Tokyo Night",
                             ThemePreference::TokyoNightStorm => "Tokyo Storm",
                             ThemePreference::TokyoNightLight => "Tokyo Light",
+                            ThemePreference::ClaudeDark => "Claude Dark",
+                            ThemePreference::ClaudeLight => "Claude Light",
                         };
 
                         egui::ComboBox::from_id_salt("live_theme_selector")
@@ -2326,6 +2334,8 @@ impl StromApp {
                                 let themes = [
                                     (ThemePreference::EguiDark, "Dark (default)"),
                                     (ThemePreference::EguiLight, "Light (default)"),
+                                    (ThemePreference::ClaudeDark, "Claude Dark"),
+                                    (ThemePreference::ClaudeLight, "Claude Light"),
                                     (ThemePreference::NordDark, "Nord Dark"),
                                     (ThemePreference::NordLight, "Nord Light"),
                                     (ThemePreference::TokyoNight, "Tokyo Night"),
@@ -2529,6 +2539,8 @@ impl StromApp {
                         ThemePreference::TokyoNight => "Tokyo Night",
                         ThemePreference::TokyoNightStorm => "Tokyo Storm",
                         ThemePreference::TokyoNightLight => "Tokyo Light",
+                        ThemePreference::ClaudeDark => "Claude Dark",
+                        ThemePreference::ClaudeLight => "Claude Light",
                     };
 
                     egui::ComboBox::from_id_salt("theme_selector")
@@ -2537,6 +2549,8 @@ impl StromApp {
                             let themes = [
                                 (ThemePreference::EguiDark, "Dark (default)"),
                                 (ThemePreference::EguiLight, "Light (default)"),
+                                (ThemePreference::ClaudeDark, "Claude Dark"),
+                                (ThemePreference::ClaudeLight, "Claude Light"),
                                 (ThemePreference::NordDark, "Nord Dark"),
                                 (ThemePreference::NordLight, "Nord Light"),
                                 (ThemePreference::TokyoNight, "Tokyo Night"),
