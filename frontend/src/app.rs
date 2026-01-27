@@ -303,7 +303,7 @@ fn get_current_hostname() -> String {
 }
 
 /// Theme preference for the application
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 enum ThemePreference {
     /// Standard egui dark theme
     #[default]
@@ -322,44 +322,17 @@ enum ThemePreference {
     TokyoNightLight,
 }
 
-const THEME_STORAGE_KEY: &str = "theme_preference";
-
-impl ThemePreference {
-    /// Convert to string for storage
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::EguiDark => "egui_dark",
-            Self::EguiLight => "egui_light",
-            Self::NordDark => "nord_dark",
-            Self::NordLight => "nord_light",
-            Self::TokyoNight => "tokyo_night",
-            Self::TokyoNightStorm => "tokyo_night_storm",
-            Self::TokyoNightLight => "tokyo_night_light",
-        }
-    }
-
-    /// Parse from string, defaults to EguiDark if unknown
-    fn from_str(s: &str) -> Self {
-        match s {
-            "egui_dark" => Self::EguiDark,
-            "egui_light" => Self::EguiLight,
-            "nord_dark" => Self::NordDark,
-            "nord_light" => Self::NordLight,
-            "tokyo_night" => Self::TokyoNight,
-            "tokyo_night_storm" => Self::TokyoNightStorm,
-            "tokyo_night_light" => Self::TokyoNightLight,
-            _ => Self::default(),
-        }
-    }
-
-    /// Load from eframe storage, defaults to EguiDark
-    fn load(storage: Option<&dyn eframe::Storage>) -> Self {
-        storage
-            .and_then(|s| s.get_string(THEME_STORAGE_KEY))
-            .map(|s| Self::from_str(&s))
-            .unwrap_or_default()
-    }
+/// Persisted application settings (theme, zoom, etc.)
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct AppSettings {
+    /// Theme preference
+    theme: ThemePreference,
+    /// Zoom level (None = system default)
+    zoom: Option<f32>,
 }
+
+const APP_SETTINGS_KEY: &str = "app_settings";
 
 /// Import format for flow import
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -590,8 +563,10 @@ pub struct StromApp {
     show_system_monitor: bool,
     /// Last time WebRTC stats were polled
     last_webrtc_poll: instant::Instant,
-    /// Current theme preference
-    theme_preference: ThemePreference,
+    /// Persisted settings (theme, zoom, etc.)
+    settings: AppSettings,
+    /// Whether we need to apply settings in the first update frame (workaround for iOS)
+    needs_initial_settings_apply: bool,
     /// Version information from the backend
     version_info: Option<crate::api::VersionInfo>,
     /// Login screen
@@ -765,7 +740,11 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::load(cc.storage),
+            settings: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, APP_SETTINGS_KEY))
+                .unwrap_or_default(),
+            needs_initial_settings_apply: true,
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -809,8 +788,7 @@ impl StromApp {
             native_pixels_per_point: cc.egui_ctx.pixels_per_point(),
         };
 
-        // Apply initial theme based on system preference
-        app.apply_theme(cc.egui_ctx.clone());
+        // Note: Settings (theme, zoom) are applied in first update() frame for iOS compatibility
 
         // Load default elements temporarily (will be replaced by API data)
         app.palette.load_default_elements();
@@ -892,7 +870,11 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::load(cc.storage),
+            settings: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, APP_SETTINGS_KEY))
+                .unwrap_or_default(),
+            needs_initial_settings_apply: true,
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -936,8 +918,7 @@ impl StromApp {
             native_pixels_per_point: cc.egui_ctx.pixels_per_point(),
         };
 
-        // Apply initial theme based on system preference
-        app.apply_theme(cc.egui_ctx.clone());
+        // Note: Settings (theme, zoom) are applied in first update() frame for iOS compatibility
 
         // Load default elements temporarily (will be replaced by API data)
         app.palette.load_default_elements();
@@ -978,7 +959,9 @@ impl StromApp {
     fn apply_theme(&self, ctx: egui::Context) {
         use crate::themes;
 
-        let visuals = match self.theme_preference {
+        tracing::debug!("Applying theme: {:?}", self.settings.theme);
+
+        let visuals = match self.settings.theme {
             ThemePreference::EguiDark => egui::Visuals::dark(),
             ThemePreference::EguiLight => egui::Visuals::light(),
             ThemePreference::NordDark => themes::nord_dark(),
@@ -2327,7 +2310,7 @@ impl StromApp {
                         ui.separator();
 
                         // Theme picker
-                        let theme_name = match self.theme_preference {
+                        let theme_name = match self.settings.theme {
                             ThemePreference::EguiDark => "Dark",
                             ThemePreference::EguiLight => "Light",
                             ThemePreference::NordDark => "Nord Dark",
@@ -2351,10 +2334,10 @@ impl StromApp {
                                 ];
                                 for (theme, label) in themes {
                                     if ui
-                                        .selectable_label(self.theme_preference == theme, label)
+                                        .selectable_label(self.settings.theme == theme, label)
                                         .clicked()
                                     {
-                                        self.theme_preference = theme;
+                                        self.settings.theme = theme;
                                         self.apply_theme(ctx.clone());
                                     }
                                 }
@@ -2433,7 +2416,9 @@ impl StromApp {
                     let zoom_percent = (current_zoom * 100.0).round() as i32;
 
                     if ui.small_button("-").on_hover_text("Zoom out").clicked() {
-                        ctx.set_pixels_per_point((current_zoom / 1.1).max(0.5));
+                        let new_zoom = (current_zoom / 1.1).max(0.5);
+                        ctx.set_pixels_per_point(new_zoom);
+                        self.settings.zoom = Some(new_zoom);
                     }
 
                     if ui
@@ -2442,10 +2427,13 @@ impl StromApp {
                         .clicked()
                     {
                         ctx.set_pixels_per_point(self.native_pixels_per_point);
+                        self.settings.zoom = None; // Reset to system default
                     }
 
                     if ui.small_button("+").on_hover_text("Zoom in").clicked() {
-                        ctx.set_pixels_per_point((current_zoom * 1.1).min(5.0));
+                        let new_zoom = (current_zoom * 1.1).min(5.0);
+                        ctx.set_pixels_per_point(new_zoom);
+                        self.settings.zoom = Some(new_zoom);
                     }
 
                     // Open Web GUI button (native mode only)
@@ -2533,7 +2521,7 @@ impl StromApp {
                     ui.separator();
 
                     // Theme dropdown menu
-                    let theme_name = match self.theme_preference {
+                    let theme_name = match self.settings.theme {
                         ThemePreference::EguiDark => "Dark",
                         ThemePreference::EguiLight => "Light",
                         ThemePreference::NordDark => "Nord Dark",
@@ -2557,10 +2545,10 @@ impl StromApp {
                             ];
                             for (theme, label) in themes {
                                 if ui
-                                    .selectable_label(self.theme_preference == theme, label)
+                                    .selectable_label(self.settings.theme == theme, label)
                                     .clicked()
                                 {
-                                    self.theme_preference = theme;
+                                    self.settings.theme = theme;
                                     self.apply_theme(ctx.clone());
                                 }
                             }
@@ -5400,6 +5388,16 @@ impl eframe::App for StromApp {
             }
         }
 
+        // Apply theme and zoom in first update frame (iOS workaround - settings during construction may not persist)
+        // Apply settings in first update frame (iOS workaround - settings during construction may not persist)
+        if self.needs_initial_settings_apply {
+            self.needs_initial_settings_apply = false;
+            self.apply_theme(ctx.clone());
+            if let Some(zoom) = self.settings.zoom {
+                ctx.set_pixels_per_point(zoom);
+            }
+        }
+
         // Handle pending flow selection (deferred from previous frame to avoid accesskit panic)
         // This MUST happen before any UI is drawn to prevent "Focused ID not in node list" errors
         if let Some(flow_id) = self.pending_flow_selection.take() {
@@ -5490,6 +5488,7 @@ impl eframe::App for StromApp {
                                             && scale_f32 < 10.0
                                         {
                                             ctx.set_pixels_per_point(scale_f32);
+                                            self.settings.zoom = Some(scale_f32);
                                         }
                                     }
                                 }
@@ -6842,11 +6841,13 @@ impl eframe::App for StromApp {
         }
     }
 
-    /// Save persistent state (called by eframe on shutdown)
+    /// Save persistent state (called by eframe on shutdown and periodically)
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(
-            THEME_STORAGE_KEY,
-            self.theme_preference.as_str().to_string(),
-        );
+        eframe::set_value(storage, APP_SETTINGS_KEY, &self.settings);
+    }
+
+    /// Auto-save interval - save every second to ensure persistence on iOS PWA
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(1)
     }
 }
