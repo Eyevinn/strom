@@ -25,6 +25,7 @@ mod ptp_monitor;
 mod qos_monitor;
 mod state;
 mod system_monitor;
+mod themes;
 mod webrtc_stats;
 mod ws;
 

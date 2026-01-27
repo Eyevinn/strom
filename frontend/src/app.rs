@@ -48,7 +48,7 @@ pub fn remove_local_storage(key: &str) {
     }
 }
 
-// Stubs for native mode (use in-memory HashMap)
+// Stubs for native mode (in-memory only, used for transient state)
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 #[cfg(not(target_arch = "wasm32"))]
@@ -303,12 +303,36 @@ fn get_current_hostname() -> String {
 }
 
 /// Theme preference for the application
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 enum ThemePreference {
-    System,
-    Light,
-    Dark,
+    /// Standard egui dark theme
+    #[default]
+    EguiDark,
+    /// Standard egui light theme
+    EguiLight,
+    /// Nord Dark theme (arctic-inspired)
+    NordDark,
+    /// Nord Light theme (arctic-inspired)
+    NordLight,
+    /// Tokyo Night theme (VSCode-inspired)
+    TokyoNight,
+    /// Tokyo Night Storm variant (lighter dark)
+    TokyoNightStorm,
+    /// Tokyo Night Light theme
+    TokyoNightLight,
 }
+
+/// Persisted application settings (theme, zoom, etc.)
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct AppSettings {
+    /// Theme preference
+    theme: ThemePreference,
+    /// Zoom level (None = system default)
+    zoom: Option<f32>,
+}
+
+const APP_SETTINGS_KEY: &str = "app_settings";
 
 /// Import format for flow import
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -539,8 +563,10 @@ pub struct StromApp {
     show_system_monitor: bool,
     /// Last time WebRTC stats were polled
     last_webrtc_poll: instant::Instant,
-    /// Current theme preference
-    theme_preference: ThemePreference,
+    /// Persisted settings (theme, zoom, etc.)
+    settings: AppSettings,
+    /// Whether we need to apply settings in the first update frame (workaround for iOS)
+    needs_initial_settings_apply: bool,
     /// Version information from the backend
     version_info: Option<crate::api::VersionInfo>,
     /// Login screen
@@ -714,7 +740,11 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::Dark,
+            settings: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, APP_SETTINGS_KEY))
+                .unwrap_or_default(),
+            needs_initial_settings_apply: true,
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -758,8 +788,7 @@ impl StromApp {
             native_pixels_per_point: cc.egui_ctx.pixels_per_point(),
         };
 
-        // Apply initial theme based on system preference
-        app.apply_theme(cc.egui_ctx.clone());
+        // Note: Settings (theme, zoom) are applied in first update() frame for iOS compatibility
 
         // Load default elements temporarily (will be replaced by API data)
         app.palette.load_default_elements();
@@ -841,7 +870,11 @@ impl StromApp {
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
             last_webrtc_poll: instant::Instant::now(),
-            theme_preference: ThemePreference::Dark,
+            settings: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, APP_SETTINGS_KEY))
+                .unwrap_or_default(),
+            needs_initial_settings_apply: true,
             version_info: None,
             login_screen: LoginScreen::default(),
             auth_status: None,
@@ -885,8 +918,7 @@ impl StromApp {
             native_pixels_per_point: cc.egui_ctx.pixels_per_point(),
         };
 
-        // Apply initial theme based on system preference
-        app.apply_theme(cc.egui_ctx.clone());
+        // Note: Settings (theme, zoom) are applied in first update() frame for iOS compatibility
 
         // Load default elements temporarily (will be replaced by API data)
         app.palette.load_default_elements();
@@ -925,34 +957,18 @@ impl StromApp {
 
     /// Apply the current theme preference to the UI context.
     fn apply_theme(&self, ctx: egui::Context) {
-        let visuals = match self.theme_preference {
-            ThemePreference::System => {
-                // Detect system theme preference
-                #[cfg(target_arch = "wasm32")]
-                {
-                    // In WASM, check browser's preferred color scheme
-                    if let Some(window) = web_sys::window() {
-                        if let Ok(Some(mql)) = window.match_media("(prefers-color-scheme: dark)") {
-                            if mql.matches() {
-                                egui::Visuals::dark()
-                            } else {
-                                egui::Visuals::light()
-                            }
-                        } else {
-                            egui::Visuals::dark() // Default to dark if detection fails
-                        }
-                    } else {
-                        egui::Visuals::dark() // Default to dark if no window
-                    }
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    // In native mode, default to dark theme (could be enhanced to detect OS theme)
-                    egui::Visuals::dark()
-                }
-            }
-            ThemePreference::Light => egui::Visuals::light(),
-            ThemePreference::Dark => egui::Visuals::dark(),
+        use crate::themes;
+
+        tracing::debug!("Applying theme: {:?}", self.settings.theme);
+
+        let visuals = match self.settings.theme {
+            ThemePreference::EguiDark => egui::Visuals::dark(),
+            ThemePreference::EguiLight => egui::Visuals::light(),
+            ThemePreference::NordDark => themes::nord_dark(),
+            ThemePreference::NordLight => themes::nord_light(),
+            ThemePreference::TokyoNight => themes::tokyo_night(),
+            ThemePreference::TokyoNightStorm => themes::tokyo_night_storm(),
+            ThemePreference::TokyoNightLight => themes::tokyo_night_light(),
         };
         ctx.set_visuals(visuals);
     }
@@ -2269,7 +2285,7 @@ impl StromApp {
                     ui.label("›");
                     ui.label(block_id);
 
-                    // Right side: connection status and copy URL button
+                    // Right side: connection status, theme picker, and copy URL button
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Copy URL button (WASM only)
                         #[cfg(target_arch = "wasm32")]
@@ -2290,6 +2306,42 @@ impl StromApp {
                                 }
                             }
                         }
+
+                        ui.separator();
+
+                        // Theme picker
+                        let theme_name = match self.settings.theme {
+                            ThemePreference::EguiDark => "Dark",
+                            ThemePreference::EguiLight => "Light",
+                            ThemePreference::NordDark => "Nord Dark",
+                            ThemePreference::NordLight => "Nord Light",
+                            ThemePreference::TokyoNight => "Tokyo Night",
+                            ThemePreference::TokyoNightStorm => "Tokyo Storm",
+                            ThemePreference::TokyoNightLight => "Tokyo Light",
+                        };
+
+                        egui::ComboBox::from_id_salt("live_theme_selector")
+                            .selected_text(theme_name)
+                            .show_ui(ui, |ui| {
+                                let themes = [
+                                    (ThemePreference::EguiDark, "Dark (default)"),
+                                    (ThemePreference::EguiLight, "Light (default)"),
+                                    (ThemePreference::NordDark, "Nord Dark"),
+                                    (ThemePreference::NordLight, "Nord Light"),
+                                    (ThemePreference::TokyoNight, "Tokyo Night"),
+                                    (ThemePreference::TokyoNightStorm, "Tokyo Night Storm"),
+                                    (ThemePreference::TokyoNightLight, "Tokyo Night Light"),
+                                ];
+                                for (theme, label) in themes {
+                                    if ui
+                                        .selectable_label(self.settings.theme == theme, label)
+                                        .clicked()
+                                    {
+                                        self.settings.theme = theme;
+                                        self.apply_theme(ctx.clone());
+                                    }
+                                }
+                            });
 
                         ui.separator();
 
@@ -2364,7 +2416,9 @@ impl StromApp {
                     let zoom_percent = (current_zoom * 100.0).round() as i32;
 
                     if ui.small_button("-").on_hover_text("Zoom out").clicked() {
-                        ctx.set_pixels_per_point((current_zoom / 1.1).max(0.5));
+                        let new_zoom = (current_zoom / 1.1).max(0.5);
+                        ctx.set_pixels_per_point(new_zoom);
+                        self.settings.zoom = Some(new_zoom);
                     }
 
                     if ui
@@ -2373,10 +2427,13 @@ impl StromApp {
                         .clicked()
                     {
                         ctx.set_pixels_per_point(self.native_pixels_per_point);
+                        self.settings.zoom = None; // Reset to system default
                     }
 
                     if ui.small_button("+").on_hover_text("Zoom in").clicked() {
-                        ctx.set_pixels_per_point((current_zoom * 1.1).min(5.0));
+                        let new_zoom = (current_zoom * 1.1).min(5.0);
+                        ctx.set_pixels_per_point(new_zoom);
+                        self.settings.zoom = Some(new_zoom);
                     }
 
                     // Open Web GUI button (native mode only)
@@ -2463,26 +2520,39 @@ impl StromApp {
 
                     ui.separator();
 
-                    // Theme switch button
-                    let theme_icon = match self.theme_preference {
-                        ThemePreference::System => "🖥",
-                        ThemePreference::Light => "☀",
-                        ThemePreference::Dark => "🌙",
+                    // Theme dropdown menu
+                    let theme_name = match self.settings.theme {
+                        ThemePreference::EguiDark => "Dark",
+                        ThemePreference::EguiLight => "Light",
+                        ThemePreference::NordDark => "Nord Dark",
+                        ThemePreference::NordLight => "Nord Light",
+                        ThemePreference::TokyoNight => "Tokyo Night",
+                        ThemePreference::TokyoNightStorm => "Tokyo Storm",
+                        ThemePreference::TokyoNightLight => "Tokyo Light",
                     };
 
-                    if ui
-                        .button(theme_icon)
-                        .on_hover_text("Change theme")
-                        .clicked()
-                    {
-                        let new_theme = match self.theme_preference {
-                            ThemePreference::System => ThemePreference::Light,
-                            ThemePreference::Light => ThemePreference::Dark,
-                            ThemePreference::Dark => ThemePreference::System,
-                        };
-                        self.theme_preference = new_theme;
-                        self.apply_theme(ctx.clone());
-                    }
+                    egui::ComboBox::from_id_salt("theme_selector")
+                        .selected_text(theme_name)
+                        .show_ui(ui, |ui| {
+                            let themes = [
+                                (ThemePreference::EguiDark, "Dark (default)"),
+                                (ThemePreference::EguiLight, "Light (default)"),
+                                (ThemePreference::NordDark, "Nord Dark"),
+                                (ThemePreference::NordLight, "Nord Light"),
+                                (ThemePreference::TokyoNight, "Tokyo Night"),
+                                (ThemePreference::TokyoNightStorm, "Tokyo Night Storm"),
+                                (ThemePreference::TokyoNightLight, "Tokyo Night Light"),
+                            ];
+                            for (theme, label) in themes {
+                                if ui
+                                    .selectable_label(self.settings.theme == theme, label)
+                                    .clicked()
+                                {
+                                    self.settings.theme = theme;
+                                    self.apply_theme(ctx.clone());
+                                }
+                            }
+                        });
 
                     // Logout button (only show if auth is enabled and user is authenticated)
                     if let Some(ref status) = self.auth_status {
@@ -5318,6 +5388,16 @@ impl eframe::App for StromApp {
             }
         }
 
+        // Apply theme and zoom in first update frame (iOS workaround - settings during construction may not persist)
+        // Apply settings in first update frame (iOS workaround - settings during construction may not persist)
+        if self.needs_initial_settings_apply {
+            self.needs_initial_settings_apply = false;
+            self.apply_theme(ctx.clone());
+            if let Some(zoom) = self.settings.zoom {
+                ctx.set_pixels_per_point(zoom);
+            }
+        }
+
         // Handle pending flow selection (deferred from previous frame to avoid accesskit panic)
         // This MUST happen before any UI is drawn to prevent "Focused ID not in node list" errors
         if let Some(flow_id) = self.pending_flow_selection.take() {
@@ -5408,6 +5488,7 @@ impl eframe::App for StromApp {
                                             && scale_f32 < 10.0
                                         {
                                             ctx.set_pixels_per_point(scale_f32);
+                                            self.settings.zoom = Some(scale_f32);
                                         }
                                     }
                                 }
@@ -6758,5 +6839,15 @@ impl eframe::App for StromApp {
         if let Some(flow) = self.flow_pending_copy.take() {
             self.copy_flow(&flow, ctx);
         }
+    }
+
+    /// Save persistent state (called by eframe on shutdown and periodically)
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, APP_SETTINGS_KEY, &self.settings);
+    }
+
+    /// Auto-save interval - save every second to ensure persistence on iOS PWA
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(1)
     }
 }
