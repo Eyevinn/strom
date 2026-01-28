@@ -785,12 +785,14 @@ impl GraphEditor {
                 |pos: Pos2| -> Pos2 { ((pos - rect_min - pan_offset) / zoom).to_pos2() };
 
             // Handle zoom and scroll - use global pointer position so it works even over nodes
+            // But don't capture scroll if a window/modal is hovered (prevents scroll bleed-through)
             let pointer_pos = ui.input(|i| i.pointer.hover_pos());
             let pointer_in_canvas = pointer_pos
                 .map(|p| response.rect.contains(p))
                 .unwrap_or(false);
+            let window_hovered = ui.ctx().wants_pointer_input();
 
-            if pointer_in_canvas {
+            if pointer_in_canvas && !window_hovered {
                 let hover_pos = pointer_pos.unwrap();
                 let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
                 let pinch_zoom = ui.input(|i| i.zoom_delta());
@@ -1033,6 +1035,13 @@ impl GraphEditor {
                     && block.block_definition_id == "builtin.whep_output"
                 {
                     set_local_storage("open_whep_player", &block.id);
+                }
+
+                // Handle double-click to open routing matrix for Audio Router blocks
+                if node_response.double_clicked()
+                    && block.block_definition_id == "builtin.audiorouter"
+                {
+                    set_local_storage("open_routing_editor", &block.id);
                 }
 
                 // Note: Playlist editor for media player is opened via the + button in the compact UI

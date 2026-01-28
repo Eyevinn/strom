@@ -4,6 +4,7 @@ use egui::{CentralPanel, Color32, Context, SidePanel, TopBottomPanel};
 use strom_types::{Flow, PipelineState};
 
 use crate::api::{ApiClient, AuthStatusResponse};
+use crate::audiorouter::RoutingMatrixEditor;
 use crate::compositor_editor::CompositorEditor;
 use crate::graph::GraphEditor;
 use crate::info_page::{
@@ -618,6 +619,8 @@ pub struct StromApp {
     compositor_editor: Option<CompositorEditor>,
     /// Playlist editor (if open)
     playlist_editor: Option<PlaylistEditor>,
+    /// Routing matrix editor for Audio Router blocks (if open)
+    routing_matrix_editor: Option<RoutingMatrixEditor>,
     /// Log entries for pipeline messages (errors, warnings, info)
     log_entries: Vec<LogEntry>,
     /// Whether to show the log panel
@@ -781,6 +784,7 @@ impl StromApp {
             show_stats_panel: false,
             compositor_editor: None,
             playlist_editor: None,
+            routing_matrix_editor: None,
             network_interfaces: Vec::new(),
             network_interfaces_loaded: false,
             available_channels: Vec::new(),
@@ -916,6 +920,7 @@ impl StromApp {
             show_stats_panel: false,
             compositor_editor: None,
             playlist_editor: None,
+            routing_matrix_editor: None,
             network_interfaces: Vec::new(),
             network_interfaces_loaded: false,
             available_channels: Vec::new(),
@@ -5885,7 +5890,7 @@ impl eframe::App for StromApp {
                                 element_id.clone(),
                                 crate::meter::MeterData { rms, peak, decay },
                             );
-                            tracing::trace!("📊 Meter data stored for element {}", element_id);
+                            tracing::trace!("Meter data stored for element {}", element_id);
                         }
                         StromEvent::MediaPlayerPosition {
                             flow_id,
@@ -6720,6 +6725,73 @@ impl eframe::App for StromApp {
             if !editor.open {
                 self.playlist_editor = None;
             }
+        }
+
+        // Check for routing matrix editor open signal
+        if let Some(block_id) = get_local_storage("open_routing_editor") {
+            remove_local_storage("open_routing_editor");
+
+            // Get current flow and block definitions
+            if let Some(flow) = self.current_flow() {
+                if let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) {
+                    // Find block definition using graph's lookup
+                    if let Some(definition) = self
+                        .graph
+                        .get_block_definition_by_id(&block.block_definition_id)
+                    {
+                        let mut editor = RoutingMatrixEditor::new(flow.id, block_id.clone());
+                        editor.load_from_block(block, definition);
+                        self.routing_matrix_editor = Some(editor);
+                    }
+                }
+            }
+        }
+
+        // Show routing matrix editor if open
+        let mut routing_save_pending: Option<(strom_types::FlowId, String, String)> = None;
+        if let Some(ref mut editor) = self.routing_matrix_editor {
+            if let Some(routing_json) = editor.show(ctx) {
+                // Mark that we need to save
+                routing_save_pending =
+                    Some((editor.flow_id, editor.block_id.clone(), routing_json));
+            }
+
+            if !editor.open {
+                self.routing_matrix_editor = None;
+            }
+        }
+
+        // Process routing save outside the borrow
+        if let Some((flow_id, block_id, routing_json)) = routing_save_pending {
+            tracing::debug!(
+                "Processing routing save for block {} in flow {}",
+                block_id,
+                flow_id
+            );
+            tracing::debug!("Routing JSON to save: {}", routing_json);
+
+            // Update the block property in BOTH self.graph.blocks AND self.flows
+            // (save_current_flow copies from graph.blocks, so we must update there)
+            if let Some(block) = self.graph.blocks.iter_mut().find(|b| b.id == block_id) {
+                block.properties.insert(
+                    "routing_matrix".to_string(),
+                    strom_types::PropertyValue::String(routing_json.clone()),
+                );
+                tracing::debug!("Updated routing_matrix in graph.blocks");
+            }
+
+            // Also update in self.flows for consistency
+            if let Some(flow) = self.flows.iter_mut().find(|f| f.id == flow_id) {
+                if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_id) {
+                    block.properties.insert(
+                        "routing_matrix".to_string(),
+                        strom_types::PropertyValue::String(routing_json),
+                    );
+                }
+            }
+
+            // Save the flow
+            self.save_current_flow(ctx);
         }
 
         // Check for player action signals (from compact UI controls)

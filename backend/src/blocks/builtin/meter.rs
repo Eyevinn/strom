@@ -18,7 +18,7 @@ impl BlockBuilder for MeterBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        tracing::info!("Building Meter block instance: {}", instance_id);
+        tracing::debug!("Building Meter block instance: {}", instance_id);
 
         // Get interval property (in milliseconds, convert to nanoseconds for GStreamer)
         let interval_ms = properties
@@ -32,8 +32,8 @@ impl BlockBuilder for MeterBuilder {
 
         let interval_ns = interval_ms * 1_000_000; // Convert ms to ns
 
-        tracing::info!(
-            "📊 Meter block properties: interval_ms={}, interval_ns={}",
+        tracing::debug!(
+            "Meter block properties: interval_ms={}, interval_ns={}",
             interval_ms,
             interval_ns
         );
@@ -41,8 +41,7 @@ impl BlockBuilder for MeterBuilder {
         // Create the level element
         let level_id = format!("{}:level", instance_id);
 
-        tracing::info!("Creating level element: {}", level_id);
-        tracing::info!("Setting post-messages=true on level element");
+        tracing::debug!("Creating level element: {}", level_id);
 
         let level = gst::ElementFactory::make("level")
             .name(&level_id)
@@ -51,12 +50,15 @@ impl BlockBuilder for MeterBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("level: {}", e)))?;
 
-        tracing::info!("Level element created successfully: {}", level_id);
+        tracing::debug!("Level element created successfully: {}", level_id);
 
         // Create a bus message handler that will be called when the pipeline starts
+        // Clone level_id for the closure - this ensures the handler only processes
+        // messages from THIS meter's level element, not from other meters
+        let expected_element_id = level_id.clone();
         let bus_message_handler = Some(Box::new(
             move |bus: &gst::Bus, flow_id: FlowId, events: EventBroadcaster| {
-                connect_level_message_handler(bus, flow_id, events)
+                connect_level_message_handler(bus, flow_id, events, expected_element_id.clone())
             },
         ) as crate::blocks::BusMessageConnectFn);
 
@@ -83,17 +85,25 @@ fn extract_level_values(structure: &gst::StructureRef, field_name: &str) -> Vec<
     }
 }
 
-/// Connect a message handler for level messages from the meter block.
+/// Connect a message handler for level messages from a specific meter block.
 /// This is called when the pipeline starts and uses `connect_message` which
 /// allows multiple handlers (unlike `add_watch` which only allows one).
+///
+/// The `expected_element_id` parameter ensures this handler only processes
+/// messages from its own level element, preventing duplicate events when
+/// multiple meter blocks are in the same pipeline.
 fn connect_level_message_handler(
     bus: &gst::Bus,
     flow_id: FlowId,
     events: EventBroadcaster,
+    expected_element_id: String,
 ) -> gst::glib::SignalHandlerId {
     use gst::MessageView;
 
-    debug!("Connecting level message handler via connect_message");
+    debug!(
+        "Connecting level message handler for flow {} element {}",
+        flow_id, expected_element_id
+    );
 
     // First ensure signal watch is enabled (this is ref-counted, safe to call multiple times)
     bus.add_signal_watch();
@@ -103,25 +113,31 @@ fn connect_level_message_handler(
         // Only handle element messages with "level" structure
         if let MessageView::Element(element_msg) = msg.view() {
             if let Some(s) = element_msg.structure() {
-                let structure_name = s.name();
-
-                if structure_name == "level" {
-                    trace!("Received 'level' message from GStreamer bus!");
-
-                    // Extract element ID from the source
+                if s.name() == "level" {
+                    // Extract element ID from the source and check if it's from our level element
                     if let Some(source) = msg.src() {
-                        let full_element_id = source.name().to_string();
-                        trace!("Level message from element: {}", full_element_id);
+                        let source_element_id = source.name().to_string();
+
+                        // Only process messages from our specific level element
+                        // This prevents duplicate events when multiple meters are in the pipeline
+                        if source_element_id != expected_element_id {
+                            return; // Not our message, ignore it
+                        }
+
+                        trace!(
+                            "Level message from element: {} (flow {})",
+                            source_element_id,
+                            flow_id
+                        );
 
                         // Strip ":level" suffix to get the block ID
                         // Meter blocks create elements like "block_id:level", but UI looks up by "block_id"
                         let element_id =
-                            if let Some(block_id) = full_element_id.strip_suffix(":level") {
+                            if let Some(block_id) = source_element_id.strip_suffix(":level") {
                                 block_id.to_string()
                             } else {
-                                full_element_id
+                                source_element_id
                             };
-                        trace!("Using block ID for lookup: {}", element_id);
 
                         // Extract RMS, peak, and decay values from the message structure
                         // These are GValueArrays containing one f64 per channel
@@ -129,18 +145,12 @@ fn connect_level_message_handler(
                         let peak = extract_level_values(s, "peak");
                         let decay = extract_level_values(s, "decay");
 
-                        trace!(
-                            "📊 Extracted values: rms={:?}, peak={:?}, decay={:?}",
-                            rms,
-                            peak,
-                            decay
-                        );
-
                         if !rms.is_empty() {
                             trace!(
-                                "📊 Broadcasting MeterData event for flow {} element {}",
+                                "Broadcasting MeterData for flow {} element {} ({} channels)",
                                 flow_id,
-                                element_id
+                                element_id,
+                                rms.len()
                             );
                             // Broadcast meter data event
                             events.broadcast(StromEvent::MeterData {
@@ -153,8 +163,6 @@ fn connect_level_message_handler(
                         } else {
                             warn!("RMS array is empty, not broadcasting MeterData");
                         }
-                    } else {
-                        warn!("Level message has no source element");
                     }
                 }
             }

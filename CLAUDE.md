@@ -9,6 +9,9 @@ compiles to both native and WASM
 
 don't suggest blacklisting elements when troubleshooting segfaults. 
 
+do not add emojis to logging.
+if you find emojis in log rows, i.e. info!, debug!, trace!, warn!, error!: remove emojis. emojis in icons are ok. 
+
 when investigating pipeline errors, segfaults and troubleshooting: 
 - Use GST_DEBUG an GST_DEBUG_FILE for gstreamer logs
 - Use config logging in .strom.toml, set level to debug or tracing. Then monitor the logging file. 

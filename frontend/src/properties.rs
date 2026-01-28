@@ -431,6 +431,13 @@ impl PropertyInspector {
                 crate::app::set_local_storage("open_playlist_editor", &block.id);
             }
 
+            // Edit Routing Matrix button for Audio Router blocks
+            if definition.id == "builtin.audiorouter"
+                && ui.button("🔀 Edit Routing Matrix").clicked()
+            {
+                crate::app::set_local_storage("open_routing_editor", &block.id);
+            }
+
             // Download VLC Playlist button for MPEG-TS/SRT output blocks (only in listener mode)
             if definition.id == "builtin.mpegtssrt_output" {
                 // Get SRT URI from block properties
@@ -527,16 +534,28 @@ impl PropertyInspector {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if !definition.exposed_properties.is_empty() {
-                        for exposed_prop in &definition.exposed_properties {
-                            Self::show_exposed_property(
+                        // Special handling for Audio Router - show only relevant properties
+                        if definition.id == "builtin.audiorouter" {
+                            Self::show_audiorouter_properties(
                                 ui,
                                 block,
-                                exposed_prop,
                                 definition,
                                 flow_id,
                                 network_interfaces,
                                 available_channels,
                             );
+                        } else {
+                            for exposed_prop in &definition.exposed_properties {
+                                Self::show_exposed_property(
+                                    ui,
+                                    block,
+                                    exposed_prop,
+                                    definition,
+                                    flow_id,
+                                    network_interfaces,
+                                    available_channels,
+                                );
+                            }
                         }
                     } else {
                         ui.label("This block has no configurable properties");
@@ -545,13 +564,13 @@ impl PropertyInspector {
                     // Show meter visualization for meter blocks
                     if definition.id == "builtin.meter" {
                         ui.separator();
-                        tracing::debug!("📊 Checking for meter data: flow_id={:?}, block_id={}", flow_id, block.id);
+                        tracing::debug!("Checking for meter data: flow_id={:?}, block_id={}", flow_id, block.id);
                         if let Some(flow_id) = flow_id {
                             if let Some(meter_data) = meter_data_store.get(&flow_id, &block.id) {
-                                tracing::debug!("📊 Found meter data, calling show_full");
+                                tracing::debug!("Found meter data, calling show_full");
                                 crate::meter::show_full(ui, &block.id, meter_data);
                             } else {
-                                tracing::debug!("📊 No meter data found for this block");
+                                tracing::debug!("No meter data found for this block");
                                 ui.colored_label(
                                     Color32::from_rgb(200, 200, 100),
                                     "⚠ No audio level data available",
@@ -560,7 +579,7 @@ impl PropertyInspector {
                                 ui.small("Meter data will appear when audio is flowing through this block.");
                             }
                         } else {
-                            tracing::debug!("📊 No flow_id available");
+                            tracing::debug!("No flow_id available");
                             ui.colored_label(
                                 Color32::from_rgb(200, 200, 100),
                                 "⚠ No flow selected",
@@ -758,11 +777,132 @@ impl PropertyInspector {
                             ui.small("Start the flow to see RTP jitterbuffer statistics.");
                         }
                     }
+
                 });
             }); // outer ScrollArea
         });
 
         result
+    }
+
+    /// Show Audio Router properties with filtered view.
+    fn show_audiorouter_properties(
+        ui: &mut Ui,
+        block: &mut BlockInstance,
+        definition: &BlockDefinition,
+        flow_id: Option<strom_types::FlowId>,
+        network_interfaces: &[strom_types::NetworkInterfaceInfo],
+        available_channels: &[strom_types::api::AvailableOutput],
+    ) {
+        // Helper to get property value (from block or default)
+        let get_uint_prop = |name: &str| -> usize {
+            block
+                .properties
+                .get(name)
+                .and_then(|v| match v {
+                    PropertyValue::UInt(u) => Some(*u as usize),
+                    PropertyValue::Int(i) if *i > 0 => Some(*i as usize),
+                    _ => None,
+                })
+                .or_else(|| {
+                    definition
+                        .exposed_properties
+                        .iter()
+                        .find(|p| p.name == name)
+                        .and_then(|p| p.default_value.as_ref())
+                        .and_then(|v| match v {
+                            PropertyValue::UInt(u) => Some(*u as usize),
+                            PropertyValue::Int(i) if *i > 0 => Some(*i as usize),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(2)
+        };
+
+        // Get current num_inputs and num_outputs
+        let num_inputs = get_uint_prop("num_inputs").clamp(1, 8);
+        let num_outputs = get_uint_prop("num_outputs").clamp(1, 8);
+
+        // Show num_inputs property
+        if let Some(prop) = definition
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == "num_inputs")
+        {
+            Self::show_exposed_property(
+                ui,
+                block,
+                prop,
+                definition,
+                flow_id,
+                network_interfaces,
+                available_channels,
+            );
+        }
+
+        // Show relevant input channel properties
+        for i in 0..num_inputs {
+            let prop_name = format!("input_{}_channels", i);
+            if let Some(prop) = definition
+                .exposed_properties
+                .iter()
+                .find(|p| p.name == prop_name)
+            {
+                Self::show_exposed_property(
+                    ui,
+                    block,
+                    prop,
+                    definition,
+                    flow_id,
+                    network_interfaces,
+                    available_channels,
+                );
+            }
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // Show num_outputs property
+        if let Some(prop) = definition
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == "num_outputs")
+        {
+            Self::show_exposed_property(
+                ui,
+                block,
+                prop,
+                definition,
+                flow_id,
+                network_interfaces,
+                available_channels,
+            );
+        }
+
+        // Show relevant output channel properties
+        for i in 0..num_outputs {
+            let prop_name = format!("output_{}_channels", i);
+            if let Some(prop) = definition
+                .exposed_properties
+                .iter()
+                .find(|p| p.name == prop_name)
+            {
+                Self::show_exposed_property(
+                    ui,
+                    block,
+                    prop,
+                    definition,
+                    flow_id,
+                    network_interfaces,
+                    available_channels,
+                );
+            }
+        }
+
+        // Note: routing_matrix property is NOT shown as a text field
+        // The modal routing editor handles all routing configuration
     }
 
     fn show_exposed_property(

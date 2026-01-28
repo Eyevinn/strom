@@ -70,7 +70,7 @@ impl SystemMonitor {
         let (nvml, use_nvidia_smi_fallback) = match nvml_wrapper::Nvml::init() {
             Ok(nvml) => {
                 let count = nvml.device_count().unwrap_or(0);
-                tracing::info!("✓ NVML initialized successfully - found {} GPU(s)", count);
+                tracing::info!("NVML initialized successfully - found {} GPU(s)", count);
                 (Some(nvml), false)
             }
             Err(e) => {
@@ -82,11 +82,11 @@ impl SystemMonitor {
                     Ok(output) if output.status.success() => {
                         let gpu_list = String::from_utf8_lossy(&output.stdout);
                         let count = gpu_list.lines().filter(|l| l.contains("GPU")).count();
-                        tracing::info!("✓ nvidia-smi fallback enabled - found {} GPU(s)", count);
+                        tracing::info!("nvidia-smi fallback enabled - found {} GPU(s)", count);
                         (None, true)
                     }
                     _ => {
-                        tracing::warn!("✗ nvidia-smi also unavailable. GPU monitoring disabled.");
+                        tracing::warn!("nvidia-smi also unavailable. GPU monitoring disabled.");
                         (None, false)
                     }
                 }
