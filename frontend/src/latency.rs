@@ -264,7 +264,11 @@ pub fn show_full(ui: &mut Ui, element_id: &str, latency_data: &LatencyData) {
     ui.horizontal(|ui| {
         ui.label("Average Latency:");
         let color = latency_to_color(avg_ms);
-        ui.label(RichText::new(format!("{:.2} ms", avg_ms)).color(color).strong());
+        ui.label(
+            RichText::new(format!("{:.2} ms", avg_ms))
+                .color(color)
+                .strong(),
+        );
     });
 
     ui.horizontal(|ui| {
@@ -288,10 +292,18 @@ pub fn show_full(ui: &mut Ui, element_id: &str, latency_data: &LatencyData) {
 
     // Draw zone backgrounds
     let zones = [
-        (0.0, 10.0 / max_latency_ms, Color32::from_rgb(0, 60, 0)),      // Excellent
-        (10.0 / max_latency_ms, 50.0 / max_latency_ms, Color32::from_rgb(60, 60, 0)),  // Good
-        (50.0 / max_latency_ms, 100.0 / max_latency_ms, Color32::from_rgb(60, 45, 0)), // Acceptable
-        (100.0 / max_latency_ms, 1.0, Color32::from_rgb(60, 0, 0)),     // Poor
+        (0.0, 10.0 / max_latency_ms, Color32::from_rgb(0, 60, 0)), // Excellent
+        (
+            10.0 / max_latency_ms,
+            50.0 / max_latency_ms,
+            Color32::from_rgb(60, 60, 0),
+        ), // Good
+        (
+            50.0 / max_latency_ms,
+            100.0 / max_latency_ms,
+            Color32::from_rgb(60, 45, 0),
+        ), // Acceptable
+        (100.0 / max_latency_ms, 1.0, Color32::from_rgb(60, 0, 0)), // Poor
     ];
 
     for (start, end, color) in zones {
@@ -315,10 +327,7 @@ pub fn show_full(ui: &mut Ui, element_id: &str, latency_data: &LatencyData) {
     if avg_level > 0.0 {
         let filled_rect = Rect::from_min_max(
             rect.min,
-            egui::pos2(
-                rect.min.x + rect.width() * avg_level as f32,
-                rect.max.y,
-            ),
+            egui::pos2(rect.min.x + rect.width() * avg_level as f32, rect.max.y),
         );
         painter.rect(
             filled_rect,

@@ -163,10 +163,7 @@ fn latency_definition() -> BlockDefinition {
                 name: "samplesperbuffer".to_string(),
                 label: "Samples Per Buffer".to_string(),
                 description: "Number of samples in each outgoing buffer".to_string(),
-                property_type: PropertyType::Int {
-                    min: Some(1),
-                    max: Some(48000),
-                },
+                property_type: PropertyType::Int,
                 default_value: Some(PropertyValue::Int(240)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
