@@ -7,7 +7,8 @@ use crate::gst::{ElementDiscovery, PipelineError, PipelineManager};
 use crate::ptp_monitor::PtpMonitor;
 use crate::sharing::ChannelRegistry;
 use crate::storage::{JsonFileStorage, Storage};
-use crate::system_monitor::SystemMonitor;
+use crate::system_monitor::{SystemMonitor, ThreadCpuSampler};
+use crate::thread_registry::ThreadRegistry;
 use crate::whep_registry::WhepRegistry;
 use chrono::Local;
 use std::collections::{HashMap, HashSet};
@@ -41,6 +42,10 @@ struct AppStateInner {
     block_registry: BlockRegistry,
     /// System monitor for CPU and GPU statistics
     system_monitor: SystemMonitor,
+    /// Thread registry for tracking GStreamer streaming threads
+    thread_registry: ThreadRegistry,
+    /// Thread CPU sampler for measuring per-thread CPU usage
+    thread_cpu_sampler: parking_lot::Mutex<ThreadCpuSampler>,
     /// Channel registry for inter-pipeline sharing
     channel_registry: ChannelRegistry,
     /// AES67 stream discovery service (SAP/mDNS)
@@ -77,6 +82,8 @@ impl AppState {
                 events: events.clone(),
                 block_registry: BlockRegistry::new(blocks_path),
                 system_monitor: SystemMonitor::new(),
+                thread_registry: ThreadRegistry::new(),
+                thread_cpu_sampler: parking_lot::Mutex::new(ThreadCpuSampler::new()),
                 channel_registry: ChannelRegistry::new(),
                 discovery: DiscoveryService::new(events, sap_multicast_addresses.clone()),
                 ptp_monitor: PtpMonitor::new(),
@@ -126,6 +133,19 @@ impl AppState {
     /// Get the configured ICE servers for WebRTC.
     pub fn ice_servers(&self) -> &[String] {
         &self.inner.ice_servers
+    }
+
+    /// Get the thread registry for tracking GStreamer streaming threads.
+    pub fn thread_registry(&self) -> &ThreadRegistry {
+        &self.inner.thread_registry
+    }
+
+    /// Get current thread CPU statistics.
+    ///
+    /// Samples CPU usage for all registered GStreamer streaming threads.
+    pub fn get_thread_stats(&self) -> strom_types::ThreadStats {
+        let mut sampler = self.inner.thread_cpu_sampler.lock();
+        sampler.sample(&self.inner.thread_registry)
     }
 
     /// Start background services (SAP discovery, etc).
@@ -594,6 +614,9 @@ impl AppState {
             self.inner.ice_servers.clone(),
         )?;
         info!("PipelineManager created successfully");
+
+        // Set thread registry for CPU monitoring
+        manager.set_thread_registry(self.inner.thread_registry.clone());
 
         // Start pipeline
         info!("Calling manager.start() (this may block)...");

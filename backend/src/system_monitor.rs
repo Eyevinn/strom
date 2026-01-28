@@ -2,6 +2,7 @@
 //!
 //! Stats are collected in a background thread to avoid blocking the async runtime.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,7 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
-use strom_types::{GpuStats, SystemStats};
+use crate::thread_registry::ThreadRegistry;
+use strom_types::{GpuStats, SystemStats, ThreadCpuStats, ThreadStats};
 
 #[cfg(feature = "nvidia")]
 use std::process::Command;
@@ -265,6 +267,199 @@ impl SystemMonitor {
 }
 
 impl Default for SystemMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Thread CPU sampler for measuring per-thread CPU usage.
+///
+/// This uses Linux-specific /proc filesystem to read thread CPU times.
+/// On other platforms, CPU usage is not available and returns None.
+pub struct ThreadCpuSampler {
+    /// Previous CPU times for each thread (for delta calculation)
+    previous_times: HashMap<u64, ThreadCpuTime>,
+    /// Previous total CPU time (for delta calculation)
+    previous_total_time: u64,
+    /// Number of CPU cores (for scaling)
+    num_cpus: usize,
+}
+
+/// Get the number of CPUs on this system.
+fn get_num_cpus() -> usize {
+    // Use sysinfo to get CPU count (already a dependency)
+    let system =
+        System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::everything()));
+    system.cpus().len().max(1)
+}
+
+/// CPU time for a single thread.
+#[derive(Clone, Copy)]
+struct ThreadCpuTime {
+    /// User mode CPU time in clock ticks
+    utime: u64,
+    /// System mode CPU time in clock ticks
+    stime: u64,
+}
+
+impl ThreadCpuSampler {
+    /// Create a new thread CPU sampler.
+    pub fn new() -> Self {
+        Self {
+            previous_times: HashMap::new(),
+            previous_total_time: 0,
+            num_cpus: get_num_cpus(),
+        }
+    }
+
+    /// Sample CPU usage for all threads in the registry.
+    ///
+    /// Returns ThreadStats with CPU usage percentages for each thread.
+    /// On non-Linux platforms, returns stats with 0% CPU usage.
+    pub fn sample(&mut self, registry: &ThreadRegistry) -> ThreadStats {
+        let threads = registry.get_all();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        #[cfg(target_os = "linux")]
+        let thread_stats = self.sample_linux(&threads);
+
+        #[cfg(not(target_os = "linux"))]
+        let thread_stats = self.sample_stub(&threads);
+
+        ThreadStats {
+            threads: thread_stats,
+            timestamp,
+        }
+    }
+
+    /// Linux implementation: read /proc/{pid}/task/{tid}/stat for CPU times.
+    #[cfg(target_os = "linux")]
+    fn sample_linux(
+        &mut self,
+        threads: &[crate::thread_registry::ThreadInfo],
+    ) -> Vec<ThreadCpuStats> {
+        let pid = std::process::id();
+        let current_total_time = Self::read_total_cpu_time();
+
+        let mut results = Vec::with_capacity(threads.len());
+
+        for thread in threads {
+            let cpu_usage = if let Some(current) = Self::read_thread_cpu_time(pid, thread.thread_id)
+            {
+                // Calculate delta
+                let prev = self.previous_times.get(&thread.thread_id);
+                let cpu_usage = if let Some(prev) = prev {
+                    let delta_thread =
+                        (current.utime + current.stime).saturating_sub(prev.utime + prev.stime);
+                    let delta_total = current_total_time.saturating_sub(self.previous_total_time);
+
+                    if delta_total > 0 {
+                        // CPU usage as percentage (scaled by number of CPUs for multi-core)
+                        // This gives per-thread CPU% where 100% means using one full core
+                        (delta_thread as f32 / delta_total as f32) * 100.0 * self.num_cpus as f32
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                // Store current values for next sample
+                self.previous_times.insert(thread.thread_id, current);
+
+                cpu_usage
+            } else {
+                0.0
+            };
+
+            results.push(ThreadCpuStats {
+                thread_id: thread.thread_id,
+                cpu_usage,
+                element_name: thread.element_name.clone(),
+                flow_id: thread.flow_id,
+                block_id: thread.block_id.clone(),
+            });
+        }
+
+        // Update total time for next sample
+        self.previous_total_time = current_total_time;
+
+        // Clean up old entries for threads that no longer exist
+        let active_thread_ids: std::collections::HashSet<u64> =
+            threads.iter().map(|t| t.thread_id).collect();
+        self.previous_times
+            .retain(|id, _| active_thread_ids.contains(id));
+
+        results
+    }
+
+    /// Read CPU time for a specific thread from /proc/{pid}/task/{tid}/stat.
+    #[cfg(target_os = "linux")]
+    fn read_thread_cpu_time(pid: u32, tid: u64) -> Option<ThreadCpuTime> {
+        let path = format!("/proc/{}/task/{}/stat", pid, tid);
+        let content = std::fs::read_to_string(&path).ok()?;
+
+        // /proc/[pid]/task/[tid]/stat format:
+        // pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt
+        // cmajflt utime stime cutime cstime ...
+        //
+        // We need fields 14 (utime) and 15 (stime), which are 0-indexed as 13 and 14
+        // But the command name (field 2) can contain spaces and parentheses, so we need
+        // to find the closing paren first.
+        let close_paren = content.rfind(')')?;
+        let fields: Vec<&str> = content[close_paren + 2..].split_whitespace().collect();
+
+        // After (comm), fields are: state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
+        // tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9) cmajflt(10) utime(11) stime(12)
+        let utime = fields.get(11)?.parse::<u64>().ok()?;
+        let stime = fields.get(12)?.parse::<u64>().ok()?;
+
+        Some(ThreadCpuTime { utime, stime })
+    }
+
+    /// Read total CPU time from /proc/stat.
+    #[cfg(target_os = "linux")]
+    fn read_total_cpu_time() -> u64 {
+        if let Ok(content) = std::fs::read_to_string("/proc/stat") {
+            // First line is total CPU: cpu user nice system idle iowait irq softirq steal guest guest_nice
+            if let Some(cpu_line) = content.lines().next() {
+                let parts: Vec<&str> = cpu_line.split_whitespace().collect();
+                if parts.len() >= 5 && parts[0] == "cpu" {
+                    // Sum all CPU times
+                    return parts[1..]
+                        .iter()
+                        .filter_map(|s| s.parse::<u64>().ok())
+                        .sum();
+                }
+            }
+        }
+        0
+    }
+
+    /// Stub implementation for non-Linux platforms.
+    #[cfg(not(target_os = "linux"))]
+    fn sample_stub(
+        &mut self,
+        threads: &[crate::thread_registry::ThreadInfo],
+    ) -> Vec<ThreadCpuStats> {
+        // On non-Linux platforms, return threads with 0% CPU usage
+        threads
+            .iter()
+            .map(|thread| ThreadCpuStats {
+                thread_id: thread.thread_id,
+                cpu_usage: 0.0, // Not available on this platform
+                element_name: thread.element_name.clone(),
+                flow_id: thread.flow_id,
+                block_id: thread.block_id.clone(),
+            })
+            .collect()
+    }
+}
+
+impl Default for ThreadCpuSampler {
     fn default() -> Self {
         Self::new()
     }

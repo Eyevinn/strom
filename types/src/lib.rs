@@ -15,6 +15,7 @@ pub mod network;
 pub mod state;
 pub mod stats;
 pub mod system_monitor;
+pub mod thread_stats;
 
 // Re-export commonly used types
 pub use block::{
@@ -34,3 +35,4 @@ pub use stats::{
     RtpSessionStats, StatMetadata, StatValue, Statistic,
 };
 pub use system_monitor::{GpuStats, SystemStats};
+pub use thread_stats::{ThreadCpuStats, ThreadStats};
