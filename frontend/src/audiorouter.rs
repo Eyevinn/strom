@@ -23,6 +23,8 @@ pub struct RoutingMatrixEditor {
     pub output_channels: Vec<usize>,
     /// Currently selected output tab
     pub selected_output: usize,
+    /// Flip rows/columns in matrix display
+    pub flip_layout: bool,
 }
 
 impl RoutingMatrixEditor {
@@ -38,6 +40,7 @@ impl RoutingMatrixEditor {
             input_channels: vec![2, 2],
             output_channels: vec![2, 2],
             selected_output: 0,
+            flip_layout: false,
         }
     }
 
@@ -203,23 +206,45 @@ impl RoutingMatrixEditor {
             .min_height(200.0)
             .resizable(true)
             .show(ctx, |ui| {
-                // Header with info
+                // Header with info and action buttons
                 ui.horizontal(|ui| {
                     ui.label(format!(
-                        "{} inputs ({} ch) → {} outputs ({} ch)",
+                        "{} inputs ({} ch) -> {} outputs ({} ch)",
                         num_inputs, total_in_ch, num_outputs, total_out_ch
                     ));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if dirty {
                             ui.colored_label(Color32::from_rgb(255, 200, 100), "• Unsaved");
+                            ui.add_space(8.0);
+                        }
+                        if ui
+                            .small_button(format!("Clear Out {}", selected_output))
+                            .on_hover_text("Remove routing for this output only")
+                            .clicked()
+                        {
+                            clear_output = true;
+                        }
+                        if ui
+                            .small_button("Clear All")
+                            .on_hover_text("Remove all routing")
+                            .clicked()
+                        {
+                            clear_all = true;
+                        }
+                        if ui
+                            .small_button("1:1 Diagonal")
+                            .on_hover_text("Route input channels 1:1 to all outputs")
+                            .clicked()
+                        {
+                            set_diagonal = true;
                         }
                     });
                 });
 
                 ui.separator();
 
-                // Output tabs
+                // Output tabs and layout toggle
                 ui.horizontal(|ui| {
                     for (out_idx, &num_ch) in output_channels.iter().enumerate().take(num_outputs) {
                         let label = format!("Out {} ({} ch)", out_idx, num_ch);
@@ -230,39 +255,20 @@ impl RoutingMatrixEditor {
                             new_selected_output = out_idx;
                         }
                     }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.checkbox(&mut self.flip_layout, "Inputs as columns")
+                            .on_hover_text(
+                                "Swap rows and columns: inputs become columns, outputs become rows",
+                            );
+                    });
                 });
 
                 ui.separator();
 
-                // Quick action buttons
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("1:1 Diagonal")
-                        .on_hover_text("Route input channels 1:1 to all outputs")
-                        .clicked()
-                    {
-                        set_diagonal = true;
-                    }
-                    if ui
-                        .button("Clear All")
-                        .on_hover_text("Remove all routing")
-                        .clicked()
-                    {
-                        clear_all = true;
-                    }
-                    if ui
-                        .button(format!("Clear Out {}", selected_output))
-                        .on_hover_text("Remove routing for this output only")
-                        .clicked()
-                    {
-                        clear_output = true;
-                    }
-                });
-
-                ui.add_space(4.0);
-
                 // Matrix for selected output
                 let out_ch_count = output_channels[selected_output];
+                let flip = self.flip_layout;
 
                 ScrollArea::both()
                     .id_salt(format!("routing_matrix_scroll_{}", selected_output))
@@ -275,6 +281,7 @@ impl RoutingMatrixEditor {
                             selected_output,
                             &input_channels,
                             out_ch_count,
+                            flip,
                         );
                     });
 
@@ -320,6 +327,9 @@ impl RoutingMatrixEditor {
     }
 
     /// Show the matrix for a single output with compact checkboxes.
+    /// When flip=false: rows=inputs, columns=outputs
+    /// When flip=true: rows=outputs, columns=inputs
+    #[allow(clippy::too_many_arguments)]
     fn show_output_matrix(
         ui: &mut Ui,
         routing: &mut HashMap<String, Vec<String>>,
@@ -328,97 +338,233 @@ impl RoutingMatrixEditor {
         out_idx: usize,
         input_channels: &[usize],
         out_ch_count: usize,
+        flip: bool,
     ) {
-        const CHECKBOX_SIZE: f32 = 18.0;
+        const CHECKBOX_SIZE: f32 = 16.0;
         const ROW_LABEL_WIDTH: f32 = 50.0;
 
-        // Channel number headers
-        ui.horizontal(|ui| {
-            ui.add_space(ROW_LABEL_WIDTH);
-            for out_ch in 0..out_ch_count {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(CHECKBOX_SIZE, 14.0),
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        ui.label(egui::RichText::new(format!("{}", out_ch)).small().strong());
-                    },
-                );
-            }
-        });
-
-        ui.add_space(2.0);
-
-        // Data rows - grouped by input
-        for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
-            // Input group header
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("In {} ({} ch)", in_idx, in_ch_count))
-                        .small()
-                        .strong(),
-                );
-            });
-
-            for in_ch in 0..in_ch_count {
-                ui.horizontal(|ui| {
-                    // Row label
-                    ui.add_sized(
-                        [ROW_LABEL_WIDTH, CHECKBOX_SIZE],
-                        egui::Label::new(egui::RichText::new(format!(" Ch {}", in_ch)).small()),
-                    );
-
-                    let src_key = format!("i{}c{}", in_idx, in_ch);
-
-                    // Checkboxes for each output channel
-                    for out_ch in 0..out_ch_count {
-                        let dest_key = format!("o{}c{}", out_idx, out_ch);
-
-                        let is_routed = routing
-                            .get(&src_key)
-                            .map(|dests| dests.contains(&dest_key))
-                            .unwrap_or(false);
-
-                        let mut checked = is_routed;
-
-                        // Use unique ID for each checkbox to prevent state confusion
-                        let checkbox_id = format!("cb_{}_{}", src_key, dest_key);
-                        ui.push_id(&checkbox_id, |ui| {
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(CHECKBOX_SIZE, CHECKBOX_SIZE),
-                                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                                |ui| {
-                                    if ui.checkbox(&mut checked, "").changed() {
-                                        *dirty = true;
-                                        tracing::debug!(
-                                            "Checkbox changed: {} -> {} = {}",
-                                            src_key,
-                                            dest_key,
-                                            checked
-                                        );
-                                        if checked {
-                                            routing
-                                                .entry(src_key.clone())
-                                                .or_default()
-                                                .push(dest_key.clone());
-                                        } else if let Some(dests) = routing.get_mut(&src_key) {
-                                            dests.retain(|d| d != &dest_key);
-                                            if dests.is_empty() {
-                                                routing.remove(&src_key);
-                                            }
-                                        }
-                                    }
-                                },
-                            );
-                        });
-                    }
-                });
-            }
-
-            // Space between input groups
-            if in_idx < num_inputs - 1 {
-                ui.add_space(4.0);
-            }
+        if flip {
+            // Flipped: rows = output channels, columns = input channels
+            Self::show_matrix_flipped(
+                ui,
+                routing,
+                dirty,
+                num_inputs,
+                out_idx,
+                input_channels,
+                out_ch_count,
+                CHECKBOX_SIZE,
+                ROW_LABEL_WIDTH,
+            );
+        } else {
+            // Normal: rows = input channels, columns = output channels
+            Self::show_matrix_normal(
+                ui,
+                routing,
+                dirty,
+                num_inputs,
+                out_idx,
+                input_channels,
+                out_ch_count,
+                CHECKBOX_SIZE,
+                ROW_LABEL_WIDTH,
+            );
         }
+    }
+
+    /// Normal layout: rows = inputs, columns = outputs (using Grid for proper alignment)
+    #[allow(clippy::too_many_arguments)]
+    fn show_matrix_normal(
+        ui: &mut Ui,
+        routing: &mut HashMap<String, Vec<String>>,
+        dirty: &mut bool,
+        num_inputs: usize,
+        out_idx: usize,
+        input_channels: &[usize],
+        out_ch_count: usize,
+        checkbox_size: f32,
+        _row_label_width: f32,
+    ) {
+        egui::Grid::new(format!("routing_matrix_normal_{}", out_idx))
+            .min_col_width(checkbox_size)
+            .spacing([2.0, 4.0])
+            .show(ui, |ui| {
+                // Header row: empty corner + output channel numbers
+                ui.label(""); // Empty corner cell
+                for out_ch in 0..out_ch_count {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(checkbox_size, 14.0),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            ui.label(egui::RichText::new(format!("{}", out_ch)).small().strong());
+                        },
+                    );
+                }
+                ui.end_row();
+
+                // Data rows - grouped by input
+                for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
+                    // Input group header row
+                    ui.label(
+                        egui::RichText::new(format!("In {}", in_idx))
+                            .small()
+                            .strong(),
+                    );
+                    for _ in 0..out_ch_count {
+                        ui.label("");
+                    }
+                    ui.end_row();
+
+                    // Channel rows
+                    for in_ch in 0..in_ch_count {
+                        ui.label(egui::RichText::new(format!("  {}", in_ch)).small());
+
+                        let src_key = format!("i{}c{}", in_idx, in_ch);
+
+                        for out_ch in 0..out_ch_count {
+                            let dest_key = format!("o{}c{}", out_idx, out_ch);
+                            Self::show_routing_checkbox_grid(
+                                ui,
+                                routing,
+                                dirty,
+                                &src_key,
+                                &dest_key,
+                                checkbox_size,
+                            );
+                        }
+                        ui.end_row();
+                    }
+
+                    // Separator row between input groups
+                    if in_idx < num_inputs - 1 {
+                        ui.label("");
+                        ui.end_row();
+                    }
+                }
+            });
+    }
+
+    /// Flipped layout: rows = outputs, columns = inputs (using Grid for proper alignment)
+    #[allow(clippy::too_many_arguments)]
+    fn show_matrix_flipped(
+        ui: &mut Ui,
+        routing: &mut HashMap<String, Vec<String>>,
+        dirty: &mut bool,
+        num_inputs: usize,
+        out_idx: usize,
+        input_channels: &[usize],
+        out_ch_count: usize,
+        checkbox_size: f32,
+        _row_label_width: f32,
+    ) {
+        egui::Grid::new(format!("routing_matrix_flipped_{}", out_idx))
+            .min_col_width(checkbox_size)
+            .spacing([2.0, 4.0])
+            .show(ui, |ui| {
+                // Header row 1: Input group labels at start of each group
+                ui.label(""); // Empty corner cell
+                for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
+                    ui.label(
+                        egui::RichText::new(format!("In {}", in_idx))
+                            .small()
+                            .strong(),
+                    );
+                    for _ in 1..in_ch_count {
+                        ui.label("");
+                    }
+                    // Separator column between input groups
+                    if in_idx < num_inputs - 1 {
+                        ui.label("");
+                    }
+                }
+                ui.end_row();
+
+                // Header row 2: Channel numbers
+                ui.label(""); // Empty corner cell
+                for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
+                    for in_ch in 0..in_ch_count {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(checkbox_size, 14.0),
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                            |ui| {
+                                ui.label(egui::RichText::new(format!("{}", in_ch)).small());
+                            },
+                        );
+                    }
+                    // Separator column between input groups
+                    if in_idx < num_inputs - 1 {
+                        ui.label("");
+                    }
+                }
+                ui.end_row();
+
+                // Data rows - one per output channel
+                for out_ch in 0..out_ch_count {
+                    // Row label
+                    ui.label(egui::RichText::new(format!("Out {}", out_ch)).small());
+
+                    let dest_key = format!("o{}c{}", out_idx, out_ch);
+
+                    // Checkboxes for each input channel
+                    for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs)
+                    {
+                        for in_ch in 0..in_ch_count {
+                            let src_key = format!("i{}c{}", in_idx, in_ch);
+                            Self::show_routing_checkbox_grid(
+                                ui,
+                                routing,
+                                dirty,
+                                &src_key,
+                                &dest_key,
+                                checkbox_size,
+                            );
+                        }
+                        // Separator column between input groups
+                        if in_idx < num_inputs - 1 {
+                            ui.label("");
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+    }
+
+    /// Show routing checkbox for Grid layout (no push_id wrapper needed)
+    fn show_routing_checkbox_grid(
+        ui: &mut Ui,
+        routing: &mut HashMap<String, Vec<String>>,
+        dirty: &mut bool,
+        src_key: &str,
+        dest_key: &str,
+        checkbox_size: f32,
+    ) {
+        let is_routed = routing
+            .get(src_key)
+            .map(|dests| dests.contains(&dest_key.to_string()))
+            .unwrap_or(false);
+
+        let mut checked = is_routed;
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(checkbox_size, checkbox_size),
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            |ui| {
+                if ui.checkbox(&mut checked, "").changed() {
+                    *dirty = true;
+                    if checked {
+                        routing
+                            .entry(src_key.to_string())
+                            .or_default()
+                            .push(dest_key.to_string());
+                    } else if let Some(dests) = routing.get_mut(src_key) {
+                        dests.retain(|d| d != dest_key);
+                        if dests.is_empty() {
+                            routing.remove(src_key);
+                        }
+                    }
+                }
+            },
+        );
     }
 
     /// Set 1:1 diagonal routing.

@@ -6,7 +6,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{block::*, EnumValue, PropertyValue, StromEvent, *};
-use tracing::{info, trace, warn};
+use tracing::{debug, trace, warn};
 
 /// Audio Meter block builder.
 pub struct MeterBuilder;
@@ -18,7 +18,7 @@ impl BlockBuilder for MeterBuilder {
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        tracing::info!("Building Meter block instance: {}", instance_id);
+        tracing::debug!("Building Meter block instance: {}", instance_id);
 
         // Get interval property (in milliseconds, convert to nanoseconds for GStreamer)
         let interval_ms = properties
@@ -32,7 +32,7 @@ impl BlockBuilder for MeterBuilder {
 
         let interval_ns = interval_ms * 1_000_000; // Convert ms to ns
 
-        tracing::info!(
+        tracing::debug!(
             "Meter block properties: interval_ms={}, interval_ns={}",
             interval_ms,
             interval_ns
@@ -41,8 +41,7 @@ impl BlockBuilder for MeterBuilder {
         // Create the level element
         let level_id = format!("{}:level", instance_id);
 
-        tracing::info!("Creating level element: {}", level_id);
-        tracing::info!("Setting post-messages=true on level element");
+        tracing::debug!("Creating level element: {}", level_id);
 
         let level = gst::ElementFactory::make("level")
             .name(&level_id)
@@ -51,7 +50,7 @@ impl BlockBuilder for MeterBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("level: {}", e)))?;
 
-        tracing::info!("Level element created successfully: {}", level_id);
+        tracing::debug!("Level element created successfully: {}", level_id);
 
         // Create a bus message handler that will be called when the pipeline starts
         let bus_message_handler = Some(Box::new(
@@ -93,7 +92,7 @@ fn connect_level_message_handler(
 ) -> gst::glib::SignalHandlerId {
     use gst::MessageView;
 
-    info!("Connecting level message handler for flow {}", flow_id);
+    debug!("Connecting level message handler for flow {}", flow_id);
 
     // First ensure signal watch is enabled (this is ref-counted, safe to call multiple times)
     bus.add_signal_watch();
@@ -106,7 +105,7 @@ fn connect_level_message_handler(
                 let structure_name = s.name();
 
                 if structure_name == "level" {
-                    info!("Received 'level' message from GStreamer bus!");
+                    trace!("Received 'level' message from GStreamer bus!");
 
                     // Extract element ID from the source
                     if let Some(source) = msg.src() {
