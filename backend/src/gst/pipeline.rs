@@ -165,6 +165,8 @@ pub struct PipelineManager {
     block_message_connect_fns: Vec<crate::blocks::BusMessageConnectFn>,
     /// Thread priority state tracker (tracks whether priority was successfully set)
     thread_priority_state: Option<ThreadPriorityState>,
+    /// Thread registry for tracking streaming threads (optional, for CPU monitoring)
+    thread_registry: Option<crate::thread_registry::ThreadRegistry>,
     /// Cached pipeline state to avoid querying async sinks during initialization
     cached_state: std::sync::Arc<std::sync::RwLock<PipelineState>>,
     /// QoS statistics aggregator (collects and periodically broadcasts QoS events)
@@ -226,6 +228,7 @@ impl PipelineManager {
             block_message_handlers: Vec::new(),
             block_message_connect_fns: Vec::new(),
             thread_priority_state: None,
+            thread_registry: None,
             cached_state: std::sync::Arc::new(std::sync::RwLock::new(PipelineState::Null)),
             qos_aggregator: QoSAggregator::new(),
             qos_broadcast_task: None,
@@ -1764,12 +1767,15 @@ impl PipelineManager {
         // Set up thread priority handler FIRST (before any state changes)
         // This must be done before the pipeline starts so we catch all thread enter events
         info!(
-            "Setting up thread priority handler (requested: {:?})...",
-            self.properties.thread_priority
+            "Setting up thread priority handler (requested: {:?}, registry: {})...",
+            self.properties.thread_priority,
+            self.thread_registry.is_some()
         );
         let priority_state = thread_priority::setup_thread_priority_handler(
             &self.pipeline,
             self.properties.thread_priority,
+            self.flow_id,
+            self.thread_registry.clone(),
         );
         self.thread_priority_state = Some(priority_state);
         info!("Thread priority handler installed");
@@ -1917,6 +1923,11 @@ impl PipelineManager {
         thread_priority::remove_thread_priority_handler(&self.pipeline);
         self.thread_priority_state = None;
 
+        // Unregister all threads belonging to this flow from the registry
+        if let Some(ref registry) = self.thread_registry {
+            registry.unregister_flow(&self.flow_id);
+        }
+
         // Update cached state
         *self.cached_state.write().unwrap() = PipelineState::Null;
 
@@ -2056,6 +2067,13 @@ impl PipelineManager {
     /// Get the underlying GStreamer pipeline (for debugging).
     pub fn pipeline(&self) -> &gst::Pipeline {
         &self.pipeline
+    }
+
+    /// Set the thread registry for tracking streaming threads.
+    ///
+    /// This should be called before start() to enable thread CPU monitoring.
+    pub fn set_thread_registry(&mut self, registry: crate::thread_registry::ThreadRegistry) {
+        self.thread_registry = Some(registry);
     }
 
     /// Get WHEP endpoints registered by blocks in this pipeline.

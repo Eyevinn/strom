@@ -92,13 +92,22 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
 
-            // System stats interval (also sends PTP stats for flows with PTP clocks)
+            // System stats interval (also sends PTP stats and thread stats)
             _ = stats_interval.tick() => {
                 // Send system stats
                 let stats = state.get_system_stats().await;
                 let event = StromEvent::SystemStats(stats);
                 if let Err(e) = send_event(&mut sender, event).await {
                     debug!("Failed to send system stats, client likely disconnected: {}", e);
+                    break;
+                }
+
+                // Send thread stats (CPU per GStreamer streaming thread)
+                // Always send, even when empty, so frontend clears stale data
+                let thread_stats = state.get_thread_stats();
+                let event = StromEvent::ThreadStats(thread_stats);
+                if let Err(e) = send_event(&mut sender, event).await {
+                    debug!("Failed to send thread stats, client likely disconnected: {}", e);
                     break;
                 }
 

@@ -3,11 +3,13 @@
 //! This module provides functionality to set thread priorities on GStreamer's
 //! internal streaming threads using the bus sync handler mechanism.
 
+use crate::thread_registry::ThreadRegistry;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use strom_types::flow::{ThreadPriority, ThreadPriorityStatus};
+use strom_types::FlowId;
 use tracing::{debug, error, info, warn};
 
 /// Shared state for tracking thread priority configuration across threads.
@@ -235,20 +237,29 @@ fn set_nice_value(nice: i32) -> Result<(), String> {
     }
 }
 
-/// Set up a sync handler on the pipeline bus to configure thread priorities.
+/// Set up a sync handler on the pipeline bus to configure thread priorities
+/// and register threads with the thread registry.
 ///
 /// The sync handler is called in the context of the thread that posts the message,
 /// which allows us to set the priority of GStreamer's streaming threads as they
-/// enter their processing loops.
+/// enter their processing loops, and to capture their native thread IDs.
 pub fn setup_thread_priority_handler(
     pipeline: &gst::Pipeline,
     priority: ThreadPriority,
+    flow_id: FlowId,
+    thread_registry: Option<ThreadRegistry>,
 ) -> ThreadPriorityState {
     let state = ThreadPriorityState::new(priority);
 
-    if matches!(priority, ThreadPriority::Normal) {
-        // No need to set up handler for normal priority
-        info!("Thread priority set to Normal - no sync handler needed");
+    // Check if we have a thread registry before moving it
+    let has_registry = thread_registry.is_some();
+
+    // Always set up handler if we have a thread registry (for CPU monitoring),
+    // even if priority is Normal
+    let need_handler = !matches!(priority, ThreadPriority::Normal) || has_registry;
+
+    if !need_handler {
+        info!("Thread priority set to Normal and no thread registry - no sync handler needed");
         state.achieved.store(true, Ordering::SeqCst);
         return state;
     }
@@ -267,34 +278,66 @@ pub fn setup_thread_priority_handler(
 
         if let MessageView::StreamStatus(status) = msg.view() {
             let (status_type, owner_element) = status.get();
+            let owner = owner_element.name().to_string();
 
-            // We're interested in the Enter event - this is when the thread
-            // is about to enter its processing loop
-            if status_type == gst::StreamStatusType::Enter {
-                let owner = owner_element.name().to_string();
+            match status_type {
+                gst::StreamStatusType::Enter => {
+                    // Get the native thread ID
+                    let thread_id = get_current_thread_native_id();
 
-                debug!(
-                    "Thread entering streaming loop for element '{}' in pipeline '{}'",
-                    owner, flow_name
-                );
+                    debug!(
+                        "Thread {} entering streaming loop for element '{}' in pipeline '{}'",
+                        thread_id, owner, flow_name
+                    );
 
-                // Set thread priority
-                match set_current_thread_priority(state_clone.requested) {
-                    Ok(()) => {
-                        info!(
-                            "Set {:?} priority for streaming thread (element: {}, pipeline: {})",
-                            state_clone.requested, owner, flow_name
-                        );
+                    // Register thread with the registry
+                    if let Some(ref registry) = thread_registry {
+                        // Try to extract block ID from element name (format: "block_id:element_type")
+                        let block_id = if owner.contains(':') {
+                            owner.split(':').next().map(|s| s.to_string())
+                        } else {
+                            None
+                        };
+                        registry.register(thread_id, owner.clone(), flow_id, block_id);
+                    }
+
+                    // Set thread priority (if not Normal)
+                    if !matches!(state_clone.requested, ThreadPriority::Normal) {
+                        match set_current_thread_priority(state_clone.requested) {
+                            Ok(()) => {
+                                info!(
+                                    "Set {:?} priority for streaming thread {} (element: {}, pipeline: {})",
+                                    state_clone.requested, thread_id, owner, flow_name
+                                );
+                                state_clone.record_success();
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to set {:?} priority for streaming thread {} (element: {}, pipeline: {}): {}",
+                                    state_clone.requested, thread_id, owner, flow_name, e
+                                );
+                                state_clone.record_failure(e);
+                            }
+                        }
+                    } else {
+                        // For Normal priority, still count as success for status reporting
                         state_clone.record_success();
                     }
-                    Err(e) => {
-                        warn!(
-                            "Failed to set {:?} priority for streaming thread (element: {}, pipeline: {}): {}",
-                            state_clone.requested, owner, flow_name, e
-                        );
-                        state_clone.record_failure(e);
+                }
+                gst::StreamStatusType::Leave => {
+                    let thread_id = get_current_thread_native_id();
+
+                    debug!(
+                        "Thread {} leaving streaming loop for element '{}' in pipeline '{}'",
+                        thread_id, owner, flow_name
+                    );
+
+                    // Unregister thread from the registry
+                    if let Some(ref registry) = thread_registry {
+                        registry.unregister(thread_id);
                     }
                 }
+                _ => {}
             }
         }
 
@@ -303,12 +346,43 @@ pub fn setup_thread_priority_handler(
     });
 
     info!(
-        "Thread priority sync handler installed for pipeline '{}' (requested: {:?})",
+        "Thread priority sync handler installed for pipeline '{}' (requested: {:?}, registry: {})",
         pipeline.name(),
-        priority
+        priority,
+        has_registry
     );
 
     state
+}
+
+/// Get the native thread ID of the current thread.
+///
+/// On Linux, this returns the TID from gettid() syscall, which is needed
+/// for /proc/{pid}/task/{tid}/stat access.
+fn get_current_thread_native_id() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        // Use gettid() syscall to get the actual Linux TID
+        // This is different from pthread_t which is what thread_native_id() returns
+        unsafe { libc::syscall(libc::SYS_gettid) as u64 }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use thread_priority::thread_native_id;
+        thread_native_id() as u64
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use thread_priority::thread_native_id;
+        thread_native_id() as u64
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        0
+    }
 }
 
 /// Remove the sync handler from the pipeline bus.

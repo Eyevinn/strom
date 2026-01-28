@@ -2,7 +2,21 @@
 
 use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, Widget};
 use std::collections::VecDeque;
-use strom_types::SystemStats;
+use strom_types::{FlowId, SystemStats};
+
+/// Navigation action from thread monitor clicks.
+#[derive(Debug, Clone)]
+pub enum ThreadNavigationAction {
+    /// Navigate to a flow
+    Flow(FlowId),
+    /// Navigate to a flow and select a block
+    Block { flow_id: FlowId, block_id: String },
+    /// Navigate to a flow and select an element
+    Element {
+        flow_id: FlowId,
+        element_name: String,
+    },
+}
 
 const HISTORY_SIZE: usize = 60; // Keep 60 seconds of history
 
@@ -220,21 +234,109 @@ fn draw_mini_graph(painter: &egui::Painter, rect: Rect, data: &VecDeque<f32>, co
     }
 }
 
+/// Tab selection for the detailed system monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SystemMonitorTab {
+    #[default]
+    System,
+    Threads,
+}
+
+/// Column to sort threads by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThreadSortColumn {
+    #[default]
+    Cpu,
+    Element,
+    Block,
+    Flow,
+    ThreadId,
+}
+
+/// Sort direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDirection {
+    #[default]
+    Descending,
+    Ascending,
+}
+
+impl SortDirection {
+    fn toggle(&self) -> Self {
+        match self {
+            SortDirection::Ascending => SortDirection::Descending,
+            SortDirection::Descending => SortDirection::Ascending,
+        }
+    }
+
+    fn arrow(&self) -> &'static str {
+        match self {
+            SortDirection::Ascending => " ^",
+            SortDirection::Descending => " v",
+        }
+    }
+}
+
 /// Detailed system monitor window.
 pub struct DetailedSystemMonitor<'a> {
-    store: &'a SystemMonitorStore,
+    system_store: &'a SystemMonitorStore,
+    thread_store: &'a crate::thread_monitor::ThreadMonitorStore,
+    selected_tab: &'a mut SystemMonitorTab,
+    sort_column: &'a mut ThreadSortColumn,
+    sort_direction: &'a mut SortDirection,
+    /// Flow ID to name mapping for display
+    flow_names: &'a std::collections::HashMap<FlowId, String>,
 }
 
 impl<'a> DetailedSystemMonitor<'a> {
-    pub fn new(store: &'a SystemMonitorStore) -> Self {
-        Self { store }
+    pub fn new(
+        system_store: &'a SystemMonitorStore,
+        thread_store: &'a crate::thread_monitor::ThreadMonitorStore,
+        selected_tab: &'a mut SystemMonitorTab,
+        sort_column: &'a mut ThreadSortColumn,
+        sort_direction: &'a mut SortDirection,
+        flow_names: &'a std::collections::HashMap<FlowId, String>,
+    ) -> Self {
+        Self {
+            system_store,
+            thread_store,
+            selected_tab,
+            sort_column,
+            sort_direction,
+            flow_names,
+        }
     }
 
-    pub fn show(&self, ui: &mut Ui) {
-        if let Some(stats) = self.store.latest() {
-            ui.heading("System Monitoring");
-            ui.separator();
+    /// Show the system monitor UI and return any navigation action.
+    pub fn show(&mut self, ui: &mut Ui) -> Option<ThreadNavigationAction> {
+        // Tab bar
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(*self.selected_tab == SystemMonitorTab::System, "System")
+                .clicked()
+            {
+                *self.selected_tab = SystemMonitorTab::System;
+            }
+            if ui
+                .selectable_label(*self.selected_tab == SystemMonitorTab::Threads, "Threads")
+                .clicked()
+            {
+                *self.selected_tab = SystemMonitorTab::Threads;
+            }
+        });
+        ui.separator();
 
+        match self.selected_tab {
+            SystemMonitorTab::System => {
+                self.show_system_tab(ui);
+                None
+            }
+            SystemMonitorTab::Threads => self.show_threads_tab(ui),
+        }
+    }
+
+    fn show_system_tab(&self, ui: &mut Ui) {
+        if let Some(stats) = self.system_store.latest() {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label("CPU Usage");
@@ -244,7 +346,7 @@ impl<'a> DetailedSystemMonitor<'a> {
                     draw_large_graph(
                         ui.painter(),
                         cpu_rect.1,
-                        self.store.cpu_history(),
+                        self.system_store.cpu_history(),
                         Color32::from_rgb(100, 200, 255),
                         "CPU %",
                         bg_color,
@@ -263,7 +365,7 @@ impl<'a> DetailedSystemMonitor<'a> {
                     draw_large_graph(
                         ui.painter(),
                         mem_rect.1,
-                        self.store.memory_history(),
+                        self.system_store.memory_history(),
                         Color32::from_rgb(100, 255, 100),
                         "Memory %",
                         bg_color,
@@ -294,7 +396,7 @@ impl<'a> DetailedSystemMonitor<'a> {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label("GPU Utilization");
-                                if let Some(gpu_hist) = self.store.gpu_history(i) {
+                                if let Some(gpu_hist) = self.system_store.gpu_history(i) {
                                     let gpu_rect = ui.allocate_space(Vec2::new(250.0, 80.0));
                                     let bg_color = ui.visuals().extreme_bg_color;
                                     let stroke_color =
@@ -337,6 +439,201 @@ impl<'a> DetailedSystemMonitor<'a> {
             }
         } else {
             ui.label("No system monitoring data available");
+        }
+    }
+
+    fn show_threads_tab(&mut self, ui: &mut Ui) -> Option<ThreadNavigationAction> {
+        if self.thread_store.is_empty() {
+            ui.label("No GStreamer streaming threads active.");
+            ui.label("Start a flow to see thread CPU usage.");
+            return None;
+        }
+
+        // Summary
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Active threads: {}",
+                self.thread_store.thread_count()
+            ));
+            ui.separator();
+            ui.label(format!(
+                "Total CPU: {:.1}%",
+                self.thread_store.total_cpu_usage()
+            ));
+        });
+        ui.separator();
+
+        // Collect threads for sorting
+        let mut threads: Vec<_> = self
+            .thread_store
+            .get_sorted_threads()
+            .into_iter()
+            .filter_map(|h| h.latest.clone())
+            .collect();
+
+        // Sort by selected column
+        let sort_dir = *self.sort_direction;
+        match self.sort_column {
+            ThreadSortColumn::Cpu => {
+                threads.sort_by(|a, b| {
+                    let cmp = a
+                        .cpu_usage
+                        .partial_cmp(&b.cpu_usage)
+                        .unwrap_or(std::cmp::Ordering::Equal);
+                    if matches!(sort_dir, SortDirection::Descending) {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                });
+            }
+            ThreadSortColumn::Element => {
+                threads.sort_by(|a, b| {
+                    let cmp = a.element_name.cmp(&b.element_name);
+                    if matches!(sort_dir, SortDirection::Descending) {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                });
+            }
+            ThreadSortColumn::Block => {
+                threads.sort_by(|a, b| {
+                    let cmp = a.block_id.cmp(&b.block_id);
+                    if matches!(sort_dir, SortDirection::Descending) {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                });
+            }
+            ThreadSortColumn::Flow => {
+                threads.sort_by(|a, b| {
+                    let cmp = a.flow_id.cmp(&b.flow_id);
+                    if matches!(sort_dir, SortDirection::Descending) {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                });
+            }
+            ThreadSortColumn::ThreadId => {
+                threads.sort_by(|a, b| {
+                    let cmp = a.thread_id.cmp(&b.thread_id);
+                    if matches!(sort_dir, SortDirection::Descending) {
+                        cmp.reverse()
+                    } else {
+                        cmp
+                    }
+                });
+            }
+        }
+
+        let mut nav_action: Option<ThreadNavigationAction> = None;
+
+        // Thread table
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                egui::Grid::new("thread_grid")
+                    .num_columns(5)
+                    .spacing([20.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        // Clickable headers for sorting
+                        self.sortable_header(ui, "CPU %", ThreadSortColumn::Cpu);
+                        self.sortable_header(ui, "Element", ThreadSortColumn::Element);
+                        self.sortable_header(ui, "Block", ThreadSortColumn::Block);
+                        self.sortable_header(ui, "Flow", ThreadSortColumn::Flow);
+                        self.sortable_header(ui, "Thread ID", ThreadSortColumn::ThreadId);
+                        ui.end_row();
+
+                        // Rows
+                        for stats in &threads {
+                            // CPU % with color coding
+                            let cpu = stats.cpu_usage;
+                            let color = if cpu > 80.0 {
+                                Color32::from_rgb(255, 80, 80) // Red
+                            } else if cpu > 50.0 {
+                                Color32::from_rgb(255, 200, 50) // Yellow
+                            } else {
+                                ui.visuals().text_color()
+                            };
+                            ui.colored_label(color, format!("{:.1}%", cpu));
+
+                            // Element name (clickable)
+                            if ui.link(&stats.element_name).clicked() {
+                                nav_action = Some(ThreadNavigationAction::Element {
+                                    flow_id: stats.flow_id,
+                                    element_name: stats.element_name.clone(),
+                                });
+                            }
+
+                            // Block ID (clickable if present)
+                            if let Some(block_id) = &stats.block_id {
+                                if ui.link(block_id).clicked() {
+                                    nav_action = Some(ThreadNavigationAction::Block {
+                                        flow_id: stats.flow_id,
+                                        block_id: block_id.clone(),
+                                    });
+                                }
+                            } else {
+                                ui.label("-");
+                            }
+
+                            // Flow name (clickable)
+                            let flow_display = self
+                                .flow_names
+                                .get(&stats.flow_id)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    let id = stats.flow_id.to_string();
+                                    if id.len() > 8 {
+                                        format!("{}...", &id[..8])
+                                    } else {
+                                        id
+                                    }
+                                });
+                            if ui.link(&flow_display).clicked() {
+                                nav_action = Some(ThreadNavigationAction::Flow(stats.flow_id));
+                            }
+
+                            // Thread ID
+                            ui.label(format!("{}", stats.thread_id));
+
+                            ui.end_row();
+                        }
+                    });
+            });
+
+        nav_action
+    }
+
+    /// Render a clickable sortable column header.
+    fn sortable_header(&mut self, ui: &mut Ui, label: &str, column: ThreadSortColumn) {
+        let is_selected = *self.sort_column == column;
+        let text = if is_selected {
+            format!("{}{}", label, self.sort_direction.arrow())
+        } else {
+            label.to_string()
+        };
+
+        if ui
+            .selectable_label(is_selected, egui::RichText::new(text).strong())
+            .clicked()
+        {
+            if *self.sort_column == column {
+                // Toggle direction
+                *self.sort_direction = self.sort_direction.toggle();
+            } else {
+                // New column, default to descending for CPU, ascending for others
+                *self.sort_column = column;
+                *self.sort_direction = if column == ThreadSortColumn::Cpu {
+                    SortDirection::Descending
+                } else {
+                    SortDirection::Ascending
+                };
+            }
         }
     }
 }

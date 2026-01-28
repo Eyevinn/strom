@@ -2,6 +2,7 @@
 
 use crate::element::PropertyValue;
 use crate::system_monitor::SystemStats;
+use crate::thread_stats::ThreadStats;
 use crate::FlowId;
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +72,8 @@ pub enum StromEvent {
     },
     /// System monitoring statistics (CPU and GPU)
     SystemStats(SystemStats),
+    /// Thread CPU statistics for GStreamer streaming threads
+    ThreadStats(ThreadStats),
     /// PTP clock statistics for a flow
     PtpStats {
         flow_id: FlowId,
@@ -277,6 +280,9 @@ impl StromEvent {
                     (stats.used_memory as f64 / stats.total_memory as f64) * 100.0,
                     stats.gpu_stats.len()
                 )
+            }
+            StromEvent::ThreadStats(stats) => {
+                format!("Thread stats: {} active threads", stats.threads.len())
             }
             StromEvent::QoSStats {
                 flow_id,

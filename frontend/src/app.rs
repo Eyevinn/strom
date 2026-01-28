@@ -16,6 +16,7 @@ use crate::palette::ElementPalette;
 use crate::properties::PropertyInspector;
 use crate::state::{AppMessage, AppStateChannels, ConnectionState};
 use crate::system_monitor::SystemMonitorStore;
+use crate::thread_monitor::ThreadMonitorStore;
 use crate::webrtc_stats::WebRtcStatsStore;
 use crate::ws::WebSocketClient;
 
@@ -557,6 +558,8 @@ pub struct StromApp {
     webrtc_stats: WebRtcStatsStore,
     /// System monitoring statistics
     system_monitor: SystemMonitorStore,
+    /// Thread CPU monitoring statistics
+    thread_monitor: ThreadMonitorStore,
     /// PTP clock statistics per flow
     ptp_stats: crate::ptp_monitor::PtpStatsStore,
     /// QoS (buffer drop) statistics per flow/element
@@ -565,6 +568,14 @@ pub struct StromApp {
     flow_start_times: std::collections::HashMap<strom_types::FlowId, instant::Instant>,
     /// Whether to show the detailed system monitor window
     show_system_monitor: bool,
+    /// Selected tab in the system monitor window
+    system_monitor_tab: crate::system_monitor::SystemMonitorTab,
+    /// Thread sort column
+    thread_sort_column: crate::system_monitor::ThreadSortColumn,
+    /// Thread sort direction
+    thread_sort_direction: crate::system_monitor::SortDirection,
+    /// Pending navigation action from thread monitor (deferred to avoid borrow conflicts)
+    pending_thread_nav_action: Option<crate::system_monitor::ThreadNavigationAction>,
     /// Last time WebRTC stats were polled
     last_webrtc_poll: instant::Instant,
     /// Persisted settings (theme, zoom, etc.)
@@ -739,10 +750,15 @@ impl StromApp {
             mediaplayer_data: MediaPlayerDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
+            thread_monitor: ThreadMonitorStore::new(),
             ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
             qos_stats: crate::qos_monitor::QoSStore::new(),
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
+            system_monitor_tab: crate::system_monitor::SystemMonitorTab::default(),
+            thread_sort_column: crate::system_monitor::ThreadSortColumn::default(),
+            thread_sort_direction: crate::system_monitor::SortDirection::default(),
+            pending_thread_nav_action: None,
             last_webrtc_poll: instant::Instant::now(),
             settings: cc
                 .storage
@@ -869,10 +885,15 @@ impl StromApp {
             mediaplayer_data: MediaPlayerDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
+            thread_monitor: ThreadMonitorStore::new(),
             ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
             qos_stats: crate::qos_monitor::QoSStore::new(),
             flow_start_times: std::collections::HashMap::new(),
             show_system_monitor: false,
+            system_monitor_tab: crate::system_monitor::SystemMonitorTab::default(),
+            thread_sort_column: crate::system_monitor::ThreadSortColumn::default(),
+            thread_sort_direction: crate::system_monitor::SortDirection::default(),
+            pending_thread_nav_action: None,
             last_webrtc_poll: instant::Instant::now(),
             settings: cc
                 .storage
@@ -4309,8 +4330,45 @@ impl StromApp {
             .default_height(500.0)
             .open(&mut self.show_system_monitor)
             .show(ctx, |ui| {
-                crate::system_monitor::DetailedSystemMonitor::new(&self.system_monitor).show(ui);
+                // Build flow_id -> name mapping
+                let flow_names: std::collections::HashMap<_, _> =
+                    self.flows.iter().map(|f| (f.id, f.name.clone())).collect();
+
+                let nav_action = crate::system_monitor::DetailedSystemMonitor::new(
+                    &self.system_monitor,
+                    &self.thread_monitor,
+                    &mut self.system_monitor_tab,
+                    &mut self.thread_sort_column,
+                    &mut self.thread_sort_direction,
+                    &flow_names,
+                )
+                .show(ui);
+
+                // Store action to handle after closure (to avoid borrow conflict)
+                if let Some(action) = nav_action {
+                    self.pending_thread_nav_action = Some(action);
+                }
             });
+
+        // Handle navigation action outside the closure
+        if let Some(action) = self.pending_thread_nav_action.take() {
+            match action {
+                crate::system_monitor::ThreadNavigationAction::Flow(flow_id) => {
+                    self.select_flow(flow_id);
+                }
+                crate::system_monitor::ThreadNavigationAction::Block { flow_id, block_id } => {
+                    self.select_flow(flow_id);
+                    self.graph.select_node(block_id);
+                }
+                crate::system_monitor::ThreadNavigationAction::Element {
+                    flow_id,
+                    element_name,
+                } => {
+                    self.select_flow(flow_id);
+                    self.graph.select_node(element_name);
+                }
+            }
+        }
     }
 
     /// Render the flow properties dialog.
@@ -5874,6 +5932,9 @@ impl eframe::App for StromApp {
                         }
                         StromEvent::SystemStats(stats) => {
                             self.system_monitor.update(stats);
+                        }
+                        StromEvent::ThreadStats(stats) => {
+                            self.thread_monitor.update(stats);
                         }
                         StromEvent::PtpStats {
                             flow_id,

@@ -39,6 +39,7 @@ pub mod state;
 pub mod stats;
 pub mod storage;
 pub mod system_monitor;
+pub mod thread_registry;
 pub mod version;
 pub mod whep_registry;
 
