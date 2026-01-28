@@ -103,13 +103,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
 
                 // Send thread stats (CPU per GStreamer streaming thread)
+                // Always send, even when empty, so frontend clears stale data
                 let thread_stats = state.get_thread_stats();
-                if !thread_stats.threads.is_empty() {
-                    let event = StromEvent::ThreadStats(thread_stats);
-                    if let Err(e) = send_event(&mut sender, event).await {
-                        debug!("Failed to send thread stats, client likely disconnected: {}", e);
-                        break;
-                    }
+                let event = StromEvent::ThreadStats(thread_stats);
+                if let Err(e) = send_event(&mut sender, event).await {
+                    debug!("Failed to send thread stats, client likely disconnected: {}", e);
+                    break;
                 }
 
                 // Send PTP stats for flows with PTP clocks
