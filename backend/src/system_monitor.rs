@@ -3,6 +3,7 @@
 //! Stats are collected in a background thread to avoid blocking the async runtime.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,8 +25,10 @@ use std::process::Command;
 pub struct SystemMonitor {
     /// Cached stats updated by background thread
     cached_stats: Arc<RwLock<SystemStats>>,
-    /// Handle to background thread (dropped when monitor is dropped)
-    _collector_handle: Option<thread::JoinHandle<()>>,
+    /// Signal to stop the background collector thread
+    shutdown: Arc<AtomicBool>,
+    /// Handle to background thread, joined on drop
+    collector_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl SystemMonitor {
@@ -39,21 +42,24 @@ impl SystemMonitor {
             timestamp: 0,
         }));
 
+        let shutdown = Arc::new(AtomicBool::new(false));
         let stats_clone = cached_stats.clone();
+        let shutdown_clone = shutdown.clone();
 
         // Spawn background thread for stats collection
         let collector_handle = thread::spawn(move || {
-            Self::collector_loop(stats_clone);
+            Self::collector_loop(stats_clone, shutdown_clone);
         });
 
         Self {
             cached_stats,
-            _collector_handle: Some(collector_handle),
+            shutdown,
+            collector_handle: Some(collector_handle),
         }
     }
 
     /// Background loop that collects stats periodically.
-    fn collector_loop(cached_stats: Arc<RwLock<SystemStats>>) {
+    fn collector_loop(cached_stats: Arc<RwLock<SystemStats>>, shutdown: Arc<AtomicBool>) {
         let mut system = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::everything())
@@ -90,7 +96,7 @@ impl SystemMonitor {
         #[cfg(not(feature = "nvidia"))]
         let (nvml, use_nvidia_smi_fallback): (Option<()>, bool) = (None, false);
 
-        loop {
+        while !shutdown.load(Ordering::Relaxed) {
             // Refresh system information
             system.refresh_cpu_all();
             system.refresh_memory();
@@ -272,6 +278,18 @@ impl Default for SystemMonitor {
     }
 }
 
+impl Drop for SystemMonitor {
+    fn drop(&mut self) {
+        // Signal the background thread to stop
+        self.shutdown.store(true, Ordering::Relaxed);
+
+        // Wait for the thread to finish
+        if let Some(handle) = self.collector_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Thread CPU sampler for measuring per-thread CPU usage.
 ///
 /// This uses Linux-specific /proc filesystem to read thread CPU times.
@@ -357,8 +375,11 @@ impl ThreadCpuSampler {
                     let delta_total = current_total_time.saturating_sub(self.previous_total_time);
 
                     if delta_total > 0 {
-                        // CPU usage as percentage (scaled by number of CPUs for multi-core)
-                        // This gives per-thread CPU% where 100% means using one full core
+                        // CPU usage formula: (thread_cpu_ticks / total_cpu_ticks) * 100% * num_cpus
+                        // - delta_thread: CPU ticks used by this thread (user + system time)
+                        // - delta_total: Total CPU ticks across all cores from /proc/stat
+                        // - Multiplying by num_cpus normalizes to per-core percentage
+                        //   (100% = one full core, 800% max on 8-core system)
                         (delta_thread as f32 / delta_total as f32) * 100.0 * self.num_cpus as f32
                     } else {
                         0.0

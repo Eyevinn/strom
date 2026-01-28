@@ -46,6 +46,12 @@ impl ThreadRegistry {
         flow_id: FlowId,
         block_id: Option<String>,
     ) {
+        tracing::debug!(
+            "Registered thread {} for element '{}' in flow {}",
+            thread_id,
+            element_name,
+            flow_id
+        );
         let mut threads = self.threads.write();
         threads.insert(
             thread_id,
@@ -55,12 +61,6 @@ impl ThreadRegistry {
                 flow_id,
                 block_id,
             },
-        );
-        tracing::debug!(
-            "Registered thread {} for element '{}' in flow {}",
-            thread_id,
-            threads.get(&thread_id).map(|t| &t.element_name).unwrap(),
-            flow_id
         );
     }
 

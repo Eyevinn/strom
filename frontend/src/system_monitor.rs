@@ -570,7 +570,7 @@ impl<'a> DetailedSystemMonitor<'a> {
                             }
 
                             // Block ID (clickable if present)
-                            if let Some(ref block_id) = &stats.block_id {
+                            if let Some(block_id) = &stats.block_id {
                                 if ui.link(block_id).clicked() {
                                     nav_action = Some(ThreadNavigationAction::Block {
                                         flow_id: stats.flow_id,
