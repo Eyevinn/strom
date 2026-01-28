@@ -10,13 +10,15 @@
 //!
 //! Pipeline structure (simple routing):
 //! ```text
-//! Input_N → identity_N → deinterleave_N → [tee] → queue → interleave_M → queue_out_M → Output_M
+//! Input_N → identity_N → deinterleave_N → [tee] → queue → interleave_M → capssetter_M → queue_out_M → Output_M
 //! ```
 //!
 //! Pipeline structure (when mixing needed):
 //! ```text
-//! Input_N → identity_N → deinterleave_N → [tee] → queue → audiomixer → interleave_M → queue_out_M → Output_M
+//! Input_N → identity_N → deinterleave_N → [tee] → queue → audiomixer → interleave_M → capssetter_M → queue_out_M → Output_M
 //! ```
+//!
+//! The capssetter fixes channel-mask: 1ch=0x1, 2ch=0x3, 3+ch=0x0 (unpositioned)
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -211,6 +213,26 @@ impl BlockBuilder for AudioRouterBuilder {
             elements.push((interleave_id.clone(), interleave.clone()));
             interleaves.lock().unwrap().push(interleave.clone());
 
+            // Create capssetter to fix channel-mask for downstream elements
+            // 1 channel: 0x1 (front center), 2 channels: 0x3 (front left + right), 3+: 0x0 (unpositioned)
+            let capssetter_id = format!("{}:capssetter_{}", instance_id, out_idx);
+            let channel_mask: u64 = match out_ch_count {
+                1 => 0x1,
+                2 => 0x3,
+                _ => 0x0,
+            };
+            let caps = gst::Caps::builder("audio/x-raw")
+                .field("channel-mask", gst::Bitmask::new(channel_mask))
+                .build();
+            let capssetter = gst::ElementFactory::make("capssetter")
+                .name(&capssetter_id)
+                .property("caps", &caps)
+                .property("join", true) // merge with existing caps
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("capssetter: {}", e)))?;
+
+            elements.push((capssetter_id.clone(), capssetter));
+
             // Create output queue
             let queue_out_id = format!("{}:queue_out_{}", instance_id, out_idx);
             let queue_out = gst::ElementFactory::make("queue")
@@ -223,9 +245,13 @@ impl BlockBuilder for AudioRouterBuilder {
 
             elements.push((queue_out_id.clone(), queue_out));
 
-            // Link: interleave → queue_out
+            // Link: interleave → capssetter → queue_out
             internal_links.push((
                 ElementPadRef::pad(&interleave_id, "src"),
+                ElementPadRef::pad(&capssetter_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&capssetter_id, "src"),
                 ElementPadRef::pad(&queue_out_id, "sink"),
             ));
 
