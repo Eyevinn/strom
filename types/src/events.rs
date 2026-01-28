@@ -70,6 +70,15 @@ pub enum StromEvent {
         /// Decay values in dB for each channel
         decay: Vec<f64>,
     },
+    /// Audio latency measurement data from GStreamer audiolatency element
+    LatencyData {
+        flow_id: FlowId,
+        element_id: String,
+        /// Last measured latency in microseconds
+        last_latency_us: i64,
+        /// Running average latency in microseconds (last 5 measurements)
+        average_latency_us: i64,
+    },
     /// System monitoring statistics (CPU and GPU)
     SystemStats(SystemStats),
     /// Thread CPU statistics for GStreamer streaming threads
@@ -271,6 +280,20 @@ impl StromEvent {
                     element_id,
                     flow_id,
                     rms.len()
+                )
+            }
+            StromEvent::LatencyData {
+                flow_id,
+                element_id,
+                last_latency_us,
+                average_latency_us,
+            } => {
+                format!(
+                    "Latency data from {} in flow {}: last={:.2}ms, avg={:.2}ms",
+                    element_id,
+                    flow_id,
+                    *last_latency_us as f64 / 1000.0,
+                    *average_latency_us as f64 / 1000.0
                 )
             }
             StromEvent::SystemStats(stats) => {

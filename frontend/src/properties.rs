@@ -339,6 +339,7 @@ impl PropertyInspector {
         definition: &BlockDefinition,
         flow_id: Option<strom_types::FlowId>,
         meter_data_store: &crate::meter::MeterDataStore,
+        latency_data_store: &crate::latency::LatencyDataStore,
         webrtc_stats_store: &crate::webrtc_stats::WebRtcStatsStore,
         rtp_stats: Option<&crate::api::FlowRtpStatsInfo>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
@@ -583,6 +584,32 @@ impl PropertyInspector {
                             ui.colored_label(
                                 Color32::from_rgb(200, 200, 100),
                                 "⚠ No flow selected",
+                            );
+                        }
+                    }
+
+                    // Show latency visualization for latency blocks
+                    if definition.id == "builtin.latency" {
+                        ui.separator();
+                        tracing::debug!("Checking for latency data: flow_id={:?}, block_id={}", flow_id, block.id);
+                        if let Some(flow_id) = flow_id {
+                            if let Some(latency_data) = latency_data_store.get(&flow_id, &block.id) {
+                                tracing::debug!("Found latency data, calling show_full");
+                                crate::latency::show_full(ui, &block.id, latency_data);
+                            } else {
+                                tracing::debug!("No latency data found for this block");
+                                ui.colored_label(
+                                    Color32::from_rgb(200, 200, 100),
+                                    "No latency data available",
+                                );
+                                ui.add_space(4.0);
+                                ui.small("Latency measurements will appear when audio is flowing through this block. Note: The audiolatency element measures round-trip latency using periodic ticks (1 second intervals).");
+                            }
+                        } else {
+                            tracing::debug!("No flow_id available for latency block");
+                            ui.colored_label(
+                                Color32::from_rgb(200, 200, 100),
+                                "No flow selected",
                             );
                         }
                     }

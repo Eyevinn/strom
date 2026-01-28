@@ -10,6 +10,7 @@ use crate::graph::GraphEditor;
 use crate::info_page::{
     current_time_millis, format_datetime_local, format_uptime, parse_iso8601_to_millis,
 };
+use crate::latency::LatencyDataStore;
 use crate::login::LoginScreen;
 use crate::mediaplayer::{MediaPlayerDataStore, PlaylistEditor};
 use crate::meter::MeterDataStore;
@@ -553,6 +554,8 @@ pub struct StromApp {
     last_inter_input_refresh: Option<String>,
     /// Meter data storage for all audio level meters
     meter_data: MeterDataStore,
+    /// Latency data storage for all audio latency measurements
+    latency_data: LatencyDataStore,
     /// Media player data storage for all media player blocks
     mediaplayer_data: MediaPlayerDataStore,
     /// WebRTC stats storage for all WebRTC connections
@@ -750,6 +753,7 @@ impl StromApp {
             properties_ptp_domain_buffer: String::new(),
             properties_thread_priority_buffer: strom_types::flow::ThreadPriority::High,
             meter_data: MeterDataStore::new(),
+            latency_data: LatencyDataStore::new(),
             mediaplayer_data: MediaPlayerDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
@@ -886,6 +890,7 @@ impl StromApp {
             port,
             auth_token,
             meter_data: MeterDataStore::new(),
+            latency_data: LatencyDataStore::new(),
             mediaplayer_data: MediaPlayerDataStore::new(),
             webrtc_stats: WebRtcStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
@@ -3630,6 +3635,7 @@ impl StromApp {
                             &def,
                             flow_id,
                             &self.meter_data,
+                            &self.latency_data,
                             &self.webrtc_stats,
                             rtp_stats,
                             &self.network_interfaces,
@@ -3827,6 +3833,32 @@ impl StromApp {
                                     additional_height: height + 10.0,
                                     render_callback: Some(Box::new(move |ui, _rect| {
                                         crate::meter::show_compact(ui, &meter_data_clone);
+                                    })),
+                                },
+                            );
+                        }
+                    }
+
+                    // Setup dynamic content for latency blocks
+                    let latency_blocks: Vec<_> = self
+                        .graph
+                        .blocks
+                        .iter()
+                        .filter(|b| b.block_definition_id == "builtin.latency")
+                        .map(|b| b.id.clone())
+                        .collect();
+
+                    for block_id in latency_blocks {
+                        if let Some(latency_data) = self.latency_data.get(&flow_id, &block_id) {
+                            let height = crate::latency::calculate_compact_height();
+                            let latency_data_clone = latency_data.clone();
+
+                            self.graph.set_block_content(
+                                block_id,
+                                crate::graph::BlockContentInfo {
+                                    additional_height: height + 10.0,
+                                    render_callback: Some(Box::new(move |ui, _rect| {
+                                        crate::latency::show_compact(ui, &latency_data_clone);
                                     })),
                                 },
                             );
@@ -5891,6 +5923,30 @@ impl eframe::App for StromApp {
                                 crate::meter::MeterData { rms, peak, decay },
                             );
                             tracing::trace!("Meter data stored for element {}", element_id);
+                        }
+                        StromEvent::LatencyData {
+                            flow_id,
+                            element_id,
+                            last_latency_us,
+                            average_latency_us,
+                        } => {
+                            tracing::trace!(
+                                "Latency data received: flow={}, element={}, last={}us, avg={}us",
+                                flow_id,
+                                element_id,
+                                last_latency_us,
+                                average_latency_us
+                            );
+                            // Store latency data for visualization
+                            self.latency_data.update(
+                                flow_id,
+                                element_id.clone(),
+                                crate::latency::LatencyData {
+                                    last_latency_us,
+                                    average_latency_us,
+                                },
+                            );
+                            tracing::trace!("Latency data stored for element {}", element_id);
                         }
                         StromEvent::MediaPlayerPosition {
                             flow_id,
