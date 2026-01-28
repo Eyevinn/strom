@@ -25,7 +25,7 @@ use strom_types::{
     block::*, common_video_resolution_enum_values, element::ElementPadRef, parse_resolution_string,
     PropertyValue, *,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Backend selection for the compositor.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -207,7 +207,7 @@ fn select_compositor(
         }
         CompositorPreference::Auto => {
             if has_gl {
-                info!("Auto-selected GPU (OpenGL) compositor");
+                debug!("Auto-selected GPU (OpenGL) compositor");
                 Ok(CompositorBackend::OpenGL)
             } else if has_software {
                 warn!("GPU compositor unavailable, falling back to CPU compositor");
