@@ -2,7 +2,22 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
-## [Unreleased]
+## [0.3.15] - 2026-01-28
+
+### Added
+- Audio Latency measurement block using GStreamer audiolatency element (#299)
+- Audio Router block for flexible channel routing and remapping (#298)
+- Thread monitoring with per-thread CPU usage tracking (#300)
+- Claude theme for UI (#294)
+- Reconnect Now button on connection splash screen (#293)
+
+### Changed
+- Reduce compositor auto-select log level to debug (#301)
+
+### Fixed
+- AES67: Dynamic channel-mask override for multi-channel audio (#297)
+- AES67 channel-mask handling and improved RTP stats display (#295)
+- Theme contrast issues (#294)
 
 ---
 
