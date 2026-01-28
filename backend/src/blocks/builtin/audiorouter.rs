@@ -10,12 +10,12 @@
 //!
 //! Pipeline structure (simple routing):
 //! ```text
-//! Input_N → queue_in_N → deinterleave_N → [tee] → queue → interleave_M → queue_out_M → Output_M
+//! Input_N → identity_N → deinterleave_N → [tee] → queue → interleave_M → queue_out_M → Output_M
 //! ```
 //!
 //! Pipeline structure (when mixing needed):
 //! ```text
-//! Input_N → queue_in_N → deinterleave_N → [tee] → queue → audiomixer → interleave_M → queue_out_M → Output_M
+//! Input_N → identity_N → deinterleave_N → [tee] → queue → audiomixer → interleave_M → queue_out_M → Output_M
 //! ```
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
@@ -52,12 +52,12 @@ impl BlockBuilder for AudioRouterBuilder {
         let num_inputs = parse_num_streams(properties, "num_inputs", 2);
         let num_outputs = parse_num_streams(properties, "num_outputs", 2);
 
-        // Create input pads dynamically
+        // Create input pads dynamically - connect to identity element
         let inputs = (0..num_inputs)
             .map(|i| ExternalPad {
                 name: format!("audio_in_{}", i),
                 media_type: MediaType::Audio,
-                internal_element_id: format!("queue_in_{}", i),
+                internal_element_id: format!("identity_in_{}", i),
                 internal_pad_name: "sink".to_string(),
             })
             .collect();
@@ -349,21 +349,19 @@ impl BlockBuilder for AudioRouterBuilder {
         }
 
         // ========================================================================
-        // Create INPUT side (queues and deinterleaves)
+        // Create INPUT side (identity pass-through → deinterleave)
         // ========================================================================
 
         for (in_idx, _in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
-            // Create input queue
-            let queue_in_id = format!("{}:queue_in_{}", instance_id, in_idx);
-            let queue_in = gst::ElementFactory::make("queue")
-                .name(&queue_in_id)
-                .property("max-size-buffers", 3u32)
-                .property("max-size-time", 0u64)
-                .property("max-size-bytes", 0u32)
+            // Create identity element (pass-through, no buffering)
+            let identity_id = format!("{}:identity_in_{}", instance_id, in_idx);
+            let identity = gst::ElementFactory::make("identity")
+                .name(&identity_id)
+                .property("silent", true)
                 .build()
-                .map_err(|e| BlockBuildError::ElementCreation(format!("queue_in: {}", e)))?;
+                .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {}", e)))?;
 
-            elements.push((queue_in_id.clone(), queue_in));
+            elements.push((identity_id.clone(), identity));
 
             // Create deinterleave
             let deinterleave_id = format!("{}:deinterleave_{}", instance_id, in_idx);
@@ -373,9 +371,9 @@ impl BlockBuilder for AudioRouterBuilder {
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("deinterleave: {}", e)))?;
 
-            // Link: queue_in → deinterleave
+            // Link: identity → deinterleave
             internal_links.push((
-                ElementPadRef::pad(&queue_in_id, "src"),
+                ElementPadRef::pad(&identity_id, "src"),
                 ElementPadRef::pad(&deinterleave_id, "sink"),
             ));
 
@@ -583,11 +581,21 @@ impl BlockBuilder for AudioRouterBuilder {
                         };
 
                         let interleave_sink_name = format!("sink_{}", dest.channel_idx);
-                        let Some(interleave_sink) = interleave.static_pad(&interleave_sink_name)
-                        else {
+                        // Find pad in pads list - request pads aren't accessible via static_pad()
+                        let interleave_sink = interleave
+                            .pads()
+                            .into_iter()
+                            .find(|p| p.name() == interleave_sink_name);
+                        let Some(interleave_sink) = interleave_sink else {
                             error!(
-                                "Interleave {} has no pad {}",
-                                dest.output_idx, interleave_sink_name
+                                "Interleave {} has no pad {} (available: {:?})",
+                                dest.output_idx,
+                                interleave_sink_name,
+                                interleave
+                                    .pads()
+                                    .iter()
+                                    .map(|p| p.name().to_string())
+                                    .collect::<Vec<_>>()
                             );
                             continue;
                         };
@@ -825,13 +833,13 @@ fn audiorouter_definition() -> BlockDefinition {
                 ExternalPad {
                     name: "audio_in_0".to_string(),
                     media_type: MediaType::Audio,
-                    internal_element_id: "queue_in_0".to_string(),
+                    internal_element_id: "identity_in_0".to_string(),
                     internal_pad_name: "sink".to_string(),
                 },
                 ExternalPad {
                     name: "audio_in_1".to_string(),
                     media_type: MediaType::Audio,
-                    internal_element_id: "queue_in_1".to_string(),
+                    internal_element_id: "identity_in_1".to_string(),
                     internal_pad_name: "sink".to_string(),
                 },
             ],
