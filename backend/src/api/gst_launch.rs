@@ -1636,6 +1636,12 @@ mod tests {
     fn test_parse_tee_pattern() {
         init_gst();
 
+        // Skip if x264enc not available (e.g., Windows MSVC GStreamer)
+        if gst::ElementFactory::find("x264enc").is_none() {
+            println!("x264enc not available, skipping test");
+            return;
+        }
+
         // Tee pattern: record and display simultaneously
         let input = r#"videotestsrc ! tee name=t
             t. ! queue ! x264enc ! mp4mux ! filesink location=test.mp4
@@ -1719,6 +1725,12 @@ mod tests {
     fn test_parse_rtp_streaming_pattern() {
         init_gst();
 
+        // Skip if x264enc not available (e.g., Windows MSVC GStreamer)
+        if gst::ElementFactory::find("x264enc").is_none() {
+            println!("x264enc not available, skipping test");
+            return;
+        }
+
         // Simple RTP pattern (without the complex caps string that has typed values)
         let input = "videotestsrc ! x264enc ! rtph264pay ! udpsink port=5000";
 
@@ -1754,6 +1766,14 @@ mod tests {
     #[test]
     fn test_parse_multiline_mux_pipeline() {
         init_gst();
+
+        // Skip if x264enc or lamemp3enc not available (e.g., Windows MSVC GStreamer)
+        if gst::ElementFactory::find("x264enc").is_none()
+            || gst::ElementFactory::find("lamemp3enc").is_none()
+        {
+            println!("x264enc or lamemp3enc not available, skipping test");
+            return;
+        }
 
         // The user's example pipeline with video and audio branches
         let input = r#"gst-launch-1.0 -v -e videotestsrc \

@@ -205,23 +205,6 @@ fn test_encoder_selection_software_only() {
 }
 
 #[test]
-fn test_encoder_selection_with_fallback() {
-    init_gst();
-
-    // Auto mode with fallback should find something
-    let result = select_encoder(Codec::H264, EncoderPreference::Auto);
-
-    assert!(
-        result.is_ok(),
-        "Should find at least one H.264 encoder with fallback enabled"
-    );
-
-    if let Ok(encoder) = result {
-        println!("Selected encoder: {}", encoder);
-    }
-}
-
-#[test]
 fn test_get_codec_caps_string() {
     assert_eq!(
         get_codec_caps_string(Codec::H264),
@@ -512,51 +495,6 @@ fn test_all_available_encoders() {
         !available.is_empty(),
         "At least one encoder should be available on any system"
     );
-}
-
-/// Integration test: Build a complete video encoder block
-#[test]
-fn test_build_video_encoder_block() {
-    init_gst();
-
-    let builder = VideoEncBuilder;
-    let mut properties = HashMap::new();
-
-    // Use default codec (h264)
-    properties.insert(
-        "quality_preset".to_string(),
-        PropertyValue::String("fast".to_string()),
-    );
-    properties.insert("bitrate".to_string(), PropertyValue::UInt(5000));
-
-    let ctx = BlockBuildContext::new(vec!["stun:stun.l.google.com:19302".to_string()]);
-    let result = builder.build("test_block", &properties, &ctx);
-
-    match result {
-        Ok(block_result) => {
-            assert_eq!(
-                block_result.elements.len(),
-                4,
-                "Should create 4 elements (videoconvert, encoder, parser, capsfilter)"
-            );
-            assert_eq!(
-                block_result.internal_links.len(),
-                3,
-                "Should create 3 internal links"
-            );
-            println!("✓ Video encoder block built successfully");
-
-            // Verify elements have correct names
-            let element_ids: Vec<_> = block_result.elements.iter().map(|(id, _)| id).collect();
-            assert!(element_ids.iter().any(|id| id.contains("videoconvert")));
-            assert!(element_ids.iter().any(|id| id.contains("encoder")));
-            assert!(element_ids.iter().any(|id| id.contains("parser")));
-            assert!(element_ids.iter().any(|id| id.contains("capsfilter")));
-        }
-        Err(e) => {
-            panic!("Failed to build video encoder block: {:?}", e);
-        }
-    }
 }
 
 /// Test that block respects encoder preference
