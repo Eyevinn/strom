@@ -37,6 +37,32 @@ echo "✓ Clippy check passed"
 # fi
 # echo "✓ Tests passed"
 
+# Check for sensitive information using Claude (if available)
+if command -v claude &> /dev/null; then
+    echo "→ Checking for sensitive information..."
+    DIFF=$(git diff --cached --diff-filter=d)
+    if [ -n "$DIFF" ]; then
+        RESULT=$(echo "$DIFF" | claude -p "Does this diff contain sensitive info (internal hostnames, usernames, IPs, credentials, API keys)? Reply only: SENSITIVE: <reason> or CLEAN" --output-format text 2>/dev/null || echo "SKIP")
+        if [[ "$RESULT" == SENSITIVE:* ]]; then
+            echo ""
+            echo "⚠️  Potentially sensitive content detected!"
+            echo "   $RESULT"
+            echo ""
+            read -p "Continue anyway? [y/N] " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                exit 1
+            fi
+        elif [[ "$RESULT" == "SKIP" ]]; then
+            echo "⏭ Skipped (Claude unavailable)"
+        else
+            echo "✓ No sensitive content detected"
+        fi
+    fi
+else
+    echo "⏭ Skipping sensitive content check (claude not installed)"
+fi
+
 echo ""
 echo "✅ All pre-commit checks passed!"
 exit 0
