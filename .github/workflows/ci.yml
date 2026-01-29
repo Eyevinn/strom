@@ -17,7 +17,7 @@ jobs:
   # Shares cache with build-linux-x86_64
   check-linux:
     name: Check (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
