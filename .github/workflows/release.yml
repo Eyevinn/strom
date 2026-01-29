@@ -190,13 +190,16 @@ jobs:
         env:
           RUSTFLAGS: "-L /usr/lib/${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu' || 'x86_64-linux-gnu' }}"
         run: |
+          set -e
           cargo zigbuild --release --package strom --target ${{ matrix.target }}.${{ matrix.glibc }}
           cargo zigbuild --release --package strom-mcp-server --target ${{ matrix.target }}.${{ matrix.glibc }}
 
       # Non-Linux: Build with regular cargo
       - name: Build backend (non-Linux)
         if: ${{ !startsWith(matrix.platform, 'linux') }}
+        shell: bash
         run: |
+          set -e
           cargo build --release --package strom --target ${{ matrix.target }}
           cargo build --release --package strom-mcp-server --target ${{ matrix.target }}
 
@@ -206,6 +209,7 @@ jobs:
           name: strom-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/strom${{ matrix.binary_ext }}
           retention-days: 90
+          if-no-files-found: error
 
       - name: Upload MCP server binary
         uses: actions/upload-artifact@v4
@@ -213,6 +217,7 @@ jobs:
           name: strom-mcp-server-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/strom-mcp-server${{ matrix.binary_ext }}
           retention-days: 90
+          if-no-files-found: error
 
   create-release:
     name: Create GitHub Release

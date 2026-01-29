@@ -262,6 +262,7 @@ jobs:
           name: strom-msi-${{ steps.version.outputs.version }}
           path: installer/windows/build/strom-${{ steps.version.outputs.version }}-windows-x86_64.msi
           retention-days: 90
+          if-no-files-found: error
 
       - name: Upload MSI to release
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.upload_to_release != 'false'
