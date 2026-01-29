@@ -41,7 +41,7 @@ jobs:
           cache-on-failure: true
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -98,7 +98,7 @@ jobs:
           cache-on-failure: true
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Run Clippy on frontend
         run: cargo clippy --package strom-frontend --target wasm32-unknown-unknown --all-features -- -D warnings
@@ -168,7 +168,7 @@ jobs:
           cache-on-failure: true
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Build
         env:
@@ -243,7 +243,7 @@ jobs:
           cache-on-failure: true
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Build
         env:
@@ -324,7 +324,7 @@ jobs:
           cache-on-failure: true
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Run Clippy
         run: |
@@ -402,7 +402,7 @@ jobs:
           cache-on-failure: true
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.7
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Run Clippy
         run: |
