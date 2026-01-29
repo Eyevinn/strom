@@ -197,6 +197,7 @@ jobs:
       # Non-Linux: Build with regular cargo
       - name: Build backend (non-Linux)
         if: ${{ !startsWith(matrix.platform, 'linux') }}
+        shell: bash
         run: |
           set -e
           cargo build --release --package strom --target ${{ matrix.target }}
