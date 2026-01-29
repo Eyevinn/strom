@@ -82,7 +82,7 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
         info!(
-            "📹 DeckLink Video Input configured: device={}, mode={}, connection={}",
+            "DeckLink Video Input configured: device={}, mode={}, connection={}",
             device_number, mode, connection
         );
 
@@ -184,7 +184,7 @@ impl BlockBuilder for DeckLinkAudioInputBuilder {
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
         info!(
-            "🎵 DeckLink Audio Input configured: device={}, connection={}, channels={}",
+            "DeckLink Audio Input configured: device={}, connection={}, channels={}",
             device_number, connection, channels
         );
 
@@ -272,7 +272,7 @@ impl BlockBuilder for DeckLinkVideoOutputBuilder {
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkvideosink: {}", e)))?;
 
         info!(
-            "📹 DeckLink Video Output configured: device={}, mode={}",
+            "DeckLink Video Output configured: device={}, mode={}",
             device_number, mode
         );
 
@@ -334,10 +334,7 @@ impl BlockBuilder for DeckLinkAudioOutputBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkaudiosink: {}", e)))?;
 
-        info!(
-            "🎵 DeckLink Audio Output configured: device={}",
-            device_number
-        );
+        info!("DeckLink Audio Output configured: device={}", device_number);
 
         // Chain: audioconvert -> audioresample -> decklinkaudiosink
         let internal_links = vec![

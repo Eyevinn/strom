@@ -311,7 +311,7 @@ fn select_encoder(codec: Codec, preference: EncoderPreference) -> Result<String,
                 continue;
             }
             info!(
-                "✓ Found available encoder: {} (rank={:?})",
+                "Found available encoder: {} (rank={:?})",
                 encoder_name,
                 factory.rank()
             );

@@ -417,7 +417,7 @@ impl CompositorEditor {
             let ctx = ctx.clone();
 
             tracing::debug!(
-                "🖼️ Fetching thumbnail for flow={} block={} input={}",
+                "Fetching thumbnail for flow={} block={} input={}",
                 flow_id,
                 block_id,
                 idx
@@ -430,7 +430,7 @@ impl CompositorEditor {
                 {
                     Ok(jpeg_bytes) => {
                         tracing::debug!(
-                            "🖼️ Got thumbnail {} bytes for input {}",
+                            "Got thumbnail {} bytes for input {}",
                             jpeg_bytes.len(),
                             idx
                         );
@@ -469,7 +469,7 @@ impl CompositorEditor {
             let key = format!("compositor_thumb_{}_{}", self.flow_id, idx);
             if let Some(b64) = crate::app::get_local_storage(&key) {
                 tracing::debug!(
-                    "🖼️ Found thumbnail in storage for input {}, {} bytes b64",
+                    "Found thumbnail in storage for input {}, {} bytes b64",
                     idx,
                     b64.len()
                 );
@@ -481,7 +481,7 @@ impl CompositorEditor {
                 match base64::engine::general_purpose::STANDARD.decode(&b64) {
                     Ok(jpeg_bytes) => {
                         tracing::debug!(
-                            "🖼️ Decoded {} JPEG bytes for input {}, header: {:02X} {:02X} {:02X}",
+                            "Decoded {} JPEG bytes for input {}, header: {:02X} {:02X} {:02X}",
                             jpeg_bytes.len(),
                             idx,
                             jpeg_bytes.first().copied().unwrap_or(0),
@@ -497,7 +497,7 @@ impl CompositorEditor {
                                 let rgba = img.to_rgba8();
                                 let size = [rgba.width() as usize, rgba.height() as usize];
                                 tracing::debug!(
-                                    "🖼️ Loaded image {}x{} for input {}",
+                                    "Loaded image {}x{} for input {}",
                                     size[0],
                                     size[1],
                                     idx
@@ -556,7 +556,7 @@ impl CompositorEditor {
         let property_name = property_name.to_string();
 
         tracing::info!(
-            "🎨 Updating compositor pad property: flow={} element={} pad={} property={}={:?}",
+            "Updating compositor pad property: flow={} element={} pad={} property={}={:?}",
             flow_id,
             mixer_element_id,
             pad_name,
@@ -580,7 +580,7 @@ impl CompositorEditor {
             {
                 Ok(_) => {
                     tracing::info!(
-                        "✅ Compositor pad property updated: {}={:?}",
+                        "Compositor pad property updated: {}={:?}",
                         property_name,
                         value
                     );
@@ -592,7 +592,7 @@ impl CompositorEditor {
                 }
                 Err(e) => {
                     tracing::error!(
-                        "❌ Failed to update compositor pad property {}: {}",
+                        "Failed to update compositor pad property {}: {}",
                         property_name,
                         e
                     );
@@ -2634,7 +2634,7 @@ impl CompositorEditor {
         let ctx = ctx.clone();
 
         tracing::info!(
-            "🎬 Animating input {} to ({:?}, {:?}, {:?}, {:?}) over {}ms",
+            "Animating input {} to ({:?}, {:?}, {:?}, {:?}) over {}ms",
             idx,
             xpos,
             ypos,
@@ -2711,7 +2711,7 @@ impl CompositorEditor {
         };
 
         tracing::info!(
-            "🎬 Triggering {} transition: {} -> {} ({}ms)",
+            "Triggering {} transition: {} -> {} ({}ms)",
             transition_type,
             from_input,
             to_input,

@@ -339,7 +339,7 @@ pub fn calculate_compact_height(channel_count: usize) -> f32 {
 pub fn show_compact(ui: &mut Ui, meter_data: &MeterData) {
     let channel_count = meter_data.rms.len();
     tracing::trace!(
-        "📊 show_compact called: channels={}, rms={:?}",
+        "show_compact called: channels={}, rms={:?}",
         channel_count,
         meter_data.rms
     );
@@ -448,7 +448,7 @@ pub fn show_compact(ui: &mut Ui, meter_data: &MeterData) {
 pub fn show_full(ui: &mut Ui, element_id: &str, meter_data: &MeterData) {
     let channel_count = meter_data.rms.len();
     tracing::trace!(
-        "📊 show_full called for element {}: channels={}, rms={:?}",
+        "show_full called for element {}: channels={}, rms={:?}",
         element_id,
         channel_count,
         meter_data.rms

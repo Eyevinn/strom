@@ -76,7 +76,7 @@ impl SystemMonitor {
             }
             Err(e) => {
                 tracing::warn!(
-                    "✗ NVML initialization failed: {}. Trying nvidia-smi fallback...",
+                    "NVML initialization failed: {}. Trying nvidia-smi fallback...",
                     e
                 );
                 match Command::new("nvidia-smi").arg("-L").output() {

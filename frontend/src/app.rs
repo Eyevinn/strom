@@ -5909,7 +5909,7 @@ impl eframe::App for StromApp {
                             decay,
                         } => {
                             tracing::trace!(
-                                "📊 METER DATA RECEIVED: flow={}, element={}, channels={}, rms={:?}, peak={:?}",
+                                "METER DATA RECEIVED: flow={}, element={}, channels={}, rms={:?}, peak={:?}",
                                 flow_id,
                                 element_id,
                                 rms.len(),
