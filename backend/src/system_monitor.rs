@@ -296,14 +296,18 @@ impl Drop for SystemMonitor {
 /// On other platforms, CPU usage is not available and returns None.
 pub struct ThreadCpuSampler {
     /// Previous CPU times for each thread (for delta calculation)
+    #[cfg(target_os = "linux")]
     previous_times: HashMap<u64, ThreadCpuTime>,
     /// Previous total CPU time (for delta calculation)
+    #[cfg(target_os = "linux")]
     previous_total_time: u64,
     /// Number of CPU cores (for scaling)
+    #[cfg(target_os = "linux")]
     num_cpus: usize,
 }
 
 /// Get the number of CPUs on this system.
+#[cfg(target_os = "linux")]
 fn get_num_cpus() -> usize {
     // Use sysinfo to get CPU count (already a dependency)
     let system =
@@ -312,6 +316,7 @@ fn get_num_cpus() -> usize {
 }
 
 /// CPU time for a single thread.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 struct ThreadCpuTime {
     /// User mode CPU time in clock ticks
@@ -322,12 +327,19 @@ struct ThreadCpuTime {
 
 impl ThreadCpuSampler {
     /// Create a new thread CPU sampler.
+    #[cfg(target_os = "linux")]
     pub fn new() -> Self {
         Self {
             previous_times: HashMap::new(),
             previous_total_time: 0,
             num_cpus: get_num_cpus(),
         }
+    }
+
+    /// Create a new thread CPU sampler (non-Linux stub).
+    #[cfg(not(target_os = "linux"))]
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Sample CPU usage for all threads in the registry.

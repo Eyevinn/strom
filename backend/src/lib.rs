@@ -12,7 +12,9 @@ use axum::{
     Extension, Router,
 };
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+#[cfg(debug_assertions)]
+use tower_http::cors::Any;
+use tower_http::cors::CorsLayer;
 use tower_sessions::{cookie::time::Duration, Expiry, MemoryStore, SessionManagerLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;

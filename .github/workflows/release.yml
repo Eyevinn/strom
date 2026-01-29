@@ -58,7 +58,7 @@ jobs:
     name: Build ${{ matrix.platform }}
     needs: build-frontend
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.platform == 'macos' && 60 || 30 }}
     strategy:
       fail-fast: false
       matrix:
