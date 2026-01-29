@@ -318,7 +318,7 @@ impl ElementPalette {
                         }
                     }
                     PaletteTab::Blocks => {
-                        let filtered: Vec<BlockDefinition> = self
+                        let mut filtered: Vec<BlockDefinition> = self
                             .blocks
                             .iter()
                             .filter(|b| {
@@ -339,6 +339,9 @@ impl ElementPalette {
                             })
                             .cloned()
                             .collect();
+
+                        // Sort by name
+                        filtered.sort_by(|a, b| a.name.cmp(&b.name));
 
                         if filtered.is_empty() {
                             ui.label("No blocks found");
