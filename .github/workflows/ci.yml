@@ -137,12 +137,23 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64
+          cache-on-failure: true
+
       - name: Install Zig and cargo-zigbuild
         run: |
           ZIG_VERSION="0.13.0"
           curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /usr/local
           sudo ln -sf /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
           cargo install --locked cargo-zigbuild
+        env:
+          RUSTC_WRAPPER: sccache
 
       - name: Install GStreamer
         run: |
@@ -160,15 +171,6 @@ jobs:
         with:
           name: frontend-dist
           path: backend/dist
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-x86_64
-          cache-on-failure: true
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Build
         env:
@@ -212,12 +214,23 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-arm64
+          cache-on-failure: true
+
       - name: Install Zig and cargo-zigbuild
         run: |
           ZIG_VERSION="0.13.0"
           curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-aarch64-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /usr/local
           sudo ln -sf /usr/local/zig-linux-aarch64-${ZIG_VERSION}/zig /usr/local/bin/zig
           cargo install --locked cargo-zigbuild
+        env:
+          RUSTC_WRAPPER: sccache
 
       - name: Install GStreamer
         run: |
@@ -235,15 +248,6 @@ jobs:
         with:
           name: frontend-dist
           path: backend/dist
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-arm64
-          cache-on-failure: true
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Build
         env:
