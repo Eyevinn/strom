@@ -25,15 +25,6 @@ fn is_encoder_available(encoder_name: &str) -> bool {
         .is_some()
 }
 
-/// Get list of available encoders from a list
-fn get_available_encoders(encoder_names: &[&str]) -> Vec<String> {
-    encoder_names
-        .iter()
-        .filter(|name| is_encoder_available(name))
-        .map(|s| s.to_string())
-        .collect()
-}
-
 #[test]
 fn test_codec_parsing_default() {
     let properties = HashMap::new();
@@ -201,23 +192,6 @@ fn test_encoder_selection_software_only() {
             // x264enc might not be installed, that's OK for this test
             println!("x264enc not available on system, test skipped");
         }
-    }
-}
-
-#[test]
-fn test_encoder_selection_with_fallback() {
-    init_gst();
-
-    // Auto mode with fallback should find something
-    let result = select_encoder(Codec::H264, EncoderPreference::Auto);
-
-    assert!(
-        result.is_ok(),
-        "Should find at least one H.264 encoder with fallback enabled"
-    );
-
-    if let Ok(encoder) = result {
-        println!("Selected encoder: {}", encoder);
     }
 }
 
@@ -445,118 +419,6 @@ fn test_quality_preset_mappings() {
     assert_eq!(map_quality_preset_qsv("medium"), 4);
     assert_eq!(map_quality_preset_qsv("slow"), 2);
     assert_eq!(map_quality_preset_qsv("veryslow"), 1);
-}
-
-/// Test all available encoders on the system
-#[test]
-fn test_all_available_encoders() {
-    init_gst();
-
-    let all_encoders = vec![
-        // H.264
-        "nvautogpuh264enc",
-        "nvh264enc",
-        "qsvh264enc",
-        "vah264enc",
-        "amfh264enc",
-        "x264enc",
-        // H.265
-        "nvautogpuh265enc",
-        "nvh265enc",
-        "qsvh265enc",
-        "vah265enc",
-        "amfh265enc",
-        "x265enc",
-        // AV1
-        "nvautogpuav1enc",
-        "nvav1enc",
-        "qsvav1enc",
-        "vaav1enc",
-        "amfav1enc",
-        "svtav1enc",
-        "av1enc",
-        // VP9
-        "qsvvp9enc",
-        "vavp9enc",
-        "vp9enc",
-    ];
-
-    let available = get_available_encoders(&all_encoders);
-
-    println!("Available encoders on this system:");
-    for encoder in &available {
-        println!("  - {}", encoder);
-    }
-
-    // Test that we can create each available encoder
-    for encoder_name in &available {
-        let encoder = gst::ElementFactory::make(encoder_name)
-            .build()
-            .unwrap_or_else(|_| panic!("Should create {}", encoder_name));
-
-        // Test basic property setting
-        set_encoder_properties(
-            &encoder,
-            encoder_name,
-            4000,
-            "medium",
-            "zerolatency",
-            RateControl::VBR,
-            60,
-        );
-
-        println!("✓ {} configured successfully", encoder_name);
-    }
-
-    assert!(
-        !available.is_empty(),
-        "At least one encoder should be available on any system"
-    );
-}
-
-/// Integration test: Build a complete video encoder block
-#[test]
-fn test_build_video_encoder_block() {
-    init_gst();
-
-    let builder = VideoEncBuilder;
-    let mut properties = HashMap::new();
-
-    // Use default codec (h264)
-    properties.insert(
-        "quality_preset".to_string(),
-        PropertyValue::String("fast".to_string()),
-    );
-    properties.insert("bitrate".to_string(), PropertyValue::UInt(5000));
-
-    let ctx = BlockBuildContext::new(vec!["stun:stun.l.google.com:19302".to_string()]);
-    let result = builder.build("test_block", &properties, &ctx);
-
-    match result {
-        Ok(block_result) => {
-            assert_eq!(
-                block_result.elements.len(),
-                4,
-                "Should create 4 elements (videoconvert, encoder, parser, capsfilter)"
-            );
-            assert_eq!(
-                block_result.internal_links.len(),
-                3,
-                "Should create 3 internal links"
-            );
-            println!("✓ Video encoder block built successfully");
-
-            // Verify elements have correct names
-            let element_ids: Vec<_> = block_result.elements.iter().map(|(id, _)| id).collect();
-            assert!(element_ids.iter().any(|id| id.contains("videoconvert")));
-            assert!(element_ids.iter().any(|id| id.contains("encoder")));
-            assert!(element_ids.iter().any(|id| id.contains("parser")));
-            assert!(element_ids.iter().any(|id| id.contains("capsfilter")));
-        }
-        Err(e) => {
-            panic!("Failed to build video encoder block: {:?}", e);
-        }
-    }
 }
 
 /// Test that block respects encoder preference

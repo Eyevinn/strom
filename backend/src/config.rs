@@ -494,6 +494,9 @@ database_url = "postgresql://localhost/test"
         let config_file = temp_dir.path().join(".strom.toml");
         let data_dir = temp_dir.path().join("custom_data");
 
+        // Use forward slashes for TOML (works on all platforms)
+        let data_dir_str = data_dir.display().to_string().replace('\\', "/");
+
         let config_content = format!(
             r#"
 [server]
@@ -502,7 +505,7 @@ port = 8080
 [storage]
 data_dir = "{}"
 "#,
-            data_dir.display()
+            data_dir_str
         );
         fs::write(&config_file, config_content).unwrap();
 

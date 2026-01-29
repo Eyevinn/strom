@@ -9,64 +9,66 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Trunk version for caching
   TRUNK_VERSION: "0.21.14"
-  # Disable incremental compilation to avoid deadlocks
   CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  fmt:
-    name: Format Check
-    runs-on: ubuntu-latest
+  # Fast checks on Linux: fmt + clippy + test
+  # Shares cache with build-linux-x86_64
+  check-linux:
+    name: Check (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
+
+      - name: Cache apt packages
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libssl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base
+          version: 1.2
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fmt
+          shared-key: linux-x86_64
           cache-on-failure: true
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  clippy:
-    name: Clippy (Backend & MCP)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache apt packages
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: libssl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools
-          version: 1.2
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: clippy-backend
-          cache-on-failure: true
-
       - name: Run Clippy on backend
         run: cargo clippy --package strom --all-targets --all-features -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
 
       - name: Run Clippy on MCP server
         run: cargo clippy --package strom-mcp-server --all-targets --all-features -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
 
-  clippy-frontend:
-    name: Clippy (Frontend WASM)
+      - name: Run tests on backend
+        run: cargo test --package strom --all-features
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Run tests on MCP server
+        run: cargo test --package strom-mcp-server --all-features
+        env:
+          RUSTC_WRAPPER: sccache
+
+  # WASM: clippy + build frontend
+  check-wasm:
+    name: Check & Build (WASM)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,54 +77,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: clippy-frontend
-          cache-on-failure: true
-
-      - name: Run Clippy on frontend
-        run: cargo clippy --package strom-frontend --target wasm32-unknown-unknown --all-features -- -D warnings
-
-  test:
-    name: Test Suite
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache apt packages
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: libssl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools
-          version: 1.2
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test
-          cache-on-failure: true
-
-      - name: Run tests on backend
-        run: cargo test --package strom --all-features
-
-      - name: Run tests on MCP server
-        run: cargo test --package strom-mcp-server --all-features
-
-  build-frontend:
-    name: Build Frontend (WASM)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable with WASM target
-        uses: dtolnay/rust-toolchain@stable
-        with:
           targets: wasm32-unknown-unknown
 
       - name: Cache trunk binary
@@ -140,13 +94,23 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: frontend-wasm
+          shared-key: wasm
           cache-on-failure: true
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Run Clippy on frontend
+        run: cargo clippy --package strom-frontend --target wasm32-unknown-unknown --all-features -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
 
       - name: Build frontend
         run: |
           cd frontend
           trunk build --release
+        env:
+          RUSTC_WRAPPER: sccache
 
       - name: Upload frontend dist
         uses: actions/upload-artifact@v4
@@ -155,69 +119,43 @@ jobs:
           path: backend/dist
           retention-days: 1
 
-  build:
-    name: Build ${{ matrix.platform }}
-    needs: build-frontend
-    runs-on: ${{ matrix.os }}
+  # Linux x86_64 build
+  build-linux-x86_64:
+    name: Build (Linux x86_64)
+    needs: check-wasm
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            platform: linux-x86_64
-            target: x86_64-unknown-linux-gnu
-            glibc: "2.31"
-            binary_ext: ""
-          - os: ubuntu-24.04-arm
-            platform: linux-arm64
-            target: aarch64-unknown-linux-gnu
-            glibc: "2.31"
-            binary_ext: ""
-          - os: windows-latest
-            platform: windows
-            target: x86_64-pc-windows-msvc
-            binary_ext: ".exe"
-          - os: macos-latest
-            platform: macos
-            target: aarch64-apple-darwin
-            binary_ext: ""
     steps:
       - uses: actions/checkout@v4
 
       - name: Extract version from Cargo.toml
         id: version
-        shell: bash
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
-      # Linux: Install Zig and cargo-zigbuild for glibc 2.31 compatibility
-      - name: Install Zig and cargo-zigbuild (Linux)
-        if: startsWith(matrix.platform, 'linux')
-        shell: bash
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64
+          cache-on-failure: true
+
+      - name: Install Zig and cargo-zigbuild
         run: |
           ZIG_VERSION="0.13.0"
-          ARCH=$(uname -m)
-          if [ "$ARCH" = "aarch64" ]; then
-            ZIG_ARCH="aarch64"
-          else
-            ZIG_ARCH="x86_64"
-          fi
-          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /usr/local
-          sudo ln -sf /usr/local/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
-          zig version
+          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /usr/local
+          sudo ln -sf /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
           cargo install --locked cargo-zigbuild
+        env:
+          RUSTC_WRAPPER: sccache
 
-      # Linux: Install GStreamer dev packages
-      - name: Install GStreamer (Linux)
-        if: startsWith(matrix.platform, 'linux')
+      - name: Install GStreamer
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -228,46 +166,155 @@ jobs:
             libssl-dev \
             pkg-config
 
-      # Windows: Install GStreamer from our GitHub release mirror
-      # (freedesktop.org has bot protection that blocks CI downloads)
-      - name: Install GStreamer (Windows)
-        if: matrix.platform == 'windows'
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: backend/dist
+
+      - name: Build
+        env:
+          RUSTFLAGS: "-L /usr/lib/x86_64-linux-gnu"
+          RUSTC_WRAPPER: sccache
+        run: |
+          cargo zigbuild --release --package strom --target x86_64-unknown-linux-gnu.2.31
+          cargo zigbuild --release --package strom-mcp-server --target x86_64-unknown-linux-gnu.2.31
+
+      - name: Upload backend binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: strom-v${{ steps.version.outputs.version }}-linux-x86_64-x86_64-unknown-linux-gnu
+          path: target/x86_64-unknown-linux-gnu/release/strom
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload MCP server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64-x86_64-unknown-linux-gnu
+          path: target/x86_64-unknown-linux-gnu/release/strom-mcp-server
+          retention-days: 7
+          if-no-files-found: error
+
+  # Linux ARM64 build (build only - no native clippy/test)
+  build-linux-arm64:
+    name: Build (Linux ARM64)
+    needs: check-wasm
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-arm64
+          cache-on-failure: true
+
+      - name: Install Zig and cargo-zigbuild
+        run: |
+          ZIG_VERSION="0.13.0"
+          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-aarch64-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /usr/local
+          sudo ln -sf /usr/local/zig-linux-aarch64-${ZIG_VERSION}/zig /usr/local/bin/zig
+          cargo install --locked cargo-zigbuild
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libunwind-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: backend/dist
+
+      - name: Build
+        env:
+          RUSTFLAGS: "-L /usr/lib/aarch64-linux-gnu"
+          RUSTC_WRAPPER: sccache
+        run: |
+          cargo zigbuild --release --package strom --target aarch64-unknown-linux-gnu.2.31
+          cargo zigbuild --release --package strom-mcp-server --target aarch64-unknown-linux-gnu.2.31
+
+      - name: Upload backend binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: strom-v${{ steps.version.outputs.version }}-linux-arm64-aarch64-unknown-linux-gnu
+          path: target/aarch64-unknown-linux-gnu/release/strom
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload MCP server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: strom-mcp-server-v${{ steps.version.outputs.version }}-linux-arm64-aarch64-unknown-linux-gnu
+          path: target/aarch64-unknown-linux-gnu/release/strom-mcp-server
+          retention-days: 7
+          if-no-files-found: error
+
+  # Windows: clippy + test + build
+  build-windows:
+    name: Build (Windows)
+    needs: check-wasm
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install GStreamer
         run: |
           $GSTREAMER_VERSION = "1.26.10"
           $BASE_URL = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
 
-          # Download and install runtime from our GitHub mirror
-          Write-Host "Downloading GStreamer runtime from GitHub mirror..."
+          Write-Host "Downloading GStreamer runtime..."
           Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer.msi
           Write-Host "Installing GStreamer runtime..."
           Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer.msi /quiet /qn INSTALLDIR=D:\gstreamer'
 
-          # Download and install development files from our GitHub mirror
-          Write-Host "Downloading GStreamer development files from GitHub mirror..."
+          Write-Host "Downloading GStreamer development files..."
           Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-devel-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer-devel.msi
           Write-Host "Installing GStreamer development files..."
           Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /qn INSTALLDIR=D:\gstreamer'
 
-          # Install pkg-config via Chocolatey (still needed)
-          # --allow-empty-checksums needed because pkgconfiglite downloads from HTTP
           choco install pkgconfiglite --yes --no-progress --allow-empty-checksums
 
-          # Set environment variables
           echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=D:\gstreamer\1.0\msvc_x86_64\" >> $env:GITHUB_ENV
           echo "D:\gstreamer\1.0\msvc_x86_64\bin" >> $env:GITHUB_PATH
           echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
 
-      # macOS: Install GStreamer via Homebrew
-      # Set PKG_CONFIG_PATH to ensure correct library paths are found
-      - name: Install GStreamer (macOS)
-        if: matrix.platform == 'macos'
-        run: |
-          brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav pkg-config
-          # Set pkg-config paths for GStreamer and GLib (Homebrew paths)
-          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix gstreamer)/lib/pkgconfig:$(brew --prefix glib)/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
-
-      # Download the pre-built frontend from the frontend build job
       - name: Download frontend dist
         uses: actions/download-artifact@v4
         with:
@@ -277,40 +324,123 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: build-${{ matrix.platform }}
+          shared-key: windows
           cache-on-failure: true
 
-      # Linux: Build with zigbuild for glibc compatibility
-      - name: Build backend (Linux - glibc ${{ matrix.glibc }})
-        if: startsWith(matrix.platform, 'linux')
-        env:
-          RUSTFLAGS: "-L /usr/lib/${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu' || 'x86_64-linux-gnu' }}"
-        run: |
-          set -e
-          cargo zigbuild --release --package strom --target ${{ matrix.target }}.${{ matrix.glibc }}
-          cargo zigbuild --release --package strom-mcp-server --target ${{ matrix.target }}.${{ matrix.glibc }}
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
-      # Non-Linux: Build with regular cargo
-      - name: Build backend (non-Linux)
-        if: ${{ !startsWith(matrix.platform, 'linux') }}
-        shell: bash
+      - name: Run Clippy
         run: |
-          set -e
-          cargo build --release --package strom --target ${{ matrix.target }}
-          cargo build --release --package strom-mcp-server --target ${{ matrix.target }}
+          cargo clippy --package strom --all-features -- -D warnings
+          cargo clippy --package strom-mcp-server --all-features -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Run tests
+        run: |
+          cargo test --package strom --all-features
+          cargo test --package strom-mcp-server --all-features
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Build
+        run: |
+          cargo build --release --package strom
+          cargo build --release --package strom-mcp-server
+        env:
+          RUSTC_WRAPPER: sccache
 
       - name: Upload backend binary
         uses: actions/upload-artifact@v4
         with:
-          name: strom-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/strom${{ matrix.binary_ext }}
+          name: strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc
+          path: target/release/strom.exe
           retention-days: 7
           if-no-files-found: error
 
       - name: Upload MCP server binary
         uses: actions/upload-artifact@v4
         with:
-          name: strom-mcp-server-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/strom-mcp-server${{ matrix.binary_ext }}
+          name: strom-mcp-server-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc
+          path: target/release/strom-mcp-server.exe
+          retention-days: 7
+          if-no-files-found: error
+
+  # macOS: clippy + test + build
+  build-macos:
+    name: Build (macOS)
+    needs: check-wasm
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install GStreamer
+        run: |
+          brew install gstreamer gst-plugins-base gst-plugins-bad
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix gstreamer)/lib/pkgconfig:$(brew --prefix glib)/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: backend/dist
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos
+          cache-on-failure: true
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Run Clippy
+        run: |
+          cargo clippy --package strom --all-features -- -D warnings
+          cargo clippy --package strom-mcp-server --all-features -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Run tests
+        run: |
+          cargo test --package strom --all-features
+          cargo test --package strom-mcp-server --all-features
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Build
+        run: |
+          cargo build --release --package strom
+          cargo build --release --package strom-mcp-server
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Upload backend binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: strom-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin
+          path: target/release/strom
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload MCP server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: strom-mcp-server-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin
+          path: target/release/strom-mcp-server
           retention-days: 7
           if-no-files-found: error

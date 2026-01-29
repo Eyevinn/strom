@@ -1221,9 +1221,22 @@ mod tests {
     #[test]
     fn test_normalize_uri_absolute_path() {
         // Absolute paths that don't start with file:// should get the prefix
-        let path = "/tmp/video.mp4";
-        let result = normalize_uri(path);
-        assert_eq!(result, "file:///tmp/video.mp4");
+        #[cfg(not(target_os = "windows"))]
+        {
+            let path = "/tmp/video.mp4";
+            let result = normalize_uri(path);
+            assert_eq!(result, "file:///tmp/video.mp4");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let path = "C:\\temp\\video.mp4";
+            let result = normalize_uri(path);
+            assert!(
+                result.starts_with("file:///"),
+                "Windows path should get file:/// prefix"
+            );
+            assert!(result.contains("video.mp4"), "Should contain filename");
+        }
     }
 
     #[test]
