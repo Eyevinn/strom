@@ -66,7 +66,7 @@ jobs:
         run: cargo clippy --package strom-mcp-server --all-targets --all-features -- -D warnings
 
   clippy-frontend:
-    name: Clippy (Frontend WASM)
+    name: Fmt & Clippy (Frontend WASM)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +74,7 @@ jobs:
       - name: Install Rust stable with WASM target
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
       - name: Cache Rust dependencies
@@ -82,6 +82,9 @@ jobs:
         with:
           shared-key: clippy-frontend
           cache-on-failure: true
+
+      - name: Check formatting (frontend)
+        run: cargo fmt --package strom-frontend -- --check
 
       - name: Run Clippy on frontend
         run: cargo clippy --package strom-frontend --target wasm32-unknown-unknown --all-features -- -D warnings
@@ -196,6 +199,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: rustfmt, clippy
           targets: ${{ matrix.target }}
 
       # Linux: Install Zig and cargo-zigbuild for glibc 2.31 compatibility
@@ -279,6 +283,18 @@ jobs:
         with:
           shared-key: build-${{ matrix.platform }}
           cache-on-failure: true
+
+      # Windows/macOS: Run fmt and clippy before build
+      # (Linux runs these in separate jobs for parallelism)
+      - name: Check formatting (Windows/macOS)
+        if: matrix.platform == 'windows' || matrix.platform == 'macos'
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy (Windows/macOS)
+        if: matrix.platform == 'windows' || matrix.platform == 'macos'
+        run: |
+          cargo clippy --package strom --all-features -- -D warnings
+          cargo clippy --package strom-mcp-server --all-features -- -D warnings
 
       # Linux: Build with zigbuild for glibc compatibility
       - name: Build backend (Linux - glibc ${{ matrix.glibc }})
