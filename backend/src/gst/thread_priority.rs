@@ -375,8 +375,11 @@ fn get_current_thread_native_id() -> u64 {
 
     #[cfg(target_os = "windows")]
     {
-        use thread_priority::thread_native_id;
-        thread_native_id() as u64
+        // Use Windows API directly - GetCurrentThreadId returns DWORD (u32)
+        extern "system" {
+            fn GetCurrentThreadId() -> u32;
+        }
+        unsafe { GetCurrentThreadId() as u64 }
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
