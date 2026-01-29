@@ -890,7 +890,7 @@ mod tests {
             },
             Element {
                 id: "sink".to_string(),
-                element_type: "autovideosink".to_string(),
+                element_type: "fakesink".to_string(),
                 properties: HashMap::new(),
                 pad_properties: HashMap::new(),
                 position: (200.0, 0.0),
@@ -909,7 +909,7 @@ mod tests {
         ];
 
         let result = elements_to_gst_launch(&elements, &links);
-        assert_eq!(result, "videotestsrc ! videoconvert ! autovideosink");
+        assert_eq!(result, "videotestsrc ! videoconvert ! fakesink");
     }
 
     #[test]
@@ -1457,7 +1457,7 @@ mod tests {
 
         // THE REAL ROUND-TRIP TEST: Only explicitly set properties should be exported
         // This is what the user expected!
-        let input = "videotestsrc pattern=ball ! videoconvert ! autovideosink";
+        let input = "videotestsrc pattern=ball ! videoconvert ! fakesink";
 
         // Parse
         let pipeline = gst::parse::launch(input).unwrap();
@@ -1536,16 +1536,16 @@ mod tests {
             videoconvert.properties
         );
 
-        // Verify autovideosink has NO non-default properties
-        let autovideosink = elements
+        // Verify fakesink has NO non-default properties
+        let fakesink = elements
             .iter()
-            .find(|e| e.element_type == "autovideosink")
-            .expect("autovideosink not found");
+            .find(|e| e.element_type == "fakesink")
+            .expect("fakesink not found");
 
         assert!(
-            autovideosink.properties.is_empty(),
-            "Expected no non-default properties on autovideosink, got: {:?}",
-            autovideosink.properties
+            fakesink.properties.is_empty(),
+            "Expected no non-default properties on fakesink, got: {:?}",
+            fakesink.properties
         );
 
         // The output should be clean - only pattern=ball
@@ -1645,7 +1645,7 @@ mod tests {
         // Tee pattern: record and display simultaneously
         let input = r#"videotestsrc ! tee name=t
             t. ! queue ! x264enc ! mp4mux ! filesink location=test.mp4
-            t. ! queue ! autovideosink"#;
+            t. ! queue ! fakesink"#;
 
         let cleaned = preprocess_pipeline_string(input);
         let pipeline = gst::parse::launch(&cleaned).unwrap();
@@ -1653,7 +1653,7 @@ mod tests {
 
         let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
 
-        // Should have: videotestsrc, tee, queue (x2), x264enc, mp4mux, filesink, autovideosink
+        // Should have: videotestsrc, tee, queue (x2), x264enc, mp4mux, filesink, fakesink
         assert!(
             elements.len() >= 6,
             "Expected at least 6 elements in tee pipeline, got {}",

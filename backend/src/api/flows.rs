@@ -1578,7 +1578,7 @@ mod tests {
     fn test_is_pad_valid_gst_launch_imported_element() {
         // gst-launch imported elements have IDs like "videotestsrc_0", "videoconvert_1"
         // This was the bug - these were incorrectly rejected because they don't start with 'e'
-        let elements = element_ids(&["videotestsrc_0", "videoconvert_1", "autovideosink_2"]);
+        let elements = element_ids(&["videotestsrc_0", "videoconvert_1", "fakesink_2"]);
         let blocks = block_pads(&[]);
         let block_ids = block_ids_set(&[]);
         let computed = computed_blocks(&[]);
@@ -1604,13 +1604,7 @@ mod tests {
             "gst-launch imported element sink pads should be valid"
         );
         assert!(
-            is_pad_valid(
-                "autovideosink_2:sink",
-                &blocks,
-                &elements,
-                &block_ids,
-                &computed
-            ),
+            is_pad_valid("fakesink_2:sink", &blocks, &elements, &block_ids, &computed),
             "gst-launch imported sink element pads should be valid"
         );
     }
