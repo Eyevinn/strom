@@ -3,13 +3,19 @@
 //! Supports two GStreamer implementations:
 //! - `whipclientsink` (new): Uses signaller interface, handles encoding internally
 //! - `whipsink` (legacy): Simpler implementation, requires pre-encoded RTP input
+//!
+//! Note: WHIP is a send-only protocol, but SMB (Symphony Media Bridge) may still
+//! send RTP back to the whipsink. For `whipsink`, we handle this by detecting the
+//! internal webrtcbin and linking any incoming source pads to a fakesink to prevent
+//! "not-linked" errors. This workaround does not work for `whipclientsink` due to
+//! its different internal structure (webrtcbin is not a direct child of the sink bin).
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// WHIP Output block builder.
 pub struct WHIPOutputBuilder;
@@ -248,6 +254,13 @@ fn build_whipsink(
         whip_endpoint, stun_server, turn_server
     );
 
+    // Hook into internal webrtcbin to handle unexpected incoming RTP.
+    // SMB (Symphony Media Bridge) doesn't support direction, so it sends RTP to
+    // all endpoints including send-only WHIP clients. Without handling this,
+    // the internal nicesrc pads go "not-linked" and crash the pipeline.
+    // Solution: Link any incoming source pads to fakesink.
+    setup_incoming_rtp_handler(&whipsink, instance_id);
+
     // Define internal links
     // whipsink uses generic sink_%u pads for RTP streams
     let internal_links = vec![
@@ -362,4 +375,173 @@ fn whip_output_definition() -> BlockDefinition {
             ..Default::default()
         }),
     }
+}
+
+/// Setup handler for unexpected incoming RTP on WHIP sink elements.
+///
+/// WHIP is send-only, but SMB sends RTP to all endpoints. The error occurs in
+/// TransportReceiveBin inside webrtcbin - the receive chain has nowhere to send data.
+///
+/// We handle this by:
+/// 1. Using deep-element-added to catch TransportReceiveBin when created
+/// 2. Connecting to its pad-added signal
+/// 3. Linking any src pads to fakesink before they cause "not-linked" errors
+fn setup_incoming_rtp_handler(whip_element: &gst::Element, instance_id: &str) {
+    // Try to downcast the whip element to a Bin
+    let bin = match whip_element.clone().downcast::<gst::Bin>() {
+        Ok(b) => b,
+        Err(_) => {
+            warn!("WHIP: Element is not a bin, cannot setup incoming RTP handler");
+            return;
+        }
+    };
+
+    // Use deep-element-added to catch TransportReceiveBin when it's created
+    bin.connect("deep-element-added", false, move |values| {
+        let parent_bin = values[0].get::<gst::Bin>().unwrap();
+        let element = values[2].get::<gst::Element>().unwrap();
+        let element_name = element.name();
+        let element_type = element.type_().name();
+
+        // Look for TransportReceiveBin - its rtp_src pad may be unlinked
+        if element_type == "TransportReceiveBin" {
+            info!(
+                "WHIP: Found {} (parent bin: {}), checking for unlinked src pads",
+                element_name,
+                parent_bin.name()
+            );
+
+            let element_name_clone = element_name.to_string();
+
+            // Check existing src pads
+            for pad in element.src_pads() {
+                let pad_name = pad.name();
+                info!(
+                    "WHIP: {} has src pad: {} (linked: {})",
+                    element_name,
+                    pad_name,
+                    pad.is_linked()
+                );
+
+                if !pad.is_linked() && pad_name.contains("rtp_src") {
+                    // Get the direct parent bin of transportreceivebin (should be webrtcbin)
+                    // We can't add fakesink to whipsink because linking would fail with WrongHierarchy
+                    let direct_parent = match element.parent() {
+                        Some(p) => match p.downcast::<gst::Bin>() {
+                            Ok(bin) => bin,
+                            Err(_) => {
+                                warn!("WHIP: Direct parent of {} is not a bin", element_name);
+                                continue;
+                            }
+                        },
+                        None => {
+                            warn!("WHIP: {} has no parent", element_name);
+                            continue;
+                        }
+                    };
+
+                    info!(
+                        "WHIP: Will link unlinked {} to fakesink (adding to direct parent: {})",
+                        pad_name,
+                        direct_parent.name()
+                    );
+
+                    let fakesink_name = format!("whip_fakesink_{}", pad_name);
+                    match gst::ElementFactory::make("fakesink")
+                        .name(&fakesink_name)
+                        .property("sync", false)
+                        .property("async", false)
+                        .build()
+                    {
+                        Ok(fakesink) => {
+                            info!(
+                                "WHIP: Created fakesink {}, adding to {}",
+                                fakesink_name,
+                                direct_parent.name()
+                            );
+                            if let Err(e) = direct_parent.add(&fakesink) {
+                                warn!(
+                                    "WHIP: Failed to add fakesink to {}: {}",
+                                    direct_parent.name(),
+                                    e
+                                );
+                                continue;
+                            }
+                            info!("WHIP: Added fakesink, syncing state");
+                            if let Err(e) = fakesink.sync_state_with_parent() {
+                                warn!("WHIP: Failed to sync state: {}", e);
+                            }
+                            if let Some(sink_pad) = fakesink.static_pad("sink") {
+                                info!("WHIP: Got fakesink's sink pad, linking {} to it", pad_name);
+                                match pad.link(&sink_pad) {
+                                    Ok(_) => {
+                                        info!("WHIP: Successfully linked {} to fakesink", pad_name)
+                                    }
+                                    Err(e) => warn!(
+                                        "WHIP: Failed to link {} to fakesink: {:?}",
+                                        pad_name, e
+                                    ),
+                                }
+                            } else {
+                                warn!("WHIP: fakesink has no sink pad");
+                            }
+                        }
+                        Err(e) => warn!("WHIP: Failed to create fakesink: {}", e),
+                    }
+                }
+            }
+
+            // Also handle pads added later via pad-added callback
+            element.connect_pad_added(move |elem, pad| {
+                let pad_name = pad.name();
+                if pad.direction() != gst::PadDirection::Src {
+                    return;
+                }
+
+                info!("WHIP: {} pad-added: {}", element_name_clone, pad_name);
+
+                if pad.is_linked() || !pad_name.contains("rtp_src") {
+                    return;
+                }
+
+                // Get direct parent of the element (webrtcbin) to add fakesink at correct hierarchy level
+                let direct_parent = match elem.parent() {
+                    Some(p) => match p.downcast::<gst::Bin>() {
+                        Ok(bin) => bin,
+                        Err(_) => {
+                            warn!("WHIP: Direct parent is not a bin");
+                            return;
+                        }
+                    },
+                    None => {
+                        warn!("WHIP: Element has no parent");
+                        return;
+                    }
+                };
+
+                let fakesink_name = format!("whip_fakesink_{}", pad_name);
+                if let Ok(fakesink) = gst::ElementFactory::make("fakesink")
+                    .name(&fakesink_name)
+                    .property("sync", false)
+                    .property("async", false)
+                    .build()
+                {
+                    if direct_parent.add(&fakesink).is_err() {
+                        warn!("WHIP: Failed to add fakesink to {}", direct_parent.name());
+                        return;
+                    }
+                    let _ = fakesink.sync_state_with_parent();
+                    if let Some(sink_pad) = fakesink.static_pad("sink") {
+                        if pad.link(&sink_pad).is_ok() {
+                            info!("WHIP: Linked new pad {} to fakesink", pad_name);
+                        }
+                    }
+                }
+            });
+        }
+
+        None
+    });
+
+    info!("WHIP: Incoming RTP handler installed for {}", instance_id);
 }
