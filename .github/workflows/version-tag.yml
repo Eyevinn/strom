@@ -1,0 +1,103 @@
+name: Version & Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v0.3.17)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run (no push)'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  version-and-tag:
+    name: Update version and create tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse version
+        id: version
+        run: |
+          # Strip leading 'v' if present
+          VERSION="${{ inputs.version }}"
+          VERSION="${VERSION#v}"
+          echo "number=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Parsed version: $VERSION (tag: v$VERSION)"
+
+      - name: Validate version format
+        run: |
+          if ! echo "${{ steps.version.outputs.number }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: Version must be in format vX.Y.Z (e.g., v0.3.17)"
+            exit 1
+          fi
+
+      - name: Check if tag already exists
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Error: Tag ${{ steps.version.outputs.tag }} already exists"
+            exit 1
+          fi
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Update Cargo.toml version
+        run: |
+          sed -i 's/^version = "[0-9]*\.[0-9]*\.[0-9]*"/version = "${{ steps.version.outputs.number }}"/' Cargo.toml
+          echo "Updated Cargo.toml to version ${{ steps.version.outputs.number }}"
+          grep '^version' Cargo.toml
+
+      - name: Update Cargo.lock
+        run: cargo check --workspace
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit version bump
+        run: |
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to ${{ steps.version.outputs.tag }}"
+
+      - name: Create tag
+        run: |
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+
+      - name: Show changes
+        run: |
+          echo "=== Commit ==="
+          git log -1 --oneline
+          echo ""
+          echo "=== Tag ==="
+          git tag -l "${{ steps.version.outputs.tag }}" -n1
+          echo ""
+          echo "=== Cargo.toml version ==="
+          grep '^version' Cargo.toml
+
+      - name: Push commit and tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git push origin main
+          git push origin "${{ steps.version.outputs.tag }}"
+          echo "Pushed commit and tag ${{ steps.version.outputs.tag }}"
+          echo "Release workflow should now be triggered."
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "DRY RUN - No changes pushed"
+          echo "Would have pushed:"
+          echo "  - Commit: $(git rev-parse HEAD)"
+          echo "  - Tag: ${{ steps.version.outputs.tag }}"
