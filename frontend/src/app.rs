@@ -4076,6 +4076,19 @@ impl StromApp {
 
                 // Version info on the right side
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Debug console button (WASM only)
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        if ui
+                            .small_button("🐛")
+                            .on_hover_text("Toggle debug console")
+                            .clicked()
+                        {
+                            crate::wasm_utils::toggle_debug_console_panel();
+                        }
+                        ui.separator();
+                    }
+
                     if let Some(ref version_info) = self.version_info {
                         let version_text = if !version_info.git_tag.is_empty() {
                             // On a tagged release
