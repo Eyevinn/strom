@@ -9,6 +9,7 @@
 mod api;
 mod app;
 mod audiorouter;
+mod clipboard;
 mod clocks;
 mod compositor_editor;
 mod discovery;

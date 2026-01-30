@@ -153,7 +153,7 @@ impl LinksPage {
                         ctx.open_url(egui::OpenUrl::new_tab(&streams_url));
                     }
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(streams_url.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &streams_url);
                     }
                     if ui
                         .link(egui::RichText::new(&streams_url).monospace())
@@ -184,7 +184,7 @@ impl LinksPage {
                 let player_base = format!("{}/player/whep", server_base);
                 ui.horizontal(|ui| {
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(player_base.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &player_base);
                     }
                     if ui
                         .link(egui::RichText::new(&player_base).monospace())
@@ -289,7 +289,7 @@ impl LinksPage {
                                 .on_hover_text("Copy SRT URI")
                                 .clicked()
                             {
-                                ctx.copy_text(client_uri.clone());
+                                crate::clipboard::copy_text_with_ctx(ctx, &client_uri);
                             }
 
                             ui.label(&listener.flow_name);
@@ -320,7 +320,7 @@ impl LinksPage {
                         ctx.open_url(egui::OpenUrl::new_tab(&swagger_url));
                     }
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(swagger_url.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &swagger_url);
                     }
                     ui.label("Swagger UI");
                     if ui
@@ -340,7 +340,7 @@ impl LinksPage {
                         ctx.open_url(egui::OpenUrl::new_tab(&openapi_url));
                     }
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(openapi_url.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &openapi_url);
                     }
                     ui.label("OpenAPI Spec");
                     if ui
@@ -368,7 +368,7 @@ impl LinksPage {
                         ctx.open_url(egui::OpenUrl::new_tab(&flows_api));
                     }
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(flows_api.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &flows_api);
                     }
                     ui.label("Flows");
                     if ui
@@ -388,7 +388,7 @@ impl LinksPage {
                         ctx.open_url(egui::OpenUrl::new_tab(&streams_api));
                     }
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(streams_api.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &streams_api);
                     }
                     ui.label("WHEP Streams");
                     if ui
@@ -408,7 +408,7 @@ impl LinksPage {
                         ctx.open_url(egui::OpenUrl::new_tab(&version_api));
                     }
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(version_api.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &version_api);
                     }
                     ui.label("Version");
                     if ui
@@ -428,7 +428,7 @@ impl LinksPage {
                         ctx.open_url(egui::OpenUrl::new_tab(&blocks_api));
                     }
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(blocks_api.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &blocks_api);
                     }
                     ui.label("Blocks");
                     if ui
@@ -448,7 +448,7 @@ impl LinksPage {
                         ctx.open_url(egui::OpenUrl::new_tab(&elements_api));
                     }
                     if ui.small_button("Copy").clicked() {
-                        ctx.copy_text(elements_api.clone());
+                        crate::clipboard::copy_text_with_ctx(ctx, &elements_api);
                     }
                     ui.label("Elements");
                     if ui

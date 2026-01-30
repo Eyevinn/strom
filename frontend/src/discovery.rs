@@ -711,7 +711,7 @@ impl DiscoveryPage {
                                 )
                                 .clicked()
                             {
-                                ui.ctx().copy_text(source.name.clone());
+                                crate::clipboard::copy_text_with_ctx(ui.ctx(), &source.name);
                             }
                         });
 
@@ -733,7 +733,7 @@ impl DiscoveryPage {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("📋 Copy SDP").clicked() {
-                            ui.ctx().copy_text(sdp.clone());
+                            crate::clipboard::copy_text_with_ctx(ui.ctx(), sdp);
                         }
                         // Only show "Create Flow" for discovered streams (not announced)
                         if let SelectedStream::Discovered(stream_id) = selected {

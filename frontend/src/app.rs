@@ -2336,8 +2336,7 @@ impl StromApp {
                                     if let Ok(location) = window.location().origin() {
                                         let url =
                                             format!("{}/live/{}/{}", location, flow_id, block_id);
-                                        let clipboard = window.navigator().clipboard();
-                                        let _ = clipboard.write_text(&url);
+                                        crate::clipboard::copy_text_with_ctx(ui.ctx(), &url);
                                         tracing::info!("Copied live URL: {}", url);
                                     }
                                 }
@@ -3354,7 +3353,10 @@ impl StromApp {
                                             if ui.button("📤  Export as JSON").clicked() {
                                                 match serde_json::to_string_pretty(flow) {
                                                     Ok(json) => {
-                                                        ui.ctx().copy_text(json);
+                                                        crate::clipboard::copy_text_with_ctx(
+                                                            ui.ctx(),
+                                                            &json,
+                                                        );
                                                         self.status = format!(
                                                     "Flow '{}' exported to clipboard as JSON",
                                                     flow.name
@@ -3724,7 +3726,7 @@ impl StromApp {
                         // Handle copy WHEP URL to clipboard
                         if let Some(endpoint_id) = result.copy_whep_url_requested {
                             let player_url = self.api.get_whep_player_url(&endpoint_id);
-                            ctx.copy_text(player_url);
+                            crate::clipboard::copy_text_with_ctx(ctx, &player_url);
                             self.status = "Player URL copied to clipboard".to_string();
                         }
                     } else {
@@ -6413,7 +6415,7 @@ impl eframe::App for StromApp {
                     pipeline,
                     flow_name,
                 } => {
-                    ctx.copy_text(pipeline);
+                    crate::clipboard::copy_text_with_ctx(ctx, &pipeline);
                     self.status =
                         format!("Flow '{}' exported to clipboard as gst-launch", flow_name);
                 }

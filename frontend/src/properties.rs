@@ -644,7 +644,7 @@ impl PropertyInspector {
 
                             // Copy button
                             if ui.button("📋 Copy to Clipboard").clicked() {
-                                ui.ctx().copy_text(sdp_text.to_string());
+                                crate::clipboard::copy_text_with_ctx(ui.ctx(), sdp_text);
                             }
                         } else {
                             ui.colored_label(
