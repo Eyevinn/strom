@@ -4,10 +4,13 @@ members = ["types", "backend", "frontend", "mcp-server"]
 default-members = ["backend"]
 
 [workspace.package]
-version = "0.3.16"
+version = "0.3.17"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-authors = ["Per"]
+authors = ["Per Enstedt <per.enstedt@eyevinn.se>"]
+repository = "https://github.com/Eyevinn/strom"
+homepage = "https://github.com/Eyevinn/strom"
+description = "Visual GStreamer pipeline editor and manager"
 
 [workspace.dependencies]
 # Shared types
