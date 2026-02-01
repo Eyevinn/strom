@@ -316,21 +316,34 @@ pub async fn whep_resource_proxy_options() -> Response {
 // ============================================================================
 
 /// Response structure for a WHEP stream.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct WhepStreamInfo {
+    /// Unique identifier for the WHEP endpoint
     pub endpoint_id: String,
+    /// Stream mode (e.g., "video", "audio", "video+audio")
     pub mode: String,
+    /// Whether the stream includes audio
     pub has_audio: bool,
+    /// Whether the stream includes video
     pub has_video: bool,
 }
 
 /// Response structure for the streams list endpoint.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct WhepStreamsResponse {
+    /// List of active WHEP streams
     pub streams: Vec<WhepStreamInfo>,
 }
 
 /// GET /api/whep-streams - List all active WHEP streams (JSON API).
+#[utoipa::path(
+    get,
+    path = "/api/whep-streams",
+    tag = "whep",
+    responses(
+        (status = 200, description = "List of active WHEP streams", body = WhepStreamsResponse)
+    )
+)]
 pub async fn list_whep_streams(State(state): State<AppState>) -> axum::Json<WhepStreamsResponse> {
     let endpoints = state.whep_registry().list_all().await;
 
@@ -352,7 +365,7 @@ pub async fn list_whep_streams(State(state): State<AppState>) -> axum::Json<Whep
 // ============================================================================
 
 /// Response structure for ICE servers endpoint.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct IceServersResponse {
     /// List of ICE server configurations (STUN/TURN)
     pub ice_servers: Vec<IceServer>,
@@ -360,11 +373,14 @@ pub struct IceServersResponse {
 
 /// ICE server configuration for WebRTC.
 /// For TURN servers, username and credential are extracted from the URL.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct IceServer {
+    /// ICE server URL (e.g., "stun:stun.l.google.com:19302")
     pub urls: String,
+    /// Username for TURN server authentication
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// Credential for TURN server authentication
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
 }
@@ -443,6 +459,14 @@ fn parse_ice_server(url: &str) -> IceServer {
 }
 
 /// GET /api/ice-servers - Get configured ICE servers for WebRTC connections.
+#[utoipa::path(
+    get,
+    path = "/api/ice-servers",
+    tag = "whep",
+    responses(
+        (status = 200, description = "List of configured ICE servers", body = IceServersResponse)
+    )
+)]
 pub async fn get_ice_servers(State(state): State<AppState>) -> axum::Json<IceServersResponse> {
     let ice_servers = state
         .ice_servers()

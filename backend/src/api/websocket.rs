@@ -29,6 +29,15 @@ use crate::state::AppState;
 /// ws.onclose = () => console.log('Disconnected');
 /// ws.onerror = (error) => console.error('WebSocket error:', error);
 /// ```
+#[utoipa::path(
+    get,
+    path = "/api/ws",
+    tag = "websocket",
+    responses(
+        (status = 101, description = "WebSocket connection upgraded"),
+        (status = 401, description = "Authentication required (use auth_token query param)")
+    )
+)]
 pub async fn websocket_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     info!(
         "New WebSocket client connecting (total subscribers: {})",

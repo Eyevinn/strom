@@ -553,6 +553,19 @@ pub async fn stop_flow(
 /// This endpoint generates a GraphViz DOT graph of the GStreamer pipeline
 /// and converts it to SVG format. The SVG is returned directly and can be
 /// viewed in a browser.
+#[utoipa::path(
+    get,
+    path = "/api/flows/{id}/debug-graph",
+    tag = "flows",
+    params(
+        ("id" = String, Path, description = "Flow ID (UUID)")
+    ),
+    responses(
+        (status = 200, description = "SVG debug graph of the pipeline", content_type = "image/svg+xml"),
+        (status = 404, description = "Flow not found or not running", body = ErrorResponse),
+        (status = 500, description = "Failed to generate graph (Graphviz not installed)", body = ErrorResponse)
+    )
+)]
 pub async fn debug_graph(
     State(state): State<AppState>,
     Path(id): Path<FlowId>,
@@ -642,6 +655,18 @@ pub async fn debug_graph(
 /// Returns information about dynamic pads (like decodebin outputs) that were
 /// created at runtime and auto-linked to tees. These pads can be connected
 /// to other elements in the UI.
+#[utoipa::path(
+    get,
+    path = "/api/flows/{id}/dynamic-pads",
+    tag = "flows",
+    params(
+        ("id" = String, Path, description = "Flow ID (UUID)")
+    ),
+    responses(
+        (status = 200, description = "Dynamic pads information", body = DynamicPadsResponse),
+        (status = 404, description = "Flow not found or not running", body = ErrorResponse)
+    )
+)]
 pub async fn get_dynamic_pads(
     State(state): State<AppState>,
     Path(id): Path<FlowId>,
@@ -661,7 +686,7 @@ pub async fn get_dynamic_pads(
 }
 
 /// Response containing runtime dynamic pads information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DynamicPadsResponse {
     /// Map of element_id -> {pad_name -> tee_element_name}
     /// These are pads that appeared at runtime without defined links.

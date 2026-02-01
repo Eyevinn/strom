@@ -100,24 +100,31 @@ impl AuthConfig {
 }
 
 /// Login request payload
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
+    /// Username for authentication
     pub username: String,
+    /// Password for authentication
     pub password: String,
 }
 
 /// Login response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LoginResponse {
+    /// Whether the login was successful
     pub success: bool,
+    /// Human-readable message describing the result
     pub message: String,
 }
 
 /// Authentication status response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AuthStatusResponse {
+    /// Whether the current session is authenticated
     pub authenticated: bool,
+    /// Whether authentication is required for this server
     pub auth_required: bool,
+    /// Available authentication methods (e.g., "session", "api_key")
     pub methods: Vec<String>,
 }
 
@@ -175,6 +182,16 @@ pub async fn auth_middleware(
 }
 
 /// Login handler
+#[utoipa::path(
+    post,
+    path = "/api/login",
+    tag = "auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login attempt result", body = LoginResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn login_handler(
     Extension(config): Extension<Arc<AuthConfig>>,
     session: Session,
@@ -206,6 +223,15 @@ pub async fn login_handler(
 }
 
 /// Logout handler
+#[utoipa::path(
+    post,
+    path = "/api/logout",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Logout successful", body = LoginResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn logout_handler(session: Session) -> Result<Json<LoginResponse>, StatusCode> {
     session
         .delete()
@@ -219,6 +245,14 @@ pub async fn logout_handler(session: Session) -> Result<Json<LoginResponse>, Sta
 }
 
 /// Get authentication status
+#[utoipa::path(
+    get,
+    path = "/api/auth/status",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Current authentication status", body = AuthStatusResponse)
+    )
+)]
 pub async fn auth_status_handler(
     Extension(config): Extension<Arc<AuthConfig>>,
     session: Session,

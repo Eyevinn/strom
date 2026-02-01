@@ -118,6 +118,18 @@ fn validate_mcp_auth(auth_config: &AuthConfig, headers: &HeaderMap) -> Result<()
 /// - `text/event-stream` for streaming responses (not implemented yet)
 ///
 /// The `Mcp-Session-Id` header is assigned on initialize and required for subsequent requests.
+#[utoipa::path(
+    post,
+    path = "/api/mcp",
+    tag = "mcp",
+    responses(
+        (status = 200, description = "JSON-RPC response", content_type = "application/json"),
+        (status = 202, description = "Notification accepted (no response body)"),
+        (status = 400, description = "Invalid request or session required"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Invalid origin (DNS rebinding protection)")
+    )
+)]
 pub async fn mcp_post(
     State(state): State<AppState>,
     Extension(sessions): Extension<McpSessionManager>,
@@ -207,6 +219,18 @@ pub async fn mcp_post(
 ///
 /// Opens a Server-Sent Events stream for receiving server-initiated
 /// JSON-RPC messages (notifications, requests from server).
+#[utoipa::path(
+    get,
+    path = "/api/mcp",
+    tag = "mcp",
+    responses(
+        (status = 200, description = "SSE stream for server-initiated messages", content_type = "text/event-stream"),
+        (status = 400, description = "Mcp-Session-Id header required"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Invalid origin"),
+        (status = 404, description = "Session not found")
+    )
+)]
 pub async fn mcp_get(
     State(state): State<AppState>,
     Extension(sessions): Extension<McpSessionManager>,
@@ -364,6 +388,18 @@ fn create_sse_stream(
 /// DELETE /api/mcp - Terminate a session.
 ///
 /// Terminates the session identified by the `Mcp-Session-Id` header.
+#[utoipa::path(
+    delete,
+    path = "/api/mcp",
+    tag = "mcp",
+    responses(
+        (status = 204, description = "Session terminated successfully"),
+        (status = 400, description = "Mcp-Session-Id header required"),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "Invalid origin"),
+        (status = 404, description = "Session not found")
+    )
+)]
 pub async fn mcp_delete(
     Extension(sessions): Extension<McpSessionManager>,
     Extension(auth_config): Extension<Arc<AuthConfig>>,
