@@ -70,9 +70,14 @@ WORKDIR /build/gstcefsrc
 # Build gstcefsrc
 # CEF binaries are automatically downloaded from Spotify's CDN during cmake configure
 # The CMake script automatically detects the architecture
+# Build with -march=x86-64-v3 (AVX2 baseline) to ensure compatibility with older CPUs
+# This avoids using AVX-512 instructions that may be available on GitHub runners
+# but not on production servers (e.g., Xeon E5-2680 v3 Haswell)
 RUN mkdir build && cd build && \
     cmake -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_FLAGS="-march=x86-64-v3" \
+        -DCMAKE_CXX_FLAGS="-march=x86-64-v3" \
         -DCEF_VERSION="${CEF_VERSION}" \
         .. && \
     ninja
