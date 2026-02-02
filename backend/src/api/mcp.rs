@@ -122,6 +122,7 @@ fn validate_mcp_auth(auth_config: &AuthConfig, headers: &HeaderMap) -> Result<()
     post,
     path = "/api/mcp",
     tag = "mcp",
+    request_body = JsonRpcRequest,
     responses(
         (status = 200, description = "JSON-RPC response", content_type = "application/json"),
         (status = 202, description = "Notification accepted (no response body)"),
