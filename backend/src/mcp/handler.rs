@@ -14,7 +14,7 @@ use tracing::{debug, error, info};
 pub const PROTOCOL_VERSION: &str = "2025-03-26";
 
 /// JSON-RPC 2.0 Request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     pub id: Option<Value>,
