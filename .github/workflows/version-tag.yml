@@ -13,15 +13,26 @@ on:
         type: boolean
         default: false
 
+  # Auto-create tag when version bump PR is merged
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+
 jobs:
-  version-and-tag:
-    name: Update version and create tag
+  # Job 1: Create version bump PR (triggered by workflow_dispatch)
+  create-version-pr:
+    name: Create version bump PR
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -33,12 +44,13 @@ jobs:
           VERSION="${VERSION#v}"
           echo "number=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "branch=release/v$VERSION" >> $GITHUB_OUTPUT
           echo "Parsed version: $VERSION (tag: v$VERSION)"
 
       - name: Validate version format
         run: |
           if ! echo "${{ steps.version.outputs.number }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Error: Version must be in format vX.Y.Z (e.g., v0.3.17)"
+            echo "Error: Version must be in format X.Y.Z (e.g., 0.3.17)"
             exit 1
           fi
 
@@ -49,8 +61,18 @@ jobs:
             exit 1
           fi
 
+      - name: Check if branch already exists
+        run: |
+          if git ls-remote --exit-code --heads origin "${{ steps.version.outputs.branch }}" >/dev/null 2>&1; then
+            echo "Error: Branch ${{ steps.version.outputs.branch }} already exists"
+            exit 1
+          fi
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Create release branch
+        run: git checkout -b "${{ steps.version.outputs.branch }}"
 
       - name: Update Cargo.toml version
         run: |
@@ -71,33 +93,90 @@ jobs:
           git add Cargo.toml Cargo.lock
           git commit -m "chore: bump version to ${{ steps.version.outputs.tag }}"
 
-      - name: Create tag
-        run: |
-          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
-
       - name: Show changes
         run: |
           echo "=== Commit ==="
           git log -1 --oneline
           echo ""
-          echo "=== Tag ==="
-          git tag -l "${{ steps.version.outputs.tag }}" -n1
-          echo ""
           echo "=== Cargo.toml version ==="
           grep '^version' Cargo.toml
 
-      - name: Push commit and tag
+      - name: Push branch and create PR
         if: ${{ !inputs.dry_run }}
         run: |
-          git push origin main
-          git push origin "${{ steps.version.outputs.tag }}"
-          echo "Pushed commit and tag ${{ steps.version.outputs.tag }}"
-          echo "Release workflow should now be triggered."
+          git push origin "${{ steps.version.outputs.branch }}"
+          gh pr create \
+            --title "chore: bump version to ${{ steps.version.outputs.tag }}" \
+            --body "## Summary
+
+          Bump version to ${{ steps.version.outputs.tag }}
+
+          ## After merging
+
+          A tag will be created automatically when this PR is merged, which will trigger the release workflow.
+
+          ---
+          *Created by Version & Tag workflow*" \
+            --base main \
+            --head "${{ steps.version.outputs.branch }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
         run: |
           echo "DRY RUN - No changes pushed"
-          echo "Would have pushed:"
+          echo "Would have:"
+          echo "  - Created branch: ${{ steps.version.outputs.branch }}"
           echo "  - Commit: $(git rev-parse HEAD)"
-          echo "  - Tag: ${{ steps.version.outputs.tag }}"
+          echo "  - Created PR to merge into main"
+
+  # Job 2: Create tag when version bump is merged (triggered by push to main)
+  create-tag:
+    name: Create release tag
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if this is a version bump commit
+        id: check
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Commit message: $COMMIT_MSG"
+
+          # Match "chore: bump version to vX.Y.Z"
+          if echo "$COMMIT_MSG" | grep -qE '^chore: bump version to v[0-9]+\.[0-9]+\.[0-9]+'; then
+            VERSION=$(echo "$COMMIT_MSG" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+')
+            echo "Found version bump commit for $VERSION"
+            echo "is_version_bump=true" >> $GITHUB_OUTPUT
+            echo "tag=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "Not a version bump commit, skipping"
+            echo "is_version_bump=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if tag already exists
+        if: steps.check.outputs.is_version_bump == 'true'
+        id: tag_check
+        run: |
+          if git ls-remote --exit-code --tags origin "${{ steps.check.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.check.outputs.tag }} already exists, skipping"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.is_version_bump == 'true' && steps.tag_check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.check.outputs.tag }}" -m "Release ${{ steps.check.outputs.tag }}"
+          git push origin "${{ steps.check.outputs.tag }}"
+          echo "Created and pushed tag ${{ steps.check.outputs.tag }}"
+          echo "Release workflow should now be triggered."
