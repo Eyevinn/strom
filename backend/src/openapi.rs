@@ -1,5 +1,9 @@
 //! OpenAPI documentation configuration.
 
+use crate::api::flows::DynamicPadsResponse;
+use crate::api::whep_player::{IceServer, IceServersResponse, WhepStreamInfo, WhepStreamsResponse};
+use crate::auth::{AuthStatusResponse, LoginRequest, LoginResponse};
+use crate::mcp::handler::JsonRpcRequest;
 use crate::version::VersionInfo;
 use strom_types::api::{
     CreateDirectoryRequest, CreateFlowRequest, ElementInfoResponse, ElementListResponse,
@@ -37,6 +41,8 @@ use utoipa::OpenApi;
         crate::api::flows::update_element_property,
         crate::api::flows::trigger_transition,
         crate::api::flows::animate_input,
+        crate::api::flows::debug_graph,
+        crate::api::flows::get_dynamic_pads,
         crate::api::elements::list_elements,
         crate::api::elements::get_element_info,
         crate::api::elements::get_element_pad_properties,
@@ -57,6 +63,19 @@ use utoipa::OpenApi;
         crate::api::media::delete_file,
         crate::api::media::create_directory,
         crate::api::media::delete_directory,
+        // Auth endpoints
+        crate::auth::login_handler,
+        crate::auth::logout_handler,
+        crate::auth::auth_status_handler,
+        // WHEP endpoints
+        crate::api::whep_player::list_whep_streams,
+        crate::api::whep_player::get_ice_servers,
+        // MCP endpoints
+        crate::api::mcp::mcp_post,
+        crate::api::mcp::mcp_get,
+        crate::api::mcp::mcp_delete,
+        // WebSocket endpoint
+        crate::api::websocket::websocket_handler,
     ),
     components(
         schemas(
@@ -102,6 +121,19 @@ use utoipa::OpenApi;
             RenameMediaRequest,
             CreateDirectoryRequest,
             MediaOperationResponse,
+            // Flow dynamic pads
+            DynamicPadsResponse,
+            // Auth types
+            LoginRequest,
+            LoginResponse,
+            AuthStatusResponse,
+            // WHEP types
+            WhepStreamInfo,
+            WhepStreamsResponse,
+            IceServersResponse,
+            IceServer,
+            // MCP types
+            JsonRpcRequest,
         )
     ),
     tags(
@@ -111,7 +143,11 @@ use utoipa::OpenApi;
         (name = "gst-launch", description = "gst-launch-1.0 import/export endpoints"),
         (name = "Network", description = "Network interface discovery endpoints"),
         (name = "System", description = "System information endpoints"),
-        (name = "Media", description = "Media file management endpoints")
+        (name = "Media", description = "Media file management endpoints"),
+        (name = "auth", description = "Authentication endpoints"),
+        (name = "whep", description = "WHEP WebRTC playback endpoints"),
+        (name = "mcp", description = "Model Context Protocol (MCP) endpoints"),
+        (name = "websocket", description = "WebSocket real-time communication")
     ),
     info(
         title = "Strom GStreamer Flow Engine API",
