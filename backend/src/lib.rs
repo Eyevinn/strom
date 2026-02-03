@@ -3,7 +3,6 @@
 //! This module exposes the application builder for use in tests.
 
 use axum::extract::DefaultBodyLimit;
-#[cfg(not(debug_assertions))]
 use axum::http::HeaderValue;
 use axum::http::{header, HeaderName, Method};
 use axum::{
@@ -12,9 +11,7 @@ use axum::{
     Extension, Router,
 };
 use std::sync::Arc;
-#[cfg(debug_assertions)]
-use tower_http::cors::Any;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_sessions::{cookie::time::Duration, Expiry, MemoryStore, SessionManagerLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -63,6 +60,18 @@ pub async fn create_app_with_state(state: AppState) -> Router {
 pub async fn create_app_with_state_and_auth(
     state: AppState,
     auth_config: auth::AuthConfig,
+) -> Router {
+    create_app_with_config(state, auth_config, Vec::new()).await
+}
+
+/// Create the Axum application router with a given state, auth configuration, and CORS origins.
+///
+/// If `cors_allowed_origins` is empty, any origin is allowed.
+/// Otherwise, only the specified origins are allowed.
+pub async fn create_app_with_config(
+    state: AppState,
+    auth_config: auth::AuthConfig,
+    cors_allowed_origins: Vec<String>,
 ) -> Router {
     // Note: GStreamer is already initialized in main.rs before this is called.
     // DO NOT call gst::init() here - it can corrupt internal state if pipelines
@@ -330,17 +339,17 @@ pub async fn create_app_with_state_and_auth(
                 ])
                 .expose_headers([HeaderName::from_static("mcp-session-id")]);
 
-            // Debug builds: allow any origin for trunk serve and mobile testing
-            #[cfg(debug_assertions)]
-            let cors = cors.allow_origin(Any);
-
-            // Release builds: restrict to same origin
-            #[cfg(not(debug_assertions))]
-            let cors = cors
-                .allow_origin("http://localhost:8080".parse::<HeaderValue>().unwrap())
-                .allow_credentials(true);
-
-            cors
+            // If no origins specified, allow any origin
+            // Otherwise, restrict to the specified origins
+            if cors_allowed_origins.is_empty() {
+                cors.allow_origin(Any)
+            } else {
+                let origins: Vec<HeaderValue> = cors_allowed_origins
+                    .iter()
+                    .filter_map(|o| o.parse::<HeaderValue>().ok())
+                    .collect();
+                cors.allow_origin(origins).allow_credentials(true)
+            }
         })
         .with_state(state)
         // Serve embedded frontend for all other routes

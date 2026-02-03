@@ -28,6 +28,10 @@ struct ServerConfig {
     port: u16,
     #[serde(default = "default_ice_servers")]
     ice_servers: Vec<String>,
+    /// CORS allowed origins. If empty, allows any origin.
+    /// Example: ["https://example.com", "http://localhost:3000"]
+    #[serde(default)]
+    cors_allowed_origins: Vec<String>,
 }
 
 fn default_ice_servers() -> Vec<String> {
@@ -125,6 +129,9 @@ pub struct Config {
     /// SAP multicast addresses to listen on and announce to.
     /// Default: ["239.255.255.255", "224.2.127.254"] (AES67 + global scope)
     pub sap_multicast_addresses: Vec<String>,
+    /// CORS allowed origins. If empty, allows any origin.
+    /// Example: ["https://example.com", "http://localhost:3000"]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -155,6 +162,7 @@ impl Config {
             server: ServerConfig {
                 port: strom_types::DEFAULT_PORT,
                 ice_servers: default_ice_servers(),
+                cors_allowed_origins: Vec::new(),
             },
             storage: StorageConfig::default(),
             logging: LoggingConfig::default(),
@@ -241,6 +249,7 @@ impl Config {
             log_level: config_file.logging.log_level,
             ice_servers: normalize_ice_servers(config_file.server.ice_servers),
             sap_multicast_addresses: config_file.discovery.sap_multicast_addresses,
+            cors_allowed_origins: config_file.server.cors_allowed_origins,
         })
     }
 
@@ -274,6 +283,7 @@ impl Config {
             log_level: None,
             ice_servers: default_ice_servers(),
             sap_multicast_addresses: default_sap_multicast_addresses(),
+            cors_allowed_origins: Vec::new(),
         })
     }
 
@@ -319,6 +329,7 @@ impl Default for Config {
                 log_level: None,
                 ice_servers: default_ice_servers(),
                 sap_multicast_addresses: default_sap_multicast_addresses(),
+                cors_allowed_origins: Vec::new(),
             }
         })
     }
