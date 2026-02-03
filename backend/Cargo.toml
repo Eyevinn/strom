@@ -126,7 +126,7 @@ winresource = "0.1"
 tempfile = "3.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-serial_test = "3.0"
+serial_test = "3.3"
 
 [[bin]]
 name = "mediaplayer-test"
