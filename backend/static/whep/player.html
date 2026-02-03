@@ -8,7 +8,11 @@
 </head>
 <body style="display: flex; flex-direction: column; align-items: center;">
     <div class="container">
-        <div style="text-align: right; margin-bottom: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <div style="display: flex; align-items: center; gap: 4px;">
+                <input type="checkbox" id="debugMode" onchange="toggleDebugMode()" style="margin: 0;">
+                <label for="debugMode" style="color: #666; font-size: 0.8em; cursor: pointer;">Debug</label>
+            </div>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em;">All streams →</a>
         </div>
         <h1 style="text-align: center;">WHEP Player at <span id="hostAddress"></span></h1>
@@ -210,7 +214,10 @@
                 },
                 onIceState: (state) => {
                     if (myConnectionId !== connectionId) return; // Stale
-                    log('ICE state: ' + state);
+                    // Only log ICE state in debug mode
+                    if (document.getElementById('debugMode').checked) {
+                        log('ICE state: ' + state);
+                    }
                 },
                 onLog: (msg, type) => {
                     if (myConnectionId !== connectionId) return; // Stale
@@ -252,9 +259,48 @@
 
         function copyFullUrl() {
             const fullUrl = document.getElementById('fullUrl').value;
-            navigator.clipboard.writeText(fullUrl).then(() => {
+            if (!fullUrl) {
+                log('No URL to copy', 'error');
+                return;
+            }
+
+            // Try modern clipboard API first
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(fullUrl).then(() => {
+                    log('Copied URL to clipboard', 'success');
+                }).catch(err => {
+                    // Fallback to old method
+                    copyFallback(fullUrl);
+                });
+            } else {
+                // Fallback for older browsers or non-HTTPS
+                copyFallback(fullUrl);
+            }
+        }
+
+        function copyFallback(text) {
+            const textArea = document.createElement('textarea');
+            textArea.value = text;
+            textArea.style.position = 'fixed';
+            textArea.style.left = '-9999px';
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+                document.execCommand('copy');
                 log('Copied URL to clipboard', 'success');
-            });
+            } catch (err) {
+                log('Failed to copy URL: ' + err, 'error');
+            }
+            document.body.removeChild(textArea);
+        }
+
+        function toggleDebugMode() {
+            const enabled = document.getElementById('debugMode').checked;
+            setWhepDebugMode(enabled);
+            // Only log when enabling, to keep disabled mode quiet
+            if (enabled) {
+                log('Debug mode enabled', 'success');
+            }
         }
 
         function toggleMute() {
