@@ -3,6 +3,10 @@ compiles to both native and WASM
 - **Backend** (`strom-backend`): Axum server + GUI that can run the
   native GUI and serve the embedded WASM version
 
+## Security
+- Always anonymize sensitive data (IP addresses, hostnames, credentials, internal server names) before including in commits, PRs, or documentation
+- Use example.com, 192.0.2.x, or placeholder values instead of real infrastructure data
+
 ## Troubleshooting GUI Issues
 1. Add logging to strom-frontend
 2. Recompile and restart backend. When in native gui mode, default, backend logs shows whole application log
