@@ -456,6 +456,7 @@ fn build_whepclientsrc(
     if let Ok(bin) = whepclientsrc.clone().downcast::<gst::Bin>() {
         let liveadder_weak2 = liveadder.downgrade();
         let whepclientsrc_weak = whepclientsrc.downgrade();
+        let ice_transport_policy = ctx.ice_transport_policy().to_string();
 
         // Use deep-element-added to catch webrtcbin when it's created
         bin.connect("deep-element-added", false, move |values| {
@@ -466,6 +467,16 @@ fn build_whepclientsrc(
                 // Look for webrtcbin
                 if element_name.starts_with("webrtcbin") {
                     info!("WHEP: Found webrtcbin: {}", element_name);
+
+                    // Set ICE transport policy on webrtcbin (from config)
+                    if element.has_property("ice-transport-policy") {
+                        let policy_value: u32 = if ice_transport_policy == "relay" { 1 } else { 0 };
+                        element.set_property("ice-transport-policy", policy_value);
+                        info!(
+                            "WHEP Input: Set ice-transport-policy={} on webrtcbin {}",
+                            ice_transport_policy, element_name
+                        );
+                    }
 
                     let liveadder_weak3 = liveadder_weak2.clone();
                     let whepclientsrc_weak2 = whepclientsrc_weak.clone();
@@ -770,6 +781,7 @@ fn build_whepserversink(
     // Also register the webrtcbin for stats collection (since it's in a separate session pipeline).
     let dynamic_webrtcbin_store = ctx.dynamic_webrtcbin_store();
     let block_id_for_callback = instance_id.to_string();
+    let ice_transport_policy = ctx.ice_transport_policy().to_string();
     whepserversink.connect("consumer-added", false, move |values| {
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let webrtcbin = values[2].get::<gst::Element>().unwrap();
@@ -778,6 +790,23 @@ fn build_whepserversink(
             "WHEP Output: consumer-added for {}, modifying transceiver codec-preferences",
             consumer_id
         );
+
+        // Set ICE transport policy on webrtcbin (from config)
+        if webrtcbin.has_property("ice-transport-policy") {
+            // Convert config string to GStreamer enum value
+            // "all" -> 0 (WebRTCICETransportPolicy::All)
+            // "relay" -> 1 (WebRTCICETransportPolicy::Relay)
+            let policy_value: u32 = if ice_transport_policy == "relay" {
+                1
+            } else {
+                0
+            };
+            webrtcbin.set_property("ice-transport-policy", policy_value);
+            debug!(
+                "WHEP Output: Set ice-transport-policy={} on webrtcbin for consumer {}",
+                ice_transport_policy, consumer_id
+            );
+        }
 
         // Register webrtcbin for stats collection
         if let Ok(mut store) = dynamic_webrtcbin_store.lock() {

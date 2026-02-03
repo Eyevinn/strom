@@ -111,9 +111,9 @@ class WhepConnection {
         this.remoteCandidates = [];
 
         try {
-            // Fetch ICE servers from the server configuration
+            // Fetch ICE servers and transport policy from the server configuration
             let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]; // fallback
-            let iceTransportPolicy = 'relay'; // Force relay for TURN testing
+            let iceTransportPolicy = 'all'; // fallback
 
             this._log('Fetching ICE server configuration from /api/ice-servers...');
 
@@ -124,6 +124,9 @@ class WhepConnection {
                     this._logDebug('ICE config response: ' + JSON.stringify(config, null, 2));
                     if (config.ice_servers && config.ice_servers.length > 0) {
                         iceServers = config.ice_servers;
+                    }
+                    if (config.ice_transport_policy) {
+                        iceTransportPolicy = config.ice_transport_policy;
                     }
                 } else {
                     this._log('Failed to fetch ICE servers: HTTP ' + response.status, 'warning');
@@ -144,7 +147,7 @@ class WhepConnection {
             }
             this._log('=========================');
 
-            // Create RTCPeerConnection with relay-only policy for TURN testing
+            // Create RTCPeerConnection with configured transport policy
             this._log('Creating RTCPeerConnection with iceTransportPolicy=' + iceTransportPolicy);
             this.peerConnection = new RTCPeerConnection({ iceServers, iceTransportPolicy });
 

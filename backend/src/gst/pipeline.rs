@@ -198,6 +198,7 @@ impl PipelineManager {
         events: EventBroadcaster,
         _block_registry: &BlockRegistry,
         ice_servers: Vec<String>,
+        ice_transport_policy: String,
     ) -> Result<Self, PipelineError> {
         info!("Creating pipeline for flow: {} ({})", flow.name, flow.id);
         info!(
@@ -252,6 +253,7 @@ impl PipelineManager {
                     &flow.links,
                     &flow_id,
                     ice_servers,
+                    ice_transport_policy,
                     dynamic_webrtcbins,
                 )
                 .await;
@@ -3820,7 +3822,13 @@ mod tests {
         let flow = create_test_flow();
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(&flow, events, &registry, default_test_ice_servers());
+        let manager = PipelineManager::new(
+            &flow,
+            events,
+            &registry,
+            default_test_ice_servers(),
+            "all".to_string(),
+        );
         assert!(manager.is_ok());
     }
 
@@ -3830,8 +3838,14 @@ mod tests {
         let flow = create_test_flow();
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let mut manager =
-            PipelineManager::new(&flow, events, &registry, default_test_ice_servers()).unwrap();
+        let mut manager = PipelineManager::new(
+            &flow,
+            events,
+            &registry,
+            default_test_ice_servers(),
+            "all".to_string(),
+        )
+        .unwrap();
 
         // Start pipeline
         let state = manager.start();
@@ -3856,7 +3870,13 @@ mod tests {
 
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(&flow, events, &registry, default_test_ice_servers());
+        let manager = PipelineManager::new(
+            &flow,
+            events,
+            &registry,
+            default_test_ice_servers(),
+            "all".to_string(),
+        );
         assert!(manager.is_err());
     }
 
@@ -3902,7 +3922,13 @@ mod tests {
 
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(&flow, events, &registry, default_test_ice_servers());
+        let manager = PipelineManager::new(
+            &flow,
+            events,
+            &registry,
+            default_test_ice_servers(),
+            "all".to_string(),
+        );
         assert!(manager.is_ok());
 
         let manager = manager.unwrap();
@@ -3920,8 +3946,14 @@ mod tests {
 
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager =
-            PipelineManager::new(&flow, events, &registry, default_test_ice_servers()).unwrap();
+        let manager = PipelineManager::new(
+            &flow,
+            events,
+            &registry,
+            default_test_ice_servers(),
+            "all".to_string(),
+        )
+        .unwrap();
 
         // Should have only 2 original elements, no tee
         assert_eq!(manager.elements.len(), 2);

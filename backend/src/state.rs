@@ -58,6 +58,8 @@ struct AppStateInner {
     whep_registry: WhepRegistry,
     /// ICE servers for WebRTC NAT traversal (STUN/TURN URLs)
     ice_servers: Vec<String>,
+    /// ICE transport policy for WebRTC connections ("all" or "relay")
+    ice_transport_policy: String,
     /// Flows pending save (debounced to avoid excessive disk writes)
     pending_saves: RwLock<HashSet<FlowId>>,
 }
@@ -69,6 +71,7 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        ice_transport_policy: String,
         sap_multicast_addresses: Vec<String>,
     ) -> Self {
         let events = EventBroadcaster::default();
@@ -90,6 +93,7 @@ impl AppState {
                 media_path: media_path.into(),
                 whep_registry: WhepRegistry::new(),
                 ice_servers,
+                ice_transport_policy,
                 pending_saves: RwLock::new(HashSet::new()),
             }),
         }
@@ -135,6 +139,11 @@ impl AppState {
         &self.inner.ice_servers
     }
 
+    /// Get the configured ICE transport policy for WebRTC.
+    pub fn ice_transport_policy(&self) -> &str {
+        &self.inner.ice_transport_policy
+    }
+
     /// Get the thread registry for tracking GStreamer streaming threads.
     pub fn thread_registry(&self) -> &ThreadRegistry {
         &self.inner.thread_registry
@@ -162,6 +171,7 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        ice_transport_policy: String,
         sap_multicast_addresses: Vec<String>,
     ) -> Self {
         Self::new(
@@ -169,6 +179,7 @@ impl AppState {
             blocks_path,
             media_path,
             ice_servers,
+            ice_transport_policy,
             sap_multicast_addresses,
         )
     }
@@ -182,6 +193,7 @@ impl AppState {
         blocks_path: impl Into<PathBuf>,
         media_path: impl Into<PathBuf>,
         ice_servers: Vec<String>,
+        ice_transport_policy: String,
         sap_multicast_addresses: Vec<String>,
     ) -> anyhow::Result<Self> {
         use crate::storage::PostgresStorage;
@@ -194,6 +206,7 @@ impl AppState {
             blocks_path,
             media_path,
             ice_servers,
+            ice_transport_policy,
             sap_multicast_addresses,
         ))
     }
@@ -612,6 +625,7 @@ impl AppState {
             self.inner.events.clone(),
             &self.inner.block_registry,
             self.inner.ice_servers.clone(),
+            self.inner.ice_transport_policy.clone(),
         )?;
         info!("PipelineManager created successfully");
 
@@ -1449,6 +1463,7 @@ impl Default for AppState {
             "blocks.json",
             "media",
             vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
             vec!["239.255.255.255".to_string(), "224.2.127.254".to_string()],
         )
     }

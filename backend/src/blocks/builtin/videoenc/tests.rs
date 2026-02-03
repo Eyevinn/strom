@@ -444,7 +444,10 @@ fn test_block_encoder_preference() {
         PropertyValue::String("software".to_string()),
     );
 
-    let ctx = BlockBuildContext::new(vec!["stun:stun.l.google.com:19302".to_string()]);
+    let ctx = BlockBuildContext::new(
+        vec!["stun:stun.l.google.com:19302".to_string()],
+        "all".to_string(),
+    );
     let result = builder.build("test_software", &properties, &ctx);
     assert!(
         result.is_ok(),

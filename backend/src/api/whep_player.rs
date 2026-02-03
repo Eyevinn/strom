@@ -369,6 +369,8 @@ pub async fn list_whep_streams(State(state): State<AppState>) -> axum::Json<Whep
 pub struct IceServersResponse {
     /// List of ICE server configurations (STUN/TURN)
     pub ice_servers: Vec<IceServer>,
+    /// ICE transport policy ("all" or "relay")
+    pub ice_transport_policy: String,
 }
 
 /// ICE server configuration for WebRTC.
@@ -474,7 +476,10 @@ pub async fn get_ice_servers(State(state): State<AppState>) -> axum::Json<IceSer
         .map(|url| parse_ice_server(url))
         .collect();
 
-    axum::Json(IceServersResponse { ice_servers })
+    axum::Json(IceServersResponse {
+        ice_servers,
+        ice_transport_policy: state.ice_transport_policy().to_string(),
+    })
 }
 
 #[cfg(test)]

@@ -28,6 +28,8 @@ struct ServerConfig {
     port: u16,
     #[serde(default = "default_ice_servers")]
     ice_servers: Vec<String>,
+    #[serde(default = "default_ice_transport_policy")]
+    ice_transport_policy: String,
     /// CORS allowed origins. If empty, allows any origin.
     /// Example: ["https://example.com", "http://localhost:3000"]
     #[serde(default)]
@@ -36,6 +38,10 @@ struct ServerConfig {
 
 fn default_ice_servers() -> Vec<String> {
     vec!["stun:stun.l.google.com:19302".to_string()]
+}
+
+fn default_ice_transport_policy() -> String {
+    "all".to_string()
 }
 
 /// Normalize an ICE server URL to RFC 7064/7065 format.
@@ -126,6 +132,10 @@ pub struct Config {
     /// ICE servers for WebRTC NAT traversal (STUN/TURN)
     /// Format: stun:host:port or turn:user:pass@host:port
     pub ice_servers: Vec<String>,
+    /// ICE transport policy for WebRTC connections
+    /// "all" (default) = use all candidate types (host, srflx, relay)
+    /// "relay" = only use TURN relay candidates
+    pub ice_transport_policy: String,
     /// SAP multicast addresses to listen on and announce to.
     /// Default: ["239.255.255.255", "224.2.127.254"] (AES67 + global scope)
     pub sap_multicast_addresses: Vec<String>,
@@ -162,6 +172,7 @@ impl Config {
             server: ServerConfig {
                 port: strom_types::DEFAULT_PORT,
                 ice_servers: default_ice_servers(),
+                ice_transport_policy: default_ice_transport_policy(),
                 cors_allowed_origins: Vec::new(),
             },
             storage: StorageConfig::default(),
@@ -248,6 +259,7 @@ impl Config {
             log_file: config_file.logging.log_file,
             log_level: config_file.logging.log_level,
             ice_servers: normalize_ice_servers(config_file.server.ice_servers),
+            ice_transport_policy: config_file.server.ice_transport_policy,
             sap_multicast_addresses: config_file.discovery.sap_multicast_addresses,
             cors_allowed_origins: config_file.server.cors_allowed_origins,
         })
@@ -282,6 +294,7 @@ impl Config {
             log_file: None,
             log_level: None,
             ice_servers: default_ice_servers(),
+            ice_transport_policy: default_ice_transport_policy(),
             sap_multicast_addresses: default_sap_multicast_addresses(),
             cors_allowed_origins: Vec::new(),
         })
@@ -328,6 +341,7 @@ impl Default for Config {
                 log_file: None,
                 log_level: None,
                 ice_servers: default_ice_servers(),
+                ice_transport_policy: default_ice_transport_policy(),
                 sap_multicast_addresses: default_sap_multicast_addresses(),
                 cors_allowed_origins: Vec::new(),
             }

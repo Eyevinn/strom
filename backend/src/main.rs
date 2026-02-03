@@ -385,6 +385,7 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
                 &config.blocks_path,
                 &config.media_path,
                 config.ice_servers.clone(),
+                config.ice_transport_policy.clone(),
                 config.sap_multicast_addresses.clone(),
             )
             .await
@@ -396,6 +397,7 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
                 &config.blocks_path,
                 &config.media_path,
                 config.ice_servers.clone(),
+                config.ice_transport_policy.clone(),
                 config.sap_multicast_addresses.clone(),
             )
         };
@@ -555,6 +557,7 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
             &config.blocks_path,
             &config.media_path,
             config.ice_servers.clone(),
+            config.ice_transport_policy.clone(),
             config.sap_multicast_addresses.clone(),
         )
         .await?
@@ -565,6 +568,7 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
             &config.blocks_path,
             &config.media_path,
             config.ice_servers.clone(),
+            config.ice_transport_policy.clone(),
             config.sap_multicast_addresses.clone(),
         )
     };

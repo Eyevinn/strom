@@ -131,6 +131,30 @@ fn build_whipclientsink(
         signaller.set_property("auth-token", token);
     }
 
+    // Set ICE transport policy on internal webrtcbin via deep-element-added
+    if let Ok(bin) = whipclientsink.clone().downcast::<gst::Bin>() {
+        let ice_transport_policy = ctx.ice_transport_policy().to_string();
+        bin.connect("deep-element-added", false, move |values| {
+            let element = values[2].get::<gst::Element>().unwrap();
+            let element_name = element.name();
+
+            if element_name.starts_with("webrtcbin") && element.has_property("ice-transport-policy")
+            {
+                let policy_value: u32 = if ice_transport_policy == "relay" {
+                    1
+                } else {
+                    0
+                };
+                element.set_property("ice-transport-policy", policy_value);
+                info!(
+                    "WHIP (whipclientsink): Set ice-transport-policy={} on webrtcbin {}",
+                    ice_transport_policy, element_name
+                );
+            }
+            None
+        });
+    }
+
     debug!(
         "WHIP Output (whipclientsink) configured: endpoint={}, stun={:?}, turn={:?}",
         whip_endpoint, stun_server, turn_server
@@ -259,7 +283,8 @@ fn build_whipsink(
     // all endpoints including send-only WHIP clients. Without handling this,
     // the internal nicesrc pads go "not-linked" and crash the pipeline.
     // Solution: Link any incoming source pads to fakesink.
-    setup_incoming_rtp_handler(&whipsink, instance_id);
+    // Also sets ice-transport-policy on the internal webrtcbin.
+    setup_incoming_rtp_handler(&whipsink, instance_id, ctx.ice_transport_policy());
 
     // Define internal links
     // whipsink uses generic sink_%u pads for RTP streams
@@ -386,7 +411,13 @@ fn whip_output_definition() -> BlockDefinition {
 /// 1. Using deep-element-added to catch TransportReceiveBin when created
 /// 2. Connecting to its pad-added signal
 /// 3. Linking any src pads to fakesink before they cause "not-linked" errors
-fn setup_incoming_rtp_handler(whip_element: &gst::Element, instance_id: &str) {
+///
+/// Also sets the ICE transport policy on the internal webrtcbin element.
+fn setup_incoming_rtp_handler(
+    whip_element: &gst::Element,
+    instance_id: &str,
+    ice_transport_policy: &str,
+) {
     // Try to downcast the whip element to a Bin
     let bin = match whip_element.clone().downcast::<gst::Bin>() {
         Ok(b) => b,
@@ -396,12 +427,28 @@ fn setup_incoming_rtp_handler(whip_element: &gst::Element, instance_id: &str) {
         }
     };
 
+    let ice_transport_policy = ice_transport_policy.to_string();
+
     // Use deep-element-added to catch TransportReceiveBin when it's created
     bin.connect("deep-element-added", false, move |values| {
         let parent_bin = values[0].get::<gst::Bin>().unwrap();
         let element = values[2].get::<gst::Element>().unwrap();
         let element_name = element.name();
         let element_type = element.type_().name();
+
+        // Set ICE transport policy on webrtcbin when found
+        if element_name.starts_with("webrtcbin") && element.has_property("ice-transport-policy") {
+            let policy_value: u32 = if ice_transport_policy == "relay" {
+                1
+            } else {
+                0
+            };
+            element.set_property("ice-transport-policy", policy_value);
+            info!(
+                "WHIP: Set ice-transport-policy={} on webrtcbin {}",
+                ice_transport_policy, element_name
+            );
+        }
 
         // Look for TransportReceiveBin - its rtp_src pad may be unlinked
         if element_type == "TransportReceiveBin" {

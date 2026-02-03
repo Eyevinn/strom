@@ -108,6 +108,8 @@ pub struct BlockBuildContext {
     whep_endpoints: RefCell<Vec<WhepEndpointInfo>>,
     /// ICE servers for WebRTC NAT traversal (STUN/TURN URLs)
     ice_servers: Vec<String>,
+    /// ICE transport policy ("all" or "relay")
+    ice_transport_policy: String,
     /// Storage for dynamically created webrtcbin elements (shared with PipelineManager).
     /// Used by blocks like WHEP Output that create webrtcbins dynamically via consumer-added.
     dynamic_webrtcbins: DynamicWebrtcbinStore,
@@ -115,10 +117,11 @@ pub struct BlockBuildContext {
 
 impl BlockBuildContext {
     /// Create a new build context with the given ICE servers.
-    pub fn new(ice_servers: Vec<String>) -> Self {
+    pub fn new(ice_servers: Vec<String>, ice_transport_policy: String) -> Self {
         Self {
             whep_endpoints: RefCell::new(Vec::new()),
             ice_servers,
+            ice_transport_policy,
             dynamic_webrtcbins: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -126,11 +129,13 @@ impl BlockBuildContext {
     /// Create a new build context with shared dynamic webrtcbin storage.
     pub fn new_with_webrtcbin_store(
         ice_servers: Vec<String>,
+        ice_transport_policy: String,
         dynamic_webrtcbins: DynamicWebrtcbinStore,
     ) -> Self {
         Self {
             whep_endpoints: RefCell::new(Vec::new()),
             ice_servers,
+            ice_transport_policy,
             dynamic_webrtcbins,
         }
     }
@@ -158,6 +163,11 @@ impl BlockBuildContext {
     /// Get the configured ICE servers.
     pub fn ice_servers(&self) -> &[String] {
         &self.ice_servers
+    }
+
+    /// Get the configured ICE transport policy ("all" or "relay").
+    pub fn ice_transport_policy(&self) -> &str {
+        &self.ice_transport_policy
     }
 
     /// Get the first STUN server URL (for GStreamer elements).
