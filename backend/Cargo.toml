@@ -55,7 +55,7 @@ gst-plugin-inter.workspace = true
 
 # Error handling
 anyhow = "1.0"
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 async-trait = "0.1"
 
 # Database
