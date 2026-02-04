@@ -140,12 +140,7 @@ fn build_whipclientsink(
 
             if element_name.starts_with("webrtcbin") && element.has_property("ice-transport-policy")
             {
-                let policy_value: u32 = if ice_transport_policy == "relay" {
-                    1
-                } else {
-                    0
-                };
-                element.set_property("ice-transport-policy", policy_value);
+                element.set_property_from_str("ice-transport-policy", &ice_transport_policy);
                 info!(
                     "WHIP (whipclientsink): Set ice-transport-policy={} on webrtcbin {}",
                     ice_transport_policy, element_name
@@ -438,12 +433,7 @@ fn setup_incoming_rtp_handler(
 
         // Set ICE transport policy on webrtcbin when found
         if element_name.starts_with("webrtcbin") && element.has_property("ice-transport-policy") {
-            let policy_value: u32 = if ice_transport_policy == "relay" {
-                1
-            } else {
-                0
-            };
-            element.set_property("ice-transport-policy", policy_value);
+            element.set_property_from_str("ice-transport-policy", &ice_transport_policy);
             info!(
                 "WHIP: Set ice-transport-policy={} on webrtcbin {}",
                 ice_transport_policy, element_name

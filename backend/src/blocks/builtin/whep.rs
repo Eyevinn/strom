@@ -793,16 +793,8 @@ fn build_whepserversink(
 
         // Set ICE transport policy on webrtcbin (from config)
         if webrtcbin.has_property("ice-transport-policy") {
-            // Convert config string to GStreamer enum value
-            // "all" -> 0 (WebRTCICETransportPolicy::All)
-            // "relay" -> 1 (WebRTCICETransportPolicy::Relay)
-            let policy_value: u32 = if ice_transport_policy == "relay" {
-                1
-            } else {
-                0
-            };
-            webrtcbin.set_property("ice-transport-policy", policy_value);
-            debug!(
+            webrtcbin.set_property_from_str("ice-transport-policy", &ice_transport_policy);
+            info!(
                 "WHEP Output: Set ice-transport-policy={} on webrtcbin for consumer {}",
                 ice_transport_policy, consumer_id
             );
