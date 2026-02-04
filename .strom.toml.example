@@ -30,6 +30,12 @@ port = 8080
 #     "turn:username:password@turn.example.com:3478"
 # ]
 
+# ICE transport policy for WebRTC connections
+# "all" (default) = use all candidate types (host, srflx, relay)
+# "relay" = only use TURN relay candidates (forces traffic through TURN server)
+# Env: STROM_SERVER_ICE_TRANSPORT_POLICY=relay
+# ice_transport_policy = "all"
+
 # ============================================================================
 # Storage Configuration
 # ============================================================================
