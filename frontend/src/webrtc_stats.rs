@@ -49,6 +49,19 @@ impl WebRtcStatsStore {
             .unwrap_or(true)
     }
 
+    /// Remove stats that haven't been updated within the given TTL.
+    pub fn evict_stale(&mut self, ttl: std::time::Duration) {
+        let stale_flows: Vec<FlowId> = self
+            .last_update
+            .iter()
+            .filter(|(_, t)| t.elapsed() > ttl)
+            .map(|(id, _)| *id)
+            .collect();
+        for flow_id in stale_flows {
+            self.clear_flow(&flow_id);
+        }
+    }
+
     /// Clear all WebRTC stats data.
     pub fn clear(&mut self) {
         self.data.clear();
