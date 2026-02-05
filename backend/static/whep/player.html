@@ -297,6 +297,7 @@
         function toggleDebugMode() {
             const enabled = document.getElementById('debugMode').checked;
             setWhepDebugMode(enabled);
+            try { localStorage.setItem('whep-debug', enabled); } catch(e) {}
             // Only log when enabling, to keep disabled mode quiet
             if (enabled) {
                 log('Debug mode enabled', 'success');
@@ -340,6 +341,13 @@
             document.getElementById('hostAddress').textContent = location.host;
             document.title = 'WHEP Player | Strom | ' + location.host;
             updateFullUrl();
+            // Restore debug mode from previous session
+            try {
+                if (localStorage.getItem('whep-debug') === 'true') {
+                    document.getElementById('debugMode').checked = true;
+                    setWhepDebugMode(true);
+                }
+            } catch(e) {}
             const endpoint = document.getElementById('endpoint').value;
             if (endpoint) {
                 wantConnected = true;
