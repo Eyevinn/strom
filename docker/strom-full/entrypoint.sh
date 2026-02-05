@@ -17,7 +17,9 @@ export DISPLAY=:99
 export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,enable-logging=stderr"
 
 # Set CEF cache location to avoid singleton behavior warning
+# Clean up stale CEF cache/locks from previous runs/crashes
 export GST_CEF_CACHE_LOCATION="/tmp/cef-cache"
+rm -rf /tmp/cef-cache
 mkdir -p /tmp/cef-cache
 
 # Enable CEF debug logging
