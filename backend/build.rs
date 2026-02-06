@@ -217,16 +217,13 @@ fn build_frontend(frontend_dir: &Path) {
         println!("cargo:warning=Install trunk with: cargo install trunk");
         println!("cargo:warning=Backend will compile without embedded frontend");
 
-        // Create empty dist directory with placeholder
+        // Create dist directory with a placeholder index.html
         let dist_dir = PathBuf::from("dist");
         if !dist_dir.exists() {
             fs::create_dir(&dist_dir).expect("Failed to create dist directory");
         }
-        fs::write(
-            dist_dir.join(".placeholder"),
-            "Frontend not built - trunk not available during compilation",
-        )
-        .expect("Failed to create placeholder file");
+        fs::write(dist_dir.join("index.html"), generate_placeholder_html())
+            .expect("Failed to create placeholder index.html");
 
         return;
     }
@@ -241,6 +238,95 @@ fn build_frontend(frontend_dir: &Path) {
     if !status.success() {
         panic!("trunk build failed");
     }
+}
+
+/// Generate a placeholder HTML page shown when the WASM frontend was not compiled.
+/// This happens when `trunk` is not installed or the `wasm32-unknown-unknown` target is missing.
+fn generate_placeholder_html() -> String {
+    r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strom - Frontend Not Available</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            max-width: 640px;
+            padding: 2.5rem;
+            background: #16213e;
+            border-radius: 12px;
+            border: 1px solid #0f3460;
+        }
+        h1 { color: #e94560; margin-bottom: 1rem; font-size: 1.5rem; }
+        p { line-height: 1.7; margin-bottom: 1rem; color: #b0b0b0; }
+        .reason { color: #c0c0c0; }
+        code {
+            background: #0f3460;
+            padding: 0.15em 0.4em;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: #e94560;
+        }
+        pre {
+            background: #0f3460;
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 1rem 0;
+            line-height: 1.6;
+        }
+        pre code { background: none; padding: 0; }
+        a { color: #e94560; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .note {
+            margin-top: 1.5rem;
+            padding-top: 1rem;
+            border-top: 1px solid #0f3460;
+            font-size: 0.9rem;
+            color: #808080;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Web GUI Not Available</h1>
+        <p>
+            The Strom backend is running, but the web-based frontend (WASM) was not
+            included in this build.
+        </p>
+        <p class="reason">This usually means one of the following:</p>
+        <ul style="margin: 0.5rem 0 1rem 1.5rem; line-height: 2; color: #b0b0b0;">
+            <li><code>trunk</code> was not installed when the backend was compiled</li>
+            <li>The <code>wasm32-unknown-unknown</code> Rust target was not installed</li>
+        </ul>
+        <p>To build with the web frontend, install the required tools and recompile:</p>
+        <pre><code>rustup target add wasm32-unknown-unknown
+cargo install trunk
+cargo build -p strom-backend --release</code></pre>
+        <p>
+            See the
+            <a href="https://github.com/Eyevinn/strom#readme" target="_blank" rel="noopener">
+                Strom repository
+            </a>
+            for full setup instructions.
+        </p>
+        <p class="note">
+            The REST API and native GUI (if enabled) are still fully functional.
+        </p>
+    </div>
+</body>
+</html>"#
+        .to_string()
 }
 
 /// Embed Windows resources (icon, version info) into the executable
