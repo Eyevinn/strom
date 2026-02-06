@@ -286,6 +286,16 @@ install_binary() {
 
     log_info "Installing to $dest..."
 
+    # Create install directory if it doesn't exist
+    if [ ! -d "$install_dir" ]; then
+        log_info "Creating $install_dir..."
+        if [ -w "$(dirname "$install_dir")" ]; then
+            mkdir -p "$install_dir"
+        else
+            run_elevated mkdir -p "$install_dir"
+        fi
+    fi
+
     if [ -w "$install_dir" ]; then
         mv "$tmp_file" "$dest"
         chmod +x "$dest"
