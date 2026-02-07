@@ -800,6 +800,27 @@ fn build_whepserversink(
             );
         }
 
+        // WORKAROUND #3: Set bundle-policy to max-bundle.
+        //
+        // Problem: When audio-caps is empty (video-only mode), the browser's SDP offer
+        // still contains an audio m-line (m-line 0) which gets answered with a=inactive.
+        // Video ends up on m-line 1. With the default bundle-policy=none, webrtcbin
+        // creates only one ICE transport but fails to map m-line 1 to it, logging
+        // "Unknown mline 1, dropping ICE candidates from SDP". The SSRC-to-transceiver
+        // mapping gets media_idx=4294967295 (UINT_MAX), and although DTLS/SRTP complete
+        // successfully, RTP packets never reach the browser.
+        //
+        // Solution: Set bundle-policy=max-bundle so webrtcbin correctly multiplexes
+        // all m-lines onto a single transport, properly mapping both m-line 0 (inactive
+        // audio) and m-line 1 (sendonly video) through the same BUNDLE group.
+        if webrtcbin.has_property("bundle-policy") {
+            webrtcbin.set_property_from_str("bundle-policy", "max-bundle");
+            info!(
+                "WHEP Output: Set bundle-policy=max-bundle on webrtcbin for consumer {}",
+                consumer_id
+            );
+        }
+
         // Register webrtcbin for stats collection
         if let Ok(mut store) = dynamic_webrtcbin_store.lock() {
             store
@@ -1699,7 +1720,7 @@ fn whep_output_definition() -> BlockDefinition {
                         },
                     ],
                 },
-                default_value: Some(PropertyValue::String("audio_video".to_string())),
+                default_value: Some(PropertyValue::String("video".to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "mode".to_string(),
@@ -1723,9 +1744,9 @@ fn whep_output_definition() -> BlockDefinition {
         // determined dynamically by WHEPOutputBuilder::get_external_pads() based on mode.
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {
-                name: "audio_in".to_string(),
-                media_type: MediaType::Audio,
-                internal_element_id: "audioconvert".to_string(),
+                name: "video_in".to_string(),
+                media_type: MediaType::Video,
+                internal_element_id: "video_queue".to_string(),
                 internal_pad_name: "sink".to_string(),
             }],
             outputs: vec![],

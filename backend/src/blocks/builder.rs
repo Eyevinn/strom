@@ -50,9 +50,9 @@ pub type BusWatchSetupFn = BusMessageConnectFn;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WhepStreamMode {
     /// Audio only
-    #[default]
     Audio,
     /// Video only
+    #[default]
     Video,
     /// Both audio and video
     AudioVideo,
@@ -77,9 +77,9 @@ impl WhepStreamMode {
 
     pub fn parse(s: &str) -> Self {
         match s {
-            "video" => WhepStreamMode::Video,
+            "audio" => WhepStreamMode::Audio,
             "audio_video" => WhepStreamMode::AudioVideo,
-            _ => WhepStreamMode::Audio,
+            _ => WhepStreamMode::Video,
         }
     }
 }
