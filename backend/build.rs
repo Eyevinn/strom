@@ -253,8 +253,8 @@ fn generate_placeholder_html() -> String {
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: #1a1a2e;
-            color: #e0e0e0;
+            background: #1b1b1b;
+            color: #8c8c8c;
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -263,22 +263,22 @@ fn generate_placeholder_html() -> String {
         .container {
             max-width: 640px;
             padding: 2.5rem;
-            background: #16213e;
+            background: #1b1b1b;
             border-radius: 12px;
-            border: 1px solid #0f3460;
+            border: 1px solid #3c3c3c;
         }
-        h1 { color: #e94560; margin-bottom: 1rem; font-size: 1.5rem; }
-        p { line-height: 1.7; margin-bottom: 1rem; color: #b0b0b0; }
-        .reason { color: #c0c0c0; }
+        h1 { color: #ffffff; margin-bottom: 1rem; font-size: 1.5rem; }
+        p { line-height: 1.7; margin-bottom: 1rem; color: #8c8c8c; }
+        .reason { color: #8c8c8c; }
         code {
-            background: #0f3460;
+            background: #0a0a0a;
             padding: 0.15em 0.4em;
             border-radius: 4px;
             font-size: 0.9em;
-            color: #e94560;
+            color: #5aaaff;
         }
         pre {
-            background: #0f3460;
+            background: #0a0a0a;
             padding: 1rem;
             border-radius: 8px;
             overflow-x: auto;
@@ -286,14 +286,14 @@ fn generate_placeholder_html() -> String {
             line-height: 1.6;
         }
         pre code { background: none; padding: 0; }
-        a { color: #e94560; text-decoration: none; }
+        a { color: #5aaaff; text-decoration: none; }
         a:hover { text-decoration: underline; }
         .note {
             margin-top: 1.5rem;
             padding-top: 1rem;
-            border-top: 1px solid #0f3460;
+            border-top: 1px solid #3c3c3c;
             font-size: 0.9rem;
-            color: #808080;
+            color: #545454;
         }
     </style>
 </head>
@@ -312,7 +312,7 @@ fn generate_placeholder_html() -> String {
         <p>To build with the web frontend, install the required tools and recompile:</p>
         <pre><code>rustup target add wasm32-unknown-unknown
 cargo install trunk
-cargo build -p strom-backend --release</code></pre>
+cargo build --release</code></pre>
         <p>
             See the
             <a href="https://github.com/Eyevinn/strom#readme" target="_blank" rel="noopener">
