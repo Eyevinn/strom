@@ -101,11 +101,14 @@ Access the web UI at `http://localhost:8080`
 #### Prerequisites
 
 ```bash
-# Install GStreamer
+# Install GStreamer (Ubuntu/Debian)
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
   gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
   gstreamer1.0-tools libnice-dev gstreamer1.0-nice graphviz
+
+# Install GStreamer (macOS)
+brew install gstreamer gst-plugins-base libnice-gstreamer
 
 # Install Rust and tools
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh

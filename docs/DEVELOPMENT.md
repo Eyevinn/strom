@@ -20,7 +20,7 @@ Make sure you have the following installed:
    sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel
 
    # macOS
-   brew install gstreamer gst-plugins-base
+   brew install gstreamer gst-plugins-base libnice-gstreamer
    ```
 
 3. **WebAssembly target** (for frontend)
