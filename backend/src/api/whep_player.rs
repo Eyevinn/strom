@@ -45,7 +45,7 @@ pub async fn whep_js() -> impl IntoResponse {
         Some(content) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/javascript")
-            .header(header::CACHE_CONTROL, "public, max-age=3600")
+            .header(header::CACHE_CONTROL, "no-cache")
             .body(Body::from(content.data))
             .unwrap(),
         None => Response::builder()

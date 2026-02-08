@@ -28,6 +28,15 @@ function enableOpusStereo(sdp) {
     });
 }
 
+// Strip Opus stereo/sprop-stereo fmtp params from SDP before sending to server.
+// webrtcsink uses these fmtp values as capsfilter constraints in its codec
+// discovery pipeline. rtpopuspay cannot produce stereo= in its output caps,
+// so the discovery capsfilter blocks and the 30s timeout fires.
+// The local description keeps stereo=1 so Chrome decodes stereo correctly.
+function stripOpusStereoForServer(sdp) {
+    return sdp.replace(/;stereo=1/g, '').replace(/;sprop-stereo=1/g, '');
+}
+
 // Extract ICE candidates from SDP for debugging
 function extractIceCandidatesFromSdp(sdp) {
     const candidates = [];
@@ -279,11 +288,13 @@ class WhepConnection {
             }
 
             // Send offer to WHEP endpoint
+            // Strip stereo fmtp params that break webrtcsink's codec discovery
+            const serverSdp = stripOpusStereoForServer(localSdp);
             this._log('Sending SDP offer to ' + this.endpoint);
             const response = await fetch(this.endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/sdp' },
-                body: localSdp,
+                body: serverSdp,
             });
 
             if (!response.ok) {

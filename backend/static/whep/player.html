@@ -9,9 +9,10 @@
 <body style="display: flex; flex-direction: column; align-items: center;">
     <div class="container">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <div style="display: flex; align-items: center; gap: 4px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
                 <input type="checkbox" id="debugMode" onchange="toggleDebugMode()" style="margin: 0;">
                 <label for="debugMode" style="color: #666; font-size: 0.8em; cursor: pointer;">Debug</label>
+                <button onclick="copyLog()" style="font-size: 0.7em; padding: 2px 6px; cursor: pointer;">Copy log</button>
             </div>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em;">All streams →</a>
         </div>
@@ -292,6 +293,16 @@
                 log('Failed to copy URL: ' + err, 'error');
             }
             document.body.removeChild(textArea);
+        }
+
+        function copyLog() {
+            const logEl = document.getElementById('log');
+            const text = Array.from(logEl.children).map(e => e.textContent).join('\n');
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(() => log('Log copied', 'success')).catch(() => copyFallback(text));
+            } else {
+                copyFallback(text);
+            }
         }
 
         function toggleDebugMode() {
