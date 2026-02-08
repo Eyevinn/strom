@@ -99,6 +99,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.videoenc" => Some(Arc::new(videoenc::VideoEncBuilder)),
         "builtin.videoformat" => Some(Arc::new(videoformat::VideoFormatBuilder)),
         "builtin.whip_output" => Some(Arc::new(whip::WHIPOutputBuilder)),
+        "builtin.whip_input" => Some(Arc::new(whip::WHIPInputBuilder)),
         "builtin.whep_input" => Some(Arc::new(whep::WHEPInputBuilder)),
         "builtin.whep_output" => Some(Arc::new(whep::WHEPOutputBuilder)),
         // Future: Add more builders here

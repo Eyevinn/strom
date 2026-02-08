@@ -41,6 +41,7 @@ pub mod system_monitor;
 pub mod thread_registry;
 pub mod version;
 pub mod whep_registry;
+pub mod whip_registry;
 
 use state::AppState;
 
@@ -258,6 +259,8 @@ pub async fn create_app_with_config(
         .route("/auth/status", get(auth::auth_status_handler))
         // WHEP streams list API (JSON)
         .route("/whep-streams", get(api::whep_player::list_whep_streams))
+        // WHIP endpoints list API (JSON)
+        .route("/whip-endpoints", get(api::whip_ingest::list_whip_endpoints))
         // ICE servers for WebRTC connections
         .route("/ice-servers", get(api::whep_player::get_ice_servers))
         // MCP Streamable HTTP endpoint (has its own session management)
@@ -265,10 +268,12 @@ pub async fn create_app_with_config(
         .route("/mcp", get(api::mcp::mcp_get))
         .route("/mcp", delete(api::mcp::mcp_delete));
 
-    // WHEP player pages (HTML) - outside /api
+    // Player/ingest pages (HTML) - outside /api
     let player_router = Router::new()
         .route("/whep", get(api::whep_player::whep_player))
-        .route("/whep-streams", get(api::whep_player::whep_streams_page));
+        .route("/whep-streams", get(api::whep_player::whep_streams_page))
+        .route("/whip-ingest", get(api::whip_ingest::whip_ingest_page))
+        .with_state(state.clone());
 
     // WHEP proxy routes - outside /api (acts as WHEP server endpoint)
     let whep_router = Router::new()
@@ -294,10 +299,36 @@ pub async fn create_app_with_config(
         )
         .with_state(state.clone());
 
-    // Static assets for WHEP player
+    // WHIP proxy routes - outside /api (acts as WHIP server endpoint)
+    let whip_router = Router::new()
+        .route(
+            "/{endpoint_id}",
+            post(api::whip_ingest::whip_post),
+        )
+        .route(
+            "/{endpoint_id}",
+            axum::routing::options(api::whip_ingest::whip_options),
+        )
+        .route(
+            "/{endpoint_id}/resource/{resource_id}",
+            delete(api::whip_ingest::whip_resource_delete),
+        )
+        .route(
+            "/{endpoint_id}/resource/{resource_id}",
+            patch(api::whip_ingest::whip_resource_patch),
+        )
+        .route(
+            "/{endpoint_id}/resource/{resource_id}",
+            axum::routing::options(api::whip_ingest::whip_resource_options),
+        )
+        .with_state(state.clone());
+
+    // Static assets for WHEP player and WHIP ingest
     let static_router = Router::new()
         .route("/whep.css", get(api::whep_player::whep_css))
-        .route("/whep.js", get(api::whep_player::whep_js));
+        .route("/whep.js", get(api::whep_player::whep_js))
+        .route("/whip_client.js", get(serve_whip_js))
+        .route("/whip.css", get(serve_whip_css));
 
     // Create MCP session manager
     let mcp_sessions = mcp::McpSessionManager::new();
@@ -318,6 +349,7 @@ pub async fn create_app_with_config(
         .nest("/api", api_router)
         .nest("/player", player_router)
         .nest("/whep", whep_router)
+        .nest("/whip", whip_router)
         .nest("/static", static_router)
         .layer(session_layer)
         .layer({
@@ -359,4 +391,34 @@ pub async fn create_app_with_config(
 /// Health check endpoint.
 async fn health() -> &'static str {
     "OK"
+}
+
+/// Serve WHIP client JavaScript.
+async fn serve_whip_js() -> impl axum::response::IntoResponse {
+    match assets::WhipAssets::get("whip_client.js") {
+        Some(content) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "application/javascript")
+            .body(axum::body::Body::from(content.data))
+            .unwrap(),
+        None => axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("Not found"))
+            .unwrap(),
+    }
+}
+
+/// Serve WHIP ingest CSS.
+async fn serve_whip_css() -> impl axum::response::IntoResponse {
+    match assets::WhipAssets::get("whip.css") {
+        Some(content) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/css")
+            .body(axum::body::Body::from(content.data))
+            .unwrap(),
+        None => axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("Not found"))
+            .unwrap(),
+    }
 }

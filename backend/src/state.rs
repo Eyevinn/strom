@@ -10,6 +10,7 @@ use crate::storage::{JsonFileStorage, Storage};
 use crate::system_monitor::{SystemMonitor, ThreadCpuSampler};
 use crate::thread_registry::ThreadRegistry;
 use crate::whep_registry::WhepRegistry;
+use crate::whip_registry::WhipRegistry;
 use chrono::Local;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -56,6 +57,8 @@ struct AppStateInner {
     media_path: PathBuf,
     /// WHEP endpoint registry (maps endpoint IDs to internal ports)
     whep_registry: WhepRegistry,
+    /// WHIP endpoint registry (maps endpoint IDs to internal ports)
+    whip_registry: WhipRegistry,
     /// ICE servers for WebRTC NAT traversal (STUN/TURN URLs)
     ice_servers: Vec<String>,
     /// ICE transport policy for WebRTC connections ("all" or "relay")
@@ -92,6 +95,7 @@ impl AppState {
                 ptp_monitor: PtpMonitor::new(),
                 media_path: media_path.into(),
                 whep_registry: WhepRegistry::new(),
+                whip_registry: WhipRegistry::new(),
                 ice_servers,
                 ice_transport_policy,
                 pending_saves: RwLock::new(HashSet::new()),
@@ -102,6 +106,11 @@ impl AppState {
     /// Get the WHEP endpoint registry.
     pub fn whep_registry(&self) -> &WhepRegistry {
         &self.inner.whep_registry
+    }
+
+    /// Get the WHIP endpoint registry.
+    pub fn whip_registry(&self) -> &WhipRegistry {
+        &self.inner.whip_registry
     }
 
     /// Get the event broadcaster.
@@ -679,6 +688,32 @@ impl AppState {
             Vec::new()
         };
 
+        // Collect and register WHIP endpoints from blocks
+        let whip_endpoints: Vec<(String, String)> = if let Some(manager) = pipelines_guard.get(id) {
+            let mut endpoints = Vec::new();
+            for whip_info in manager.whip_endpoints() {
+                info!(
+                    "Registering WHIP endpoint '{}' (block {}) on port {} mode={:?}",
+                    whip_info.endpoint_id,
+                    whip_info.block_id,
+                    whip_info.internal_port,
+                    whip_info.mode
+                );
+                self.inner
+                    .whip_registry
+                    .register(
+                        whip_info.endpoint_id.clone(),
+                        whip_info.internal_port,
+                        whip_info.mode,
+                    )
+                    .await;
+                endpoints.push((whip_info.block_id.clone(), whip_info.endpoint_id.clone()));
+            }
+            endpoints
+        } else {
+            Vec::new()
+        };
+
         // Drop the pipelines guard - we don't need it anymore
         drop(pipelines_guard);
 
@@ -827,14 +862,32 @@ impl AppState {
                         endpoint_id, block.id
                     );
 
-                    // Initialize runtime_data if needed
                     if block.runtime_data.is_none() {
                         block.runtime_data = Some(std::collections::HashMap::new());
                     }
 
-                    // Store endpoint_id
                     if let Some(runtime_data) = &mut block.runtime_data {
                         runtime_data.insert("whep_endpoint_id".to_string(), endpoint_id.clone());
+                    }
+                }
+            }
+
+            // Store endpoint_id in runtime_data for WHIP input blocks
+            if block.block_definition_id == "builtin.whip_input" {
+                if let Some((_, endpoint_id)) =
+                    whip_endpoints.iter().find(|(bid, _)| bid == &block.id)
+                {
+                    info!(
+                        "Storing WHIP endpoint_id '{}' for block {} in runtime_data",
+                        endpoint_id, block.id
+                    );
+
+                    if block.runtime_data.is_none() {
+                        block.runtime_data = Some(std::collections::HashMap::new());
+                    }
+
+                    if let Some(runtime_data) = &mut block.runtime_data {
+                        runtime_data.insert("whip_endpoint_id".to_string(), endpoint_id.clone());
                     }
                 }
             }
@@ -939,6 +992,18 @@ impl AppState {
             self.inner
                 .whep_registry
                 .unregister(&whep_info.endpoint_id)
+                .await;
+        }
+
+        // Unregister WHIP endpoints before stopping
+        for whip_info in manager.whip_endpoints() {
+            info!(
+                "Unregistering WHIP endpoint '{}' (block {})",
+                whip_info.endpoint_id, whip_info.block_id
+            );
+            self.inner
+                .whip_registry
+                .unregister(&whip_info.endpoint_id)
                 .await;
         }
 

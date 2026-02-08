@@ -1037,6 +1037,13 @@ impl GraphEditor {
                     set_local_storage("open_whep_player", &block.id);
                 }
 
+                // Handle double-click to open ingest page for WHIP Input blocks
+                if node_response.double_clicked()
+                    && block.block_definition_id == "builtin.whip_input"
+                {
+                    set_local_storage("open_whip_ingest", &block.id);
+                }
+
                 // Handle double-click to open routing matrix for Audio Router blocks
                 if node_response.double_clicked()
                     && block.block_definition_id == "builtin.audiorouter"

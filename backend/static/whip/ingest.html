@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>WHIP Ingest</title>
+    <link rel="stylesheet" href="/static/whip.css">
+    <link rel="icon" href="/assets/favicon.ico">
+</head>
+<body>
+    <div class="container">
+        <h1>WHIP Ingest</h1>
+
+        <!-- Endpoint selection -->
+        <div class="card">
+            <h2>Endpoint</h2>
+            <div class="endpoint-section">
+                <select id="endpointSelect">
+                    <option value="">Loading endpoints...</option>
+                </select>
+                <span style="color:#666;">or</span>
+                <input type="text" id="endpointUrl" placeholder="Enter WHIP endpoint URL">
+            </div>
+        </div>
+
+        <!-- Video preview -->
+        <div class="card">
+            <h2>Preview</h2>
+            <div class="video-container" id="videoContainer">
+                <video id="localVideo" autoplay playsinline muted></video>
+            </div>
+
+            <!-- Media settings -->
+            <div class="media-controls">
+                <label>Camera:
+                    <select id="cameraSelect">
+                        <option value="user">Front</option>
+                        <option value="environment">Back</option>
+                    </select>
+                </label>
+                <label>Resolution:
+                    <select id="resolutionSelect">
+                        <option value="720">720p</option>
+                        <option value="1080">1080p</option>
+                        <option value="480">480p</option>
+                        <option value="auto">Auto</option>
+                    </select>
+                </label>
+                <label>
+                    <input type="checkbox" id="enableAudio" checked> Audio
+                </label>
+                <label>
+                    <input type="checkbox" id="enableVideo" checked> Video
+                </label>
+                <div class="audio-meter" id="audioMeter" style="display:none;">
+                    <span style="font-size:0.8rem; color:#888;">Mic:</span>
+                    <div class="meter-bar"><div class="meter-fill" id="meterFill"></div></div>
+                </div>
+            </div>
+
+            <!-- Connection controls -->
+            <div class="controls">
+                <button id="btnPreview" class="btn-secondary">Preview</button>
+                <button id="btnConnect" class="btn-connect" disabled>Connect</button>
+                <button id="btnDisconnect" class="btn-disconnect" disabled>Disconnect</button>
+                <button id="btnFlipCamera" class="btn-toggle" style="display:none;">Flip Camera</button>
+            </div>
+
+            <!-- Status -->
+            <div class="status-bar">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Not connected</span>
+            </div>
+        </div>
+
+        <!-- Log -->
+        <div class="card">
+            <h2>Log</h2>
+            <div class="log-container" id="logContainer"></div>
+        </div>
+    </div>
+
+    <script src="/static/whip_client.js"></script>
+    <script>
+        // Elements
+        const endpointSelect = document.getElementById('endpointSelect');
+        const endpointUrl = document.getElementById('endpointUrl');
+        const localVideo = document.getElementById('localVideo');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const resolutionSelect = document.getElementById('resolutionSelect');
+        const enableAudio = document.getElementById('enableAudio');
+        const enableVideo = document.getElementById('enableVideo');
+        const btnPreview = document.getElementById('btnPreview');
+        const btnConnect = document.getElementById('btnConnect');
+        const btnDisconnect = document.getElementById('btnDisconnect');
+        const btnFlipCamera = document.getElementById('btnFlipCamera');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const logContainer = document.getElementById('logContainer');
+        const audioMeter = document.getElementById('audioMeter');
+        const meterFill = document.getElementById('meterFill');
+
+        let whipClient = null;
+        let previewStream = null;
+        let audioContext = null;
+        let audioAnalyser = null;
+        let meterAnimFrame = null;
+
+        // Parse endpoint from URL query param
+        const urlParams = new URLSearchParams(window.location.search);
+        const initialEndpoint = urlParams.get('endpoint');
+        if (initialEndpoint) {
+            endpointUrl.value = initialEndpoint;
+        }
+
+        // Log function
+        function addLog(msg, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + type;
+            const time = new Date().toLocaleTimeString();
+            entry.textContent = '[' + time + '] ' + msg;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // Set status
+        function setStatus(text, state) {
+            statusText.textContent = text;
+            statusDot.className = 'status-dot ' + (state || '');
+        }
+
+        // Get selected endpoint URL
+        function getEndpointUrl() {
+            const manual = endpointUrl.value.trim();
+            if (manual) return manual;
+            const selected = endpointSelect.value;
+            if (selected) return selected;
+            return null;
+        }
+
+        // Build media constraints
+        function getConstraints() {
+            const constraints = {};
+
+            if (enableAudio.checked) {
+                constraints.audio = {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
+                };
+            } else {
+                constraints.audio = false;
+            }
+
+            if (enableVideo.checked) {
+                const facing = cameraSelect.value;
+                const res = resolutionSelect.value;
+                const videoConstraints = {
+                    facingMode: facing,
+                };
+                if (res !== 'auto') {
+                    const height = parseInt(res);
+                    videoConstraints.height = { ideal: height };
+                    videoConstraints.width = { ideal: Math.round(height * 16 / 9) };
+                }
+                constraints.video = videoConstraints;
+            } else {
+                constraints.video = false;
+            }
+
+            return constraints;
+        }
+
+        // Setup audio meter
+        function setupAudioMeter(stream) {
+            const audioTracks = stream.getAudioTracks();
+            if (audioTracks.length === 0) {
+                audioMeter.style.display = 'none';
+                return;
+            }
+
+            audioMeter.style.display = 'flex';
+
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                audioAnalyser = audioContext.createAnalyser();
+                audioAnalyser.fftSize = 256;
+                source.connect(audioAnalyser);
+
+                const dataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
+
+                function updateMeter() {
+                    audioAnalyser.getByteFrequencyData(dataArray);
+                    let sum = 0;
+                    for (let i = 0; i < dataArray.length; i++) {
+                        sum += dataArray[i];
+                    }
+                    const avg = sum / dataArray.length;
+                    const pct = Math.min(100, (avg / 128) * 100);
+                    meterFill.style.width = pct + '%';
+                    if (pct > 60) {
+                        meterFill.style.background = '#8a5a5a';
+                    } else if (pct > 30) {
+                        meterFill.style.background = '#8a8a5a';
+                    } else {
+                        meterFill.style.background = '#5a8a5a';
+                    }
+                    meterAnimFrame = requestAnimationFrame(updateMeter);
+                }
+                updateMeter();
+            } catch (e) {
+                addLog('Audio meter setup failed: ' + e.message, 'error');
+            }
+        }
+
+        function stopAudioMeter() {
+            if (meterAnimFrame) {
+                cancelAnimationFrame(meterAnimFrame);
+                meterAnimFrame = null;
+            }
+            if (audioContext) {
+                audioContext.close().catch(() => {});
+                audioContext = null;
+            }
+            audioAnalyser = null;
+            audioMeter.style.display = 'none';
+            meterFill.style.width = '0%';
+        }
+
+        // Stop preview
+        function stopPreview() {
+            stopAudioMeter();
+            if (previewStream) {
+                previewStream.getTracks().forEach(t => t.stop());
+                previewStream = null;
+            }
+            localVideo.srcObject = null;
+        }
+
+        // Preview button
+        btnPreview.addEventListener('click', async () => {
+            stopPreview();
+            const constraints = getConstraints();
+            if (!constraints.audio && !constraints.video) {
+                addLog('Enable at least audio or video', 'error');
+                return;
+            }
+
+            try {
+                previewStream = await navigator.mediaDevices.getUserMedia(constraints);
+                localVideo.srcObject = previewStream;
+                addLog('Preview started');
+                btnConnect.disabled = false;
+
+                // Show flip camera on mobile
+                if (enableVideo.checked && /Mobi|Android/i.test(navigator.userAgent)) {
+                    btnFlipCamera.style.display = 'inline-block';
+                }
+
+                setupAudioMeter(previewStream);
+            } catch (e) {
+                addLog('Failed to get media: ' + e.message, 'error');
+                setStatus('Media error: ' + e.message, 'error');
+            }
+        });
+
+        // Connect button
+        btnConnect.addEventListener('click', async () => {
+            const endpoint = getEndpointUrl();
+            if (!endpoint) {
+                addLog('Select or enter an endpoint URL', 'error');
+                return;
+            }
+
+            // Get a fresh stream for the connection (preview stream stays separate)
+            const constraints = getConstraints();
+            let sendStream;
+            try {
+                sendStream = await navigator.mediaDevices.getUserMedia(constraints);
+            } catch (e) {
+                addLog('Failed to get media for connection: ' + e.message, 'error');
+                return;
+            }
+
+            // Update preview with the send stream
+            stopPreview();
+            previewStream = sendStream;
+            localVideo.srcObject = sendStream;
+            setupAudioMeter(sendStream);
+
+            setStatus('Connecting...', 'connecting');
+            btnConnect.disabled = true;
+            btnDisconnect.disabled = false;
+
+            whipClient = new WhipClient(endpoint, {
+                onLog: (msg, type) => addLog(msg, type),
+                onConnected: () => {
+                    setStatus('Connected', 'connected');
+                    addLog('Connected to endpoint', 'success');
+                },
+                onDisconnected: () => {
+                    setStatus('Disconnected', '');
+                    btnConnect.disabled = false;
+                    btnDisconnect.disabled = true;
+                },
+                onError: (msg) => {
+                    setStatus('Error: ' + msg, 'error');
+                    addLog('Error: ' + msg, 'error');
+                    btnConnect.disabled = false;
+                    btnDisconnect.disabled = true;
+                },
+                onIceState: (state) => {
+                    if (state === 'checking') {
+                        setStatus('ICE checking...', 'connecting');
+                    }
+                },
+            });
+
+            try {
+                await whipClient.connect(sendStream);
+            } catch (e) {
+                addLog('Connection failed: ' + e.message, 'error');
+                setStatus('Connection failed', 'error');
+                btnConnect.disabled = false;
+                btnDisconnect.disabled = true;
+            }
+        });
+
+        // Disconnect button
+        btnDisconnect.addEventListener('click', async () => {
+            if (whipClient) {
+                await whipClient.disconnect();
+                whipClient = null;
+            }
+            stopPreview();
+            setStatus('Disconnected', '');
+            btnConnect.disabled = false;
+            btnDisconnect.disabled = true;
+            localVideo.srcObject = null;
+        });
+
+        // Flip camera button
+        btnFlipCamera.addEventListener('click', async () => {
+            const current = cameraSelect.value;
+            cameraSelect.value = current === 'user' ? 'environment' : 'user';
+            // Restart preview with new camera
+            btnPreview.click();
+        });
+
+        // Fetch available endpoints
+        async function loadEndpoints() {
+            try {
+                const resp = await fetch('/api/whip-endpoints');
+                if (resp.ok) {
+                    const endpoints = await resp.json();
+                    endpointSelect.innerHTML = '';
+
+                    if (endpoints.length === 0) {
+                        endpointSelect.innerHTML = '<option value="">No active endpoints</option>';
+                    } else {
+                        endpointSelect.innerHTML = '<option value="">Select endpoint...</option>';
+                        for (const ep of endpoints) {
+                            const option = document.createElement('option');
+                            option.value = '/whip/' + ep.endpoint_id;
+                            option.textContent = ep.endpoint_id + ' (' + ep.mode + ')';
+                            endpointSelect.appendChild(option);
+                        }
+                    }
+
+                    // Auto-select if URL param matches
+                    if (initialEndpoint) {
+                        for (const opt of endpointSelect.options) {
+                            if (opt.value === initialEndpoint) {
+                                opt.selected = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                endpointSelect.innerHTML = '<option value="">Failed to load</option>';
+            }
+        }
+
+        // Load endpoints on page load and refresh periodically
+        loadEndpoints();
+        setInterval(loadEndpoints, 10000);
+
+        // Auto-select from dropdown to text input
+        endpointSelect.addEventListener('change', () => {
+            if (endpointSelect.value) {
+                endpointUrl.value = endpointSelect.value;
+            }
+        });
+    </script>
+</body>
+</html>

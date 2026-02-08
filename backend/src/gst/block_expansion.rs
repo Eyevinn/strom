@@ -3,6 +3,7 @@
 use crate::blocks::builtin;
 use crate::blocks::{
     BlockBuildContext, BusMessageConnectFn, DynamicWebrtcbinStore, WhepEndpointInfo,
+    WhipEndpointInfo,
 };
 use gstreamer as gst;
 use strom_types::{BlockInstance, Link};
@@ -25,6 +26,8 @@ pub struct ExpandedPipeline {
     pub pad_properties: HashMap<String, HashMap<String, HashMap<String, PropertyValue>>>,
     /// WHEP endpoints registered by blocks
     pub whep_endpoints: Vec<WhepEndpointInfo>,
+    /// WHIP endpoints registered by blocks
+    pub whip_endpoints: Vec<WhipEndpointInfo>,
 }
 
 /// Expand block instances into GStreamer elements using BlockBuilder trait.
@@ -151,13 +154,25 @@ pub async fn expand_blocks(
         }
     }
 
+    // Collect WHIP endpoints from context
+    let whip_endpoints = ctx.take_whip_endpoints();
+    if !whip_endpoints.is_empty() {
+        for ep in &whip_endpoints {
+            info!(
+                "Block {} registered WHIP endpoint: endpoint_id='{}', port={}",
+                ep.block_id, ep.endpoint_id, ep.internal_port
+            );
+        }
+    }
+
     debug!(
-        "Block expansion complete: {} GStreamer elements, {} links, {} bus message handlers, {} elements with pad properties, {} WHEP endpoints",
+        "Block expansion complete: {} GStreamer elements, {} links, {} bus message handlers, {} elements with pad properties, {} WHEP endpoints, {} WHIP endpoints",
         gst_elements.len(),
         all_links.len(),
         bus_message_handlers.len(),
         all_pad_properties.len(),
-        whep_endpoints.len()
+        whep_endpoints.len(),
+        whip_endpoints.len()
     );
 
     Ok(ExpandedPipeline {
@@ -166,6 +181,7 @@ pub async fn expand_blocks(
         bus_message_handlers,
         pad_properties: all_pad_properties,
         whep_endpoints,
+        whip_endpoints,
     })
 }
 

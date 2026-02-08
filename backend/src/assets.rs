@@ -17,6 +17,11 @@ pub struct Assets;
 #[folder = "static/whep/"]
 pub struct WhepAssets;
 
+/// Embedded WHIP ingest assets (CSS, JS, HTML templates)
+#[derive(RustEmbed)]
+#[folder = "static/whip/"]
+pub struct WhipAssets;
+
 /// Embedded icon assets (favicons, app icons, etc.)
 #[derive(RustEmbed)]
 #[folder = "../assets/"]

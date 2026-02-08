@@ -186,6 +186,8 @@ pub struct PipelineManager {
     dynamic_pad_tees: std::sync::Arc<std::sync::RwLock<HashMap<String, HashMap<String, String>>>>,
     /// WHEP endpoints registered by blocks
     whep_endpoints: Vec<crate::blocks::WhepEndpointInfo>,
+    /// WHIP endpoints registered by blocks
+    whip_endpoints: Vec<crate::blocks::WhipEndpointInfo>,
     /// Dynamically created webrtcbins (from webrtcsink/whepserversink consumer-added callbacks).
     /// Maps block_id to list of (consumer_id, webrtcbin) pairs.
     dynamic_webrtcbins: crate::blocks::DynamicWebrtcbinStore,
@@ -238,6 +240,7 @@ impl PipelineManager {
             ptp_stats_callback: None,
             dynamic_pad_tees: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             whep_endpoints: Vec::new(),
+            whip_endpoints: Vec::new(),
             dynamic_webrtcbins: Arc::clone(&dynamic_webrtcbins),
         };
 
@@ -329,6 +332,15 @@ impl PipelineManager {
             );
         }
         manager.whep_endpoints = expanded.whep_endpoints;
+
+        // Store WHIP endpoints from blocks
+        if !expanded.whip_endpoints.is_empty() {
+            info!(
+                "Storing {} WHIP endpoint(s) from blocks",
+                expanded.whip_endpoints.len()
+            );
+        }
+        manager.whip_endpoints = expanded.whip_endpoints;
 
         // Analyze links and auto-insert tee elements where needed
         let all_links = expanded.links;
@@ -2081,6 +2093,11 @@ impl PipelineManager {
     /// Get WHEP endpoints registered by blocks in this pipeline.
     pub fn whep_endpoints(&self) -> &[crate::blocks::WhepEndpointInfo] {
         &self.whep_endpoints
+    }
+
+    /// Get WHIP endpoints registered by blocks in this pipeline.
+    pub fn whip_endpoints(&self) -> &[crate::blocks::WhipEndpointInfo] {
+        &self.whip_endpoints
     }
 
     /// Generate a DOT graph of the pipeline for debugging.
