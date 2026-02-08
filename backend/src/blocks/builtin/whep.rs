@@ -861,39 +861,32 @@ fn build_whepserversink(
                 pad_name, codec_prefs
             );
 
-            // Check if this transceiver has profile constraints that need relaxing
-            let mut needs_modification = false;
+            // Filter codec-preferences: remove outdated codecs and relax profile constraints.
+            // IMPORTANT: Only keep ONE entry per codec type to avoid duplicate streams.
+            // Browser may offer multiple H.264 profiles (baseline, main, high) - if we
+            // accept all of them after relaxing profile matching, webrtcsink sends the
+            // same data on multiple payloads, doubling bandwidth.
+            let mut new_caps = gst::Caps::new_empty();
+            let mut seen_codecs = std::collections::HashSet::new();
             for i in 0..codec_prefs.size() {
-                if let Some(s) = codec_prefs.structure(i) {
-                    if s.has_field("profile-level-id") || s.has_field("profile") {
-                        needs_modification = true;
-                        break;
+                if let Some(structure) = codec_prefs.structure(i) {
+                    let codec_name = structure.name().as_str();
+                    // Skip VP8 - outdated codec, not worth offering
+                    if codec_name == "video/x-vp8" {
+                        continue;
+                    }
+                    // Only add first occurrence of each codec type
+                    if seen_codecs.insert(codec_name.to_string()) {
+                        let mut new_structure = structure.to_owned();
+                        new_structure.remove_field("profile-level-id");
+                        new_structure.remove_field("profile");
+                        new_caps.get_mut().unwrap().append_structure(new_structure);
                     }
                 }
             }
-
-            if needs_modification {
-                // Create new caps without profile constraints
-                // IMPORTANT: Only keep ONE entry per codec type to avoid duplicate streams.
-                // Browser may offer multiple H.264 profiles (baseline, main, high) - if we
-                // accept all of them after relaxing profile matching, webrtcsink sends the
-                // same data on multiple payloads, doubling bandwidth.
-                let mut new_caps = gst::Caps::new_empty();
-                let mut seen_codecs = std::collections::HashSet::new();
-                for i in 0..codec_prefs.size() {
-                    if let Some(structure) = codec_prefs.structure(i) {
-                        let codec_name = structure.name().as_str();
-                        // Only add first occurrence of each codec type
-                        if seen_codecs.insert(codec_name.to_string()) {
-                            let mut new_structure = structure.to_owned();
-                            new_structure.remove_field("profile-level-id");
-                            new_structure.remove_field("profile");
-                            new_caps.get_mut().unwrap().append_structure(new_structure);
-                        }
-                    }
-                }
+            if new_caps != codec_prefs {
                 debug!(
-                    "WHEP Output: Relaxing transceiver for pad {} codec-preferences: {:?} -> {:?}",
+                    "WHEP Output: Modified transceiver for pad {} codec-preferences: {:?} -> {:?}",
                     pad_name, codec_prefs, new_caps
                 );
                 transceiver.set_property("codec-preferences", &new_caps);
@@ -1038,7 +1031,7 @@ fn build_whepserversink(
 
         // Dynamic video codec detection: Add a pad probe to detect input codec
         // and set video-caps on whepserversink before discovery runs.
-        // This allows the WHEP block to work with any codec (H264, H265, VP8, VP9, AV1, raw).
+        // This allows the WHEP block to work with any codec (H264, H265, VP9, AV1, raw).
         let whepserversink_weak = whepserversink.downgrade();
         let caps_set = Arc::new(AtomicBool::new(false));
         let caps_set_clone = caps_set.clone();
@@ -1068,10 +1061,6 @@ fn build_whepserversink(
                                 "video/x-h265" => {
                                     info!("WHEP Output: Detected H.265 input, setting video-caps");
                                     Some(gst::Caps::builder("video/x-h265").build())
-                                }
-                                "video/x-vp8" => {
-                                    info!("WHEP Output: Detected VP8 input, setting video-caps");
-                                    Some(gst::Caps::builder("video/x-vp8").build())
                                 }
                                 "video/x-vp9" => {
                                     info!("WHEP Output: Detected VP9 input, setting video-caps");
