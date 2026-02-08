@@ -16,6 +16,9 @@
         document.title = 'WHEP Streams | Strom | ' + location.host;
     </script>
 
+    <div id="safariWarning" style="display:none; background:#553300; border:1px solid #885500; color:#ffcc66; padding:10px 14px; border-radius:6px; margin:0 16px 12px 16px; font-size:0.85em;">
+        Safari requires HTTPS for WebRTC. Playback will not work over HTTP. Use Chrome, or access this page via HTTPS.
+    </div>
     <div class="streams-grid" id="streamsGrid">
         <div class="no-streams" id="noStreams">
             <div class="no-streams-icon">--</div>
@@ -28,6 +31,10 @@
 
     <script src="/static/whep.js"></script>
     <script>
+        if (isSafariOnHttp()) {
+            document.getElementById('safariWarning').style.display = 'block';
+        }
+
         const streamConnections = new Map();
 
         async function loadStreams() {

@@ -16,6 +16,9 @@
             </div>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em;">All streams →</a>
         </div>
+        <div id="safariWarning" style="display:none; background:#553300; border:1px solid #885500; color:#ffcc66; padding:10px 14px; border-radius:6px; margin-bottom:12px; font-size:0.85em;">
+            Safari requires HTTPS for WebRTC. Playback will not work over HTTP. Use Chrome, or access this page via HTTPS.
+        </div>
         <h1 style="text-align: center;">WHEP Player at <span id="hostAddress"></span></h1>
 
         <div class="form-group">
@@ -63,6 +66,10 @@
 
     <script src="/static/whep.js"></script>
     <script>
+        if (isSafariOnHttp()) {
+            document.getElementById('safariWarning').style.display = 'block';
+        }
+
         let connection = null;
         let connectionId = 0;       // Incremented each connect to ignore stale callbacks
         let wantConnected = false;  // User's intent: should we be connected?

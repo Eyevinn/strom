@@ -1,5 +1,12 @@
 // WHEP Connection Library with extensive TURN/ICE debugging
 
+// Detect Safari on HTTP and warn - Safari blocks ICE candidate gathering
+// on insecure origins, making WebRTC connections impossible.
+function isSafariOnHttp() {
+    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+    return isSafari && location.protocol === 'http:';
+}
+
 // Global debug mode flag - toggle via UI or setWhepDebugMode(true/false)
 let whepDebugMode = false;
 
