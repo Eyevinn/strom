@@ -908,62 +908,117 @@ fn build_whepserversink(
         None
     });
 
-    // WORKAROUND #2: Relax strict H.264 profile-level-id matching in capsfilters.
+    // WORKAROUND #2: Fix H.264 profile-level-id mismatch blocking video flow.
     //
-    // Problem: Browsers send profile-level-id=42e01f (Constrained Baseline + Extended constraint).
-    // Our encoder produces 42c0xx (Constrained Baseline without Extended constraint).
-    // Both are codec-compatible, but webrtcsink does strict string matching on profile-level-id
-    // in the capsfilter it creates during discovery, causing a 30-second timeout.
+    // Problem: webrtcsink creates capsfilters downstream of the payloader with
+    // profile-level-id from the browser's SDP (e.g. 42001f = Baseline). When the
+    // actual H.264 stream has a different profile (e.g. high-4:4:4 = f40028),
+    // rtph264pay queries downstream, sees only baseline is acceptable, and
+    // negotiation fails with NOT_NEGOTIATED.
     //
-    // Solution: Connect to payloader-setup signal. Find the downstream capsfilter (pay_filter)
-    // and remove the profile-level-id constraint.
+    // There are two cases:
+    //   1. Discovery pipeline: the output_filter capsfilter already exists at
+    //      payloader-setup time → we strip profile-level-id immediately.
+    //   2. Consumer session: the pay_filter capsfilter is created later in
+    //      connect_input_stream → we use element-added + notify::caps to strip
+    //      profile-level-id synchronously when the capsfilter's caps are set,
+    //      before negotiation occurs.
     whepserversink.connect("payloader-setup", false, |values| {
-        // values[0] = self, values[1] = consumer_id, values[2] = pad_name, values[3] = payloader
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let payloader = values[3].get::<gst::Element>().unwrap();
 
-        // Always relax profile matching - both for discovery and real consumer sessions.
-        // This allows browsers requesting profile-level-id=42e01f to connect to streams
-        // encoded with profile-level-id=42c015 (both are constrained-baseline compatible).
-        // Find the downstream capsfilter by traversing from payloader's src pad
-        if let Some(src_pad) = payloader.static_pad("src") {
-            if let Some(peer_pad) = src_pad.peer() {
-                if let Some(capsfilter) = peer_pad.parent_element() {
-                    // Verify it's a capsfilter
-                    if capsfilter
+        // Helper: walk downstream capsfilters from a pad and strip profile fields
+        fn strip_downstream_capsfilters(start_pad: &gst::Pad, consumer_id: &str) -> u32 {
+            let mut count = 0u32;
+            let mut next_pad = start_pad.peer();
+            while let Some(peer) = next_pad {
+                if let Some(element) = peer.parent_element() {
+                    let is_capsfilter = element
                         .factory()
                         .map(|f| f.name().as_str() == "capsfilter")
-                        .unwrap_or(false)
-                    {
-                        let caps: gst::Caps = capsfilter.property("caps");
-                        // Check if caps contain profile constraints (H.264 RTP caps)
-                        // Browsers may send profile-level-id, profile, or both
+                        .unwrap_or(false);
+                    if is_capsfilter {
+                        let caps: gst::Caps = element.property("caps");
                         if let Some(s) = caps.structure(0) {
                             if s.has_field("profile-level-id") || s.has_field("profile") {
-                                // Create new caps without profile constraints
-                                // Use merge_structure to deduplicate identical caps
                                 let mut new_caps = gst::Caps::new_empty();
                                 for i in 0..caps.size() {
                                     if let Some(structure) = caps.structure(i) {
-                                        let mut new_structure: gst::Structure =
-                                            structure.to_owned();
-                                        new_structure.remove_field("profile-level-id");
-                                        new_structure.remove_field("profile");
-                                        new_caps.merge_structure(new_structure);
+                                        let mut ns = structure.to_owned();
+                                        ns.remove_field("profile-level-id");
+                                        ns.remove_field("profile");
+                                        new_caps.merge_structure(ns);
                                     }
                                 }
-                                debug!(
-                                    "WHEP Output: Relaxing capsfilter profile matching for {}: {:?} -> {:?}",
-                                    consumer_id, caps, new_caps
+                                info!(
+                                    "WHEP Output: Stripped profile from capsfilter {} for {}: {:?}",
+                                    element.name(),
+                                    consumer_id,
+                                    new_caps
                                 );
-                                capsfilter.set_property("caps", &new_caps);
+                                element.set_property("caps", &new_caps);
+                                count += 1;
                             }
                         }
                     }
+                    next_pad = element.static_pad("src").and_then(|p| p.peer());
+                } else {
+                    break;
+                }
+            }
+            count
+        }
+
+        if let Some(src_pad) = payloader.static_pad("src") {
+            // Case 1: Strip any capsfilters that already exist downstream (discovery).
+            strip_downstream_capsfilters(&src_pad, &consumer_id);
+        }
+
+        // Case 2: For consumer sessions, connect_input_stream creates a second
+        // capsfilter (pay_filter) AFTER payloader-setup and sets it with SDP caps
+        // including profile-level-id. We intercept this by watching for new
+        // capsfilters added to the session pipeline and stripping profile-level-id
+        // from their caps via notify::caps (fires synchronously during set_property,
+        // BEFORE any caps negotiation occurs).
+        if consumer_id != "discovery" {
+            if let Some(parent) = payloader.parent() {
+                if let Ok(bin) = parent.downcast::<gst::Bin>() {
+                    let consumer_id_bin = consumer_id.clone();
+                    bin.connect_element_added(move |_bin, element| {
+                        let is_capsfilter = element
+                            .factory()
+                            .map(|f| f.name().as_str() == "capsfilter")
+                            .unwrap_or(false);
+                        if !is_capsfilter {
+                            return;
+                        }
+                        let cid = consumer_id_bin.clone();
+                        element.connect_notify(Some("caps"), move |el, _| {
+                            let caps: gst::Caps = el.property("caps");
+                            if let Some(s) = caps.structure(0) {
+                                if s.has_field("profile-level-id") || s.has_field("profile") {
+                                    let mut new_caps = gst::Caps::new_empty();
+                                    for i in 0..caps.size() {
+                                        if let Some(structure) = caps.structure(i) {
+                                            let mut ns = structure.to_owned();
+                                            ns.remove_field("profile-level-id");
+                                            ns.remove_field("profile");
+                                            new_caps.merge_structure(ns);
+                                        }
+                                    }
+                                    info!(
+                                        "WHEP Output: notify::caps stripped profile from {} for {}: {:?}",
+                                        el.name(), cid, new_caps
+                                    );
+                                    el.set_property("caps", &new_caps);
+                                }
+                            }
+                        });
+                    });
                 }
             }
         }
-        // Return false to let default handler run as well
+
         Some(false.to_value())
     });
 
