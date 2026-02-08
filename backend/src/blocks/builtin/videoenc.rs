@@ -702,17 +702,6 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
     }
 }
 
-/// Map quality preset to Apple VideoToolbox quality (0.0=worst, 1.0=best).
-fn map_quality_preset_vtenc(quality_preset: &str) -> f32 {
-    match quality_preset {
-        "ultrafast" => 0.25,
-        "fast" => 0.5,
-        "slow" => 0.85,
-        "veryslow" => 1.0,
-        _ => 0.65, // medium
-    }
-}
-
 /// Get codec-specific caps string for capsfilter.
 fn get_codec_caps_string(codec: Codec) -> String {
     match codec {
