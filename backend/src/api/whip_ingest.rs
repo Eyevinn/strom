@@ -258,7 +258,13 @@ pub async fn whip_resource_patch(
     };
 
     let status = response.status();
-    let resp_body = response.bytes().await.unwrap_or_default();
+    let resp_body = match response.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Failed to read PATCH proxy response: {}", e);
+            axum::body::Bytes::new()
+        }
+    };
 
     let builder = Response::builder()
         .status(StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
@@ -627,4 +633,227 @@ fn remove_standalone_x_google(sdp: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // strip_redundancy_codecs tests
+    // ========================================================================
+
+    #[test]
+    fn strip_redundancy_codecs_removes_red_rtx_ulpfec() {
+        let sdp = "\
+v=0\r\n\
+o=- 0 0 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111 63\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=rtpmap:63 red/48000/2\r\n\
+a=fmtp:63 111/111\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n\
+a=rtpmap:97 rtx/90000\r\n\
+a=fmtp:97 apt=96\r\n\
+a=rtpmap:98 red/90000\r\n\
+a=rtpmap:99 ulpfec/90000\r\n\
+a=rtcp-fb:97 nack\r\n";
+
+        let result = strip_redundancy_codecs(sdp);
+
+        // Primary codecs should remain
+        assert!(result.contains("a=rtpmap:111 opus/48000/2"));
+        assert!(result.contains("a=rtpmap:96 H264/90000"));
+        assert!(result.contains("a=fmtp:96 level-asymmetry-allowed"));
+
+        // Redundancy codecs should be removed
+        assert!(!result.contains("a=rtpmap:63 red/"));
+        assert!(!result.contains("a=fmtp:63"));
+        assert!(!result.contains("a=rtpmap:97 rtx/"));
+        assert!(!result.contains("a=fmtp:97"));
+        assert!(!result.contains("a=rtpmap:98 red/"));
+        assert!(!result.contains("a=rtpmap:99 ulpfec/"));
+        assert!(!result.contains("a=rtcp-fb:97"));
+
+        // m= lines should have PTs removed
+        assert!(result.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111"));
+        assert!(!result.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111 63"));
+        assert!(result.contains("m=video 9 UDP/TLS/RTP/SAVPF 96"));
+        assert!(!result.contains(" 97"));
+    }
+
+    #[test]
+    fn strip_redundancy_codecs_noop_without_redundancy() {
+        let sdp = "\
+v=0\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 level-asymmetry-allowed=1\r\n";
+
+        let result = strip_redundancy_codecs(sdp);
+        assert_eq!(result, sdp);
+    }
+
+    #[test]
+    fn strip_redundancy_codecs_preserves_primary_codecs() {
+        let sdp = "\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 minptime=10;useinbandfec=1\r\n\
+a=rtcp-fb:111 transport-cc\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=rtcp-fb:96 nack\r\n\
+a=rtcp-fb:96 transport-cc\r\n";
+
+        let result = strip_redundancy_codecs(sdp);
+        assert_eq!(result, sdp);
+    }
+
+    // ========================================================================
+    // add_goog_remb tests
+    // ========================================================================
+
+    #[test]
+    fn add_goog_remb_inserts_after_transport_cc() {
+        let sdp = "\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=rtcp-fb:96 transport-cc\r\n\
+a=fmtp:96 level-asymmetry-allowed=1\r\n";
+
+        let result = add_goog_remb(sdp);
+
+        assert!(result.contains("a=rtcp-fb:96 goog-remb\r\n"));
+        // Should be right after transport-cc line
+        let tc_pos = result.find("a=rtcp-fb:96 transport-cc").unwrap();
+        let remb_pos = result.find("a=rtcp-fb:96 goog-remb").unwrap();
+        let fmtp_pos = result.find("a=fmtp:96").unwrap();
+        assert!(remb_pos > tc_pos);
+        assert!(remb_pos < fmtp_pos);
+    }
+
+    #[test]
+    fn add_goog_remb_noop_without_video() {
+        let sdp = "\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=rtcp-fb:111 transport-cc\r\n";
+
+        let result = add_goog_remb(sdp);
+        assert_eq!(result, sdp);
+    }
+
+    #[test]
+    fn add_goog_remb_noop_if_already_present() {
+        let sdp = "\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=rtcp-fb:96 transport-cc\r\n\
+a=rtcp-fb:96 goog-remb\r\n\
+a=fmtp:96 level-asymmetry-allowed=1\r\n";
+
+        let result = add_goog_remb(sdp);
+        assert_eq!(result, sdp);
+    }
+
+    #[test]
+    fn add_goog_remb_preserves_crlf() {
+        let sdp = "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtcp-fb:96 transport-cc\r\n\
+a=fmtp:96 foo\r\n";
+
+        let result = add_goog_remb(sdp);
+        // Every line should end with \r\n
+        for line in result.split('\n') {
+            if !line.is_empty() {
+                assert!(line.ends_with('\r'), "Line missing \\r: {:?}", line);
+            }
+        }
+    }
+
+    // ========================================================================
+    // fix_video_bitrate_hints tests
+    // ========================================================================
+
+    #[test]
+    fn fix_video_bitrate_hints_moves_standalone_to_fmtp() {
+        let sdp = "\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 level-asymmetry-allowed=1\r\n\
+a=x-google-min-bitrate:1500\r\n\
+a=x-google-start-bitrate:1500\r\n\
+a=x-google-max-bitrate:3000\r\n";
+
+        let result = fix_video_bitrate_hints(sdp);
+
+        // Standalone lines should be removed
+        assert!(!result.contains("a=x-google-min-bitrate:"));
+        assert!(!result.contains("a=x-google-start-bitrate:"));
+        assert!(!result.contains("a=x-google-max-bitrate:"));
+
+        // Values should be in the fmtp line
+        assert!(result.contains("x-google-min-bitrate=1500"));
+        assert!(result.contains("x-google-start-bitrate=1500"));
+        assert!(result.contains("x-google-max-bitrate=3000"));
+        // Original fmtp content preserved
+        assert!(result.contains("level-asymmetry-allowed=1"));
+    }
+
+    #[test]
+    fn fix_video_bitrate_hints_applies_defaults_without_standalone() {
+        let sdp = "\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 level-asymmetry-allowed=1\r\n";
+
+        let result = fix_video_bitrate_hints(sdp);
+
+        assert!(result.contains("x-google-min-bitrate=2000"));
+        assert!(result.contains("x-google-start-bitrate=2000"));
+        assert!(result.contains("x-google-max-bitrate=4000"));
+    }
+
+    #[test]
+    fn fix_video_bitrate_hints_noop_if_already_in_fmtp() {
+        let sdp = "\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 level-asymmetry-allowed=1;x-google-start-bitrate=2000;x-google-min-bitrate=2000;x-google-max-bitrate=4000\r\n";
+
+        let result = fix_video_bitrate_hints(sdp);
+        assert_eq!(result, sdp);
+    }
+
+    #[test]
+    fn fix_video_bitrate_hints_removes_standalone_when_fmtp_has_hints() {
+        let sdp = "\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=fmtp:96 level-asymmetry-allowed=1;x-google-start-bitrate=2000\r\n\
+a=x-google-min-bitrate:1000\r\n";
+
+        let result = fix_video_bitrate_hints(sdp);
+
+        // Standalone line removed
+        assert!(!result.contains("a=x-google-min-bitrate:"));
+        // Existing fmtp hints preserved
+        assert!(result.contains("x-google-start-bitrate=2000"));
+    }
+
+    #[test]
+    fn fix_video_bitrate_hints_noop_without_video() {
+        let sdp = "\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 minptime=10\r\n";
+
+        let result = fix_video_bitrate_hints(sdp);
+        assert_eq!(result, sdp);
+    }
 }

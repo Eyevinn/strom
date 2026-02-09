@@ -298,6 +298,12 @@
                 },
                 onDisconnected: () => {
                     setStatus('status', 'Disconnected', 'disconnected');
+                    // Send DELETE so whipserversrc tears down the session
+                    if (whipClient) {
+                        const client = whipClient;
+                        whipClient = null;
+                        client.disconnect().catch(() => {});
+                    }
                     btnConnect.disabled = false;
                     btnDisconnect.disabled = true;
                     stopStats();

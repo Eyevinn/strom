@@ -429,6 +429,11 @@ fn build_whipserversrc(
         None
     };
 
+    // Only one video stream is accepted at a time. swap(true) atomically sets
+    // the flag and returns the previous value: if it was false, we are the first
+    // and proceed to link; if true, a video stream is already connected and the
+    // new one is discarded to a fakesink. The flag is reset to false in the
+    // pad-removed callback when the active client disconnects.
     let video_connected = Arc::new(AtomicBool::new(false));
 
     // Reset video_connected when video pad is removed (client disconnect).

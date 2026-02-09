@@ -449,38 +449,6 @@ impl PipelineManager {
             self.block_message_handlers.push(handler_id);
         }
 
-        // Install a sync handler to drop error messages from whipserversrc internals.
-        // When a WHIP client disconnects, internal elements (nicesrc, queue, dtls) post
-        // errors that would transition the pipeline to ERROR state, preventing reconnection.
-        // By dropping these at the sync handler level, they never reach the pipeline.
-        {
-            let flow_name_sync = self.flow_name.clone();
-            bus.set_sync_handler(move |_bus, msg| {
-                use gst::MessageView;
-                if let MessageView::Error(_) = msg.view() {
-                    let is_whipsrc_internal = msg.src().is_some_and(|s| {
-                        let mut parent = s.parent();
-                        while let Some(p) = parent {
-                            if p.name().as_str().contains("whipserversrc") {
-                                return true;
-                            }
-                            parent = p.parent();
-                        }
-                        false
-                    });
-                    if is_whipsrc_internal {
-                        let source = msg.src().map(|s| s.name().to_string());
-                        warn!(
-                            "WHIP client error in flow '{}' (dropped): source={:?}",
-                            flow_name_sync, source
-                        );
-                        return gst::BusSyncReply::Drop;
-                    }
-                }
-                gst::BusSyncReply::Pass
-            });
-        }
-
         // Enable signal watch on the bus (ref-counted, safe to call multiple times)
         // This allows using connect_message for multiple handlers
         bus.add_signal_watch();
@@ -499,6 +467,28 @@ impl PipelineManager {
 
             match msg.view() {
                 MessageView::Error(err) => {
+                    // Drop errors from whipserversrc internals (nicesrc, dtlssrtpdec, etc).
+                    // When a WHIP client disconnects, these elements post errors that would
+                    // otherwise transition the pipeline to ERROR state, preventing reconnection.
+                    let is_whipsrc_internal = err.src().is_some_and(|s| {
+                        let mut parent = s.parent();
+                        while let Some(p) = parent {
+                            if p.name().as_str().contains("whipserversrc") {
+                                return true;
+                            }
+                            parent = p.parent();
+                        }
+                        false
+                    });
+                    if is_whipsrc_internal {
+                        let source = err.src().map(|s| s.name().to_string());
+                        warn!(
+                            "WHIP client error in flow '{}' (ignored): source={:?}",
+                            flow_name, source
+                        );
+                        return;
+                    }
+
                     let error_msg = err.error().to_string();
                     let debug_info = err.debug();
                     let source = err.src().map(|s| s.name().to_string());

@@ -95,6 +95,7 @@ class WhipClient {
         this.pc = new RTCPeerConnection(config);
 
         this.pc.oniceconnectionstatechange = () => {
+            if (!this.pc) return;
             const state = this.pc.iceConnectionState;
             this.log('ICE connection state: ' + state);
             if (this.callbacks.onIceState) {
@@ -105,7 +106,7 @@ class WhipClient {
                 if (this.callbacks.onConnected) {
                     this.callbacks.onConnected();
                 }
-            } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+            } else if (state === 'disconnected' || state === 'failed') {
                 this.connected = false;
                 if (this.callbacks.onDisconnected) {
                     this.callbacks.onDisconnected();
@@ -114,7 +115,16 @@ class WhipClient {
         };
 
         this.pc.onconnectionstatechange = () => {
-            this.log('Connection state: ' + this.pc.connectionState);
+            if (!this.pc) return;
+            const state = this.pc.connectionState;
+            this.log('Connection state: ' + state);
+            // 'failed' means DTLS/ICE has failed unrecoverably
+            if (state === 'failed' && this.connected) {
+                this.connected = false;
+                if (this.callbacks.onDisconnected) {
+                    this.callbacks.onDisconnected();
+                }
+            }
         };
 
         // Add tracks from the stream
@@ -145,10 +155,8 @@ class WhipClient {
 
         // Enable stereo for Opus if present
         offer.sdp = this.enableOpusStereo(offer.sdp);
-        // Set bandwidth hint in SDP to prevent low initial bitrate
-        offer.sdp = this.setVideoBandwidth(offer.sdp, 4000);
-        // Add Google-specific bitrate hints to H264 fmtp lines
-        offer.sdp = this.addBitrateHints(offer.sdp, 2000, 2000, 4000);
+        // Note: bitrate hints (x-google-*) and b=AS are handled server-side
+        // by fix_video_bitrate_hints() on the SDP answer. No need to add them here.
 
         // Log SDP offer details
         this.log('SDP offer key lines:');
@@ -170,26 +178,38 @@ class WhipClient {
         const finalOffer = this.pc.localDescription;
         this.log('Sending SDP offer to ' + this.endpointUrl);
 
-        // POST the offer to the WHIP endpoint
+        // POST the offer to the WHIP endpoint.
+        // Retry on 500 errors - whipserversrc may need time to clean up after
+        // a previous session before it can accept a new one.
+        const maxRetries = 3;
+        const retryDelayMs = 2000;
         let response;
-        try {
-            response = await fetch(this.endpointUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/sdp',
-                },
-                body: finalOffer.sdp,
-            });
-        } catch (e) {
-            this.log('Failed to send offer: ' + e.message, 'error');
-            this.cleanup();
-            if (this.callbacks.onError) {
-                this.callbacks.onError('Failed to connect: ' + e.message);
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                response = await fetch(this.endpointUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/sdp',
+                    },
+                    body: finalOffer.sdp,
+                });
+            } catch (e) {
+                this.log('Failed to send offer: ' + e.message, 'error');
+                this.cleanup();
+                if (this.callbacks.onError) {
+                    this.callbacks.onError('Failed to connect: ' + e.message);
+                }
+                return;
             }
-            return;
-        }
 
-        if (!response.ok) {
+            if (response.ok) break;
+
+            if (response.status >= 500 && attempt < maxRetries) {
+                this.log('Server returned ' + response.status + ', retrying in ' + (retryDelayMs / 1000) + 's (attempt ' + attempt + '/' + maxRetries + ')...');
+                await new Promise(r => setTimeout(r, retryDelayMs));
+                continue;
+            }
+
             const errorText = await response.text();
             this.log('WHIP server returned ' + response.status + ': ' + errorText, 'error');
             this.cleanup();
