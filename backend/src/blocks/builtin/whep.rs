@@ -695,10 +695,11 @@ fn build_whepserversink(
         .get("endpoint_id")
         .and_then(|v| {
             if let PropertyValue::String(s) = v {
-                if s.is_empty() {
+                let trimmed = s.trim().to_string();
+                if trimmed.is_empty() {
                     None
                 } else {
-                    Some(s.clone())
+                    Some(trimmed)
                 }
             } else {
                 None

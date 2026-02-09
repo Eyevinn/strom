@@ -260,7 +260,10 @@ pub async fn create_app_with_config(
         // WHEP streams list API (JSON)
         .route("/whep-streams", get(api::whep_player::list_whep_streams))
         // WHIP endpoints list API (JSON)
-        .route("/whip-endpoints", get(api::whip_ingest::list_whip_endpoints))
+        .route(
+            "/whip-endpoints",
+            get(api::whip_ingest::list_whip_endpoints),
+        )
         // ICE servers for WebRTC connections
         .route("/ice-servers", get(api::whep_player::get_ice_servers))
         // MCP Streamable HTTP endpoint (has its own session management)
@@ -301,10 +304,7 @@ pub async fn create_app_with_config(
 
     // WHIP proxy routes - outside /api (acts as WHIP server endpoint)
     let whip_router = Router::new()
-        .route(
-            "/{endpoint_id}",
-            post(api::whip_ingest::whip_post),
-        )
+        .route("/{endpoint_id}", post(api::whip_ingest::whip_post))
         .route(
             "/{endpoint_id}",
             axum::routing::options(api::whip_ingest::whip_options),
