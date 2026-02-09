@@ -22,6 +22,11 @@ pub struct WhepAssets;
 #[folder = "static/whip/"]
 pub struct WhipAssets;
 
+/// Shared WebRTC page assets (CSS, JS shared across WHIP/WHEP pages)
+#[derive(RustEmbed)]
+#[folder = "static/webrtc/"]
+pub struct WebrtcAssets;
+
 /// Embedded icon assets (favicons, app icons, etc.)
 #[derive(RustEmbed)]
 #[folder = "../assets/"]

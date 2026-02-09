@@ -6,6 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <title>WHIP Ingest - Strom</title>
+    <link rel="stylesheet" href="/static/webrtc.css">
     <link rel="stylesheet" href="/static/whip.css">
     <link rel="icon" href="/assets/favicon.ico">
 </head>
@@ -79,14 +80,15 @@
 
         <!-- Log -->
         <div style="display: flex; align-items: center; gap: 6px; margin-top: 16px; margin-bottom: 4px;">
-            <input type="checkbox" id="debugMode" onchange="toggleDebugMode()" style="margin: 0; width: auto;">
+            <input type="checkbox" id="debugMode" data-storage-key="whip-debug" onchange="toggleDebugMode()" style="margin: 0; width: auto;">
             <label for="debugMode" style="color: #666; font-size: 0.8em; cursor: pointer; margin: 0;">Debug</label>
             <button onclick="copyLog()" style="padding: 2px 6px; white-space: nowrap;">Copy log</button>
         </div>
         <div class="log" id="log"></div>
     </div>
 
-    <script src="/static/whip_client.js"></script>
+    <script src="/static/webrtc.js"></script>
+    <script src="/static/whip.js"></script>
     <script>
         // State
         let whipClient = null;
@@ -109,47 +111,10 @@
         const btnDisconnect = document.getElementById('btnDisconnect');
 
         // ============================================================
-        // Logging
+        // Debug logging (page-specific, uses shared log())
         // ============================================================
-        function log(msg, type = '') {
-            const logEl = document.getElementById('log');
-            const entry = document.createElement('div');
-            entry.className = 'log-entry ' + type;
-            entry.textContent = new Date().toLocaleTimeString() + ' - ' + msg;
-            logEl.appendChild(entry);
-            logEl.scrollTop = logEl.scrollHeight;
-        }
-
         function debugLog(msg) {
             if (debugEnabled) log(msg);
-        }
-
-        function copyLog() {
-            const logEl = document.getElementById('log');
-            const text = Array.from(logEl.children).map(e => e.textContent).join('\n');
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(text).then(() => log('Log copied', 'success')).catch(() => copyFallback(text));
-            } else {
-                copyFallback(text);
-            }
-        }
-
-        function copyFallback(text) {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position = 'fixed';
-            ta.style.left = '-9999px';
-            document.body.appendChild(ta);
-            ta.select();
-            try { document.execCommand('copy'); log('Log copied', 'success'); }
-            catch(e) { log('Copy failed: ' + e, 'error'); }
-            document.body.removeChild(ta);
-        }
-
-        function toggleDebugMode() {
-            debugEnabled = document.getElementById('debugMode').checked;
-            try { localStorage.setItem('whip-debug', debugEnabled); } catch(e) {}
-            if (debugEnabled) log('Debug mode enabled', 'success');
         }
 
         function saveSettings() {
@@ -172,12 +137,6 @@
                 const video = localStorage.getItem('whip-video');
                 if (video !== null) document.getElementById('enableVideo').checked = video === 'true';
             } catch(e) {}
-        }
-
-        function setStatus(text, state) {
-            const el = document.getElementById('status');
-            el.textContent = text;
-            el.className = 'status ' + (state || 'disconnected');
         }
 
         // ============================================================
@@ -304,7 +263,7 @@
                 setupAudioMeter(previewStream);
             } catch(e) {
                 log('Failed to get media: ' + e.message, 'error');
-                setStatus('Media error', 'error');
+                setStatus('status', 'Media error', 'error');
             }
         });
 
@@ -323,7 +282,7 @@
             localVideo.srcObject = sendStream;
             setupAudioMeter(sendStream);
 
-            setStatus('Connecting...', 'connecting');
+            setStatus('status', 'Connecting...', 'connecting');
             btnConnect.disabled = true;
             btnDisconnect.disabled = false;
 
@@ -333,18 +292,18 @@
                     else if (debugEnabled) { log(msg, type || ''); }
                 },
                 onConnected: () => {
-                    setStatus('Connected', 'connected');
+                    setStatus('status', 'Connected', 'connected');
                     log('Connected to ' + endpoint, 'success');
                     startStats();
                 },
                 onDisconnected: () => {
-                    setStatus('Disconnected', 'disconnected');
+                    setStatus('status', 'Disconnected', 'disconnected');
                     btnConnect.disabled = false;
                     btnDisconnect.disabled = true;
                     stopStats();
                 },
                 onError: (msg) => {
-                    setStatus('Error: ' + msg, 'error');
+                    setStatus('status', 'Error: ' + msg, 'error');
                     log('Error: ' + msg, 'error');
                     btnConnect.disabled = false;
                     btnDisconnect.disabled = true;
@@ -357,7 +316,7 @@
                 await whipClient.connect(sendStream);
             } catch(e) {
                 log('Connection failed: ' + e.message, 'error');
-                setStatus('Connection failed', 'error');
+                setStatus('status', 'Connection failed', 'error');
                 btnConnect.disabled = false;
                 btnDisconnect.disabled = true;
             }
@@ -367,7 +326,7 @@
             if (whipClient) { await whipClient.disconnect(); whipClient = null; }
             stopPreview();
             stopStats();
-            setStatus('Disconnected', 'disconnected');
+            setStatus('status', 'Disconnected', 'disconnected');
             btnConnect.disabled = false;
             btnDisconnect.disabled = true;
             localVideo.srcObject = null;
@@ -460,12 +419,7 @@
 
             // Restore settings
             restoreSettings();
-            try {
-                if (localStorage.getItem('whip-debug') === 'true') {
-                    document.getElementById('debugMode').checked = true;
-                    debugEnabled = true;
-                }
-            } catch(e) {}
+            debugEnabled = restoreDebugMode('whip-debug');
 
             // Parse endpoint from URL
             const params = new URLSearchParams(window.location.search);

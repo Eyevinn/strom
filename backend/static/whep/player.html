@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WHEP Player - Strom</title>
+    <link rel="stylesheet" href="/static/webrtc.css">
     <link rel="stylesheet" href="/static/whep.css">
 </head>
 <body style="display: flex; flex-direction: column; align-items: center;">
@@ -47,7 +48,7 @@
         <div class="status disconnected" id="status" style="margin-top: 16px;">Not connected</div>
 
         <div style="display: flex; align-items: center; gap: 6px; margin-top: 16px; margin-bottom: 4px;">
-            <input type="checkbox" id="debugMode" onchange="toggleDebugMode()" style="margin: 0; width: auto;">
+            <input type="checkbox" id="debugMode" data-storage-key="whep-debug" onchange="toggleDebugMode()" style="margin: 0; width: auto;">
             <label for="debugMode" style="color: #666; font-size: 0.8em; cursor: pointer; margin: 0;">Debug</label>
             <button onclick="copyLog()" style="padding: 2px 6px; white-space: nowrap;">Copy log</button>
         </div>
@@ -56,6 +57,7 @@
 
     <audio id="audio" autoplay></audio>
 
+    <script src="/static/webrtc.js"></script>
     <script src="/static/whep.js"></script>
     <script>
         let connection = null;
@@ -65,15 +67,6 @@
         let reconnectTimer = null;
         const MAX_RECONNECT_ATTEMPTS = 15;
         const RECONNECT_DELAY = 10000;
-
-        function log(message, type = '') {
-            const logEl = document.getElementById('log');
-            const entry = document.createElement('div');
-            entry.className = 'log-entry ' + type;
-            entry.textContent = new Date().toLocaleTimeString() + ' - ' + message;
-            logEl.appendChild(entry);
-            logEl.scrollTop = logEl.scrollHeight;
-        }
 
         function scheduleReconnect(reason) {
             // Prevent double scheduling or scheduling when not wanted
@@ -247,42 +240,6 @@
             }
         }
 
-        function copyFallback(text) {
-            const textArea = document.createElement('textarea');
-            textArea.value = text;
-            textArea.style.position = 'fixed';
-            textArea.style.left = '-9999px';
-            document.body.appendChild(textArea);
-            textArea.select();
-            try {
-                document.execCommand('copy');
-                log('Copied URL to clipboard', 'success');
-            } catch (err) {
-                log('Failed to copy URL: ' + err, 'error');
-            }
-            document.body.removeChild(textArea);
-        }
-
-        function copyLog() {
-            const logEl = document.getElementById('log');
-            const text = Array.from(logEl.children).map(e => e.textContent).join('\n');
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(text).then(() => log('Log copied', 'success')).catch(() => copyFallback(text));
-            } else {
-                copyFallback(text);
-            }
-        }
-
-        function toggleDebugMode() {
-            const enabled = document.getElementById('debugMode').checked;
-            setWhepDebugMode(enabled);
-            try { localStorage.setItem('whep-debug', enabled); } catch(e) {}
-            // Only log when enabling, to keep disabled mode quiet
-            if (enabled) {
-                log('Debug mode enabled', 'success');
-            }
-        }
-
         function toggleMute() {
             const audio = document.getElementById('audio');
             const muteBtn = document.getElementById('muteBtn');
@@ -317,12 +274,8 @@
             document.getElementById('hostAddress').textContent = location.host;
             document.title = 'WHEP Player | Strom | ' + location.host;
             // Restore debug mode from previous session
-            try {
-                if (localStorage.getItem('whep-debug') === 'true') {
-                    document.getElementById('debugMode').checked = true;
-                    setWhepDebugMode(true);
-                }
-            } catch(e) {}
+            const debugRestored = restoreDebugMode('whep-debug');
+            if (debugRestored) setWhepDebugMode(true);
             // Set endpoint from server-provided value
             const serverEndpoint = '{{ENDPOINT}}';
             if (serverEndpoint) {

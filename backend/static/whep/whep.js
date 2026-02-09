@@ -514,25 +514,7 @@ class WhepConnection {
     }
 }
 
-// UI Helper functions
-function setElementClass(id, className, condition) {
-    const el = document.getElementById(id);
-    if (el) {
-        if (condition) {
-            el.classList.add(className);
-        } else {
-            el.classList.remove(className);
-        }
-    }
-}
-
-function setStatus(elementId, message, state) {
-    const el = document.getElementById(elementId);
-    if (el) {
-        el.textContent = message;
-        el.className = 'status ' + state;
-    }
-}
+// UI Helper functions (setStatus, setElementClass, copyFallback are in webrtc.js)
 
 function createAudioIndicator() {
     return `

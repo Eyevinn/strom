@@ -325,9 +325,11 @@ pub async fn create_app_with_config(
 
     // Static assets for WHEP player and WHIP ingest
     let static_router = Router::new()
+        .route("/webrtc.css", get(serve_webrtc_css))
+        .route("/webrtc.js", get(serve_webrtc_js))
         .route("/whep.css", get(api::whep_player::whep_css))
         .route("/whep.js", get(api::whep_player::whep_js))
-        .route("/whip_client.js", get(serve_whip_js))
+        .route("/whip.js", get(serve_whip_js))
         .route("/whip.css", get(serve_whip_css));
 
     // Create MCP session manager
@@ -393,9 +395,39 @@ async fn health() -> &'static str {
     "OK"
 }
 
+/// Serve shared WebRTC CSS.
+async fn serve_webrtc_css() -> impl axum::response::IntoResponse {
+    match assets::WebrtcAssets::get("webrtc.css") {
+        Some(content) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "text/css")
+            .body(axum::body::Body::from(content.data))
+            .unwrap(),
+        None => axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("Not found"))
+            .unwrap(),
+    }
+}
+
+/// Serve shared WebRTC JavaScript.
+async fn serve_webrtc_js() -> impl axum::response::IntoResponse {
+    match assets::WebrtcAssets::get("webrtc.js") {
+        Some(content) => axum::response::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "application/javascript")
+            .body(axum::body::Body::from(content.data))
+            .unwrap(),
+        None => axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("Not found"))
+            .unwrap(),
+    }
+}
+
 /// Serve WHIP client JavaScript.
 async fn serve_whip_js() -> impl axum::response::IntoResponse {
-    match assets::WhipAssets::get("whip_client.js") {
+    match assets::WhipAssets::get("whip.js") {
         Some(content) => axum::response::Response::builder()
             .status(axum::http::StatusCode::OK)
             .header(axum::http::header::CONTENT_TYPE, "application/javascript")
