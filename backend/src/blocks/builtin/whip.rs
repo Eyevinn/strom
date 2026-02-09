@@ -21,7 +21,7 @@ use gstreamer::prelude::*;
 use gstreamer_video as gst_video;
 use std::collections::HashMap;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
@@ -273,6 +273,60 @@ fn build_whipserversrc(
                     internal.set_property("twcc-feedback-interval", interval);
                     info!(
                         "WHIP Input: Set twcc-feedback-interval=50ms on {}",
+                        element_name
+                    );
+                }
+            }
+
+            // Detect video decoders for keyframe recovery on packet loss.
+            // When packet loss occurs, the jitterbuffer/depayloader sets the
+            // DISCONT flag on buffers entering the decoder's sink pad. We detect
+            // this and send UpstreamForceKeyUnit upstream, which webrtcbin
+            // translates to PLI RTCP back to the browser.
+            let element_klass = element
+                .factory()
+                .and_then(|f| f.metadata("klass").map(|s| s.to_string()))
+                .unwrap_or_default();
+            if element_klass.contains("Decoder") && element_klass.contains("Video") {
+                let decoder_name = element_name.to_string();
+                let decoder_weak = element.downgrade();
+                let last_fku_time = Arc::new(AtomicU64::new(0));
+                let block_id = block_id_for_callback.clone();
+
+                if let Some(sink_pad) = element.static_pad("sink") {
+                    sink_pad.add_probe(
+                        gst::PadProbeType::BUFFER,
+                        move |_pad, info| {
+                            if let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data {
+                                if buffer.flags().contains(gst::BufferFlags::DISCONT) {
+                                    // Rate-limit: max 1 FKU per second
+                                    let now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis()
+                                        as u64;
+                                    let last = last_fku_time.load(Ordering::Relaxed);
+                                    if now_ms.saturating_sub(last) >= 1000 {
+                                        last_fku_time.store(now_ms, Ordering::Relaxed);
+                                        if let Some(decoder) = decoder_weak.upgrade() {
+                                            debug!(
+                                                "WHIP Input [{}]: Discontinuity on {} sink, requesting keyframe (PLI)",
+                                                block_id, decoder_name
+                                            );
+                                            let fku =
+                                                gst_video::UpstreamForceKeyUnitEvent::builder()
+                                                    .all_headers(true)
+                                                    .build();
+                                            decoder.send_event(fku);
+                                        }
+                                    }
+                                }
+                            }
+                            gst::PadProbeReturn::Ok
+                        },
+                    );
+                    info!(
+                        "WHIP Input: Installed keyframe recovery probe on {} sink pad",
                         element_name
                     );
                 }
@@ -610,28 +664,6 @@ fn setup_whip_video_direct(
     queue
         .sync_state_with_parent()
         .map_err(|e| format!("Failed to sync queue state: {}", e))?;
-
-    // Monitor video buffers for discontinuities (packet loss) and request
-    // keyframes from the browser. When packet loss occurs, the decoder inside
-    // whipserversrc may produce corrupted frames but doesn't automatically
-    // send force-keyunit events upstream. We detect DISCONT flags on decoded
-    // buffers and send UpstreamForceKeyUnit events to trigger PLI via webrtcbin.
-    let probe_instance_id = instance_id.to_string();
-    src_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
-        if let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data {
-            if buffer.flags().contains(gst::BufferFlags::DISCONT) {
-                debug!(
-                    "WHIP Input [{}]: Video discontinuity detected, requesting keyframe (PLI)",
-                    probe_instance_id
-                );
-                let fku = gst_video::UpstreamForceKeyUnitEvent::builder()
-                    .all_headers(true)
-                    .build();
-                pad.push_event(fku);
-            }
-        }
-        gst::PadProbeReturn::Ok
-    });
 
     info!(
         "WHIP Input: Video stream {} linked directly (queue -> videoconvert)",
