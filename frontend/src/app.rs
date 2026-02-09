@@ -1309,7 +1309,10 @@ impl StromApp {
                 f.blocks.iter().any(|b| {
                     matches!(
                         b.block_definition_id.as_str(),
-                        "builtin.whep_input" | "builtin.whep_output" | "builtin.whip_output" | "builtin.whip_input"
+                        "builtin.whep_input"
+                            | "builtin.whep_output"
+                            | "builtin.whip_output"
+                            | "builtin.whip_input"
                     )
                 })
             })
@@ -3726,6 +3729,19 @@ impl StromApp {
                             let player_url = self.api.get_whep_player_url(&endpoint_id);
                             crate::clipboard::copy_text_with_ctx(ctx, &player_url);
                             self.status = "Player URL copied to clipboard".to_string();
+                        }
+
+                        // Handle WHIP ingest request (for WHIP Input)
+                        if let Some(endpoint_id) = result.whip_ingest_url {
+                            let ingest_url = self.api.get_whip_ingest_url(&endpoint_id);
+                            ctx.open_url(egui::OpenUrl::new_tab(&ingest_url));
+                        }
+
+                        // Handle copy WHIP ingest URL to clipboard
+                        if let Some(endpoint_id) = result.copy_whip_url_requested {
+                            let ingest_url = self.api.get_whip_ingest_url(&endpoint_id);
+                            crate::clipboard::copy_text_with_ctx(ctx, &ingest_url);
+                            self.status = "Ingest URL copied to clipboard".to_string();
                         }
                     } else {
                         ui.label("Block definition not found");
@@ -6690,8 +6706,7 @@ impl eframe::App for StromApp {
                         let server_base = self.api.base_url().trim_end_matches("/api");
                         let ingest_url = format!(
                             "{}/player/whip-ingest?endpoint=/whip/{}",
-                            server_base,
-                            endpoint_id
+                            server_base, endpoint_id
                         );
                         ctx.open_url(egui::OpenUrl::new_tab(&ingest_url));
                     }

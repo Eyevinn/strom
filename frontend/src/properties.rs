@@ -25,6 +25,10 @@ pub struct BlockInspectorResult {
     pub whep_player_url: Option<String>,
     /// Copy WHEP player URL to clipboard - contains endpoint_id
     pub copy_whep_url_requested: Option<String>,
+    /// WHIP ingest endpoint_id (for WHIP Input blocks) - used to construct full ingest URL
+    pub whip_ingest_url: Option<String>,
+    /// Copy WHIP ingest URL to clipboard - contains endpoint_id
+    pub copy_whip_url_requested: Option<String>,
 }
 
 /// Property inspector panel.
@@ -390,6 +394,7 @@ impl PropertyInspector {
                     | "builtin.media_player"
                     | "builtin.mpegtssrt_output"
                     | "builtin.whep_output"
+                    | "builtin.whip_input"
             );
 
             // Only show separator before action buttons if there are any
@@ -521,6 +526,45 @@ impl PropertyInspector {
                         ui.button("▶ Open Player")
                             .on_hover_text("Start the flow to enable player")
                             .on_disabled_hover_text("Start the flow to enable player");
+                    });
+                }
+            }
+
+            // Open WHIP Ingest button for WHIP Input blocks
+            if definition.id == "builtin.whip_input" {
+                let endpoint_id = block
+                    .runtime_data
+                    .as_ref()
+                    .and_then(|rd| rd.get("whip_endpoint_id").cloned())
+                    .or_else(|| {
+                        block.properties.get("endpoint_id").and_then(|v| match v {
+                            PropertyValue::String(s) if !s.is_empty() => Some(s.clone()),
+                            _ => None,
+                        })
+                    });
+
+                if let Some(endpoint_id) = endpoint_id {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("▶ Open Ingest Page")
+                            .on_hover_text("Open WHIP ingest page in browser")
+                            .clicked()
+                        {
+                            result.whip_ingest_url = Some(endpoint_id.clone());
+                        }
+                        if ui
+                            .button("📋 Copy URL")
+                            .on_hover_text("Copy ingest URL to clipboard")
+                            .clicked()
+                        {
+                            result.copy_whip_url_requested = Some(endpoint_id.clone());
+                        }
+                    });
+                } else {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.button("▶ Open Ingest Page")
+                            .on_hover_text("Start the flow to enable ingest page")
+                            .on_disabled_hover_text("Start the flow to enable ingest page");
                     });
                 }
             }
@@ -660,6 +704,7 @@ impl PropertyInspector {
                     if definition.id == "builtin.whep_input"
                         || definition.id == "builtin.whep_output"
                         || definition.id == "builtin.whip_output"
+                        || definition.id == "builtin.whip_input"
                     {
                         ui.separator();
                         ui.heading("📊 WebRTC Statistics");

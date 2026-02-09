@@ -444,6 +444,16 @@ impl ApiClient {
         )
     }
 
+    /// Get the WHIP ingest URL for a given endpoint ID.
+    /// Returns the full URL that can be opened in a new tab.
+    pub fn get_whip_ingest_url(&self, endpoint_id: &str) -> String {
+        let server_base = self.base_url.trim_end_matches("/api");
+        format!(
+            "{}/player/whip-ingest?endpoint=/whip/{}",
+            server_base, endpoint_id
+        )
+    }
+
     /// List all block definitions (built-in + user-defined).
     pub async fn list_blocks(&self) -> ApiResult<Vec<strom_types::BlockDefinition>> {
         use strom_types::block::BlockListResponse;
