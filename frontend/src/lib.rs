@@ -53,7 +53,7 @@ fn load_icon() -> Option<egui::IconData> {
 
 // Re-export the native entry point (without tracing init - parent should handle that)
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run_native_gui(port: u16) -> eframe::Result<()> {
+pub fn run_native_gui(port: u16, tls_enabled: bool) -> eframe::Result<()> {
     tracing::info!(
         "Initializing Strom frontend (embedded mode) connecting to port {}",
         port
@@ -77,7 +77,7 @@ pub fn run_native_gui(port: u16) -> eframe::Result<()> {
         native_options,
         Box::new(move |cc| {
             // Theme is now set by the app based on user preference
-            Ok(Box::new(StromApp::new(cc, port)))
+            Ok(Box::new(StromApp::new(cc, port, tls_enabled)))
         }),
     )
 }
@@ -86,6 +86,7 @@ pub fn run_native_gui(port: u16) -> eframe::Result<()> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native_gui_with_shutdown(
     port: u16,
+    tls_enabled: bool,
     shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     auth_token: Option<String>,
 ) -> eframe::Result<()> {
@@ -115,6 +116,7 @@ pub fn run_native_gui_with_shutdown(
             Ok(Box::new(StromApp::new_with_shutdown_and_auth(
                 cc,
                 port,
+                tls_enabled,
                 shutdown_flag,
                 auth_token,
             )))

@@ -539,6 +539,9 @@ pub struct StromApp {
     /// Port number for backend connection (native mode only)
     #[cfg(not(target_arch = "wasm32"))]
     port: u16,
+    /// Whether the backend is using TLS (native mode only)
+    #[cfg(not(target_arch = "wasm32"))]
+    tls_enabled: bool,
     /// Auth token for native GUI authentication
     #[cfg(not(target_arch = "wasm32"))]
     auth_token: Option<String>,
@@ -707,9 +710,10 @@ impl StromApp {
 
     /// Create a new application instance for native mode.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn new(cc: &eframe::CreationContext<'_>, port: u16) -> Self {
-        let api_base_url = format!("http://localhost:{}/api", port);
-        Self::new_internal(cc, api_base_url, None, port, None)
+    pub fn new(cc: &eframe::CreationContext<'_>, port: u16, tls_enabled: bool) -> Self {
+        let scheme = if tls_enabled { "https" } else { "http" };
+        let api_base_url = format!("{}://localhost:{}/api", scheme, port);
+        Self::new_internal(cc, api_base_url, None, port, tls_enabled, None)
     }
 
     /// Internal constructor shared by all creation methods (WASM version).
@@ -851,6 +855,7 @@ impl StromApp {
         api_base_url: String,
         shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         port: u16,
+        tls_enabled: bool,
         auth_token: Option<String>,
     ) -> Self {
         // Install image loaders for egui (required for Image::from_bytes)
@@ -888,6 +893,7 @@ impl StromApp {
             properties_thread_priority_buffer: strom_types::flow::ThreadPriority::High,
             shutdown_flag,
             port,
+            tls_enabled,
             auth_token,
             meter_data: MeterDataStore::new(),
             latency_data: LatencyDataStore::new(),
@@ -972,10 +978,19 @@ impl StromApp {
     pub fn new_with_shutdown(
         cc: &eframe::CreationContext<'_>,
         port: u16,
+        tls_enabled: bool,
         shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
-        let api_base_url = format!("http://localhost:{}/api", port);
-        Self::new_internal(cc, api_base_url, Some(shutdown_flag), port, None)
+        let scheme = if tls_enabled { "https" } else { "http" };
+        let api_base_url = format!("{}://localhost:{}/api", scheme, port);
+        Self::new_internal(
+            cc,
+            api_base_url,
+            Some(shutdown_flag),
+            port,
+            tls_enabled,
+            None,
+        )
     }
 
     /// Create a new application instance with shutdown handler and auth token (native mode only).
@@ -983,11 +998,20 @@ impl StromApp {
     pub fn new_with_shutdown_and_auth(
         cc: &eframe::CreationContext<'_>,
         port: u16,
+        tls_enabled: bool,
         shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
         auth_token: Option<String>,
     ) -> Self {
-        let api_base_url = format!("http://localhost:{}/api", port);
-        Self::new_internal(cc, api_base_url, Some(shutdown_flag), port, auth_token)
+        let scheme = if tls_enabled { "https" } else { "http" };
+        let api_base_url = format!("{}://localhost:{}/api", scheme, port);
+        Self::new_internal(
+            cc,
+            api_base_url,
+            Some(shutdown_flag),
+            port,
+            tls_enabled,
+            auth_token,
+        )
     }
 
     /// Apply the current theme preference to the UI context.
@@ -1043,7 +1067,10 @@ impl StromApp {
         };
 
         #[cfg(not(target_arch = "wasm32"))]
-        let ws_url = format!("ws://localhost:{}/api/ws", self.port);
+        let ws_url = {
+            let scheme = if self.tls_enabled { "wss" } else { "ws" };
+            format!("{}://localhost:{}/api/ws", scheme, self.port)
+        };
 
         tracing::info!("Connecting WebSocket to: {}", ws_url);
 
@@ -2485,7 +2512,8 @@ impl StromApp {
                             .on_hover_text("Open the web interface in your browser")
                             .clicked()
                         {
-                            let url = format!("http://localhost:{}", self.port);
+                            let scheme = if self.tls_enabled { "https" } else { "http" };
+                            let url = format!("{}://localhost:{}", scheme, self.port);
                             ctx.open_url(egui::OpenUrl::new_tab(&url));
                         }
                     }

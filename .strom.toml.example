@@ -36,6 +36,15 @@ port = 8080
 # Env: STROM_SERVER_ICE_TRANSPORT_POLICY=relay
 # ice_transport_policy = "all"
 
+# TLS/HTTPS (optional)
+# When both tls_cert and tls_key are set, the server serves HTTPS instead of HTTP.
+# Certificate and key must be in PEM format. The cert file can include intermediates.
+# Generate certs for local development with: mkcert <your-ip> localhost
+# CLI: --tls-cert cert.pem --tls-key key.pem
+# Env: STROM_TLS_CERT=cert.pem STROM_TLS_KEY=key.pem
+# tls_cert = "cert.pem"
+# tls_key = "key.pem"
+
 # ============================================================================
 # Storage Configuration
 # ============================================================================

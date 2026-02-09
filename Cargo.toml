@@ -32,6 +32,7 @@ gstreamer-video = { version = "0.24.4", features = ["v1_20"] }
 gst-plugin-webrtc = { version = "0.15.0-alpha.1", features = ["whep", "whip"] }
 gst-plugin-webrtchttp = "0.14"
 gst-plugin-inter = "0.14"
+gst-plugin-rtp = "0.15.0-alpha.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 time = { version = "0.3", features = ["formatting", "local-offset"] }

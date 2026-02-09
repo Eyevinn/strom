@@ -173,6 +173,14 @@ struct Args {
     #[arg(long)]
     wayland: bool,
 
+    /// Path to TLS certificate file (PEM). Enables HTTPS when paired with --tls-key.
+    #[arg(long, env = "STROM_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to TLS private key file (PEM). Enables HTTPS when paired with --tls-cert.
+    #[arg(long, env = "STROM_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+
     /// Disable automatic restart of flows on startup (useful for development/testing)
     #[arg(long)]
     no_auto_restart: bool,
@@ -271,6 +279,8 @@ fn main() -> anyhow::Result<()> {
         args.blocks_path.clone(),
         args.media_path.clone(),
         args.database_url.clone(),
+        args.tls_cert.clone(),
+        args.tls_key.clone(),
     )
     .unwrap_or_else(|e| {
         eprintln!("Failed to load configuration: {}", e);
@@ -335,6 +345,9 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
     // Create tokio runtime on main thread
     let runtime = tokio::runtime::Runtime::new()?;
 
+    // Determine TLS state before config is moved into the async block
+    let tls_enabled = config.tls_cert.is_some();
+
     // Shared shutdown flag for coordination between threads
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_gui = shutdown_flag.clone();
@@ -364,6 +377,7 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
         gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
         gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
         gstrsinter::plugin_register_static().expect("Could not register inter plugins");
+        gstrsrtp::plugin_register_static().expect("Could not register rtp plugins");
 
         // Detect GPU capabilities for video conversion mode selection
         // This tests CUDA-GL interop to determine if autovideoconvert works
@@ -426,16 +440,34 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
         let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
 
         let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => {
-                info!("Server listening on {}", addr);
-                l
-            }
+            Ok(l) => l,
             Err(e) => {
                 eprintln!("Error: Failed to bind to port {}: {}", config.port, e);
                 eprintln!("Port {} is already in use or unavailable.", config.port);
                 eprintln!("Please either:");
                 eprintln!("  - Stop the other process using this port");
                 eprintln!("  - Use a different port with --port <PORT> or STROM_PORT=<PORT>");
+                std::process::exit(1);
+            }
+        };
+
+        let tls_acceptor = match config.tls_paths() {
+            Ok(Some((cert, key))) => match strom::tls::load_tls_config(cert, key) {
+                Ok(acceptor) => {
+                    info!("Server listening on https://{}", addr);
+                    Some(acceptor)
+                }
+                Err(e) => {
+                    eprintln!("Error: Failed to load TLS configuration: {}", e);
+                    std::process::exit(1);
+                }
+            },
+            Ok(None) => {
+                info!("Server listening on http://{}", addr);
+                None
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
         };
@@ -493,10 +525,18 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
             shutdown_flag.store(true, Ordering::SeqCst);
         };
 
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal)
-            .await
-            .expect("Server error");
+        if let Some(acceptor) = tls_acceptor {
+            let tls_listener = strom::tls::TlsListener::new(listener, acceptor);
+            axum::serve(tls_listener, app)
+                .with_graceful_shutdown(shutdown_signal)
+                .await
+                .expect("Server error");
+        } else {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal)
+                .await
+                .expect("Server error");
+        }
     });
 
     // Wait for server to start and get the actual port
@@ -513,9 +553,9 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
     // Run GUI on main thread (blocks until window closes)
     // If auth is enabled, pass the native GUI token for auto-authentication
     let gui_result = if let Some(token) = native_gui_token {
-        strom::gui::launch_gui_with_auth(actual_port, shutdown_flag_gui, token)
+        strom::gui::launch_gui_with_auth(actual_port, tls_enabled, shutdown_flag_gui, token)
     } else {
-        strom::gui::launch_gui_with_shutdown(actual_port, shutdown_flag_gui)
+        strom::gui::launch_gui_with_shutdown(actual_port, tls_enabled, shutdown_flag_gui)
     };
 
     if let Err(e) = gui_result {
@@ -538,6 +578,7 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
     gstwebrtchttp::plugin_register_static().expect("Could not register webrtchttp plugins");
     gstrswebrtc::plugin_register_static().expect("Could not register webrtc plugins");
     gstrsinter::plugin_register_static().expect("Could not register inter plugins");
+    gstrsrtp::plugin_register_static().expect("Could not register rtp plugins");
 
     // Detect GPU capabilities for video conversion mode selection
     // This tests CUDA-GL interop to determine if autovideoconvert works
@@ -589,16 +630,34 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => {
-            info!("Server listening on {}", addr);
-            l
-        }
+        Ok(l) => l,
         Err(e) => {
             eprintln!("Error: Failed to bind to port {}: {}", config.port, e);
             eprintln!("Port {} is already in use or unavailable.", config.port);
             eprintln!("Please either:");
             eprintln!("  - Stop the other process using this port");
             eprintln!("  - Use a different port with --port <PORT> or STROM_PORT=<PORT>");
+            std::process::exit(1);
+        }
+    };
+
+    let tls_acceptor = match config.tls_paths() {
+        Ok(Some((cert, key))) => match strom::tls::load_tls_config(cert, key) {
+            Ok(acceptor) => {
+                info!("Server listening on https://{}", addr);
+                Some(acceptor)
+            }
+            Err(e) => {
+                eprintln!("Error: Failed to load TLS configuration: {}", e);
+                std::process::exit(1);
+            }
+        },
+        Ok(None) => {
+            info!("Server listening on http://{}", addr);
+            None
+        }
+        Err(e) => {
+            eprintln!("Error: {}", e);
             std::process::exit(1);
         }
     };
@@ -652,9 +711,16 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
         info!("Server shutting down");
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    if let Some(acceptor) = tls_acceptor {
+        let tls_listener = strom::tls::TlsListener::new(listener, acceptor);
+        axum::serve(tls_listener, app)
+            .with_graceful_shutdown(shutdown_signal)
+            .await?;
+    } else {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal)
+            .await?;
+    }
 
     Ok(())
 }

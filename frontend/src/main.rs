@@ -192,7 +192,11 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|cc| {
             // Theme is now set by the app based on user preference
-            Ok(Box::new(StromApp::new(cc, strom_types::DEFAULT_PORT)))
+            Ok(Box::new(StromApp::new(
+                cc,
+                strom_types::DEFAULT_PORT,
+                false,
+            )))
         }),
     )
 }
