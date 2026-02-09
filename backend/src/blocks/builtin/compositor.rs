@@ -206,12 +206,16 @@ fn select_compositor(
             }
         }
         CompositorPreference::Auto => {
-            if has_gl {
-                debug!("Auto-selected GPU (OpenGL) compositor");
-                Ok(CompositorBackend::OpenGL)
-            } else if has_software {
-                warn!("GPU compositor unavailable, falling back to CPU compositor");
+            // Prefer CPU compositor because it supports ignore-inactive-pads,
+            // which is critical for pipelines with dynamic/optional inputs (e.g. WHIP).
+            // glvideomixerelement in GStreamer 1.24 does NOT support this property,
+            // causing the aggregator to block waiting for data on ALL pads.
+            if has_software {
+                debug!("Auto-selected CPU compositor (supports ignore-inactive-pads)");
                 Ok(CompositorBackend::Software)
+            } else if has_gl {
+                warn!("CPU compositor unavailable, falling back to GPU compositor (no ignore-inactive-pads support)");
+                Ok(CompositorBackend::OpenGL)
             } else {
                 Err(BlockBuildError::InvalidConfiguration(
                     "No compositor backend available (neither glvideomixerelement nor compositor)"
@@ -247,6 +251,23 @@ fn build_opengl_compositor(
 
     // Set mixer properties in NULL state
     mixer.set_property_from_str("background", background);
+
+    // Allow mixer to produce output when only some inputs have data.
+    // ignore-inactive-pads: skip pads without active data in latency queries and aggregation.
+    // Without this, the aggregator blocks when upstream latency queries fail on unlinked pads.
+    if mixer.has_property("ignore-inactive-pads") {
+        mixer.set_property("ignore-inactive-pads", true);
+        info!("GL mixer: set ignore-inactive-pads=true");
+    }
+    if mixer.has_property("start-time-selection") {
+        mixer.set_property_from_str("start-time-selection", "first");
+    }
+    if mixer.has_property("min-upstream-latency")
+        && !properties.contains_key("min_upstream_latency")
+    {
+        let default_min_upstream_ns: u64 = 33_333_333; // ~33ms
+        mixer.set_property("min-upstream-latency", default_min_upstream_ns);
+    }
 
     // Set latency properties
     set_mixer_latency_properties(&mixer, properties);
@@ -453,6 +474,23 @@ fn build_software_compositor(
     // Note: compositor element has force-live as read-only (unlike glvideomixerelement)
     // so we don't set it here - it defaults based on whether live sources are connected
     let _ = force_live; // Acknowledge parameter even though we can't use it for CPU backend
+
+    // Allow compositor to produce output when only some inputs have data.
+    // ignore-inactive-pads: skip pads without active data in latency queries and aggregation.
+    // Without this, the aggregator blocks when upstream latency queries fail on unlinked pads.
+    if mixer.has_property("ignore-inactive-pads") {
+        mixer.set_property("ignore-inactive-pads", true);
+        info!("CPU mixer: set ignore-inactive-pads=true");
+    }
+    if mixer.has_property("start-time-selection") {
+        mixer.set_property_from_str("start-time-selection", "first");
+    }
+    if mixer.has_property("min-upstream-latency")
+        && !properties.contains_key("min_upstream_latency")
+    {
+        let default_min_upstream_ns: u64 = 33_333_333; // ~33ms
+        mixer.set_property("min-upstream-latency", default_min_upstream_ns);
+    }
 
     // Set latency properties
     set_mixer_latency_properties(&mixer, properties);

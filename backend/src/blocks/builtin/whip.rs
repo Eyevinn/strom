@@ -13,7 +13,9 @@
 //! "not-linked" errors. This workaround does not work for `whipclientsink` due to
 //! its different internal structure (webrtcbin is not a direct child of the sink bin).
 
-use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, WhepStreamMode};
+use crate::blocks::{
+    BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, WhepStreamMode,
+};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -146,10 +148,11 @@ fn build_whipserversrc(
         .get("endpoint_id")
         .and_then(|v| {
             if let PropertyValue::String(s) = v {
-                if s.is_empty() {
+                let trimmed = s.trim().to_string();
+                if trimmed.is_empty() {
                     None
                 } else {
-                    Some(s.clone())
+                    Some(trimmed)
                 }
             } else {
                 None
@@ -201,12 +204,24 @@ fn build_whipserversrc(
     let host_addr = format!("http://127.0.0.1:{}", internal_port);
     signaller.set_property("host-addr", &host_addr);
 
-    // Configure audio/video caps based on mode
-    if !mode.has_audio() {
-        whipserversrc.set_property("audio-caps", gst::Caps::new_empty());
+    // Configure codec negotiation based on mode.
+    // whipserversrc uses video-codecs/audio-codecs properties (gst::Array of
+    // codec name strings) to control SDP negotiation. Setting explicit codecs
+    // avoids RED/RTX/ULPFEC meta-encodings that can cause issues.
+    // whipserversrc decodes internally, so source pads output raw media.
+    if mode.has_audio() {
+        let audio_codecs = gst::Array::new(["OPUS"]);
+        whipserversrc.set_property("audio-codecs", &audio_codecs);
+    } else {
+        let empty = gst::Array::new(Vec::<&str>::new());
+        whipserversrc.set_property("audio-codecs", &empty);
     }
-    if !mode.has_video() {
-        whipserversrc.set_property("video-caps", gst::Caps::new_empty());
+    if mode.has_video() {
+        let video_codecs = gst::Array::new(["H264"]);
+        whipserversrc.set_property("video-codecs", &video_codecs);
+    } else {
+        let empty = gst::Array::new(Vec::<&str>::new());
+        whipserversrc.set_property("video-codecs", &empty);
     }
 
     // Set ICE transport policy on internal webrtcbin via deep-element-added
@@ -238,6 +253,26 @@ fn build_whipserversrc(
                     debug!(
                         "WHIP Input: Registered webrtcbin for block {}",
                         block_id_for_callback
+                    );
+                }
+            }
+
+            // Configure TWCC feedback interval on internal RTP sessions.
+            // By default, twcc-feedback-interval is G_MAXUINT64 (marker-bit based),
+            // which may not generate enough feedback for Chrome's GCC bandwidth
+            // estimator. Set a fixed 50ms interval to ensure regular feedback.
+            let factory_name = element
+                .factory()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default();
+            if factory_name == "rtpsession" && element.has_property("internal-session") {
+                let internal: gst::glib::Object = element.property("internal-session");
+                if internal.has_property("twcc-feedback-interval") {
+                    let interval: u64 = 50_000_000; // 50ms in nanoseconds
+                    internal.set_property("twcc-feedback-interval", interval);
+                    info!(
+                        "WHIP Input: Set twcc-feedback-interval=50ms on {}",
+                        element_name
                     );
                 }
             }
@@ -312,9 +347,7 @@ fn build_whipserversrc(
         let output_videoconvert = gst::ElementFactory::make("videoconvert")
             .name(&output_videoconvert_id)
             .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("output_videoconvert: {}", e))
-            })?;
+            .map_err(|e| BlockBuildError::ElementCreation(format!("output_videoconvert: {}", e)))?;
 
         elements.push((output_videoconvert_id, output_videoconvert));
     }
@@ -343,6 +376,32 @@ fn build_whipserversrc(
 
     let video_connected = Arc::new(AtomicBool::new(false));
 
+    // Reset video_connected when video pad is removed (client disconnect).
+    // Also clean up dynamically added elements for that stream.
+    let video_connected_for_remove = Arc::clone(&video_connected);
+    let videoconvert_weak_for_remove = videoconvert_weak.clone();
+    whipserversrc.connect_pad_removed(move |_src, pad| {
+        let pad_name = pad.name();
+        info!("WHIP Input: Pad removed: {}", pad_name);
+
+        if pad_name.starts_with("video_") {
+            video_connected_for_remove.store(false, Ordering::SeqCst);
+            info!("WHIP Input: Video disconnected, ready for new connection");
+
+            // Unlink videoconvert sink so next client can link to it
+            if let Some(ref vc_weak) = videoconvert_weak_for_remove {
+                if let Some(vc) = vc_weak.upgrade() {
+                    if let Some(sink_pad) = vc.static_pad("sink") {
+                        if let Some(peer) = sink_pad.peer() {
+                            let _ = peer.unlink(&sink_pad);
+                            info!("WHIP Input: Unlinked videoconvert sink pad");
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     whipserversrc.connect_pad_added(move |src, pad| {
         let pad_name = pad.name();
         let stream_num = stream_counter.fetch_add(1, Ordering::SeqCst);
@@ -352,17 +411,66 @@ fn build_whipserversrc(
             pad_name, stream_num
         );
 
-        // Use caps detection to determine audio vs video
-        if let Err(e) = setup_whip_stream_with_caps_detection(
-            src,
-            pad,
-            liveadder_weak.as_ref(),
-            videoconvert_weak.as_ref(),
-            &video_connected,
-            &instance_id_owned,
-            stream_num,
-        ) {
-            error!("WHIP Input: Failed to setup stream: {}", e);
+        // whipserversrc decodes internally (BaseWebRTCSrc → webrtcbin → parsebin
+        // → decodebin3 → ghost pad). Output pads are already decoded (audio/x-raw,
+        // video/x-raw). Route by pad name, link directly like the whipserver.rs example.
+        let pipeline = match get_pipeline_from_element(src) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("WHIP Input: Failed to get pipeline: {}", e);
+                return;
+            }
+        };
+
+        if pad_name.starts_with("audio_") {
+            if let Some(ref liveadder_weak) = liveadder_weak {
+                if let Some(liveadder) = liveadder_weak.upgrade() {
+                    if let Err(e) = setup_whip_audio_direct(
+                        pad,
+                        &pipeline,
+                        &liveadder,
+                        &instance_id_owned,
+                        stream_num,
+                    ) {
+                        error!("WHIP Input: Failed to setup audio stream: {}", e);
+                    }
+                }
+            } else {
+                info!(
+                    "WHIP Input: Audio stream {} ignored (audio not enabled in mode)",
+                    stream_num
+                );
+                let _ = setup_whip_discard(pad, &pipeline, &instance_id_owned, stream_num, "audio");
+            }
+        } else if pad_name.starts_with("video_") {
+            if !video_connected.swap(true, Ordering::SeqCst) {
+                if let Some(ref videoconvert_weak) = videoconvert_weak {
+                    if let Some(videoconvert) = videoconvert_weak.upgrade() {
+                        if let Err(e) = setup_whip_video_direct(
+                            pad,
+                            &pipeline,
+                            &videoconvert,
+                            &instance_id_owned,
+                            stream_num,
+                        ) {
+                            error!("WHIP Input: Failed to setup video stream: {}", e);
+                            video_connected.store(false, Ordering::SeqCst);
+                        }
+                    }
+                }
+            } else {
+                info!(
+                    "WHIP Input: Additional video stream {} discarded (already connected)",
+                    stream_num
+                );
+                let _ = setup_whip_discard(pad, &pipeline, &instance_id_owned, stream_num, "video");
+            }
+        } else {
+            warn!(
+                "WHIP Input: Unknown pad name pattern: {} (stream {})",
+                pad_name, stream_num
+            );
+            let _ = setup_whip_discard(pad, &pipeline, &instance_id_owned, stream_num, "unknown");
         }
     });
 
@@ -385,210 +493,26 @@ fn build_whipserversrc(
     })
 }
 
-/// Setup a stream from whipserversrc with caps detection.
-/// Uses an identity element to immediately claim the pad, then a pad probe
-/// to detect actual caps before routing:
-/// - Audio: decode and route to liveadder
-/// - Video: route to videoconvert output
-fn setup_whip_stream_with_caps_detection(
-    src: &gst::Element,
-    src_pad: &gst::Pad,
-    liveadder_weak: Option<&gst::glib::WeakRef<gst::Element>>,
-    videoconvert_weak: Option<&gst::glib::WeakRef<gst::Element>>,
-    video_connected: &Arc<AtomicBool>,
-    instance_id: &str,
-    stream_num: usize,
-) -> Result<(), String> {
-    let pipeline = get_pipeline_from_element(src)?;
-
-    // Create identity element to claim the pad immediately
-    let identity_name = format!("{}:whip_identity_{}", instance_id, stream_num);
-    let identity = gst::ElementFactory::make("identity")
-        .name(&identity_name)
-        .build()
-        .map_err(|e| format!("Failed to create identity: {}", e))?;
-
-    pipeline
-        .add(&identity)
-        .map_err(|e| format!("Failed to add identity to pipeline: {}", e))?;
-    identity
-        .sync_state_with_parent()
-        .map_err(|e| format!("Failed to sync identity state: {}", e))?;
-
-    let identity_sink = identity
-        .static_pad("sink")
-        .ok_or("Identity has no sink pad")?;
-    src_pad
-        .link(&identity_sink)
-        .map_err(|e| format!("Failed to link to identity: {:?}", e))?;
-
-    info!(
-        "WHIP Input: Stream {} linked to identity (pad claimed)",
-        stream_num
-    );
-
-    let identity_src = identity
-        .static_pad("src")
-        .ok_or("Identity has no src pad")?;
-
-    let pipeline_weak = pipeline.downgrade();
-    let liveadder_weak = liveadder_weak.cloned();
-    let videoconvert_weak = videoconvert_weak.cloned();
-    let video_connected = Arc::clone(video_connected);
-    let instance_id_owned = instance_id.to_string();
-    let handled = Arc::new(AtomicBool::new(false));
-    let handled_clone = Arc::clone(&handled);
-
-    identity_src.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
-        if handled_clone.load(Ordering::SeqCst) {
-            return gst::PadProbeReturn::Pass;
-        }
-
-        if let Some(gst::PadProbeData::Event(ref event)) = info.data {
-            if event.type_() == gst::EventType::Caps {
-                if let gst::EventView::Caps(c) = event.view() {
-                    let caps = c.caps();
-                    if let Some(structure) = caps.structure(0) {
-                        let caps_name = structure.name();
-                        info!(
-                            "WHIP Input: Stream {} detected caps: {}",
-                            stream_num, caps_name
-                        );
-
-                        let is_audio = if caps_name == "application/x-rtp" {
-                            let media_field =
-                                structure.get::<&str>("media").ok().unwrap_or("");
-                            media_field == "audio"
-                        } else {
-                            caps_name.starts_with("audio/")
-                        };
-
-                        let is_video = if caps_name == "application/x-rtp" {
-                            let media_field =
-                                structure.get::<&str>("media").ok().unwrap_or("");
-                            media_field == "video"
-                        } else {
-                            caps_name.starts_with("video/")
-                        };
-
-                        handled_clone.store(true, Ordering::SeqCst);
-
-                        let pipeline = match pipeline_weak.upgrade() {
-                            Some(p) => p,
-                            None => {
-                                error!("WHIP Input: Pipeline no longer exists");
-                                return gst::PadProbeReturn::Remove;
-                            }
-                        };
-
-                        if is_audio {
-                            info!(
-                                "WHIP Input: Stream {} is audio, setting up decode chain",
-                                stream_num
-                            );
-                            if let Some(ref liveadder_weak) = liveadder_weak {
-                                if let Some(liveadder) = liveadder_weak.upgrade() {
-                                    if let Err(e) = setup_whip_audio_decode_chain(
-                                        pad,
-                                        &pipeline,
-                                        &liveadder,
-                                        &instance_id_owned,
-                                        stream_num,
-                                    ) {
-                                        error!(
-                                            "WHIP Input: Failed to setup audio decode chain: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            } else {
-                                info!(
-                                    "WHIP Input: Audio stream {} ignored (audio not enabled in mode)",
-                                    stream_num
-                                );
-                                if let Err(e) = setup_whip_discard(
-                                    pad,
-                                    &pipeline,
-                                    &instance_id_owned,
-                                    stream_num,
-                                    "audio",
-                                ) {
-                                    error!("WHIP Input: Failed to discard audio: {}", e);
-                                }
-                            }
-                        } else if is_video {
-                            if !video_connected.swap(true, Ordering::SeqCst) {
-                                info!(
-                                    "WHIP Input: Stream {} is video, routing to output",
-                                    stream_num
-                                );
-                                if let Some(ref videoconvert_weak) = videoconvert_weak {
-                                    if let Some(videoconvert) = videoconvert_weak.upgrade() {
-                                        if let Err(e) = setup_whip_video_chain(
-                                            pad,
-                                            &pipeline,
-                                            &videoconvert,
-                                            &instance_id_owned,
-                                            stream_num,
-                                        ) {
-                                            error!(
-                                                "WHIP Input: Failed to setup video chain: {}",
-                                                e
-                                            );
-                                            video_connected.store(false, Ordering::SeqCst);
-                                        }
-                                    }
-                                }
-                            } else {
-                                info!(
-                                    "WHIP Input: Additional video stream {} discarded (already connected)",
-                                    stream_num
-                                );
-                                if let Err(e) = setup_whip_discard(
-                                    pad,
-                                    &pipeline,
-                                    &instance_id_owned,
-                                    stream_num,
-                                    "video",
-                                ) {
-                                    error!("WHIP Input: Failed to discard extra video: {}", e);
-                                }
-                            }
-                        } else {
-                            warn!(
-                                "WHIP Input: Stream {} has unknown media type: {}",
-                                stream_num, caps_name
-                            );
-                        }
-
-                        return gst::PadProbeReturn::Remove;
-                    }
-                }
-            }
-        }
-
-        gst::PadProbeReturn::Pass
-    });
-
-    Ok(())
-}
-
-/// Setup audio decode chain for WHIP input: decodebin -> audioconvert -> audioresample -> liveadder
-fn setup_whip_audio_decode_chain(
+/// Setup audio stream from whipserversrc: pad (decoded) -> queue -> audioconvert -> audioresample -> liveadder.
+/// whipserversrc decodes internally, so the pad already outputs audio/x-raw.
+fn setup_whip_audio_direct(
     src_pad: &gst::Pad,
     pipeline: &gst::Pipeline,
     liveadder: &gst::Element,
     instance_id: &str,
     stream_num: usize,
 ) -> Result<(), String> {
-    let decodebin_name = format!("{}:whip_decodebin_{}", instance_id, stream_num);
+    let queue_name = format!("{}:whip_audio_queue_{}", instance_id, stream_num);
     let audioconvert_name = format!("{}:whip_audioconvert_{}", instance_id, stream_num);
     let audioresample_name = format!("{}:whip_audioresample_{}", instance_id, stream_num);
 
-    let decodebin = gst::ElementFactory::make("decodebin")
-        .name(&decodebin_name)
+    let queue = gst::ElementFactory::make("queue")
+        .name(&queue_name)
+        .property("max-size-buffers", 3u32)
+        .property("max-size-time", 0u64)
+        .property("max-size-bytes", 0u32)
         .build()
-        .map_err(|e| format!("Failed to create decodebin: {}", e))?;
+        .map_err(|e| format!("Failed to create queue: {}", e))?;
 
     let audioconvert = gst::ElementFactory::make("audioconvert")
         .name(&audioconvert_name)
@@ -601,153 +525,93 @@ fn setup_whip_audio_decode_chain(
         .map_err(|e| format!("Failed to create audioresample: {}", e))?;
 
     pipeline
-        .add(&audioconvert)
-        .map_err(|e| format!("Failed to add audioconvert: {}", e))?;
-    pipeline
-        .add(&audioresample)
-        .map_err(|e| format!("Failed to add audioresample: {}", e))?;
+        .add_many([&queue, &audioconvert, &audioresample])
+        .map_err(|e| format!("Failed to add audio elements: {}", e))?;
 
-    let audioconvert_weak = audioconvert.downgrade();
-    let audioresample_weak = audioresample.downgrade();
-    let liveadder_weak = liveadder.downgrade();
-
-    decodebin.connect_pad_added(move |_decodebin, pad| {
-        let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
-        if let Some(caps) = caps {
-            if let Some(structure) = caps.structure(0) {
-                if structure.name().starts_with("audio/") {
-                    let (audioconvert, audioresample, liveadder) = match (
-                        audioconvert_weak.upgrade(),
-                        audioresample_weak.upgrade(),
-                        liveadder_weak.upgrade(),
-                    ) {
-                        (Some(a), Some(b), Some(c)) => (a, b, c),
-                        _ => {
-                            error!("WHIP Input: Failed to upgrade element refs in decodebin callback");
-                            return;
-                        }
-                    };
-
-                    if let Err(e) = audioconvert.sync_state_with_parent() {
-                        error!("WHIP Input: Failed to sync audioconvert state: {}", e);
-                        return;
-                    }
-                    if let Err(e) = audioresample.sync_state_with_parent() {
-                        error!("WHIP Input: Failed to sync audioresample state: {}", e);
-                        return;
-                    }
-
-                    let audioconvert_sink = audioconvert.static_pad("sink").unwrap();
-                    if let Err(e) = pad.link(&audioconvert_sink) {
-                        error!("WHIP Input: Failed to link decodebin to audioconvert: {:?}", e);
-                        return;
-                    }
-
-                    if let Err(e) = audioconvert.link(&audioresample) {
-                        error!("WHIP Input: Failed to link audioconvert to audioresample: {:?}", e);
-                        return;
-                    }
-
-                    if let Some(liveadder_sink) = liveadder.request_pad_simple("sink_%u") {
-                        liveadder_sink.set_property("qos-messages", true);
-                        let audioresample_src = audioresample.static_pad("src").unwrap();
-                        if let Err(e) = audioresample_src.link(&liveadder_sink) {
-                            error!("WHIP Input: Failed to link audioresample to liveadder: {:?}", e);
-                            return;
-                        }
-                        info!(
-                            "WHIP Input: Audio stream {} linked to liveadder",
-                            stream_num
-                        );
-                    }
-                }
-            }
-        }
-    });
-
-    pipeline
-        .add(&decodebin)
-        .map_err(|e| format!("Failed to add decodebin: {}", e))?;
-
-    let decodebin_sink = decodebin
-        .static_pad("sink")
-        .ok_or("Decodebin has no sink pad")?;
+    // Link: src_pad -> queue -> audioconvert -> audioresample -> liveadder
+    let queue_sink = queue.static_pad("sink").ok_or("queue has no sink pad")?;
     src_pad
-        .link(&decodebin_sink)
-        .map_err(|e| format!("Failed to link to decodebin: {:?}", e))?;
+        .link(&queue_sink)
+        .map_err(|e| format!("Failed to link pad to queue: {:?}", e))?;
 
-    decodebin
+    queue
+        .link(&audioconvert)
+        .map_err(|e| format!("Failed to link queue to audioconvert: {:?}", e))?;
+
+    audioconvert
+        .link(&audioresample)
+        .map_err(|e| format!("Failed to link audioconvert to audioresample: {:?}", e))?;
+
+    if let Some(liveadder_sink) = liveadder.request_pad_simple("sink_%u") {
+        liveadder_sink.set_property("qos-messages", true);
+        let audioresample_src = audioresample.static_pad("src").unwrap();
+        audioresample_src
+            .link(&liveadder_sink)
+            .map_err(|e| format!("Failed to link audioresample to liveadder: {:?}", e))?;
+    } else {
+        return Err("Failed to request sink pad from liveadder".to_string());
+    }
+
+    queue
         .sync_state_with_parent()
-        .map_err(|e| format!("Failed to sync decodebin state: {}", e))?;
+        .map_err(|e| format!("Failed to sync queue state: {}", e))?;
+    audioconvert
+        .sync_state_with_parent()
+        .map_err(|e| format!("Failed to sync audioconvert state: {}", e))?;
+    audioresample
+        .sync_state_with_parent()
+        .map_err(|e| format!("Failed to sync audioresample state: {}", e))?;
 
     info!(
-        "WHIP Input: Audio decode chain setup complete for stream {}",
+        "WHIP Input: Audio stream {} linked directly (queue -> audioconvert -> audioresample -> liveadder)",
         stream_num
     );
     Ok(())
 }
 
-/// Setup video chain for WHIP input: decodebin -> videoconvert (output)
-fn setup_whip_video_chain(
+/// Setup video stream from whipserversrc: pad (decoded) -> queue -> output_videoconvert.
+/// whipserversrc decodes internally, so the pad already outputs video/x-raw.
+fn setup_whip_video_direct(
     src_pad: &gst::Pad,
     pipeline: &gst::Pipeline,
     output_videoconvert: &gst::Element,
     instance_id: &str,
     stream_num: usize,
 ) -> Result<(), String> {
-    let decodebin_name = format!("{}:whip_video_decodebin_{}", instance_id, stream_num);
+    let queue_name = format!("{}:whip_video_queue_{}", instance_id, stream_num);
 
-    let decodebin = gst::ElementFactory::make("decodebin")
-        .name(&decodebin_name)
+    let queue = gst::ElementFactory::make("queue")
+        .name(&queue_name)
+        .property("max-size-buffers", 3u32)
+        .property("max-size-time", 0u64)
+        .property("max-size-bytes", 0u32)
         .build()
-        .map_err(|e| format!("Failed to create video decodebin: {}", e))?;
-
-    let videoconvert_weak = output_videoconvert.downgrade();
-
-    decodebin.connect_pad_added(move |_decodebin, pad| {
-        let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
-        if let Some(caps) = caps {
-            if let Some(structure) = caps.structure(0) {
-                if structure.name().starts_with("video/") {
-                    if let Some(videoconvert) = videoconvert_weak.upgrade() {
-                        if let Err(e) = videoconvert.sync_state_with_parent() {
-                            error!("WHIP Input: Failed to sync videoconvert state: {}", e);
-                            return;
-                        }
-
-                        let videoconvert_sink = videoconvert.static_pad("sink").unwrap();
-                        if videoconvert_sink.is_linked() {
-                            warn!("WHIP Input: videoconvert sink already linked, skipping");
-                            return;
-                        }
-                        if let Err(e) = pad.link(&videoconvert_sink) {
-                            error!("WHIP Input: Failed to link decodebin to videoconvert: {:?}", e);
-                            return;
-                        }
-                        info!("WHIP Input: Video stream {} linked to output", stream_num);
-                    }
-                }
-            }
-        }
-    });
+        .map_err(|e| format!("Failed to create queue: {}", e))?;
 
     pipeline
-        .add(&decodebin)
-        .map_err(|e| format!("Failed to add video decodebin: {}", e))?;
+        .add(&queue)
+        .map_err(|e| format!("Failed to add queue: {}", e))?;
 
-    let decodebin_sink = decodebin
-        .static_pad("sink")
-        .ok_or("Video decodebin has no sink pad")?;
+    // Link: src_pad -> queue -> output_videoconvert
+    let queue_sink = queue.static_pad("sink").ok_or("queue has no sink pad")?;
     src_pad
-        .link(&decodebin_sink)
-        .map_err(|e| format!("Failed to link to video decodebin: {:?}", e))?;
+        .link(&queue_sink)
+        .map_err(|e| format!("Failed to link pad to queue: {:?}", e))?;
 
-    decodebin
+    let queue_src = queue.static_pad("src").ok_or("queue has no src pad")?;
+    let videoconvert_sink = output_videoconvert
+        .static_pad("sink")
+        .ok_or("videoconvert has no sink pad")?;
+    queue_src
+        .link(&videoconvert_sink)
+        .map_err(|e| format!("Failed to link queue to videoconvert: {:?}", e))?;
+
+    queue
         .sync_state_with_parent()
-        .map_err(|e| format!("Failed to sync video decodebin state: {}", e))?;
+        .map_err(|e| format!("Failed to sync queue state: {}", e))?;
 
     info!(
-        "WHIP Input: Video chain setup complete for stream {}",
+        "WHIP Input: Video stream {} linked directly (queue -> videoconvert)",
         stream_num
     );
     Ok(())
@@ -761,7 +625,10 @@ fn setup_whip_discard(
     stream_num: usize,
     media_type: &str,
 ) -> Result<(), String> {
-    let fakesink_name = format!("{}:whip_{}_fakesink_{}", instance_id, media_type, stream_num);
+    let fakesink_name = format!(
+        "{}:whip_{}_fakesink_{}",
+        instance_id, media_type, stream_num
+    );
 
     let fakesink = gst::ElementFactory::make("fakesink")
         .name(&fakesink_name)

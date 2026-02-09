@@ -449,6 +449,38 @@ impl PipelineManager {
             self.block_message_handlers.push(handler_id);
         }
 
+        // Install a sync handler to drop error messages from whipserversrc internals.
+        // When a WHIP client disconnects, internal elements (nicesrc, queue, dtls) post
+        // errors that would transition the pipeline to ERROR state, preventing reconnection.
+        // By dropping these at the sync handler level, they never reach the pipeline.
+        {
+            let flow_name_sync = self.flow_name.clone();
+            bus.set_sync_handler(move |_bus, msg| {
+                use gst::MessageView;
+                if let MessageView::Error(_) = msg.view() {
+                    let is_whipsrc_internal = msg.src().is_some_and(|s| {
+                        let mut parent = s.parent();
+                        while let Some(p) = parent {
+                            if p.name().as_str().contains("whipserversrc") {
+                                return true;
+                            }
+                            parent = p.parent();
+                        }
+                        false
+                    });
+                    if is_whipsrc_internal {
+                        let source = msg.src().map(|s| s.name().to_string());
+                        warn!(
+                            "WHIP client error in flow '{}' (dropped): source={:?}",
+                            flow_name_sync, source
+                        );
+                        return gst::BusSyncReply::Drop;
+                    }
+                }
+                gst::BusSyncReply::Pass
+            });
+        }
+
         // Enable signal watch on the bus (ref-counted, safe to call multiple times)
         // This allows using connect_message for multiple handlers
         bus.add_signal_watch();
@@ -1923,9 +1955,16 @@ impl PipelineManager {
     pub fn stop(&mut self) -> Result<PipelineState, PipelineError> {
         info!("Stopping pipeline: {}", self.flow_name);
 
-        self.pipeline
-            .set_state(gst::State::Null)
+        // Run set_state on a dedicated OS thread to avoid "Cannot start a runtime
+        // from within a runtime" panics. Some GStreamer elements (e.g. whipserversrc)
+        // internally call block_on() during state transitions, which is incompatible
+        // with being called from within a tokio runtime context.
+        let pipeline = self.pipeline.clone();
+        let result = std::thread::spawn(move || pipeline.set_state(gst::State::Null))
+            .join()
+            .map_err(|_| PipelineError::StateChange("set_state thread panicked".to_string()))?
             .map_err(|e| PipelineError::StateChange(format!("Failed to stop: {}", e)))?;
+        let _ = result;
 
         // Remove bus watch when stopped to free resources
         self.remove_bus_watch();
@@ -3795,7 +3834,11 @@ impl PipelineManager {
 impl Drop for PipelineManager {
     fn drop(&mut self) {
         debug!("Dropping pipeline for flow: {}", self.flow_name);
-        let _ = self.pipeline.set_state(gst::State::Null);
+        // Run set_state on a dedicated OS thread to avoid "Cannot start a runtime
+        // from within a runtime" panics when GStreamer elements (e.g. whipserversrc)
+        // internally call block_on() during cleanup.
+        let pipeline = self.pipeline.clone();
+        let _ = std::thread::spawn(move || pipeline.set_state(gst::State::Null)).join();
         self.stop_qos_broadcast_task();
     }
 }
