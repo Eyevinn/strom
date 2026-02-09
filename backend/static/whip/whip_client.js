@@ -55,6 +55,13 @@ class WhipClient {
      */
     async getMedia(constraints) {
         this.log('Requesting user media...');
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            const msg = window.isSecureContext
+                ? 'getUserMedia not supported by this browser'
+                : 'Camera/mic requires HTTPS. Connect via localhost or enable HTTPS.';
+            this.log(msg, 'error');
+            throw new Error(msg);
+        }
         try {
             this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
             const tracks = this.localStream.getTracks().map(t => t.kind + ':' + t.label);
@@ -113,10 +120,22 @@ class WhipClient {
         // Add tracks from the stream
         for (const track of stream.getTracks()) {
             this.log('Adding ' + track.kind + ' track: ' + track.label);
+            const transceiver = this.pc.addTransceiver(track, { direction: 'sendonly' });
+
+            // Set encoding parameters for video
             if (track.kind === 'video') {
-                this.pc.addTransceiver(track, { direction: 'sendonly' });
-            } else {
-                this.pc.addTransceiver(track, { direction: 'sendonly' });
+                try {
+                    const params = transceiver.sender.getParameters();
+                    if (!params.encodings || params.encodings.length === 0) {
+                        params.encodings = [{}];
+                    }
+                    params.encodings[0].maxBitrate = 4_000_000; // 4 Mbps
+                    params.encodings[0].maxFramerate = 30;
+                    await transceiver.sender.setParameters(params);
+                    this.log('Set video encoding: maxBitrate=4Mbps, maxFramerate=30');
+                } catch (e) {
+                    this.log('Failed to set video encoding params: ' + e.message, 'error');
+                }
             }
         }
 
@@ -126,6 +145,22 @@ class WhipClient {
 
         // Enable stereo for Opus if present
         offer.sdp = this.enableOpusStereo(offer.sdp);
+        // Set bandwidth hint in SDP to prevent low initial bitrate
+        offer.sdp = this.setVideoBandwidth(offer.sdp, 4000);
+        // Add Google-specific bitrate hints to H264 fmtp lines
+        offer.sdp = this.addBitrateHints(offer.sdp, 2000, 2000, 4000);
+
+        // Log SDP offer details
+        this.log('SDP offer key lines:');
+        for (const line of offer.sdp.split('\r\n')) {
+            if (line.startsWith('m=video') || line.startsWith('b=AS') ||
+                line.startsWith('a=rtpmap:') || line.startsWith('a=fmtp:') ||
+                line.startsWith('a=extmap:') ||
+                line.includes('transport-cc') || line.includes('remb') ||
+                line.includes('x-google')) {
+                this.log('  ' + line);
+            }
+        }
 
         await this.pc.setLocalDescription(offer);
 
@@ -186,6 +221,18 @@ class WhipClient {
                 sdp: answerSdp,
             });
             this.log('Remote description set', 'success');
+
+            // Log key SDP answer lines
+            this.log('SDP answer key lines:');
+            for (const line of answerSdp.split('\n')) {
+                const l = line.trim();
+                if (l.startsWith('m=video') || l.startsWith('b=') ||
+                    l.startsWith('a=rtpmap:') || l.startsWith('a=fmtp:') ||
+                    l.includes('transport-cc') || l.includes('remb') ||
+                    l.includes('rtcp-fb') || l.startsWith('a=extmap:')) {
+                    this.log('  ' + l);
+                }
+            }
         } catch (e) {
             this.log('Failed to set remote description: ' + e.message, 'error');
             this.cleanup();
@@ -238,6 +285,85 @@ class WhipClient {
                 return 'a=fmtp:' + pt + ' ' + params;
             }
         );
+    }
+
+    /**
+     * Add x-google bitrate hints to H264/video fmtp lines in SDP.
+     * These are Chrome-specific but directly control the encoder's bitrate ramp-up.
+     */
+    addBitrateHints(sdp, minBitrateKbps, startBitrateKbps, maxBitrateKbps) {
+        // Add x-google hints only to actual video codec fmtp lines (not RTX/RED/ULPFEC)
+        const lines = sdp.split('\r\n');
+        const result = [];
+        let inVideo = false;
+        const metaPts = new Set(); // RTX, RED, ULPFEC payload types to skip
+
+        // First pass: find RTX/RED/ULPFEC payload types in video section
+        for (const line of lines) {
+            if (line.startsWith('m=video')) inVideo = true;
+            else if (line.startsWith('m=') && !line.startsWith('m=video')) inVideo = false;
+
+            if (inVideo && line.startsWith('a=rtpmap:')) {
+                const rest = line.substring(9);
+                const parts = rest.split(' ');
+                if (parts.length >= 2) {
+                    const encoding = parts[1].toLowerCase();
+                    if (encoding.startsWith('rtx/') || encoding.startsWith('red/') || encoding.startsWith('ulpfec/')) {
+                        metaPts.add(parts[0]);
+                    }
+                }
+            }
+        }
+
+        // Second pass: add bitrate hints to non-meta fmtp lines in video section
+        inVideo = false;
+        for (const line of lines) {
+            if (line.startsWith('m=video')) inVideo = true;
+            else if (line.startsWith('m=') && !line.startsWith('m=video')) inVideo = false;
+
+            if (inVideo && line.startsWith('a=fmtp:')) {
+                const pt = line.split(':')[1].split(' ')[0];
+                if (!metaPts.has(pt)) {
+                    let modified = line;
+                    if (!modified.includes('x-google-min-bitrate'))
+                        modified += ';x-google-min-bitrate=' + minBitrateKbps;
+                    if (!modified.includes('x-google-start-bitrate'))
+                        modified += ';x-google-start-bitrate=' + startBitrateKbps;
+                    if (!modified.includes('x-google-max-bitrate'))
+                        modified += ';x-google-max-bitrate=' + maxBitrateKbps;
+                    result.push(modified);
+                    continue;
+                }
+            }
+            result.push(line);
+        }
+        return result.join('\r\n');
+    }
+
+    /**
+     * Set video bandwidth in SDP (b=AS: line) to hint higher initial bitrate.
+     * @param {string} sdp
+     * @param {number} kbps - bandwidth in kbps
+     */
+    setVideoBandwidth(sdp, kbps) {
+        const lines = sdp.split('\r\n');
+        const result = [];
+        let inVideo = false;
+        for (const line of lines) {
+            if (line.startsWith('m=video')) {
+                inVideo = true;
+                result.push(line);
+                result.push('b=AS:' + kbps);
+                continue;
+            }
+            if (line.startsWith('m=') && !line.startsWith('m=video')) {
+                inVideo = false;
+            }
+            // Skip existing b= lines in video section
+            if (inVideo && line.startsWith('b=')) continue;
+            result.push(line);
+        }
+        return result.join('\r\n');
     }
 
     /**
