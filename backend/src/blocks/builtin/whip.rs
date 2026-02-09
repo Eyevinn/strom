@@ -18,6 +18,7 @@ use crate::blocks::{
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_video as gst_video;
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -609,6 +610,28 @@ fn setup_whip_video_direct(
     queue
         .sync_state_with_parent()
         .map_err(|e| format!("Failed to sync queue state: {}", e))?;
+
+    // Monitor video buffers for discontinuities (packet loss) and request
+    // keyframes from the browser. When packet loss occurs, the decoder inside
+    // whipserversrc may produce corrupted frames but doesn't automatically
+    // send force-keyunit events upstream. We detect DISCONT flags on decoded
+    // buffers and send UpstreamForceKeyUnit events to trigger PLI via webrtcbin.
+    let probe_instance_id = instance_id.to_string();
+    src_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+        if let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data {
+            if buffer.flags().contains(gst::BufferFlags::DISCONT) {
+                debug!(
+                    "WHIP Input [{}]: Video discontinuity detected, requesting keyframe (PLI)",
+                    probe_instance_id
+                );
+                let fku = gst_video::UpstreamForceKeyUnitEvent::builder()
+                    .all_headers(true)
+                    .build();
+                pad.push_event(fku);
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
 
     info!(
         "WHIP Input: Video stream {} linked directly (queue -> videoconvert)",

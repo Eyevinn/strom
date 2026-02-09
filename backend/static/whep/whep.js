@@ -87,6 +87,11 @@ class WhepConnection {
         this.remoteCandidates = [];
         this.iceConfig = null;
         this.statsInterval = null;
+        this._videoHealthInterval = null;
+        this._prevFramesDecoded = 0;
+        this._prevPacketsLost = 0;
+        this._frozenSince = 0;      // timestamp when freeze was first detected
+        this._lossRecoveryPending = false;
     }
 
     // Always log (for essential messages like errors, connection status)
@@ -228,6 +233,8 @@ class WhepConnection {
                     this._logConnectionStats();
                     // Start periodic stats logging
                     this._startStatsLogging();
+                    // Start video health monitor for freeze/artifact recovery
+                    this._startVideoHealthMonitor();
                 } else if (state === 'failed') {
                     this._logAlways('ICE connection failed', 'error');
                     this._logDebugSummary();
@@ -430,7 +437,7 @@ class WhepConnection {
 
         this.statsInterval = setInterval(async () => {
             // Stop if debug mode disabled, disconnected, or connection gone
-            if (!whepDebugMode || !this.peerConnection || this.peerConnection.iceConnectionState !== 'connected') {
+            if (!whepDebugMode || !this.isConnected()) {
                 clearInterval(this.statsInterval);
                 this.statsInterval = null;
                 return;
@@ -467,8 +474,104 @@ class WhepConnection {
         }, 5000);
     }
 
+    // Monitor video health: detect freeze after packet loss and recover
+    // by re-attaching the stream to force a fresh decoder context + PLI burst.
+    _startVideoHealthMonitor() {
+        if (this._videoHealthInterval) return;
+        this._prevFramesDecoded = 0;
+        this._prevPacketsLost = 0;
+        this._frozenSince = 0;
+        this._lossRecoveryPending = false;
+
+        this._videoHealthInterval = setInterval(async () => {
+            if (!this.isConnected() || !this.hasVideo) return;
+
+            try {
+                const stats = await this.peerConnection.getStats();
+                let framesDecoded = 0;
+                let packetsLost = 0;
+                let pliCount = 0;
+
+                stats.forEach(report => {
+                    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                        framesDecoded = report.framesDecoded || 0;
+                        packetsLost = report.packetsLost || 0;
+                        pliCount = report.pliCount || 0;
+                    }
+                });
+
+                const newLoss = packetsLost - this._prevPacketsLost;
+                const newFrames = framesDecoded - this._prevFramesDecoded;
+
+                // Detect new packet loss
+                if (newLoss > 0 && this._prevPacketsLost > 0) {
+                    this._lossRecoveryPending = true;
+                    this._logDebug('Video packet loss detected: +' + newLoss +
+                        ' (total=' + packetsLost + ', PLIs sent=' + pliCount + ')');
+                }
+
+                // Check if video is frozen (no new frames decoded)
+                const now = Date.now();
+                if (this._prevFramesDecoded > 0 && newFrames === 0) {
+                    if (this._frozenSince === 0) {
+                        this._frozenSince = now;
+                    }
+                } else {
+                    // Frames are being decoded
+                    if (this._lossRecoveryPending && newFrames > 0) {
+                        // Got fresh frames after loss - recovery succeeded
+                        this._lossRecoveryPending = false;
+                    }
+                    this._frozenSince = 0;
+                }
+
+                // If frozen for >3s after packet loss, re-attach stream to recover
+                if (this._frozenSince > 0 && this._lossRecoveryPending &&
+                    (now - this._frozenSince) > 3000) {
+                    this._logAlways('Video frozen after packet loss, requesting recovery', 'warning');
+                    this._recoverVideo();
+                    this._frozenSince = 0;
+                    this._lossRecoveryPending = false;
+                }
+
+                this._prevFramesDecoded = framesDecoded;
+                this._prevPacketsLost = packetsLost;
+            } catch (e) {
+                // PC may be closing
+            }
+        }, 1000);
+    }
+
+    _stopVideoHealthMonitor() {
+        if (this._videoHealthInterval) {
+            clearInterval(this._videoHealthInterval);
+            this._videoHealthInterval = null;
+        }
+    }
+
+    // Re-attach video stream to force decoder reset + new PLI
+    _recoverVideo() {
+        if (!this.peerConnection) return;
+        const receivers = this.peerConnection.getReceivers();
+        for (const receiver of receivers) {
+            if (receiver.track && receiver.track.kind === 'video') {
+                // Create a new MediaStream with the same track to force
+                // the video element to re-initialize its decoder, which
+                // triggers an immediate PLI request for a fresh keyframe.
+                const freshStream = new MediaStream([receiver.track]);
+                if (this.callbacks.onVideoTrack) {
+                    this.callbacks.onVideoTrack(freshStream);
+                }
+                this._logDebug('Re-attached video stream for decoder recovery');
+                break;
+            }
+        }
+    }
+
     _updateStatus() {
-        if (this.peerConnection && this.peerConnection.iceConnectionState === 'connected') {
+        if (!this.peerConnection) return;
+        const state = this.peerConnection.iceConnectionState;
+        if (state === 'connected' || state === 'completed') {
             if (this.callbacks.onMediaStatus) {
                 this.callbacks.onMediaStatus(this.hasAudio, this.hasVideo);
             }
@@ -499,6 +602,7 @@ class WhepConnection {
             clearInterval(this.statsInterval);
             this.statsInterval = null;
         }
+        this._stopVideoHealthMonitor();
 
         if (this.peerConnection) {
             this.peerConnection.close();
@@ -510,7 +614,9 @@ class WhepConnection {
     }
 
     isConnected() {
-        return this.peerConnection && this.peerConnection.iceConnectionState === 'connected';
+        if (!this.peerConnection) return false;
+        const s = this.peerConnection.iceConnectionState;
+        return s === 'connected' || s === 'completed';
     }
 }
 
