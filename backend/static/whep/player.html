@@ -15,14 +15,9 @@
 
         <div class="form-group">
             <label for="endpoint">WHEP Endpoint URL</label>
-            <input type="text" id="endpoint" placeholder="/whep/my-stream" value="{{ENDPOINT}}">
-        </div>
-
-        <div class="form-group" id="fullUrlGroup" style="display: none;">
-            <label>Full WHEP URL (for external players)</label>
             <div style="display: flex; gap: 8px;">
-                <input type="text" id="fullUrl" readonly style="flex: 1; background: #252525; cursor: text;">
-                <button onclick="copyFullUrl()" style="white-space: nowrap;">Copy URL</button>
+                <input type="text" id="endpoint" placeholder="http://localhost:8081/whep/my-stream" value="" style="flex: 1;">
+                <button onclick="copyEndpointUrl()" style="white-space: nowrap;">Copy URL</button>
             </div>
         </div>
 
@@ -69,7 +64,7 @@
         let reconnectAttempt = 0;
         let reconnectTimer = null;
         const MAX_RECONNECT_ATTEMPTS = 15;
-        const RECONNECT_DELAYS = [1000, 2000, 3000, 5000, 5000, 10000, 15000, 30000]; // Backoff delays in ms
+        const RECONNECT_DELAY = 10000;
 
         function log(message, type = '') {
             const logEl = document.getElementById('log');
@@ -78,11 +73,6 @@
             entry.textContent = new Date().toLocaleTimeString() + ' - ' + message;
             logEl.appendChild(entry);
             logEl.scrollTop = logEl.scrollHeight;
-        }
-
-        function getReconnectDelay() {
-            const idx = Math.min(reconnectAttempt, RECONNECT_DELAYS.length - 1);
-            return RECONNECT_DELAYS[idx];
         }
 
         function scheduleReconnect(reason) {
@@ -99,7 +89,7 @@
                 return;
             }
 
-            const delay = getReconnectDelay();
+            const delay = RECONNECT_DELAY;
             reconnectAttempt++;
             log('Reconnecting in ' + (delay/1000) + 's (attempt ' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
             setStatus('status', 'Reconnecting in ' + (delay/1000) + 's (attempt ' + reconnectAttempt + ')...', 'connecting');
@@ -245,37 +235,15 @@
             log('Disconnected', 'success');
         }
 
-        function updateFullUrl() {
-            const endpoint = document.getElementById('endpoint').value.trim();
-            const fullUrlGroup = document.getElementById('fullUrlGroup');
-            const fullUrlInput = document.getElementById('fullUrl');
-            if (endpoint) {
-                const fullUrl = window.location.protocol + '//' + window.location.host + endpoint;
-                fullUrlInput.value = fullUrl;
-                fullUrlGroup.style.display = 'block';
-            } else {
-                fullUrlGroup.style.display = 'none';
-            }
-        }
-
-        function copyFullUrl() {
-            const fullUrl = document.getElementById('fullUrl').value;
-            if (!fullUrl) {
-                log('No URL to copy', 'error');
-                return;
-            }
-
-            // Try modern clipboard API first
+        function copyEndpointUrl() {
+            const url = document.getElementById('endpoint').value.trim();
+            if (!url) { log('No URL to copy', 'error'); return; }
             if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(fullUrl).then(() => {
+                navigator.clipboard.writeText(url).then(() => {
                     log('Copied URL to clipboard', 'success');
-                }).catch(err => {
-                    // Fallback to old method
-                    copyFallback(fullUrl);
-                });
+                }).catch(() => copyFallback(url));
             } else {
-                // Fallback for older browsers or non-HTTPS
-                copyFallback(fullUrl);
+                copyFallback(url);
             }
         }
 
@@ -344,14 +312,10 @@
             }
         }
 
-        // Update full URL when endpoint changes
-        document.getElementById('endpoint').addEventListener('input', updateFullUrl);
-
         // Auto-connect if endpoint is provided
         window.onload = () => {
             document.getElementById('hostAddress').textContent = location.host;
             document.title = 'WHEP Player | Strom | ' + location.host;
-            updateFullUrl();
             // Restore debug mode from previous session
             try {
                 if (localStorage.getItem('whep-debug') === 'true') {
@@ -359,8 +323,10 @@
                     setWhepDebugMode(true);
                 }
             } catch(e) {}
-            const endpoint = document.getElementById('endpoint').value;
-            if (endpoint) {
+            // Set endpoint from server-provided value
+            const serverEndpoint = '{{ENDPOINT}}';
+            if (serverEndpoint) {
+                document.getElementById('endpoint').value = location.protocol + '//' + location.host + serverEndpoint;
                 wantConnected = true;
                 setTimeout(() => doConnect(false), 500);
             }
