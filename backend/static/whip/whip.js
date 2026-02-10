@@ -30,6 +30,8 @@ class WhipClient {
      * Fetch ICE server configuration from the backend.
      */
     async fetchIceServers() {
+        this.iceServers = [];
+        this.iceTransportPolicy = 'all';
         try {
             const resp = await fetch('/api/ice-servers');
             if (resp.ok) {
