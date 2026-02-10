@@ -245,10 +245,10 @@ impl WhipServerContext {
                 if factory_name == "rtpsession" && element.has_property("internal-session") {
                     let internal: gst::glib::Object = element.property("internal-session");
                     if internal.has_property("twcc-feedback-interval") {
-                        let interval: u64 = 50_000_000; // 50ms in nanoseconds
+                        let interval: u64 = 200_000_000; // 200ms in nanoseconds
                         internal.set_property("twcc-feedback-interval", interval);
                         info!(
-                            "WHIP Input: Set twcc-feedback-interval=50ms on {}",
+                            "WHIP Input: Set twcc-feedback-interval=200ms on {}",
                             element_name
                         );
                     }
