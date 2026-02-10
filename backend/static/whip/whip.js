@@ -180,10 +180,10 @@ class WhipClient {
             };
 
             this.peerConnection.onicecandidateerror = (event) => {
-                this._logAlways('ICE candidate error: ' + event.errorText +
+                this._log('ICE candidate error: ' + event.errorText +
                     ' (code=' + event.errorCode +
                     ' url=' + event.url +
-                    ' host=' + event.address + ':' + event.port + ')', 'error');
+                    ' host=' + event.address + ':' + event.port + ')');
             };
 
             this.peerConnection.oniceconnectionstatechange = () => {
