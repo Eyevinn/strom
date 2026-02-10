@@ -121,13 +121,18 @@ pub async fn whip_post(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/sdp");
 
-    // Strip RED/RTX/ULPFEC from SDP offer to prevent whipserversrc's internal
-    // decodebin3 from failing on these meta-encodings it can't decode.
-    let body_bytes = if content_type.contains("sdp") {
-        if let Ok(sdp_str) = std::str::from_utf8(&body_bytes) {
-            let cleaned = strip_redundancy_codecs(sdp_str);
-            debug!("WHIP: SDP after stripping redundancy codecs:\n{}", cleaned);
-            axum::body::Bytes::from(cleaned)
+    // Strip RED/RTX/ULPFEC from SDP offer. Disabled: decodebin3 handles these
+    // fine in current gst-plugins-rs. Re-enable if "No streams to output" errors return.
+    #[allow(unreachable_code)]
+    let body_bytes = if false {
+        if content_type.contains("sdp") {
+            if let Ok(sdp_str) = std::str::from_utf8(&body_bytes) {
+                let cleaned = strip_redundancy_codecs(sdp_str);
+                debug!("WHIP: SDP after stripping redundancy codecs:\n{}", cleaned);
+                axum::body::Bytes::from(cleaned)
+            } else {
+                body_bytes
+            }
         } else {
             body_bytes
         }
@@ -275,7 +280,14 @@ fn build_whip_post_response(
     // NOTE: We intentionally do NOT rewrite extmap IDs in the answer.
     // webrtcbin assigns its own extmap IDs internally.
     let resp_body = if let Ok(answer_str) = std::str::from_utf8(&resp_body) {
-        let patched = add_goog_remb(answer_str);
+        // goog-remb: Disabled: no measurable effect on bandwidth estimation.
+        // TWCC alone is sufficient. Re-enable if TWCC feedback degrades.
+        #[allow(unreachable_code)]
+        let patched = if false {
+            add_goog_remb(answer_str)
+        } else {
+            answer_str.to_string()
+        };
         let patched = fix_video_bitrate_hints(&patched);
         debug!("WHIP: SDP answer:\n{}", patched);
         axum::body::Bytes::from(patched)

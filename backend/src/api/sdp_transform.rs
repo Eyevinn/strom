@@ -192,9 +192,9 @@ pub(crate) fn fix_video_bitrate_hints(sdp: &str) -> String {
     }
 
     // Use defaults if standalone lines weren't present
-    let min_val = min_bitrate.unwrap_or("2000");
+    let min_val = min_bitrate.unwrap_or("1000");
     let start_val = start_bitrate.unwrap_or("2000");
-    let max_val = max_bitrate.unwrap_or("4000");
+    let max_val = max_bitrate.unwrap_or("6000");
 
     let hints = format!(
         ";x-google-min-bitrate={};x-google-start-bitrate={};x-google-max-bitrate={}",
@@ -464,9 +464,9 @@ a=fmtp:96 level-asymmetry-allowed=1\r\n";
 
         let result = fix_video_bitrate_hints(sdp);
 
-        assert!(result.contains("x-google-min-bitrate=2000"));
+        assert!(result.contains("x-google-min-bitrate=1000"));
         assert!(result.contains("x-google-start-bitrate=2000"));
-        assert!(result.contains("x-google-max-bitrate=4000"));
+        assert!(result.contains("x-google-max-bitrate=6000"));
     }
 
     #[test]
