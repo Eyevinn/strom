@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=0.85">
     <title>WHEP Player - Strom</title>
     <link rel="stylesheet" href="/static/webrtc.css">
     <link rel="stylesheet" href="/static/whep.css">
@@ -43,6 +43,11 @@
                 <input type="range" class="volume-slider" id="volumeSlider" min="0" max="100" value="100" oninput="setVolume(this.value)">
                 <span class="volume-label" id="volumeLabel">100%</span>
             </div>
+            <div id="audioOutputGroup" style="display: none; width: 100%; max-width: 400px;">
+                <label style="color: #888; font-size: 12px;">Output:
+                    <select id="audioOutputSelect" style="width: auto; padding: 4px 8px;" onchange="onAudioOutputChange()"></select>
+                </label>
+            </div>
         </div>
 
         <div class="status disconnected" id="status" style="margin-top: 16px;">Not connected</div>
@@ -59,6 +64,7 @@
 
     <script src="/static/webrtc.js"></script>
     <script src="/static/whep.js"></script>
+    <script src="/static/devices.js"></script>
     <script>
         let connection = null;
         let connectionId = 0;       // Incremented each connect to ignore stale callbacks
@@ -66,8 +72,32 @@
         let reconnectAttempt = 0;
         let reconnectTimer = null;
         let transportSuffix = '';   // Debug: " - relay <addr>" or " - direct <addr>"
+        let hasAudioStream = false;
         const MAX_RECONNECT_ATTEMPTS = 15;
         const RECONNECT_DELAY = 10000;
+
+        // Device management (audio output selection)
+        const deviceManager = new DeviceManager({
+            storagePrefix: 'whep',
+            onLog: (msg, type) => log(msg, type),
+            onDevicesChanged: updateAudioOutputDropdown
+        });
+
+        function updateAudioOutputDropdown() {
+            const group = document.getElementById('audioOutputGroup');
+            const select = document.getElementById('audioOutputSelect');
+            const showDropdown = hasAudioStream && deviceManager.populateAudioOutputSelect(select);
+            group.style.display = showDropdown ? 'block' : 'none';
+        }
+
+        async function onAudioOutputChange() {
+            const deviceId = document.getElementById('audioOutputSelect').value;
+            if (!deviceId) return;
+            const audio = document.getElementById('audio');
+            const video = document.getElementById('video');
+            const ok = await deviceManager.setAudioOutput(deviceId, audio, video);
+            if (ok) log('Switched audio output');
+        }
 
         function scheduleReconnect(reason) {
             // Prevent double scheduling or scheduling when not wanted
@@ -173,6 +203,8 @@
                     const isAudioOnly = hasAudio && !hasVideo;
                     setElementClass('audioIndicator', 'active', hasAudio);
                     setElementClass('audioControls', 'active', isAudioOnly);
+                    hasAudioStream = hasAudio;
+                    updateAudioOutputDropdown();
                 },
                 onError: (msg) => {
                     if (myConnectionId !== connectionId) return; // Stale
@@ -190,6 +222,8 @@
                     setElementClass('audioIndicator', 'active', false);
                     setElementClass('audioControls', 'active', false);
                     setElementClass('videoContainer', 'active', false);
+                    hasAudioStream = false;
+                    updateAudioOutputDropdown();
                     document.getElementById('audio').srcObject = null;
                     document.getElementById('video').srcObject = null;
                     document.getElementById('connectBtn').disabled = false;
@@ -228,6 +262,14 @@
                 connection.disconnect();
                 connection = null;
             }
+            // Clean up UI (onDisconnected callback won't fire - stale connectionId)
+            setElementClass('audioIndicator', 'active', false);
+            setElementClass('audioControls', 'active', false);
+            setElementClass('videoContainer', 'active', false);
+            hasAudioStream = false;
+            updateAudioOutputDropdown();
+            document.getElementById('audio').srcObject = null;
+            document.getElementById('video').srcObject = null;
             setStatus('status', 'Disconnected', 'disconnected');
             document.getElementById('connectBtn').disabled = false;
             document.getElementById('disconnectBtn').disabled = true;
@@ -282,6 +324,8 @@
             // Restore debug mode from previous session
             const debugRestored = restoreDebugMode('whep-debug');
             if (debugRestored) setWhepDebugMode(true);
+            // Enumerate audio output devices
+            deviceManager.enumerate();
             // Set endpoint from server-provided value
             const serverEndpoint = '{{ENDPOINT}}';
             if (serverEndpoint) {

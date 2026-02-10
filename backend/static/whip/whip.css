@@ -1,22 +1,19 @@
 /* WHIP Ingest - page-specific styles (shared styles in webrtc.css) */
 
-.preview-btn {
-    background: #4a5a4a;
-    border-color: #5a6a5a;
-}
-
-.preview-btn:hover:not(:disabled) {
-    background: #5a6a5a;
-}
-
-/* Media settings row */
+/* Media settings (two-row layout) */
 .media-settings {
     display: flex;
-    gap: 12px;
-    align-items: center;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 8px;
     margin-bottom: 12px;
     font-size: 13px;
+}
+
+.media-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
 }
 
 .media-settings label {
@@ -28,6 +25,51 @@
 .media-settings select {
     width: auto;
     padding: 4px 8px;
+}
+
+/* Camera flip button (mobile) */
+.flip-btn {
+    padding: 4px 10px;
+    font-size: 16px;
+    line-height: 1;
+    background: #2a2a2a;
+    border: 1px solid #3d3d3d;
+    color: #e0e0e0;
+    border-radius: 4px;
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.flip-btn:hover {
+    background: #3a3a3a;
+}
+
+.flip-btn:active {
+    background: #4a4a4a;
+}
+
+/* Media toggle button (mute/video-off) */
+.media-toggle {
+    padding: 4px 10px;
+    font-size: 13px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid #3d3d3d;
+    background: #5a2a2a;
+    color: #cc8888;
+    min-width: 70px;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.media-toggle.active {
+    background: #2a4a2a;
+    color: #88cc88;
+    border-color: #3d5d3d;
+}
+
+.media-toggle:hover {
+    filter: brightness(1.15);
 }
 
 /* Audio level meter */
@@ -109,9 +151,13 @@
 
 /* Responsive */
 @media (max-width: 600px) {
-    .media-settings {
+    .media-row {
         flex-direction: column;
         align-items: stretch;
+    }
+
+    .media-toggle {
+        width: 100%;
     }
 
     .stats-grid {

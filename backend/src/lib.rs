@@ -339,6 +339,12 @@ pub async fn create_app_with_config(
             }),
         )
         .route(
+            "/devices.js",
+            get(|| async {
+                serve_embedded_asset::<assets::WebrtcAssets>("devices.js", "application/javascript")
+            }),
+        )
+        .route(
             "/whep.css",
             get(|| async { serve_embedded_asset::<assets::WhepAssets>("whep.css", "text/css") }),
         )

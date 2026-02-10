@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=0.85">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <title>WHIP Ingest - Strom</title>
@@ -18,7 +18,7 @@
         </div>
 
         <!-- Endpoint -->
-        <div class="form-group">
+        <div class="form-group" id="endpointGroup">
             <label for="endpointSelect">WHIP Endpoint</label>
             <div style="display: flex; gap: 8px; align-items: center;">
                 <select id="endpointSelect" style="flex: 1;">
@@ -31,27 +31,30 @@
 
         <!-- Media settings -->
         <div class="media-settings">
-            <label>Camera: <select id="cameraSelect" style="width: auto;" onchange="saveSettings()">
-                <option value="user">Front</option>
-                <option value="environment">Back</option>
-            </select></label>
-            <label>Resolution: <select id="resolutionSelect" style="width: auto;" onchange="saveSettings()">
-                <option value="720">720p</option>
-                <option value="1080">1080p</option>
-                <option value="480">480p</option>
-                <option value="auto">Auto</option>
-            </select></label>
-            <label><input type="checkbox" id="enableAudio" checked style="width: auto;" onchange="saveSettings()"> Audio</label>
-            <label><input type="checkbox" id="enableVideo" checked style="width: auto;" onchange="saveSettings()"> Video</label>
-            <div class="audio-meter" id="audioMeter">
-                <span style="font-size: 11px; color: #666;">Mic:</span>
-                <div class="meter-bar"><div class="meter-fill" id="meterFill"></div></div>
+            <div class="media-row">
+                <button class="media-toggle active" id="videoToggle" onclick="toggleVideo()" title="Toggle video">&#9673; Video</button>
+                <label>Camera:
+                    <select id="cameraSelect" style="width: auto;" onchange="onCameraChange()"></select>
+                    <button id="cameraFlipBtn" class="flip-btn" onclick="onCameraFlip()" style="display: none;" title="Switch camera">&#8693;</button>
+                </label>
+                <label>Resolution: <select id="resolutionSelect" style="width: auto;" onchange="saveSettings()">
+                    <option value="720">720p</option>
+                    <option value="1080">1080p</option>
+                    <option value="480">480p</option>
+                    <option value="auto">Auto</option>
+                </select></label>
+            </div>
+            <div class="media-row">
+                <button class="media-toggle active" id="audioToggle" onclick="toggleAudio()" title="Toggle audio">&#9673; Audio</button>
+                <label>Mic: <select id="micSelect" style="width: auto;" onchange="onMicChange()"></select></label>
+                <div class="audio-meter" id="audioMeter">
+                    <div class="meter-bar"><div class="meter-fill" id="meterFill"></div></div>
+                </div>
             </div>
         </div>
 
         <!-- Buttons -->
         <div style="display: flex; gap: 8px; margin-bottom: 16px;">
-            <button class="preview-btn" id="btnPreview" style="flex: 1;">Preview</button>
             <button class="connect-btn" id="btnConnect" style="flex: 1;" disabled>Connect</button>
             <button class="disconnect-btn" id="btnDisconnect" style="flex: 1;" disabled>Disconnect</button>
         </div>
@@ -89,6 +92,7 @@
 
     <script src="/static/webrtc.js"></script>
     <script src="/static/whip.js"></script>
+    <script src="/static/devices.js"></script>
     <script>
         // State
         let whipClient = null;
@@ -100,6 +104,8 @@
         let prevVideoBytes = 0;
         let prevAudioBytes = 0;
         let prevTimestamp = 0;
+        let videoEnabled = true;
+        let audioEnabled = true;
         // debug state is in whipDebugMode (whip.js global)
 
         // Reconnect state
@@ -114,9 +120,128 @@
         const endpointSelect = document.getElementById('endpointSelect');
         const endpointUrlInput = document.getElementById('endpointUrl');
         const localVideo = document.getElementById('localVideo');
-        const btnPreview = document.getElementById('btnPreview');
         const btnConnect = document.getElementById('btnConnect');
         const btnDisconnect = document.getElementById('btnDisconnect');
+
+        // ============================================================
+        // Device management
+        // ============================================================
+        const deviceManager = new DeviceManager({
+            storagePrefix: 'whip',
+            onLog: (msg, type) => log(msg, type),
+            onDevicesChanged: () => {
+                deviceManager.populateCameraUI(
+                    document.getElementById('cameraSelect'),
+                    document.getElementById('cameraFlipBtn')
+                );
+                deviceManager.populateMicSelect(document.getElementById('micSelect'));
+                deviceManager.restoreCameraFlipIndex();
+            }
+        });
+
+        function getResolutionConstraints() {
+            const res = document.getElementById('resolutionSelect').value;
+            if (res === 'auto') return {};
+            const h = parseInt(res);
+            return { height: { ideal: h }, width: { ideal: Math.round(h * 16 / 9) } };
+        }
+
+        function getActivePeerConnection() {
+            return whipClient && whipClient.isConnected() ? whipClient.peerConnection : null;
+        }
+
+        function updatePreviewVideoTrack(newTrack, oldTrack) {
+            if (previewStream) {
+                for (const t of previewStream.getVideoTracks()) {
+                    if (t !== newTrack) previewStream.removeTrack(t);
+                }
+                if (!previewStream.getVideoTracks().includes(newTrack)) {
+                    previewStream.addTrack(newTrack);
+                }
+            }
+            if (oldTrack) oldTrack.stop();
+            localVideo.srcObject = previewStream;
+        }
+
+        function updatePreviewAudioTrack(newTrack, oldTrack) {
+            if (previewStream) {
+                for (const t of previewStream.getAudioTracks()) {
+                    if (t !== newTrack) previewStream.removeTrack(t);
+                }
+                if (!previewStream.getAudioTracks().includes(newTrack)) {
+                    previewStream.addTrack(newTrack);
+                }
+            }
+            if (oldTrack) oldTrack.stop();
+            stopAudioMeter();
+            if (previewStream) setupAudioMeter(previewStream);
+        }
+
+        async function onCameraChange() {
+            const deviceId = document.getElementById('cameraSelect').value;
+            if (!deviceId) return;
+            if (previewStream) {
+                const result = await deviceManager.switchCamera(deviceId, getResolutionConstraints(), getActivePeerConnection());
+                if (result) {
+                    updatePreviewVideoTrack(result.newTrack, result.oldTrack);
+                    result.newTrack.enabled = videoEnabled;
+                    const s = result.newTrack.getSettings();
+                    log('Switched camera: ' + (s.width || '?') + 'x' + (s.height || '?') + ' @ ' + (s.frameRate || '?') + 'fps');
+                }
+            } else {
+                deviceManager.saveSelection('camera', deviceId);
+            }
+        }
+
+        async function onCameraFlip() {
+            if (!previewStream) return;
+            const result = await deviceManager.flipCamera(getResolutionConstraints(), getActivePeerConnection());
+            if (result) {
+                updatePreviewVideoTrack(result.newTrack, result.oldTrack);
+                result.newTrack.enabled = videoEnabled;
+                log('Flipped to ' + deviceManager.getCameraFlipLabel() + ' camera');
+            }
+        }
+
+        async function onMicChange() {
+            const deviceId = document.getElementById('micSelect').value;
+            if (!deviceId) return;
+            if (previewStream) {
+                const result = await deviceManager.switchMic(deviceId, {}, getActivePeerConnection());
+                if (result) {
+                    updatePreviewAudioTrack(result.newTrack, result.oldTrack);
+                    result.newTrack.enabled = audioEnabled;
+                    log('Switched mic: ' + result.newTrack.label);
+                }
+            } else {
+                deviceManager.saveSelection('mic', deviceId);
+            }
+        }
+
+        // ============================================================
+        // Mute / Video-off toggles
+        // ============================================================
+        function toggleVideo() {
+            videoEnabled = !videoEnabled;
+            if (previewStream) {
+                previewStream.getVideoTracks().forEach(t => t.enabled = videoEnabled);
+            }
+            document.getElementById('videoToggle').classList.toggle('active', videoEnabled);
+            saveSettings();
+        }
+
+        function toggleAudio() {
+            audioEnabled = !audioEnabled;
+            if (previewStream) {
+                previewStream.getAudioTracks().forEach(t => t.enabled = audioEnabled);
+            }
+            document.getElementById('audioToggle').classList.toggle('active', audioEnabled);
+            // Hide meter when muted
+            const hasTracks = previewStream && previewStream.getAudioTracks().length > 0;
+            document.getElementById('audioMeter').style.display =
+                audioEnabled && hasTracks ? 'flex' : 'none';
+            saveSettings();
+        }
 
         // ============================================================
         // Debug logging (syncs with whipDebugMode in whip.js)
@@ -173,23 +298,26 @@
 
         function saveSettings() {
             try {
-                localStorage.setItem('whip-camera', document.getElementById('cameraSelect').value);
                 localStorage.setItem('whip-resolution', document.getElementById('resolutionSelect').value);
-                localStorage.setItem('whip-audio', document.getElementById('enableAudio').checked);
-                localStorage.setItem('whip-video', document.getElementById('enableVideo').checked);
+                localStorage.setItem('whip-audio-enabled', audioEnabled);
+                localStorage.setItem('whip-video-enabled', videoEnabled);
             } catch(e) {}
         }
 
         function restoreSettings() {
             try {
-                const cam = localStorage.getItem('whip-camera');
-                if (cam) document.getElementById('cameraSelect').value = cam;
                 const res = localStorage.getItem('whip-resolution');
                 if (res) document.getElementById('resolutionSelect').value = res;
-                const audio = localStorage.getItem('whip-audio');
-                if (audio !== null) document.getElementById('enableAudio').checked = audio === 'true';
-                const video = localStorage.getItem('whip-video');
-                if (video !== null) document.getElementById('enableVideo').checked = video === 'true';
+                const audio = localStorage.getItem('whip-audio-enabled');
+                if (audio !== null) {
+                    audioEnabled = audio === 'true';
+                    document.getElementById('audioToggle').classList.toggle('active', audioEnabled);
+                }
+                const video = localStorage.getItem('whip-video-enabled');
+                if (video !== null) {
+                    videoEnabled = video === 'true';
+                    document.getElementById('videoToggle').classList.toggle('active', videoEnabled);
+                }
             } catch(e) {}
         }
 
@@ -207,6 +335,7 @@
                 const resp = await fetch('/api/whip-endpoints');
                 if (!resp.ok) return;
                 const endpoints = await resp.json();
+                endpoints.sort((a, b) => a.endpoint_id.localeCompare(b.endpoint_id));
                 endpointSelect.innerHTML = '';
                 if (endpoints.length === 0) {
                     endpointSelect.innerHTML = '<option value="">No active endpoints</option>';
@@ -218,6 +347,12 @@
                         opt.textContent = ep.endpoint_id;
                         endpointSelect.appendChild(opt);
                     }
+                    // Sync dropdown to match current text input
+                    const current = endpointUrlInput.value.trim();
+                    if (current) {
+                        const match = Array.from(endpointSelect.options).some(o => o.value === current);
+                        if (match) endpointSelect.value = current;
+                    }
                 }
             } catch(e) {
                 endpointSelect.innerHTML = '<option value="">Failed to load</option>';
@@ -225,35 +360,55 @@
         }
 
         endpointSelect.addEventListener('change', () => {
-            if (endpointSelect.value) endpointUrlInput.value = endpointSelect.value;
+            if (endpointSelect.value) {
+                endpointUrlInput.value = endpointSelect.value;
+                saveEndpoint(endpointSelect.value);
+            }
         });
+
+        endpointUrlInput.addEventListener('change', () => {
+            const val = endpointUrlInput.value.trim();
+            if (val) saveEndpoint(val);
+        });
+
+        function saveEndpoint(value) {
+            try { localStorage.setItem('whip-endpoint', value); } catch(e) {}
+        }
+
+        function restoreEndpoint() {
+            try {
+                const saved = localStorage.getItem('whip-endpoint');
+                if (saved) endpointUrlInput.value = saved;
+            } catch(e) {}
+        }
 
         // ============================================================
         // Media
         // ============================================================
         function getConstraints() {
             const c = {};
-            const enableAudio = document.getElementById('enableAudio');
-            const enableVideo = document.getElementById('enableVideo');
 
-            c.audio = enableAudio.checked ? {
+            // Always request audio
+            const micId = document.getElementById('micSelect').value;
+            c.audio = {
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true,
-            } : false;
+            };
+            if (micId) c.audio.deviceId = { exact: micId };
 
-            if (enableVideo.checked) {
-                const res = document.getElementById('resolutionSelect').value;
-                const vc = { facingMode: document.getElementById('cameraSelect').value };
-                if (res !== 'auto') {
-                    const h = parseInt(res);
-                    vc.height = { ideal: h };
-                    vc.width = { ideal: Math.round(h * 16 / 9) };
-                }
-                c.video = vc;
-            } else {
-                c.video = false;
+            // Always request video
+            const res = document.getElementById('resolutionSelect').value;
+            const cameraId = document.getElementById('cameraSelect').value;
+            const vc = {};
+            if (cameraId) vc.deviceId = { exact: cameraId };
+            if (res !== 'auto') {
+                const h = parseInt(res);
+                vc.height = { ideal: h };
+                vc.width = { ideal: Math.round(h * 16 / 9) };
             }
+            c.video = Object.keys(vc).length > 0 ? vc : true;
+
             return c;
         }
 
@@ -296,15 +451,19 @@
         }
 
         // ============================================================
-        // Preview / Connect / Disconnect
+        // Start media / Connect / Disconnect
         // ============================================================
-        btnPreview.addEventListener('click', async () => {
+        async function startMedia() {
             stopPreview();
             const constraints = getConstraints();
-            if (!constraints.audio && !constraints.video) { log('Enable at least audio or video', 'error'); return; }
             try {
                 previewStream = await navigator.mediaDevices.getUserMedia(constraints);
+                // Apply mute/video-off states
+                previewStream.getVideoTracks().forEach(t => t.enabled = videoEnabled);
+                previewStream.getAudioTracks().forEach(t => t.enabled = audioEnabled);
                 localVideo.srcObject = previewStream;
+                // Re-enumerate devices now that we have permission (for labels)
+                deviceManager.enumerate();
                 // Log actual track settings
                 for (const t of previewStream.getTracks()) {
                     if (t.kind === 'video') {
@@ -312,14 +471,13 @@
                         log('Camera: ' + s.width + 'x' + s.height + ' @ ' + (s.frameRate||'?') + 'fps');
                     }
                 }
-                log('Preview started');
                 btnConnect.disabled = false;
-                setupAudioMeter(previewStream);
+                if (audioEnabled) setupAudioMeter(previewStream);
             } catch(e) {
                 log('Failed to get media: ' + e.message, 'error');
                 setStatus('status', 'Media error', 'error');
             }
-        });
+        }
 
         function doConnectWithStream(endpoint, stream) {
             // Clean up previous client without triggering callbacks
@@ -386,17 +544,8 @@
         btnConnect.addEventListener('click', async () => {
             const endpoint = getEndpointUrl();
             if (!endpoint) { log('Select or enter endpoint', 'error'); return; }
-
-            const constraints = getConstraints();
-            let sendStream;
-            try {
-                sendStream = await navigator.mediaDevices.getUserMedia(constraints);
-            } catch(e) { log('Failed to get media: ' + e.message, 'error'); return; }
-
-            stopPreview();
-            previewStream = sendStream;
-            localVideo.srcObject = sendStream;
-            setupAudioMeter(sendStream);
+            if (!previewStream) { log('No media available', 'error'); return; }
+            saveEndpoint(endpoint);
 
             setStatus('status', 'Connecting...', 'connecting');
             btnConnect.disabled = true;
@@ -405,7 +554,7 @@
             wantConnected = true;
             activeEndpoint = endpoint;
             reconnectAttempt = 0;
-            doConnectWithStream(endpoint, sendStream);
+            doConnectWithStream(endpoint, previewStream);
         });
 
         btnDisconnect.addEventListener('click', async () => {
@@ -413,12 +562,10 @@
             cancelReconnect();
             reconnectAttempt = 0;
             if (whipClient) { await whipClient.disconnect(); whipClient = null; }
-            stopPreview();
             stopStats();
             setStatus('status', 'Disconnected', 'disconnected');
             btnConnect.disabled = false;
             btnDisconnect.disabled = true;
-            localVideo.srcObject = null;
         });
 
         // ============================================================
@@ -502,21 +649,31 @@
         // ============================================================
         // Init
         // ============================================================
-        window.onload = () => {
+        window.onload = async () => {
             document.getElementById('hostAddress').textContent = location.host;
             document.title = 'WHIP Ingest | Strom | ' + location.host;
 
             // Restore settings
             restoreSettings();
+            restoreEndpoint();
             whipDebugMode = restoreDebugMode('whip-debug');
 
-            // Parse endpoint from URL
+            // URL param overrides saved endpoint and hides the selector
             const params = new URLSearchParams(window.location.search);
             const ep = params.get('endpoint');
-            if (ep) endpointUrlInput.value = ep;
+            if (ep) {
+                endpointUrlInput.value = ep;
+                document.getElementById('endpointGroup').style.display = 'none';
+            }
 
             loadEndpoints();
             setInterval(loadEndpoints, 10000);
+
+            // Enumerate devices and wait for dropdowns to populate before preview
+            await deviceManager.enumerate();
+
+            // Auto-start camera/mic
+            await startMedia();
         };
     </script>
 </body>
