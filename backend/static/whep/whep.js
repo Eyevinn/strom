@@ -92,14 +92,17 @@ class WhepConnection {
         this._prevPacketsLost = 0;
         this._frozenSince = 0;      // timestamp when freeze was first detected
         this._lossRecoveryPending = false;
+        // Short session ID for log correlation
+        this._sessionId = Array.from(crypto.getRandomValues(new Uint8Array(3)),
+            b => b.toString(16).padStart(2, '0')).join('');
     }
 
     // Always log (for essential messages like errors, connection status)
     _logAlways(message, type = '') {
         const timestamp = new Date().toISOString();
-        console.log(`[WHEP ${timestamp}] ${message}`);
+        console.log(`[WHEP ${this._sessionId} ${timestamp}] ${message}`);
         if (this.callbacks.onLog) {
-            this.callbacks.onLog(message, type);
+            this.callbacks.onLog(`[${this._sessionId}] ${message}`, type);
         }
     }
 
@@ -112,9 +115,9 @@ class WhepConnection {
     _logDebug(message) {
         if (!whepDebugMode) return;
         const timestamp = new Date().toISOString();
-        console.log(`[WHEP DEBUG ${timestamp}] ${message}`);
+        console.log(`[WHEP DEBUG ${this._sessionId} ${timestamp}] ${message}`);
         if (this.callbacks.onLog) {
-            this.callbacks.onLog(`[DEBUG] ${message}`, 'debug');
+            this.callbacks.onLog(`[${this._sessionId}] [DEBUG] ${message}`, 'debug');
         }
     }
 

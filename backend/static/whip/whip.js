@@ -57,14 +57,17 @@ class WhipClient {
         this.connected = false;
         this.localCandidates = [];
         this._disconnectTimer = null;
+        // Short session ID for log correlation
+        this._sessionId = Array.from(crypto.getRandomValues(new Uint8Array(3)),
+            b => b.toString(16).padStart(2, '0')).join('');
     }
 
     // Always log (errors, connection status)
     _logAlways(msg, type = '') {
         const timestamp = new Date().toISOString();
-        console.log(`[WHIP ${timestamp}] ${msg}`);
+        console.log(`[WHIP ${this._sessionId} ${timestamp}] ${msg}`);
         if (this.callbacks.onLog) {
-            this.callbacks.onLog(msg, type);
+            this.callbacks.onLog(`[${this._sessionId}] ${msg}`, type);
         }
     }
 
@@ -77,9 +80,9 @@ class WhipClient {
     _logDebug(msg) {
         if (!whipDebugMode) return;
         const timestamp = new Date().toISOString();
-        console.log(`[WHIP DEBUG ${timestamp}] ${msg}`);
+        console.log(`[WHIP DEBUG ${this._sessionId} ${timestamp}] ${msg}`);
         if (this.callbacks.onLog) {
-            this.callbacks.onLog(`[DEBUG] ${msg}`, 'debug');
+            this.callbacks.onLog(`[${this._sessionId}] [DEBUG] ${msg}`, 'debug');
         }
     }
 
@@ -221,8 +224,8 @@ class WhipClient {
                     }
                 } else if (state === 'disconnected') {
                     // ICE 'disconnected' is transient — it can recover to 'connected'.
-                    // Wait 5s before treating it as a real disconnect.
-                    this._logAlways('ICE disconnected (waiting 5s for recovery...)', 'warning');
+                    // Wait 10s before treating it as a real disconnect.
+                    this._logAlways('ICE disconnected (waiting 10s for recovery...)', 'warning');
                     if (!this._disconnectTimer) {
                         this._disconnectTimer = setTimeout(() => {
                             this._disconnectTimer = null;
@@ -234,7 +237,7 @@ class WhipClient {
                                     this.callbacks.onDisconnected();
                                 }
                             }
-                        }, 5000);
+                        }, 10000);
                     }
                 }
             };
