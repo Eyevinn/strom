@@ -215,7 +215,7 @@
                     for (const ep of endpoints) {
                         const opt = document.createElement('option');
                         opt.value = '/whip/' + ep.endpoint_id;
-                        opt.textContent = ep.endpoint_id + ' (' + ep.mode + ')';
+                        opt.textContent = ep.endpoint_id;
                         endpointSelect.appendChild(opt);
                     }
                 }
