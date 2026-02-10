@@ -280,14 +280,7 @@ fn build_whip_post_response(
     // NOTE: We intentionally do NOT rewrite extmap IDs in the answer.
     // webrtcbin assigns its own extmap IDs internally.
     let resp_body = if let Ok(answer_str) = std::str::from_utf8(&resp_body) {
-        // goog-remb: Disabled: no measurable effect on bandwidth estimation.
-        // TWCC alone is sufficient. Re-enable if TWCC feedback degrades.
-        #[allow(unreachable_code)]
-        let patched = if false {
-            add_goog_remb(answer_str)
-        } else {
-            answer_str.to_string()
-        };
+        let patched = add_goog_remb(answer_str);
         let patched = fix_video_bitrate_hints(&patched);
         debug!("WHIP: SDP answer:\n{}", patched);
         axum::body::Bytes::from(patched)
