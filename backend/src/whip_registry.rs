@@ -66,4 +66,15 @@ impl WhipRegistry {
         let map = self.inner.read().await;
         map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
+
+    /// Update the port for an existing endpoint (sync version for use from
+    /// non-async contexts like `spawn_blocking` or `std::thread::spawn`).
+    ///
+    /// Used when whipserversrc is recreated on a new port after session end.
+    pub fn update_port_sync(&self, endpoint_id: &str, new_port: u16) {
+        let mut map = self.inner.blocking_write();
+        if let Some(entry) = map.get_mut(endpoint_id) {
+            entry.port = new_port;
+        }
+    }
 }

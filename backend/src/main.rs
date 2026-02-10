@@ -516,6 +516,10 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
                 info!("Received Ctrl+C, shutting down gracefully...");
             }
 
+            // Suppress WHIP element recreation during shutdown to prevent
+            // deadlocks from GStreamer threads interacting with a dying pipeline.
+            strom::blocks::builtin::whip::shutdown_whip_servers();
+
             // Note: We don't need to explicitly stop flows here.
             // GStreamer will clean up when the process exits, and
             // we want to preserve the auto_restart flag for flows
@@ -702,6 +706,10 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
                 .expect("Failed to install Ctrl+C handler");
             info!("Received Ctrl+C, shutting down gracefully...");
         }
+
+        // Suppress WHIP element recreation during shutdown to prevent
+        // deadlocks from GStreamer threads interacting with a dying pipeline.
+        strom::blocks::builtin::whip::shutdown_whip_servers();
 
         // Note: We don't need to explicitly stop flows here.
         // GStreamer will clean up when the process exits, and

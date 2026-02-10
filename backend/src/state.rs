@@ -635,6 +635,7 @@ impl AppState {
             &self.inner.block_registry,
             self.inner.ice_servers.clone(),
             self.inner.ice_transport_policy.clone(),
+            Some(self.inner.whip_registry.clone()),
         )?;
         info!("PipelineManager created successfully");
 

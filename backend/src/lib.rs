@@ -265,6 +265,8 @@ pub async fn create_app_with_config(
             "/whip-endpoints",
             get(api::whip_ingest::list_whip_endpoints),
         )
+        // Client-side log relay (WHIP/WHEP browser pages)
+        .route("/client-log", post(api::whip_ingest::client_log))
         // ICE servers for WebRTC connections
         .route("/ice-servers", get(api::whep_player::get_ice_servers))
         // MCP Streamable HTTP endpoint (has its own session management)

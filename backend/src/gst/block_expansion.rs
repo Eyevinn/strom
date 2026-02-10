@@ -5,6 +5,7 @@ use crate::blocks::{
     BlockBuildContext, BusMessageConnectFn, DynamicWebrtcbinStore, WhepEndpointInfo,
     WhipEndpointInfo,
 };
+use crate::whip_registry::WhipRegistry;
 use gstreamer as gst;
 use strom_types::{BlockInstance, Link};
 use tracing::{debug, info};
@@ -46,6 +47,7 @@ pub async fn expand_blocks(
     ice_servers: Vec<String>,
     ice_transport_policy: String,
     dynamic_webrtcbins: DynamicWebrtcbinStore,
+    whip_registry: Option<WhipRegistry>,
 ) -> Result<ExpandedPipeline, PipelineError> {
     let mut gst_elements = Vec::new();
     let mut all_links = Vec::new();
@@ -58,6 +60,7 @@ pub async fn expand_blocks(
         ice_servers,
         ice_transport_policy,
         dynamic_webrtcbins,
+        whip_registry,
     );
 
     debug!("Expanding {} block instance(s)", blocks.len());
@@ -304,6 +307,7 @@ mod tests {
             ice_servers,
             ice_transport_policy,
             dynamic_webrtcbins,
+            None,
         )
         .await;
         assert!(result.is_ok());

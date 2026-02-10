@@ -1,6 +1,7 @@
 //! Block builder trait for runtime GStreamer element creation.
 
 use crate::events::EventBroadcaster;
+use crate::whip_registry::WhipRegistry;
 use gstreamer as gst;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -128,6 +129,8 @@ pub struct BlockBuildContext {
     /// Storage for dynamically created webrtcbin elements (shared with PipelineManager).
     /// Used by blocks like WHEP Output that create webrtcbins dynamically via consumer-added.
     dynamic_webrtcbins: DynamicWebrtcbinStore,
+    /// WHIP endpoint registry (optional, only set when WHIP blocks need it for element recreation)
+    whip_registry: Option<WhipRegistry>,
 }
 
 impl BlockBuildContext {
@@ -139,6 +142,7 @@ impl BlockBuildContext {
             ice_servers,
             ice_transport_policy,
             dynamic_webrtcbins: Arc::new(Mutex::new(HashMap::new())),
+            whip_registry: None,
         }
     }
 
@@ -147,6 +151,7 @@ impl BlockBuildContext {
         ice_servers: Vec<String>,
         ice_transport_policy: String,
         dynamic_webrtcbins: DynamicWebrtcbinStore,
+        whip_registry: Option<WhipRegistry>,
     ) -> Self {
         Self {
             whep_endpoints: RefCell::new(Vec::new()),
@@ -154,6 +159,7 @@ impl BlockBuildContext {
             ice_servers,
             ice_transport_policy,
             dynamic_webrtcbins,
+            whip_registry,
         }
     }
 
@@ -161,6 +167,11 @@ impl BlockBuildContext {
     /// Use this to pass to callbacks that create webrtcbins dynamically.
     pub fn dynamic_webrtcbin_store(&self) -> DynamicWebrtcbinStore {
         Arc::clone(&self.dynamic_webrtcbins)
+    }
+
+    /// Get the WHIP endpoint registry (if available).
+    pub fn whip_registry(&self) -> Option<&WhipRegistry> {
+        self.whip_registry.as_ref()
     }
 
     /// Register a dynamically created webrtcbin (called from consumer-added callbacks).

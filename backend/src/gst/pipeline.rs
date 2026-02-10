@@ -3,6 +3,7 @@
 use crate::blocks::BlockRegistry;
 use crate::events::EventBroadcaster;
 use crate::gst::thread_priority::{self, ThreadPriorityState};
+use crate::whip_registry::WhipRegistry;
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -201,6 +202,7 @@ impl PipelineManager {
         _block_registry: &BlockRegistry,
         ice_servers: Vec<String>,
         ice_transport_policy: String,
+        whip_registry: Option<WhipRegistry>,
     ) -> Result<Self, PipelineError> {
         info!("Creating pipeline for flow: {} ({})", flow.name, flow.id);
         info!(
@@ -258,6 +260,7 @@ impl PipelineManager {
                     ice_servers,
                     ice_transport_policy,
                     dynamic_webrtcbins,
+                    whip_registry,
                 )
                 .await;
                 info!("expand_blocks completed");
@@ -3878,6 +3881,7 @@ mod tests {
             &registry,
             default_test_ice_servers(),
             "all".to_string(),
+            None,
         );
         assert!(manager.is_ok());
     }
@@ -3894,6 +3898,7 @@ mod tests {
             &registry,
             default_test_ice_servers(),
             "all".to_string(),
+            None,
         )
         .unwrap();
 
@@ -3926,6 +3931,7 @@ mod tests {
             &registry,
             default_test_ice_servers(),
             "all".to_string(),
+            None,
         );
         assert!(manager.is_err());
     }
@@ -3978,6 +3984,7 @@ mod tests {
             &registry,
             default_test_ice_servers(),
             "all".to_string(),
+            None,
         );
         assert!(manager.is_ok());
 
@@ -4002,6 +4009,7 @@ mod tests {
             &registry,
             default_test_ice_servers(),
             "all".to_string(),
+            None,
         )
         .unwrap();
 

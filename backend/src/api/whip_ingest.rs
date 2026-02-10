@@ -11,6 +11,7 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
+    Json,
 };
 use tracing::{debug, error, info, warn};
 
@@ -43,10 +44,36 @@ pub async fn list_whip_endpoints(State(state): State<AppState>) -> impl IntoResp
     axum::Json(list).into_response()
 }
 
+/// Receive client-side log messages from the WHIP ingest page.
+///
+/// Accepts a JSON array of log entries and writes them to the server log
+/// prefixed with `[WHIP-CLIENT]` so they can be correlated with server-side events.
+pub async fn client_log(Json(entries): Json<Vec<ClientLogEntry>>) -> impl IntoResponse {
+    for entry in &entries {
+        match entry.level.as_deref().unwrap_or("info") {
+            "error" => error!("[WHIP-CLIENT] {}", entry.msg),
+            "warning" | "warn" => warn!("[WHIP-CLIENT] {}", entry.msg),
+            "debug" => debug!("[WHIP-CLIENT] {}", entry.msg),
+            _ => info!("[WHIP-CLIENT] {}", entry.msg),
+        }
+    }
+    StatusCode::NO_CONTENT
+}
+
+#[derive(serde::Deserialize)]
+pub struct ClientLogEntry {
+    pub msg: String,
+    pub level: Option<String>,
+}
+
 /// Handle WHIP POST request (SDP offer from client).
 ///
 /// Proxies the SDP offer to the internal whipserversrc HTTP server and returns
 /// the SDP answer, rewriting the Location header to use the proxy path.
+///
+/// If the internal server returns 500 or times out (stale session), we recreate
+/// the whipserversrc element in the background and return the error immediately.
+/// The client's own retry logic will resend the offer to the fresh element.
 pub async fn whip_post(
     State(state): State<AppState>,
     Path(endpoint_id): Path<String>,
@@ -66,7 +93,13 @@ pub async fn whip_post(
     // Forward the request to the internal whipserversrc
     let internal_url = format!("http://127.0.0.1:{}/whip/endpoint", port);
 
-    let client = match reqwest::Client::builder().no_proxy().build() {
+    // 5s timeout: a healthy whipserversrc responds in <1s. If it takes longer,
+    // the element is stuck (zombie session) and needs recreation.
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create HTTP client: {}", e);
@@ -74,7 +107,6 @@ pub async fn whip_post(
         }
     };
 
-    // Build the forwarded request
     let body_bytes = match axum::body::to_bytes(body, 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
@@ -102,13 +134,101 @@ pub async fn whip_post(
         body_bytes
     };
 
-    let mut req = client
-        .post(&internal_url)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(body_bytes);
+    let auth_header = headers.get(header::AUTHORIZATION).cloned();
 
-    // Forward Authorization header if present
-    if let Some(auth) = headers.get(header::AUTHORIZATION) {
+    let result = forward_whip_post(
+        &client,
+        &internal_url,
+        content_type,
+        &body_bytes,
+        &auth_header,
+    )
+    .await;
+
+    // Handle proxy errors (timeout, connection refused, etc.)
+    let (status, resp_headers, resp_body) = match result {
+        Ok(tuple) => tuple,
+        Err(_) => {
+            // Proxy failed (likely timeout) - recreate element in background so it's
+            // ready when the client retries, then return error immediately.
+            warn!(
+                "WHIP: Proxy request to whipserversrc timed out for endpoint '{}' -- triggering recreation",
+                endpoint_id
+            );
+            let eid = endpoint_id.clone();
+            tokio::task::spawn(async move {
+                match tokio::task::spawn_blocking(move || {
+                    crate::blocks::builtin::whip::recreate_whipserversrc(&eid)
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!("WHIP: Failed to recreate element: {}", e),
+                    Err(e) => error!("WHIP: Recreation task panicked: {:?}", e),
+                }
+            });
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WHIP element busy, retry in a moment",
+            )
+                .into_response();
+        }
+    };
+
+    // If internal server returned 500, the element has a stale session.
+    // Recreate in background and return error so the client retries against
+    // the fresh element (no server-side retry to avoid creating zombie sessions).
+    if status.is_server_error() {
+        let body_str = std::str::from_utf8(&resp_body).unwrap_or("<non-utf8>");
+        warn!(
+            "WHIP: Internal server returned {} for endpoint '{}': {} -- triggering recreation",
+            status, endpoint_id, body_str
+        );
+
+        let eid = endpoint_id.clone();
+        tokio::task::spawn(async move {
+            match tokio::task::spawn_blocking(move || {
+                crate::blocks::builtin::whip::recreate_whipserversrc(&eid)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("WHIP: Failed to recreate element: {}", e),
+                Err(e) => error!("WHIP: Recreation task panicked: {:?}", e),
+            }
+        });
+    } else if status.is_client_error() {
+        let body_str = std::str::from_utf8(&resp_body).unwrap_or("<non-utf8>");
+        warn!(
+            "WHIP: Internal server returned {} for endpoint '{}': {}",
+            status, endpoint_id, body_str
+        );
+    }
+
+    build_whip_post_response(&endpoint_id, status, &resp_headers, resp_body).into_response()
+}
+
+/// Forward a WHIP POST request to the internal whipserversrc.
+async fn forward_whip_post(
+    client: &reqwest::Client,
+    internal_url: &str,
+    content_type: &str,
+    body_bytes: &axum::body::Bytes,
+    auth_header: &Option<axum::http::HeaderValue>,
+) -> Result<
+    (
+        reqwest::StatusCode,
+        reqwest::header::HeaderMap,
+        axum::body::Bytes,
+    ),
+    Response,
+> {
+    let mut req = client
+        .post(internal_url)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(body_bytes.clone());
+
+    if let Some(auth) = auth_header {
         req = req.header(header::AUTHORIZATION, auth.clone());
     }
 
@@ -116,7 +236,7 @@ pub async fn whip_post(
         Ok(r) => r,
         Err(e) => {
             error!("Failed to proxy WHIP POST to {}: {}", internal_url, e);
-            return (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response();
+            return Err((StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response());
         }
     };
 
@@ -126,18 +246,24 @@ pub async fn whip_post(
         Ok(b) => b,
         Err(e) => {
             error!("Failed to read proxy response: {}", e);
-            return (StatusCode::BAD_GATEWAY, "Failed to read response").into_response();
+            return Err((StatusCode::BAD_GATEWAY, "Failed to read response").into_response());
         }
     };
 
-    if status.is_server_error() || status.is_client_error() {
-        let body_str = std::str::from_utf8(&resp_body).unwrap_or("<non-utf8>");
-        warn!(
-            "WHIP: Internal server returned {} for endpoint '{}': {}",
-            status, endpoint_id, body_str
-        );
-    }
+    Ok((
+        status,
+        resp_headers,
+        axum::body::Bytes::from(resp_body.to_vec()),
+    ))
+}
 
+/// Build the final WHIP POST response with SDP patching and header rewriting.
+fn build_whip_post_response(
+    endpoint_id: &str,
+    status: reqwest::StatusCode,
+    resp_headers: &reqwest::header::HeaderMap,
+    resp_body: axum::body::Bytes,
+) -> Response {
     // Patch the SDP answer for better Chrome bandwidth estimation:
     // 1. Add goog-remb as fallback bandwidth estimation
     // 2. Add x-google bitrate hints to the video fmtp line so Chrome
@@ -174,7 +300,7 @@ pub async fn whip_post(
     }
 
     // Forward relevant headers
-    for (name, value) in &resp_headers {
+    for (name, value) in resp_headers {
         let name_str = name.as_str().to_lowercase();
         match name_str.as_str() {
             "content-type" | "link" | "accept-patch" | "etag" => {
@@ -201,10 +327,13 @@ pub async fn whip_post(
         );
 
     match builder.body(Body::from(resp_body)) {
-        Ok(resp) => resp.into_response(),
+        Ok(resp) => resp,
         Err(e) => {
             error!("Failed to build response: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Response build error").into_response()
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("Response build error"))
+                .unwrap()
         }
     }
 }
@@ -288,6 +417,12 @@ pub async fn whip_resource_patch(
 }
 
 /// Handle WHIP DELETE request (client disconnect).
+///
+/// After forwarding DELETE to whipserversrc, we trigger async element
+/// recreation. The whipserversrc element is treated as single-use: it handles
+/// one session, then gets destroyed and replaced with a fresh element.
+/// The pad-removed callback also triggers recreation, but the AtomicBool
+/// idempotency flag in WhipServerContext prevents double-recreation.
 pub async fn whip_resource_delete(
     State(state): State<AppState>,
     Path((endpoint_id, resource_id)): Path<(String, String)>,
@@ -314,29 +449,52 @@ pub async fn whip_resource_delete(
         }
     };
 
-    match client.delete(&internal_url).send().await {
-        Ok(r) => {
-            let status = r.status();
-            Response::builder()
-                .status(
-                    StatusCode::from_u16(status.as_u16())
-                        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                )
-                .header("Access-Control-Allow-Origin", "*")
-                .body(Body::empty())
-                .unwrap_or_else(|_| {
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Body::empty())
-                        .unwrap()
-                })
-                .into_response()
-        }
+    let resp_status = match client.delete(&internal_url).send().await {
+        Ok(r) => r.status(),
         Err(e) => {
             error!("Failed to proxy WHIP DELETE: {}", e);
-            (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response()
+            return (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response();
         }
+    };
+
+    // Recreate the whipserversrc element synchronously before returning the
+    // DELETE response. This ensures the new element is ready to accept the next
+    // client connection immediately. We use spawn_blocking + await because
+    // recreate_whipserversrc does GStreamer operations that must not run on
+    // the tokio runtime. The short sleep gives whipserversrc time to finish
+    // its internal teardown before we destroy the element.
+    let endpoint_id_for_recreate = endpoint_id.clone();
+    let recreate_result = tokio::task::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        crate::blocks::builtin::whip::recreate_whipserversrc(&endpoint_id_for_recreate)
+    })
+    .await;
+
+    match recreate_result {
+        Ok(Ok(())) => info!("WHIP DELETE: Recreated whipserversrc for '{}'", endpoint_id),
+        Ok(Err(e)) => warn!(
+            "WHIP DELETE: Failed to recreate for '{}': {}",
+            endpoint_id, e
+        ),
+        Err(e) => error!(
+            "WHIP DELETE: Recreation task panicked for '{}': {:?}",
+            endpoint_id, e
+        ),
     }
+
+    Response::builder()
+        .status(
+            StatusCode::from_u16(resp_status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        )
+        .header("Access-Control-Allow-Origin", "*")
+        .body(Body::empty())
+        .unwrap_or_else(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .unwrap()
+        })
+        .into_response()
 }
 
 /// Handle CORS preflight for WHIP endpoints.
