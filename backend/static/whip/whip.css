@@ -54,18 +54,22 @@
     font-size: 13px;
     border-radius: 4px;
     cursor: pointer;
-    border: 1px solid #3d3d3d;
-    background: #5a2a2a;
-    color: #cc8888;
+    border: 1px solid #555;
+    background: #333;
+    color: #888;
     min-width: 70px;
     text-align: center;
     white-space: nowrap;
+    text-decoration: line-through;
+    opacity: 0.7;
 }
 
 .media-toggle.active {
-    background: #2a4a2a;
-    color: #88cc88;
-    border-color: #3d5d3d;
+    background: #2a3a4a;
+    color: #ccc;
+    border-color: #5a7a9a;
+    text-decoration: none;
+    opacity: 1;
 }
 
 .media-toggle:hover {
@@ -152,14 +156,6 @@
 
 /* Responsive */
 @media (max-width: 600px) {
-    .media-row {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
-    .media-toggle {
-        width: 100%;
-    }
 
     .stats-grid {
         grid-template-columns: 1fr 1fr;

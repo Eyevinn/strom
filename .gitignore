@@ -15,7 +15,6 @@ frontend/dist/
 backend/dist/
 backend/.frontend-build-hash
 
-
 # Runtime files
 flows.json
 blocks.json
@@ -27,8 +26,11 @@ config.toml
 .DS_Store
 Thumbs.db
 
+# other
 /*.sh
 /notes.txt
-media/
-.mcp.json
-/*.pem
+/media
+/.mcp.json
+*.pem
+
+whip-iterate-instructions.md

@@ -14,6 +14,7 @@
     <div class="container">
         <div style="position: relative; margin-bottom: 8px;">
             <h1 style="text-align: center; margin: 0;">WHIP Ingest at <span id="hostAddress"></span></h1>
+            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v5</span>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em; position: absolute; right: 0; top: 50%; transform: translateY(-50%);">WHEP streams</a>
         </div>
 
@@ -32,12 +33,11 @@
         <!-- Media settings -->
         <div class="media-settings">
             <div class="media-row">
-                <button class="media-toggle active" id="videoToggle" onclick="toggleVideo()" title="Toggle video">&#9673; Video</button>
-                <label>Camera:
-                    <select id="cameraSelect" style="width: auto;" onchange="onCameraChange()"></select>
+                <button class="media-toggle active" id="videoToggle" onclick="toggleVideo()" title="Toggle video">Video</button>
+                <label><select id="cameraSelect" style="width: auto;" onchange="onCameraChange()"></select>
                     <button id="cameraFlipBtn" class="flip-btn" onclick="onCameraFlip()" style="display: none;" title="Switch camera">&#8693;</button>
                 </label>
-                <label>Resolution: <select id="resolutionSelect" style="width: auto;" onchange="saveSettings()">
+                <label><select id="resolutionSelect" style="width: auto;" onchange="saveSettings()">
                     <option value="720">720p</option>
                     <option value="1080">1080p</option>
                     <option value="480">480p</option>
@@ -45,8 +45,8 @@
                 </select></label>
             </div>
             <div class="media-row">
-                <button class="media-toggle active" id="audioToggle" onclick="toggleAudio()" title="Toggle audio">&#9673; Audio</button>
-                <label>Mic: <select id="micSelect" style="width: auto;" onchange="onMicChange()"></select></label>
+                <button class="media-toggle active" id="audioToggle" onclick="toggleAudio()" title="Toggle audio">Audio</button>
+                <label><select id="micSelect" style="width: auto;" onchange="onMicChange()"></select></label>
                 <div class="audio-meter" id="audioMeter">
                     <div class="meter-bar"><div class="meter-fill" id="meterFill"></div></div>
                 </div>
@@ -221,12 +221,18 @@
         // ============================================================
         // Mute / Video-off toggles
         // ============================================================
+        function updateToggleLabel(id, label, enabled) {
+            const btn = document.getElementById(id);
+            btn.classList.toggle('active', enabled);
+            btn.textContent = enabled ? label : label + ' OFF';
+        }
+
         function toggleVideo() {
             videoEnabled = !videoEnabled;
             if (previewStream) {
                 previewStream.getVideoTracks().forEach(t => t.enabled = videoEnabled);
             }
-            document.getElementById('videoToggle').classList.toggle('active', videoEnabled);
+            updateToggleLabel('videoToggle', 'Video', videoEnabled);
             saveSettings();
         }
 
@@ -235,7 +241,7 @@
             if (previewStream) {
                 previewStream.getAudioTracks().forEach(t => t.enabled = audioEnabled);
             }
-            document.getElementById('audioToggle').classList.toggle('active', audioEnabled);
+            updateToggleLabel('audioToggle', 'Audio', audioEnabled);
             // Hide meter when muted
             const hasTracks = previewStream && previewStream.getAudioTracks().length > 0;
             document.getElementById('audioMeter').style.display =
@@ -311,12 +317,12 @@
                 const audio = localStorage.getItem('whip-audio-enabled');
                 if (audio !== null) {
                     audioEnabled = audio === 'true';
-                    document.getElementById('audioToggle').classList.toggle('active', audioEnabled);
+                    updateToggleLabel('audioToggle', 'Audio', audioEnabled);
                 }
                 const video = localStorage.getItem('whip-video-enabled');
                 if (video !== null) {
                     videoEnabled = video === 'true';
-                    document.getElementById('videoToggle').classList.toggle('active', videoEnabled);
+                    updateToggleLabel('videoToggle', 'Video', videoEnabled);
                 }
             } catch(e) {}
         }
@@ -674,6 +680,122 @@
 
             // Auto-start camera/mic
             await startMedia();
+
+            // Auto-test mode: ?autotest=1&endpoint=/whip/raktest
+            // Loops: connect -> wait -> disconnect -> wait -> reconnect -> verify -> repeat
+            //
+            // IMPORTANT: wantConnected stays false to suppress the built-in reconnect
+            // mechanism. The autotest manages its own connect/disconnect lifecycle.
+            if (params.get('autotest') === '1') {
+                // Enable debug mode for log relay during autotest
+                const debugCheckbox = document.getElementById('debugMode');
+                if (debugCheckbox) { debugCheckbox.checked = true; whipDebugMode = true; }
+
+                const testEndpoint = getEndpointUrl();
+                if (!testEndpoint || !previewStream) {
+                    log('AUTOTEST: No endpoint or media available', 'error');
+                } else {
+                    let cycle = 0;
+                    let passCount = 0;
+                    let failCount = 0;
+
+                    async function autotestConnect(stream) {
+                        // Clean up any previous client (suppress callbacks to avoid reconnect)
+                        if (whipClient) {
+                            whipClient.callbacks = {};
+                            whipClient.cleanup();
+                            whipClient = null;
+                        }
+                        stopStats();
+
+                        return new Promise((resolve) => {
+                            let settled = false;
+                            const settle = (result) => {
+                                if (!settled) { settled = true; resolve(result); }
+                            };
+
+                            whipClient = new WhipClient(testEndpoint, {
+                                onLog: (msg, type) => log(msg, type || ''),
+                                onConnected: () => {
+                                    startStats();
+                                    settle('connected');
+                                },
+                                onDisconnected: () => settle('disconnected'),
+                                onError: (msg) => settle('error: ' + msg),
+                                onIceState: () => {},
+                            });
+                            whipClient.connect(stream);
+
+                            // Timeout: if not connected in 15s, give up
+                            setTimeout(() => settle('timeout'), 15000);
+                        });
+                    }
+
+                    async function autotestDisconnect() {
+                        cancelReconnect();
+                        if (whipClient) {
+                            whipClient.callbacks = {};
+                            await whipClient.disconnect();
+                            whipClient = null;
+                        }
+                        stopStats();
+                    }
+
+                    async function runAutoTestCycle() {
+                        cycle++;
+                        log('=== AUTOTEST cycle ' + cycle + ': connect -> disconnect -> reconnect ===', 'warning');
+                        wantConnected = false;
+
+                        // Phase 1: Connect
+                        log('AUTOTEST [' + cycle + ']: Connect', 'warning');
+                        let result = await autotestConnect(previewStream);
+                        log('AUTOTEST [' + cycle + ']: Connect result: ' + result);
+                        if (result !== 'connected') {
+                            log('AUTOTEST [' + cycle + ']: Initial connect failed (' + result + '), skipping cycle', 'error');
+                            failCount++;
+                            await autotestDisconnect();
+                            await new Promise(r => setTimeout(r, 4000));
+                            runAutoTestCycle();
+                            return;
+                        }
+
+                        // Stay connected for 10s to verify stability (catches
+                        // late disconnects from DTLS/ICE issues that surface after ~7s)
+                        await new Promise(r => setTimeout(r, 10000));
+                        if (!whipClient || !whipClient.isConnected()) {
+                            log('AUTOTEST [' + cycle + ']: Connection dropped during stability check', 'error');
+                            failCount++;
+                            await autotestDisconnect();
+                            await new Promise(r => setTimeout(r, 4000));
+                            runAutoTestCycle();
+                            return;
+                        }
+
+                        // Phase 2: Disconnect
+                        log('AUTOTEST [' + cycle + ']: Disconnect', 'warning');
+                        await autotestDisconnect();
+                        await new Promise(r => setTimeout(r, 4000));
+
+                        // Phase 3: Reconnect
+                        log('AUTOTEST [' + cycle + ']: Reconnect', 'warning');
+                        result = await autotestConnect(previewStream);
+                        const ok = result === 'connected';
+                        if (ok) passCount++; else failCount++;
+                        log('AUTOTEST [' + cycle + ']: ' + (ok ? 'PASS' : 'FAIL (' + result + ')') +
+                            ' [total: ' + passCount + ' pass, ' + failCount + ' fail]',
+                            ok ? 'success' : 'error');
+
+                        // Clean disconnect before next cycle
+                        await autotestDisconnect();
+                        await new Promise(r => setTimeout(r, 4000));
+
+                        // Loop
+                        runAutoTestCycle();
+                    }
+                    await new Promise(r => setTimeout(r, 1000));
+                    runAutoTestCycle();
+                }
+            }
         };
     </script>
 </body>

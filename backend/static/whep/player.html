@@ -330,6 +330,142 @@
             const serverEndpoint = '{{ENDPOINT}}';
             if (serverEndpoint) {
                 document.getElementById('endpoint').value = location.protocol + '//' + location.host + serverEndpoint;
+            }
+
+            // Auto-test mode: ?autotest=1
+            // Loops: connect -> verify stream -> disconnect -> wait -> reconnect -> verify -> repeat
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('autotest') === '1') {
+                // Enable debug mode for log relay during autotest
+                const debugCheckbox = document.getElementById('debugMode');
+                if (debugCheckbox) { debugCheckbox.checked = true; whepDebugMode = true; }
+
+                let cycle = 0;
+                let passCount = 0;
+                let failCount = 0;
+
+                function autotestConnect() {
+                    // Clean up any existing connection
+                    if (connection) {
+                        connection.callbacks = {};
+                        connection.close();
+                        connection = null;
+                    }
+                    cancelReconnect();
+
+                    return new Promise((resolve) => {
+                        let settled = false;
+                        const settle = (result) => {
+                            if (!settled) { settled = true; resolve(result); }
+                        };
+
+                        connectionId++;
+                        const myId = connectionId;
+                        const endpoint = document.getElementById('endpoint').value.trim();
+
+                        connection = new WhepConnection(endpoint, {
+                            onAudioTrack: (stream) => {
+                                if (myId !== connectionId) return;
+                                document.getElementById('audio').srcObject = stream;
+                            },
+                            onVideoTrack: (stream) => {
+                                if (myId !== connectionId) return;
+                                document.getElementById('video').srcObject = stream;
+                            },
+                            onConnected: () => {
+                                if (myId !== connectionId) return;
+                                settle('connected');
+                            },
+                            onMediaStatus: () => {},
+                            onError: (msg) => {
+                                if (myId !== connectionId) return;
+                                settle('error: ' + msg);
+                            },
+                            onDisconnected: () => {
+                                if (myId !== connectionId) return;
+                                settle('disconnected');
+                            },
+                            onIceState: () => {},
+                            onLog: (msg, type) => {
+                                if (myId !== connectionId) return;
+                                log(msg, type || '');
+                            }
+                        });
+                        connection.connect();
+
+                        // Timeout
+                        setTimeout(() => settle('timeout'), 30000);
+                    });
+                }
+
+                function autotestDisconnect() {
+                    cancelReconnect();
+                    wantConnected = false;
+                    connectionId++;
+                    if (connection) {
+                        connection.callbacks = {};
+                        connection.disconnect();
+                        connection = null;
+                    }
+                }
+
+                async function runAutoTestCycle() {
+                    cycle++;
+                    log('=== WHEP AUTOTEST cycle ' + cycle + ': connect -> disconnect -> reconnect ===', 'warning');
+                    wantConnected = false;
+
+                    // Phase 1: Connect
+                    log('AUTOTEST [' + cycle + ']: Connect', 'warning');
+                    let result = await autotestConnect();
+                    log('AUTOTEST [' + cycle + ']: Connect result: ' + result);
+                    if (result !== 'connected') {
+                        log('AUTOTEST [' + cycle + ']: Initial connect failed (' + result + '), retrying cycle', 'error');
+                        failCount++;
+                        autotestDisconnect();
+                        await new Promise(r => setTimeout(r, 5000));
+                        runAutoTestCycle();
+                        return;
+                    }
+
+                    // Stay connected 10s to verify stability
+                    await new Promise(r => setTimeout(r, 10000));
+                    if (!connection || !connection.isConnected()) {
+                        log('AUTOTEST [' + cycle + ']: Connection dropped during stability check', 'error');
+                        failCount++;
+                        autotestDisconnect();
+                        await new Promise(r => setTimeout(r, 5000));
+                        runAutoTestCycle();
+                        return;
+                    }
+
+                    // Phase 2: Disconnect
+                    log('AUTOTEST [' + cycle + ']: Disconnect', 'warning');
+                    autotestDisconnect();
+                    await new Promise(r => setTimeout(r, 4000));
+
+                    // Phase 3: Reconnect
+                    log('AUTOTEST [' + cycle + ']: Reconnect', 'warning');
+                    result = await autotestConnect();
+                    const ok = result === 'connected';
+                    if (ok) passCount++; else failCount++;
+                    log('AUTOTEST [' + cycle + ']: ' + (ok ? 'PASS' : 'FAIL (' + result + ')') +
+                        ' [total: ' + passCount + ' pass, ' + failCount + ' fail]',
+                        ok ? 'success' : 'error');
+
+                    // Clean disconnect
+                    autotestDisconnect();
+                    await new Promise(r => setTimeout(r, 4000));
+                    runAutoTestCycle();
+                }
+
+                // Start after a short delay
+                if (serverEndpoint) {
+                    setTimeout(() => runAutoTestCycle(), 2000);
+                } else {
+                    log('AUTOTEST: No endpoint configured', 'error');
+                }
+            } else if (serverEndpoint) {
+                // Normal auto-connect
                 wantConnected = true;
                 setTimeout(() => doConnect(false), 500);
             }

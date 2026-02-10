@@ -56,6 +56,7 @@ class WhipClient {
         this.localStream = null;
         this.connected = false;
         this.localCandidates = [];
+        this._disconnectTimer = null;
     }
 
     // Always log (errors, connection status)
@@ -196,12 +197,22 @@ class WhipClient {
                     this.callbacks.onIceState(state);
                 }
                 if (state === 'connected' || state === 'completed') {
+                    // Clear any pending disconnect timer — ICE recovered
+                    if (this._disconnectTimer) {
+                        clearTimeout(this._disconnectTimer);
+                        this._disconnectTimer = null;
+                        this._logAlways('ICE recovered from disconnected state');
+                    }
                     this.connected = true;
                     this._logConnectionStats();
                     if (this.callbacks.onConnected) {
                         this.callbacks.onConnected();
                     }
                 } else if (state === 'failed') {
+                    if (this._disconnectTimer) {
+                        clearTimeout(this._disconnectTimer);
+                        this._disconnectTimer = null;
+                    }
                     this._logAlways('ICE connection failed', 'error');
                     this._logDebugSummary();
                     this.connected = false;
@@ -209,10 +220,21 @@ class WhipClient {
                         this.callbacks.onDisconnected();
                     }
                 } else if (state === 'disconnected') {
-                    this._logAlways('ICE disconnected', 'warning');
-                    this.connected = false;
-                    if (this.callbacks.onDisconnected) {
-                        this.callbacks.onDisconnected();
+                    // ICE 'disconnected' is transient — it can recover to 'connected'.
+                    // Wait 5s before treating it as a real disconnect.
+                    this._logAlways('ICE disconnected (waiting 5s for recovery...)', 'warning');
+                    if (!this._disconnectTimer) {
+                        this._disconnectTimer = setTimeout(() => {
+                            this._disconnectTimer = null;
+                            if (this.peerConnection &&
+                                this.peerConnection.iceConnectionState === 'disconnected') {
+                                this._logAlways('ICE did not recover, disconnecting', 'error');
+                                this.connected = false;
+                                if (this.callbacks.onDisconnected) {
+                                    this.callbacks.onDisconnected();
+                                }
+                            }
+                        }, 5000);
                     }
                 }
             };
@@ -267,17 +289,8 @@ class WhipClient {
             // Enable stereo for Opus if present
             offer.sdp = enableOpusStereo(offer.sdp);
 
-            // Log SDP offer details
-            this._log('SDP offer key lines:');
-            for (const line of offer.sdp.split('\r\n')) {
-                if (line.startsWith('m=video') || line.startsWith('b=AS') ||
-                    line.startsWith('a=rtpmap:') || line.startsWith('a=fmtp:') ||
-                    line.startsWith('a=extmap:') ||
-                    line.includes('transport-cc') || line.includes('remb') ||
-                    line.includes('x-google')) {
-                    this._log('  ' + line);
-                }
-            }
+            // SDP logging commented out for autotest - re-enable when needed
+            // this._logDebug('SDP offer created (' + offer.sdp.length + ' bytes)');
 
             await this.peerConnection.setLocalDescription(offer);
 
@@ -308,7 +321,7 @@ class WhipClient {
 
             const finalOffer = this.peerConnection.localDescription;
             this._log('Sending SDP offer to ' + this.endpoint);
-            this._logDebug('=== LOCAL SDP OFFER ===\n' + finalOffer.sdp);
+            // this._logDebug('=== LOCAL SDP OFFER ===\n' + finalOffer.sdp);
 
             // POST the offer to the WHIP endpoint.
             // Retry on 500 errors - whipserversrc may need time to clean up after
@@ -351,18 +364,13 @@ class WhipClient {
             // Set the SDP answer
             const answerSdp = await response.text();
             this._log('Received SDP answer (' + answerSdp.length + ' bytes)', 'success');
-            this._logDebug('=== REMOTE SDP ANSWER ===\n' + answerSdp);
+            // Full SDP answer logging commented out for autotest - re-enable when needed
+            // this._logDebug('=== REMOTE SDP ANSWER ===\n' + answerSdp);
 
-            // Log key SDP answer lines
-            this._log('SDP answer key lines:');
-            for (const line of answerSdp.split('\n')) {
-                const l = line.trim();
-                if (l.startsWith('m=video') || l.startsWith('b=') ||
-                    l.startsWith('a=rtpmap:') || l.startsWith('a=fmtp:') ||
-                    l.includes('transport-cc') || l.includes('remb') ||
-                    l.includes('rtcp-fb') || l.startsWith('a=extmap:')) {
-                    this._log('  ' + l);
-                }
+            // Guard: peerConnection may have been nulled by cleanup() during the fetch
+            if (!this.peerConnection) {
+                this._logAlways('PeerConnection closed during negotiation, aborting', 'warning');
+                return;
             }
 
             await this.peerConnection.setRemoteDescription({
@@ -537,6 +545,10 @@ class WhipClient {
      * Stop all local media tracks and close the peer connection.
      */
     cleanup() {
+        if (this._disconnectTimer) {
+            clearTimeout(this._disconnectTimer);
+            this._disconnectTimer = null;
+        }
         if (this.localStream) {
             this.localStream.getTracks().forEach(t => t.stop());
             this.localStream = null;

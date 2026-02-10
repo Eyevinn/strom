@@ -1,5 +1,36 @@
 // Shared WebRTC page utilities - logging, clipboard, status, debug toggle
 
+// --- Server log relay ---
+// Batches client-side log messages and POSTs them to /api/client-log
+// so server-side tooling can read browser logs without a devtools session.
+const _logRelayQueue = [];
+let _logRelayTimer = null;
+
+function _flushLogRelay() {
+    _logRelayTimer = null;
+    if (_logRelayQueue.length === 0) return;
+    const batch = _logRelayQueue.splice(0);
+    fetch('/api/client-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(batch),
+    }).catch(() => {}); // best-effort
+}
+
+function _relayLog(msg, type) {
+    // Only relay logs when debug mode is enabled
+    const debugCheckbox = document.getElementById('debugMode');
+    if (!debugCheckbox || !debugCheckbox.checked) return;
+    const level = type === 'error' ? 'error'
+        : type === 'warning' ? 'warning'
+        : type === 'debug' ? 'debug'
+        : 'info';
+    _logRelayQueue.push({ msg, level });
+    if (!_logRelayTimer) {
+        _logRelayTimer = setTimeout(_flushLogRelay, 500);
+    }
+}
+
 /**
  * Append a timestamped entry to the log panel.
  * @param {string} msg  - message text
@@ -13,6 +44,7 @@ function log(msg, type) {
     entry.textContent = new Date().toLocaleTimeString() + ' - ' + msg;
     logEl.appendChild(entry);
     logEl.scrollTop = logEl.scrollHeight;
+    _relayLog(msg, type);
 }
 
 /**
