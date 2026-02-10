@@ -102,6 +102,14 @@
         let prevTimestamp = 0;
         // debug state is in whipDebugMode (whip.js global)
 
+        // Reconnect state
+        let wantConnected = false;
+        let reconnectAttempt = 0;
+        let reconnectTimer = null;
+        let activeEndpoint = null;
+        const MAX_RECONNECT_ATTEMPTS = 15;
+        const RECONNECT_DELAY = 10000;
+
         // Elements
         const endpointSelect = document.getElementById('endpointSelect');
         const endpointUrlInput = document.getElementById('endpointUrl');
@@ -115,6 +123,52 @@
         // ============================================================
         function debugLog(msg) {
             if (whipDebugMode) log(msg);
+        }
+
+        // ============================================================
+        // Reconnect logic
+        // ============================================================
+        function scheduleReconnect(reason) {
+            if (!wantConnected || reconnectTimer) return;
+            if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+                log('Max reconnection attempts (' + MAX_RECONNECT_ATTEMPTS + ') reached. Giving up.', 'error');
+                setStatus('status', 'Connection failed', 'error');
+                wantConnected = false;
+                btnConnect.disabled = false;
+                btnDisconnect.disabled = true;
+                return;
+            }
+            reconnectAttempt++;
+            log('Reconnecting in ' + (RECONNECT_DELAY / 1000) + 's (attempt ' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
+            setStatus('status', 'Reconnecting in ' + (RECONNECT_DELAY / 1000) + 's (attempt ' + reconnectAttempt + ')...', 'connecting');
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                if (wantConnected) doReconnect();
+            }, RECONNECT_DELAY);
+        }
+
+        function cancelReconnect() {
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+        }
+
+        async function doReconnect() {
+            if (!activeEndpoint || !previewStream) return;
+            // Check that media tracks are still alive
+            const liveTracks = previewStream.getTracks().filter(t => t.readyState === 'live');
+            if (liveTracks.length === 0) {
+                log('Media tracks ended, cannot reconnect', 'error');
+                setStatus('status', 'Media lost', 'error');
+                wantConnected = false;
+                btnConnect.disabled = false;
+                btnDisconnect.disabled = true;
+                return;
+            }
+            setStatus('status', 'Reconnecting...', 'connecting');
+            log('Reconnecting to ' + activeEndpoint);
+            doConnectWithStream(activeEndpoint, previewStream);
         }
 
         function saveSettings() {
@@ -267,6 +321,68 @@
             }
         });
 
+        function doConnectWithStream(endpoint, stream) {
+            // Clean up previous client without triggering callbacks
+            if (whipClient) {
+                whipClient.callbacks = {};
+                whipClient.cleanup();
+                whipClient = null;
+            }
+            stopStats();
+
+            whipClient = new WhipClient(endpoint, {
+                onLog: (msg, type) => { log(msg, type || ''); },
+                onConnected: async () => {
+                    cancelReconnect();
+                    reconnectAttempt = 0;
+                    let statusText = 'Connected';
+                    if (whipDebugMode && whipClient) {
+                        const info = await whipClient.getTransportInfo();
+                        if (info) {
+                            const via = info.type === 'relay' ? 'relay' : 'direct';
+                            statusText += ' - ' + via + (info.remoteAddress ? ' ' + info.remoteAddress : '');
+                            log('Transport: ' + via + ' (' + info.protocol + ')' +
+                                (info.remoteAddress ? ' to ' + info.remoteAddress : '') +
+                                (info.relayProtocol ? ' via ' + info.relayProtocol : ''), 'success');
+                        }
+                    }
+                    setStatus('status', statusText, 'connected');
+                    log('Connected to ' + endpoint, 'success');
+                    startStats();
+                },
+                onDisconnected: () => {
+                    // Send DELETE so whipserversrc tears down the session
+                    if (whipClient) {
+                        const client = whipClient;
+                        whipClient = null;
+                        client.disconnect().catch(() => {});
+                    }
+                    stopStats();
+                    if (wantConnected) {
+                        scheduleReconnect('connection lost');
+                    } else {
+                        setStatus('status', 'Disconnected', 'disconnected');
+                        btnConnect.disabled = false;
+                        btnDisconnect.disabled = true;
+                    }
+                },
+                onError: (msg) => {
+                    log('Error: ' + msg, 'error');
+                    stopStats();
+                    if (wantConnected) {
+                        scheduleReconnect('error: ' + msg);
+                    } else {
+                        setStatus('status', 'Error: ' + msg, 'error');
+                        btnConnect.disabled = false;
+                        btnDisconnect.disabled = true;
+                    }
+                },
+                onIceState: () => {},
+            });
+
+            whipClient.connect(stream);
+        }
+
         btnConnect.addEventListener('click', async () => {
             const endpoint = getEndpointUrl();
             if (!endpoint) { log('Select or enter endpoint', 'error'); return; }
@@ -286,57 +402,16 @@
             btnConnect.disabled = true;
             btnDisconnect.disabled = false;
 
-            whipClient = new WhipClient(endpoint, {
-                onLog: (msg, type) => { log(msg, type || ''); },
-                onConnected: async () => {
-                    let statusText = 'Connected';
-                    if (whipDebugMode && whipClient) {
-                        const info = await whipClient.getTransportInfo();
-                        if (info) {
-                            const via = info.type === 'relay' ? 'relay' : 'direct';
-                            statusText += ' - ' + via + (info.remoteAddress ? ' ' + info.remoteAddress : '');
-                            log('Transport: ' + via + ' (' + info.protocol + ')' +
-                                (info.remoteAddress ? ' to ' + info.remoteAddress : '') +
-                                (info.relayProtocol ? ' via ' + info.relayProtocol : ''), 'success');
-                        }
-                    }
-                    setStatus('status', statusText, 'connected');
-                    log('Connected to ' + endpoint, 'success');
-                    startStats();
-                },
-                onDisconnected: () => {
-                    setStatus('status', 'Disconnected', 'disconnected');
-                    // Send DELETE so whipserversrc tears down the session
-                    if (whipClient) {
-                        const client = whipClient;
-                        whipClient = null;
-                        client.disconnect().catch(() => {});
-                    }
-                    btnConnect.disabled = false;
-                    btnDisconnect.disabled = true;
-                    stopStats();
-                },
-                onError: (msg) => {
-                    setStatus('status', 'Error: ' + msg, 'error');
-                    log('Error: ' + msg, 'error');
-                    btnConnect.disabled = false;
-                    btnDisconnect.disabled = true;
-                    stopStats();
-                },
-                onIceState: () => {},
-            });
-
-            try {
-                await whipClient.connect(sendStream);
-            } catch(e) {
-                log('Connection failed: ' + e.message, 'error');
-                setStatus('status', 'Connection failed', 'error');
-                btnConnect.disabled = false;
-                btnDisconnect.disabled = true;
-            }
+            wantConnected = true;
+            activeEndpoint = endpoint;
+            reconnectAttempt = 0;
+            doConnectWithStream(endpoint, sendStream);
         });
 
         btnDisconnect.addEventListener('click', async () => {
+            wantConnected = false;
+            cancelReconnect();
+            reconnectAttempt = 0;
             if (whipClient) { await whipClient.disconnect(); whipClient = null; }
             stopPreview();
             stopStats();
