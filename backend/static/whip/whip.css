@@ -98,6 +98,7 @@
 /* Video preview */
 .video-container {
     margin-bottom: 12px;
+    max-width: 50%;
 }
 
 /* Stats panel */

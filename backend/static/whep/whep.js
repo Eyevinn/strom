@@ -126,7 +126,7 @@ class WhepConnection {
 
         try {
             // Fetch ICE servers and transport policy from the server configuration
-            let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]; // fallback
+            let iceServers = [];
             let iceTransportPolicy = 'all'; // fallback
 
             this._log('Fetching ICE server configuration from /api/ice-servers...');
@@ -266,7 +266,7 @@ class WhepConnection {
             this._logDebug('=== LOCAL SDP OFFER ===\n' + offer.sdp);
 
             // Wait for ICE gathering with detailed logging
-            this._log('Waiting for ICE gathering (timeout: 5s)...');
+            this._log('Waiting for ICE gathering (timeout: 2s)...');
             const gatheringStartTime = Date.now();
 
             await new Promise((resolve) => {
@@ -274,9 +274,9 @@ class WhepConnection {
                     resolve();
                 } else {
                     const timeout = setTimeout(() => {
-                        this._log('ICE gathering timeout after 5s', 'warning');
+                        this._log('ICE gathering timeout after 2s', 'warning');
                         resolve();
-                    }, 5000);
+                    }, 2000);
                     this.peerConnection.onicegatheringstatechange = () => {
                         if (this.peerConnection.iceGatheringState === 'complete') {
                             clearTimeout(timeout);

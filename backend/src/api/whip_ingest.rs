@@ -130,6 +130,14 @@ pub async fn whip_post(
         }
     };
 
+    if status.is_server_error() || status.is_client_error() {
+        let body_str = std::str::from_utf8(&resp_body).unwrap_or("<non-utf8>");
+        warn!(
+            "WHIP: Internal server returned {} for endpoint '{}': {}",
+            status, endpoint_id, body_str
+        );
+    }
+
     // Patch the SDP answer for better Chrome bandwidth estimation:
     // 1. Add goog-remb as fallback bandwidth estimation
     // 2. Add x-google bitrate hints to the video fmtp line so Chrome

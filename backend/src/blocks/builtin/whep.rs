@@ -179,8 +179,11 @@ fn build_whepsrc(
 
     // Set properties directly on whepsrc (no signaller child)
     whepsrc.set_property("whep-endpoint", &whep_endpoint);
-    if let Some(ref stun) = stun_server {
-        whepsrc.set_property("stun-server", stun);
+    // Explicitly clear defaults when not configured,
+    // since whepsrc defaults to stun://stun.l.google.com:19302
+    match stun_server {
+        Some(ref stun) => whepsrc.set_property("stun-server", stun),
+        None => whepsrc.set_property("stun-server", None::<&str>),
     }
     if let Some(ref turn) = turn_server {
         whepsrc.set_property("turn-server", turn);
@@ -363,9 +366,11 @@ fn build_whepclientsrc(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("whepclientsrc: {}", e)))?;
 
-    // Set ICE server properties on the source
-    if let Some(ref stun) = stun_server {
-        whepclientsrc.set_property("stun-server", stun);
+    // Set ICE server properties on the source (explicitly clear defaults when
+    // not configured, since webrtcsrc defaults to stun://stun.l.google.com:19302)
+    match stun_server {
+        Some(ref stun) => whepclientsrc.set_property("stun-server", stun),
+        None => whepclientsrc.set_property("stun-server", None::<&str>),
     }
     if let Some(ref turn) = turn_server {
         whepclientsrc.set_property("turn-server", turn);
@@ -737,10 +742,12 @@ fn build_whepserversink(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("whepserversink: {}", e)))?;
 
-    // Set ICE server properties
+    // Set ICE server properties (explicitly clear defaults when not configured,
+    // since webrtcsink defaults to stun://stun.l.google.com:19302)
     // Note: webrtcsink-based elements use "turn-servers" (plural, array) not "turn-server"
-    if let Some(ref stun) = stun_server {
-        whepserversink.set_property("stun-server", stun);
+    match stun_server {
+        Some(ref stun) => whepserversink.set_property("stun-server", stun),
+        None => whepserversink.set_property("stun-server", None::<&str>),
     }
     if let Some(ref turn) = turn_server {
         let turn_servers = gst::Array::new([turn]);

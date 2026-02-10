@@ -22,10 +22,14 @@ use gstreamer_video as gst_video;
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Audio stream elements tracked for cleanup on disconnect:
+/// (dynamically created elements, liveadder request pad).
+type AudioStreamMap = HashMap<String, (Vec<gst::Element>, gst::Pad)>;
 
 /// WHIP Output block builder.
 pub struct WHIPOutputBuilder;
@@ -190,9 +194,11 @@ fn build_whipserversrc(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("whipserversrc: {}", e)))?;
 
-    // Set ICE server properties
-    if let Some(ref stun) = stun_server {
-        whipserversrc.set_property("stun-server", stun);
+    // Set ICE server properties (explicitly clear defaults when not configured,
+    // since webrtcsrc defaults to stun://stun.l.google.com:19302)
+    match stun_server {
+        Some(ref stun) => whipserversrc.set_property("stun-server", stun),
+        None => whipserversrc.set_property("stun-server", None::<&str>),
     }
     if let Some(ref turn) = turn_server {
         let turn_servers = gst::Array::new([turn]);
@@ -436,28 +442,114 @@ fn build_whipserversrc(
     // pad-removed callback when the active client disconnects.
     let video_connected = Arc::new(AtomicBool::new(false));
 
+    // Track the current video queue so we can remove it on disconnect.
+    let video_queue: Arc<Mutex<Option<gst::Element>>> = Arc::new(Mutex::new(None));
+
+    // Track audio stream elements per pad name so we can clean them up on disconnect.
+    // Each entry: (dynamically created elements, liveadder request pad).
+    let audio_streams: Arc<Mutex<AudioStreamMap>> = Arc::new(Mutex::new(HashMap::new()));
+
     // Reset video_connected when video pad is removed (client disconnect).
     // Also clean up dynamically added elements for that stream.
     let video_connected_for_remove = Arc::clone(&video_connected);
     let videoconvert_weak_for_remove = videoconvert_weak.clone();
-    whipserversrc.connect_pad_removed(move |_src, pad| {
+    let video_queue_for_remove = Arc::clone(&video_queue);
+    let audio_streams_for_remove = Arc::clone(&audio_streams);
+    let liveadder_weak_for_remove = liveadder_weak.clone();
+    whipserversrc.connect_pad_removed(move |src, pad| {
         let pad_name = pad.name();
         info!("WHIP Input: Pad removed: {}", pad_name);
 
+        // Workaround for gst-plugins-rs BaseWebRTCSrc bug: force all internal
+        // session elements to NULL before whipserversrc drops them. This prevents
+        // GStreamer-CRITICAL warnings about elements disposed in PLAYING state,
+        // which can corrupt internal state and cause 500 errors on reconnect.
+        //
+        // Strategy: collect strong refs to ALL descendants of whipserversrc
+        // synchronously (fast, no locks needed). This prevents finalization while
+        // whipserversrc tears down the session. Then spawn a thread to set them
+        // to NULL (must be async to avoid deadlock from streaming thread locks).
+        if let Ok(bin) = src.clone().downcast::<gst::Bin>() {
+            let to_null: Vec<gst::Element> = bin
+                .iterate_recurse()
+                .into_iter()
+                .flatten()
+                .filter(|e| {
+                    let (_, current, _) = e.state(gst::ClockTime::ZERO);
+                    current != gst::State::Null
+                })
+                .collect();
+
+            if !to_null.is_empty() {
+                let count = to_null.len();
+                std::thread::spawn(move || {
+                    for elem in &to_null {
+                        let _ = elem.set_state(gst::State::Null);
+                    }
+                    info!(
+                        "WHIP Input: Force-set {} internal elements to NULL (async cleanup)",
+                        count
+                    );
+                });
+            }
+        }
+
         if pad_name.starts_with("video_") {
             video_connected_for_remove.store(false, Ordering::SeqCst);
-            info!("WHIP Input: Video disconnected, ready for new connection");
 
-            // Unlink videoconvert sink so next client can link to it
-            if let Some(ref vc_weak) = videoconvert_weak_for_remove {
-                if let Some(vc) = vc_weak.upgrade() {
-                    if let Some(sink_pad) = vc.static_pad("sink") {
-                        if let Some(peer) = sink_pad.peer() {
-                            let _ = peer.unlink(&sink_pad);
-                            info!("WHIP Input: Unlinked videoconvert sink pad");
+            // Remove the old video queue from the pipeline so the next
+            // connection can create a fresh one and link to videoconvert.
+            let old_queue = video_queue_for_remove.lock().unwrap().take();
+            if let Some(queue) = old_queue {
+                // Unlink queue -> videoconvert, then remove queue from pipeline.
+                // The new connection will create a fresh queue and link it.
+                // whipserversrc sends proper stream-start → caps → segment events
+                // on the new pad, which resets downstream streaming state naturally.
+                if let Some(ref vc_weak) = videoconvert_weak_for_remove {
+                    if let Some(vc) = vc_weak.upgrade() {
+                        if let Some(sink_pad) = vc.static_pad("sink") {
+                            if let Some(peer) = sink_pad.peer() {
+                                let _ = peer.unlink(&sink_pad);
+                            }
                         }
                     }
                 }
+                // Remove queue from pipeline
+                let _ = queue.set_state(gst::State::Null);
+                if let Ok(pipeline) = get_pipeline_from_element(src.upcast_ref()) {
+                    let _ = pipeline.remove(&queue);
+                }
+                info!("WHIP Input: Removed old video queue, ready for new connection");
+            } else {
+                info!("WHIP Input: Video disconnected (no queue to clean up)");
+            }
+        } else if pad_name.starts_with("audio_") {
+            // Clean up dynamically created audio elements for this stream.
+            let pad_key = pad_name.to_string();
+            let entry = audio_streams_for_remove.lock().unwrap().remove(&pad_key);
+            if let Some((elements, liveadder_pad)) = entry {
+                if let Ok(pipeline) = get_pipeline_from_element(src.upcast_ref()) {
+                    for elem in &elements {
+                        let _ = elem.set_state(gst::State::Null);
+                        let _ = pipeline.remove(elem);
+                    }
+                }
+                // Release the liveadder request pad
+                if let Some(ref la_weak) = liveadder_weak_for_remove {
+                    if let Some(la) = la_weak.upgrade() {
+                        la.release_request_pad(&liveadder_pad);
+                    }
+                }
+                info!(
+                    "WHIP Input: Removed {} audio elements and released liveadder pad for {}",
+                    elements.len(),
+                    pad_name
+                );
+            } else {
+                info!(
+                    "WHIP Input: Audio disconnected {} (no elements to clean up)",
+                    pad_name
+                );
             }
         }
     });
@@ -485,14 +577,22 @@ fn build_whipserversrc(
         if pad_name.starts_with("audio_") {
             if let Some(ref liveadder_weak) = liveadder_weak {
                 if let Some(liveadder) = liveadder_weak.upgrade() {
-                    if let Err(e) = setup_whip_audio_direct(
+                    match setup_whip_audio_direct(
                         pad,
                         &pipeline,
                         &liveadder,
                         &instance_id_owned,
                         stream_num,
                     ) {
-                        error!("WHIP Input: Failed to setup audio stream: {}", e);
+                        Ok((elements, liveadder_pad)) => {
+                            audio_streams
+                                .lock()
+                                .unwrap()
+                                .insert(pad_name.to_string(), (elements, liveadder_pad));
+                        }
+                        Err(e) => {
+                            error!("WHIP Input: Failed to setup audio stream: {}", e);
+                        }
                     }
                 }
             } else {
@@ -506,15 +606,20 @@ fn build_whipserversrc(
             if !video_connected.swap(true, Ordering::SeqCst) {
                 if let Some(ref videoconvert_weak) = videoconvert_weak {
                     if let Some(videoconvert) = videoconvert_weak.upgrade() {
-                        if let Err(e) = setup_whip_video_direct(
+                        match setup_whip_video_direct(
                             pad,
                             &pipeline,
                             &videoconvert,
                             &instance_id_owned,
                             stream_num,
                         ) {
-                            error!("WHIP Input: Failed to setup video stream: {}", e);
-                            video_connected.store(false, Ordering::SeqCst);
+                            Ok(queue) => {
+                                *video_queue.lock().unwrap() = Some(queue);
+                            }
+                            Err(e) => {
+                                error!("WHIP Input: Failed to setup video stream: {}", e);
+                                video_connected.store(false, Ordering::SeqCst);
+                            }
                         }
                     }
                 }
@@ -555,13 +660,14 @@ fn build_whipserversrc(
 
 /// Setup audio stream from whipserversrc: pad (decoded) -> queue -> audioconvert -> audioresample -> liveadder.
 /// whipserversrc decodes internally, so the pad already outputs audio/x-raw.
+/// Returns the dynamically created elements and the liveadder request pad for cleanup on disconnect.
 fn setup_whip_audio_direct(
     src_pad: &gst::Pad,
     pipeline: &gst::Pipeline,
     liveadder: &gst::Element,
     instance_id: &str,
     stream_num: usize,
-) -> Result<(), String> {
+) -> Result<(Vec<gst::Element>, gst::Pad), String> {
     let queue_name = format!("{}:whip_audio_queue_{}", instance_id, stream_num);
     let audioconvert_name = format!("{}:whip_audioconvert_{}", instance_id, stream_num);
     let audioresample_name = format!("{}:whip_audioresample_{}", instance_id, stream_num);
@@ -602,15 +708,14 @@ fn setup_whip_audio_direct(
         .link(&audioresample)
         .map_err(|e| format!("Failed to link audioconvert to audioresample: {:?}", e))?;
 
-    if let Some(liveadder_sink) = liveadder.request_pad_simple("sink_%u") {
-        liveadder_sink.set_property("qos-messages", true);
-        let audioresample_src = audioresample.static_pad("src").unwrap();
-        audioresample_src
-            .link(&liveadder_sink)
-            .map_err(|e| format!("Failed to link audioresample to liveadder: {:?}", e))?;
-    } else {
-        return Err("Failed to request sink pad from liveadder".to_string());
-    }
+    let liveadder_sink = liveadder
+        .request_pad_simple("sink_%u")
+        .ok_or("Failed to request sink pad from liveadder")?;
+    liveadder_sink.set_property("qos-messages", true);
+    let audioresample_src = audioresample.static_pad("src").unwrap();
+    audioresample_src
+        .link(&liveadder_sink)
+        .map_err(|e| format!("Failed to link audioresample to liveadder: {:?}", e))?;
 
     queue
         .sync_state_with_parent()
@@ -626,7 +731,7 @@ fn setup_whip_audio_direct(
         "WHIP Input: Audio stream {} linked directly (queue -> audioconvert -> audioresample -> liveadder)",
         stream_num
     );
-    Ok(())
+    Ok((vec![queue, audioconvert, audioresample], liveadder_sink))
 }
 
 /// Setup video stream from whipserversrc: pad (decoded) -> queue -> output_videoconvert.
@@ -637,7 +742,7 @@ fn setup_whip_video_direct(
     output_videoconvert: &gst::Element,
     instance_id: &str,
     stream_num: usize,
-) -> Result<(), String> {
+) -> Result<gst::Element, String> {
     let queue_name = format!("{}:whip_video_queue_{}", instance_id, stream_num);
 
     let queue = gst::ElementFactory::make("queue")
@@ -674,7 +779,7 @@ fn setup_whip_video_direct(
         "WHIP Input: Video stream {} linked directly (queue -> videoconvert)",
         stream_num
     );
-    Ok(())
+    Ok(queue)
 }
 
 /// Discard a stream via fakesink (no decoding)
@@ -811,9 +916,11 @@ fn build_whipclientsink(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("whipclientsink: {}", e)))?;
 
-    // Set ICE server properties
-    if let Some(ref stun) = stun_server {
-        whipclientsink.set_property("stun-server", stun);
+    // Set ICE server properties (explicitly clear defaults when not configured,
+    // since webrtcsink defaults to stun://stun.l.google.com:19302)
+    match stun_server {
+        Some(ref stun) => whipclientsink.set_property("stun-server", stun),
+        None => whipclientsink.set_property("stun-server", None::<&str>),
     }
     if let Some(ref turn) = turn_server {
         let turn_servers = gst::Array::new([turn]);
@@ -947,8 +1054,11 @@ fn build_whipsink(
         .map_err(|e| BlockBuildError::ElementCreation(format!("whipsink: {}", e)))?;
 
     whipsink.set_property("whip-endpoint", &whip_endpoint);
-    if let Some(ref stun) = stun_server {
-        whipsink.set_property("stun-server", stun);
+    // Explicitly clear defaults when not configured,
+    // since whipsink defaults to stun://stun.l.google.com:19302
+    match stun_server {
+        Some(ref stun) => whipsink.set_property("stun-server", stun),
+        None => whipsink.set_property("stun-server", None::<&str>),
     }
     if let Some(ref turn) = turn_server {
         whipsink.set_property("turn-server", turn);
