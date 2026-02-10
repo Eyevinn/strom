@@ -16,6 +16,7 @@ class WhipClient {
         this.resourceUrl = null;
         this.localStream = null;
         this.iceServers = [];
+        this.iceTransportPolicy = 'all';
         this.connected = false;
     }
 
@@ -32,15 +33,17 @@ class WhipClient {
         try {
             const resp = await fetch('/api/ice-servers');
             if (resp.ok) {
-                const data = await resp.json();
-                if (data && data.length > 0) {
-                    this.iceServers = data.map(url => {
-                        if (url.startsWith('turn:') || url.startsWith('turns:')) {
-                            return { urls: url, username: '', credential: '' };
-                        }
-                        return { urls: url };
-                    });
-                    this.log('Loaded ICE servers: ' + data.join(', '));
+                const config = await resp.json();
+                if (config.ice_servers && config.ice_servers.length > 0) {
+                    this.iceServers = config.ice_servers;
+                }
+                if (config.ice_transport_policy) {
+                    this.iceTransportPolicy = config.ice_transport_policy;
+                }
+                this.log('ICE transport policy: ' + this.iceTransportPolicy);
+                for (const server of this.iceServers) {
+                    this.log('ICE server: ' + server.urls +
+                        (server.username ? ' (credentials set)' : ''));
                 }
             }
         } catch (e) {
@@ -89,6 +92,7 @@ class WhipClient {
 
         const config = {
             iceServers: this.iceServers.length > 0 ? this.iceServers : undefined,
+            iceTransportPolicy: this.iceTransportPolicy,
             bundlePolicy: 'max-bundle',
         };
 
