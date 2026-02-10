@@ -80,7 +80,7 @@
 
         <!-- Log -->
         <div style="display: flex; align-items: center; gap: 6px; margin-top: 16px; margin-bottom: 4px;">
-            <input type="checkbox" id="debugMode" data-storage-key="whip-debug" onchange="toggleDebugMode()" style="margin: 0; width: auto;">
+            <input type="checkbox" id="debugMode" data-storage-key="whip-debug" onchange="toggleDebugMode(); whipDebugMode = this.checked;" style="margin: 0; width: auto;">
             <label for="debugMode" style="color: #666; font-size: 0.8em; cursor: pointer; margin: 0;">Debug</label>
             <button onclick="copyLog()" style="padding: 2px 6px; white-space: nowrap;">Copy log</button>
         </div>
@@ -100,7 +100,7 @@
         let prevVideoBytes = 0;
         let prevAudioBytes = 0;
         let prevTimestamp = 0;
-        let debugEnabled = false;
+        // debug state is in whipDebugMode (whip.js global)
 
         // Elements
         const endpointSelect = document.getElementById('endpointSelect');
@@ -111,10 +111,10 @@
         const btnDisconnect = document.getElementById('btnDisconnect');
 
         // ============================================================
-        // Debug logging (page-specific, uses shared log())
+        // Debug logging (syncs with whipDebugMode in whip.js)
         // ============================================================
         function debugLog(msg) {
-            if (debugEnabled) log(msg);
+            if (whipDebugMode) log(msg);
         }
 
         function saveSettings() {
@@ -287,10 +287,7 @@
             btnDisconnect.disabled = false;
 
             whipClient = new WhipClient(endpoint, {
-                onLog: (msg, type) => {
-                    if (type === 'error') { log(msg, 'error'); }
-                    else if (debugEnabled) { log(msg, type || ''); }
-                },
+                onLog: (msg, type) => { log(msg, type || ''); },
                 onConnected: () => {
                     setStatus('status', 'Connected', 'connected');
                     log('Connected to ' + endpoint, 'success');
@@ -315,7 +312,7 @@
                     btnDisconnect.disabled = true;
                     stopStats();
                 },
-                onIceState: (state) => { debugLog('ICE: ' + state); },
+                onIceState: () => {},
             });
 
             try {
@@ -353,9 +350,9 @@
         }
 
         async function collectStats() {
-            if (!whipClient || !whipClient.pc) return;
+            if (!whipClient || !whipClient.peerConnection) return;
             try {
-                const stats = await whipClient.pc.getStats();
+                const stats = await whipClient.peerConnection.getStats();
                 const now = performance.now();
                 const elapsed = prevTimestamp > 0 ? (now - prevTimestamp) / 1000 : 1;
 
@@ -425,7 +422,7 @@
 
             // Restore settings
             restoreSettings();
-            debugEnabled = restoreDebugMode('whip-debug');
+            whipDebugMode = restoreDebugMode('whip-debug');
 
             // Parse endpoint from URL
             const params = new URLSearchParams(window.location.search);

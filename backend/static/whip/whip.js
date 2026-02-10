@@ -1,55 +1,84 @@
-/**
- * WHIP Client - WebRTC-HTTP Ingestion Protocol client for browser-based sending.
- *
- * Sends camera/microphone media to a WHIP server endpoint.
- */
+// WHIP Client - WebRTC-HTTP Ingestion Protocol client for browser-based sending.
+
+// Global debug mode flag - toggle via UI or setWhipDebugMode(true/false)
+let whipDebugMode = false;
+
+function setWhipDebugMode(enabled) {
+    whipDebugMode = enabled;
+    console.log('[WHIP] Debug mode ' + (enabled ? 'enabled' : 'disabled'));
+}
+
+// Enable stereo for Opus codec in SDP
+// Chrome defaults to mono (stereo=0) which makes stereo audio play as mono
+function enableOpusStereo(sdp) {
+    // Find Opus payload type from rtpmap line (e.g., "a=rtpmap:111 opus/48000/2")
+    const opusMatch = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i);
+    if (!opusMatch) return sdp;
+    const opusPt = opusMatch[1];
+    const fmtpRegex = new RegExp(`(a=fmtp:${opusPt} [^\\r\\n]+)`, 'g');
+    return sdp.replace(fmtpRegex, (match) => {
+        if (match.includes('stereo=')) return match;
+        return match + ';stereo=1;sprop-stereo=1';
+    });
+}
+
+// Parse ICE candidate for detailed logging
+function parseIceCandidate(candidateStr) {
+    const parts = candidateStr.split(' ');
+    if (parts.length < 8) return { raw: candidateStr };
+    const result = {
+        foundation: parts[0].replace('candidate:', ''),
+        component: parts[1],
+        protocol: parts[2],
+        priority: parts[3],
+        ip: parts[4],
+        port: parts[5],
+        type: parts[7],
+        raw: candidateStr
+    };
+    for (let i = 8; i < parts.length - 1; i++) {
+        if (parts[i] === 'raddr') result.relatedAddress = parts[i + 1];
+        if (parts[i] === 'rport') result.relatedPort = parts[i + 1];
+    }
+    return result;
+}
 
 class WhipClient {
     /**
-     * @param {string} endpointUrl - The WHIP endpoint URL (e.g., /whip/my-stream)
+     * @param {string} endpoint - The WHIP endpoint URL (e.g., /whip/my-stream)
      * @param {Object} callbacks - Event callbacks
      */
-    constructor(endpointUrl, callbacks = {}) {
-        this.endpointUrl = endpointUrl;
+    constructor(endpoint, callbacks = {}) {
+        this.endpoint = endpoint;
         this.callbacks = callbacks;
-        this.pc = null;
+        this.peerConnection = null;
         this.resourceUrl = null;
         this.localStream = null;
-        this.iceServers = [];
-        this.iceTransportPolicy = 'all';
         this.connected = false;
+        this.localCandidates = [];
     }
 
-    log(msg, type = 'info') {
+    // Always log (errors, connection status)
+    _logAlways(msg, type = '') {
+        const timestamp = new Date().toISOString();
+        console.log(`[WHIP ${timestamp}] ${msg}`);
         if (this.callbacks.onLog) {
             this.callbacks.onLog(msg, type);
         }
     }
 
-    /**
-     * Fetch ICE server configuration from the backend.
-     */
-    async fetchIceServers() {
-        this.iceServers = [];
-        this.iceTransportPolicy = 'all';
-        try {
-            const resp = await fetch('/api/ice-servers');
-            if (resp.ok) {
-                const config = await resp.json();
-                if (config.ice_servers && config.ice_servers.length > 0) {
-                    this.iceServers = config.ice_servers;
-                }
-                if (config.ice_transport_policy) {
-                    this.iceTransportPolicy = config.ice_transport_policy;
-                }
-                this.log('ICE transport policy: ' + this.iceTransportPolicy);
-                for (const server of this.iceServers) {
-                    this.log('ICE server: ' + server.urls +
-                        (server.username ? ' (credentials set)' : ''));
-                }
-            }
-        } catch (e) {
-            this.log('Failed to fetch ICE servers: ' + e.message, 'error');
+    // Only log when debug mode is enabled
+    _log(msg, type = '') {
+        if (!whipDebugMode) return;
+        this._logAlways(msg, type);
+    }
+
+    _logDebug(msg) {
+        if (!whipDebugMode) return;
+        const timestamp = new Date().toISOString();
+        console.log(`[WHIP DEBUG ${timestamp}] ${msg}`);
+        if (this.callbacks.onLog) {
+            this.callbacks.onLog(`[DEBUG] ${msg}`, 'debug');
         }
     }
 
@@ -59,21 +88,21 @@ class WhipClient {
      * @returns {MediaStream}
      */
     async getMedia(constraints) {
-        this.log('Requesting user media...');
+        this._logAlways('Requesting user media...');
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             const msg = window.isSecureContext
                 ? 'getUserMedia not supported by this browser'
                 : 'Camera/mic requires HTTPS. Connect via localhost or enable HTTPS.';
-            this.log(msg, 'error');
+            this._logAlways(msg, 'error');
             throw new Error(msg);
         }
         try {
             this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
             const tracks = this.localStream.getTracks().map(t => t.kind + ':' + t.label);
-            this.log('Got media tracks: ' + tracks.join(', '));
+            this._logAlways('Got media tracks: ' + tracks.join(', '));
             return this.localStream;
         } catch (e) {
-            this.log('Failed to get user media: ' + e.message, 'error');
+            this._logAlways('Failed to get user media: ' + e.message, 'error');
             throw e;
         }
     }
@@ -84,233 +113,334 @@ class WhipClient {
      */
     async connect(stream) {
         if (this.connected) {
-            this.log('Already connected, disconnect first', 'error');
+            this._logAlways('Already connected, disconnect first', 'error');
             return;
         }
 
-        await this.fetchIceServers();
-
-        this.log('Creating peer connection...');
-
-        const config = {
-            iceServers: this.iceServers.length > 0 ? this.iceServers : undefined,
-            iceTransportPolicy: this.iceTransportPolicy,
-            bundlePolicy: 'max-bundle',
-        };
-
-        this.pc = new RTCPeerConnection(config);
-
-        this.pc.oniceconnectionstatechange = () => {
-            if (!this.pc) return;
-            const state = this.pc.iceConnectionState;
-            this.log('ICE connection state: ' + state);
-            if (this.callbacks.onIceState) {
-                this.callbacks.onIceState(state);
-            }
-            if (state === 'connected' || state === 'completed') {
-                this.connected = true;
-                if (this.callbacks.onConnected) {
-                    this.callbacks.onConnected();
-                }
-            } else if (state === 'disconnected' || state === 'failed') {
-                this.connected = false;
-                if (this.callbacks.onDisconnected) {
-                    this.callbacks.onDisconnected();
-                }
-            }
-        };
-
-        this.pc.onconnectionstatechange = () => {
-            if (!this.pc) return;
-            const state = this.pc.connectionState;
-            this.log('Connection state: ' + state);
-            // 'failed' means DTLS/ICE has failed unrecoverably
-            if (state === 'failed' && this.connected) {
-                this.connected = false;
-                if (this.callbacks.onDisconnected) {
-                    this.callbacks.onDisconnected();
-                }
-            }
-        };
-
-        // Add tracks from the stream
-        for (const track of stream.getTracks()) {
-            this.log('Adding ' + track.kind + ' track: ' + track.label);
-            const transceiver = this.pc.addTransceiver(track, { direction: 'sendonly' });
-
-            // Set encoding parameters for video
-            if (track.kind === 'video') {
-                try {
-                    const params = transceiver.sender.getParameters();
-                    if (!params.encodings || params.encodings.length === 0) {
-                        params.encodings = [{}];
-                    }
-                    params.encodings[0].maxBitrate = 4_000_000; // 4 Mbps
-                    params.encodings[0].maxFramerate = 30;
-                    await transceiver.sender.setParameters(params);
-                    this.log('Set video encoding: maxBitrate=4Mbps, maxFramerate=30');
-                } catch (e) {
-                    this.log('Failed to set video encoding params: ' + e.message, 'error');
-                }
-            }
-        }
-
-        // Create SDP offer
-        this.log('Creating SDP offer...');
-        const offer = await this.pc.createOffer();
-
-        // Enable stereo for Opus if present
-        offer.sdp = this.enableOpusStereo(offer.sdp);
-        // Note: bitrate hints (x-google-*) and b=AS are handled server-side
-        // by fix_video_bitrate_hints() on the SDP answer. No need to add them here.
-
-        // Log SDP offer details
-        this.log('SDP offer key lines:');
-        for (const line of offer.sdp.split('\r\n')) {
-            if (line.startsWith('m=video') || line.startsWith('b=AS') ||
-                line.startsWith('a=rtpmap:') || line.startsWith('a=fmtp:') ||
-                line.startsWith('a=extmap:') ||
-                line.includes('transport-cc') || line.includes('remb') ||
-                line.includes('x-google')) {
-                this.log('  ' + line);
-            }
-        }
-
-        await this.pc.setLocalDescription(offer);
-
-        // Wait for ICE gathering to complete (or timeout)
-        await this.waitForIceGathering(5000);
-
-        const finalOffer = this.pc.localDescription;
-        this.log('Sending SDP offer to ' + this.endpointUrl);
-
-        // POST the offer to the WHIP endpoint.
-        // Retry on 500 errors - whipserversrc may need time to clean up after
-        // a previous session before it can accept a new one.
-        const maxRetries = 3;
-        const retryDelayMs = 2000;
-        let response;
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                response = await fetch(this.endpointUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/sdp',
-                    },
-                    body: finalOffer.sdp,
-                });
-            } catch (e) {
-                this.log('Failed to send offer: ' + e.message, 'error');
-                this.cleanup();
-                if (this.callbacks.onError) {
-                    this.callbacks.onError('Failed to connect: ' + e.message);
-                }
-                return;
-            }
-
-            if (response.ok) break;
-
-            if (response.status >= 500 && attempt < maxRetries) {
-                this.log('Server returned ' + response.status + ', retrying in ' + (retryDelayMs / 1000) + 's (attempt ' + attempt + '/' + maxRetries + ')...');
-                await new Promise(r => setTimeout(r, retryDelayMs));
-                continue;
-            }
-
-            const errorText = await response.text();
-            this.log('WHIP server returned ' + response.status + ': ' + errorText, 'error');
-            this.cleanup();
-            if (this.callbacks.onError) {
-                this.callbacks.onError('Server error: ' + response.status);
-            }
-            return;
-        }
-
-        // Get the resource URL for cleanup
-        const locationHeader = response.headers.get('Location');
-        if (locationHeader) {
-            // Make it absolute if relative
-            if (locationHeader.startsWith('/')) {
-                this.resourceUrl = window.location.origin + locationHeader;
-            } else {
-                this.resourceUrl = locationHeader;
-            }
-            this.log('Resource URL: ' + this.resourceUrl);
-        }
-
-        // Set the SDP answer
-        const answerSdp = await response.text();
-        this.log('Received SDP answer (' + answerSdp.length + ' bytes)');
+        this.localCandidates = [];
 
         try {
-            await this.pc.setRemoteDescription({
-                type: 'answer',
-                sdp: answerSdp,
+            // Fetch ICE servers and transport policy from the server configuration
+            let iceServers = [];
+            let iceTransportPolicy = 'all';
+
+            this._log('Fetching ICE server configuration from /api/ice-servers...');
+
+            try {
+                const resp = await fetch('/api/ice-servers');
+                if (resp.ok) {
+                    const config = await resp.json();
+                    this._logDebug('ICE config response: ' + JSON.stringify(config, null, 2));
+                    if (config.ice_servers && config.ice_servers.length > 0) {
+                        iceServers = config.ice_servers;
+                    }
+                    if (config.ice_transport_policy) {
+                        iceTransportPolicy = config.ice_transport_policy;
+                    }
+                } else {
+                    this._log('Failed to fetch ICE servers: HTTP ' + resp.status, 'warning');
+                }
+            } catch (e) {
+                this._log('Failed to fetch ICE servers: ' + e.message, 'warning');
+            }
+
+            // Log ICE configuration
+            this._log('=== ICE CONFIGURATION ===');
+            this._log('iceTransportPolicy: ' + iceTransportPolicy);
+            this._log('iceServers:');
+            for (const server of iceServers) {
+                this._log('  - urls: ' + server.urls);
+                if (server.username) this._log('    username: ' + server.username);
+                if (server.credential) this._log('    credential: ***');
+            }
+            this._log('=========================');
+
+            // Create RTCPeerConnection
+            this._log('Creating RTCPeerConnection with iceTransportPolicy=' + iceTransportPolicy);
+            this.peerConnection = new RTCPeerConnection({
+                iceServers: iceServers.length > 0 ? iceServers : undefined,
+                iceTransportPolicy,
+                bundlePolicy: 'max-bundle',
             });
-            this.log('Remote description set', 'success');
+
+            // Track ICE candidates
+            this.peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    const parsed = parseIceCandidate(event.candidate.candidate);
+                    this.localCandidates.push(parsed);
+                    this._log('Local ICE candidate: type=' + parsed.type +
+                        ' protocol=' + parsed.protocol +
+                        ' ip=' + parsed.ip + ':' + parsed.port +
+                        (parsed.relatedAddress ? ' relay-from=' + parsed.relatedAddress + ':' + parsed.relatedPort : ''));
+                    this._logDebug('Full candidate: ' + event.candidate.candidate);
+                } else {
+                    this._log('ICE candidate gathering complete (null candidate)');
+                    this._logLocalCandidateSummary();
+                }
+            };
+
+            this.peerConnection.onicecandidateerror = (event) => {
+                this._logAlways('ICE candidate error: ' + event.errorText +
+                    ' (code=' + event.errorCode +
+                    ' url=' + event.url +
+                    ' host=' + event.address + ':' + event.port + ')', 'error');
+            };
+
+            this.peerConnection.oniceconnectionstatechange = () => {
+                if (!this.peerConnection) return;
+                const state = this.peerConnection.iceConnectionState;
+                this._log('ICE connection state: ' + state,
+                    state === 'connected' ? 'success' :
+                    state === 'failed' ? 'error' : '');
+                if (this.callbacks.onIceState) {
+                    this.callbacks.onIceState(state);
+                }
+                if (state === 'connected' || state === 'completed') {
+                    this.connected = true;
+                    this._logConnectionStats();
+                    if (this.callbacks.onConnected) {
+                        this.callbacks.onConnected();
+                    }
+                } else if (state === 'failed') {
+                    this._logAlways('ICE connection failed', 'error');
+                    this._logDebugSummary();
+                    this.connected = false;
+                    if (this.callbacks.onDisconnected) {
+                        this.callbacks.onDisconnected();
+                    }
+                } else if (state === 'disconnected') {
+                    this._logAlways('ICE disconnected', 'warning');
+                    this.connected = false;
+                    if (this.callbacks.onDisconnected) {
+                        this.callbacks.onDisconnected();
+                    }
+                }
+            };
+
+            this.peerConnection.onconnectionstatechange = () => {
+                if (!this.peerConnection) return;
+                const state = this.peerConnection.connectionState;
+                this._log('Connection state: ' + state,
+                    state === 'connected' ? 'success' : '');
+                if (state === 'failed' && this.connected) {
+                    this.connected = false;
+                    if (this.callbacks.onDisconnected) {
+                        this.callbacks.onDisconnected();
+                    }
+                }
+            };
+
+            this.peerConnection.onsignalingstatechange = () => {
+                this._logDebug('Signaling state: ' + this.peerConnection.signalingState);
+            };
+
+            this.peerConnection.onicegatheringstatechange = () => {
+                this._log('ICE gathering state: ' + this.peerConnection.iceGatheringState);
+            };
+
+            // Add tracks from the stream
+            for (const track of stream.getTracks()) {
+                this._log('Adding ' + track.kind + ' track: ' + track.label);
+                const transceiver = this.peerConnection.addTransceiver(track, { direction: 'sendonly' });
+
+                // Set encoding parameters for video
+                if (track.kind === 'video') {
+                    try {
+                        const params = transceiver.sender.getParameters();
+                        if (!params.encodings || params.encodings.length === 0) {
+                            params.encodings = [{}];
+                        }
+                        params.encodings[0].maxBitrate = 4_000_000; // 4 Mbps
+                        params.encodings[0].maxFramerate = 30;
+                        await transceiver.sender.setParameters(params);
+                        this._log('Set video encoding: maxBitrate=4Mbps, maxFramerate=30');
+                    } catch (e) {
+                        this._logAlways('Failed to set video encoding params: ' + e.message, 'error');
+                    }
+                }
+            }
+
+            // Create SDP offer
+            this._log('Creating SDP offer...');
+            const offer = await this.peerConnection.createOffer();
+
+            // Enable stereo for Opus if present
+            offer.sdp = enableOpusStereo(offer.sdp);
+
+            // Log SDP offer details
+            this._log('SDP offer key lines:');
+            for (const line of offer.sdp.split('\r\n')) {
+                if (line.startsWith('m=video') || line.startsWith('b=AS') ||
+                    line.startsWith('a=rtpmap:') || line.startsWith('a=fmtp:') ||
+                    line.startsWith('a=extmap:') ||
+                    line.includes('transport-cc') || line.includes('remb') ||
+                    line.includes('x-google')) {
+                    this._log('  ' + line);
+                }
+            }
+
+            await this.peerConnection.setLocalDescription(offer);
+
+            // Wait for ICE gathering to complete (or timeout)
+            this._log('Waiting for ICE gathering (timeout: 5s)...');
+            const gatheringStartTime = Date.now();
+
+            await new Promise((resolve) => {
+                if (this.peerConnection.iceGatheringState === 'complete') {
+                    resolve();
+                    return;
+                }
+                const timeout = setTimeout(() => {
+                    this._log('ICE gathering timeout after 5s', 'warning');
+                    resolve();
+                }, 5000);
+                this.peerConnection.onicegatheringstatechange = () => {
+                    if (this.peerConnection.iceGatheringState === 'complete') {
+                        clearTimeout(timeout);
+                        this._log('ICE gathering complete');
+                        resolve();
+                    }
+                };
+            });
+
+            const gatheringTime = Date.now() - gatheringStartTime;
+            this._log('ICE gathering completed in ' + gatheringTime + 'ms');
+
+            const finalOffer = this.peerConnection.localDescription;
+            this._log('Sending SDP offer to ' + this.endpoint);
+            this._logDebug('=== LOCAL SDP OFFER ===\n' + finalOffer.sdp);
+
+            // POST the offer to the WHIP endpoint.
+            // Retry on 500 errors - whipserversrc may need time to clean up after
+            // a previous session before it can accept a new one.
+            const maxRetries = 3;
+            const retryDelayMs = 2000;
+            let response;
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    response = await fetch(this.endpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/sdp' },
+                        body: finalOffer.sdp,
+                    });
+                } catch (e) {
+                    throw new Error('Failed to send offer: ' + e.message);
+                }
+
+                if (response.ok) break;
+
+                if (response.status >= 500 && attempt < maxRetries) {
+                    this._logAlways('Server returned ' + response.status + ', retrying in ' + (retryDelayMs / 1000) + 's (attempt ' + attempt + '/' + maxRetries + ')...', 'warning');
+                    await new Promise(r => setTimeout(r, retryDelayMs));
+                    continue;
+                }
+
+                const errorText = await response.text();
+                throw new Error('WHIP server returned ' + response.status + ': ' + errorText);
+            }
+
+            // Get the resource URL for cleanup
+            const locationHeader = response.headers.get('Location');
+            if (locationHeader) {
+                this.resourceUrl = locationHeader.startsWith('/')
+                    ? window.location.origin + locationHeader
+                    : locationHeader;
+                this._log('Resource URL: ' + this.resourceUrl);
+            }
+
+            // Set the SDP answer
+            const answerSdp = await response.text();
+            this._log('Received SDP answer (' + answerSdp.length + ' bytes)', 'success');
+            this._logDebug('=== REMOTE SDP ANSWER ===\n' + answerSdp);
 
             // Log key SDP answer lines
-            this.log('SDP answer key lines:');
+            this._log('SDP answer key lines:');
             for (const line of answerSdp.split('\n')) {
                 const l = line.trim();
                 if (l.startsWith('m=video') || l.startsWith('b=') ||
                     l.startsWith('a=rtpmap:') || l.startsWith('a=fmtp:') ||
                     l.includes('transport-cc') || l.includes('remb') ||
                     l.includes('rtcp-fb') || l.startsWith('a=extmap:')) {
-                    this.log('  ' + l);
+                    this._log('  ' + l);
                 }
             }
-        } catch (e) {
-            this.log('Failed to set remote description: ' + e.message, 'error');
-            this.cleanup();
+
+            await this.peerConnection.setRemoteDescription({
+                type: 'answer',
+                sdp: answerSdp,
+            });
+
+            this._log('Remote description set, waiting for ICE to connect...');
+
+        } catch (error) {
+            this._logAlways('Connection error: ' + error.message, 'error');
+            this._logDebugSummary();
             if (this.callbacks.onError) {
-                this.callbacks.onError('Failed to set answer: ' + e.message);
+                this.callbacks.onError(error.message);
             }
+            this.cleanup();
         }
     }
 
-    /**
-     * Wait for ICE gathering to complete or timeout.
-     */
-    waitForIceGathering(timeoutMs) {
-        return new Promise((resolve) => {
-            if (this.pc.iceGatheringState === 'complete') {
-                resolve();
-                return;
-            }
-
-            const timeout = setTimeout(() => {
-                this.log('ICE gathering timeout, proceeding with gathered candidates');
-                resolve();
-            }, timeoutMs);
-
-            this.pc.onicegatheringstatechange = () => {
-                if (this.pc.iceGatheringState === 'complete') {
-                    clearTimeout(timeout);
-                    this.log('ICE gathering complete');
-                    resolve();
-                }
-            };
-        });
+    _logLocalCandidateSummary() {
+        this._log('=== LOCAL CANDIDATE SUMMARY ===');
+        const byType = {};
+        for (const c of this.localCandidates) {
+            byType[c.type] = (byType[c.type] || 0) + 1;
+        }
+        for (const [type, count] of Object.entries(byType)) {
+            this._log('  ' + type + ': ' + count);
+        }
+        if (this.localCandidates.length === 0) {
+            this._log('  (no candidates gathered - TURN server may be unreachable)', 'warning');
+        }
+        this._log('================================');
     }
 
-    /**
-     * Enable stereo for Opus codec in SDP.
-     */
-    enableOpusStereo(sdp) {
-        return sdp.replace(
-            /a=fmtp:(\d+) (.+)/g,
-            (match, pt, params) => {
-                if (params.includes('opus')) {
-                    if (!params.includes('stereo=')) {
-                        params += ';stereo=1';
-                    }
-                    if (!params.includes('sprop-stereo=')) {
-                        params += ';sprop-stereo=1';
+    _logDebugSummary() {
+        this._log('=== DEBUG SUMMARY ===');
+        this._log('Local candidates: ' + this.localCandidates.length);
+        if (this.peerConnection) {
+            this._log('ICE connection state: ' + this.peerConnection.iceConnectionState);
+            this._log('ICE gathering state: ' + this.peerConnection.iceGatheringState);
+            this._log('Connection state: ' + this.peerConnection.connectionState);
+            this._log('Signaling state: ' + this.peerConnection.signalingState);
+        }
+        this._log('=====================');
+    }
+
+    async _logConnectionStats() {
+        if (!this.peerConnection) return;
+        try {
+            const stats = await this.peerConnection.getStats();
+            this._log('=== CONNECTION STATS ===');
+            stats.forEach(report => {
+                if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                    this._log('Active candidate pair:');
+                    this._log('  local: ' + report.localCandidateId);
+                    this._log('  remote: ' + report.remoteCandidateId);
+                    if (report.currentRoundTripTime) {
+                        this._log('  RTT: ' + (report.currentRoundTripTime * 1000).toFixed(1) + 'ms');
                     }
                 }
-                return 'a=fmtp:' + pt + ' ' + params;
-            }
-        );
+                if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+                    const prefix = report.type === 'local-candidate' ? 'Local' : 'Remote';
+                    this._logDebug(prefix + ' candidate [' + report.id + ']: ' +
+                        'type=' + report.candidateType +
+                        ' protocol=' + report.protocol +
+                        ' address=' + report.address + ':' + report.port +
+                        (report.relayProtocol ? ' relayProtocol=' + report.relayProtocol : ''));
+                }
+                if (report.type === 'transport') {
+                    this._log('Transport:');
+                    this._log('  dtlsState: ' + report.dtlsState);
+                    this._log('  iceState: ' + report.iceState);
+                }
+            });
+            this._log('========================');
+        } catch (e) {
+            this._logDebug('Failed to get stats: ' + e.message);
+        }
     }
 
     /**
@@ -318,13 +448,11 @@ class WhipClient {
      * These are Chrome-specific but directly control the encoder's bitrate ramp-up.
      */
     addBitrateHints(sdp, minBitrateKbps, startBitrateKbps, maxBitrateKbps) {
-        // Add x-google hints only to actual video codec fmtp lines (not RTX/RED/ULPFEC)
         const lines = sdp.split('\r\n');
         const result = [];
         let inVideo = false;
-        const metaPts = new Set(); // RTX, RED, ULPFEC payload types to skip
+        const metaPts = new Set();
 
-        // First pass: find RTX/RED/ULPFEC payload types in video section
         for (const line of lines) {
             if (line.startsWith('m=video')) inVideo = true;
             else if (line.startsWith('m=') && !line.startsWith('m=video')) inVideo = false;
@@ -341,7 +469,6 @@ class WhipClient {
             }
         }
 
-        // Second pass: add bitrate hints to non-meta fmtp lines in video section
         inVideo = false;
         for (const line of lines) {
             if (line.startsWith('m=video')) inVideo = true;
@@ -367,9 +494,7 @@ class WhipClient {
     }
 
     /**
-     * Set video bandwidth in SDP (b=AS: line) to hint higher initial bitrate.
-     * @param {string} sdp
-     * @param {number} kbps - bandwidth in kbps
+     * Set video bandwidth in SDP (b=AS: line).
      */
     setVideoBandwidth(sdp, kbps) {
         const lines = sdp.split('\r\n');
@@ -385,7 +510,6 @@ class WhipClient {
             if (line.startsWith('m=') && !line.startsWith('m=video')) {
                 inVideo = false;
             }
-            // Skip existing b= lines in video section
             if (inVideo && line.startsWith('b=')) continue;
             result.push(line);
         }
@@ -396,20 +520,17 @@ class WhipClient {
      * Disconnect from the WHIP endpoint.
      */
     async disconnect() {
-        this.log('Disconnecting...');
-
-        // Send DELETE to resource URL
+        this._logAlways('Disconnecting...');
         if (this.resourceUrl) {
             try {
                 await fetch(this.resourceUrl, { method: 'DELETE' });
-                this.log('Sent DELETE to resource URL');
+                this._log('Sent DELETE to resource URL');
             } catch (e) {
-                this.log('Failed to send DELETE: ' + e.message, 'error');
+                this._logAlways('Failed to send DELETE: ' + e.message, 'error');
             }
         }
-
         this.cleanup();
-        this.log('Disconnected', 'success');
+        this._logAlways('Disconnected', 'success');
     }
 
     /**
@@ -420,13 +541,17 @@ class WhipClient {
             this.localStream.getTracks().forEach(t => t.stop());
             this.localStream = null;
         }
-
-        if (this.pc) {
-            this.pc.close();
-            this.pc = null;
+        if (this.peerConnection) {
+            this.peerConnection.close();
+            this.peerConnection = null;
         }
-
         this.resourceUrl = null;
         this.connected = false;
+    }
+
+    isConnected() {
+        if (!this.peerConnection) return false;
+        const s = this.peerConnection.iceConnectionState;
+        return s === 'connected' || s === 'completed';
     }
 }
