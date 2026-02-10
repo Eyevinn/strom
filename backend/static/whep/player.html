@@ -48,7 +48,7 @@
         <div class="status disconnected" id="status" style="margin-top: 16px;">Not connected</div>
 
         <div style="display: flex; align-items: center; gap: 6px; margin-top: 16px; margin-bottom: 4px;">
-            <input type="checkbox" id="debugMode" data-storage-key="whep-debug" onchange="toggleDebugMode()" style="margin: 0; width: auto;">
+            <input type="checkbox" id="debugMode" data-storage-key="whep-debug" onchange="toggleDebugMode(); whepDebugMode = this.checked;" style="margin: 0; width: auto;">
             <label for="debugMode" style="color: #666; font-size: 0.8em; cursor: pointer; margin: 0;">Debug</label>
             <button onclick="copyLog()" style="padding: 2px 6px; white-space: nowrap;">Copy log</button>
         </div>
@@ -65,6 +65,7 @@
         let wantConnected = false;  // User's intent: should we be connected?
         let reconnectAttempt = 0;
         let reconnectTimer = null;
+        let transportSuffix = '';   // Debug: " - relay <addr>" or " - direct <addr>"
         const MAX_RECONNECT_ATTEMPTS = 15;
         const RECONNECT_DELAY = 10000;
 
@@ -146,22 +147,27 @@
                         log('Autoplay blocked: ' + e.message, 'warning');
                     });
                 },
-                onConnected: () => {
+                onConnected: async () => {
                     if (myConnectionId !== connectionId) return; // Stale
                     cancelReconnect(); // Cancel any pending reconnect timer!
                     reconnectAttempt = 0; // Reset on successful connection
                     document.getElementById('disconnectBtn').disabled = false;
-                    setStatus('status', 'Connected - Waiting for media...', 'connected');
+                    transportSuffix = '';
+                    if (whepDebugMode && connection) {
+                        const info = await connection.getTransportInfo();
+                        if (info) {
+                            const via = info.type === 'relay' ? 'relay' : 'direct';
+                            transportSuffix = ' - ' + via + (info.remoteAddress ? ' ' + info.remoteAddress : '');
+                            log('Transport: ' + via + ' (' + info.protocol + ')' +
+                                (info.remoteAddress ? ' to ' + info.remoteAddress : '') +
+                                (info.relayProtocol ? ' via ' + info.relayProtocol : ''), 'success');
+                        }
+                    }
+                    setStatus('status', 'Connected' + transportSuffix, 'connected');
                     log('Connected successfully', 'success');
                 },
                 onMediaStatus: (hasAudio, hasVideo) => {
                     if (myConnectionId !== connectionId) return; // Stale
-                    let mediaTypes = [];
-                    if (hasAudio) mediaTypes.push('audio');
-                    if (hasVideo) mediaTypes.push('video');
-                    if (mediaTypes.length > 0) {
-                        setStatus('status', 'Connected - Playing ' + mediaTypes.join(' + '), 'connected');
-                    }
                     // Show audio indicator if stream has audio (regardless of video)
                     // Show audio controls only for audio-only streams (video has its own controls)
                     const isAudioOnly = hasAudio && !hasVideo;

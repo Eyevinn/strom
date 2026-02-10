@@ -618,6 +618,37 @@ class WhepConnection {
         const s = this.peerConnection.iceConnectionState;
         return s === 'connected' || s === 'completed';
     }
+
+    /**
+     * Get info about the active ICE transport (candidate type, remote address).
+     * @returns {{ type: string, protocol: string, remoteAddress: string, relayProtocol: string|null } | null}
+     */
+    async getTransportInfo() {
+        if (!this.peerConnection) return null;
+        try {
+            const stats = await this.peerConnection.getStats();
+            let localId = null;
+            let remoteId = null;
+            stats.forEach(report => {
+                if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+                    localId = report.localCandidateId;
+                    remoteId = report.remoteCandidateId;
+                }
+            });
+            if (!localId) return null;
+            const local = stats.get(localId);
+            const remote = stats.get(remoteId);
+            const remoteAddr = remote?.address || remote?.ip || null;
+            return {
+                type: local?.candidateType || 'unknown',
+                protocol: local?.protocol || 'unknown',
+                remoteAddress: remoteAddr ? remoteAddr + ':' + remote.port : null,
+                relayProtocol: local?.relayProtocol || null,
+            };
+        } catch (e) {
+            return null;
+        }
+    }
 }
 
 // UI Helper functions (setStatus, setElementClass, copyFallback are in webrtc.js)

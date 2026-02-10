@@ -288,8 +288,19 @@
 
             whipClient = new WhipClient(endpoint, {
                 onLog: (msg, type) => { log(msg, type || ''); },
-                onConnected: () => {
-                    setStatus('status', 'Connected', 'connected');
+                onConnected: async () => {
+                    let statusText = 'Connected';
+                    if (whipDebugMode && whipClient) {
+                        const info = await whipClient.getTransportInfo();
+                        if (info) {
+                            const via = info.type === 'relay' ? 'relay' : 'direct';
+                            statusText += ' - ' + via + (info.remoteAddress ? ' ' + info.remoteAddress : '');
+                            log('Transport: ' + via + ' (' + info.protocol + ')' +
+                                (info.remoteAddress ? ' to ' + info.remoteAddress : '') +
+                                (info.relayProtocol ? ' via ' + info.relayProtocol : ''), 'success');
+                        }
+                    }
+                    setStatus('status', statusText, 'connected');
                     log('Connected to ' + endpoint, 'success');
                     startStats();
                 },
