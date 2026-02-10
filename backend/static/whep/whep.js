@@ -231,6 +231,9 @@ class WhepConnection {
                 if (state === 'connected' || state === 'completed') {
                     this._updateStatus();
                     this._logConnectionStats();
+                    if (this.callbacks.onConnected) {
+                        this.callbacks.onConnected();
+                    }
                     // Start periodic stats logging
                     this._startStatsLogging();
                     // Start video health monitor for freeze/artifact recovery
@@ -332,10 +335,6 @@ class WhepConnection {
             });
 
             this._log('Remote description set, waiting for ICE to connect...');
-
-            if (this.callbacks.onConnected) {
-                this.callbacks.onConnected();
-            }
 
             return true;
         } catch (error) {
