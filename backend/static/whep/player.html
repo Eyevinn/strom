@@ -10,6 +10,7 @@
 <body style="display: flex; flex-direction: column; align-items: center;">
     <div class="container">
         <div style="position: relative; margin-bottom: 8px;">
+            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v4</span>
             <h1 style="text-align: center; margin: 0;">WHEP Player at <span id="hostAddress"></span></h1>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em; position: absolute; right: 0; top: 50%; transform: translateY(-50%);">All streams</a>
         </div>
@@ -183,17 +184,24 @@
                     reconnectAttempt = 0; // Reset on successful connection
                     document.getElementById('disconnectBtn').disabled = false;
                     transportSuffix = '';
+                    setStatus('status', 'Connected', 'connected');
+                    // Delay transport info check — ICE connects with the first
+                    // successful pair (often relay) then promotes a better direct
+                    // pair. Wait 2s so ICE has time to settle on the final pair.
                     if (whepDebugMode && connection) {
-                        const info = await connection.getTransportInfo();
-                        if (info) {
-                            const via = info.type === 'relay' ? 'relay' : 'direct';
-                            transportSuffix = ' - ' + via + (info.remoteAddress ? ' ' + info.remoteAddress : '');
-                            log('Transport: ' + via + ' (' + info.protocol + ')' +
-                                (info.remoteAddress ? ' to ' + info.remoteAddress : '') +
-                                (info.relayProtocol ? ' via ' + info.relayProtocol : ''), 'success');
-                        }
+                        setTimeout(async () => {
+                            if (myConnectionId !== connectionId || !connection) return;
+                            const info = await connection.getTransportInfo();
+                            if (info) {
+                                const via = info.type === 'relay' ? 'relay' : 'direct';
+                                transportSuffix = ' - ' + via + (info.remoteAddress ? ' ' + info.remoteAddress : '');
+                                log('Transport: ' + via + ' (' + info.protocol + ')' +
+                                    (info.remoteAddress ? ' to ' + info.remoteAddress : '') +
+                                    (info.relayProtocol ? ' via ' + info.relayProtocol : ''), 'success');
+                                setStatus('status', 'Connected' + transportSuffix, 'connected');
+                            }
+                        }, 2000);
                     }
-                    setStatus('status', 'Connected' + transportSuffix, 'connected');
                     log('Connected successfully', 'success');
                 },
                 onMediaStatus: (hasAudio, hasVideo) => {

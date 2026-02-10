@@ -578,14 +578,22 @@ class WhipClient {
         if (!this.peerConnection) return null;
         try {
             const stats = await this.peerConnection.getStats();
-            let localId = null;
-            let remoteId = null;
+            // Find the active candidate pair via the transport report's selectedCandidatePairId
+            let selectedPairId = null;
             stats.forEach(report => {
-                if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
-                    localId = report.localCandidateId;
-                    remoteId = report.remoteCandidateId;
+                if (report.type === 'transport' && report.selectedCandidatePairId) {
+                    selectedPairId = report.selectedCandidatePairId;
                 }
             });
+            let localId = null;
+            let remoteId = null;
+            if (selectedPairId) {
+                const pair = stats.get(selectedPairId);
+                if (pair) {
+                    localId = pair.localCandidateId;
+                    remoteId = pair.remoteCandidateId;
+                }
+            }
             if (!localId) return null;
             const local = stats.get(localId);
             const remote = stats.get(remoteId);

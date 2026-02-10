@@ -14,7 +14,7 @@
     <div class="container">
         <div style="position: relative; margin-bottom: 8px;">
             <h1 style="text-align: center; margin: 0;">WHIP Ingest at <span id="hostAddress"></span></h1>
-            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v5</span>
+            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v6</span>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em; position: absolute; right: 0; top: 50%; transform: translateY(-50%);">WHEP streams</a>
         </div>
 
@@ -499,18 +499,24 @@
                 onConnected: async () => {
                     cancelReconnect();
                     reconnectAttempt = 0;
-                    let statusText = 'Connected';
+                    setStatus('status', 'Connected', 'connected');
+                    // Delay transport info check — ICE connects with the first
+                    // successful pair (often relay) then promotes a better direct
+                    // pair. Wait 2s so ICE has time to settle on the final pair.
                     if (whipDebugMode && whipClient) {
-                        const info = await whipClient.getTransportInfo();
-                        if (info) {
-                            const via = info.type === 'relay' ? 'relay' : 'direct';
-                            statusText += ' - ' + via + (info.remoteAddress ? ' ' + info.remoteAddress : '');
-                            log('Transport: ' + via + ' (' + info.protocol + ')' +
-                                (info.remoteAddress ? ' to ' + info.remoteAddress : '') +
-                                (info.relayProtocol ? ' via ' + info.relayProtocol : ''), 'success');
-                        }
+                        setTimeout(async () => {
+                            if (!whipClient) return;
+                            const info = await whipClient.getTransportInfo();
+                            if (info) {
+                                const via = info.type === 'relay' ? 'relay' : 'direct';
+                                const statusText = 'Connected - ' + via + (info.remoteAddress ? ' ' + info.remoteAddress : '');
+                                log('Transport: ' + via + ' (' + info.protocol + ')' +
+                                    (info.remoteAddress ? ' to ' + info.remoteAddress : '') +
+                                    (info.relayProtocol ? ' via ' + info.relayProtocol : ''), 'success');
+                                setStatus('status', statusText, 'connected');
+                            }
+                        }, 2000);
                     }
-                    setStatus('status', statusText, 'connected');
                     log('Connected to ' + endpoint, 'success');
                     startStats();
                 },
