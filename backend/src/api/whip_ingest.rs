@@ -5,7 +5,9 @@
 //!
 //! Also serves the WHIP ingest HTML page for browser-based camera/mic sending.
 
-use crate::api::sdp_transform::{add_goog_remb, fix_video_bitrate_hints, strip_redundancy_codecs};
+use crate::api::sdp_transform::{
+    add_goog_remb, fix_video_bitrate_hints, strip_cvo_extension, strip_redundancy_codecs,
+};
 use crate::state::AppState;
 use axum::{
     body::Body,
@@ -282,6 +284,7 @@ fn build_whip_post_response(
     let resp_body = if let Ok(answer_str) = std::str::from_utf8(&resp_body) {
         let patched = add_goog_remb(answer_str);
         let patched = fix_video_bitrate_hints(&patched);
+        let patched = strip_cvo_extension(&patched);
         debug!("WHIP: SDP answer:\n{}", patched);
         axum::body::Bytes::from(patched)
     } else {

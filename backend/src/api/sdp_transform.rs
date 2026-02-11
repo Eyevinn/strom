@@ -284,6 +284,48 @@ fn remove_standalone_x_google(sdp: &str) -> String {
     result
 }
 
+/// Strip `urn:3gpp:video-orientation` (CVO) extmap from an SDP answer.
+///
+/// GStreamer's webrtcbin has no built-in handler for the CVO RTP header
+/// extension. If the extension is negotiated, mobile browsers (Safari iOS,
+/// Chrome Android) send unrotated video frames and signal orientation via
+/// the RTP header extension — which GStreamer silently ignores, resulting
+/// in video stuck in landscape.
+///
+/// By stripping the extension from the answer, the browser falls back to
+/// rotating the video pixels in the encoder before sending, so the receiver
+/// gets correctly oriented frames without needing CVO support.
+pub(crate) fn strip_cvo_extension(sdp: &str) -> String {
+    let mut result = String::with_capacity(sdp.len());
+    let mut stripped = false;
+    let mut pos = 0;
+
+    while pos < sdp.len() {
+        let remaining = &sdp[pos..];
+        let line_end = remaining
+            .find('\n')
+            .map(|p| p + 1)
+            .unwrap_or(remaining.len());
+        let line = &remaining[..line_end];
+        let trimmed = line.trim();
+
+        if trimmed.contains("urn:3gpp:video-orientation") {
+            stripped = true;
+            pos += line_end;
+            continue;
+        }
+
+        result.push_str(line);
+        pos += line_end;
+    }
+
+    if stripped {
+        info!("WHIP: Stripped urn:3gpp:video-orientation from SDP answer (forcing browser pixel rotation)");
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +545,40 @@ a=rtpmap:111 opus/48000/2\r\n\
 a=fmtp:111 minptime=10\r\n";
 
         let result = fix_video_bitrate_hints(sdp);
+        assert_eq!(result, sdp);
+    }
+
+    // ========================================================================
+    // strip_cvo_extension tests
+    // ========================================================================
+
+    #[test]
+    fn strip_cvo_extension_removes_video_orientation_extmap() {
+        let sdp = "\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n\
+a=extmap:4 urn:3gpp:video-orientation\r\n\
+a=extmap:5 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+a=fmtp:96 level-asymmetry-allowed=1\r\n";
+
+        let result = strip_cvo_extension(sdp);
+
+        assert!(!result.contains("3gpp:video-orientation"));
+        assert!(result.contains("a=extmap:3"));
+        assert!(result.contains("a=extmap:5"));
+        assert!(result.contains("a=fmtp:96"));
+    }
+
+    #[test]
+    fn strip_cvo_extension_noop_without_cvo() {
+        let sdp = "\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\r\n\
+a=fmtp:96 level-asymmetry-allowed=1\r\n";
+
+        let result = strip_cvo_extension(sdp);
         assert_eq!(result, sdp);
     }
 }
