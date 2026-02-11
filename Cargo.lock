@@ -6145,7 +6145,7 @@ dependencies = [
 
 [[package]]
 name = "strom"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6212,7 +6212,7 @@ dependencies = [
 
 [[package]]
 name = "strom-frontend"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "base64",
  "chrono",
@@ -6244,7 +6244,7 @@ dependencies = [
 
 [[package]]
 name = "strom-mcp-server"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "anyhow",
  "reqwest 0.13.1",
@@ -6258,7 +6258,7 @@ dependencies = [
 
 [[package]]
 name = "strom-types"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "serde",
  "serde_json",
