@@ -2439,9 +2439,9 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-webrtc"
-version = "0.15.0-alpha.1"
+version = "0.15.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6824a2c10f47947041d43baa87ea7d80118a893528921e0ff70145a64d229eff"
+checksum = "f5bd124a4dec73bab4b2148a3190a755c75e1c105004dfc9f96318d9f7bd4ee3"
 dependencies = [
  "anyhow",
  "async-tungstenite",
