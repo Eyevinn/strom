@@ -121,8 +121,11 @@ struct WhipServerContext {
     recreating: AtomicBool,
 
     // Generation counter — incremented on each recreation. Used by pad-removed
-    // threads to detect that a recreation already happened while they were sleeping.
+    // tasks to detect that a recreation already happened while they were sleeping.
     generation: AtomicUsize,
+
+    // Tokio runtime handle for spawning async tasks from GStreamer callbacks
+    tokio_handle: tokio::runtime::Handle,
 }
 
 impl WhipServerContext {
@@ -310,6 +313,7 @@ impl WhipServerContext {
         let audio_streams_for_remove = Arc::clone(&self.audio_streams);
         let liveadder_weak_for_remove = self.liveadder_weak.clone();
         let endpoint_id_for_remove = self.endpoint_id.clone();
+        let tokio_handle_for_remove = self.tokio_handle.clone();
         whipserversrc.connect_pad_removed(move |src, pad| {
             let pad_name = pad.name();
             info!("WHIP Input: Pad removed: {}", pad_name);
@@ -317,7 +321,13 @@ impl WhipServerContext {
             if pad_name.starts_with("video_") {
                 video_connected_for_remove.store(false, Ordering::SeqCst);
 
-                let old_queue = video_queue_for_remove.lock().unwrap().take();
+                let old_queue = match video_queue_for_remove.lock() {
+                    Ok(mut g) => g.take(),
+                    Err(e) => {
+                        warn!("WHIP Input: video_queue lock poisoned in pad-removed: {}", e);
+                        None
+                    }
+                };
                 if let Some(queue) = old_queue {
                     if let Some(ref vc_weak) = videoconvert_weak_for_remove {
                         let vc_opt: Option<gst::Element> = vc_weak.upgrade();
@@ -337,7 +347,13 @@ impl WhipServerContext {
                 }
             } else if pad_name.starts_with("audio_") {
                 let pad_key = pad_name.to_string();
-                let entry = audio_streams_for_remove.lock().unwrap().remove(&pad_key);
+                let entry = match audio_streams_for_remove.lock() {
+                    Ok(mut g) => g.remove(&pad_key),
+                    Err(e) => {
+                        warn!("WHIP Input: audio_streams lock poisoned in pad-removed: {}", e);
+                        None
+                    }
+                };
                 if let Some((elements, liveadder_pad)) = entry {
                     if let Ok(pipeline) = get_pipeline_from_element(src.upcast_ref()) {
                         for elem in &elements {
@@ -367,26 +383,29 @@ impl WhipServerContext {
                 return;
             }
             let endpoint_id = endpoint_id_for_remove.clone();
-            let gen_at_removal = {
-                let store = whip_servers().lock().unwrap();
-                store
+            let gen_at_removal = match whip_servers().lock() {
+                Ok(store) => store
                     .get(&endpoint_id)
                     .map(|ctx| ctx.generation.load(Ordering::SeqCst))
-                    .unwrap_or(0)
+                    .unwrap_or(0),
+                Err(e) => {
+                    warn!("WHIP Input: whip_servers lock poisoned in pad-removed: {}", e);
+                    return;
+                }
             };
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+            tokio_handle_for_remove.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 // Bail out if process is shutting down
                 if WHIP_SHUTDOWN.load(Ordering::SeqCst) {
                     return;
                 }
                 // Check if generation changed (means someone already recreated)
-                let current_gen = {
-                    let store = whip_servers().lock().unwrap();
-                    store
+                let current_gen = match whip_servers().lock() {
+                    Ok(store) => store
                         .get(&endpoint_id)
                         .map(|ctx| ctx.generation.load(Ordering::SeqCst))
-                        .unwrap_or(0)
+                        .unwrap_or(0),
+                    Err(_) => return,
                 };
                 if current_gen != gen_at_removal {
                     info!(
@@ -399,7 +418,14 @@ impl WhipServerContext {
                     "WHIP Input: Triggering element recreation for endpoint '{}'",
                     endpoint_id
                 );
-                if let Err(e) = recreate_whipserversrc(&endpoint_id) {
+                // Recreation is blocking (set_state, sleep) — run on blocking thread pool
+                let eid = endpoint_id.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    recreate_whipserversrc(&eid)
+                })
+                .await
+                .unwrap_or(Err("spawn_blocking panicked".into()))
+                {
                     warn!("WHIP Input: Failed to recreate whipserversrc: {}", e);
                 }
             });
@@ -443,10 +469,11 @@ impl WhipServerContext {
                             stream_num,
                         ) {
                             Ok((elements, liveadder_pad)) => {
-                                audio_streams
-                                    .lock()
-                                    .unwrap()
-                                    .insert(pad_name.to_string(), (elements, liveadder_pad));
+                                if let Ok(mut g) = audio_streams.lock() {
+                                    g.insert(pad_name.to_string(), (elements, liveadder_pad));
+                                } else {
+                                    error!("WHIP Input: audio_streams lock poisoned in pad-added");
+                                }
                             }
                             Err(e) => {
                                 error!("WHIP Input: Failed to setup audio stream: {}", e);
@@ -474,7 +501,13 @@ impl WhipServerContext {
                                 stream_num,
                             ) {
                                 Ok(queue) => {
-                                    *video_queue.lock().unwrap() = Some(queue);
+                                    if let Ok(mut g) = video_queue.lock() {
+                                        *g = Some(queue);
+                                    } else {
+                                        error!(
+                                            "WHIP Input: video_queue lock poisoned in pad-added"
+                                        );
+                                    }
                                 }
                                 Err(e) => {
                                     error!("WHIP Input: Failed to setup video stream: {}", e);
@@ -524,7 +557,11 @@ impl WhipServerContext {
 
     fn replace_element_inner(&self) -> Result<(), String> {
         // Take old element
-        let old_element = self.current_element.lock().unwrap().take();
+        let old_element = self
+            .current_element
+            .lock()
+            .expect("current_element lock poisoned")
+            .take();
         let old_element = match old_element {
             Some(e) => e,
             None => {
@@ -545,7 +582,11 @@ impl WhipServerContext {
         self.video_connected.store(false, Ordering::SeqCst);
 
         // Remove video queue and unlink videoconvert
-        let old_queue = self.video_queue.lock().unwrap().take();
+        let old_queue = self
+            .video_queue
+            .lock()
+            .expect("video_queue lock poisoned")
+            .take();
         if let Some(queue) = old_queue {
             if let Some(ref vc_weak) = self.videoconvert_weak {
                 let vc_opt: Option<gst::Element> = vc_weak.upgrade();
@@ -562,7 +603,12 @@ impl WhipServerContext {
         }
 
         // Remove audio stream elements and release liveadder pads
-        let audio_entries: Vec<_> = self.audio_streams.lock().unwrap().drain().collect();
+        let audio_entries: Vec<_> = self
+            .audio_streams
+            .lock()
+            .expect("audio_streams lock poisoned")
+            .drain()
+            .collect();
         for (_pad_name, (elements, liveadder_pad)) in audio_entries {
             for elem in &elements {
                 let _ = elem.set_state(gst::State::Null);
@@ -668,7 +714,10 @@ impl WhipServerContext {
             .map_err(|e| format!("Failed to sync new element state: {}", e))?;
 
         // Store new element and bump generation
-        *self.current_element.lock().unwrap() = Some(new_element);
+        *self
+            .current_element
+            .lock()
+            .expect("current_element lock poisoned") = Some(new_element);
         self.generation.fetch_add(1, Ordering::SeqCst);
 
         info!(
@@ -938,6 +987,7 @@ fn build_whipserversrc(
         current_element: Mutex::new(None),
         recreating: AtomicBool::new(false),
         generation: AtomicUsize::new(0),
+        tokio_handle: tokio::runtime::Handle::current(),
     });
 
     // Create the initial whipserversrc element (also allocates a free port)
@@ -946,11 +996,14 @@ fn build_whipserversrc(
         .map_err(BlockBuildError::ElementCreation)?;
 
     // Store element in context
-    *whip_ctx.current_element.lock().unwrap() = Some(whipserversrc.clone());
+    *whip_ctx
+        .current_element
+        .lock()
+        .expect("current_element lock poisoned") = Some(whipserversrc.clone());
 
     // Register context in module-level store
     {
-        let mut store = whip_servers().lock().unwrap();
+        let mut store = whip_servers().lock().expect("whip_servers lock poisoned");
         store.insert(endpoint_id.clone(), Arc::clone(&whip_ctx));
     }
 

@@ -67,8 +67,9 @@ thread-priority = "3.0.0"
 libc = "0.2"
 
 # TLS
-tokio-rustls = "0.26"
+axum-server.workspace = true
 rustls = { version = "0.23", features = ["ring"] }
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 
 # Authentication
 bcrypt = "0.18.0"

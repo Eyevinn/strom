@@ -20,6 +20,7 @@ uuid = { version = "1.20", features = ["serde", "v4", "js"] }
 
 # Backend
 axum = { version = "0.8.8", features = ["ws", "multipart"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 tokio = { version = "1.49", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
