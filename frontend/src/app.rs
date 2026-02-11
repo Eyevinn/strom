@@ -6731,11 +6731,7 @@ impl eframe::App for StromApp {
                         });
 
                     if let Some(endpoint_id) = endpoint_id {
-                        let server_base = self.api.base_url().trim_end_matches("/api");
-                        let ingest_url = format!(
-                            "{}/player/whip-ingest?endpoint=/whip/{}",
-                            server_base, endpoint_id
-                        );
+                        let ingest_url = self.api.get_whip_ingest_url(&endpoint_id);
                         ctx.open_url(egui::OpenUrl::new_tab(&ingest_url));
                     }
                 }

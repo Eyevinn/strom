@@ -10,9 +10,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 use strom_types::flow::GStreamerClockType;
 
-#[cfg(not(feature = "no-gui"))]
-use strom::create_app_with_config;
-use strom::{auth, config::Config, create_app_with_state, state::AppState};
+use strom::{auth, config::Config, create_app_with_config, state::AppState};
 
 /// Initialize logging with optional file output and configurable log level
 fn init_logging(log_file: Option<&PathBuf>, log_level: Option<&String>) -> anyhow::Result<()> {
@@ -558,7 +556,12 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
     // GStreamer elements are discovered lazily on first /api/elements request
 
     // Create the HTTP app BEFORE auto-restart, then bind AFTER
-    let app = create_app_with_state(state.clone()).await;
+    let app = create_app_with_config(
+        state.clone(),
+        auth::AuthConfig::from_env(),
+        config.cors_allowed_origins.clone(),
+    )
+    .await;
 
     // Start server - bind to 0.0.0.0 to be accessible from all interfaces (Docker, network, etc.)
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));

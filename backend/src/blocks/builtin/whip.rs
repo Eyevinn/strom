@@ -479,6 +479,18 @@ impl WhipServerContext {
                                 error!("WHIP Input: Failed to setup audio stream: {}", e);
                             }
                         }
+                    } else {
+                        warn!(
+                            "WHIP Input: liveadder destroyed, discarding audio stream {}",
+                            stream_num
+                        );
+                        let _ = setup_whip_discard(
+                            pad,
+                            &pipeline,
+                            &instance_id_owned,
+                            stream_num,
+                            "audio",
+                        );
                     }
                 } else {
                     info!(
@@ -514,6 +526,19 @@ impl WhipServerContext {
                                     video_connected.store(false, Ordering::SeqCst);
                                 }
                             }
+                        } else {
+                            warn!(
+                                "WHIP Input: videoconvert destroyed, discarding video stream {}",
+                                stream_num
+                            );
+                            video_connected.store(false, Ordering::SeqCst);
+                            let _ = setup_whip_discard(
+                                pad,
+                                &pipeline,
+                                &instance_id_owned,
+                                stream_num,
+                                "video",
+                            );
                         }
                     }
                 } else {
