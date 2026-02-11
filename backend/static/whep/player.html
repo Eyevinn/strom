@@ -10,7 +10,7 @@
 <body style="display: flex; flex-direction: column; align-items: center;">
     <div class="container">
         <div style="position: relative; margin-bottom: 8px;">
-            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v4</span>
+            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v5</span>
             <h1 style="text-align: center; margin: 0;">WHEP Player at <span id="hostAddress"></span></h1>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em; position: absolute; right: 0; top: 50%; transform: translateY(-50%);">All streams</a>
         </div>
@@ -212,7 +212,11 @@
                     setElementClass('audioIndicator', 'active', hasAudio);
                     setElementClass('audioControls', 'active', isAudioOnly);
                     hasAudioStream = hasAudio;
-                    updateAudioOutputDropdown();
+                    // Re-enumerate devices now that we have an active media
+                    // session — browsers restrict enumerateDevices until media
+                    // is flowing, so the initial enumeration may have returned
+                    // only the default device.
+                    deviceManager.enumerate();
                 },
                 onError: (msg) => {
                     if (myConnectionId !== connectionId) return; // Stale
