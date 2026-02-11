@@ -207,18 +207,37 @@ fn is_dir_empty(dir: &Path) -> Result<bool, std::io::Error> {
     Ok(fs::read_dir(dir)?.next().is_none())
 }
 
+/// Check if a directory contains any `.wasm` files (indicating a pre-built frontend)
+fn dir_contains_wasm(dir: &Path) -> bool {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "wasm"))
+        })
+        .unwrap_or(false)
+}
+
 /// Build the frontend using trunk
 fn build_frontend(frontend_dir: &Path) {
     // Check if trunk is available
     let trunk_check = Command::new("trunk").arg("--version").output();
 
     if trunk_check.is_err() {
+        let dist_dir = PathBuf::from("dist");
+
+        // If dist/ already contains pre-built WASM files (e.g. from a Docker
+        // multi-stage build), keep them instead of overwriting with a placeholder.
+        if dist_dir.exists() && dir_contains_wasm(&dist_dir) {
+            println!("cargo:warning=trunk not found - using pre-built frontend from dist/");
+            return;
+        }
+
         println!("cargo:warning=trunk not found - skipping frontend build");
         println!("cargo:warning=Install trunk with: cargo install trunk");
         println!("cargo:warning=Backend will compile without embedded frontend");
 
         // Create dist directory with a placeholder index.html
-        let dist_dir = PathBuf::from("dist");
         if !dist_dir.exists() {
             fs::create_dir(&dist_dir).expect("Failed to create dist directory");
         }
