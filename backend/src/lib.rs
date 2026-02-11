@@ -375,15 +375,21 @@ pub async fn create_app_with_config(
     let api_router = Router::new()
         .merge(public_api_router)
         .merge(protected_api_router)
-        .layer(Extension(auth_config))
+        .layer(Extension(auth_config.clone()))
         .layer(Extension(mcp_sessions));
 
-    // Build main router with Swagger UI
-    Router::new()
-        .route("/health", get(health))
+    // Build Swagger UI router behind authentication
+    let swagger_router = Router::new()
         .merge(
             SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", openapi::ApiDoc::openapi()),
         )
+        .layer(middleware::from_fn(auth::auth_middleware))
+        .layer(Extension(auth_config));
+
+    // Build main router
+    Router::new()
+        .route("/health", get(health))
+        .merge(swagger_router)
         .nest("/api", api_router)
         .nest("/player", player_router)
         .nest("/whep", whep_router)
