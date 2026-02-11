@@ -439,6 +439,7 @@ fn serve_embedded_asset<T: rust_embed::RustEmbed>(
         Some(content) => axum::response::Response::builder()
             .status(axum::http::StatusCode::OK)
             .header(axum::http::header::CONTENT_TYPE, content_type)
+            .header(axum::http::header::CACHE_CONTROL, "no-cache")
             .body(axum::body::Body::from(content.data))
             .unwrap(),
         None => axum::response::Response::builder()
