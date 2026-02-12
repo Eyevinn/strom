@@ -55,7 +55,7 @@ fn load_icon() -> Option<egui::IconData> {
 /// macOS: wgpu (Metal) to avoid OpenGL conflicts with GStreamer.
 /// Others: glow (OpenGL) as the stable default.
 #[cfg(not(target_arch = "wasm32"))]
-fn preferred_renderer() -> eframe::Renderer {
+pub fn preferred_renderer() -> eframe::Renderer {
     #[cfg(target_os = "macos")]
     {
         eframe::Renderer::Wgpu
