@@ -42,7 +42,7 @@ The frontend (egui/WASM) communicates via REST + WebSocket.
 - **Safari lacks support** -- no public timeline from Apple
 - Rust ecosystem: `quinn` (mature QUIC), `wtransport`, `h3-webtransport`
 - GStreamer: `gst-plugin-quinn` in the official `gst-plugins-rs` since 1.26
-  - Elements: `quinnwtsink`, `quinnwtclientsrc`
+  - Elements: `quinnwtsrc`, `quinnwtsink`
 
 ### WebCodecs
 
@@ -281,8 +281,10 @@ async function connect(endpointId) {
 
 ## The Safari Problem
 
-Safari completely lacks WebTransport support. No public timeline from Apple.
-Experimental support behind a feature flag in iOS 18 but unreliable.
+Safari has no stable WebTransport support. Experimental support exists behind a
+feature flag in iOS 18 but is unreliable. However, WebTransport is included in
+the [Interop 2026](https://webkit.org/blog/17818/announcing-interop-2026/)
+initiative, which is a strong signal that Safari will gain support during 2026.
 
 **Consequence:** WebRTC/WHEP must be maintained as a full alternative.
 WebTransport/MoQ becomes a *complement*, not a replacement.
@@ -309,7 +311,7 @@ fall back to WHEP automatically.
 | Element | Plugin | Function |
 |---------|--------|----------|
 | `quinnwtsink` | gst-plugin-quinn | Send data via WebTransport |
-| `quinnwtclientsrc` | gst-plugin-quinn | Receive data via WebTransport |
+| `quinnwtsrc` | gst-plugin-quinn | Receive data via WebTransport |
 | `quinnquicsrc/sink` | gst-plugin-quinn | Raw QUIC streams |
 | `quinnroqmux` | gst-plugin-quinn | RTP-over-QUIC |
 | hang-gst elements | hang-gst | MoQ publish/subscribe |
