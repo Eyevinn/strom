@@ -651,8 +651,8 @@ pub struct StromApp {
     media_page: crate::media::MediaPage,
     /// Info page state
     info_page: crate::info_page::InfoPage,
-    /// Rendering backend name (e.g. "glow (OpenGL)", "wgpu (Metal)")
-    renderer_info: String,
+    /// Rendering backend info detected at startup
+    renderer_info: crate::info_page::RendererInfo,
     /// Links page state
     links_page: crate::links::LinksPage,
     /// Flow list filter text

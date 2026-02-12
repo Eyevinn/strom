@@ -1,6 +1,7 @@
 //! Info page for displaying system and version information.
 
 use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2};
+use glow::HasContext;
 use std::collections::VecDeque;
 
 use crate::api::VersionInfo;
@@ -8,22 +9,71 @@ use crate::system_monitor::SystemMonitorStore;
 
 const HISTORY_SIZE: usize = 60;
 
+/// Rendering backend information detected at startup.
+pub struct RendererInfo {
+    /// Short display label, e.g. "wgpu (Metal)" or "glow (OpenGL)"
+    pub display: String,
+    /// Key-value detail pairs for expanded view
+    pub details: Vec<(&'static str, String)>,
+}
+
 /// Detect the active rendering backend from eframe's CreationContext.
 /// Checks which renderer is actually active at runtime - no cfg needed.
-pub fn detect_renderer(cc: &eframe::CreationContext<'_>) -> String {
+pub fn detect_renderer(cc: &eframe::CreationContext<'_>) -> RendererInfo {
     if let Some(render_state) = &cc.wgpu_render_state {
         let info = render_state.adapter.get_info();
-        return format!("wgpu ({:?}, {})", info.backend, info.name);
+        let mut details = vec![
+            ("Backend", format!("{:?}", info.backend)),
+            ("Device Type", format!("{:?}", info.device_type)),
+            ("Name", info.name.clone()),
+        ];
+        if !info.driver.is_empty() {
+            details.push(("Driver", info.driver.clone()));
+        }
+        if !info.driver_info.is_empty() {
+            details.push(("Driver Info", info.driver_info.clone()));
+        }
+        if info.vendor != 0 {
+            details.push(("Vendor", format!("0x{:04X}", info.vendor)));
+        }
+        return RendererInfo {
+            display: format!("wgpu ({:?})", info.backend),
+            details,
+        };
     }
 
-    if cc.gl.is_some() {
-        #[cfg(target_arch = "wasm32")]
-        return "glow (WebGL)".to_string();
-        #[cfg(not(target_arch = "wasm32"))]
-        return "glow (OpenGL)".to_string();
+    if let Some(gl) = &cc.gl {
+        let details = unsafe {
+            vec![
+                ("Version", gl.get_parameter_string(glow::VERSION)),
+                ("Renderer", gl.get_parameter_string(glow::RENDERER)),
+                ("Vendor", gl.get_parameter_string(glow::VENDOR)),
+                (
+                    "GLSL",
+                    gl.get_parameter_string(glow::SHADING_LANGUAGE_VERSION),
+                ),
+            ]
+        };
+        let label = {
+            #[cfg(target_arch = "wasm32")]
+            {
+                "glow (WebGL)"
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                "glow (OpenGL)"
+            }
+        };
+        return RendererInfo {
+            display: label.to_string(),
+            details,
+        };
     }
 
-    "unknown".to_string()
+    RendererInfo {
+        display: "unknown".to_string(),
+        details: Vec::new(),
+    }
 }
 
 /// Get the current time as Unix timestamp in milliseconds
@@ -153,7 +203,7 @@ impl InfoPage {
         system_monitor: &SystemMonitorStore,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         flows: &[strom_types::Flow],
-        renderer_info: &str,
+        renderer_info: &RendererInfo,
     ) {
         // Get available width and use minimum if window is too small
         // Subtract extra padding to account for scrollbar and frame overhead
@@ -179,7 +229,7 @@ impl InfoPage {
                     ui.add_space(MARGIN);
 
                     render_box(ui, "Version & Build", box_width_3, |ui| {
-                        self.render_version_content(ui, version_info, renderer_info);
+                        self.render_version_content(ui, version_info);
                     });
 
                     ui.add_space(GAP);
@@ -191,7 +241,7 @@ impl InfoPage {
                     ui.add_space(GAP);
 
                     render_box(ui, "Process", box_width_3, |ui| {
-                        self.render_process_content(ui, version_info, flows);
+                        self.render_process_content(ui, version_info, flows, renderer_info);
                     });
                 });
 
@@ -233,12 +283,7 @@ impl InfoPage {
             });
     }
 
-    fn render_version_content(
-        &self,
-        ui: &mut Ui,
-        version_info: Option<&VersionInfo>,
-        renderer_info: &str,
-    ) {
+    fn render_version_content(&self, ui: &mut Ui, version_info: Option<&VersionInfo>) {
         if let Some(info) = version_info {
             egui::Grid::new("version_grid")
                 .num_columns(2)
@@ -280,10 +325,6 @@ impl InfoPage {
                         );
                         ui.end_row();
                     }
-
-                    ui.label("Renderer:");
-                    ui.label(egui::RichText::new(renderer_info).monospace());
-                    ui.end_row();
                 });
         } else {
             ui.horizontal(|ui| {
@@ -350,6 +391,7 @@ impl InfoPage {
         ui: &mut Ui,
         version_info: Option<&VersionInfo>,
         flows: &[strom_types::Flow],
+        renderer_info: &RendererInfo,
     ) {
         if let Some(info) = version_info {
             egui::Grid::new("process_grid")
@@ -358,6 +400,10 @@ impl InfoPage {
                 .show(ui, |ui| {
                     ui.label("GStreamer:");
                     ui.label(egui::RichText::new(&info.gstreamer_version).monospace());
+                    ui.end_row();
+
+                    ui.label("Renderer:");
+                    ui.label(egui::RichText::new(&renderer_info.display).monospace());
                     ui.end_row();
 
                     // Show process start time and uptime
@@ -387,6 +433,25 @@ impl InfoPage {
                     ui.label(format!("{} / {}", running_flows, total_flows));
                     ui.end_row();
                 });
+
+            // Collapsible renderer details
+            if !renderer_info.details.is_empty() {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new("Renderer Details")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        egui::Grid::new("renderer_details")
+                            .num_columns(2)
+                            .spacing([8.0, 2.0])
+                            .show(ui, |ui| {
+                                for (key, value) in &renderer_info.details {
+                                    ui.label(format!("{}:", key));
+                                    ui.label(egui::RichText::new(value).monospace());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
         } else {
             ui.horizontal(|ui| {
                 ui.spinner();
