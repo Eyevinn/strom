@@ -149,19 +149,6 @@ fn main() {
 // Native Entry Point
 // ============================================================================
 
-/// Load the app icon for native windows
-#[cfg(not(target_arch = "wasm32"))]
-fn load_icon() -> Option<egui::IconData> {
-    let icon_bytes = include_bytes!("icon.png");
-    let image = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
-    let (width, height) = image.dimensions();
-    Some(egui::IconData {
-        rgba: image.into_raw(),
-        width,
-        height,
-    })
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     // Initialize tracing for native
@@ -178,7 +165,7 @@ fn main() -> eframe::Result<()> {
         .with_inner_size([1280.0, 720.0])
         .with_title("Strom");
 
-    if let Some(icon) = load_icon() {
+    if let Some(icon) = strom_frontend::load_icon() {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
 

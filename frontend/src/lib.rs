@@ -40,7 +40,7 @@ pub use app::StromApp;
 
 /// Load the app icon for native windows
 #[cfg(not(target_arch = "wasm32"))]
-fn load_icon() -> Option<egui::IconData> {
+pub fn load_icon() -> Option<egui::IconData> {
     let icon_bytes = include_bytes!("icon.png");
     let image = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
