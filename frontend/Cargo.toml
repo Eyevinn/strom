@@ -55,6 +55,8 @@ wasm-bindgen = "0.2"
 
 # Native-specific dependencies
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Enable wgpu renderer for native (macOS Metal support) - not available for WASM
+eframe = { workspace = true, features = ["wgpu"] }
 # Cross-platform time (standard for native)
 instant = "0.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }

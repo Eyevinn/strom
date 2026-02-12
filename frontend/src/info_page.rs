@@ -18,8 +18,10 @@ pub struct RendererInfo {
 }
 
 /// Detect the active rendering backend from eframe's CreationContext.
-/// Checks which renderer is actually active at runtime - no cfg needed.
+/// Checks which renderer is actually active at runtime.
 pub fn detect_renderer(cc: &eframe::CreationContext<'_>) -> RendererInfo {
+    // wgpu renderer detection - only available on native where the wgpu feature is enabled
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(render_state) = &cc.wgpu_render_state {
         let info = render_state.adapter.get_info();
         let mut details = vec![
