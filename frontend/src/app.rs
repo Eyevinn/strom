@@ -651,6 +651,8 @@ pub struct StromApp {
     media_page: crate::media::MediaPage,
     /// Info page state
     info_page: crate::info_page::InfoPage,
+    /// Rendering backend name (e.g. "glow (OpenGL)", "wgpu (Metal)")
+    renderer_info: String,
     /// Links page state
     links_page: crate::links::LinksPage,
     /// Flow list filter text
@@ -725,6 +727,8 @@ impl StromApp {
     ) -> Self {
         // Install image loaders for egui (required for Image::from_bytes)
         egui_extras::install_image_loaders(&cc.egui_ctx);
+
+        let renderer_info = crate::info_page::detect_renderer(cc);
 
         // Create channels for async communication
         let channels = AppStateChannels::new();
@@ -810,6 +814,7 @@ impl StromApp {
             clocks_page: crate::clocks::ClocksPage::new(),
             media_page: crate::media::MediaPage::new(),
             info_page: crate::info_page::InfoPage::new(),
+            renderer_info,
             links_page: crate::links::LinksPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
@@ -860,6 +865,8 @@ impl StromApp {
     ) -> Self {
         // Install image loaders for egui (required for Image::from_bytes)
         egui_extras::install_image_loaders(&cc.egui_ctx);
+
+        let renderer_info = crate::info_page::detect_renderer(cc);
 
         // Create channels for async communication
         let channels = AppStateChannels::new();
@@ -949,6 +956,7 @@ impl StromApp {
             clocks_page: crate::clocks::ClocksPage::new(),
             media_page: crate::media::MediaPage::new(),
             info_page: crate::info_page::InfoPage::new(),
+            renderer_info,
             links_page: crate::links::LinksPage::new(),
             flow_filter: String::new(),
             show_stream_picker_for_block: None,
@@ -7125,6 +7133,7 @@ impl eframe::App for StromApp {
                                 &self.system_monitor,
                                 &self.network_interfaces,
                                 &self.flows,
+                                &self.renderer_info,
                             );
                         });
                     }

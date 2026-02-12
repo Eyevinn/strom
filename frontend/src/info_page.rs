@@ -8,6 +8,37 @@ use crate::system_monitor::SystemMonitorStore;
 
 const HISTORY_SIZE: usize = 60;
 
+/// Detect the active rendering backend from eframe's CreationContext.
+/// On macOS eframe is compiled with wgpu (Metal), elsewhere with glow (OpenGL/WebGL).
+pub fn detect_renderer(cc: &eframe::CreationContext<'_>) -> String {
+    // On macOS native, eframe is compiled with wgpu feature
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+    {
+        if let Some(render_state) = &cc.wgpu_render_state {
+            let info = render_state.adapter.get_info();
+            return format!("wgpu ({:?}, {})", info.backend, info.name);
+        }
+    }
+
+    // On Linux/Windows native, eframe is compiled with glow feature
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+    {
+        if cc.gl.is_some() {
+            return "glow (OpenGL)".to_string();
+        }
+    }
+
+    // WASM always uses glow (WebGL)
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = cc;
+        return "glow (WebGL)".to_string();
+    }
+
+    #[allow(unreachable_code)]
+    "unknown".to_string()
+}
+
 /// Get the current time as Unix timestamp in milliseconds
 pub(crate) fn current_time_millis() -> i64 {
     #[cfg(target_arch = "wasm32")]
@@ -135,6 +166,7 @@ impl InfoPage {
         system_monitor: &SystemMonitorStore,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         flows: &[strom_types::Flow],
+        renderer_info: &str,
     ) {
         // Get available width and use minimum if window is too small
         // Subtract extra padding to account for scrollbar and frame overhead
@@ -160,7 +192,7 @@ impl InfoPage {
                     ui.add_space(MARGIN);
 
                     render_box(ui, "Version & Build", box_width_3, |ui| {
-                        self.render_version_content(ui, version_info);
+                        self.render_version_content(ui, version_info, renderer_info);
                     });
 
                     ui.add_space(GAP);
@@ -214,7 +246,12 @@ impl InfoPage {
             });
     }
 
-    fn render_version_content(&self, ui: &mut Ui, version_info: Option<&VersionInfo>) {
+    fn render_version_content(
+        &self,
+        ui: &mut Ui,
+        version_info: Option<&VersionInfo>,
+        renderer_info: &str,
+    ) {
         if let Some(info) = version_info {
             egui::Grid::new("version_grid")
                 .num_columns(2)
@@ -256,6 +293,10 @@ impl InfoPage {
                         );
                         ui.end_row();
                     }
+
+                    ui.label("Renderer:");
+                    ui.label(egui::RichText::new(renderer_info).monospace());
+                    ui.end_row();
                 });
         } else {
             ui.horizontal(|ui| {
