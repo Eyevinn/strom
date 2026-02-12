@@ -17,12 +17,6 @@ egui.workspace = true
 eframe.workspace = true
 egui_extras.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-eframe = { workspace = true, features = ["wgpu"] }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-eframe = { workspace = true, features = ["glow"] }
-
 # HTTP client - works on both WASM and native
 reqwest = { workspace = true, features = ["json", "multipart"] }
 

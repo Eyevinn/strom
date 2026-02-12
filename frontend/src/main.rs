@@ -162,6 +162,21 @@ fn load_icon() -> Option<egui::IconData> {
     })
 }
 
+/// Select the preferred renderer per platform.
+/// macOS: wgpu (Metal) to avoid OpenGL conflicts with GStreamer.
+/// Others: glow (OpenGL) as the stable default.
+#[cfg(not(target_arch = "wasm32"))]
+fn preferred_renderer() -> eframe::Renderer {
+    #[cfg(target_os = "macos")]
+    {
+        eframe::Renderer::Wgpu
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        eframe::Renderer::Glow
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     // Initialize tracing for native
@@ -184,6 +199,7 @@ fn main() -> eframe::Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport,
+        renderer: preferred_renderer(),
         ..Default::default()
     };
 

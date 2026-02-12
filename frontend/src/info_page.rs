@@ -9,33 +9,20 @@ use crate::system_monitor::SystemMonitorStore;
 const HISTORY_SIZE: usize = 60;
 
 /// Detect the active rendering backend from eframe's CreationContext.
-/// On macOS eframe is compiled with wgpu (Metal), elsewhere with glow (OpenGL/WebGL).
+/// Checks which renderer is actually active at runtime - no cfg needed.
 pub fn detect_renderer(cc: &eframe::CreationContext<'_>) -> String {
-    // On macOS native, eframe is compiled with wgpu feature
-    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
-    {
-        if let Some(render_state) = &cc.wgpu_render_state {
-            let info = render_state.adapter.get_info();
-            return format!("wgpu ({:?}, {})", info.backend, info.name);
-        }
+    if let Some(render_state) = &cc.wgpu_render_state {
+        let info = render_state.adapter.get_info();
+        return format!("wgpu ({:?}, {})", info.backend, info.name);
     }
 
-    // On Linux/Windows native, eframe is compiled with glow feature
-    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
-    {
-        if cc.gl.is_some() {
-            return "glow (OpenGL)".to_string();
-        }
-    }
-
-    // WASM always uses glow (WebGL)
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = cc;
+    if cc.gl.is_some() {
+        #[cfg(target_arch = "wasm32")]
         return "glow (WebGL)".to_string();
+        #[cfg(not(target_arch = "wasm32"))]
+        return "glow (OpenGL)".to_string();
     }
 
-    #[allow(unreachable_code)]
     "unknown".to_string()
 }
 
