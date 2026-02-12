@@ -1,189 +1,189 @@
-# MoQ / WebCodecs / WebTransport som komplement till WebRTC i Strom
+# MoQ / WebCodecs / WebTransport as a Complement to WebRTC in Strom
 
-## Bakgrund
+## Background
 
-Strom använder idag WebRTC via WHEP/WHIP för webbläsarleverans med låg latens.
-WebRTC fungerar bra men har begränsningar vid skalning (broadcast/one-to-many)
-och ger utvecklaren begränsad kontroll över codec-pipeline i webbläsaren.
+Strom currently uses WebRTC via WHEP/WHIP for low-latency browser delivery.
+WebRTC works well but has limitations when scaling (broadcast/one-to-many)
+and gives developers limited control over the codec pipeline in the browser.
 
-Tre nya teknologier kan komplettera WebRTC:
+Three emerging technologies can complement WebRTC:
 
-| Teknologi | Roll | Mognadsgrad |
-|-----------|------|-------------|
-| **WebTransport** | Transportlager (QUIC till webbläsare) | Stöd i Chrome/Firefox/Edge. **Ej Safari.** |
-| **WebCodecs** | Encode/decode i webbläsare | Stöd i alla stora webbläsare inkl. Safari 26.1 |
-| **MoQ (Media over QUIC)** | Pub/sub-protokoll för media ovanpå QUIC | IETF draft-15, ej RFC. Experimentellt. |
+| Technology | Role | Maturity |
+|------------|------|----------|
+| **WebTransport** | Transport layer (QUIC to browser) | Supported in Chrome/Firefox/Edge. **Not Safari.** |
+| **WebCodecs** | Encode/decode in the browser | Supported in all major browsers incl. Safari 26.1 |
+| **MoQ (Media over QUIC)** | Pub/sub protocol for media on top of QUIC | IETF draft-15, not yet RFC. Experimental. |
 
 ---
 
-## Nuläge i Strom
+## Current State of Strom
 
 ```
 GStreamer pipeline
-  ├── WHEP output (whepserversink) ──► WebRTC till webbläsare
+  ├── WHEP output (whepserversink) ──► WebRTC to browser
   ├── WHIP input/output             ──► WebRTC ingest/egress
-  ├── AES67 (RTP multicast)         ──► Professionell audio
+  ├── AES67 (RTP multicast)         ──► Professional audio
   ├── SRT/MPEG-TS                   ──► Contribution/distribution
-  └── NDI, DeckLink                 ──► Lokalt studio
+  └── NDI, DeckLink                 ──► Local studio
 ```
 
-Axum-servern proxar WHEP/WHIP-signalering och hanterar SDP/ICE.
-Frontend (egui/WASM) kommunicerar via REST + WebSocket.
+The Axum server proxies WHEP/WHIP signaling and handles SDP/ICE.
+The frontend (egui/WASM) communicates via REST + WebSocket.
 
 ---
 
-## Teknologiöversikt
+## Technology Overview
 
 ### WebTransport
 
-- QUIC-baserat, ger både reliable streams och unreliable datagrams
-- Eliminerar head-of-line blocking (varje QUIC-stream är oberoende)
-- Kräver HTTP/3 (ALPN `h3`) och TLS 1.3
-- **Safari saknar stöd** -- ingen publik tidplan från Apple
-- Rust-ekosystem: `quinn` (mogen QUIC), `wtransport`, `h3-webtransport`
-- GStreamer: `gst-plugin-quinn` i officiella `gst-plugins-rs` sedan 1.26
-  - Element: `quinnwtsink`, `quinnwtclientsrc`
+- QUIC-based, provides both reliable streams and unreliable datagrams
+- Eliminates head-of-line blocking (each QUIC stream is independent)
+- Requires HTTP/3 (ALPN `h3`) and TLS 1.3
+- **Safari lacks support** -- no public timeline from Apple
+- Rust ecosystem: `quinn` (mature QUIC), `wtransport`, `h3-webtransport`
+- GStreamer: `gst-plugin-quinn` in the official `gst-plugins-rs` since 1.26
+  - Elements: `quinnwtsink`, `quinnwtclientsrc`
 
 ### WebCodecs
 
-- Lågnivå-API för video/audio encode/decode i webbläsaren
-- Ger utvecklaren full kontroll över frames (till skillnad från WebRTC:s svarta låda)
+- Low-level API for video/audio encode/decode in the browser
+- Gives the developer full control over frames (unlike WebRTC's black box)
 - `VideoDecoder` / `VideoEncoder` / `AudioDecoder` / `AudioEncoder`
-- Stöd i Chrome, Firefox, Edge, Safari 26.1
-- Renderar via `<canvas>` eller `VideoTrackGenerator` → `<video>`
-- Kan ta emot encoded chunks från vilken transport som helst (WebTransport, WebSocket, fetch)
+- Supported in Chrome, Firefox, Edge, Safari 26.1
+- Renders via `<canvas>` or `VideoTrackGenerator` -> `<video>`
+- Can receive encoded chunks from any transport (WebTransport, WebSocket, fetch)
 
 ### MoQ (Media over QUIC)
 
-- IETF-standardisering pågår (draft-ietf-moq-transport-15, oktober 2025)
-- Pub/sub-modell: tracks (namngivna strömmar) och groups (oberoende chunks, typiskt GOP:ar)
-- Relay-arkitektur: codec-agnostiska noder som fläktar ut data (CDN-vänligt)
-- Rust-implementationer:
-  - `moq-dev/moq` (kixelated) -- mest aktiv, stöd för `iroh` (P2P QUIC)
-  - `cloudflare/moq-rs` -- productionstestad hos Cloudflare
-- GStreamer-plugins:
-  - `hang-gst` / `moq-gst` (moq-dev) -- publicera/prenumerera
-  - `gst-moq-pub` (Cloudflare) -- publicera mot MoQ-relay
+- IETF standardization in progress (draft-ietf-moq-transport-15, October 2025)
+- Pub/sub model: tracks (named streams) and groups (independently decodable chunks, typically GOPs)
+- Relay architecture: codec-agnostic nodes that fan out data (CDN-friendly)
+- Rust implementations:
+  - `moq-dev/moq` (kixelated) -- most active, supports `iroh` (P2P QUIC)
+  - `cloudflare/moq-rs` -- production-tested at Cloudflare
+- GStreamer plugins:
+  - `hang-gst` / `moq-gst` (moq-dev) -- publish/subscribe
+  - `gst-moq-pub` (Cloudflare) -- publish to MoQ relay
 
 ---
 
-## Arkitekturförslag
+## Architecture Proposal
 
-### Fas 1: WebTransport + WebCodecs (utan MoQ)
+### Phase 1: WebTransport + WebCodecs (without MoQ)
 
-Enklast att börja med. Ger låg latens utan WebRTC:s signaleringskomplexitet.
+Simplest starting point. Provides low latency without WebRTC's signaling complexity.
 
 ```
 ┌──────────────── Strom Backend ─────────────────┐
 │                                                  │
 │  GStreamer pipeline                              │
 │    └── videoenc (H.264/H.265)                    │
-│        └── [ny] quinnwtsink / custom sink        │
+│        └── [new] quinnwtsink / custom sink       │
 │            └── QUIC stream per GOP               │
 │                                                  │
 │  Axum server                                     │
-│    ├── Befintlig REST/WS API                     │
-│    ├── Befintlig WHEP/WHIP proxy                 │
-│    └── [ny] WebTransport endpoint (/wt/{id})     │
+│    ├── Existing REST/WS API                      │
+│    ├── Existing WHEP/WHIP proxy                  │
+│    └── [new] WebTransport endpoint (/wt/{id})    │
 │         ├── H3 session setup (quinn + h3)        │
-│         └── Skickar encoded frames               │
-│             via QUIC uni-streams eller datagrams  │
+│         └── Sends encoded frames                 │
+│             via QUIC uni-streams or datagrams    │
 │                                                  │
 └──────────────────────────────────────────────────┘
               │
               │ QUIC / WebTransport
               ▼
-┌──────────── Webbläsare ─────────────┐
+┌──────────── Browser ────────────────┐
 │                                      │
 │  WebTransport API                    │
-│    └── Ta emot encoded chunks        │
+│    └── Receive encoded chunks        │
 │                                      │
 │  WebCodecs                           │
 │    ├── VideoDecoder (H.264/H.265)    │
 │    └── AudioDecoder (Opus/AAC)       │
 │                                      │
 │  Rendering                           │
-│    └── <canvas> eller <video>        │
+│    └── <canvas> or <video>           │
 │                                      │
 └──────────────────────────────────────┘
 ```
 
-#### Konkreta steg
+#### Concrete Steps
 
-1. **Backend: QUIC/H3-lager i Axum**
-   - Lägg till `quinn` och `h3`/`h3-quinn` som dependencies
-   - Skapa en parallell QUIC-listener vid sidan av den befintliga TCP-listenern
-   - Implementera WebTransport session-hantering (HTTP/3 CONNECT)
-   - Endpoint: `GET /wt/{endpoint_id}` → uppgraderas till WebTransport-session
+1. **Backend: QUIC/H3 layer in Axum**
+   - Add `quinn` and `h3`/`h3-quinn` as dependencies
+   - Create a parallel QUIC listener alongside the existing TCP listener
+   - Implement WebTransport session handling (HTTP/3 CONNECT)
+   - Endpoint: `GET /wt/{endpoint_id}` -> upgrades to a WebTransport session
 
-2. **Backend: Ny output-block `WebTransportOutput`**
-   - Liknande struktur som `WhepOutputBlock` men utan SDP/ICE
-   - Hämtar encoded data från GStreamer-pipelinen (via appsink eller inter-element)
-   - Paketerar i ett enkelt frame-format: `[timestamp][flags][codec_id][data]`
-   - Skickar varje GOP-grupp på en ny QUIC uni-directional stream
-     (eller datagrams för ultra-låg latens med accepterad förlust)
-   - Registrerar sig i en `WebTransportRegistry` (likt `WhepRegistry`)
+2. **Backend: New output block `WebTransportOutput`**
+   - Similar structure to `WhepOutputBlock` but without SDP/ICE
+   - Retrieves encoded data from the GStreamer pipeline (via appsink or inter element)
+   - Packages in a simple frame format: `[timestamp][flags][codec_id][data]`
+   - Sends each GOP group on a new QUIC uni-directional stream
+     (or datagrams for ultra-low latency with accepted loss)
+   - Registers itself in a `WebTransportRegistry` (similar to `WhepRegistry`)
 
-3. **Frontend: JavaScript WebTransport-spelare**
-   - Ny HTML-sida `/player/wt?endpoint=/wt/{id}` (likt befintlig WHEP-player)
-   - Öppnar `WebTransport`-session mot servern
-   - Tar emot streams, demuxar frame-header
-   - Matar `EncodedVideoChunk` / `EncodedAudioChunk` till `VideoDecoder` / `AudioDecoder`
-   - Renderar till `<canvas>` (VideoFrame → drawImage)
-   - Fallback: visa meddelande om WebTransport ej stöds (Safari)
+3. **Frontend: JavaScript WebTransport player**
+   - New HTML page `/player/wt?endpoint=/wt/{id}` (similar to existing WHEP player)
+   - Opens a `WebTransport` session to the server
+   - Receives streams, demuxes frame headers
+   - Feeds `EncodedVideoChunk` / `EncodedAudioChunk` to `VideoDecoder` / `AudioDecoder`
+   - Renders to `<canvas>` (VideoFrame -> drawImage)
+   - Fallback: displays a message if WebTransport is not supported (Safari)
 
-4. **Konfiguration**
-   - `.strom.toml`: ny sektion `[quic]` med port, cert/key (krävs för QUIC)
-   - Dela TLS-cert med befintlig HTTPS-konfiguration om möjligt
-   - Block-parametrar: latency-mode (stream vs datagram), codec
+4. **Configuration**
+   - `.strom.toml`: new section `[quic]` with port, cert/key (required for QUIC)
+   - Share TLS cert with existing HTTPS configuration if possible
+   - Block parameters: latency-mode (stream vs datagram), codec
 
-#### Filer att skapa/ändra
+#### Files to Create/Modify
 
-| Fil | Ändring |
-|-----|---------|
-| `Cargo.toml` (workspace) | Lägg till `quinn`, `h3`, `h3-quinn`, `h3-webtransport` |
-| `backend/src/quic/mod.rs` | Ny modul: QUIC-listener, WebTransport session |
-| `backend/src/quic/session.rs` | Session-hantering, stream-skapande |
-| `backend/src/blocks/builtin/wt_output.rs` | Ny block: WebTransport Output |
-| `backend/src/api/wt_player.rs` | Player-sida och endpoint-proxy |
-| `backend/src/api/lib.rs` | Registrera nya routes |
-| `backend/src/state.rs` | Lägg till `WebTransportRegistry` |
-| `strom-types/src/block.rs` | Ny block-typ |
-| `frontend/assets/wt-player.html` | JavaScript WebTransport + WebCodecs spelare |
+| File | Change |
+|------|--------|
+| `Cargo.toml` (workspace) | Add `quinn`, `h3`, `h3-quinn`, `h3-webtransport` |
+| `backend/src/quic/mod.rs` | New module: QUIC listener, WebTransport session |
+| `backend/src/quic/session.rs` | Session handling, stream creation |
+| `backend/src/blocks/builtin/wt_output.rs` | New block: WebTransport Output |
+| `backend/src/api/wt_player.rs` | Player page and endpoint proxy |
+| `backend/src/api/lib.rs` | Register new routes |
+| `backend/src/state.rs` | Add `WebTransportRegistry` |
+| `strom-types/src/block.rs` | New block type |
+| `frontend/assets/wt-player.html` | JavaScript WebTransport + WebCodecs player |
 
-#### Uppskattad komplexitet
+#### Estimated Complexity
 
-- Backend QUIC-lager: Medel-hög (quinn + h3 integration med Axum)
-- Output-block: Medel (liknande WHEP men enklare utan SDP)
-- JS-spelare: Medel (WebTransport + WebCodecs API:erna är relativt rättframma)
-- Största risken: TLS-certifikat (QUIC kräver giltig TLS, self-signed kräver extra steg)
+- Backend QUIC layer: Medium-high (quinn + h3 integration with Axum)
+- Output block: Medium (similar to WHEP but simpler without SDP)
+- JS player: Medium (WebTransport + WebCodecs APIs are relatively straightforward)
+- Biggest risk: TLS certificates (QUIC requires valid TLS, self-signed requires extra steps)
 
 ---
 
-### Fas 2: MoQ-integration
+### Phase 2: MoQ Integration
 
-Lägger till pub/sub-semantik och möjliggör relay-baserad skalning.
+Adds pub/sub semantics and enables relay-based scaling.
 
 ```
 ┌─── Strom Backend (Publisher) ───┐
 │                                  │
 │  GStreamer pipeline              │
 │    └── hang-gst / moq-gst sink  │
-│        └── Publicerar tracks     │
+│        └── Publishes tracks      │
 │                                  │
 └──────────┬───────────────────────┘
            │ MoQT (QUIC)
            ▼
-┌─── MoQ Relay (valfri) ──────────┐
+┌─── MoQ Relay (optional) ────────┐
 │                                  │
 │  moq-relay (moq-dev/moq)        │
-│  Prenumererar upstream,          │
-│  fläktar ut till N subscribers   │
+│  Subscribes upstream,            │
+│  fans out to N subscribers       │
 │                                  │
 └──────────┬───────────────────────┘
            │ MoQT (WebTransport)
            ▼
-┌─── Webbläsare ──────────────────┐
+┌─── Browser ─────────────────────┐
 │                                  │
 │  moq-js (subscriber)            │
 │    └── WebCodecs decode          │
@@ -191,149 +191,150 @@ Lägger till pub/sub-semantik och möjliggör relay-baserad skalning.
 └──────────────────────────────────┘
 ```
 
-#### Konkreta steg
+#### Concrete Steps
 
-1. **Integrera `hang-gst`-pluginet**
-   - Bygg och ladda `hang-gst` som GStreamer-plugin
-   - Skapa en `MoqOutputBlock` som konfigurerar hang-gst-sink
-   - Parametrar: relay-URL, track-namn, codec-konfiguration
+1. **Integrate the `hang-gst` plugin**
+   - Build and load `hang-gst` as a GStreamer plugin
+   - Create a `MoqOutputBlock` that configures the hang-gst sink
+   - Parameters: relay URL, track name, codec configuration
 
-2. **Valfritt: inbäddad MoQ-relay**
-   - Använd `moq-native` som bibliotek i Strom-backend
-   - Kör en minimal relay-instans in-process
-   - Eller: peka mot extern relay (moq-dev/moq eller Cloudflare)
+2. **Optional: embedded MoQ relay**
+   - Use `moq-native` as a library in the Strom backend
+   - Run a minimal relay instance in-process
+   - Or: point to an external relay (moq-dev/moq or Cloudflare)
 
-3. **Webbspelare med moq-js**
-   - Integrera `moq-js` (TypeScript/WASM) i en player-sida
-   - Alternativt: bygg custom subscriber med WebTransport + WebCodecs
-     (mer kontroll men mer arbete)
+3. **Web player with moq-js**
+   - Integrate `moq-js` (TypeScript/WASM) in a player page
+   - Alternative: build a custom subscriber with WebTransport + WebCodecs
+     (more control but more work)
 
-4. **MoQ-ingest (input)**
-   - Ny `MoqInputBlock` som prenumererar på MoQ-tracks
-   - Matar decoded media in i GStreamer-pipelinen
-   - Möjliggör: MoQ-källa → Strom-processing → valfri output
+4. **MoQ ingest (input)**
+   - New `MoqInputBlock` that subscribes to MoQ tracks
+   - Feeds decoded media into the GStreamer pipeline
+   - Enables: MoQ source -> Strom processing -> any output
 
-#### Risker med MoQ
+#### Risks with MoQ
 
-- **Specifikationen är inte stabil** -- breaking changes mellan drafts
-- **Få produktionsinstallationer** utanför Cloudflare
-- **moq-dev/moq vs cloudflare/moq-rs** -- två divergerande implementationer
-- **Safari** saknar WebTransport (krävs för MoQ i webbläsare)
+- **The specification is not stable** -- breaking changes between drafts
+- **Few production deployments** outside of Cloudflare
+- **moq-dev/moq vs cloudflare/moq-rs** -- two diverging implementations
+- **Safari** lacks WebTransport (required for MoQ in the browser)
 
 ---
 
-### Fas 3: Hybrid-arkitektur (långsiktigt)
+### Phase 3: Hybrid Architecture (long-term)
 
 ```
 ┌────────── Strom Backend ──────────────────────────────┐
 │                                                        │
 │  GStreamer pipeline                                    │
-│    ├── whepserversink  → WebRTC (konferens, P2P)      │
+│    ├── whepserversink  → WebRTC (conferencing, P2P)   │
 │    ├── hang-gst sink   → MoQ relay (broadcast)        │
-│    ├── quinnwtsink     → Direkt WebTransport (enkel)  │
-│    ├── AES67/NDI       → Professionell AV             │
+│    ├── quinnwtsink     → Direct WebTransport (simple) │
+│    ├── AES67/NDI       → Professional AV              │
 │    └── SRT/MPEG-TS     → Contribution                 │
 │                                                        │
 │  Axum                                                  │
-│    ├── HTTP/1.1 + HTTP/2 (TCP) ← befintligt           │
-│    └── HTTP/3 (QUIC)           ← nytt                  │
+│    ├── HTTP/1.1 + HTTP/2 (TCP) ← existing             │
+│    └── HTTP/3 (QUIC)           ← new                  │
 │        ├── WebTransport sessions                       │
-│        └── MoQ relay (valfritt)                        │
+│        └── MoQ relay (optional)                        │
 │                                                        │
-│  Adaptiv leverans                                      │
-│    └── Välj protokoll baserat på:                      │
-│        - Webbläsarstöd (Safari → WHEP, övriga → WT)   │
-│        - Use case (konferens → WebRTC, broadcast → MoQ)│
-│        - Nätverksförhållanden                          │
+│  Adaptive delivery                                     │
+│    └── Select protocol based on:                       │
+│        - Browser support (Safari → WHEP, others → WT) │
+│        - Use case (conferencing → WebRTC, broadcast →  │
+│          MoQ)                                          │
+│        - Network conditions                            │
 │                                                        │
 └────────────────────────────────────────────────────────┘
 ```
 
-#### Adaptiv fallback-strategi i webbläsaren
+#### Adaptive Fallback Strategy in the Browser
 
 ```javascript
 async function connect(endpointId) {
-  // 1. Försök WebTransport + WebCodecs (lägst latens, mest kontroll)
+  // 1. Try WebTransport + WebCodecs (lowest latency, most control)
   if (typeof WebTransport !== 'undefined') {
     return connectWebTransport(endpointId);
   }
-  // 2. Fallback till WebRTC/WHEP (Safari, äldre webbläsare)
+  // 2. Fallback to WebRTC/WHEP (Safari, older browsers)
   return connectWhep(endpointId);
 }
 ```
 
 ---
 
-## Rekommenderad ordning
+## Recommended Order
 
-| Steg | Vad | Varför | Beroende av |
-|------|-----|--------|-------------|
-| **1a** | QUIC-lager i Axum (quinn + h3) | Grundförutsättning för allt annat | Inget |
-| **1b** | Enkel WebTransport-output + JS-spelare | Snabbast att validera, ger omedelbart värde | 1a |
-| **1c** | WebTransport-input (ingest från webbläsare) | Ersätter WHIP för kompatibla webbläsare | 1a |
-| **2a** | Utvärdera hang-gst / moq-gst | Förstå API och mognad | Inget (parallellt) |
-| **2b** | MoQ output-block med extern relay | Skalbar broadcast | 2a |
-| **2c** | Inbäddad MoQ-relay | Allt-i-ett-lösning | 2b |
-| **3** | Adaptiv protokollväljare | Bästa möjliga upplevelse per klient | 1b, 2b |
-
----
-
-## Safari-problematiken
-
-Safari saknar WebTransport-stöd helt. Ingen publik tidplan från Apple.
-Experimentellt stöd bakom feature-flag i iOS 18 men otillförlitligt.
-
-**Konsekvens:** WebRTC/WHEP måste behållas som fullgott alternativ.
-WebTransport/MoQ blir ett *komplement*, inte en ersättare.
-
-**Praktiskt:** Player-sidan bör feature-detecta `WebTransport` i JS och
-falla tillbaka till WHEP automatiskt.
+| Step | What | Why | Depends On |
+|------|------|-----|------------|
+| **1a** | QUIC layer in Axum (quinn + h3) | Prerequisite for everything else | Nothing |
+| **1b** | Simple WebTransport output + JS player | Fastest to validate, immediate value | 1a |
+| **1c** | WebTransport input (ingest from browser) | Replaces WHIP for compatible browsers | 1a |
+| **2a** | Evaluate hang-gst / moq-gst | Understand API and maturity | Nothing (parallel) |
+| **2b** | MoQ output block with external relay | Scalable broadcast | 2a |
+| **2c** | Embedded MoQ relay | All-in-one solution | 2b |
+| **3** | Adaptive protocol selector | Best possible experience per client | 1b, 2b |
 
 ---
 
-## Relevanta Rust-crates
+## The Safari Problem
 
-| Crate | Version | Användning |
-|-------|---------|------------|
-| `quinn` | 0.11+ | QUIC-implementation |
-| `h3` | 0.0.6+ | HTTP/3-protokoll |
-| `h3-quinn` | 0.0.7+ | h3 ↔ quinn-adapter |
+Safari completely lacks WebTransport support. No public timeline from Apple.
+Experimental support behind a feature flag in iOS 18 but unreliable.
+
+**Consequence:** WebRTC/WHEP must be maintained as a full alternative.
+WebTransport/MoQ becomes a *complement*, not a replacement.
+
+**In practice:** The player page should feature-detect `WebTransport` in JS and
+fall back to WHEP automatically.
+
+---
+
+## Relevant Rust Crates
+
+| Crate | Version | Usage |
+|-------|---------|-------|
+| `quinn` | 0.11+ | QUIC implementation |
+| `h3` | 0.0.6+ | HTTP/3 protocol |
+| `h3-quinn` | 0.0.7+ | h3 <-> quinn adapter |
 | `h3-webtransport` | 0.1+ | WebTransport sessions |
-| `wtransport` | 0.6+ | Alternativ: komplett WebTransport-server |
-| `moq-native` | (git) | MoQ pub/sub, QUIC-baserat |
-| `moq-karp` | (git) | MoQ media-lager (codecs, katalog) |
+| `wtransport` | 0.6+ | Alternative: complete WebTransport server |
+| `moq-native` | (git) | MoQ pub/sub, QUIC-based |
+| `moq-karp` | (git) | MoQ media layer (codecs, catalog) |
 
-## Relevanta GStreamer-element
+## Relevant GStreamer Elements
 
-| Element | Plugin | Funktion |
+| Element | Plugin | Function |
 |---------|--------|----------|
-| `quinnwtsink` | gst-plugin-quinn | Skicka data via WebTransport |
-| `quinnwtclientsrc` | gst-plugin-quinn | Ta emot data via WebTransport |
-| `quinnquicsrc/sink` | gst-plugin-quinn | Rå QUIC-strömmar |
+| `quinnwtsink` | gst-plugin-quinn | Send data via WebTransport |
+| `quinnwtclientsrc` | gst-plugin-quinn | Receive data via WebTransport |
+| `quinnquicsrc/sink` | gst-plugin-quinn | Raw QUIC streams |
 | `quinnroqmux` | gst-plugin-quinn | RTP-over-QUIC |
 | hang-gst elements | hang-gst | MoQ publish/subscribe |
 
 ---
 
-## Öppna frågor
+## Open Questions
 
-1. **TLS-certifikat:** QUIC kräver giltig TLS 1.3. Ska vi dela cert med
-   befintlig HTTPS-config eller ha separat? Self-signed-cert kräver att
-   webbläsaren litar på det (Chrome: `--origin-to-force-quic-on`).
+1. **TLS certificates:** QUIC requires valid TLS 1.3. Should we share certs with
+   the existing HTTPS config or keep them separate? Self-signed certs require
+   the browser to trust them (Chrome: `--origin-to-force-quic-on`).
 
-2. **Framing-format (fas 1):** Enkelt custom-format eller befintligt
-   container-format (fMP4, CMAF) över WebTransport-streams?
-   fMP4/CMAF har fördelen att vara beprövat och att WebCodecs har bra stöd.
+2. **Framing format (phase 1):** Simple custom format or an existing
+   container format (fMP4, CMAF) over WebTransport streams?
+   fMP4/CMAF has the advantage of being proven and having good WebCodecs support.
 
-3. **GStreamer-integration:** Använda `gst-plugin-quinn`-element direkt
-   i pipelinen, eller `appsink` → Rust-kod → QUIC? Appsink ger mer kontroll
-   men mer kod.
+3. **GStreamer integration:** Use `gst-plugin-quinn` elements directly
+   in the pipeline, or `appsink` -> Rust code -> QUIC? Appsink gives more control
+   but requires more code.
 
-4. **Port-delning:** Kan QUIC (UDP) och HTTP (TCP) dela samma portnummer?
-   Ja, det är möjligt men kräver att man lyssnar på både TCP och UDP på
-   samma port. Alternativ: separat QUIC-port (t.ex. 4443).
+4. **Port sharing:** Can QUIC (UDP) and HTTP (TCP) share the same port number?
+   Yes, it is possible but requires listening on both TCP and UDP on the same port.
+   Alternative: separate QUIC port (e.g. 4443).
 
-5. **MoQ-specversion:** Vilken draft att följa? moq-dev/moq har egna
-   förenklingar (moq-lite), cloudflare/moq-rs följer IETF draft-14.
-   Föreslår att avvakta tills RFC publiceras, eller följa moq-dev/moq
-   som prioriterar enkelhet.
+5. **MoQ spec version:** Which draft to follow? moq-dev/moq has its own
+   simplifications (moq-lite), cloudflare/moq-rs follows IETF draft-14.
+   Suggestion: wait until the RFC is published, or follow moq-dev/moq
+   which prioritizes simplicity.
