@@ -402,10 +402,6 @@ impl InfoPage {
                     ui.label(egui::RichText::new(&info.gstreamer_version).monospace());
                     ui.end_row();
 
-                    ui.label("Renderer:");
-                    ui.label(egui::RichText::new(&renderer_info.display).monospace());
-                    ui.end_row();
-
                     // Show process start time and uptime
                     if !info.process_started_at.is_empty() {
                         ui.label("Started:");
@@ -434,12 +430,13 @@ impl InfoPage {
                     ui.end_row();
                 });
 
-            // Collapsible renderer details
-            if !renderer_info.details.is_empty() {
-                ui.add_space(4.0);
-                egui::CollapsingHeader::new("Renderer Details")
-                    .default_open(false)
-                    .show(ui, |ui| {
+            // egui renderer as collapsible with details inside
+            ui.add_space(4.0);
+            let header_text = format!("egui Renderer: {}", renderer_info.display);
+            egui::CollapsingHeader::new(egui::RichText::new(header_text).monospace())
+                .default_open(false)
+                .show(ui, |ui| {
+                    if !renderer_info.details.is_empty() {
                         egui::Grid::new("renderer_details")
                             .num_columns(2)
                             .spacing([8.0, 2.0])
@@ -450,8 +447,8 @@ impl InfoPage {
                                     ui.end_row();
                                 }
                             });
-                    });
-            }
+                    }
+                });
         } else {
             ui.horizontal(|ui| {
                 ui.spinner();
