@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 use super::elements::*;
 use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
-use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR, QUEUE_MAX_BUFFERS};
+use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR};
 use strom_types::mixer::{DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS};
 
 /// Mixer block builder.
@@ -440,7 +440,6 @@ impl BlockBuilder for MixerBuilder {
             let sg_to_main_queue_id = format!("{}:group{}_to_main_queue", instance_id, sg);
             let sg_to_main_queue = gst::ElementFactory::make("queue")
                 .name(&sg_to_main_queue_id)
-                .property("max-size-buffers", QUEUE_MAX_BUFFERS)
                 .build()
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("group{}_to_main_queue: {}", sg, e))
@@ -734,7 +733,6 @@ impl BlockBuilder for MixerBuilder {
             let pfl_queue_id = format!("{}:pfl_queue_{}", instance_id, ch);
             let pfl_queue = gst::ElementFactory::make("queue")
                 .name(&pfl_queue_id)
-                .property("max-size-buffers", QUEUE_MAX_BUFFERS)
                 .build()
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("pfl_queue ch{}: {}", ch_num, e))
@@ -774,7 +772,6 @@ impl BlockBuilder for MixerBuilder {
                 let aux_queue_id = format!("{}:aux_queue_{}_{}", instance_id, ch, aux);
                 let aux_queue = gst::ElementFactory::make("queue")
                     .name(&aux_queue_id)
-                    .property("max-size-buffers", QUEUE_MAX_BUFFERS)
                     .build()
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!(
@@ -903,7 +900,6 @@ impl BlockBuilder for MixerBuilder {
             let to_main_queue_id = format!("{}:to_main_queue_{}", instance_id, ch);
             let to_main_queue = gst::ElementFactory::make("queue")
                 .name(&to_main_queue_id)
-                .property("max-size-buffers", QUEUE_MAX_BUFFERS)
                 .build()
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("to_main_queue ch{}: {}", ch_num, e))
@@ -947,7 +943,6 @@ impl BlockBuilder for MixerBuilder {
                 let to_grp_queue_id = format!("{}:to_grp{}_queue_{}", instance_id, sg, ch);
                 let to_grp_queue = gst::ElementFactory::make("queue")
                     .name(&to_grp_queue_id)
-                    .property("max-size-buffers", QUEUE_MAX_BUFFERS)
                     .build()
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!(

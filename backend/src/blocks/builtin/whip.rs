@@ -1069,9 +1069,6 @@ fn setup_whip_audio_direct(
 
     let queue = gst::ElementFactory::make("queue")
         .name(&queue_name)
-        .property("max-size-buffers", 3u32)
-        .property("max-size-time", 0u64)
-        .property("max-size-bytes", 0u32)
         .build()
         .map_err(|e| format!("Failed to create queue: {}", e))?;
 
@@ -1142,9 +1139,6 @@ fn setup_whip_video_direct(
 
     let queue = gst::ElementFactory::make("queue")
         .name(&queue_name)
-        .property("max-size-buffers", 3u32)
-        .property("max-size-time", 0u64)
-        .property("max-size-bytes", 0u32)
         .build()
         .map_err(|e| format!("Failed to create queue: {}", e))?;
 

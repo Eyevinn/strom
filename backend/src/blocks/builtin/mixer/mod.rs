@@ -42,8 +42,6 @@ use strom_types::mixer::{
 };
 /// Level meter interval in nanoseconds (100ms)
 const METER_INTERVAL_NS: u64 = 100_000_000;
-/// Maximum queue buffers for internal queues
-const QUEUE_MAX_BUFFERS: u32 = 3;
 /// EQ band type for Peaking/Bell filter (lsp-rs-equalizer enum value)
 const EQ_BAND_TYPE_BELL: i32 = 7;
 

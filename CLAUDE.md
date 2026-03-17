@@ -13,6 +13,9 @@
 - Do not add emojis to log macros (`info!`, `debug!`, `trace!`, `warn!`, `error!`)
 - If you find emojis in existing log rows, remove them. Emojis in UI icons are OK.
 
+## GStreamer Queues
+- Leave `queue`, `queue2`, and `multiqueue` elements with default property values unless there is a documented latency requirement that justifies overriding them.
+
 ## Code Organization
 - When working in or near a file that exceeds 1500 lines, proactively suggest splitting it into focused sub-modules (following the pattern used for `pipeline.rs` and `app.rs`)
 - Each sub-module should have a single clear responsibility (e.g. construction, lifecycle, linking, properties)

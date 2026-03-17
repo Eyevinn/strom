@@ -239,9 +239,6 @@ impl BlockBuilder for AudioRouterBuilder {
             let queue_out_id = format!("{}:queue_out_{}", instance_id, out_idx);
             let queue_out = gst::ElementFactory::make("queue")
                 .name(&queue_out_id)
-                .property("max-size-buffers", 3u32)
-                .property("max-size-time", 0u64)
-                .property("max-size-bytes", 0u32)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("queue_out: {}", e)))?;
 
@@ -311,9 +308,6 @@ impl BlockBuilder for AudioRouterBuilder {
                         format!("{}:silence_queue_o{}c{}", instance_id, out_idx, out_ch);
                     let silence_queue = gst::ElementFactory::make("queue")
                         .name(&silence_queue_id)
-                        .property("max-size-buffers", 3u32)
-                        .property("max-size-time", 0u64)
-                        .property("max-size-bytes", 0u32)
                         .build()
                         .map_err(|e| BlockBuildError::ElementCreation(format!("queue: {}", e)))?;
 
@@ -347,9 +341,6 @@ impl BlockBuilder for AudioRouterBuilder {
                     format!("{}:silence_queue_o{}c{}", instance_id, out_idx, out_ch);
                 let silence_queue = gst::ElementFactory::make("queue")
                     .name(&silence_queue_id)
-                    .property("max-size-buffers", 3u32)
-                    .property("max-size-time", 0u64)
-                    .property("max-size-bytes", 0u32)
                     .build()
                     .map_err(|e| BlockBuildError::ElementCreation(format!("queue: {}", e)))?;
 
@@ -523,9 +514,6 @@ impl BlockBuilder for AudioRouterBuilder {
                     );
                     let route_queue = match gst::ElementFactory::make("queue")
                         .name(&route_queue_id)
-                        .property("max-size-buffers", 3u32)
-                        .property("max-size-time", 0u64)
-                        .property("max-size-bytes", 0u32)
                         .build()
                     {
                         Ok(q) => q,
