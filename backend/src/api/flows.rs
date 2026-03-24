@@ -1490,6 +1490,46 @@ pub async fn toggle_dsk(
     }))
 }
 
+/// Toggle Fade to Black on a vision mixer block.
+#[utoipa::path(
+    post,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/ftb",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block instance ID")
+    ),
+    request_body = strom_types::api::FadeToBlackRequest,
+    responses(
+        (status = 200, description = "FTB toggled", body = strom_types::api::FadeToBlackResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+    )
+)]
+pub async fn fade_to_black(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+    Json(req): Json<strom_types::api::FadeToBlackRequest>,
+) -> Result<Json<strom_types::api::FadeToBlackResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let active = state
+        .fade_to_black(&flow_id, &block_id, req.duration_ms)
+        .await
+        .map_err(|e| {
+            error!("Failed to toggle FTB: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_details(
+                    "Failed to toggle FTB",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    Ok(Json(strom_types::api::FadeToBlackResponse {
+        message: format!("FTB {}", if active { "activated" } else { "deactivated" }),
+        active,
+    }))
+}
+
 /// Reset accumulated loudness measurements on an EBU R128 meter block.
 #[utoipa::path(
     post,

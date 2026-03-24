@@ -35,18 +35,25 @@ impl PipelineManager {
             .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
 
         // Clean up stale alpha values on video input pads only (not DSK pads).
-        // DSK pads (index >= num_video_inputs) keep their current alpha.
-        let num_video_inputs =
-            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
-                .map(|s| s.num_inputs)
-                .unwrap_or(usize::MAX);
+        // Use the server's authoritative PGM state, not the client-provided from_input,
+        // to avoid race conditions where the client's local state is out of sync.
+        let overlay_state =
+            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
+        let num_video_inputs = overlay_state
+            .as_ref()
+            .map(|s| s.num_inputs)
+            .unwrap_or(usize::MAX);
+        let actual_pgm = overlay_state
+            .as_ref()
+            .map(|s| s.pgm_input.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(from_input);
 
         for pad in mixer.sink_pads() {
             let name = pad.name();
             if name.starts_with("sink_") {
                 if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
                     if idx < num_video_inputs {
-                        let alpha = if idx == from_input { 1.0f64 } else { 0.0f64 };
+                        let alpha = if idx == actual_pgm { 1.0f64 } else { 0.0f64 };
                         pad.set_property("alpha", alpha);
                     }
                 }
@@ -415,6 +422,69 @@ impl PipelineManager {
                 pad: pad_name,
             })
         }
+    }
+
+    /// Toggle Fade to Black on a vision mixer block.
+    ///
+    /// FTB sets ALL mixer sink pads (video + DSK) to alpha=0.
+    /// Un-FTB restores PGM pad to alpha=1 and DSK pads to their previous state.
+    /// Returns the new FTB state (true = active/black).
+    pub fn fade_to_black(
+        &self,
+        block_instance_id: &str,
+        _duration_ms: u64,
+    ) -> Result<bool, PipelineError> {
+        use crate::blocks::builtin::vision_mixer::overlay;
+
+        let mixer_id = format!("{}:mixer", block_instance_id);
+        let mixer = self
+            .elements
+            .get(&mixer_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
+
+        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
+            PipelineError::ElementNotFound(format!(
+                "Vision mixer overlay state not found for {}",
+                block_instance_id
+            ))
+        })?;
+
+        let was_active = state.ftb_active.load(std::sync::atomic::Ordering::Relaxed);
+        let pgm = state.pgm_input.load(std::sync::atomic::Ordering::Relaxed);
+        let now_active = !was_active;
+
+        // FTB: set ALL pads to alpha=0 (video + DSK = everything goes black)
+        // Un-FTB: restore PGM pad to alpha=1, DSK pads to alpha=1
+        for pad in mixer.sink_pads() {
+            let name = pad.name();
+            if name.starts_with("sink_") {
+                if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
+                    if now_active {
+                        // FTB on: everything to black
+                        pad.set_property("alpha", 0.0f64);
+                    } else if idx == pgm || idx >= state.num_inputs {
+                        // FTB off: restore PGM and DSK pads
+                        pad.set_property("alpha", 1.0f64);
+                    }
+                }
+            }
+        }
+
+        state
+            .ftb_active
+            .store(now_active, std::sync::atomic::Ordering::Relaxed);
+
+        info!(
+            "Vision mixer {} FTB {}",
+            block_instance_id,
+            if now_active {
+                "activated"
+            } else {
+                "deactivated"
+            }
+        );
+
+        Ok(now_active)
     }
 }
 

@@ -887,3 +887,19 @@ pub struct DskToggleResponse {
     pub dsk: usize,
     pub enabled: bool,
 }
+
+/// Request to toggle Fade to Black on a vision mixer block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct FadeToBlackRequest {
+    /// Duration in milliseconds (0 = instant)
+    pub duration_ms: u64,
+}
+
+/// Response after toggling Fade to Black.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct FadeToBlackResponse {
+    pub message: String,
+    pub active: bool,
+}

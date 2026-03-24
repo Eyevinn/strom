@@ -55,6 +55,7 @@ use utoipa::OpenApi;
         crate::api::flows::trigger_transition,
         crate::api::flows::select_preview,
         crate::api::flows::toggle_dsk,
+        crate::api::flows::fade_to_black,
         crate::api::flows::animate_input,
         crate::api::flows::debug_graph,
         crate::api::flows::get_dynamic_pads,

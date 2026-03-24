@@ -139,12 +139,16 @@
             height: 42px;
             border: 2px solid;
             border-radius: 4px;
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 700;
             cursor: pointer;
             flex: 1;
             transition: all 0.15s ease;
             letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
         }
 
         .take-btn.cut {
@@ -175,6 +179,13 @@
             color: #fff;
             box-shadow: 0 0 8px rgba(255, 153, 0, 0.4);
         }
+        .take-btn.ftb-active {
+            background: #cc0000;
+            border-color: #ff3333;
+            color: #fff;
+            box-shadow: 0 0 12px rgba(255, 0, 0, 0.6);
+            animation: pulse 1.5s infinite;
+        }
 
         /* Transition type selector */
         .type-row {
@@ -192,6 +203,10 @@
             font-size: 11px;
             font-weight: 600;
             cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
         }
         .type-btn.active {
             background: #444;
@@ -230,6 +245,9 @@
             color: #888;
             font-size: 11px;
             cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
         .duration-preset:hover { border-color: #666; color: #ccc; }
         .duration-preset.active { background: #444; color: #fff; border-color: #888; }
@@ -267,6 +285,10 @@
             font-weight: 700;
             cursor: pointer;
             letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
         }
         .dsk-btn:focus { outline: none; }
         .dsk-btn:hover { border-color: #888; }
@@ -331,6 +353,7 @@
             <div class="transition-buttons">
                 <button class="take-btn cut" onclick="doCut()" title="Cut (X)">CUT</button>
                 <button class="take-btn auto" id="autoBtn" onclick="doAuto()" title="Auto transition (Space)">AUTO</button>
+                <button class="take-btn auto" id="ftbBtn" onclick="doFtb()" title="Fade to Black (F)">FTB</button>
             </div>
             <div class="type-row">
                 <button class="type-btn active" data-type="fade" onclick="setTransitionType('fade')">MIX</button>
@@ -345,10 +368,10 @@
                 <input type="number" class="duration-input" id="durationInput" value="1.0" min="0.1" max="10" step="0.1" onchange="onDurationInput()">
             </div>
             <div class="type-row" id="dskRow" style="display:none;">
-                <button class="dsk-btn" id="dsk0Btn" onclick="toggleDsk(0)">DSK 1</button>
-                <button class="dsk-btn" id="dsk1Btn" onclick="toggleDsk(1)" style="display:none;">DSK 2</button>
-                <button class="dsk-btn" id="dsk2Btn" onclick="toggleDsk(2)" style="display:none;">DSK 3</button>
-                <button class="dsk-btn" id="dsk3Btn" onclick="toggleDsk(3)" style="display:none;">DSK 4</button>
+                <button class="dsk-btn on" id="dsk0Btn" onclick="toggleDsk(0)">DSK 1 ON</button>
+                <button class="dsk-btn on" id="dsk1Btn" onclick="toggleDsk(1)" style="display:none;">DSK 2 ON</button>
+                <button class="dsk-btn on" id="dsk2Btn" onclick="toggleDsk(2)" style="display:none;">DSK 3 ON</button>
+                <button class="dsk-btn on" id="dsk3Btn" onclick="toggleDsk(3)" style="display:none;">DSK 4 ON</button>
             </div>
         </div>
     </div>
@@ -361,7 +384,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">1-9,0 = PVW | Space = AUTO | X = CUT</span>
+        <span class="shortcut-hint">1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -386,6 +409,7 @@
         let transitionType = 'fade';
         let transitionDurationMs = 1000;
         let transitioning = false;
+        let ftbActive = false;
 
         // ---- API helpers ----
         const API_BASE = '/api/flows/' + FLOW_ID + '/blocks/' + BLOCK_ID;
@@ -419,6 +443,13 @@
         // ---- Transitions ----
         function doTake(type, durationMs) {
             if (transitioning || currentPgm === currentPvw) return;
+            // Auto-un-FTB before transition
+            if (ftbActive) {
+                apiPost('/ftb', { duration_ms: 0 }).then(r => {
+                    ftbActive = r.active;
+                    updateFtbButton();
+                }).catch(() => {});
+            }
             transitioning = true;
             if (durationMs > 0) {
                 document.getElementById('autoBtn').classList.add('active');
@@ -459,6 +490,23 @@
 
         function doAuto() {
             doTake(transitionType, transitionDurationMs);
+        }
+
+        // ---- FTB (Fade to Black) ----
+        function doFtb() {
+            apiPost('/ftb', { duration_ms: transitionDurationMs })
+                .then(r => {
+                    ftbActive = r.active;
+                    updateFtbButton();
+                    setStatus(r.message);
+                })
+                .catch(e => setStatus('FTB error: ' + e.message));
+        }
+
+        function updateFtbButton() {
+            const btn = document.getElementById('ftbBtn');
+            btn.classList.toggle('ftb-active', ftbActive);
+            btn.textContent = ftbActive ? 'FTB ON' : 'FTB';
         }
 
         // ---- DSK toggle ----
@@ -597,6 +645,13 @@
                 e.preventDefault();
                 return;
             }
+
+            // F = FTB
+            if (e.key === 'f' || e.key === 'F') {
+                doFtb();
+                e.preventDefault();
+                return;
+            }
         });
 
         // ---- Connection status helpers ----
@@ -687,6 +742,20 @@
                             currentPvw = d.preview_input;
                             currentPgm = d.program_input;
                             updateButtons();
+                        }
+                    }
+                    if (event.type === 'VisionMixerDskChanged' && event.data) {
+                        const d = event.data;
+                        if (d.block_id === BLOCK_ID) {
+                            dskEnabled[d.dsk - 1] = d.enabled;
+                            updateDskButtons();
+                        }
+                    }
+                    if (event.type === 'VisionMixerFtbChanged' && event.data) {
+                        const d = event.data;
+                        if (d.block_id === BLOCK_ID) {
+                            ftbActive = d.active;
+                            updateFtbButton();
                         }
                     }
                 } catch {}

@@ -334,6 +334,22 @@ pub enum StromEvent {
         preview_input: usize,
         program_input: usize,
     },
+    /// Vision mixer DSK layer toggled
+    VisionMixerDskChanged {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_id: String,
+        /// DSK layer number (1-based)
+        dsk: usize,
+        enabled: bool,
+    },
+    /// Vision mixer Fade to Black state changed
+    VisionMixerFtbChanged {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_id: String,
+        active: bool,
+    },
 }
 
 impl StromEvent {
@@ -721,6 +737,32 @@ impl StromEvent {
                 format!(
                     "Vision mixer {} in flow {}: PVW={}, PGM={}",
                     block_id, flow_id, preview_input, program_input
+                )
+            }
+            StromEvent::VisionMixerDskChanged {
+                flow_id,
+                block_id,
+                dsk,
+                enabled,
+            } => {
+                format!(
+                    "Vision mixer {} in flow {}: DSK {} {}",
+                    block_id,
+                    flow_id,
+                    dsk,
+                    if *enabled { "ON" } else { "OFF" }
+                )
+            }
+            StromEvent::VisionMixerFtbChanged {
+                flow_id,
+                block_id,
+                active,
+            } => {
+                format!(
+                    "Vision mixer {} in flow {}: FTB {}",
+                    block_id,
+                    flow_id,
+                    if *active { "ON" } else { "OFF" }
                 )
             }
         }

@@ -2,7 +2,7 @@
 
 use super::layout::OverlayLayout;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
 
@@ -43,6 +43,8 @@ pub struct VisionMixerOverlayState {
     pub pvw_input: AtomicUsize,
     /// Number of inputs.
     pub num_inputs: usize,
+    /// Whether Fade to Black is active.
+    pub ftb_active: AtomicBool,
     /// Pre-computed layout (immutable after construction).
     pub layout: OverlayLayout,
     /// Input labels (set at build time, read-only after).
@@ -75,6 +77,7 @@ impl VisionMixerOverlayState {
             pgm_input: AtomicUsize::new(pgm_input),
             pvw_input: AtomicUsize::new(pvw_input),
             num_inputs,
+            ftb_active: AtomicBool::new(false),
             layout,
             labels,
             instant_base: now_instant,
@@ -262,4 +265,13 @@ pub fn draw_overlay(state: &VisionMixerOverlayState, cr: &cairo::Context) {
     draw_label_centered(
         cr, clock_str, clock_cx, clock_y, 0.0, 0.0, 0.0, 0.7, 8.0, 4.0,
     );
+
+    // --- FTB indicator ---
+    if state.ftb_active.load(Ordering::Relaxed) {
+        let r = &layout.pgm_rect;
+        let ftb_cx = r.x + r.w / 2.0;
+        let ftb_cy = r.y + r.h / 2.0;
+        cr.set_font_size(layout.header_font_size * 2.0);
+        draw_label_centered(cr, "FTB", ftb_cx, ftb_cy, 0.8, 0.0, 0.0, 0.8, 12.0, 6.0);
+    }
 }

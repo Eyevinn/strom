@@ -1424,7 +1424,45 @@ impl AppState {
         let manager = pipelines.get(flow_id).ok_or_else(|| {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
-        manager.set_dsk_enabled(block_instance_id, dsk_index, num_inputs, enabled)
+        manager.set_dsk_enabled(block_instance_id, dsk_index, num_inputs, enabled)?;
+        drop(pipelines);
+
+        // Broadcast DSK state change (1-based dsk number)
+        self.inner
+            .events
+            .broadcast(StromEvent::VisionMixerDskChanged {
+                flow_id: *flow_id,
+                block_id: block_instance_id.to_string(),
+                dsk: dsk_index + 1,
+                enabled,
+            });
+
+        Ok(())
+    }
+
+    /// Toggle Fade to Black on a vision mixer block.
+    pub async fn fade_to_black(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        duration_ms: u64,
+    ) -> Result<bool, PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+        let active = manager.fade_to_black(block_instance_id, duration_ms)?;
+        drop(pipelines);
+
+        self.inner
+            .events
+            .broadcast(StromEvent::VisionMixerFtbChanged {
+                flow_id: *flow_id,
+                block_id: block_instance_id.to_string(),
+                active,
+            });
+
+        Ok(active)
     }
 
     /// Reset accumulated loudness measurements on an EBU R128 meter block.
