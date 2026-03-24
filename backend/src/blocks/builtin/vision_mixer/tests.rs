@@ -45,7 +45,7 @@ fn test_parse_num_inputs_clamped_min() {
 fn test_parse_input_labels_defaults() {
     let props = HashMap::new();
     let labels = properties::parse_input_labels(&props, 4);
-    assert_eq!(labels, vec!["Input 1", "Input 2", "Input 3", "Input 4"]);
+    assert_eq!(labels, vec!["In 1", "In 2", "In 3", "In 4"]);
 }
 
 #[test]
@@ -61,9 +61,9 @@ fn test_parse_input_labels_custom() {
     );
     let labels = properties::parse_input_labels(&props, 4);
     assert_eq!(labels[0], "Camera 1");
-    assert_eq!(labels[1], "Input 2"); // default
+    assert_eq!(labels[1], "In 2"); // default
     assert_eq!(labels[2], "Graphics");
-    assert_eq!(labels[3], "Input 4"); // default
+    assert_eq!(labels[3], "In 4"); // default
 }
 
 #[test]

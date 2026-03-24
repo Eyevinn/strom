@@ -32,3 +32,9 @@ pub const THUMBNAIL_BORDER_WIDTH: f64 = 4.0;
 
 /// Number of thumbnails per row in the multiview grid.
 pub const THUMBNAILS_PER_ROW: usize = 5;
+
+/// Maximum number of DSK (Downstream Keyer) inputs.
+pub const MAX_DSK_INPUTS: usize = 4;
+
+/// Default number of DSK inputs (0 = no DSK).
+pub const DEFAULT_DSK_INPUTS: usize = 0;

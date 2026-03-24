@@ -174,6 +174,42 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
         },
+        // Number of DSK inputs
+        ExposedProperty {
+            name: "num_dsk_inputs".to_string(),
+            label: "DSK Inputs".to_string(),
+            description: "Number of Downstream Keyer inputs for graphics overlay (0-4)".to_string(),
+            property_type: PropertyType::Enum {
+                values: vec![
+                    EnumValue {
+                        value: "0".to_string(),
+                        label: Some("None".to_string()),
+                    },
+                    EnumValue {
+                        value: "1".to_string(),
+                        label: Some("1 DSK".to_string()),
+                    },
+                    EnumValue {
+                        value: "2".to_string(),
+                        label: Some("2 DSK".to_string()),
+                    },
+                    EnumValue {
+                        value: "3".to_string(),
+                        label: Some("3 DSK".to_string()),
+                    },
+                    EnumValue {
+                        value: "4".to_string(),
+                        label: Some("4 DSK".to_string()),
+                    },
+                ],
+            },
+            default_value: Some(PropertyValue::String(DEFAULT_DSK_INPUTS.to_string())),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: "num_dsk_inputs".to_string(),
+                transform: None,
+            },
+        },
     ];
 
     // Per-input labels
@@ -183,7 +219,7 @@ fn vision_mixer_definition() -> BlockDefinition {
             label: format!("Input {} Label", i + 1),
             description: format!("Label for input {} shown on multiview", i + 1),
             property_type: PropertyType::String,
-            default_value: Some(PropertyValue::String(format!("Input {}", i + 1))),
+            default_value: Some(PropertyValue::String(format!("In {}", i + 1))),
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: format!("input_{}_label", i),
@@ -201,17 +237,30 @@ fn vision_mixer_definition() -> BlockDefinition {
         category: "Production".to_string(),
         exposed_properties,
         external_pads: ExternalPads {
-            inputs: (0..MAX_NUM_INPUTS)
-                .map(|i| {
-                    ExternalPad::with_label(
-                        format!("video_in_{}", i),
-                        format!("V{}", i),
+            inputs: {
+                let mut pads: Vec<ExternalPad> = (0..MAX_NUM_INPUTS)
+                    .map(|i| {
+                        ExternalPad::with_label(
+                            format!("video_in_{}", i),
+                            format!("V{}", i),
+                            MediaType::Video,
+                            format!("queue_{}", i),
+                            "sink".to_string(),
+                        )
+                    })
+                    .collect();
+                // DSK input pads
+                for i in 0..MAX_DSK_INPUTS {
+                    pads.push(ExternalPad::with_label(
+                        format!("dsk_in_{}", i),
+                        format!("DSK{}", i + 1),
                         MediaType::Video,
-                        format!("queue_{}", i),
+                        format!("queue_dsk_{}", i),
                         "sink".to_string(),
-                    )
-                })
-                .collect(),
+                    ));
+                }
+                pads
+            },
             outputs: vec![
                 ExternalPad::with_label(
                     "pgm_out",

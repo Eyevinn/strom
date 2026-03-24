@@ -1,7 +1,7 @@
 use super::{PipelineError, PipelineManager};
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use tracing::info;
+use tracing::{debug, info};
 
 impl PipelineManager {
     /// Trigger a transition on a compositor/mixer block.
@@ -22,7 +22,7 @@ impl PipelineManager {
     ) -> Result<(), PipelineError> {
         use crate::gst::transitions::{TransitionController, TransitionType};
 
-        info!(
+        debug!(
             "Triggering {} transition on {} from input {} to {} ({}ms)",
             transition_type, block_instance_id, from_input, to_input, duration_ms
         );
@@ -34,14 +34,21 @@ impl PipelineManager {
             .get(&mixer_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
 
-        // Clean up stale alpha values: set all pads to alpha=0 except from_input (=1.0)
-        // This prevents leftover alpha=1 from previous transitions bleeding through
+        // Clean up stale alpha values on video input pads only (not DSK pads).
+        // DSK pads (index >= num_video_inputs) keep their current alpha.
+        let num_video_inputs =
+            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
+                .map(|s| s.num_inputs)
+                .unwrap_or(usize::MAX);
+
         for pad in mixer.sink_pads() {
             let name = pad.name();
             if name.starts_with("sink_") {
                 if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
-                    let alpha = if idx == from_input { 1.0f64 } else { 0.0f64 };
-                    pad.set_property("alpha", alpha);
+                    if idx < num_video_inputs {
+                        let alpha = if idx == from_input { 1.0f64 } else { 0.0f64 };
+                        pad.set_property("alpha", alpha);
+                    }
                 }
             }
         }
@@ -272,16 +279,18 @@ impl PipelineManager {
             });
         }
 
+        // PVW candidate pads are at offset N+1 (sink_N is the PGM big display from tee_pgm)
         if old_pvw != new_pvw {
             // Hide old PVW big pad
             if old_pvw != pgm {
-                if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + old_pvw)) {
+                if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + old_pvw))
+                {
                     pad.set_property("alpha", 0.0f64);
                 }
             }
 
             // Show new PVW big pad
-            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + new_pvw)) {
+            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + new_pvw)) {
                 let r = &state.layout.pvw_rect;
                 pad.set_property("xpos", r.x as i32);
                 pad.set_property("ypos", r.y as i32);
@@ -329,26 +338,20 @@ impl PipelineManager {
 
         let old_pvw = state.pvw_input.load(std::sync::atomic::Ordering::Relaxed);
 
-        // Hide old PVW big pad (it's being replaced by old PGM)
+        // PGM big display (sink_N) is fed from tee_pgm — it always shows the dist_comp
+        // output automatically, so no pad manipulation needed for PGM.
+        // Only update PVW: hide old PVW, show old PGM as new PVW (swap).
+        // PVW candidate pads are at offset N+1.
+
+        // Hide old PVW big pad
         if old_pvw != old_pgm {
-            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + old_pvw)) {
+            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + old_pvw)) {
                 pad.set_property("alpha", 0.0f64);
             }
         }
 
-        // Show new PGM big pad (was PVW, now moves to PGM position)
-        if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + new_pgm)) {
-            let r = &state.layout.pgm_rect;
-            pad.set_property("xpos", r.x as i32);
-            pad.set_property("ypos", r.y as i32);
-            pad.set_property("width", r.w as i32);
-            pad.set_property("height", r.h as i32);
-            pad.set_property("alpha", 1.0f64);
-            pad.set_property("zorder", 10u32);
-        }
-
-        // Swap: old PGM becomes new PVW
-        if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + old_pgm)) {
+        // Swap: old PGM becomes new PVW — show at PVW position
+        if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + old_pgm)) {
             let r = &state.layout.pvw_rect;
             pad.set_property("xpos", r.x as i32);
             pad.set_property("ypos", r.y as i32);
@@ -356,6 +359,12 @@ impl PipelineManager {
             pad.set_property("height", r.h as i32);
             pad.set_property("alpha", 1.0f64);
             pad.set_property("zorder", 10u32);
+        }
+
+        // Hide the old PVW's candidate pad (the source that just became PGM)
+        // Its video is now shown via the PGM big display from tee_pgm
+        if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + new_pgm)) {
+            pad.set_property("alpha", 0.0f64);
         }
 
         // Update state: PGM = new_pgm, PVW = old_pgm (swap)
@@ -372,6 +381,40 @@ impl PipelineManager {
         );
 
         Ok(())
+    }
+
+    /// Toggle a DSK (Downstream Keyer) layer on or off.
+    pub fn set_dsk_enabled(
+        &self,
+        block_instance_id: &str,
+        dsk_index: usize,
+        num_inputs: usize,
+        enabled: bool,
+    ) -> Result<(), PipelineError> {
+        // DSK pads are on the dist compositor (mixer) at sink_{num_inputs + dsk_index}
+        let mixer_id = format!("{}:mixer", block_instance_id);
+        let mixer = self
+            .elements
+            .get(&mixer_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
+
+        let pad_name = format!("sink_{}", num_inputs + dsk_index);
+        if let Some(pad) = find_pad(mixer, &pad_name) {
+            let alpha = if enabled { 1.0f64 } else { 0.0f64 };
+            pad.set_property("alpha", alpha);
+            info!(
+                "Vision mixer {} DSK {} {}",
+                block_instance_id,
+                dsk_index,
+                if enabled { "enabled" } else { "disabled" }
+            );
+            Ok(())
+        } else {
+            Err(PipelineError::PadNotFound {
+                element: mixer_id,
+                pad: pad_name,
+            })
+        }
     }
 }
 

@@ -1288,11 +1288,19 @@ fn build_whepserversink(
                                     Some(gst::Caps::builder("video/x-av1").build())
                                 }
                                 "video/x-raw" => {
-                                    // Raw video - let webrtcsink encode with default codecs
+                                    // Raw video - offer modern codecs (H.264 preferred), exclude VP8
                                     info!(
-                                        "WHEP Output: Detected raw video input, using default video-caps"
+                                        "WHEP Output: Detected raw video input, setting video-caps to H.264/H.265/VP9/AV1"
                                     );
-                                    None
+                                    let mut caps = gst::Caps::new_empty();
+                                    {
+                                        let caps_mut = caps.get_mut().unwrap();
+                                        caps_mut.append(gst::Caps::builder("video/x-h264").build());
+                                        caps_mut.append(gst::Caps::builder("video/x-h265").build());
+                                        caps_mut.append(gst::Caps::builder("video/x-vp9").build());
+                                        caps_mut.append(gst::Caps::builder("video/x-av1").build());
+                                    }
+                                    Some(caps)
                                 }
                                 _ => {
                                     warn!(

@@ -164,6 +164,10 @@ pub async fn create_app_with_config(
             post(api::flows::select_preview),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/dsk",
+            post(api::flows::toggle_dsk),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/animate",
             post(api::flows::animate_input),
         )

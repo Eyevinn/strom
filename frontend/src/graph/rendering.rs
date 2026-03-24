@@ -489,6 +489,13 @@ impl GraphEditor {
                     set_local_storage("open_whip_ingest", &block.id);
                 }
 
+                // Handle double-click to open vision mixer control page
+                if node_response.double_clicked()
+                    && block.block_definition_id == "builtin.vision_mixer"
+                {
+                    set_local_storage("open_vision_mixer", &block.id);
+                }
+
                 // Handle double-click to open routing matrix for Audio Router blocks
                 if node_response.double_clicked()
                     && block.block_definition_id == "builtin.audiorouter"

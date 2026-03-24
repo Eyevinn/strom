@@ -256,6 +256,31 @@
         }
         .status-text { color: #888; }
         .shortcut-hint { color: #555; font-size: 10px; }
+        .dsk-btn {
+            flex: 1;
+            height: 28px;
+            border: 2px solid #555;
+            border-radius: 3px;
+            background: #2a2a2a;
+            color: #666;
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            letter-spacing: 0.5px;
+        }
+        .dsk-btn:focus { outline: none; }
+        .dsk-btn:hover { border-color: #888; }
+        .dsk-btn.on {
+            background: #cc0000;
+            border-color: #ff3333;
+            color: #fff;
+            box-shadow: 0 0 6px rgba(255, 0, 0, 0.4);
+        }
+        .dsk-btn.off {
+            background: #333;
+            border-color: #555;
+            color: #888;
+        }
         .conn-indicators {
             display: flex;
             gap: 10px;
@@ -310,6 +335,7 @@
             <div class="type-row">
                 <button class="type-btn active" data-type="fade" onclick="setTransitionType('fade')">MIX</button>
                 <button class="type-btn" data-type="dip_to_black" onclick="setTransitionType('dip_to_black')">DIP</button>
+                <button class="type-btn" data-type="push_left" onclick="setTransitionType('push_left')">PUSH</button>
             </div>
             <div class="duration-row">
                 <label>Duration:</label>
@@ -317,6 +343,12 @@
                 <button class="duration-preset active" onclick="setDuration(1.0)">1.0s</button>
                 <button class="duration-preset" onclick="setDuration(2.0)">2.0s</button>
                 <input type="number" class="duration-input" id="durationInput" value="1.0" min="0.1" max="10" step="0.1" onchange="onDurationInput()">
+            </div>
+            <div class="type-row" id="dskRow" style="display:none;">
+                <button class="dsk-btn" id="dsk0Btn" onclick="toggleDsk(0)">DSK 1</button>
+                <button class="dsk-btn" id="dsk1Btn" onclick="toggleDsk(1)" style="display:none;">DSK 2</button>
+                <button class="dsk-btn" id="dsk2Btn" onclick="toggleDsk(2)" style="display:none;">DSK 3</button>
+                <button class="dsk-btn" id="dsk3Btn" onclick="toggleDsk(3)" style="display:none;">DSK 4</button>
             </div>
         </div>
     </div>
@@ -345,10 +377,12 @@
         const NUM_INPUTS = _cfg.num_inputs;
         const MULTIVIEW_ENDPOINT = _cfg.multiview_endpoint;
         const INPUT_LABELS = _cfg.input_labels;
+        const NUM_DSK_INPUTS = _cfg.num_dsk_inputs || 0;
 
         // ---- State ----
         let currentPgm = _cfg.initial_pgm;
         let currentPvw = _cfg.initial_pvw;
+        let dskEnabled = [true, true, true, true]; // DSK layers start enabled (alpha=1)
         let transitionType = 'fade';
         let transitionDurationMs = 1000;
         let transitioning = false;
@@ -425,6 +459,42 @@
 
         function doAuto() {
             doTake(transitionType, transitionDurationMs);
+        }
+
+        // ---- DSK toggle ----
+        function toggleDsk(index) {
+            dskEnabled[index] = !dskEnabled[index];
+            apiPost('/dsk', { dsk: index + 1, enabled: dskEnabled[index] })
+                .then(r => {
+                    updateDskButtons();
+                    setStatus(r.message);
+                })
+                .catch(e => {
+                    dskEnabled[index] = !dskEnabled[index]; // revert
+                    setStatus('DSK error: ' + e.message);
+                });
+        }
+
+        function updateDskButtons() {
+            for (let i = 0; i < 4; i++) {
+                const btn = document.getElementById('dsk' + i + 'Btn');
+                if (btn) {
+                    btn.classList.toggle('on', dskEnabled[i]);
+                    btn.classList.toggle('off', !dskEnabled[i]);
+                    btn.textContent = 'DSK ' + (i + 1) + (dskEnabled[i] ? ' ON' : ' OFF');
+                }
+            }
+        }
+
+        function initDskUi() {
+            if (NUM_DSK_INPUTS > 0) {
+                document.getElementById('dskRow').style.display = 'flex';
+                for (let i = 1; i < NUM_DSK_INPUTS; i++) {
+                    const btn = document.getElementById('dsk' + i + 'Btn');
+                    if (btn) btn.style.display = '';
+                }
+                updateDskButtons();
+            }
         }
 
         // ---- Transition type & duration ----
@@ -635,6 +705,7 @@
             document.title = 'Vision Mixer | Strom | ' + location.host;
             buildBuses();
             updateButtons();
+            initDskUi();
             connectMultiview();
             connectWebSocket();
         };

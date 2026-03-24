@@ -1258,7 +1258,7 @@ impl AppState {
         transition_type: &str,
         duration_ms: u64,
     ) -> Result<(), PipelineError> {
-        info!(
+        debug!(
             "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
             transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
         );
@@ -1407,6 +1407,24 @@ impl AppState {
             .and_then(|flow| flow.blocks.iter().find(|b| b.id == block_instance_id))
             .map(|block| vm_props::parse_num_inputs(&block.properties))
             .unwrap_or(4)
+    }
+
+    /// Toggle a DSK (Downstream Keyer) layer on a vision mixer block.
+    pub async fn set_dsk_enabled(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        dsk_index: usize,
+        enabled: bool,
+    ) -> Result<(), PipelineError> {
+        let num_inputs = self
+            .get_vision_mixer_num_inputs(flow_id, block_instance_id)
+            .await;
+        let pipelines = self.inner.pipelines.read().await;
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+        manager.set_dsk_enabled(block_instance_id, dsk_index, num_inputs, enabled)
     }
 
     /// Reset accumulated loudness measurements on an EBU R128 meter block.

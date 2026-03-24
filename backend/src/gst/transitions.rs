@@ -132,7 +132,7 @@ impl TransitionController {
             return Ok(());
         }
 
-        info!(
+        debug!(
             "Starting {:?} transition from input {} to {} over {}ms",
             transition_type, from_input, to_input, duration_ms
         );
@@ -199,7 +199,7 @@ impl TransitionController {
         from_pad.set_property("alpha", 0.0f64);
         to_pad.set_property("alpha", 1.0f64);
 
-        info!("Cut transition complete: {} -> {}", from_input, to_input);
+        debug!("Cut transition complete: {} -> {}", from_input, to_input);
         Ok(())
     }
 

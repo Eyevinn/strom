@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; }
+  body {
+    background: transparent;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    font-family: 'Segoe UI', Arial, sans-serif;
+  }
+
+  .lower-third {
+    position: absolute;
+    bottom: 80px;
+    left: 60px;
+    animation: slideIn 0.6s ease-out;
+  }
+
+  .name {
+    background: rgba(200, 0, 0, 0.9);
+    color: white;
+    font-size: 36px;
+    font-weight: 700;
+    padding: 10px 30px;
+    letter-spacing: 1px;
+  }
+
+  .title {
+    background: rgba(40, 40, 40, 0.85);
+    color: #ddd;
+    font-size: 22px;
+    padding: 6px 30px;
+    letter-spacing: 0.5px;
+  }
+
+  .bug {
+    position: absolute;
+    top: 40px;
+    right: 50px;
+    color: white;
+    font-size: 28px;
+    font-weight: 700;
+    text-shadow: 2px 2px 8px rgba(0,0,0,0.7);
+    opacity: 0.8;
+  }
+
+  .clock-overlay {
+    position: absolute;
+    top: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.6);
+    color: white;
+    font-size: 24px;
+    font-weight: 600;
+    padding: 6px 20px;
+    border-radius: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  @keyframes slideIn {
+    from { transform: translateX(-100px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+</style>
+</head>
+<body>
+  <div class="lower-third">
+    <div class="name">ANNA ANDERSSON</div>
+    <div class="title">Reporter, SVT Nyheter</div>
+  </div>
+
+  <div class="bug">LIVE</div>
+
+  <div class="clock-overlay" id="clock"></div>
+
+  <script>
+    function updateClock() {
+      const now = new Date();
+      const h = String(now.getHours()).padStart(2, '0');
+      const m = String(now.getMinutes()).padStart(2, '0');
+      const s = String(now.getSeconds()).padStart(2, '0');
+      document.getElementById('clock').textContent = h + ':' + m + ':' + s;
+    }
+    updateClock();
+    setInterval(updateClock, 1000);
+  </script>
+</body>
+</html>

@@ -817,6 +817,67 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/dsk": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Toggle a DSK (Downstream Keyer) layer on a vision mixer block.",
+        "operationId": "toggle_dsk",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DskToggleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "DSK toggled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DskToggleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/blocks/{block_id}/loudness/reset": {
       "post": {
         "tags": [
@@ -4536,6 +4597,46 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "DskToggleRequest": {
+        "type": "object",
+        "description": "Request to toggle a DSK (Downstream Keyer) layer on a vision mixer block.",
+        "required": [
+          "dsk_index",
+          "enabled"
+        ],
+        "properties": {
+          "dsk_index": {
+            "type": "integer",
+            "description": "DSK layer index (0 or 1)",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Enable or disable the DSK layer"
+          }
+        }
+      },
+      "DskToggleResponse": {
+        "type": "object",
+        "description": "Response after toggling a DSK layer.",
+        "required": [
+          "message",
+          "dsk_index",
+          "enabled"
+        ],
+        "properties": {
+          "dsk_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
           }
         }
       },

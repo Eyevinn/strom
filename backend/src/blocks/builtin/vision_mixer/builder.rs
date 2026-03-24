@@ -23,10 +23,10 @@ pub struct VisionMixerBuilder;
 impl BlockBuilder for VisionMixerBuilder {
     fn get_external_pads(&self, props: &HashMap<String, PropertyValue>) -> Option<ExternalPads> {
         let num_inputs = properties::parse_num_inputs(props);
+        let num_dsk = properties::parse_num_dsk_inputs(props);
 
         // Internal element IDs are bare names — block expansion adds the instance_id prefix
-        // Labels must match definition.rs for consistent display
-        let inputs: Vec<ExternalPad> = (0..num_inputs)
+        let mut inputs: Vec<ExternalPad> = (0..num_inputs)
             .map(|i| {
                 ExternalPad::with_label(
                     format!("video_in_{}", i),
@@ -37,6 +37,17 @@ impl BlockBuilder for VisionMixerBuilder {
                 )
             })
             .collect();
+
+        // DSK input pads
+        for i in 0..num_dsk {
+            inputs.push(ExternalPad::with_label(
+                format!("dsk_in_{}", i),
+                format!("DSK{}", i + 1),
+                MediaType::Video,
+                format!("queue_dsk_{}", i),
+                "sink",
+            ));
+        }
 
         let outputs = vec![
             ExternalPad::with_label("pgm_out", "PGM", MediaType::Video, "capsfilter_dist", "src"),
@@ -76,6 +87,8 @@ impl BlockBuilder for VisionMixerBuilder {
             vision_mixer::DEFAULT_MULTIVIEW_RESOLUTION,
         );
 
+        let num_dsk_inputs = properties::parse_num_dsk_inputs(props);
+
         let pref = props
             .get("compositor_preference")
             .and_then(|v| match v {
@@ -93,6 +106,7 @@ impl BlockBuilder for VisionMixerBuilder {
         let p = PipelineParams {
             instance_id,
             num_inputs,
+            num_dsk_inputs,
             pgm_input,
             pvw_input,
             labels: &labels,
@@ -117,6 +131,7 @@ impl BlockBuilder for VisionMixerBuilder {
 struct PipelineParams<'a> {
     instance_id: &'a str,
     num_inputs: usize,
+    num_dsk_inputs: usize,
     pgm_input: usize,
     pvw_input: usize,
     labels: &'a [String],
@@ -165,23 +180,56 @@ fn build_gpu_pipeline(
     // Compute multiview layout
     let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs);
 
-    // --- Distribution output chain: mixer → gldownload → capsfilter ---
+    // --- Distribution output chain: mixer → tee_pgm → gldownload → capsfilter ---
+    // tee_pgm splits the PGM output: one branch to distribution, one to multiview PGM display.
+    let tee_pgm_id = p.id("tee_pgm");
+    let tee_pgm = elements::make_tee(&tee_pgm_id)?;
     let dl_dist_id = p.id("gldownload_dist");
     let gldownload_dist = elements::make_element("gldownload", "gldownload_dist")?;
     gldownload_dist.set_property("name", &dl_dist_id);
     let cf_dist_id = p.id("capsfilter_dist");
     let capsfilter_dist = elements::make_capsfilter("capsfilter_dist", p.pgm_w, p.pgm_h)?;
     capsfilter_dist.set_property("name", &cf_dist_id);
+    elems.push((tee_pgm_id.clone(), tee_pgm));
     elems.push((dl_dist_id.clone(), gldownload_dist));
     elems.push((cf_dist_id.clone(), capsfilter_dist));
     links.push((
         ElementPadRef::pad(&mixer_id, "src"),
+        ElementPadRef::pad(&tee_pgm_id, "sink"),
+    ));
+    links.push((
+        ElementPadRef::pad(&tee_pgm_id, "src_0"),
         ElementPadRef::pad(&dl_dist_id, "sink"),
     ));
     links.push((
         ElementPadRef::pad(&dl_dist_id, "src"),
         ElementPadRef::pad(&cf_dist_id, "sink"),
     ));
+
+    // DSK input element chains (elements only, links to mixer added later after video inputs)
+    for i in 0..p.num_dsk_inputs {
+        let q_id = p.id(&format!("queue_dsk_{}", i));
+        let up_id = p.id(&format!("glupload_dsk_{}", i));
+        let cc_id = p.id(&format!("glcolorconvert_dsk_{}", i));
+
+        let queue = elements::make_queue(&q_id)?;
+        let glupload = elements::make_element("glupload", &up_id)?;
+        let glcolorconvert = elements::make_element("glcolorconvert", &cc_id)?;
+
+        elems.push((q_id.clone(), queue));
+        elems.push((up_id.clone(), glupload));
+        elems.push((cc_id.clone(), glcolorconvert));
+
+        links.push((
+            ElementPadRef::pad(&q_id, "src"),
+            ElementPadRef::pad(&up_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&up_id, "src"),
+            ElementPadRef::pad(&cc_id, "sink"),
+        ));
+        // NOTE: link to mixer is added later, after video input links, to ensure correct pad order
+    }
 
     // --- Multiview output chain ---
     let dl_id = p.id("gldownload_mv");
@@ -253,12 +301,20 @@ fn build_gpu_pipeline(
     }
 
     // --- Compositor links (order matters: linker auto-creates sink pads sequentially) ---
-    // Distribution compositor: tee_i.src_0 → mixer (creates sink_0..sink_{N-1})
+    // Distribution compositor: video inputs first (sink_0..N-1), then DSK (sink_N..N+dsk-1)
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         links.push((
             ElementPadRef::pad(&tee_id, "src_0"),
             ElementPadRef::pad(&mixer_id, format!("sink_{}", i)),
+        ));
+    }
+    // DSK inputs on dist compositor (after video inputs)
+    for i in 0..p.num_dsk_inputs {
+        let cc_id = p.id(&format!("glcolorconvert_dsk_{}", i));
+        links.push((
+            ElementPadRef::pad(&cc_id, "src"),
+            ElementPadRef::pad(&mixer_id, format!("sink_{}", p.num_inputs + i)),
         ));
     }
 
@@ -271,12 +327,19 @@ fn build_gpu_pipeline(
         ));
     }
 
-    // Multiview compositor big displays: tee_i.src_2 → mv_comp (creates sink_N..sink_{2N-1})
+    // Multiview PGM big display: tee_pgm.src_1 → mv_comp.sink_N
+    // Shows the actual dist_comp output (transitions, DSK visible)
+    links.push((
+        ElementPadRef::pad(&tee_pgm_id, "src_1"),
+        ElementPadRef::pad(&mv_comp_id, format!("sink_{}", p.num_inputs)),
+    ));
+
+    // Multiview PVW big candidates: tee_i.src_2 → mv_comp.sink_{N+1+i}
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         links.push((
             ElementPadRef::pad(&tee_id, "src_2"),
-            ElementPadRef::pad(&mv_comp_id, format!("sink_{}", p.num_inputs + i)),
+            ElementPadRef::pad(&mv_comp_id, format!("sink_{}", p.num_inputs + 1 + i)),
         ));
     }
 
@@ -325,15 +388,56 @@ fn build_cpu_pipeline(
 
     let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs);
 
-    // --- Distribution output chain ---
+    // --- Distribution output chain: mixer → [dsk_comp →] tee_pgm → capsfilter ---
+    let dsk_comp_id = p.id("dsk_comp");
+    if p.num_dsk_inputs > 0 {
+        let dsk_comp = elements::make_dist_compositor(
+            p.backend,
+            p.force_live,
+            p.latency_ms,
+            p.min_upstream_ms,
+        )?;
+        dsk_comp.set_property("name", dsk_comp_id.clone());
+        elems.push((dsk_comp_id.clone(), dsk_comp));
+        links.push((
+            ElementPadRef::pad(&mixer_id, "src"),
+            ElementPadRef::pad(&dsk_comp_id, "sink_0".to_string()),
+        ));
+    }
+
+    let tee_pgm_id = p.id("tee_pgm");
+    let tee_pgm = elements::make_tee(&tee_pgm_id)?;
     let cf_dist_id = p.id("capsfilter_dist");
     let capsfilter_dist = elements::make_capsfilter("capsfilter_dist", p.pgm_w, p.pgm_h)?;
     capsfilter_dist.set_property("name", &cf_dist_id);
+    elems.push((tee_pgm_id.clone(), tee_pgm));
     elems.push((cf_dist_id.clone(), capsfilter_dist));
+
     links.push((
         ElementPadRef::pad(&mixer_id, "src"),
+        ElementPadRef::pad(&tee_pgm_id, "sink"),
+    ));
+    links.push((
+        ElementPadRef::pad(&tee_pgm_id, "src_0"),
         ElementPadRef::pad(&cf_dist_id, "sink"),
     ));
+
+    // DSK input element chains (links to mixer added later after video inputs)
+    for i in 0..p.num_dsk_inputs {
+        let q_id = p.id(&format!("queue_dsk_{}", i));
+        let vc_id_dsk = p.id(&format!("videoconvert_dsk_{}", i));
+
+        let queue = elements::make_queue(&q_id)?;
+        let videoconvert = elements::make_element("videoconvert", &vc_id_dsk)?;
+
+        elems.push((q_id.clone(), queue));
+        elems.push((vc_id_dsk.clone(), videoconvert));
+
+        links.push((
+            ElementPadRef::pad(&q_id, "src"),
+            ElementPadRef::pad(&vc_id_dsk, "sink"),
+        ));
+    }
 
     // --- Multiview output chain (no gldownload needed for CPU) ---
     let vc_id = p.id("videoconvert_pre_cairo");
@@ -388,6 +492,7 @@ fn build_cpu_pipeline(
     }
 
     // --- Compositor links (grouped by compositor, order matters) ---
+    // Distribution compositor: video inputs first, then DSK
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         links.push((
@@ -395,6 +500,15 @@ fn build_cpu_pipeline(
             ElementPadRef::pad(&mixer_id, format!("sink_{}", i)),
         ));
     }
+    for i in 0..p.num_dsk_inputs {
+        let vc_id_dsk = p.id(&format!("videoconvert_dsk_{}", i));
+        links.push((
+            ElementPadRef::pad(&vc_id_dsk, "src"),
+            ElementPadRef::pad(&mixer_id, format!("sink_{}", p.num_inputs + i)),
+        ));
+    }
+
+    // Multiview compositor thumbnails
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         links.push((
@@ -402,11 +516,19 @@ fn build_cpu_pipeline(
             ElementPadRef::pad(&mv_comp_id, format!("sink_{}", i)),
         ));
     }
+
+    // Multiview PGM big display from tee_pgm (shows actual transitions)
+    links.push((
+        ElementPadRef::pad(&tee_pgm_id, "src_1"),
+        ElementPadRef::pad(&mv_comp_id, format!("sink_{}", p.num_inputs)),
+    ));
+
+    // Multiview PVW big candidates at offset N+1
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         links.push((
             ElementPadRef::pad(&tee_id, "src_2"),
-            ElementPadRef::pad(&mv_comp_id, format!("sink_{}", p.num_inputs + i)),
+            ElementPadRef::pad(&mv_comp_id, format!("sink_{}", p.num_inputs + 1 + i)),
         ));
     }
 
@@ -464,6 +586,22 @@ fn build_pad_properties(
         }
     }
 
+    // --- DSK pads on dist compositor (high zorder, above video inputs) ---
+    for i in 0..p.num_dsk_inputs {
+        let pad_name = format!("sink_{}", p.num_inputs + i);
+        let props = dist_pads.entry(pad_name).or_default();
+        props.insert("width".to_string(), PropertyValue::Int(p.pgm_w as i64));
+        props.insert("height".to_string(), PropertyValue::Int(p.pgm_h as i64));
+        props.insert("alpha".to_string(), PropertyValue::Float(1.0));
+        props.insert("zorder".to_string(), PropertyValue::UInt(100 + i as u64));
+        if is_gl {
+            props.insert(
+                "sizing-policy".to_string(),
+                PropertyValue::String("keep-aspect-ratio".to_string()),
+            );
+        }
+    }
+
     // --- Multiview compositor pad properties ---
     let mv_pads = pad_props.entry(mv_comp_id).or_default();
 
@@ -486,23 +624,36 @@ fn build_pad_properties(
         }
     }
 
-    // Big display candidate pads: sink_N..sink_{2N-1}
+    // PGM big display: sink_N (fed from tee_pgm, always visible at PGM position)
+    {
+        let pad_name = format!("sink_{}", p.num_inputs);
+        let props = mv_pads.entry(pad_name).or_default();
+        let (x, y, w, h) = layout::pgm_pad_position(mv_layout);
+        props.insert("xpos".to_string(), PropertyValue::Int(x as i64));
+        props.insert("ypos".to_string(), PropertyValue::Int(y as i64));
+        props.insert("width".to_string(), PropertyValue::Int(w as i64));
+        props.insert("height".to_string(), PropertyValue::Int(h as i64));
+        props.insert("alpha".to_string(), PropertyValue::Float(1.0));
+        props.insert("zorder".to_string(), PropertyValue::UInt(10));
+        if is_gl {
+            props.insert(
+                "sizing-policy".to_string(),
+                PropertyValue::String("keep-aspect-ratio".to_string()),
+            );
+        }
+    }
+
+    // PVW big display candidate pads: sink_{N+1}..sink_{2N}
     for i in 0..p.num_inputs {
-        let pad_name = format!("sink_{}", p.num_inputs + i);
+        let pad_name = format!("sink_{}", p.num_inputs + 1 + i);
         let props = mv_pads.entry(pad_name).or_default();
 
         let (x, y, w, h) = if i == p.pvw_input {
             layout::pvw_pad_position(mv_layout)
-        } else if i == p.pgm_input {
-            layout::pgm_pad_position(mv_layout)
         } else {
             (0, 0, 1, 1) // hidden
         };
-        let alpha = if i == p.pvw_input || i == p.pgm_input {
-            1.0
-        } else {
-            0.0
-        };
+        let alpha = if i == p.pvw_input { 1.0 } else { 0.0 };
 
         props.insert("xpos".to_string(), PropertyValue::Int(x as i64));
         props.insert("ypos".to_string(), PropertyValue::Int(y as i64));

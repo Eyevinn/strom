@@ -867,3 +867,23 @@ pub struct VisionMixerState {
     pub num_inputs: usize,
     pub input_labels: Vec<String>,
 }
+
+/// Request to toggle a DSK (Downstream Keyer) layer on a vision mixer block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct DskToggleRequest {
+    /// DSK layer number (1 or 2, 1-based)
+    pub dsk: usize,
+    /// Enable or disable the DSK layer
+    pub enabled: bool,
+}
+
+/// Response after toggling a DSK layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct DskToggleResponse {
+    pub message: String,
+    /// DSK layer number (1-based)
+    pub dsk: usize,
+    pub enabled: bool,
+}

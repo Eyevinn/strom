@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; }
+  body {
+    background: transparent;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    font-family: 'Segoe UI', Arial, sans-serif;
+  }
+
+  .ticker-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 48px;
+    background: rgba(180, 0, 0, 0.95);
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+  }
+
+  .ticker-label {
+    background: white;
+    color: #b00;
+    font-size: 22px;
+    font-weight: 800;
+    padding: 0 20px;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    letter-spacing: 2px;
+  }
+
+  .ticker-text {
+    color: white;
+    font-size: 24px;
+    font-weight: 600;
+    white-space: nowrap;
+    animation: scroll 25s linear infinite;
+    padding-left: 30px;
+  }
+
+  @keyframes scroll {
+    0% { transform: translateX(100vw); }
+    100% { transform: translateX(-200%); }
+  }
+
+  .headline {
+    position: absolute;
+    bottom: 56px;
+    left: 0;
+    right: 0;
+    background: rgba(20, 20, 20, 0.9);
+    padding: 14px 30px;
+    animation: fadeIn 0.4s ease-out;
+  }
+
+  .headline-text {
+    color: white;
+    font-size: 32px;
+    font-weight: 700;
+  }
+
+  .headline-sub {
+    color: #aaa;
+    font-size: 20px;
+    margin-top: 4px;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+  <div class="headline">
+    <div class="headline-text">BREAKING NEWS</div>
+    <div class="headline-sub">Major event developing — details coming in</div>
+  </div>
+
+  <div class="ticker-bar">
+    <div class="ticker-label">BREAKING</div>
+    <div class="ticker-text">
+      This is a scrolling news ticker with breaking news updates running across the bottom of the screen
+      &nbsp;&nbsp;&nbsp;///&nbsp;&nbsp;&nbsp;
+      Multiple sources confirm the developing story
+      &nbsp;&nbsp;&nbsp;///&nbsp;&nbsp;&nbsp;
+      Stay tuned for live coverage and analysis
+    </div>
+  </div>
+</body>
+</html>

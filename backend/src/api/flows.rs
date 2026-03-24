@@ -20,7 +20,7 @@ use strom_types::{
     },
     Flow, FlowId,
 };
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::layout;
 use crate::state::AppState;
@@ -1337,7 +1337,7 @@ pub async fn trigger_transition(
     Path((flow_id, block_id)): Path<(FlowId, String)>,
     ValidatedJson(req): ValidatedJson<TriggerTransitionRequest>,
 ) -> Result<Json<TransitionResponse>, (StatusCode, Json<ErrorResponse>)> {
-    info!(
+    debug!(
         "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
         req.transition_type, block_id, flow_id, req.from_input, req.to_input, req.duration_ms
     );
@@ -1417,6 +1417,76 @@ pub async fn select_preview(
         message: format!("Preview set to input {}", req.input),
         preview_input: pvw,
         program_input: pgm,
+    }))
+}
+
+/// Toggle a DSK (Downstream Keyer) layer on a vision mixer block.
+#[utoipa::path(
+    post,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/dsk",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block instance ID")
+    ),
+    request_body = strom_types::api::DskToggleRequest,
+    responses(
+        (status = 200, description = "DSK toggled", body = strom_types::api::DskToggleResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+    )
+)]
+pub async fn toggle_dsk(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+    Json(req): Json<strom_types::api::DskToggleRequest>,
+) -> Result<Json<strom_types::api::DskToggleResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if req.dsk < 1 || req.dsk > strom_types::vision_mixer::MAX_DSK_INPUTS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_details(
+                "Invalid DSK number",
+                format!(
+                    "DSK must be 1-{}, got {}",
+                    strom_types::vision_mixer::MAX_DSK_INPUTS,
+                    req.dsk
+                ),
+            )),
+        ));
+    }
+
+    info!(
+        "Toggling DSK {} {} on vision mixer {} in flow {}",
+        req.dsk,
+        if req.enabled { "on" } else { "off" },
+        block_id,
+        flow_id
+    );
+
+    // Convert 1-based DSK number to 0-based internal index
+    let dsk_index = req.dsk - 1;
+
+    state
+        .set_dsk_enabled(&flow_id, &block_id, dsk_index, req.enabled)
+        .await
+        .map_err(|e| {
+            error!("Failed to toggle DSK: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_details(
+                    "Failed to toggle DSK",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    Ok(Json(strom_types::api::DskToggleResponse {
+        message: format!(
+            "DSK {} {}",
+            req.dsk,
+            if req.enabled { "enabled" } else { "disabled" }
+        ),
+        dsk: req.dsk,
+        enabled: req.enabled,
     }))
 }
 

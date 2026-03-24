@@ -1,8 +1,24 @@
 //! Property parsing helpers for vision mixer block.
 
 use std::collections::HashMap;
-use strom_types::vision_mixer::{DEFAULT_NUM_INPUTS, MAX_NUM_INPUTS, MIN_NUM_INPUTS};
+use strom_types::vision_mixer::{
+    DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, MAX_DSK_INPUTS, MAX_NUM_INPUTS, MIN_NUM_INPUTS,
+};
 use strom_types::PropertyValue;
+
+/// Parse the number of DSK inputs from block properties (0-2).
+pub fn parse_num_dsk_inputs(properties: &HashMap<String, PropertyValue>) -> usize {
+    properties
+        .get("num_dsk_inputs")
+        .and_then(|v| match v {
+            PropertyValue::String(s) => s.parse::<usize>().ok(),
+            PropertyValue::UInt(n) => Some(*n as usize),
+            PropertyValue::Int(n) => Some(*n as usize),
+            _ => None,
+        })
+        .unwrap_or(DEFAULT_DSK_INPUTS)
+        .min(MAX_DSK_INPUTS)
+}
 
 /// Parse the number of inputs from block properties, clamped to valid range.
 pub fn parse_num_inputs(properties: &HashMap<String, PropertyValue>) -> usize {
@@ -46,7 +62,7 @@ pub fn parse_initial_pvw(properties: &HashMap<String, PropertyValue>, num_inputs
         .min(num_inputs.saturating_sub(1))
 }
 
-/// Parse input labels from block properties, falling back to "Input N" defaults.
+/// Parse input labels from block properties, falling back to "In N" defaults.
 pub fn parse_input_labels(
     properties: &HashMap<String, PropertyValue>,
     num_inputs: usize,
@@ -59,7 +75,7 @@ pub fn parse_input_labels(
                     PropertyValue::String(s) if !s.is_empty() => Some(s.clone()),
                     _ => None,
                 })
-                .unwrap_or_else(|| format!("Input {}", i + 1))
+                .unwrap_or_else(|| format!("In {}", i + 1))
         })
         .collect()
 }

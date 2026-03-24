@@ -40,6 +40,7 @@ pub async fn vision_mixer_page(
     let block_id = &vm_block.id;
     let num_inputs = vm_props::parse_num_inputs(&vm_block.properties);
     let labels = vm_props::parse_input_labels(&vm_block.properties, num_inputs);
+    let num_dsk_inputs = vm_props::parse_num_dsk_inputs(&vm_block.properties);
 
     // Find the multiview WHEP endpoint
     let multiview_endpoint = flow
@@ -79,6 +80,7 @@ pub async fn vision_mixer_page(
         "input_labels": labels,
         "initial_pgm": initial_pgm,
         "initial_pvw": initial_pvw,
+        "num_dsk_inputs": num_dsk_inputs,
     });
 
     let html = VISION_MIXER_HTML.replace("{{VM_CONFIG_JSON}}", &config.to_string());
