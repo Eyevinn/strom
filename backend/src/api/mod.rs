@@ -12,6 +12,7 @@ pub mod network;
 pub mod probes;
 pub mod sdp_transform;
 pub mod version;
+pub mod vision_mixer_page;
 pub mod websocket;
 pub mod whep_player;
 pub mod whip_ingest;

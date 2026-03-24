@@ -1373,6 +1373,53 @@ pub async fn trigger_transition(
     }))
 }
 
+/// Select a preview source on a vision mixer block.
+#[utoipa::path(
+    post,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/preview",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block instance ID")
+    ),
+    request_body = strom_types::api::SelectPreviewRequest,
+    responses(
+        (status = 200, description = "Preview source selected", body = strom_types::api::SelectPreviewResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 404, description = "Flow or block not found", body = ErrorResponse),
+    )
+)]
+pub async fn select_preview(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+    Json(req): Json<strom_types::api::SelectPreviewRequest>,
+) -> Result<Json<strom_types::api::SelectPreviewResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!(
+        "Selecting preview input {} on vision mixer {} in flow {}",
+        req.input, block_id, flow_id
+    );
+
+    let (pvw, pgm) = state
+        .select_vision_mixer_preview(&flow_id, &block_id, req.input)
+        .await
+        .map_err(|e| {
+            error!("Failed to select preview: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_details(
+                    "Failed to select preview",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    Ok(Json(strom_types::api::SelectPreviewResponse {
+        message: format!("Preview set to input {}", req.input),
+        preview_input: pvw,
+        program_input: pgm,
+    }))
+}
+
 /// Reset accumulated loudness measurements on an EBU R128 meter block.
 #[utoipa::path(
     post,

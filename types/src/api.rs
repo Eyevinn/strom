@@ -836,3 +836,34 @@ impl MediaOperationResponse {
         }
     }
 }
+
+// ============================================================================
+// Vision Mixer API Types
+// ============================================================================
+
+/// Request to select a preview source on a vision mixer block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SelectPreviewRequest {
+    /// Index of the input to set as preview (0-based)
+    pub input: usize,
+}
+
+/// Response after selecting a preview source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SelectPreviewResponse {
+    pub message: String,
+    pub preview_input: usize,
+    pub program_input: usize,
+}
+
+/// Current state of a vision mixer block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct VisionMixerState {
+    pub preview_input: usize,
+    pub program_input: usize,
+    pub num_inputs: usize,
+    pub input_labels: Vec<String>,
+}

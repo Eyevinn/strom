@@ -1168,6 +1168,77 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/preview": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Select a preview source on a vision mixer block.",
+        "operationId": "select_preview",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Preview source selected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SelectPreviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow or block not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/blocks/{block_id}/recorder/split": {
       "post": {
         "tags": [
@@ -6394,6 +6465,42 @@
           }
         }
       },
+      "SelectPreviewRequest": {
+        "type": "object",
+        "description": "Request to select a preview source on a vision mixer block.",
+        "required": [
+          "input"
+        ],
+        "properties": {
+          "input": {
+            "type": "integer",
+            "description": "Index of the input to set as preview (0-based)",
+            "minimum": 0
+          }
+        }
+      },
+      "SelectPreviewResponse": {
+        "type": "object",
+        "description": "Response after selecting a preview source.",
+        "required": [
+          "message",
+          "preview_input",
+          "program_input"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "preview_input": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "program_input": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "ServerMessage": {
         "oneOf": [
           {
@@ -8300,6 +8407,49 @@
                 "type": "string",
                 "enum": [
                   "BufferAgeProbeDeactivated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Vision mixer PVW/PGM state changed",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "Vision mixer PVW/PGM state changed",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "preview_input",
+                  "program_input"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "preview_input": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "program_input": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "VisionMixerStateChanged"
                 ]
               }
             }

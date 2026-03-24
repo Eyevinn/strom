@@ -46,6 +46,7 @@ utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 
 # GStreamer
+cairo-rs.workspace = true
 gstreamer.workspace = true
 gstreamer-app.workspace = true
 gstreamer-controller.workspace = true

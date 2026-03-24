@@ -24,6 +24,7 @@ pub mod spectrum;
 pub mod thumbnail;
 pub mod videoenc;
 pub mod videoformat;
+pub mod vision_mixer;
 pub mod whep;
 pub mod whip;
 
@@ -103,6 +104,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
     // Add VideoFormat blocks
     blocks.extend(videoformat::get_blocks());
 
+    // Add Vision Mixer blocks
+    blocks.extend(vision_mixer::get_blocks());
+
     // Add WHIP blocks
     blocks.extend(whip::get_blocks());
 
@@ -149,6 +153,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.thumbnail" => Some(Arc::new(thumbnail::ThumbnailBuilder)),
         "builtin.videoenc" => Some(Arc::new(videoenc::VideoEncBuilder)),
         "builtin.videoformat" => Some(Arc::new(videoformat::VideoFormatBuilder)),
+        "builtin.vision_mixer" => Some(Arc::new(vision_mixer::VisionMixerBuilder)),
         "builtin.whip_output" => Some(Arc::new(whip::WHIPOutputBuilder)),
         "builtin.whip_input" => Some(Arc::new(whip::WHIPInputBuilder)),
         "builtin.whep_input" => Some(Arc::new(whep::WHEPInputBuilder)),

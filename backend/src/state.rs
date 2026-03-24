@@ -1169,6 +1169,13 @@ impl AppState {
                         .remove_announcement(*id, &block.id)
                         .await;
                 }
+
+                // Clean up vision mixer overlay state
+                if block.block_definition_id == "builtin.vision_mixer" {
+                    crate::blocks::builtin::vision_mixer::overlay::unregister_overlay_state(
+                        &block.id,
+                    );
+                }
             }
         }
 
@@ -1273,22 +1280,29 @@ impl AppState {
         drop(pipelines);
 
         // Sync final alpha values back to flow definition for persistence
-        // After transition: from_input alpha=0.0, to_input alpha=1.0
+        // Clear ALL input alphas to 0.0, then set to_input to 1.0
+        // This prevents stale alpha=1.0 from earlier transitions
         if let Some(block_id) = block_instance_id.split(':').next() {
             let mut flows = self.inner.flows.write().await;
             if let Some(flow) = flows.get_mut(flow_id) {
                 if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_id) {
-                    block.properties.insert(
-                        format!("input_{}_alpha", from_input),
-                        PropertyValue::Float(0.0),
-                    );
+                    // Clear all existing alpha properties
+                    let alpha_keys: Vec<String> = block
+                        .properties
+                        .keys()
+                        .filter(|k| k.starts_with("input_") && k.ends_with("_alpha"))
+                        .cloned()
+                        .collect();
+                    for key in alpha_keys {
+                        block.properties.insert(key, PropertyValue::Float(0.0));
+                    }
+                    // Set the active input
                     block.properties.insert(
                         format!("input_{}_alpha", to_input),
                         PropertyValue::Float(1.0),
                     );
                     trace!(
-                        "Synced transition alpha values: input {} -> 0.0, input {} -> 1.0",
-                        from_input,
+                        "Synced transition alpha values: all -> 0.0, input {} -> 1.0",
                         to_input
                     );
                 }
@@ -1297,6 +1311,37 @@ impl AppState {
 
             // Mark flow for debounced save
             self.mark_flow_dirty(*flow_id).await;
+        }
+
+        // Check if this is a vision mixer block and update multiview accordingly
+        if let Some(block_id) = block_instance_id.split(':').next() {
+            let flows = self.inner.flows.read().await;
+            let is_vision_mixer = flows
+                .get(flow_id)
+                .and_then(|flow| flow.blocks.iter().find(|b| b.id == block_id))
+                .map(|b| b.block_definition_id == "builtin.vision_mixer")
+                .unwrap_or(false);
+            drop(flows);
+
+            if is_vision_mixer {
+                let num_inputs = self.get_vision_mixer_num_inputs(flow_id, block_id).await;
+                let pipelines = self.inner.pipelines.read().await;
+                if let Some(manager) = pipelines.get(flow_id) {
+                    let _ = manager
+                        .update_vision_mixer_after_take(block_id, from_input, to_input, num_inputs);
+                }
+                drop(pipelines);
+
+                // Broadcast vision mixer state change (after swap: PVW = old PGM)
+                self.inner
+                    .events
+                    .broadcast(StromEvent::VisionMixerStateChanged {
+                        flow_id: *flow_id,
+                        block_id: block_id.to_string(),
+                        preview_input: from_input,
+                        program_input: to_input,
+                    });
+            }
         }
 
         // Broadcast transition event
@@ -1312,6 +1357,56 @@ impl AppState {
             });
 
         Ok(())
+    }
+
+    /// Select a preview input on a vision mixer block.
+    pub async fn select_vision_mixer_preview(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        input: usize,
+    ) -> Result<(usize, usize), PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+
+        // Get num_inputs from block properties
+        let num_inputs = self
+            .get_vision_mixer_num_inputs(flow_id, block_instance_id)
+            .await;
+
+        let pgm = manager.select_vision_mixer_preview(block_instance_id, input, num_inputs)?;
+
+        drop(pipelines);
+
+        // Broadcast state change event
+        self.inner
+            .events
+            .broadcast(StromEvent::VisionMixerStateChanged {
+                flow_id: *flow_id,
+                block_id: block_instance_id.to_string(),
+                preview_input: input,
+                program_input: pgm,
+            });
+
+        Ok((input, pgm))
+    }
+
+    /// Get num_inputs for a vision mixer block from the flow definition.
+    async fn get_vision_mixer_num_inputs(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+    ) -> usize {
+        use crate::blocks::builtin::vision_mixer::properties as vm_props;
+        let flows = self.inner.flows.read().await;
+        flows
+            .get(flow_id)
+            .and_then(|flow| flow.blocks.iter().find(|b| b.id == block_instance_id))
+            .map(|block| vm_props::parse_num_inputs(&block.properties))
+            .unwrap_or(4)
     }
 
     /// Reset accumulated loudness measurements on an EBU R128 meter block.

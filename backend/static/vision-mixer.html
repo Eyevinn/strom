@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision Mixer - Strom</title>
+    <link rel="stylesheet" href="/static/webrtc.css">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #1a1a1a;
+            color: #ddd;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Multiview player */
+        .multiview {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #000;
+            min-height: 0;
+        }
+        .multiview video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        /* Control surface */
+        .controls {
+            background: #252525;
+            border-top: 2px solid #333;
+            padding: 12px 16px;
+            display: flex;
+            gap: 16px;
+            align-items: stretch;
+        }
+
+        /* Bus section */
+        .buses {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .bus-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .bus-label {
+            font-size: 11px;
+            font-weight: 700;
+            width: 36px;
+            text-align: right;
+            flex-shrink: 0;
+            letter-spacing: 0.5px;
+        }
+
+        .bus-label.pgm { color: #ff3333; }
+        .bus-label.pvw { color: #33cc33; }
+
+        .bus-buttons {
+            display: flex;
+            gap: 3px;
+            flex: 1;
+        }
+
+        .src-btn {
+            flex: 1;
+            min-width: 48px;
+            max-width: 80px;
+            height: 40px;
+            border: 2px solid #444;
+            border-radius: 4px;
+            background: #2a2a2a;
+            color: #999;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.1s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .src-btn:hover {
+            border-color: #666;
+            color: #ccc;
+        }
+
+        .src-btn.pgm-active {
+            background: #cc0000;
+            border-color: #ff3333;
+            color: #fff;
+            box-shadow: 0 0 8px rgba(255, 0, 0, 0.4);
+        }
+
+        .src-btn.pvw-active {
+            background: #006600;
+            border-color: #33cc33;
+            color: #fff;
+            box-shadow: 0 0 8px rgba(0, 255, 0, 0.3);
+        }
+
+        /* Transition section */
+        .transition-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-width: 200px;
+            border-left: 1px solid #444;
+            padding-left: 16px;
+        }
+
+        .transition-buttons {
+            display: flex;
+            gap: 6px;
+        }
+
+        .take-btn {
+            height: 42px;
+            border: 2px solid;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            flex: 1;
+            transition: all 0.15s ease;
+            letter-spacing: 1px;
+        }
+
+        .take-btn.cut {
+            background: #cc0000;
+            border-color: #ff3333;
+            color: #fff;
+        }
+        .take-btn.cut:hover {
+            background: #ee0000;
+            box-shadow: 0 0 12px rgba(255, 0, 0, 0.5);
+        }
+
+        .take-btn.auto {
+            background: #333;
+            border-color: #666;
+            color: #ddd;
+        }
+        .take-btn.auto:hover {
+            background: #444;
+            border-color: #888;
+        }
+        .take-btn.auto.active {
+            background: #995500;
+            border-color: #ff9900;
+            color: #fff;
+            box-shadow: 0 0 8px rgba(255, 153, 0, 0.4);
+        }
+
+        /* Transition type selector */
+        .type-row {
+            display: flex;
+            gap: 4px;
+        }
+
+        .type-btn {
+            flex: 1;
+            height: 28px;
+            border: 1px solid #444;
+            border-radius: 3px;
+            background: #2a2a2a;
+            color: #888;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .type-btn.active {
+            background: #444;
+            border-color: #888;
+            color: #fff;
+        }
+        .type-btn:hover { border-color: #666; }
+
+        /* Duration row */
+        .duration-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .duration-row label {
+            font-size: 11px;
+            color: #888;
+            white-space: nowrap;
+        }
+        .duration-input {
+            width: 60px;
+            height: 26px;
+            background: #333;
+            border: 1px solid #555;
+            border-radius: 3px;
+            color: #ddd;
+            text-align: center;
+            font-size: 12px;
+        }
+        .duration-preset {
+            height: 26px;
+            padding: 0 8px;
+            background: #2a2a2a;
+            border: 1px solid #444;
+            border-radius: 3px;
+            color: #888;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .duration-preset:hover { border-color: #666; color: #ccc; }
+        .duration-preset.active { background: #444; color: #fff; border-color: #888; }
+
+        /* Status bar */
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 16px;
+            background: #1e1e1e;
+            border-top: 1px solid #333;
+            font-size: 11px;
+            color: #666;
+        }
+        .on-air {
+            background: #cc0000;
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 2px;
+            font-weight: 700;
+            font-size: 10px;
+            letter-spacing: 1px;
+        }
+        .status-text { color: #888; }
+        .shortcut-hint { color: #555; font-size: 10px; }
+    </style>
+</head>
+<body>
+    <!-- Multiview monitor -->
+    <div class="multiview">
+        <video id="multiviewVideo" autoplay muted playsinline></video>
+    </div>
+
+    <!-- Control surface -->
+    <div class="controls">
+        <!-- PGM + PVW buses -->
+        <div class="buses">
+            <div class="bus-row">
+                <span class="bus-label pgm">PGM</span>
+                <div class="bus-buttons" id="pgmBus"></div>
+            </div>
+            <div class="bus-row">
+                <span class="bus-label pvw">PVW</span>
+                <div class="bus-buttons" id="pvwBus"></div>
+            </div>
+        </div>
+
+        <!-- Transition controls -->
+        <div class="transition-panel">
+            <div class="transition-buttons">
+                <button class="take-btn cut" onclick="doCut()" title="Cut (X)">CUT</button>
+                <button class="take-btn auto" id="autoBtn" onclick="doAuto()" title="Auto transition (Space)">AUTO</button>
+            </div>
+            <div class="type-row">
+                <button class="type-btn active" data-type="fade" onclick="setTransitionType('fade')">MIX</button>
+                <button class="type-btn" data-type="dip_to_black" onclick="setTransitionType('dip_to_black')">DIP</button>
+            </div>
+            <div class="duration-row">
+                <label>Duration:</label>
+                <button class="duration-preset" onclick="setDuration(0.5)">0.5s</button>
+                <button class="duration-preset active" onclick="setDuration(1.0)">1.0s</button>
+                <button class="duration-preset" onclick="setDuration(2.0)">2.0s</button>
+                <input type="number" class="duration-input" id="durationInput" value="1.0" min="0.1" max="10" step="0.1" onchange="onDurationInput()">
+            </div>
+        </div>
+    </div>
+
+    <!-- Status bar -->
+    <div class="status-bar">
+        <span class="on-air">ON AIR</span>
+        <span class="status-text" id="statusText">Connecting...</span>
+        <span class="shortcut-hint">1-9,0 = PVW | Space = AUTO | X = CUT</span>
+    </div>
+
+    <!-- Server-injected configuration (safe JSON encoding) -->
+    <script id="vm-config" type="application/json">{{VM_CONFIG_JSON}}</script>
+
+    <script src="/static/webrtc.js"></script>
+    <script src="/static/whep.js"></script>
+    <script>
+        // ---- Configuration (parsed from safe JSON block) ----
+        const _cfg = JSON.parse(document.getElementById('vm-config').textContent);
+        const FLOW_ID = _cfg.flow_id;
+        const BLOCK_ID = _cfg.block_id;
+        const NUM_INPUTS = _cfg.num_inputs;
+        const MULTIVIEW_ENDPOINT = _cfg.multiview_endpoint;
+        const INPUT_LABELS = _cfg.input_labels;
+
+        // ---- State ----
+        let currentPgm = _cfg.initial_pgm;
+        let currentPvw = _cfg.initial_pvw;
+        let transitionType = 'fade';
+        let transitionDurationMs = 1000;
+        let transitioning = false;
+
+        // ---- API helpers ----
+        const API_BASE = '/api/flows/' + FLOW_ID + '/blocks/' + BLOCK_ID;
+
+        async function apiPost(path, body) {
+            const resp = await fetch(API_BASE + path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.details || err.message || resp.statusText);
+            }
+            return resp.json();
+        }
+
+        // ---- PVW/PGM selection ----
+        function selectPreview(input) {
+            if (input === currentPgm || input === currentPvw) return;
+            apiPost('/preview', { input })
+                .then(r => {
+                    currentPvw = r.preview_input;
+                    currentPgm = r.program_input;
+                    updateButtons();
+                    setStatus('PVW: Input ' + (currentPvw + 1));
+                })
+                .catch(e => setStatus('Preview error: ' + e.message));
+        }
+
+        // ---- Transitions ----
+        function doTake(type, durationMs) {
+            if (transitioning || currentPgm === currentPvw) return;
+            transitioning = true;
+            if (durationMs > 0) {
+                document.getElementById('autoBtn').classList.add('active');
+            }
+
+            // Capture state before sending — swap immediately for responsive UI
+            const fromInput = currentPgm;
+            const toInput = currentPvw;
+            currentPgm = toInput;
+            currentPvw = fromInput;
+            updateButtons();
+
+            apiPost('/transition', {
+                from_input: fromInput,
+                to_input: toInput,
+                transition_type: type,
+                duration_ms: durationMs
+            }).then(r => {
+                setStatus(r.message);
+                setTimeout(() => {
+                    transitioning = false;
+                    document.getElementById('autoBtn').classList.remove('active');
+                }, durationMs);
+            }).catch(e => {
+                // Revert swap on error
+                currentPgm = fromInput;
+                currentPvw = toInput;
+                updateButtons();
+                transitioning = false;
+                document.getElementById('autoBtn').classList.remove('active');
+                setStatus('Transition error: ' + e.message);
+            });
+        }
+
+        function doCut() {
+            doTake('cut', 0);
+        }
+
+        function doAuto() {
+            doTake(transitionType, transitionDurationMs);
+        }
+
+        // ---- Transition type & duration ----
+        function setTransitionType(type) {
+            transitionType = type;
+            document.querySelectorAll('.type-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.type === type);
+            });
+        }
+
+        function setDuration(seconds) {
+            transitionDurationMs = Math.round(seconds * 1000);
+            document.getElementById('durationInput').value = seconds;
+            document.querySelectorAll('.duration-preset').forEach(b => {
+                b.classList.toggle('active', parseFloat(b.textContent) === seconds);
+            });
+        }
+
+        function onDurationInput() {
+            const val = parseFloat(document.getElementById('durationInput').value);
+            if (!isNaN(val) && val >= 0.1 && val <= 10) {
+                transitionDurationMs = Math.round(val * 1000);
+                document.querySelectorAll('.duration-preset').forEach(b => {
+                    b.classList.toggle('active', parseFloat(b.textContent) === val);
+                });
+            }
+        }
+
+        // ---- UI update ----
+        function updateButtons() {
+            document.querySelectorAll('#pgmBus .src-btn').forEach((btn, i) => {
+                btn.classList.toggle('pgm-active', i === currentPgm);
+            });
+            document.querySelectorAll('#pvwBus .src-btn').forEach((btn, i) => {
+                btn.classList.toggle('pvw-active', i === currentPvw);
+            });
+        }
+
+        function setStatus(msg) {
+            document.getElementById('statusText').textContent = msg;
+        }
+
+        // ---- Build bus buttons ----
+        function buildBuses() {
+            const pgmBus = document.getElementById('pgmBus');
+            const pvwBus = document.getElementById('pvwBus');
+            pgmBus.innerHTML = '';
+            pvwBus.innerHTML = '';
+
+            for (let i = 0; i < NUM_INPUTS; i++) {
+                const label = INPUT_LABELS[i] || ('Input ' + (i + 1));
+                const shortLabel = label.length > 8 ? label.substring(0, 7) + '..' : label;
+                const keyHint = i < 9 ? (i + 1) : (i === 9 ? '0' : '');
+
+                // PGM button (display only — operator doesn't click PGM row directly)
+                const pgmBtn = document.createElement('button');
+                pgmBtn.className = 'src-btn' + (i === currentPgm ? ' pgm-active' : '');
+                pgmBtn.textContent = shortLabel;
+                pgmBtn.title = label + (keyHint ? ' (Shift+' + keyHint + ')' : '');
+                pgmBtn.onclick = () => {}; // PGM row is display-only in standard workflow
+                pgmBus.appendChild(pgmBtn);
+
+                // PVW button
+                const pvwBtn = document.createElement('button');
+                pvwBtn.className = 'src-btn' + (i === currentPvw ? ' pvw-active' : '');
+                pvwBtn.textContent = shortLabel;
+                pvwBtn.title = label + (keyHint ? ' (' + keyHint + ')' : '');
+                pvwBtn.onclick = () => selectPreview(i);
+                pvwBus.appendChild(pvwBtn);
+            }
+        }
+
+        // ---- Keyboard shortcuts ----
+        document.addEventListener('keydown', (e) => {
+            // Ignore when typing in input fields
+            if (e.target.tagName === 'INPUT') return;
+
+            // 1-9, 0 = select PVW source
+            if (e.key >= '1' && e.key <= '9' && !e.shiftKey) {
+                const input = parseInt(e.key) - 1;
+                if (input < NUM_INPUTS) selectPreview(input);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === '0' && !e.shiftKey && NUM_INPUTS >= 10) {
+                selectPreview(9);
+                e.preventDefault();
+                return;
+            }
+
+            // Space = AUTO
+            if (e.key === ' ' || e.key === 'Enter') {
+                doAuto();
+                e.preventDefault();
+                return;
+            }
+
+            // X = CUT
+            if (e.key === 'x' || e.key === 'X') {
+                doCut();
+                e.preventDefault();
+                return;
+            }
+        });
+
+        // ---- WHEP multiview connection ----
+        let whepConnection = null;
+
+        function connectMultiview() {
+            if (!MULTIVIEW_ENDPOINT) {
+                setStatus('No multiview endpoint configured');
+                return;
+            }
+
+            const endpoint = location.protocol + '//' + location.host + MULTIVIEW_ENDPOINT;
+            setStatus('Connecting to multiview...');
+
+            whepConnection = new WhepConnection(endpoint, {
+                onVideoTrack: (stream) => {
+                    const video = document.getElementById('multiviewVideo');
+                    video.srcObject = stream;
+                    video.play().catch(() => {});
+                },
+                onAudioTrack: () => {},
+                onConnected: () => setStatus('Multiview connected'),
+                onMediaStatus: () => {},
+                onError: (msg) => {
+                    setStatus('Multiview error: ' + msg);
+                    setTimeout(connectMultiview, 5000);
+                },
+                onDisconnected: () => {
+                    setStatus('Multiview disconnected');
+                    setTimeout(connectMultiview, 3000);
+                },
+                onIceState: () => {},
+                onLog: () => {}
+            });
+            whepConnection.connect();
+        }
+
+        // ---- WebSocket for state sync ----
+        function connectWebSocket() {
+            const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(wsProto + '//' + location.host + '/api/ws');
+
+            ws.onmessage = (e) => {
+                try {
+                    const event = JSON.parse(e.data);
+                    if (event.type === 'VisionMixerStateChanged' && event.data) {
+                        const d = event.data;
+                        if (d.block_id === BLOCK_ID) {
+                            currentPvw = d.preview_input;
+                            currentPgm = d.program_input;
+                            updateButtons();
+                        }
+                    }
+                } catch {}
+            };
+
+            ws.onclose = () => setTimeout(connectWebSocket, 3000);
+            ws.onerror = () => {};
+        }
+
+        // ---- Init ----
+        window.onload = () => {
+            document.title = 'Vision Mixer | Strom | ' + location.host;
+            buildBuses();
+            updateButtons();
+            connectMultiview();
+            connectWebSocket();
+        };
+    </script>
+</body>
+</html>

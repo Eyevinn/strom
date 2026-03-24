@@ -24,6 +24,7 @@ pub mod state;
 pub mod stats;
 pub mod system_monitor;
 pub mod thread_stats;
+pub mod vision_mixer;
 pub mod whep;
 pub mod whip;
 

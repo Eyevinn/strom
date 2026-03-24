@@ -160,6 +160,10 @@ pub async fn create_app_with_config(
             post(api::flows::trigger_transition),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/preview",
+            post(api::flows::select_preview),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/animate",
             post(api::flows::animate_input),
         )
@@ -297,6 +301,10 @@ pub async fn create_app_with_config(
         .route("/whep", get(api::whep_player::whep_player))
         .route("/whep-streams", get(api::whep_player::whep_streams_page))
         .route("/whip-ingest", get(api::whip_ingest::whip_ingest_page))
+        .route(
+            "/vision-mixer/{flow_id}",
+            get(api::vision_mixer_page::vision_mixer_page),
+        )
         .with_state(state.clone());
 
     // WHEP proxy routes - outside /api (acts as WHEP server endpoint)

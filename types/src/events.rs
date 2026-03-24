@@ -326,6 +326,14 @@ pub enum StromEvent {
         /// Reason: "manual", "timeout", "flow_stopped"
         reason: String,
     },
+    /// Vision mixer PVW/PGM state changed
+    VisionMixerStateChanged {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_id: String,
+        preview_input: usize,
+        program_input: usize,
+    },
 }
 
 impl StromEvent {
@@ -702,6 +710,17 @@ impl StromEvent {
                 format!(
                     "Buffer age probe {} deactivated in flow {}: {}",
                     probe_id, flow_id, reason
+                )
+            }
+            StromEvent::VisionMixerStateChanged {
+                flow_id,
+                block_id,
+                preview_input,
+                program_input,
+            } => {
+                format!(
+                    "Vision mixer {} in flow {}: PVW={}, PGM={}",
+                    block_id, flow_id, preview_input, program_input
                 )
             }
         }

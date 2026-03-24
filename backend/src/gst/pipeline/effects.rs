@@ -34,6 +34,18 @@ impl PipelineManager {
             .get(&mixer_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
 
+        // Clean up stale alpha values: set all pads to alpha=0 except from_input (=1.0)
+        // This prevents leftover alpha=1 from previous transitions bleeding through
+        for pad in mixer.sink_pads() {
+            let name = pad.name();
+            if name.starts_with("sink_") {
+                if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
+                    let alpha = if idx == from_input { 1.0f64 } else { 0.0f64 };
+                    pad.set_property("alpha", alpha);
+                }
+            }
+        }
+
         // Parse transition type
         let trans_type = transition_type.parse::<TransitionType>().map_err(|_| {
             PipelineError::InvalidProperty {
@@ -217,4 +229,159 @@ impl PipelineManager {
             .get_thumbnail()
             .map_err(|e| PipelineError::ThumbnailCapture(e.to_string()))
     }
+
+    /// Select a preview input on a vision mixer block.
+    ///
+    /// Updates the multiview compositor to show the selected input in the PVW area.
+    pub fn select_vision_mixer_preview(
+        &self,
+        block_instance_id: &str,
+        new_pvw: usize,
+        num_inputs: usize,
+    ) -> Result<usize, PipelineError> {
+        use crate::blocks::builtin::vision_mixer::overlay;
+
+        let mv_comp_id = format!("{}:mv_comp", block_instance_id);
+        let mv_comp = self
+            .elements
+            .get(&mv_comp_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
+
+        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
+            PipelineError::ElementNotFound(format!(
+                "Vision mixer overlay state not found for {}",
+                block_instance_id
+            ))
+        })?;
+
+        let old_pvw = state.pvw_input.load(std::sync::atomic::Ordering::Relaxed);
+        let pgm = state.pgm_input.load(std::sync::atomic::Ordering::Relaxed);
+
+        if new_pvw >= num_inputs {
+            return Err(PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "preview_input".to_string(),
+                reason: format!("Input {} out of range (max {})", new_pvw, num_inputs - 1),
+            });
+        }
+        if new_pvw == pgm {
+            return Err(PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "preview_input".to_string(),
+                reason: format!("Input {} is already on program", new_pvw),
+            });
+        }
+
+        if old_pvw != new_pvw {
+            // Hide old PVW big pad
+            if old_pvw != pgm {
+                if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + old_pvw)) {
+                    pad.set_property("alpha", 0.0f64);
+                }
+            }
+
+            // Show new PVW big pad
+            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + new_pvw)) {
+                let r = &state.layout.pvw_rect;
+                pad.set_property("xpos", r.x as i32);
+                pad.set_property("ypos", r.y as i32);
+                pad.set_property("width", r.w as i32);
+                pad.set_property("height", r.h as i32);
+                pad.set_property("alpha", 1.0f64);
+                pad.set_property("zorder", 10u32);
+            }
+        }
+
+        state
+            .pvw_input
+            .store(new_pvw, std::sync::atomic::Ordering::Relaxed);
+
+        info!(
+            "Vision mixer {} preview changed: {} -> {}",
+            block_instance_id, old_pvw, new_pvw
+        );
+
+        Ok(pgm)
+    }
+
+    /// Update the multiview compositor after a PGM transition on a vision mixer.
+    pub fn update_vision_mixer_after_take(
+        &self,
+        block_instance_id: &str,
+        old_pgm: usize,
+        new_pgm: usize,
+        num_inputs: usize,
+    ) -> Result<(), PipelineError> {
+        use crate::blocks::builtin::vision_mixer::overlay;
+
+        let mv_comp_id = format!("{}:mv_comp", block_instance_id);
+        let mv_comp = self
+            .elements
+            .get(&mv_comp_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
+
+        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
+            PipelineError::ElementNotFound(format!(
+                "Vision mixer overlay state not found for {}",
+                block_instance_id
+            ))
+        })?;
+
+        let old_pvw = state.pvw_input.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Hide old PVW big pad (it's being replaced by old PGM)
+        if old_pvw != old_pgm {
+            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + old_pvw)) {
+                pad.set_property("alpha", 0.0f64);
+            }
+        }
+
+        // Show new PGM big pad (was PVW, now moves to PGM position)
+        if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + new_pgm)) {
+            let r = &state.layout.pgm_rect;
+            pad.set_property("xpos", r.x as i32);
+            pad.set_property("ypos", r.y as i32);
+            pad.set_property("width", r.w as i32);
+            pad.set_property("height", r.h as i32);
+            pad.set_property("alpha", 1.0f64);
+            pad.set_property("zorder", 10u32);
+        }
+
+        // Swap: old PGM becomes new PVW
+        if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + old_pgm)) {
+            let r = &state.layout.pvw_rect;
+            pad.set_property("xpos", r.x as i32);
+            pad.set_property("ypos", r.y as i32);
+            pad.set_property("width", r.w as i32);
+            pad.set_property("height", r.h as i32);
+            pad.set_property("alpha", 1.0f64);
+            pad.set_property("zorder", 10u32);
+        }
+
+        // Update state: PGM = new_pgm, PVW = old_pgm (swap)
+        state
+            .pgm_input
+            .store(new_pgm, std::sync::atomic::Ordering::Relaxed);
+        state
+            .pvw_input
+            .store(old_pgm, std::sync::atomic::Ordering::Relaxed);
+
+        info!(
+            "Vision mixer {} take: PGM {} -> {}, PVW {} -> {} (swap)",
+            block_instance_id, old_pgm, new_pgm, old_pvw, old_pgm
+        );
+
+        Ok(())
+    }
+}
+
+/// Find a pad by name on an element, checking both static and request pads.
+/// `static_pad()` doesn't find request pads on aggregator elements like glvideomixer.
+fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pad> {
+    element.static_pad(pad_name).or_else(|| {
+        element
+            .pads()
+            .into_iter()
+            .find(|p| p.name().as_str() == pad_name)
+    })
 }
