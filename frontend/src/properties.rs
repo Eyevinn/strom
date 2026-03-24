@@ -40,6 +40,8 @@ pub struct BlockInspectorResult {
     pub recorder_split_requested: Option<(FlowId, String)>,
     /// Recorder file download requested - contains relative path
     pub recorder_download_requested: Option<String>,
+    /// Vision mixer control page requested - contains flow_id
+    pub vision_mixer_url: Option<FlowId>,
 }
 
 /// Property inspector panel.
@@ -426,6 +428,7 @@ impl PropertyInspector {
                     | "builtin.compositor"
                     | "builtin.media_player"
                     | "builtin.mpegtssrt_output"
+                    | "builtin.vision_mixer"
                     | "builtin.whep_output"
                     | "builtin.whip_input"
                     | "builtin.thumbnail"
@@ -587,6 +590,22 @@ impl PropertyInspector {
                             .on_hover_text("Start the flow to enable player")
                             .on_disabled_hover_text("Start the flow to enable player");
                     });
+                }
+            }
+
+            // Open Vision Mixer control page
+            if definition.id == "builtin.vision_mixer" {
+                if let Some(fid) = flow_id {
+                    if ui
+                        .button(format!(
+                            "{} Vision Mixer",
+                            egui_phosphor::regular::ARROW_SQUARE_OUT
+                        ))
+                        .on_hover_text("Open vision mixer control page in browser")
+                        .clicked()
+                    {
+                        result.vision_mixer_url = Some(fid);
+                    }
                 }
             }
 

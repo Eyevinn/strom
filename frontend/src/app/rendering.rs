@@ -1465,6 +1465,12 @@ impl StromApp {
                             self.status = "Player URL copied to clipboard".to_string();
                         }
 
+                        // Handle vision mixer control page request
+                        if let Some(flow_id) = result.vision_mixer_url {
+                            let url = self.api.get_vision_mixer_url(&flow_id);
+                            ctx.open_url(egui::OpenUrl::new_tab(&url));
+                        }
+
                         // Handle WHIP ingest request (for WHIP Input)
                         if let Some(endpoint_id) = result.whip_ingest_url {
                             let ingest_url = self.api.get_whip_ingest_url(&endpoint_id);

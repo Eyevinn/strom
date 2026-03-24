@@ -72,29 +72,37 @@
             display: flex;
             gap: 3px;
             flex: 1;
+            flex-wrap: wrap;
+            min-width: 0;
         }
 
         .src-btn {
-            flex: 1;
-            min-width: 48px;
-            max-width: 80px;
-            height: 40px;
+            flex: 1 1 0;
+            min-width: 36px;
+            height: 36px;
             border: 2px solid #444;
             border-radius: 4px;
             background: #2a2a2a;
             color: #999;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.1s ease;
             display: flex;
             align-items: center;
             justify-content: center;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding: 0 4px;
         }
 
         .src-btn:hover {
             border-color: #666;
             color: #ccc;
+        }
+        .src-btn:focus {
+            outline: none;
         }
 
         .src-btn.pgm-active {
@@ -116,7 +124,8 @@
             display: flex;
             flex-direction: column;
             gap: 6px;
-            min-width: 200px;
+            min-width: 180px;
+            flex-shrink: 0;
             border-left: 1px solid #444;
             padding-left: 16px;
         }
@@ -142,6 +151,9 @@
             background: #cc0000;
             border-color: #ff3333;
             color: #fff;
+        }
+        .take-btn:focus, .type-btn:focus, .duration-preset:focus {
+            outline: none;
         }
         .take-btn.cut:hover {
             background: #ee0000;
@@ -244,6 +256,29 @@
         }
         .status-text { color: #888; }
         .shortcut-hint { color: #555; font-size: 10px; }
+        .conn-indicators {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .conn-dot {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 10px;
+            color: #888;
+        }
+        .conn-dot::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #555;
+        }
+        .conn-dot.ok::before { background: #33cc33; }
+        .conn-dot.err::before { background: #cc0000; }
+        .conn-dot.warn::before { background: #cc9900; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
     </style>
 </head>
 <body>
@@ -289,6 +324,10 @@
     <!-- Status bar -->
     <div class="status-bar">
         <span class="on-air">ON AIR</span>
+        <div class="conn-indicators">
+            <span class="conn-dot" id="whepDot" title="WHEP multiview">Video</span>
+            <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
+        </div>
         <span class="status-text" id="statusText">Connecting...</span>
         <span class="shortcut-hint">1-9,0 = PVW | Space = AUTO | X = CUT</span>
     </div>
@@ -437,21 +476,20 @@
 
             for (let i = 0; i < NUM_INPUTS; i++) {
                 const label = INPUT_LABELS[i] || ('Input ' + (i + 1));
-                const shortLabel = label.length > 8 ? label.substring(0, 7) + '..' : label;
+                const btnText = String(i + 1);
                 const keyHint = i < 9 ? (i + 1) : (i === 9 ? '0' : '');
 
-                // PGM button (display only — operator doesn't click PGM row directly)
+                // PGM button (display only)
                 const pgmBtn = document.createElement('button');
                 pgmBtn.className = 'src-btn' + (i === currentPgm ? ' pgm-active' : '');
-                pgmBtn.textContent = shortLabel;
-                pgmBtn.title = label + (keyHint ? ' (Shift+' + keyHint + ')' : '');
-                pgmBtn.onclick = () => {}; // PGM row is display-only in standard workflow
+                pgmBtn.textContent = btnText;
+                pgmBtn.title = label + (keyHint ? ' (' + keyHint + ')' : '');
                 pgmBus.appendChild(pgmBtn);
 
                 // PVW button
                 const pvwBtn = document.createElement('button');
                 pvwBtn.className = 'src-btn' + (i === currentPvw ? ' pvw-active' : '');
-                pvwBtn.textContent = shortLabel;
+                pvwBtn.textContent = btnText;
                 pvwBtn.title = label + (keyHint ? ' (' + keyHint + ')' : '');
                 pvwBtn.onclick = () => selectPreview(i);
                 pvwBus.appendChild(pvwBtn);
@@ -491,33 +529,68 @@
             }
         });
 
+        // ---- Connection status helpers ----
+        function setDot(id, state) {
+            const el = document.getElementById(id);
+            el.className = 'conn-dot ' + state; // 'ok', 'err', 'warn', or ''
+        }
+
         // ---- WHEP multiview connection ----
         let whepConnection = null;
+        let videoStallTimer = null;
+        let lastVideoTime = 0;
+
+        function startVideoStallDetection() {
+            if (videoStallTimer) clearInterval(videoStallTimer);
+            videoStallTimer = setInterval(() => {
+                const video = document.getElementById('multiviewVideo');
+                if (!video.srcObject) return;
+                if (video.readyState >= 2 && video.currentTime === lastVideoTime && !video.paused) {
+                    setDot('whepDot', 'warn');
+                } else if (video.readyState >= 2) {
+                    setDot('whepDot', 'ok');
+                }
+                lastVideoTime = video.currentTime;
+            }, 2000);
+        }
 
         function connectMultiview() {
             if (!MULTIVIEW_ENDPOINT) {
                 setStatus('No multiview endpoint configured');
+                setDot('whepDot', 'err');
                 return;
             }
 
             const endpoint = location.protocol + '//' + location.host + MULTIVIEW_ENDPOINT;
-            setStatus('Connecting to multiview...');
+            setDot('whepDot', 'warn');
+
+            if (whepConnection) {
+                whepConnection.callbacks = {};
+                whepConnection.close();
+                whepConnection = null;
+            }
 
             whepConnection = new WhepConnection(endpoint, {
                 onVideoTrack: (stream) => {
                     const video = document.getElementById('multiviewVideo');
                     video.srcObject = stream;
                     video.play().catch(() => {});
+                    startVideoStallDetection();
                 },
                 onAudioTrack: () => {},
-                onConnected: () => setStatus('Multiview connected'),
+                onConnected: () => {
+                    setDot('whepDot', 'ok');
+                    setStatus('Connected');
+                },
                 onMediaStatus: () => {},
                 onError: (msg) => {
-                    setStatus('Multiview error: ' + msg);
+                    setDot('whepDot', 'err');
+                    setStatus('Video error: ' + msg);
                     setTimeout(connectMultiview, 5000);
                 },
                 onDisconnected: () => {
-                    setStatus('Multiview disconnected');
+                    setDot('whepDot', 'err');
+                    setStatus('Video disconnected - reconnecting...');
                     setTimeout(connectMultiview, 3000);
                 },
                 onIceState: () => {},
@@ -527,9 +600,13 @@
         }
 
         // ---- WebSocket for state sync ----
+        let ws = null;
+
         function connectWebSocket() {
             const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const ws = new WebSocket(wsProto + '//' + location.host + '/api/ws');
+            ws = new WebSocket(wsProto + '//' + location.host + '/api/ws');
+
+            ws.onopen = () => setDot('wsDot', 'ok');
 
             ws.onmessage = (e) => {
                 try {
@@ -545,8 +622,12 @@
                 } catch {}
             };
 
-            ws.onclose = () => setTimeout(connectWebSocket, 3000);
-            ws.onerror = () => {};
+            ws.onclose = () => {
+                setDot('wsDot', 'err');
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = () => setDot('wsDot', 'err');
         }
 
         // ---- Init ----
