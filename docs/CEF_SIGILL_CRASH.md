@@ -55,15 +55,32 @@ References:
 - CEF Forum: "Process hangs after switching to chrome runtime" (MemoryInfra SIGILL)
 - SharedImageManager::ProduceMemory errors reported around Chromium 124
 
-## Fix: Disable background tracing
+## Fix: Disable MemoryInfra periodic dumps
 
 Since the MemoryInfra dump is not needed for production rendering, the fix is to
-disable the background tracing system entirely. Key chrome flags:
+prevent the periodic memory dump system from running.
+
+### Important: `disable-background-tracing` does not exist
+
+The flag `--disable-background-tracing` was used in earlier attempts but **does
+not exist as a Chromium switch**. Verified by:
+1. Checking `components/tracing/common/tracing_switches.cc` in Chromium source
+   (only `enable-background-tracing` exists, as an opt-in flag)
+2. Binary string search of `libcef.so` (Chromium 144) confirms the string
+   `disable-background-tracing` is absent
+
+Chromium silently ignores unknown switches, so this flag had no effect.
+
+### Working flags
+
+The correct approach uses three mechanisms to prevent MemoryInfra from running:
 
 | Flag | Purpose |
 |------|---------|
-| `disable-background-tracing` | Disables the background tracing manager that schedules periodic memory dumps |
-| `disable-field-trial-config` | Prevents field trials from enabling tracing |
+| `disable-features=BackgroundTracing` | Disables the BackgroundTracing feature flag, preventing automatic trace sessions |
+| `no-periodic-tasks` | Prevents periodic task scheduling, including MemoryDumpScheduler ticks |
+| `force-fieldtrials=` | Clears all field trial configurations that could enable tracing |
+| `disable-field-trial-config` | Prevents field trials from being loaded |
 | `disable-breakpad` | Disables crash reporting (not needed in production) |
 | `disable-crash-reporter` | Same as above |
 | `disable-dev-shm-usage` | Avoids Docker's limited /dev/shm (default 64MB) |
@@ -72,7 +89,7 @@ disable the background tracing system entirely. Key chrome flags:
 
 For gstcefsrc, set via environment variable (without `--` prefix):
 ```bash
-export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-background-tracing,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
+export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
 ```
 
 ## Investigation commands

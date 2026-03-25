@@ -35,19 +35,27 @@ if nvidia-smi > /dev/null 2>&1; then
     # disable-gpu alone is not enough - Chromium still starts a GPU subprocess that
     # probes the NVIDIA driver and initializes SharedImage mailboxes.
     #
-    # Also disable MemoryInfra background tracing to prevent SIGILL crashes.
+    # Prevent MemoryInfra SIGILL crashes (exit code 132):
     # Chromium's MemoryInfra thread periodically dumps PartitionAlloc stats;
     # in long-running processes the allocator metadata can become inconsistent,
-    # causing a CHECK() failure that crashes with ud2/SIGILL (exit code 132).
+    # causing a CHECK() failure (ud2/SIGILL).
+    #
+    # NOTE: "disable-background-tracing" does NOT exist as a Chromium switch
+    # (verified in Chromium 144 source and libcef.so binary). The correct
+    # approach is to disable the BackgroundTracing feature flag and prevent
+    # periodic tasks from scheduling memory dumps:
+    #   disable-features=BackgroundTracing  - disables the feature entirely
+    #   no-periodic-tasks                   - prevents periodic dump scheduling
+    #   force-fieldtrials=                  - clears all field trial configs
     # See docs/CEF_SIGILL_CRASH.md for full investigation.
-    export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-background-tracing,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
+    export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
 else
     echo "No GPU detected - using software rendering for both GStreamer and CEF"
     # Override base image GL settings to use Xvfb (X11/Mesa software renderer)
     # Without GPU, egl-device will fail since there's no EGL device available
     export GST_GL_WINDOW=x11
     export GST_GL_PLATFORM=glx
-    export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-background-tracing,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
+    export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
 fi
 
 # Set CEF cache location to avoid singleton behavior warning
