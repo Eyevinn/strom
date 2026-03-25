@@ -260,10 +260,13 @@ impl GraphEditor {
                 }
 
                 // Start creating link when dragging from input port
+                // If this input pad already has a connection, detach it and re-route from the source
                 if pad_response.drag_started()
                     || (pad_response.dragged() && self.creating_link.is_none())
                 {
-                    self.creating_link = Some((element.id.clone(), pad_to_render.name.clone()));
+                    let (drag_id, drag_pad) =
+                        self.detach_link_from_input(&element.id, &pad_to_render.name);
+                    self.creating_link = Some((drag_id, drag_pad));
                 }
 
                 if pad_response.hovered() {
@@ -300,7 +303,7 @@ impl GraphEditor {
                     self.select_element_and_focus_pad(&element.id, &pad_to_render.name, false);
                 }
 
-                // Start creating link when dragging from output port
+                // Start creating link when dragging from output port (always new — outputs support fan-out)
                 if pad_response.drag_started()
                     || (pad_response.dragged() && self.creating_link.is_none())
                 {
@@ -360,10 +363,12 @@ impl GraphEditor {
                 }
 
                 // Start creating link when dragging from input port
+                // If already connected, detach and re-route from the source
                 if input_response.drag_started()
                     || (input_response.dragged() && self.creating_link.is_none())
                 {
-                    self.creating_link = Some((element.id.clone(), "sink".to_string()));
+                    let (drag_id, drag_pad) = self.detach_link_from_input(&element.id, "sink");
+                    self.creating_link = Some((drag_id, drag_pad));
                 }
 
                 if input_response.hovered() {
@@ -433,10 +438,13 @@ impl GraphEditor {
                 );
 
                 // Start creating link when dragging from input port
+                // If this input pad already has a connection, detach and re-route from source
                 if pad_response.drag_started()
                     || (pad_response.dragged() && self.creating_link.is_none())
                 {
-                    self.creating_link = Some((block.id.clone(), external_pad.name.clone()));
+                    let (drag_id, drag_pad) =
+                        self.detach_link_from_input(&block.id, &external_pad.name);
+                    self.creating_link = Some((drag_id, drag_pad));
                 }
 
                 if pad_response.hovered() {
@@ -463,7 +471,7 @@ impl GraphEditor {
                     Sense::click_and_drag(),
                 );
 
-                // Start creating link when dragging from output port
+                // Start creating link when dragging from output port (always new — outputs support fan-out)
                 if pad_response.drag_started()
                     || (pad_response.dragged() && self.creating_link.is_none())
                 {

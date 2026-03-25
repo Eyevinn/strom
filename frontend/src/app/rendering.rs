@@ -736,6 +736,13 @@ impl StromApp {
                                     right_side_width += 18.0;
                                 }
 
+                                // CPU affinity indicator
+                                if flow.properties.cpu_affinity
+                                    != strom_types::flow::CpuAffinity::default()
+                                {
+                                    right_side_width += 18.0;
+                                }
+
                                 // Left side: state icon (always) + QoS indicator (conditional)
                                 let mut left_icons_width = 20.0; // state icon + spacing
                                 let has_qos_issues = self
@@ -1053,7 +1060,7 @@ impl StromApp {
                                             }
                                         });
 
-                                        // Show clock sync indicator for PTP/NTP (small colored dot)
+                                        // Show clock sync indicator for PTP/NTP
                                         use strom_types::flow::{
                                             ClockSyncStatus, GStreamerClockType,
                                         };
@@ -1086,10 +1093,11 @@ impl StromApp {
                                                     ),
                                                 };
 
-                                            // Small colored dot indicator
                                             ui.add_space(4.0);
                                             ui.add(egui::Label::new(
-                                                egui::RichText::new("*")
+                                                egui::RichText::new(
+                                                    egui_phosphor::regular::CLOCK_CLOCKWISE,
+                                                )
                                                     .size(12.0)
                                                     .color(text_color),
                                             ))
@@ -1115,7 +1123,9 @@ impl StromApp {
                                                 ui.add_space(2.0);
                                                 ui.add(
                                                     egui::Label::new(
-                                                        egui::RichText::new("⚠")
+                                                        egui::RichText::new(
+                                                            egui_phosphor::regular::WARNING,
+                                                        )
                                                             .size(12.0)
                                                             .color(warning_color),
                                                     )
@@ -1541,8 +1551,57 @@ impl StromApp {
                         ui.label("Block definition not found");
                     }
 
+                } else if let Some(link) = self.graph.get_selected_link().cloned() {
+                    // Link selected: show connection info
+                    let mut delete_link = false;
+                    let (from_ref, to_ref) = link.to_pad_refs();
+
+                    ui.horizontal(|ui| {
+                        ui.heading("Connection");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button(format!(
+                                    "{} Delete",
+                                    egui_phosphor::regular::TRASH
+                                ))
+                                .on_hover_text("Delete connection")
+                                .clicked()
+                            {
+                                delete_link = true;
+                            }
+                        });
+                    });
+                    ui.separator();
+
+                    let from_label = self.graph.node_label(&from_ref.element_id);
+                    let to_label = self.graph.node_label(&to_ref.element_id);
+
+                    egui::Grid::new("connection_info")
+                        .num_columns(2)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("From:");
+                            if let Some(ref pad) = from_ref.pad_name {
+                                ui.label(format!("{} ({})", from_label, pad));
+                            } else {
+                                ui.label(&from_label);
+                            }
+                            ui.end_row();
+
+                            ui.strong("To:");
+                            if let Some(ref pad) = to_ref.pad_name {
+                                ui.label(format!("{} ({})", to_label, pad));
+                            } else {
+                                ui.label(&to_label);
+                            }
+                            ui.end_row();
+                        });
+
+                    if delete_link {
+                        self.graph.remove_selected_link();
+                    }
                 } else {
-                    // No element or block selected: show ONLY the palette
+                    // No element, block, or link selected: show ONLY the palette
                     self.palette.show(ui);
                 }
             }); // ScrollArea
@@ -1936,6 +1995,11 @@ impl StromApp {
                 if self.graph.take_open_palette_request() {
                     self.show_palette_panel = true;
                     self.palette.focus_search();
+                }
+
+                // Toggle right pane when clicking background while nothing is selected
+                if self.graph.take_toggle_right_pane_request() {
+                    self.show_palette_panel = !self.show_palette_panel;
                 }
 
                 // Handle adding elements from palette

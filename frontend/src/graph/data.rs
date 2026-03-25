@@ -167,6 +167,11 @@ impl GraphEditor {
         self.request_open_palette.replace(false)
     }
 
+    /// Check if user clicked background while nothing was selected (toggle right pane).
+    pub fn take_toggle_right_pane_request(&self) -> bool {
+        self.request_toggle_right_pane.replace(false)
+    }
+
     /// Get the last known canvas rect (for hit testing pinch gestures, WASM only).
     #[allow(dead_code)]
     pub fn canvas_rect(&self) -> Option<egui::Rect> {
@@ -383,6 +388,72 @@ impl GraphEditor {
     pub fn get_selected_element_mut(&mut self) -> Option<&mut Element> {
         let selected_id = self.selected.clone()?;
         self.elements.iter_mut().find(|e| e.id == selected_id)
+    }
+
+    /// Get the currently selected link.
+    pub fn get_selected_link(&self) -> Option<&strom_types::element::Link> {
+        self.selected_link.and_then(|idx| self.links.get(idx))
+    }
+
+    /// Get a display label for an element or block by ID.
+    ///
+    /// Handles plain element IDs, block IDs, and namespaced block element IDs
+    /// (format "block_id:internal_element") by resolving the block name.
+    pub fn node_label(&self, id: &str) -> String {
+        // Direct element match
+        if let Some(element) = self.elements.iter().find(|e| e.id == id) {
+            return element.element_type.clone();
+        }
+        // Direct block match
+        if let Some(block) = self.blocks.iter().find(|b| b.id == id) {
+            return block
+                .name
+                .clone()
+                .unwrap_or_else(|| block.block_definition_id.clone());
+        }
+        // Namespaced block element: "block_id:internal_element"
+        if let Some((block_id, _)) = id.split_once(':') {
+            if let Some(block) = self.blocks.iter().find(|b| b.id == block_id) {
+                return block
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| block.block_definition_id.clone());
+            }
+        }
+        id.to_string()
+    }
+
+    /// Start a link drag from an input (sink) pad.
+    ///
+    /// If the pad already has an incoming connection, detach it and return the
+    /// source end so the user can re-route or drop to delete.
+    /// Only applies to input pads — output pads support fan-out so dragging
+    /// from them always starts a new link.
+    pub fn detach_link_from_input(&mut self, element_id: &str, pad_name: &str) -> (String, String) {
+        let pad_ref = format!("{element_id}:{pad_name}");
+
+        // Only detach links where this pad is the destination (input)
+        let existing = self.links.iter().position(|link| link.to == pad_ref);
+
+        if let Some(idx) = existing {
+            let link = self.links.remove(idx);
+            // Fix up selected_link index after removal
+            match self.selected_link {
+                Some(sel) if sel == idx => self.selected_link = None,
+                Some(sel) if sel > idx => self.selected_link = Some(sel - 1),
+                _ => {}
+            }
+            // Re-route from the source end of the removed link
+            // Use rsplit_once to handle namespaced block element IDs (e.g. "block_id:element:pad")
+            let (from_id, from_pad) = link
+                .from
+                .rsplit_once(':')
+                .map(|(id, pad)| (id.to_string(), pad.to_string()))
+                .unwrap_or_else(|| (link.from.clone(), String::new()));
+            (from_id, from_pad)
+        } else {
+            (element_id.to_string(), pad_name.to_string())
+        }
     }
 
     /// Collect actual input pad names for an element from links.

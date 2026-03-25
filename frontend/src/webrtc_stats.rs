@@ -439,9 +439,6 @@ fn show_connection_stats(ui: &mut Ui, name: &str, conn: &WebRtcConnectionStats) 
 
 /// Render a full WebRTC stats widget (for property inspector or dedicated panel).
 pub fn show_full(ui: &mut Ui, stats: &WebRtcStats) {
-    ui.heading("WebRTC Statistics");
-    ui.separator();
-
     if stats.connections.is_empty() {
         ui.label("No WebRTC connections found");
         ui.label("Start a flow with WHIP/WHEP blocks to see statistics.");

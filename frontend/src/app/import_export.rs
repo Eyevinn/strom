@@ -462,7 +462,7 @@ impl StromApp {
                 match self.connection_state {
                     ConnectionState::Disconnected => {
                         ui.heading(
-                            egui::RichText::new("⚠")
+                            egui::RichText::new(egui_phosphor::regular::WARNING)
                                 .size(80.0)
                                 .color(Color32::from_rgb(255, 165, 0))
                         );

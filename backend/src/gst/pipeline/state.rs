@@ -332,7 +332,8 @@ fn wrap_dot_labels(dot: &str, max_width: usize) -> String {
 
     while let Some(label_start) = remaining.find("label=\"") {
         // Copy everything before this label
-        result.push_str(&remaining[..label_start]);
+        let before_label = &remaining[..label_start];
+        result.push_str(before_label);
         result.push_str("label=\"");
         remaining = &remaining[label_start + 7..]; // skip past label="
 
@@ -341,17 +342,32 @@ fn wrap_dot_labels(dot: &str, max_width: usize) -> String {
         let label_content = &remaining[..label_end];
         remaining = &remaining[label_end..]; // keep the closing "
 
-        // Split label into logical property lines, respecting escaped quotes.
-        // GStreamer DOT labels use \n to separate properties, but property
-        // values can contain escaped quotes with \n inside them, e.g.:
-        //   pem=\"-----BEGIN CERT-----\\nMIIC...\\n-----END CERT-----\\n\"
-        // We must treat such a quoted value as part of one property line.
-        let lines = split_dot_label_lines(label_content);
-        for (i, line) in lines.iter().enumerate() {
-            if i > 0 {
-                result.push_str("\\n");
+        // Edge labels (caps between elements) contain negotiated caps info
+        // that is very useful to see in full — don't truncate them.
+        // Edges have "->" before the label, nodes don't.
+        let is_edge = before_label
+            .rfind('\n')
+            .map(|nl| before_label[nl..].contains("->"))
+            .unwrap_or_else(|| before_label.contains("->"));
+
+        // Also skip truncation for the legend node (Element-States key).
+        let is_legend = label_content.contains("Element-States:");
+
+        if is_edge || is_legend {
+            result.push_str(label_content);
+        } else {
+            // Split label into logical property lines, respecting escaped quotes.
+            // GStreamer DOT labels use \n to separate properties, but property
+            // values can contain escaped quotes with \n inside them, e.g.:
+            //   pem=\"-----BEGIN CERT-----\\nMIIC...\\n-----END CERT-----\\n\"
+            // We must treat such a quoted value as part of one property line.
+            let lines = split_dot_label_lines(label_content);
+            for (i, line) in lines.iter().enumerate() {
+                if i > 0 {
+                    result.push_str("\\n");
+                }
+                result.push_str(&wrap_dot_property_line(line, max_width));
             }
-            result.push_str(&wrap_dot_property_line(line, max_width));
         }
     }
 
@@ -625,6 +641,69 @@ mod tests {
         assert!(
             !result.ends_with("\\\"…"),
             "Balanced quotes should not get extra close, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_edge_label_caps_not_truncated() {
+        // Edge labels contain negotiated caps — these must not be truncated
+        let caps = "video/x-raw, format=(string)NV12, width=(int)1920, height=(int)1080, framerate=(fraction)25/1, multiview-mode=(string)mono";
+        let dot = format!(r#"element0:src -> element1:sink [label="{}"];"#, caps);
+        let result = wrap_dot_labels(&dot, 80);
+        // The full caps string should be preserved
+        assert!(
+            result.contains(caps),
+            "Edge caps should not be truncated, got: {}",
+            result
+        );
+        assert!(!result.contains('…'), "Edge label should not have ellipsis");
+    }
+
+    #[test]
+    fn test_node_label_still_truncated() {
+        // Node labels should still be truncated as before
+        let long_prop = format!("property={}", "x".repeat(200));
+        let dot = format!(
+            r#"element0 [label="GstElement\nname\n[>]\n{}"];"#,
+            long_prop
+        );
+        let result = wrap_dot_labels(&dot, 80);
+        assert!(result.contains('…'), "Node property should be truncated");
+        assert!(!result.contains(&"x".repeat(200)));
+    }
+
+    #[test]
+    fn test_mixed_nodes_and_edges() {
+        let long_caps = format!("video/x-raw, {}", "key=(int)1, ".repeat(20));
+        let long_prop = format!("extensions={}", "A".repeat(200));
+        let dot = format!(
+            r#"n1 [label="Type\nname\n[>]\n{}"]; n1:src -> n2:sink [label="{}"]; n2 [label="Type2\nname2"];"#,
+            long_prop, long_caps
+        );
+        let result = wrap_dot_labels(&dot, 80);
+        // Node property should be truncated
+        assert!(
+            result.contains("extensions=A"),
+            "Node property should exist"
+        );
+        assert!(
+            !result.contains(&"A".repeat(200)),
+            "Node property should be truncated"
+        );
+        // Edge caps should be preserved in full
+        assert!(result.contains(&long_caps), "Edge caps should be preserved");
+    }
+
+    #[test]
+    fn test_legend_not_truncated() {
+        let legend =
+            "Element-States: [~] void-pending, [0] null, [-] ready, [=] paused, [>] playing";
+        let dot = format!(r#"legend [label="{}"];"#, legend);
+        let result = wrap_dot_labels(&dot, 80);
+        assert!(
+            result.contains(legend),
+            "Legend should not be truncated, got: {}",
             result
         );
     }

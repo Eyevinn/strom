@@ -105,6 +105,8 @@ pub struct GraphEditor {
     qos_marker_clicked: std::cell::Cell<bool>,
     /// Flag indicating user double-clicked on background (to signal palette should open)
     request_open_palette: std::cell::Cell<bool>,
+    /// Flag indicating user clicked background while nothing was selected (toggle right pane)
+    request_toggle_right_pane: std::cell::Cell<bool>,
     /// Clipboard for copy/paste operations
     clipboard: Option<ClipboardContent>,
 }
@@ -176,6 +178,7 @@ impl Default for GraphEditor {
             last_canvas_rect: None,
             qos_marker_clicked: std::cell::Cell::new(false),
             request_open_palette: std::cell::Cell::new(false),
+            request_toggle_right_pane: std::cell::Cell::new(false),
             clipboard: None,
         }
     }
