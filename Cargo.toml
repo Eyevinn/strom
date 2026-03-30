@@ -47,7 +47,7 @@ garde = { version = "0.22", features = ["derive"] }
 
 # Frontend
 egui = "0.33"
-egui-phosphor = "0.11"
+egui-phosphor = "0.12"
 eframe = { version = "0.33", features = ["default_fonts", "persistence", "glow"] }
 egui_extras = { version = "0.33", features = ["image"] }
 egui_plot = "0.34"
