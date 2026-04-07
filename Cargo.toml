@@ -49,7 +49,7 @@ garde = { version = "0.22", features = ["derive"] }
 egui = "0.33"
 egui-phosphor = "0.11"
 eframe = { version = "0.33", features = ["default_fonts", "persistence", "glow"] }
-egui_extras = { version = "0.33", features = ["image"] }
+egui_extras = { version = "0.34", features = ["image"] }
 egui_plot = "0.34"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 gloo-net = { version = "0.7", features = ["websocket"] }
