@@ -123,6 +123,11 @@ pub enum AppMessage {
     MediaError(String),
     /// Request media page refresh
     MediaRefresh,
+
+    /// Log level loaded from API
+    LogLevelLoaded { current: String, default: String },
+    /// Log level update failed
+    LogLevelError(String),
 }
 
 /// WebSocket connection state.

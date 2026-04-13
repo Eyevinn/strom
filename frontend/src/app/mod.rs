@@ -595,6 +595,10 @@ pub struct StromApp {
     network_interfaces: Vec<strom_types::NetworkInterfaceInfo>,
     /// Whether network interfaces have been loaded
     network_interfaces_loaded: bool,
+    /// Current log filter string from backend
+    log_level_current: Option<String>,
+    /// Default log filter string the server started with
+    log_level_default: Option<String>,
     /// Cached available inter channels (for InterInput channel dropdown)
     available_channels: Vec<strom_types::api::AvailableOutput>,
     /// Whether available channels have been loaded

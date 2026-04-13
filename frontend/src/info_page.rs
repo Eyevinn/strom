@@ -173,16 +173,30 @@ const MIN_CONTENT_WIDTH: f32 = 800.0;
 // Frame inner margin (used in render_box)
 const BOX_INNER_MARGIN: f32 = 12.0;
 
+/// Callback actions from the info page back to the app.
+pub enum InfoPageAction {
+    /// Load the current log level from the backend
+    LoadLogLevel,
+    /// Set a new log filter on the backend
+    SetLogLevel(String),
+}
+
 /// Info page state.
 pub struct InfoPage {
     /// Whether we've requested network interfaces load
     requested_network_load: bool,
+    /// Whether we've requested the log level load
+    requested_log_level_load: bool,
+    /// Text input buffer for the log filter
+    log_filter_input: String,
 }
 
 impl InfoPage {
     pub fn new() -> Self {
         Self {
             requested_network_load: false,
+            requested_log_level_load: false,
+            log_filter_input: String::new(),
         }
     }
 
@@ -196,7 +210,18 @@ impl InfoPage {
         }
     }
 
-    /// Render the info page.
+    /// Check if log level should be loaded (call once on page show).
+    pub fn should_load_log_level(&mut self) -> bool {
+        if !self.requested_log_level_load {
+            self.requested_log_level_load = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Render the info page. Returns an optional action for the app to handle.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         ui: &mut Ui,
@@ -205,7 +230,9 @@ impl InfoPage {
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         flows: &[strom_types::Flow],
         renderer_info: &RendererInfo,
-    ) {
+        log_level_current: Option<&str>,
+        log_level_default: Option<&str>,
+    ) -> Option<InfoPageAction> {
         // Get available width and use minimum if window is too small
         // Subtract extra padding to account for scrollbar and frame overhead
         let available_width = ui.available_width() - 60.0;
@@ -216,6 +243,8 @@ impl InfoPage {
         let box_width_3 = (content_width - 2.0 * GAP) / 3.0;
         // Row 2+3: 2 boxes with 1 gap → box = (content - gap) / 2
         let box_width_2 = (content_width - GAP) / 2.0;
+
+        let mut action = None;
 
         egui::ScrollArea::both()
             .auto_shrink([false, false])
@@ -280,8 +309,97 @@ impl InfoPage {
                     });
                 });
 
+                ui.add_space(GAP);
+
+                // Row 4: Logging (full width)
+                ui.horizontal(|ui| {
+                    ui.add_space(MARGIN);
+
+                    render_box(ui, "Logging", content_width, |ui| {
+                        action =
+                            self.render_logging_content(ui, log_level_current, log_level_default);
+                    });
+                });
+
                 ui.add_space(MARGIN);
             });
+
+        action
+    }
+
+    fn render_logging_content(
+        &mut self,
+        ui: &mut Ui,
+        current: Option<&str>,
+        default: Option<&str>,
+    ) -> Option<InfoPageAction> {
+        let mut action = None;
+
+        if let Some(current_filter) = current {
+            egui::Grid::new("logging_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Active filter:");
+                    ui.label(egui::RichText::new(current_filter).monospace());
+                    ui.end_row();
+
+                    if let Some(default_filter) = default {
+                        ui.label("Default:");
+                        ui.label(egui::RichText::new(default_filter).monospace().weak());
+                        ui.end_row();
+                    }
+                });
+
+            ui.add_space(8.0);
+
+            // Initialize the input buffer from current value if empty
+            if self.log_filter_input.is_empty() {
+                self.log_filter_input = current_filter.to_string();
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Filter:");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.log_filter_input)
+                        .desired_width(400.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+
+                let input_changed = self.log_filter_input.trim() != current_filter;
+
+                if ui
+                    .add_enabled(
+                        input_changed && !self.log_filter_input.trim().is_empty(),
+                        egui::Button::new("Apply"),
+                    )
+                    .clicked()
+                    || (response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && input_changed
+                        && !self.log_filter_input.trim().is_empty())
+                {
+                    action = Some(InfoPageAction::SetLogLevel(
+                        self.log_filter_input.trim().to_string(),
+                    ));
+                }
+
+                if let Some(default_filter) = default {
+                    if current_filter != default_filter && ui.button("Reset to Default").clicked() {
+                        self.log_filter_input = default_filter.to_string();
+                        action = Some(InfoPageAction::SetLogLevel(default_filter.to_string()));
+                    }
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading...");
+            });
+            action = Some(InfoPageAction::LoadLogLevel);
+        }
+
+        action
     }
 
     fn render_version_content(&self, ui: &mut Ui, version_info: Option<&SystemInfo>) {

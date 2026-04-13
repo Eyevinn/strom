@@ -21,6 +21,11 @@ use strom_types::element::{ElementInfo, PropertyValue};
 use strom_types::{Flow, FlowId, PipelineState, StromEvent};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::reload;
+use tracing_subscriber::EnvFilter;
+
+/// Handle for reloading the log filter at runtime.
+pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -71,6 +76,10 @@ struct AppStateInner {
     ice_transport_policy: String,
     /// Flows pending save (debounced to avoid excessive disk writes)
     pending_saves: RwLock<HashSet<FlowId>>,
+    /// Handle for reloading the tracing EnvFilter at runtime
+    log_reload_handle: parking_lot::Mutex<Option<LogReloadHandle>>,
+    /// The log filter string the server was started with
+    default_log_filter: parking_lot::Mutex<String>,
 }
 
 impl AppState {
@@ -109,7 +118,46 @@ impl AppState {
                 ice_servers,
                 ice_transport_policy,
                 pending_saves: RwLock::new(HashSet::new()),
+                log_reload_handle: parking_lot::Mutex::new(None),
+                default_log_filter: parking_lot::Mutex::new("info".to_string()),
             }),
+        }
+    }
+
+    /// Set the log reload handle and default filter (called once from main after init_logging).
+    pub fn set_log_reload_handle(&self, handle: LogReloadHandle, default_filter: String) {
+        *self.inner.default_log_filter.lock() = default_filter;
+        *self.inner.log_reload_handle.lock() = Some(handle);
+    }
+
+    /// Get the current log filter string.
+    pub fn current_log_filter(&self) -> String {
+        let guard = self.inner.log_reload_handle.lock();
+        if let Some(handle) = guard.as_ref() {
+            handle
+                .with_current(|f| format!("{}", f))
+                .unwrap_or_else(|_| "unknown".to_string())
+        } else {
+            "unknown".to_string()
+        }
+    }
+
+    /// Get the default log filter string.
+    pub fn default_log_filter(&self) -> String {
+        self.inner.default_log_filter.lock().clone()
+    }
+
+    /// Reload the log filter at runtime. Returns an error if the filter string is invalid.
+    pub fn reload_log_filter(&self, filter: &str) -> Result<(), String> {
+        let new_filter = EnvFilter::try_new(filter)
+            .map_err(|e| format!("Invalid filter '{}': {}", filter, e))?;
+        let guard = self.inner.log_reload_handle.lock();
+        if let Some(handle) = guard.as_ref() {
+            handle
+                .reload(new_filter)
+                .map_err(|e| format!("Failed to reload filter: {}", e))
+        } else {
+            Err("Log reload handle not initialized".to_string())
         }
     }
 

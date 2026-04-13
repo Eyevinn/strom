@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.7"
+    "version": "0.4.9"
   },
   "paths": {
     "/api/auth/status": {
@@ -3016,6 +3016,66 @@
         }
       }
     },
+    "/api/log-level": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get the current log level filter",
+        "operationId": "get_log_level",
+        "responses": {
+          "200": {
+            "description": "Current log level",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogLevelResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Set the log level filter at runtime",
+        "operationId": "set_log_level",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetLogLevelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Log level updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogLevelResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter string",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/login": {
       "post": {
         "tags": [
@@ -5996,6 +6056,24 @@
           }
         }
       },
+      "LogLevelResponse": {
+        "type": "object",
+        "description": "Response for log level queries and updates.",
+        "required": [
+          "current",
+          "default"
+        ],
+        "properties": {
+          "current": {
+            "type": "string",
+            "description": "The currently active log filter string (e.g. \"info,strom::api=debug\")"
+          },
+          "default": {
+            "type": "string",
+            "description": "The default filter the server started with"
+          }
+        }
+      },
       "LoginRequest": {
         "type": "object",
         "description": "Login request payload.",
@@ -7098,6 +7176,19 @@
           },
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "SetLogLevelRequest": {
+        "type": "object",
+        "description": "Request to change the log level at runtime.",
+        "required": [
+          "filter"
+        ],
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "The new log filter string (e.g. \"info,strom::api=debug\")"
           }
         }
       },

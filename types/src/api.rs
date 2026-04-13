@@ -634,6 +634,28 @@ impl ErrorResponse {
 }
 
 // ============================================================================
+// Logging API Types
+// ============================================================================
+
+/// Response for log level queries and updates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct LogLevelResponse {
+    /// The currently active log filter string (e.g. "info,strom::api=debug")
+    pub current: String,
+    /// The default filter the server started with
+    pub default: String,
+}
+
+/// Request to change the log level at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SetLogLevelRequest {
+    /// The new log filter string (e.g. "info,strom::api=debug")
+    pub filter: String,
+}
+
+// ============================================================================
 // Sources API Types (for inter-pipeline sharing)
 // ============================================================================
 

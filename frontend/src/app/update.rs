@@ -1150,6 +1150,13 @@ impl eframe::App for StromApp {
                     tracing::info!("Network interfaces loaded: {} interfaces", interfaces.len());
                     self.network_interfaces = interfaces;
                 }
+                AppMessage::LogLevelLoaded { current, default } => {
+                    self.log_level_current = Some(current);
+                    self.log_level_default = Some(default);
+                }
+                AppMessage::LogLevelError(e) => {
+                    tracing::warn!("Log level error: {}", e);
+                }
                 AppMessage::AvailableChannelsLoaded(mut channels) => {
                     // Sort by flow name, then by description/name
                     channels.sort_by(|a, b| {
@@ -1835,17 +1842,37 @@ impl eframe::App for StromApp {
                             self.network_interfaces_loaded = false;
                             self.load_network_interfaces(ui.ctx().clone());
                         }
+                        // Auto-load log level when Info page is shown
+                        if self.info_page.should_load_log_level() {
+                            self.load_log_level(ui.ctx().clone());
+                        }
 
-                        CentralPanel::default().show_inside(ui, |ui| {
-                            self.info_page.render(
-                                ui,
-                                self.system_info.as_ref(),
-                                &self.system_monitor,
-                                &self.network_interfaces,
-                                &self.flows,
-                                &self.renderer_info,
-                            );
-                        });
+                        let log_action = CentralPanel::default()
+                            .show_inside(ui, |ui| {
+                                self.info_page.render(
+                                    ui,
+                                    self.system_info.as_ref(),
+                                    &self.system_monitor,
+                                    &self.network_interfaces,
+                                    &self.flows,
+                                    &self.renderer_info,
+                                    self.log_level_current.as_deref(),
+                                    self.log_level_default.as_deref(),
+                                )
+                            })
+                            .inner;
+
+                        if let Some(action) = log_action {
+                            use crate::info_page::InfoPageAction;
+                            match action {
+                                InfoPageAction::LoadLogLevel => {
+                                    self.load_log_level(ui.ctx().clone());
+                                }
+                                InfoPageAction::SetLogLevel(filter) => {
+                                    self.set_log_level(filter, ui.ctx().clone());
+                                }
+                            }
+                        }
                     }
                     AppPage::Links => {
                         CentralPanel::default().show_inside(ui, |ui| {
