@@ -2009,22 +2009,15 @@ fn whep_output_definition() -> BlockDefinition {
                 live: false,
             },
         ],
-        // Note: external_pads here are the static defaults for audio_video mode.
+        // Note: external_pads here are the static defaults for video-only mode (the default).
         // The actual pads are determined dynamically by WHEPOutputBuilder::get_external_pads() based on mode.
         external_pads: ExternalPads {
             inputs: vec![
                 ExternalPad {
-                    label: Some("V0".to_string()),
+                    label: None,
                     name: "video_in".to_string(),
                     media_type: MediaType::Video,
                     internal_element_id: "video_queue".to_string(),
-                    internal_pad_name: "sink".to_string(),
-                },
-                ExternalPad {
-                    label: Some("A0".to_string()),
-                    name: "audio_in".to_string(),
-                    media_type: MediaType::Audio,
-                    internal_element_id: "audio_queue".to_string(),
                     internal_pad_name: "sink".to_string(),
                 },
             ],

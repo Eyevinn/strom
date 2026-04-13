@@ -597,13 +597,22 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
         ],
         external_pads: ExternalPads {
             inputs: vec![],
-            outputs: vec![ExternalPad {
-                label: Some("V0".to_string()),
-                name: "video_out".to_string(),
-                media_type: MediaType::Video,
-                internal_element_id: "video_output".to_string(),
-                internal_pad_name: "src".to_string(),
-            }],
+            outputs: vec![
+                ExternalPad {
+                    label: Some("V0".to_string()),
+                    name: "video_out".to_string(),
+                    media_type: MediaType::Video,
+                    internal_element_id: "video_output".to_string(),
+                    internal_pad_name: "src".to_string(),
+                },
+                ExternalPad {
+                    label: Some("A0".to_string()),
+                    name: "audio_out_0".to_string(),
+                    media_type: MediaType::Audio,
+                    internal_element_id: "audio_output_0".to_string(),
+                    internal_pad_name: "src".to_string(),
+                },
+            ],
         },
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
