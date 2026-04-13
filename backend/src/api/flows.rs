@@ -306,6 +306,7 @@ pub async fn create_flow(
     }
 
     info!("Received create flow request: name='{}'", flow.name);
+    debug!("Create flow request body: {:?}", flow);
 
     // Assign a new ID to avoid collisions with imported flows
     flow.id = FlowId::new_v4();
@@ -375,6 +376,7 @@ pub async fn update_flow(
     ))?;
 
     info!("Updating flow: {} ({})", flow.name, flow.id);
+    debug!("Update flow request body: {:?}", flow);
 
     prepare_flow(&mut flow);
 
@@ -1143,6 +1145,7 @@ pub async fn update_flow_properties(
     JsonBody(req): JsonBody<UpdateFlowPropertiesRequest>,
 ) -> Result<Json<FlowResponse>, (StatusCode, Json<ErrorResponse>)> {
     info!("Updating properties for flow {}", id);
+    debug!("Update flow properties request body: {:?}", req);
 
     // Get the flow
     let mut flow = state.get_flow(&id).await.ok_or_else(|| {
