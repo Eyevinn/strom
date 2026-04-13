@@ -1,0 +1,29 @@
+name: Sync OSC Fork
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "prod"
+        type: choice
+        options:
+          - prod
+          - dev
+          - stage
+
+jobs:
+  sync-fork:
+    name: Sync fork (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Install OSC CLI
+        run: npm install -g @osaas/cli
+
+      - name: Trigger sync fork
+        env:
+          OSC_ACCESS_TOKEN: unused
+          OSC_API_KEY: ${{ secrets.OSC_API_KEY }}
+        run: osc --env ${{ inputs.environment }} admin sync-fork eyevinn-strom
