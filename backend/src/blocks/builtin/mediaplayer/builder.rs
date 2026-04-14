@@ -5,6 +5,7 @@ use super::normalize_uri;
 use super::state::{MediaPlayerKey, MediaPlayerState, MEDIA_PLAYER_REGISTRY};
 use crate::blocks::{
     BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, BusMessageConnectFn,
+    APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
 use crate::events::EventBroadcaster;
 use gstreamer as gst;
@@ -149,6 +150,9 @@ fn build_media_player(
         .format(gst::Format::Time)
         .is_live(true)
         .automatic_eos(false)
+        .max_bytes(APPSRC_MAX_BYTES_VIDEO)
+        .max_time(APPSRC_MAX_TIME)
+        .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();
 
     let appsrc_audio = gst_app::AppSrc::builder()
@@ -156,6 +160,9 @@ fn build_media_player(
         .format(gst::Format::Time)
         .is_live(true)
         .automatic_eos(false)
+        .max_bytes(APPSRC_MAX_BYTES_AUDIO)
+        .max_time(APPSRC_MAX_TIME)
+        .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();
 
     let video_out = gst::ElementFactory::make("identity")

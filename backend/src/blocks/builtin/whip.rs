@@ -12,6 +12,7 @@
 
 use crate::blocks::{
     BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, WhepStreamMode,
+    APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
 use crate::whip_session_manager::{SessionCleanupRequest, WhipEndpointConfig};
 use gstreamer as gst;
@@ -225,6 +226,8 @@ fn build_whipserversrc(
                 .format(gst::Format::Time)
                 .is_live(true)
                 .handle_segment_change(true)
+                .max_bytes(APPSRC_MAX_BYTES_AUDIO)
+                .max_time(APPSRC_MAX_TIME)
                 .leaky_type(gst_app::AppLeakyType::Downstream)
                 .automatic_eos(false)
                 .build();
@@ -326,6 +329,8 @@ fn build_whipserversrc(
                 .format(gst::Format::Time)
                 .is_live(true)
                 .handle_segment_change(true)
+                .max_bytes(APPSRC_MAX_BYTES_VIDEO)
+                .max_time(APPSRC_MAX_TIME)
                 .leaky_type(gst_app::AppLeakyType::Downstream)
                 .automatic_eos(false)
                 .build();
