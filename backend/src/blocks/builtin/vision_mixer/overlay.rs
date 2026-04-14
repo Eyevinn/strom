@@ -464,6 +464,15 @@ impl OverlayRenderer {
 
             let t_copy = t0.elapsed();
 
+            // Set PTS=0 so the compositor renders the overlay immediately
+            // instead of waiting for the pipeline latency to elapse.
+            // The overlay is a static frame (borders/labels) that should
+            // reflect state changes instantly, not be synced to video time.
+            {
+                let buf_ref = buffer.get_mut()?;
+                buf_ref.set_pts(gst::ClockTime::ZERO);
+            }
+
             let sample = gst::Sample::builder()
                 .buffer(&buffer)
                 .caps(&self.caps)

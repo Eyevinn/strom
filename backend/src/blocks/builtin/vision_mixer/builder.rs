@@ -386,7 +386,7 @@ fn build_gpu_pipeline(
         .format(gst::Format::Time)
         .is_live(true)
         .automatic_eos(false)
-        .do_timestamp(true)
+        .do_timestamp(false)
         .max_buffers(2)
         .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();
@@ -698,7 +698,7 @@ fn build_cpu_pipeline(
         .format(gst::Format::Time)
         .is_live(true)
         .automatic_eos(false)
-        .do_timestamp(true)
+        .do_timestamp(false)
         .max_buffers(2)
         .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();
