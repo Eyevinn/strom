@@ -339,6 +339,10 @@ pub async fn create_app_with_config(
             "/vision-mixer/{flow_id}",
             get(api::vision_mixer_page::vision_mixer_page),
         )
+        .route(
+            "/vision-mixer/{flow_id}/{block_id}",
+            get(api::vision_mixer_page::vision_mixer_page_for_block),
+        )
         .with_state(state.clone());
 
     // WHEP proxy routes - outside /api (acts as WHEP server endpoint)

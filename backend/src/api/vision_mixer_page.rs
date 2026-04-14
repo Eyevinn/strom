@@ -58,26 +58,50 @@ pub fn find_whep_endpoint_for_pad(flow: &Flow, block_id: &str, pad_name: &str) -
 
 const VISION_MIXER_HTML: &str = include_str!("../../static/vision-mixer.html");
 
-/// Serve the vision mixer control page.
+/// Serve the vision mixer control page (first vision mixer in the flow).
 /// GET /player/vision-mixer/{flow_id}
 pub async fn vision_mixer_page(
     State(state): State<AppState>,
     Path(flow_id): Path<FlowId>,
 ) -> Html<String> {
+    render_vision_mixer_page(&state, &flow_id, None).await
+}
+
+/// Serve the vision mixer control page for a specific block.
+/// GET /player/vision-mixer/{flow_id}/{block_id}
+pub async fn vision_mixer_page_for_block(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+) -> Html<String> {
+    render_vision_mixer_page(&state, &flow_id, Some(&block_id)).await
+}
+
+async fn render_vision_mixer_page(
+    state: &AppState,
+    flow_id: &FlowId,
+    requested_block_id: Option<&str>,
+) -> Html<String> {
     let flows = state.get_flows().await;
 
-    let Some(flow) = flows.iter().find(|f| f.id == flow_id) else {
+    let Some(flow) = flows.iter().find(|f| f.id == *flow_id) else {
         return Html(format!(
             "<html><body>Flow {} not found</body></html>",
             flow_id
         ));
     };
 
-    let Some(vm_block) = flow
-        .blocks
-        .iter()
-        .find(|b| b.block_definition_id == "builtin.vision_mixer")
-    else {
+    let vm_block = match requested_block_id {
+        Some(bid) => flow
+            .blocks
+            .iter()
+            .find(|b| b.id == bid && b.block_definition_id == "builtin.vision_mixer"),
+        None => flow
+            .blocks
+            .iter()
+            .find(|b| b.block_definition_id == "builtin.vision_mixer"),
+    };
+
+    let Some(vm_block) = vm_block else {
         return Html(
             "<html><body>No vision mixer block found in this flow</body></html>".to_string(),
         );

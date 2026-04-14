@@ -165,10 +165,13 @@ impl ApiClient {
         )
     }
 
-    /// Get the vision mixer control page URL for a given flow ID.
-    pub fn get_vision_mixer_url(&self, flow_id: &strom_types::FlowId) -> String {
+    /// Get the vision mixer control page URL for a given flow ID and block ID.
+    pub fn get_vision_mixer_url(&self, flow_id: &strom_types::FlowId, block_id: &str) -> String {
         let server_base = self.base_url.trim_end_matches("/api");
-        format!("{}/player/vision-mixer/{}", server_base, flow_id)
+        format!(
+            "{}/player/vision-mixer/{}/{}",
+            server_base, flow_id, block_id
+        )
     }
 
     /// Get the WHIP ingest URL for a given endpoint ID.

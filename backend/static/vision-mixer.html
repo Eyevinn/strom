@@ -951,7 +951,7 @@
                     const event = JSON.parse(e.data);
                     if (event.type === 'VisionMixerStateChanged' && event.data) {
                         const d = event.data;
-                        if (d.block_id === BLOCK_ID) {
+                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
                             currentPvwGroup = d.preview_inputs || [d.preview_input];
                             currentPgmGroup = d.program_inputs || [d.program_input];
                             updateButtons();
@@ -959,28 +959,28 @@
                     }
                     if (event.type === 'VisionMixerDskChanged' && event.data) {
                         const d = event.data;
-                        if (d.block_id === BLOCK_ID) {
+                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
                             dskEnabled[d.dsk - 1] = d.enabled;
                             updateDskButtons();
                         }
                     }
                     if (event.type === 'VisionMixerFtbChanged' && event.data) {
                         const d = event.data;
-                        if (d.block_id === BLOCK_ID) {
+                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
                             ftbActive = d.active;
                             updateFtbButton();
                         }
                     }
                     if (event.type === 'VisionMixerOverlayAlphaChanged' && event.data) {
                         const d = event.data;
-                        if (d.block_id === BLOCK_ID && !overlayAlphaDragging) {
+                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID && !overlayAlphaDragging) {
                             overlayAlpha = d.alpha;
                             updateOverlayAlphaUi();
                         }
                     }
                     if (event.type === 'VisionMixerBackgroundChanged' && event.data) {
                         const d = event.data;
-                        if (d.block_id === BLOCK_ID) {
+                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
                             currentBackground = d.background_input;
                             updateButtons();
                         }
