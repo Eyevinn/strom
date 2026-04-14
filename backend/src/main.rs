@@ -456,6 +456,9 @@ fn run_with_gui(
         // Store the log reload handle so log levels can be changed at runtime
         state.set_log_reload_handle(log_reload_handle, default_log_filter);
 
+        // Initialize GStreamer debug level tracking
+        state.init_gst_debug_filter();
+
         // Start background services (SAP discovery listener and announcer)
         state.start_services().await;
 
@@ -602,6 +605,9 @@ async fn run_headless(
 
     // Store the log reload handle so log levels can be changed at runtime
     state.set_log_reload_handle(log_reload_handle, default_log_filter);
+
+    // Initialize GStreamer debug level tracking
+    state.init_gst_debug_filter();
 
     // Start background services (SAP discovery listener and announcer)
     state.start_services().await;

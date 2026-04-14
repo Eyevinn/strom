@@ -655,6 +655,24 @@ pub struct SetLogLevelRequest {
     pub filter: String,
 }
 
+/// Response for GStreamer debug level queries and updates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct GstLogLevelResponse {
+    /// The currently active GST_DEBUG filter string (e.g. "*:2,webrtcbin:5")
+    pub current: String,
+    /// The default GST_DEBUG filter the server started with
+    pub default: String,
+}
+
+/// Request to change the GStreamer debug level at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SetGstLogLevelRequest {
+    /// The new GST_DEBUG filter string (e.g. "*:2,webrtcbin:5")
+    pub filter: String,
+}
+
 // ============================================================================
 // Sources API Types (for inter-pipeline sharing)
 // ============================================================================

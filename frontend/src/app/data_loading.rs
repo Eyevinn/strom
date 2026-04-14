@@ -155,6 +155,49 @@ impl StromApp {
         });
     }
 
+    /// Load GStreamer debug level from the backend.
+    pub(super) fn load_gst_log_level(&mut self, ctx: egui::Context) {
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+
+        spawn_task(async move {
+            match api.get_gst_log_level().await {
+                Ok(resp) => {
+                    let _ = tx.send(AppMessage::GstLogLevelLoaded {
+                        current: resp.current,
+                        default: resp.default,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load GStreamer debug level: {}", e);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Set the GStreamer debug level on the backend.
+    pub(super) fn set_gst_log_level(&mut self, filter: String, ctx: egui::Context) {
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+
+        spawn_task(async move {
+            match api.set_gst_log_level(&filter).await {
+                Ok(resp) => {
+                    let _ = tx.send(AppMessage::GstLogLevelLoaded {
+                        current: resp.current,
+                        default: resp.default,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to set GStreamer debug level: {}", e);
+                    let _ = tx.send(AppMessage::GstLogLevelError(e.to_string()));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
     /// Get cached network interfaces (for property inspector).
     pub fn network_interfaces(&self) -> &[strom_types::NetworkInterfaceInfo] {
         &self.network_interfaces

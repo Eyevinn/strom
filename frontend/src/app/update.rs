@@ -1157,6 +1157,13 @@ impl eframe::App for StromApp {
                 AppMessage::LogLevelError(e) => {
                     tracing::warn!("Log level error: {}", e);
                 }
+                AppMessage::GstLogLevelLoaded { current, default } => {
+                    self.gst_log_level_current = Some(current);
+                    self.gst_log_level_default = Some(default);
+                }
+                AppMessage::GstLogLevelError(e) => {
+                    tracing::warn!("GStreamer log level error: {}", e);
+                }
                 AppMessage::AvailableChannelsLoaded(mut channels) => {
                     // Sort by flow name, then by description/name
                     channels.sort_by(|a, b| {
@@ -1845,6 +1852,7 @@ impl eframe::App for StromApp {
                         // Auto-load log level when Info page is shown
                         if self.info_page.should_load_log_level() {
                             self.load_log_level(ui.ctx().clone());
+                            self.load_gst_log_level(ui.ctx().clone());
                         }
 
                         let log_action = CentralPanel::default()
@@ -1858,6 +1866,8 @@ impl eframe::App for StromApp {
                                     &self.renderer_info,
                                     self.log_level_current.as_deref(),
                                     self.log_level_default.as_deref(),
+                                    self.gst_log_level_current.as_deref(),
+                                    self.gst_log_level_default.as_deref(),
                                 )
                             })
                             .inner;
@@ -1865,11 +1875,17 @@ impl eframe::App for StromApp {
                         if let Some(action) = log_action {
                             use crate::info_page::InfoPageAction;
                             match action {
-                                InfoPageAction::LoadLogLevel => {
+                                InfoPageAction::LoadStromLog => {
                                     self.load_log_level(ui.ctx().clone());
                                 }
-                                InfoPageAction::SetLogLevel(filter) => {
+                                InfoPageAction::ApplyStromFilter(filter) => {
                                     self.set_log_level(filter, ui.ctx().clone());
+                                }
+                                InfoPageAction::LoadGstLog => {
+                                    self.load_gst_log_level(ui.ctx().clone());
+                                }
+                                InfoPageAction::ApplyGstFilter(filter) => {
+                                    self.set_gst_log_level(filter, ui.ctx().clone());
                                 }
                             }
                         }

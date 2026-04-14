@@ -2995,6 +2995,66 @@
         }
       }
     },
+    "/api/gst-log-level": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get the current GStreamer debug level filter",
+        "operationId": "get_gst_log_level",
+        "responses": {
+          "200": {
+            "description": "Current GStreamer debug level",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GstLogLevelResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Set the GStreamer debug level filter at runtime",
+        "operationId": "set_gst_log_level",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetGstLogLevelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "GStreamer debug level updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GstLogLevelResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter string",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ice-servers": {
       "get": {
         "tags": [
@@ -5787,6 +5847,24 @@
           }
         }
       },
+      "GstLogLevelResponse": {
+        "type": "object",
+        "description": "Response for GStreamer debug level queries and updates.",
+        "required": [
+          "current",
+          "default"
+        ],
+        "properties": {
+          "current": {
+            "type": "string",
+            "description": "The currently active GST_DEBUG filter string (e.g. \"*:2,webrtcbin:5\")"
+          },
+          "default": {
+            "type": "string",
+            "description": "The default GST_DEBUG filter the server started with"
+          }
+        }
+      },
       "IceCandidateStats": {
         "type": "object",
         "description": "ICE candidate statistics.",
@@ -7176,6 +7254,19 @@
           },
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "SetGstLogLevelRequest": {
+        "type": "object",
+        "description": "Request to change the GStreamer debug level at runtime.",
+        "required": [
+          "filter"
+        ],
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "The new GST_DEBUG filter string (e.g. \"*:2,webrtcbin:5\")"
           }
         }
       },

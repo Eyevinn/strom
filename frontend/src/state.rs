@@ -128,6 +128,11 @@ pub enum AppMessage {
     LogLevelLoaded { current: String, default: String },
     /// Log level update failed
     LogLevelError(String),
+
+    /// GStreamer debug level loaded from API
+    GstLogLevelLoaded { current: String, default: String },
+    /// GStreamer debug level update failed
+    GstLogLevelError(String),
 }
 
 /// WebSocket connection state.

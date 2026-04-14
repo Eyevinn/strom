@@ -599,6 +599,10 @@ pub struct StromApp {
     log_level_current: Option<String>,
     /// Default log filter string the server started with
     log_level_default: Option<String>,
+    /// Current GStreamer debug filter string from backend
+    gst_log_level_current: Option<String>,
+    /// Default GStreamer debug filter string the server started with
+    gst_log_level_default: Option<String>,
     /// Cached available inter channels (for InterInput channel dropdown)
     available_channels: Vec<strom_types::api::AvailableOutput>,
     /// Whether available channels have been loaded
