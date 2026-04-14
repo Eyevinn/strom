@@ -7,6 +7,7 @@ mod discovery;
 mod elements;
 mod flows;
 mod gst_launch;
+mod logging;
 mod media;
 mod player;
 mod probes;

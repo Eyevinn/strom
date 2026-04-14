@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod elements;
 pub mod flows;
 pub mod gst_launch;
+pub mod logging;
 pub mod mcp;
 pub mod media;
 pub mod mediaplayer;

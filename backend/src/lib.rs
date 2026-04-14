@@ -301,6 +301,11 @@ pub async fn create_app_with_config(
             "/flows/{flow_id}/blocks/{block_id}/player/goto",
             post(api::mediaplayer::goto_file),
         )
+        // Logging
+        .route("/log-level", get(api::logging::get_log_level))
+        .route("/log-level", put(api::logging::set_log_level))
+        .route("/gst-log-level", get(api::logging::get_gst_log_level))
+        .route("/gst-log-level", put(api::logging::set_gst_log_level))
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 

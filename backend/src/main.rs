@@ -6,14 +6,18 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info, warn};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{fmt, layer::SubscriberExt, reload, util::SubscriberInitExt, EnvFilter};
 
 use strom_types::flow::GStreamerClockType;
 
 use strom::{auth, config::Config, create_app_with_config, state::AppState};
 
-/// Initialize logging with optional file output and configurable log level
-fn init_logging(log_file: Option<&PathBuf>, log_level: Option<&String>) -> anyhow::Result<()> {
+/// Initialize logging with optional file output and configurable log level.
+/// Returns the reload handle and the initial filter string for runtime changes.
+fn init_logging(
+    log_file: Option<&PathBuf>,
+    log_level: Option<&String>,
+) -> anyhow::Result<(strom::state::LogReloadHandle, String)> {
     use time::UtcOffset;
     use tracing_subscriber::fmt::time::OffsetTime;
 
@@ -23,16 +27,16 @@ fn init_logging(log_file: Option<&PathBuf>, log_level: Option<&String>) -> anyho
     let timer = OffsetTime::new(local_offset, time::format_description::well_known::Rfc3339);
 
     // Priority: RUST_LOG env var > config file log_level > default "info"
-    let env_filter = if let Ok(filter) = EnvFilter::try_from_default_env() {
-        // RUST_LOG is set, use it (highest priority)
-        filter
+    let (env_filter, default_filter_str) = if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        (EnvFilter::try_from_default_env()?, rust_log)
     } else if let Some(level) = log_level {
-        // Use log level from config file
-        EnvFilter::new(level)
+        (EnvFilter::new(level), level.clone())
     } else {
-        // Default to info
-        EnvFilter::new("info")
+        (EnvFilter::new("info"), "info".to_string())
     };
+
+    // Wrap the filter in a reload layer so we can change it at runtime
+    let (reload_filter, reload_handle) = reload::Layer::new(env_filter);
 
     if let Some(log_path) = log_file {
         // Create parent directory if it doesn't exist
@@ -68,7 +72,7 @@ fn init_logging(log_file: Option<&PathBuf>, log_level: Option<&String>) -> anyho
 
         // Combine layers
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(reload_filter)
             .with(stdout_layer)
             .with(file_layer)
             .init();
@@ -76,15 +80,19 @@ fn init_logging(log_file: Option<&PathBuf>, log_level: Option<&String>) -> anyho
         eprintln!("Logging to file: {}", log_path.display());
     } else {
         // Stdout only with local time
-        fmt()
-            .with_env_filter(env_filter)
+        let stdout_layer = fmt::layer()
             .with_target(false)
             .with_timer(timer)
             .compact()
+            .with_writer(std::io::stdout);
+
+        tracing_subscriber::registry()
+            .with(reload_filter)
+            .with(stdout_layer)
             .init();
     }
 
-    Ok(())
+    Ok((reload_handle, default_filter_str))
 }
 
 /// Handle the hash-password subcommand
@@ -287,10 +295,11 @@ fn main() -> anyhow::Result<()> {
     });
 
     // Initialize logging with optional file output and log level
-    if let Err(e) = init_logging(config.log_file.as_ref(), config.log_level.as_ref()) {
-        eprintln!("Failed to initialize logging: {}", e);
-        std::process::exit(1);
-    }
+    let (log_reload_handle, default_log_filter) =
+        init_logging(config.log_file.as_ref(), config.log_level.as_ref()).unwrap_or_else(|e| {
+            eprintln!("Failed to initialize logging: {}", e);
+            std::process::exit(1);
+        });
 
     // Determine if GUI should be enabled
     #[cfg(not(feature = "no-gui"))]
@@ -322,22 +331,42 @@ fn main() -> anyhow::Result<()> {
     {
         if gui_enabled {
             // GUI mode: Run HTTP server in background, GUI on main thread
-            run_with_gui(config, args.no_auto_restart)
+            run_with_gui(
+                config,
+                args.no_auto_restart,
+                log_reload_handle,
+                default_log_filter,
+            )
         } else {
             // Headless mode: Run HTTP server on main thread
-            run_headless(config, args.no_auto_restart)
+            run_headless(
+                config,
+                args.no_auto_restart,
+                log_reload_handle,
+                default_log_filter,
+            )
         }
     }
 
     #[cfg(feature = "no-gui")]
     {
         // Always headless when no-gui feature is enabled
-        run_headless(config, args.no_auto_restart)
+        run_headless(
+            config,
+            args.no_auto_restart,
+            log_reload_handle,
+            default_log_filter,
+        )
     }
 }
 
 #[cfg(not(feature = "no-gui"))]
-fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
+fn run_with_gui(
+    config: Config,
+    no_auto_restart: bool,
+    log_reload_handle: strom::state::LogReloadHandle,
+    default_log_filter: String,
+) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -424,6 +453,12 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
             .await
             .expect("Failed to load storage");
 
+        // Store the log reload handle so log levels can be changed at runtime
+        state.set_log_reload_handle(log_reload_handle, default_log_filter);
+
+        // Initialize GStreamer debug level tracking
+        state.init_gst_debug_filter();
+
         // Start background services (SAP discovery listener and announcer)
         state.start_services().await;
 
@@ -509,7 +544,12 @@ fn run_with_gui(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
 }
 
 #[tokio::main]
-async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<()> {
+async fn run_headless(
+    config: Config,
+    no_auto_restart: bool,
+    log_reload_handle: strom::state::LogReloadHandle,
+    default_log_filter: String,
+) -> anyhow::Result<()> {
     // Initialize GStreamer INSIDE tokio runtime
     gstreamer::init()?;
     info!("GStreamer initialized");
@@ -562,6 +602,12 @@ async fn run_headless(config: Config, no_auto_restart: bool) -> anyhow::Result<(
         )
     };
     state.load_from_storage().await?;
+
+    // Store the log reload handle so log levels can be changed at runtime
+    state.set_log_reload_handle(log_reload_handle, default_log_filter);
+
+    // Initialize GStreamer debug level tracking
+    state.init_gst_debug_filter();
 
     // Start background services (SAP discovery listener and announcer)
     state.start_services().await;

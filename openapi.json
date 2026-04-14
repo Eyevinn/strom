@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.7"
+    "version": "0.4.9"
   },
   "paths": {
     "/api/auth/status": {
@@ -2995,6 +2995,66 @@
         }
       }
     },
+    "/api/gst-log-level": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get the current GStreamer debug level filter",
+        "operationId": "get_gst_log_level",
+        "responses": {
+          "200": {
+            "description": "Current GStreamer debug level",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GstLogLevelResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Set the GStreamer debug level filter at runtime",
+        "operationId": "set_gst_log_level",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetGstLogLevelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "GStreamer debug level updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GstLogLevelResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter string",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ice-servers": {
       "get": {
         "tags": [
@@ -3009,6 +3069,66 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IceServersResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/log-level": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get the current log level filter",
+        "operationId": "get_log_level",
+        "responses": {
+          "200": {
+            "description": "Current log level",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogLevelResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Set the log level filter at runtime",
+        "operationId": "set_log_level",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetLogLevelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Log level updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogLevelResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter string",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -5727,6 +5847,24 @@
           }
         }
       },
+      "GstLogLevelResponse": {
+        "type": "object",
+        "description": "Response for GStreamer debug level queries and updates.",
+        "required": [
+          "current",
+          "default"
+        ],
+        "properties": {
+          "current": {
+            "type": "string",
+            "description": "The currently active GST_DEBUG filter string (e.g. \"*:2,webrtcbin:5\")"
+          },
+          "default": {
+            "type": "string",
+            "description": "The default GST_DEBUG filter the server started with"
+          }
+        }
+      },
       "IceCandidateStats": {
         "type": "object",
         "description": "ICE candidate statistics.",
@@ -5993,6 +6131,24 @@
               "null"
             ],
             "description": "Parent directory path (None if at root)"
+          }
+        }
+      },
+      "LogLevelResponse": {
+        "type": "object",
+        "description": "Response for log level queries and updates.",
+        "required": [
+          "current",
+          "default"
+        ],
+        "properties": {
+          "current": {
+            "type": "string",
+            "description": "The currently active log filter string (e.g. \"info,strom::api=debug\")"
+          },
+          "default": {
+            "type": "string",
+            "description": "The default filter the server started with"
           }
         }
       },
@@ -7098,6 +7254,32 @@
           },
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "SetGstLogLevelRequest": {
+        "type": "object",
+        "description": "Request to change the GStreamer debug level at runtime.",
+        "required": [
+          "filter"
+        ],
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "The new GST_DEBUG filter string (e.g. \"*:2,webrtcbin:5\")"
+          }
+        }
+      },
+      "SetLogLevelRequest": {
+        "type": "object",
+        "description": "Request to change the log level at runtime.",
+        "required": [
+          "filter"
+        ],
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "The new log filter string (e.g. \"info,strom::api=debug\")"
           }
         }
       },

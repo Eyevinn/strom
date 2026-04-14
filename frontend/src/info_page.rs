@@ -173,16 +173,70 @@ const MIN_CONTENT_WIDTH: f32 = 800.0;
 // Frame inner margin (used in render_box)
 const BOX_INNER_MARGIN: f32 = 12.0;
 
+/// Quick-select level presets for strom (tracing) logging.
+const STROM_LEVEL_PRESETS: &[(&str, &str)] = &[
+    ("error", "error"),
+    ("warn", "warn"),
+    ("info", "info"),
+    ("debug", "debug"),
+    ("trace", "trace"),
+];
+
+/// Named filter presets for strom logging.
+const STROM_FILTER_PRESETS: &[(&str, &str)] = &[
+    ("API debug", "info,strom::api=debug"),
+    ("Pipeline debug", "info,strom::gst=debug"),
+    ("Pipeline trace", "info,strom::gst=trace"),
+];
+
+/// Quick-select level presets for GStreamer logging.
+const GST_LEVEL_PRESETS: &[(&str, &str)] = &[
+    ("none", "*:0"),
+    ("error", "*:1"),
+    ("warning", "*:2"),
+    ("info", "*:4"),
+    ("debug", "*:5"),
+    ("trace", "*:7"),
+];
+
+/// Named filter presets for GStreamer logging.
+const GST_FILTER_PRESETS: &[(&str, &str)] = &[
+    ("WebRTC debug", "*:2,webrtcbin:5,webrtcice:5"),
+    ("Encoding debug", "*:2,nvenc:5,x264enc:5,x265enc:5"),
+    ("Compositor debug", "*:2,compositor:5,glvideomixer:5"),
+];
+
+/// Callback actions from the info page back to the app.
+pub enum InfoPageAction {
+    /// Load the current strom log level from the backend
+    LoadStromLog,
+    /// Set a new strom log filter on the backend
+    ApplyStromFilter(String),
+    /// Load the current GStreamer debug level from the backend
+    LoadGstLog,
+    /// Set a new GStreamer debug filter on the backend
+    ApplyGstFilter(String),
+}
+
 /// Info page state.
 pub struct InfoPage {
     /// Whether we've requested network interfaces load
     requested_network_load: bool,
+    /// Whether we've requested the log level load
+    requested_log_level_load: bool,
+    /// Text input buffer for the strom log filter
+    log_filter_input: String,
+    /// Text input buffer for the GStreamer debug filter
+    gst_filter_input: String,
 }
 
 impl InfoPage {
     pub fn new() -> Self {
         Self {
             requested_network_load: false,
+            requested_log_level_load: false,
+            log_filter_input: String::new(),
+            gst_filter_input: String::new(),
         }
     }
 
@@ -196,7 +250,18 @@ impl InfoPage {
         }
     }
 
-    /// Render the info page.
+    /// Check if log level should be loaded (call once on page show).
+    pub fn should_load_log_level(&mut self) -> bool {
+        if !self.requested_log_level_load {
+            self.requested_log_level_load = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Render the info page. Returns an optional action for the app to handle.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         ui: &mut Ui,
@@ -205,7 +270,11 @@ impl InfoPage {
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         flows: &[strom_types::Flow],
         renderer_info: &RendererInfo,
-    ) {
+        log_level_current: Option<&str>,
+        log_level_default: Option<&str>,
+        gst_log_level_current: Option<&str>,
+        gst_log_level_default: Option<&str>,
+    ) -> Option<InfoPageAction> {
         // Get available width and use minimum if window is too small
         // Subtract extra padding to account for scrollbar and frame overhead
         let available_width = ui.available_width() - 60.0;
@@ -216,6 +285,8 @@ impl InfoPage {
         let box_width_3 = (content_width - 2.0 * GAP) / 3.0;
         // Row 2+3: 2 boxes with 1 gap → box = (content - gap) / 2
         let box_width_2 = (content_width - GAP) / 2.0;
+
+        let mut action = None;
 
         egui::ScrollArea::both()
             .auto_shrink([false, false])
@@ -280,8 +351,283 @@ impl InfoPage {
                     });
                 });
 
+                ui.add_space(GAP);
+
+                // Row 4: strom logging | GStreamer logging
+                ui.horizontal(|ui| {
+                    ui.add_space(MARGIN);
+
+                    render_box(ui, "strom logging", box_width_2, |ui| {
+                        action =
+                            self.render_strom_logging(ui, log_level_current, log_level_default);
+                    });
+
+                    ui.add_space(GAP);
+
+                    render_box(ui, "GStreamer logging", box_width_2, |ui| {
+                        let gst_action = self.render_gst_logging(
+                            ui,
+                            gst_log_level_current,
+                            gst_log_level_default,
+                        );
+                        if gst_action.is_some() {
+                            action = gst_action;
+                        }
+                    });
+                });
+
                 ui.add_space(MARGIN);
             });
+
+        action
+    }
+
+    fn render_strom_logging(
+        &mut self,
+        ui: &mut Ui,
+        current: Option<&str>,
+        default: Option<&str>,
+    ) -> Option<InfoPageAction> {
+        let mut action = None;
+        // Restore default horizontal spacing inside the box
+        ui.spacing_mut().item_spacing.x = 8.0;
+
+        if let Some(current_filter) = current {
+            egui::Grid::new("strom_logging_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Active filter:");
+                    ui.label(egui::RichText::new(current_filter).monospace());
+                    ui.end_row();
+
+                    if let Some(default_filter) = default {
+                        ui.label("Default:");
+                        ui.label(egui::RichText::new(default_filter).monospace().weak());
+                        ui.end_row();
+                    }
+                });
+
+            ui.add_space(8.0);
+
+            // Quick-select level buttons
+            ui.horizontal(|ui| {
+                for (label, filter) in STROM_LEVEL_PRESETS {
+                    let active = current_filter == *filter;
+                    if ui
+                        .add(egui::Button::new(if active {
+                            egui::RichText::new(*label).strong()
+                        } else {
+                            egui::RichText::new(*label)
+                        }))
+                        .clicked()
+                    {
+                        self.log_filter_input = filter.to_string();
+                        action = Some(InfoPageAction::ApplyStromFilter(filter.to_string()));
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // Preset filter buttons
+            ui.horizontal(|ui| {
+                ui.label("Presets:");
+                for (label, filter) in STROM_FILTER_PRESETS {
+                    let active = current_filter == *filter;
+                    if ui
+                        .add(egui::Button::new(if active {
+                            egui::RichText::new(*label).strong().monospace()
+                        } else {
+                            egui::RichText::new(*label).monospace()
+                        }))
+                        .on_hover_text(*filter)
+                        .clicked()
+                    {
+                        self.log_filter_input = filter.to_string();
+                        action = Some(InfoPageAction::ApplyStromFilter(filter.to_string()));
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // Initialize the input buffer from current value if empty
+            if self.log_filter_input.is_empty() {
+                self.log_filter_input = current_filter.to_string();
+            }
+
+            let response = ui.horizontal(|ui| {
+                ui.label("Filter:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.log_filter_input)
+                        .desired_width(ui.available_width() - 8.0)
+                        .font(egui::TextStyle::Monospace),
+                )
+            });
+            let response = response.inner;
+
+            let input_changed = self.log_filter_input.trim() != current_filter;
+
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        input_changed && !self.log_filter_input.trim().is_empty(),
+                        egui::Button::new("Apply"),
+                    )
+                    .clicked()
+                    || (response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && input_changed
+                        && !self.log_filter_input.trim().is_empty())
+                {
+                    action = Some(InfoPageAction::ApplyStromFilter(
+                        self.log_filter_input.trim().to_string(),
+                    ));
+                }
+
+                if let Some(default_filter) = default {
+                    if current_filter != default_filter && ui.button("Reset to Default").clicked() {
+                        self.log_filter_input = default_filter.to_string();
+                        action = Some(InfoPageAction::ApplyStromFilter(default_filter.to_string()));
+                    }
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading...");
+            });
+            action = Some(InfoPageAction::LoadStromLog);
+        }
+
+        action
+    }
+
+    fn render_gst_logging(
+        &mut self,
+        ui: &mut Ui,
+        current: Option<&str>,
+        default: Option<&str>,
+    ) -> Option<InfoPageAction> {
+        let mut action = None;
+        // Restore default horizontal spacing inside the box
+        ui.spacing_mut().item_spacing.x = 8.0;
+
+        if let Some(current_filter) = current {
+            egui::Grid::new("gst_logging_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Active filter:");
+                    ui.label(egui::RichText::new(current_filter).monospace());
+                    ui.end_row();
+
+                    if let Some(default_filter) = default {
+                        ui.label("Default:");
+                        ui.label(egui::RichText::new(default_filter).monospace().weak());
+                        ui.end_row();
+                    }
+                });
+
+            ui.add_space(8.0);
+
+            // Quick-select level buttons
+            ui.horizontal(|ui| {
+                for (label, filter) in GST_LEVEL_PRESETS {
+                    let active = current_filter == *filter;
+                    if ui
+                        .add(egui::Button::new(if active {
+                            egui::RichText::new(*label).strong()
+                        } else {
+                            egui::RichText::new(*label)
+                        }))
+                        .clicked()
+                    {
+                        self.gst_filter_input = filter.to_string();
+                        action = Some(InfoPageAction::ApplyGstFilter(filter.to_string()));
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // Preset filter buttons
+            ui.horizontal(|ui| {
+                ui.label("Presets:");
+                for (label, filter) in GST_FILTER_PRESETS {
+                    let active = current_filter == *filter;
+                    if ui
+                        .add(egui::Button::new(if active {
+                            egui::RichText::new(*label).strong().monospace()
+                        } else {
+                            egui::RichText::new(*label).monospace()
+                        }))
+                        .on_hover_text(*filter)
+                        .clicked()
+                    {
+                        self.gst_filter_input = filter.to_string();
+                        action = Some(InfoPageAction::ApplyGstFilter(filter.to_string()));
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // Initialize the input buffer from current value if empty
+            if self.gst_filter_input.is_empty() {
+                self.gst_filter_input = current_filter.to_string();
+            }
+
+            let response = ui.horizontal(|ui| {
+                ui.label("Filter:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.gst_filter_input)
+                        .desired_width(ui.available_width() - 8.0)
+                        .font(egui::TextStyle::Monospace),
+                )
+            });
+            let response = response.inner;
+
+            let input_changed = self.gst_filter_input.trim() != current_filter;
+
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        input_changed && !self.gst_filter_input.trim().is_empty(),
+                        egui::Button::new("Apply"),
+                    )
+                    .clicked()
+                    || (response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && input_changed
+                        && !self.gst_filter_input.trim().is_empty())
+                {
+                    action = Some(InfoPageAction::ApplyGstFilter(
+                        self.gst_filter_input.trim().to_string(),
+                    ));
+                }
+
+                if let Some(default_filter) = default {
+                    if current_filter != default_filter && ui.button("Reset to Default").clicked() {
+                        self.gst_filter_input = default_filter.to_string();
+                        action = Some(InfoPageAction::ApplyGstFilter(default_filter.to_string()));
+                    }
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading...");
+            });
+            action = Some(InfoPageAction::LoadGstLog);
+        }
+
+        action
     }
 
     fn render_version_content(&self, ui: &mut Ui, version_info: Option<&SystemInfo>) {

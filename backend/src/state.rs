@@ -21,6 +21,11 @@ use strom_types::element::{ElementInfo, PropertyValue};
 use strom_types::{Flow, FlowId, PipelineState, StromEvent};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::reload;
+use tracing_subscriber::EnvFilter;
+
+/// Handle for reloading the log filter at runtime.
+pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -71,6 +76,14 @@ struct AppStateInner {
     ice_transport_policy: String,
     /// Flows pending save (debounced to avoid excessive disk writes)
     pending_saves: RwLock<HashSet<FlowId>>,
+    /// Handle for reloading the tracing EnvFilter at runtime
+    log_reload_handle: parking_lot::Mutex<Option<LogReloadHandle>>,
+    /// The log filter string the server was started with
+    default_log_filter: parking_lot::Mutex<String>,
+    /// The currently active GStreamer debug filter string (tracked by us)
+    gst_debug_filter: parking_lot::Mutex<String>,
+    /// The GStreamer debug filter the server started with
+    default_gst_debug_filter: parking_lot::Mutex<String>,
 }
 
 impl AppState {
@@ -109,8 +122,106 @@ impl AppState {
                 ice_servers,
                 ice_transport_policy,
                 pending_saves: RwLock::new(HashSet::new()),
+                log_reload_handle: parking_lot::Mutex::new(None),
+                default_log_filter: parking_lot::Mutex::new("info".to_string()),
+                gst_debug_filter: parking_lot::Mutex::new(String::new()),
+                default_gst_debug_filter: parking_lot::Mutex::new(String::new()),
             }),
         }
+    }
+
+    /// Set the log reload handle and default filter (called once from main after init_logging).
+    pub fn set_log_reload_handle(&self, handle: LogReloadHandle, default_filter: String) {
+        *self.inner.default_log_filter.lock() = default_filter;
+        *self.inner.log_reload_handle.lock() = Some(handle);
+    }
+
+    /// Get the current log filter string.
+    pub fn current_log_filter(&self) -> String {
+        let guard = self.inner.log_reload_handle.lock();
+        if let Some(handle) = guard.as_ref() {
+            handle
+                .with_current(|f| format!("{}", f))
+                .unwrap_or_else(|_| "unknown".to_string())
+        } else {
+            "unknown".to_string()
+        }
+    }
+
+    /// Get the default log filter string.
+    pub fn default_log_filter(&self) -> String {
+        self.inner.default_log_filter.lock().clone()
+    }
+
+    /// Reload the log filter at runtime. Returns an error if the filter string is invalid.
+    pub fn reload_log_filter(&self, filter: &str) -> Result<(), String> {
+        let new_filter = EnvFilter::try_new(filter)
+            .map_err(|e| format!("Invalid filter '{}': {}", filter, e))?;
+        let guard = self.inner.log_reload_handle.lock();
+        if let Some(handle) = guard.as_ref() {
+            handle
+                .reload(new_filter)
+                .map_err(|e| format!("Failed to reload filter: {}", e))
+        } else {
+            Err("Log reload handle not initialized".to_string())
+        }
+    }
+
+    /// Initialize GStreamer debug level tracking (called once after gst::init).
+    pub fn init_gst_debug_filter(&self) {
+        let initial = std::env::var("GST_DEBUG").unwrap_or_default();
+        let filter = if initial.is_empty() {
+            let level = gst_level_to_int(gstreamer::log::get_default_threshold());
+            format!("*:{}", level)
+        } else {
+            initial
+        };
+        *self.inner.default_gst_debug_filter.lock() = filter.clone();
+        *self.inner.gst_debug_filter.lock() = filter;
+    }
+
+    /// Get the current GStreamer debug filter string.
+    pub fn current_gst_debug_filter(&self) -> String {
+        self.inner.gst_debug_filter.lock().clone()
+    }
+
+    /// Get the default GStreamer debug filter string.
+    pub fn default_gst_debug_filter(&self) -> String {
+        self.inner.default_gst_debug_filter.lock().clone()
+    }
+
+    /// Apply a new GStreamer debug filter at runtime.
+    pub fn set_gst_debug_filter(&self, filter: &str) -> Result<(), String> {
+        let filter = filter.trim();
+        if filter.is_empty() {
+            return Err("Filter string must not be empty".to_string());
+        }
+
+        // First reset default threshold to none, then apply the new filter.
+        // This ensures previously set per-category overrides from a prior
+        // filter string don't linger when switching to a simpler filter.
+        gstreamer::log::set_default_threshold(gstreamer::DebugLevel::None);
+
+        for part in filter.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if let Some((cat, level_str)) = part.split_once(':') {
+                let level = parse_gst_level(level_str.trim())?;
+                if cat.trim() == "*" {
+                    gstreamer::log::set_default_threshold(level);
+                } else {
+                    gstreamer::log::set_threshold_for_name(cat.trim(), level);
+                }
+            } else {
+                let level = parse_gst_level(part)?;
+                gstreamer::log::set_default_threshold(level);
+            }
+        }
+
+        *self.inner.gst_debug_filter.lock() = filter.to_string();
+        Ok(())
     }
 
     /// Get the WHEP endpoint registry.
@@ -1986,5 +2097,43 @@ impl Default for AppState {
             "all".to_string(),
             vec!["239.255.255.255".to_string(), "224.2.127.254".to_string()],
         )
+    }
+}
+
+/// Convert a GStreamer debug level to its numeric value.
+fn gst_level_to_int(level: gstreamer::DebugLevel) -> u32 {
+    match level {
+        gstreamer::DebugLevel::None => 0,
+        gstreamer::DebugLevel::Error => 1,
+        gstreamer::DebugLevel::Warning => 2,
+        gstreamer::DebugLevel::Fixme => 3,
+        gstreamer::DebugLevel::Info => 4,
+        gstreamer::DebugLevel::Debug => 5,
+        gstreamer::DebugLevel::Log => 6,
+        gstreamer::DebugLevel::Trace => 7,
+        gstreamer::DebugLevel::Memdump => 9,
+        _ => 0,
+    }
+}
+
+/// Parse a GStreamer debug level from a string (number 0-9).
+fn parse_gst_level(s: &str) -> Result<gstreamer::DebugLevel, String> {
+    let n: u32 = s
+        .parse()
+        .map_err(|_| format!("Invalid GStreamer debug level '{}': expected 0-9", s))?;
+    match n {
+        0 => Ok(gstreamer::DebugLevel::None),
+        1 => Ok(gstreamer::DebugLevel::Error),
+        2 => Ok(gstreamer::DebugLevel::Warning),
+        3 => Ok(gstreamer::DebugLevel::Fixme),
+        4 => Ok(gstreamer::DebugLevel::Info),
+        5 => Ok(gstreamer::DebugLevel::Debug),
+        6 => Ok(gstreamer::DebugLevel::Log),
+        7 => Ok(gstreamer::DebugLevel::Trace),
+        9 => Ok(gstreamer::DebugLevel::Memdump),
+        _ => Err(format!(
+            "Invalid GStreamer debug level '{}': expected 0-7 or 9",
+            n
+        )),
     }
 }
