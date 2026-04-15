@@ -1436,11 +1436,11 @@ impl eframe::App for StromApp {
         }
 
         // Check for vision mixer control page open signal (double-click on Vision Mixer)
-        if let Some(_block_id) = get_local_storage("open_vision_mixer") {
+        if let Some(block_id) = get_local_storage("open_vision_mixer") {
             remove_local_storage("open_vision_mixer");
 
             if let Some(flow) = self.current_flow() {
-                let url = self.api.get_vision_mixer_url(&flow.id);
+                let url = self.api.get_vision_mixer_url(&flow.id, &block_id);
                 ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
             }
         }

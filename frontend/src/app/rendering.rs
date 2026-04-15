@@ -1519,8 +1519,8 @@ impl StromApp {
                         }
 
                         // Handle vision mixer control page request
-                        if let Some(flow_id) = result.vision_mixer_url {
-                            let url = self.api.get_vision_mixer_url(&flow_id);
+                        if let Some((flow_id, block_id)) = result.vision_mixer_url {
+                            let url = self.api.get_vision_mixer_url(&flow_id, &block_id);
                             ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
                         }
 
