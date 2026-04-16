@@ -319,6 +319,7 @@ pub struct OverlayRenderer {
     width: i32,
     height: i32,
     surface: Option<cairo::ImageSurface>,
+    last_sample: Option<gst::Sample>,
     last_pgm: u64,
     last_pvw: u64,
     last_bg: u64,
@@ -346,6 +347,7 @@ impl OverlayRenderer {
             width,
             height,
             surface: None,
+            last_sample: None,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
             last_bg: u64::MAX - 1,
@@ -354,7 +356,11 @@ impl OverlayRenderer {
         }
     }
 
-    /// Render overlay and push to appsrc if state changed. Returns true if pushed.
+    /// Render overlay if state changed, then push to appsrc.
+    ///
+    /// Always pushes a frame (re-pushing the last sample if nothing changed)
+    /// so the multiview compositor has a steady stream of overlay buffers and
+    /// does not stall waiting for the overlay pad.
     pub fn render_if_dirty(&mut self) -> bool {
         let pgm_packed = self.state.pgm_group_packed();
         let pvw_packed = self.state.pvw_group_packed();
@@ -363,40 +369,40 @@ impl OverlayRenderer {
         let (h, m, s) = self.state.wall_clock_hms();
         let clock_secs = h as u64 * 3600 + m as u64 * 60 + s as u64;
 
-        if self.last_pgm == pgm_packed
-            && self.last_pvw == pvw_packed
-            && self.last_bg == bg_packed
-            && self.last_ftb == ftb
-            && self.last_clock_secs == clock_secs
-        {
-            return false;
-        }
+        let dirty = self.last_pgm != pgm_packed
+            || self.last_pvw != pvw_packed
+            || self.last_bg != bg_packed
+            || self.last_ftb != ftb
+            || self.last_clock_secs != clock_secs;
 
-        let pgm_group = vision_mixer::unpack_source_group(pgm_packed);
-        let pvw_group = vision_mixer::unpack_source_group(pvw_packed);
-        let bg = self.state.background_input();
+        if dirty {
+            let pgm_group = vision_mixer::unpack_source_group(pgm_packed);
+            let pvw_group = vision_mixer::unpack_source_group(pvw_packed);
+            let bg = self.state.background_input();
 
-        let t0 = std::time::Instant::now();
-        let pushed = self.push_frame(&pgm_group, &pvw_group, bg, ftb, h, m, s);
-        let elapsed = t0.elapsed();
-        debug!(
-            "Overlay render+push: {:.1}ms (pgm={:?}, pvw={:?}, ftb={}, pushed={})",
-            elapsed.as_secs_f64() * 1000.0,
-            pgm_group,
-            pvw_group,
-            ftb,
+            let t0 = std::time::Instant::now();
+            let pushed = self.push_frame(&pgm_group, &pvw_group, bg, ftb, h, m, s);
+            let elapsed = t0.elapsed();
+            debug!(
+                "Overlay render+push: {:.1}ms (pgm={:?}, pvw={:?}, ftb={}, pushed={})",
+                elapsed.as_secs_f64() * 1000.0,
+                pgm_group,
+                pvw_group,
+                ftb,
+                pushed
+            );
+
+            if pushed {
+                self.last_pgm = pgm_packed;
+                self.last_pvw = pvw_packed;
+                self.last_bg = bg_packed;
+                self.last_ftb = ftb;
+                self.last_clock_secs = clock_secs;
+            }
             pushed
-        );
-
-        if pushed {
-            self.last_pgm = pgm_packed;
-            self.last_pvw = pvw_packed;
-            self.last_bg = bg_packed;
-            self.last_ftb = ftb;
-            self.last_clock_secs = clock_secs;
-            true
         } else {
-            false
+            // Not dirty — re-push the last sample to keep the compositor fed
+            self.repush_last_sample()
         }
     }
 
@@ -464,19 +470,16 @@ impl OverlayRenderer {
 
             let t_copy = t0.elapsed();
 
-            // Set PTS=0 so the compositor renders the overlay immediately
-            // instead of waiting for the pipeline latency to elapse.
-            // The overlay is a static frame (borders/labels) that should
-            // reflect state changes instantly, not be synced to video time.
-            {
-                let buf_ref = buffer.get_mut()?;
-                buf_ref.set_pts(gst::ClockTime::ZERO);
-            }
+            // do-timestamp=true on the appsrc sets PTS to the current
+            // pipeline running time automatically. Do NOT set PTS=0 here —
+            // that makes the compositor see the overlay as perpetually stale,
+            // causing it to wait up to its full deadline on every frame.
 
             let sample = gst::Sample::builder()
                 .buffer(&buffer)
                 .caps(&self.caps)
                 .build();
+            self.last_sample = Some(sample.clone());
             self.appsrc.push_sample(&sample).ok()?;
 
             let t_push = t0.elapsed();
@@ -497,6 +500,16 @@ impl OverlayRenderer {
 
         self.surface = Some(surface);
         pushed
+    }
+
+    /// Re-push the last overlay sample without re-rendering.
+    /// Keeps the compositor fed so it doesn't stall waiting for the overlay pad.
+    fn repush_last_sample(&self) -> bool {
+        if let Some(ref sample) = self.last_sample {
+            self.appsrc.push_sample(sample).is_ok()
+        } else {
+            false
+        }
     }
 }
 
@@ -544,9 +557,20 @@ pub fn trigger_overlay_update(block_id: &str) {
     }
 }
 
-/// Start the 1Hz clock timer for overlay updates.
+/// Start the overlay push timer.
+///
+/// Pushes at the multiview framerate so the compositor always has a current
+/// buffer on the overlay pad. Only re-renders when state actually changes
+/// (PGM/PVW switch, clock tick); otherwise re-pushes the last sample.
 /// The thread stops when the renderer is unregistered (flow stop).
-pub fn start_overlay_timer(block_id: String, renderer: Arc<Mutex<OverlayRenderer>>) {
+pub fn start_overlay_timer(
+    block_id: String,
+    renderer: Arc<Mutex<OverlayRenderer>>,
+    mv_framerate: (i32, i32),
+) {
+    let frame_interval = std::time::Duration::from_nanos(
+        (mv_framerate.1 as u64 * 1_000_000_000) / mv_framerate.0.max(1) as u64,
+    );
     std::thread::Builder::new()
         .name(format!(
             "overlay-timer-{}",
@@ -576,7 +600,7 @@ pub fn start_overlay_timer(block_id: String, renderer: Arc<Mutex<OverlayRenderer
                 r.render_if_dirty();
             }
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::sleep(frame_interval);
                 if get_overlay_renderer(&block_id).is_none() {
                     debug!("Overlay timer stopping for {}", block_id);
                     break;
