@@ -835,16 +835,17 @@ fn build_whepserversink(
 
     info!("WHEP Output mode: {:?}", mode);
 
-    // Get ts-offset in milliseconds (applied to clocksync elements inside whepserversink)
-    // A negative value makes this output play out earlier than the pipeline latency dictates,
-    // useful for multiview outputs that should display with minimal delay.
-    let ts_offset_ms = properties
-        .get("ts_offset_ms")
+    // Low-latency mode: disable clock synchronization on internal appsinks so buffers
+    // flow through immediately instead of waiting for the pipeline's negotiated latency.
+    // Useful for multiview outputs that should display with minimal delay.
+    // A/V sync is preserved on the receiver side via RTCP sender reports.
+    let low_latency = properties
+        .get("low_latency")
         .and_then(|v| match v {
-            PropertyValue::Int(i) => Some(*i),
+            PropertyValue::Bool(b) => Some(*b),
             _ => None,
         })
-        .unwrap_or(0);
+        .unwrap_or(false);
 
     // Get endpoint_id (user-configurable, defaults to UUID)
     let endpoint_id = properties
@@ -919,22 +920,27 @@ fn build_whepserversink(
     let host_addr = format!("http://127.0.0.1:{}", internal_port);
     signaller.set_property("host-addr", &host_addr);
 
-    // Apply ts-offset to all clocksync elements created inside whepserversink.
-    // whepserversink mounts a clocksync element per stream (audio/video) to synchronize
-    // playout. Setting a negative ts-offset makes the output play out earlier.
-    if ts_offset_ms != 0 {
-        let ts_offset_ns = ts_offset_ms * 1_000_000;
-        let instance_id_for_ts = instance_id.to_string();
+    // Low-latency mode: disable sync on internal appsink elements.
+    //
+    // webrtcsink's pipeline is: input → clocksync → appsink (StreamProducer).
+    // The appsink has sync=true by default, meaning it waits for the pipeline's
+    // negotiated latency before consuming each buffer. Disabling sync makes
+    // buffers flow through immediately, eliminating the playout delay.
+    //
+    // Note: ts-offset on clocksync does NOT work for this purpose — clocksync
+    // releases buffers earlier, but the downstream appsink (sync=true) re-applies
+    // the same clock wait, negating the effect.
+    if low_latency {
+        let instance_id_for_ll = instance_id.to_string();
         if let Ok(bin) = whepserversink.clone().downcast::<gst::Bin>() {
             bin.connect("deep-element-added", false, move |args| {
                 let added: gst::Element = args[2].get().unwrap();
                 if let Some(factory) = added.factory() {
-                    if factory.name() == "clocksync" && added.has_property("ts-offset") {
-                        added.set_property("ts-offset", ts_offset_ns);
+                    if factory.name() == "appsink" && added.has_property("sync") {
+                        added.set_property("sync", false);
                         info!(
-                            "WHEP Output {}: Set ts-offset={}ms on {}",
-                            instance_id_for_ts,
-                            ts_offset_ms,
+                            "WHEP Output {}: Set sync=false on {} (low-latency mode)",
+                            instance_id_for_ll,
                             added.name()
                         );
                     }
@@ -942,10 +948,7 @@ fn build_whepserversink(
                 None
             });
         }
-        info!(
-            "WHEP Output: ts-offset={}ms will be applied to clocksync elements",
-            ts_offset_ms
-        );
+        info!("WHEP Output: low-latency mode enabled (appsink sync disabled)");
     }
 
     // Configure audio/video caps based on mode.
@@ -2049,14 +2052,14 @@ fn whep_output_definition() -> BlockDefinition {
                 live: false,
             },
             ExposedProperty {
-                name: "ts_offset_ms".to_string(),
-                label: "TS Offset (ms)".to_string(),
-                description: "Timestamp offset applied to all streams in this output. A negative value (e.g. -200) makes the output play out earlier than the pipeline latency dictates. Useful for multiview outputs that should display with minimal delay while the PGM output uses full pipeline latency for sync.".to_string(),
-                property_type: PropertyType::Int,
-                default_value: Some(PropertyValue::Int(0)),
+                name: "low_latency".to_string(),
+                label: "Low Latency".to_string(),
+                description: "Disable clock synchronization on this output. Buffers flow through immediately instead of waiting for the pipeline's negotiated latency. Useful for multiview outputs that should display with minimal delay. A/V sync is maintained on the receiver side via RTCP sender reports.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
-                    property_name: "ts_offset_ms".to_string(),
+                    property_name: "low_latency".to_string(),
                     transform: None,
                 },
                 live: false,
