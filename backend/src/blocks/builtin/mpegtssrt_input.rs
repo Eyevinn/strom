@@ -129,6 +129,16 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             })
             .unwrap_or(DEFAULT_SRT_LATENCY_MS);
 
+        // Get tsdemux latency (applies to tsdemux inside decodebin or in passthrough mode)
+        let tsdemux_latency = properties
+            .get("tsdemux_latency")
+            .and_then(|v| match v {
+                PropertyValue::UInt(u) => Some(*u as i32),
+                PropertyValue::Int(i) => Some(*i as i32),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_TSDEMUX_LATENCY_MS);
+
         // Get number of video and audio tracks
         let num_video_tracks = properties
             .get("num_video_tracks")
@@ -159,8 +169,8 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         srtsrc.set_property("latency", latency);
 
         info!(
-            "SRT source configured: uri={}, latency={}ms",
-            srt_uri, latency
+            "SRT source configured: uri={}, latency={}ms, tsdemux_latency={}ms",
+            srt_uri, latency, tsdemux_latency
         );
 
         // Create demux/decode element
@@ -174,6 +184,24 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 .name(&id)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("decodebin: {}", e)))?;
+
+            // Catch tsdemux when decodebin creates it internally, and set its latency.
+            let instance_for_deep = instance_id.to_string();
+            element.connect("deep-element-added", false, move |args| {
+                let added: gst::Element = args[2].get().unwrap();
+                let factory = added.factory();
+                if let Some(f) = factory {
+                    if f.name() == "tsdemux" {
+                        added.set_property("latency", tsdemux_latency);
+                        info!(
+                            "MPEGTSSRT Input {}: Set tsdemux latency to {}ms (inside decodebin)",
+                            instance_for_deep, tsdemux_latency
+                        );
+                    }
+                }
+                None
+            });
+
             (id, element)
         } else {
             let id = format!("{}:tsdemux", instance_id);
@@ -181,6 +209,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 .name(&id)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("tsdemux: {}", e)))?;
+            element.set_property("latency", tsdemux_latency);
             (id, element)
         };
 
@@ -551,6 +580,19 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "latency".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "tsdemux_latency".to_string(),
+                label: "TS Demux Latency (ms)".to_string(),
+                description: "MPEG-TS demuxer latency in milliseconds. GStreamer defaults to 700ms for PCR synchronization; lower values reduce end-to-end latency in live pipelines.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(DEFAULT_TSDEMUX_LATENCY_MS as i64)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "tsdemux_latency".to_string(),
                     transform: None,
                 },
                 live: false,
