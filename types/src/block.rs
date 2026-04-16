@@ -308,10 +308,11 @@ pub const DEFAULT_SRT_INPUT_URI: &str = "srt://127.0.0.1:5000?mode=caller";
 pub const DEFAULT_SRT_LATENCY_MS: i32 = 125;
 
 /// Default tsdemux latency in milliseconds.
-/// GStreamer's default is 700ms (for PCR synchronization). We use 100ms for
-/// lower end-to-end latency in live pipelines while keeping enough margin for
-/// PCR-based A/V sync.
-pub const DEFAULT_TSDEMUX_LATENCY_MS: i32 = 100;
+/// GStreamer's default is 700ms (for PCR synchronization). We use 0ms for
+/// live pipelines because this property only affects the reported latency in
+/// GStreamer's latency query, not internal buffering. SRT already handles
+/// jitter, so tsdemux doesn't need to add additional latency margin.
+pub const DEFAULT_TSDEMUX_LATENCY_MS: i32 = 0;
 
 /// Default MTU for EFP fragmentation (bytes).
 pub const DEFAULT_EFP_MTU: u32 = 1400;
