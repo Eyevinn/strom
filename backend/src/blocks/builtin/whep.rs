@@ -835,6 +835,17 @@ fn build_whepserversink(
 
     info!("WHEP Output mode: {:?}", mode);
 
+    // Get ts-offset in milliseconds (applied to clocksync elements inside whepserversink)
+    // A negative value makes this output play out earlier than the pipeline latency dictates,
+    // useful for multiview outputs that should display with minimal delay.
+    let ts_offset_ms = properties
+        .get("ts_offset_ms")
+        .and_then(|v| match v {
+            PropertyValue::Int(i) => Some(*i),
+            _ => None,
+        })
+        .unwrap_or(0);
+
     // Get endpoint_id (user-configurable, defaults to UUID)
     let endpoint_id = properties
         .get("endpoint_id")
@@ -907,6 +918,35 @@ fn build_whepserversink(
     let signaller = whepserversink.property::<gst::glib::Object>("signaller");
     let host_addr = format!("http://127.0.0.1:{}", internal_port);
     signaller.set_property("host-addr", &host_addr);
+
+    // Apply ts-offset to all clocksync elements created inside whepserversink.
+    // whepserversink mounts a clocksync element per stream (audio/video) to synchronize
+    // playout. Setting a negative ts-offset makes the output play out earlier.
+    if ts_offset_ms != 0 {
+        let ts_offset_ns = ts_offset_ms * 1_000_000;
+        let instance_id_for_ts = instance_id.to_string();
+        if let Ok(bin) = whepserversink.clone().downcast::<gst::Bin>() {
+            bin.connect("deep-element-added", false, move |args| {
+                let added: gst::Element = args[2].get().unwrap();
+                if let Some(factory) = added.factory() {
+                    if factory.name() == "clocksync" && added.has_property("ts-offset") {
+                        added.set_property("ts-offset", ts_offset_ns);
+                        info!(
+                            "WHEP Output {}: Set ts-offset={}ms on {}",
+                            instance_id_for_ts,
+                            ts_offset_ms,
+                            added.name()
+                        );
+                    }
+                }
+                None
+            });
+        }
+        info!(
+            "WHEP Output: ts-offset={}ms will be applied to clocksync elements",
+            ts_offset_ms
+        );
+    }
 
     // Configure audio/video caps based on mode.
     // Video caps will be set dynamically when we detect the input codec.
@@ -2004,6 +2044,19 @@ fn whep_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "endpoint_id".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "ts_offset_ms".to_string(),
+                label: "TS Offset (ms)".to_string(),
+                description: "Timestamp offset applied to all streams in this output. A negative value (e.g. -200) makes the output play out earlier than the pipeline latency dictates. Useful for multiview outputs that should display with minimal delay while the PGM output uses full pipeline latency for sync.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ts_offset_ms".to_string(),
                     transform: None,
                 },
                 live: false,
