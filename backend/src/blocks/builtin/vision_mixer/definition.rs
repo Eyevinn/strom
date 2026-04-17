@@ -227,6 +227,21 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
         },
+        // Show VU meters in multiview overlay
+        ExposedProperty {
+            name: "show_vu_meters".to_string(),
+            label: "Show VU Meters".to_string(),
+            description:
+                "Render per-input and PGM audio VU meters on the multiview overlay".to_string(),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(DEFAULT_SHOW_VU_METERS)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: "show_vu_meters".to_string(),
+                transform: None,
+            },
+            live: false,
+        },
         // Number of DSK inputs
         ExposedProperty {
             name: "num_dsk_inputs".to_string(),
@@ -292,17 +307,36 @@ fn vision_mixer_definition() -> BlockDefinition {
         category: "Production".to_string(),
         exposed_properties,
         external_pads: ExternalPads {
-            inputs: (0..DEFAULT_NUM_INPUTS)
-                .map(|i| {
-                    ExternalPad::with_label(
-                        format!("video_in_{}", i),
-                        format!("V{}", i),
-                        MediaType::Video,
-                        format!("queue_{}", i),
+            inputs: {
+                let mut pads: Vec<ExternalPad> = (0..DEFAULT_NUM_INPUTS)
+                    .map(|i| {
+                        ExternalPad::with_label(
+                            format!("video_in_{}", i),
+                            format!("V{}", i),
+                            MediaType::Video,
+                            format!("queue_{}", i),
+                            "sink".to_string(),
+                        )
+                    })
+                    .collect();
+                for i in 0..DEFAULT_NUM_INPUTS {
+                    pads.push(ExternalPad::with_label(
+                        format!("audio_in_{}", i),
+                        format!("A{}", i),
+                        MediaType::Audio,
+                        format!("queue_audio_{}", i),
                         "sink".to_string(),
-                    )
-                })
-                .collect(),
+                    ));
+                }
+                pads.push(ExternalPad::with_label(
+                    "pgm_audio_in",
+                    "PGM Audio",
+                    MediaType::Audio,
+                    "queue_audio_pgm",
+                    "sink".to_string(),
+                ));
+                pads
+            },
             outputs: vec![
                 ExternalPad::with_label(
                     "pgm_out",
