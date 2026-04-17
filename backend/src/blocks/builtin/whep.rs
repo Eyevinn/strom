@@ -1003,14 +1003,15 @@ fn build_whepserversink(
     // BusSyncReply::Drop and routes all messages through an internal channel.
     // Replacing it breaks session lifecycle (sessions never terminate).
     let session_thread_config = ctx.session_thread_config();
-    if session_thread_config.is_active() {
-        whepserversink.connect("consumer-pipeline-created", false, move |values| {
-            let consumer_id = values[1].get::<String>().unwrap_or_default();
-            let pipeline = values[2].get::<gst::Pipeline>().unwrap();
-            session_thread_config.install_on_session_pipeline(&pipeline, &consumer_id);
-            None
-        });
-    }
+    whepserversink.connect("consumer-pipeline-created", false, move |values| {
+        if !session_thread_config.is_active() {
+            return None;
+        }
+        let consumer_id = values[1].get::<String>().unwrap_or_default();
+        let pipeline = values[2].get::<gst::Pipeline>().unwrap();
+        session_thread_config.install_on_session_pipeline(&pipeline, &consumer_id);
+        None
+    });
 
     // WORKAROUND #1: Relax transceiver codec-preferences BEFORE SDP offer is processed.
     //

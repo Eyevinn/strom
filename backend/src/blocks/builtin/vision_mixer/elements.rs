@@ -4,7 +4,7 @@ use crate::blocks::BlockBuildError;
 use crate::gpu;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Compositor backend selection result.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -165,7 +165,7 @@ pub fn suppress_latency_query(queue: &gst::Element) {
     pad.add_probe(gst::PadProbeType::QUERY_UPSTREAM, |_pad, info| {
         if let Some(query) = info.query_mut() {
             if let gst::QueryViewMut::Latency(latency) = query.view_mut() {
-                debug!(
+                trace!(
                     "Suppressed latency query on PGM->MV path (preventing compositor latency stacking)"
                 );
                 latency.set(true, gst::ClockTime::ZERO, None::<gst::ClockTime>);

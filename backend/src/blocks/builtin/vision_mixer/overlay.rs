@@ -622,6 +622,11 @@ pub fn start_overlay_timer(
                 let now = std::time::Instant::now();
                 if next_tick > now {
                     std::thread::sleep(next_tick - now);
+                } else if now - next_tick > frame_interval {
+                    // Fell behind by more than one frame (mutex contention,
+                    // system sleep, etc.) — skip missed ticks instead of
+                    // spinning a catch-up burst.
+                    next_tick = now;
                 }
                 if get_overlay_renderer(&block_id).is_none() {
                     debug!("Overlay timer stopping for {}", block_id);
