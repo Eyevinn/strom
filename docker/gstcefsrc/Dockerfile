@@ -15,13 +15,21 @@
 
 ARG TARGETARCH
 
-# Latest stable CEF version (as of 2026-01)
-ARG CEF_VERSION=144.0.11+ge135be2+chromium-144.0.7559.97
+# CEF 126 (Alloy runtime) — intentionally downgraded from 144 to avoid the
+# MemoryInfra SIGILL crash introduced when Chrome runtime became default in
+# CEF 127. See docs/CEF_SIGILL_CRASH.md.
+ARG CEF_VERSION=126.2.18+g3647d39+chromium-126.0.6478.183
+
+# Pinned gstcefsrc commit — last upstream master commit that defaulted to
+# CEF 122 (parent of the CEF 130 bump `be42330b4a`). Later gstcefsrc masters
+# target Chrome-runtime-era CEF and require newer CEF ABI than 126 ships.
+ARG GSTCEFSRC_REF=0e470f51fd
 
 FROM ubuntu:questing AS builder
 
 ARG TARGETARCH
 ARG CEF_VERSION
+ARG GSTCEFSRC_REF
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -62,8 +70,15 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /build
 
-# Clone gstcefsrc from Centricular
-RUN git clone --depth 1 https://github.com/centricular/gstcefsrc.git
+# Clone gstcefsrc from Centricular at the pinned ref.
+# We can't shallow-clone an arbitrary SHA directly, so we init an empty repo,
+# fetch the specific commit, and check it out. This works against GitHub which
+# enables `uploadpack.allowAnySHA1InWant` by default.
+RUN git init gstcefsrc && \
+    cd gstcefsrc && \
+    git remote add origin https://github.com/centricular/gstcefsrc.git && \
+    git fetch --depth 1 origin "${GSTCEFSRC_REF}" && \
+    git checkout FETCH_HEAD
 
 WORKDIR /build/gstcefsrc
 

@@ -7,9 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       cef_version:
-        description: 'CEF version (e.g., 144.0.11+ge135be2+chromium-144.0.7559.97)'
+        description: 'CEF version (e.g., 126.2.18+g3647d39+chromium-126.0.6478.183)'
         required: true
-        default: '144.0.11+ge135be2+chromium-144.0.7559.97'
+        default: '126.2.18+g3647d39+chromium-126.0.6478.183'
+        type: string
+      gstcefsrc_ref:
+        description: 'gstcefsrc git ref (commit SHA, tag, or branch). Default pins to the last master commit that defaulted to CEF 122, compatible with CEF 126 (Alloy runtime).'
+        required: true
+        default: '0e470f51fd'
         type: string
       upload_to_release:
         description: 'Upload artifacts to GitHub release'
@@ -62,6 +67,7 @@ jobs:
           docker build \
             --platform ${{ matrix.docker_platform }} \
             --build-arg CEF_VERSION="${{ inputs.cef_version }}" \
+            --build-arg GSTCEFSRC_REF="${{ inputs.gstcefsrc_ref }}" \
             -t gstcefsrc-builder:${{ matrix.arch }} \
             -f docker/gstcefsrc/Dockerfile \
             docker/gstcefsrc/
@@ -117,6 +123,7 @@ jobs:
           echo "## gstcefsrc Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**CEF Version:** \`${{ inputs.cef_version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**gstcefsrc ref:** \`${{ inputs.gstcefsrc_ref }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
