@@ -60,9 +60,9 @@ pub enum WhepStreamMode {
     /// Audio only
     Audio,
     /// Video only
-    #[default]
     Video,
     /// Both audio and video
+    #[default]
     AudioVideo,
 }
 

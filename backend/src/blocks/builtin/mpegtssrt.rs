@@ -945,6 +945,13 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
                     internal_element_id: "video_input".to_string(),
                     internal_pad_name: "sink".to_string(),
                 },
+                ExternalPad {
+                    label: Some("A0".to_string()),
+                    name: "audio_in_0".to_string(),
+                    media_type: MediaType::Audio,
+                    internal_element_id: "audio_input_0".to_string(),
+                    internal_pad_name: "sink".to_string(),
+                },
             ],
             outputs: vec![],
         },

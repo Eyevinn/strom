@@ -292,30 +292,17 @@ fn vision_mixer_definition() -> BlockDefinition {
         category: "Production".to_string(),
         exposed_properties,
         external_pads: ExternalPads {
-            inputs: {
-                let mut pads: Vec<ExternalPad> = (0..MAX_NUM_INPUTS)
-                    .map(|i| {
-                        ExternalPad::with_label(
-                            format!("video_in_{}", i),
-                            format!("V{}", i),
-                            MediaType::Video,
-                            format!("queue_{}", i),
-                            "sink".to_string(),
-                        )
-                    })
-                    .collect();
-                // DSK input pads
-                for i in 0..MAX_DSK_INPUTS {
-                    pads.push(ExternalPad::with_label(
-                        format!("dsk_in_{}", i),
-                        format!("DSK{}", i + 1),
+            inputs: (0..DEFAULT_NUM_INPUTS)
+                .map(|i| {
+                    ExternalPad::with_label(
+                        format!("video_in_{}", i),
+                        format!("V{}", i),
                         MediaType::Video,
-                        format!("queue_dsk_{}", i),
+                        format!("queue_{}", i),
                         "sink".to_string(),
-                    ));
-                }
-                pads
-            },
+                    )
+                })
+                .collect(),
             outputs: vec![
                 ExternalPad::with_label(
                     "pgm_out",
