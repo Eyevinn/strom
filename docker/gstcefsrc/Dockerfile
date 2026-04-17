@@ -15,18 +15,16 @@
 
 ARG TARGETARCH
 
-# CEF 122 (Alloy runtime) — intentionally downgraded from 144 to avoid the
-# MemoryInfra SIGILL crash introduced when Chrome runtime became default in
-# CEF 127. We use 122 (not 126) because the pinned gstcefsrc commit was
-# tested against exactly this version; CEF 126 introduced an ABI change in
-# OnRenderProcessTerminated that breaks the build.
-# See docs/CEF_SIGILL_CRASH.md.
-ARG CEF_VERSION=122.1.13+gde5b724+chromium-122.0.6261.130
+# CEF 144 (Chrome runtime). The MemoryInfra SIGILL that could otherwise crash
+# libcef in long-running processes is handled at runtime by LD_PRELOADing
+# libmallinfo_shim.so (see docker/strom-full/entrypoint.sh and
+# docs/CEF_SIGILL_CRASH.md). The shim interposes glibc's legacy int-based
+# mallinfo(), whose fields overflow when the CEF process arena > 2 GiB and
+# trigger a Chromium CHECK() on a failed checked_cast<size_t>.
+ARG CEF_VERSION=144.0.11+ge135be2+chromium-144.0.7559.97
 
-# Pinned gstcefsrc commit — last upstream master commit that defaulted to
-# CEF 122 (parent of the CEF 130 bump `be42330b4a`). Upstream jumped straight
-# from 122 to 130, so no gstcefsrc commit was ever tested against 123-129.
-ARG GSTCEFSRC_REF=0e470f51fdb8afdd9e31ef0b3d75b26536b180e5
+# Current gstcefsrc master (pinned to a full SHA for reproducibility).
+ARG GSTCEFSRC_REF=b63340852fc93b0ab67b07200e1ff44f59ba6769
 
 FROM ubuntu:questing AS builder
 
@@ -72,6 +70,11 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+
+# Copy and compile the mallinfo LD_PRELOAD shim (fixes CEF MemoryInfra SIGILL
+# when arena > 2 GiB; see mallinfo_shim.c and docs/CEF_SIGILL_CRASH.md).
+COPY mallinfo_shim.c /build/mallinfo_shim.c
+RUN gcc -shared -fPIC -O2 -o /build/libmallinfo_shim.so /build/mallinfo_shim.c
 
 # Clone gstcefsrc from Centricular at the pinned ref.
 # We can't shallow-clone an arbitrary SHA directly, so we init an empty repo,
@@ -129,6 +132,8 @@ RUN mkdir -p /output/lib/gstreamer-1.0 && \
     cp /build/gstcefsrc/build/Release/libvk_swiftshader.so /output/lib/cef/ 2>/dev/null || true && \
     cp /build/gstcefsrc/build/Release/libvulkan.so.1 /output/lib/cef/ 2>/dev/null || true && \
     cp /build/gstcefsrc/build/Release/vk_swiftshader_icd.json /output/lib/cef/ 2>/dev/null || true && \
+    # Copy the mallinfo LD_PRELOAD shim
+    cp /build/libmallinfo_shim.so /output/lib/cef/ && \
     # Create version info file
     echo "CEF_VERSION=${CEF_VERSION}" > /output/version.txt && \
     echo "TARGETARCH=${TARGETARCH}" >> /output/version.txt && \

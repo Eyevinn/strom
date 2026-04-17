@@ -21,14 +21,23 @@ SIGILL, Illegal instruction
 #2  ContinueAsyncProcessDump() at memory_dump_manager.cc:377
 ```
 
-MemoryInfra periodically collects memory statistics from **PartitionAlloc**
-(Chromium's memory allocator since ~M116, replacing tcmalloc).
-`MallocDumpProvider::OnMemoryDump()` walks PartitionAlloc's internal metadata
-to gather allocation stats. In long-running, high-throughput rendering processes
-(like gstcefsrc), the metadata can end up in an inconsistent state. When the
-dump provider encounters this, the CHECK fails and Chromium crashes.
+### The actual bug (identified 2025-10, CEF issue [#3963](https://github.com/chromiumembedded/cef/issues/3963))
+
+`MallocDumpProvider::OnMemoryDump()` calls glibc's **legacy `mallinfo()`**,
+not `mallinfo2()`. Spotify's official CEF builds compile against a Debian
+bullseye sysroot (glibc 2.31) which lacks `mallinfo2`, so the int-based
+API is what ends up baked into `libcef.so` regardless of the host's glibc.
+
+Once the CEF process's arena exceeds **2 GiB** (INT_MAX ≈ 2.147 GB), the
+int fields overflow to negative values. Chromium narrows them via
+`checked_cast<size_t>(int)`, the narrowing check fails, and Chromium
+CHECKs — executing `ud2` → SIGILL.
 
 Core dump files are named `core.MemoryInfra.*`, confirming the crashing thread.
+
+This is not truly a Chrome-runtime regression, even though Chrome runtime
+(CEF 127+) made it much more visible by running more long-lived allocations.
+Both Alloy- and Chrome-runtime builds can hit it given enough memory.
 
 ## Previous symptoms
 
@@ -47,52 +56,58 @@ pci id for fd 9: 10de:2204, driver (null)
 
 ## Known issue
 
-Reported on the CEF Forum for CEF 127+ (which introduced the Chrome runtime by
-default, changing threading and process models). No upstream fix exists as of
-2026-03.
+Tracked in CEF issue [#3963](https://github.com/chromiumembedded/cef/issues/3963)
+(closed 2025-10 as "not planned") and upstream Chromium bug
+[401168177](https://issues.chromium.org/issues/401168177) (open, no progress
+as of 2026-04).
 
-References:
-- CEF Forum: "Process hangs after switching to chrome runtime" (MemoryInfra SIGILL)
-- SharedImageManager::ProduceMemory errors reported around Chromium 124
+## Fix: LD_PRELOAD mallinfo shim
 
-## Fix: Downgrade to CEF 122 (Alloy runtime)
+Since the bug is an int overflow of `mallinfo()`'s return fields, the simplest
+fix is to interpose `mallinfo()` and return zeroed values. Chromium then
+narrows 0 to size_t without any CHECK() failure, and the memory dump records
+zero bytes for the CEF process (we don't use MemoryInfra profiling in
+production).
 
-The root cause is the Chrome runtime, which became the default in CEF 127 and
-is mandatory from CEF 128 onwards (the Alloy bootstrap was removed). CEF 126
-and earlier, under Alloy, do not exhibit the MemoryInfra SIGILL.
+The shim source is `docker/gstcefsrc/mallinfo_shim.c`. It is compiled to
+`libmallinfo_shim.so` during the gstcefsrc build and shipped alongside the
+CEF binaries in the release tarball. `docker/strom-full/entrypoint.sh`
+injects it via `LD_PRELOAD` before `exec`ing the strom binary.
 
-We pin the build to:
+### Why this is safe for the rest of the stack
 
-- **CEF `122.1.13+gde5b724+chromium-122.0.6261.130`** — latest stable CEF 122,
-  Alloy runtime default. This is the exact version the pinned gstcefsrc commit
-  was tested against. CEF 123-126 are also pre-Chrome-runtime but introduced
-  ABI changes (notably `OnRenderProcessTerminated` gaining `error_code` and
-  `error_string` parameters in CEF 126) that break this gstcefsrc commit.
-- **gstcefsrc commit `0e470f51fdb8afdd9e31ef0b3d75b26536b180e5`** — last master
-  commit that defaulted to CEF 122, the parent of the CEF 130 bump
-  (`be42330b4a`, 2024-10-02). Upstream gstcefsrc jumped straight from 122 to
-  130, so no commit was ever tested against CEF 123-129.
+`LD_PRELOAD` only replaces the specific symbol `mallinfo()`; all other
+allocator entry points (malloc/free/calloc/realloc) are untouched. GStreamer,
+GLib, Rust's allocator interface, and our own code do not call `mallinfo()`.
+The only consumer in our process tree is Chromium's MemoryInfra thread —
+which is exactly what we want to silence.
 
-Pinning lives in:
+### This was confirmed by another CEF user
 
-- `docker/gstcefsrc/Dockerfile` — `ARG CEF_VERSION` and `ARG GSTCEFSRC_REF`.
-- `.github/workflows/build-gstcefsrc.yml` — `cef_version` and `gstcefsrc_ref`
-  inputs.
-- `docker/strom-full/Dockerfile` — `ARG GSTCEFSRC_VERSION` must match the
-  short CEF version string (`122.1.13`) produced by the workflow.
+From CEF [#3963](https://github.com/chromiumembedded/cef/issues/3963#issuecomment-3677232632):
+> "We are working around it for now by LD_PRELOADing a small lib which
+> interposes mallinfo and basically does pad the reported values, working
+> fine for now."
 
-**Trade-off**: Chromium 122 is ~26 months old (released 2024-02-20). More than
-sufficient for HTML overlay rendering (CSS, WebGL, WebCodecs, View Transitions
-are all supported), but lacks security patches and bleeding-edge web platform
-features from 2024-2026. Acceptable for an internal overlay renderer running
-trusted content.
+### Why not downgrade to an older CEF?
 
-## Legacy fix: Disable MemoryInfra periodic dumps (Chrome runtime only)
+Earlier attempts downgraded to CEF 122 / 126 (pre-Chrome-runtime), believing
+this was a Chrome-runtime regression. That does avoid the crash, but:
 
-If the project ever moves back to a Chrome-runtime CEF (127+), the following
-flags reduce — but do not eliminate — the crash rate. They are no-ops on the
-Alloy runtime we currently use, but are kept in `entrypoint.sh` as
-defense-in-depth.
+- Gives up ~20 Chromium versions of security patches and web platform features.
+- Pins to an old gstcefsrc commit (`0e470f51fd`, 2024-10); no bugfixes.
+- CEF 123–126 introduced ABI changes (e.g. `OnRenderProcessTerminated` added
+  `error_code`/`error_string` params in CEF 126) that break that gstcefsrc
+  pin, forcing CEF 122 specifically.
+
+The shim targets the real bug at a lower level and keeps us on modern CEF.
+
+### Defense-in-depth flags
+
+The Chromium flags in `entrypoint.sh` reduce how often MemoryInfra runs,
+which lowers the probability of hitting the overflow path even without the
+shim. They are retained because they're harmless and provide a second line
+of defense:
 
 ### Important: `disable-background-tracing` does not exist
 

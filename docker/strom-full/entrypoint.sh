@@ -36,11 +36,12 @@ if nvidia-smi > /dev/null 2>&1; then
     # probes the NVIDIA driver and initializes SharedImage mailboxes.
     #
     # MemoryInfra/PartitionAlloc SIGILL (exit code 132):
-    # This crash is a Chrome-runtime regression (CEF 127+). We currently build
-    # against CEF 122 (Alloy runtime) specifically to avoid it, so the
-    # "disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials="
-    # flags below are no-ops on Alloy but are kept as defense-in-depth in case
-    # we ever move forward to a Chrome-runtime CEF. See docs/CEF_SIGILL_CRASH.md.
+    # The root cause is an mallinfo() int overflow when the CEF process arena
+    # exceeds 2 GiB — fixed at runtime by LD_PRELOADing libmallinfo_shim.so
+    # (see the LD_PRELOAD block below and docs/CEF_SIGILL_CRASH.md).
+    # The Chrome-runtime-specific flags below (disable-features=BackgroundTracing,
+    # no-periodic-tasks, etc.) are defense-in-depth — they reduce how often
+    # MemoryInfra runs but do not by themselves prevent the overflow CHECK.
     export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
 else
     echo "No GPU detected - using software rendering for both GStreamer and CEF"
@@ -59,6 +60,16 @@ mkdir -p /tmp/cef-cache
 
 # Enable CEF debug logging
 export GST_CEF_LOG_SEVERITY="verbose"
+
+# LD_PRELOAD the mallinfo shim to neutralise the MemoryInfra SIGILL crash.
+# libcef.so was built against an old sysroot and calls glibc's int-based
+# mallinfo(); when the CEF process arena exceeds 2 GiB, the ints overflow to
+# negative values, Chromium checked_casts them to size_t, and CHECK()s -> SIGILL.
+# The shim returns zeroed values so the cast succeeds harmlessly.
+# Reference: https://github.com/chromiumembedded/cef/issues/3963
+if [ -f /usr/local/lib/cef/libmallinfo_shim.so ]; then
+    export LD_PRELOAD="/usr/local/lib/cef/libmallinfo_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 
 # Wait briefly for Xvfb to initialize
 sleep 0.5

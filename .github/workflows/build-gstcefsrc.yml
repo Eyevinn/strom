@@ -7,14 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       cef_version:
-        description: 'CEF version (e.g., 122.1.13+gde5b724+chromium-122.0.6261.130)'
+        description: 'CEF version (e.g., 144.0.11+ge135be2+chromium-144.0.7559.97)'
         required: true
-        default: '122.1.13+gde5b724+chromium-122.0.6261.130'
+        default: '144.0.11+ge135be2+chromium-144.0.7559.97'
         type: string
       gstcefsrc_ref:
-        description: 'gstcefsrc git ref (full 40-char commit SHA, tag, or branch). Default pins to the last master commit that defaulted to CEF 122 (Alloy runtime). Must be a full SHA — GitHub uploadpack does not resolve short SHAs.'
+        description: 'gstcefsrc git ref (full 40-char commit SHA, tag, or branch). Must be a full SHA — GitHub uploadpack does not resolve short SHAs.'
         required: true
-        default: '0e470f51fdb8afdd9e31ef0b3d75b26536b180e5'
+        default: 'b63340852fc93b0ab67b07200e1ff44f59ba6769'
         type: string
       upload_to_release:
         description: 'Upload artifacts to GitHub release'
