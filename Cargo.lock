@@ -1671,16 +1671,16 @@ dependencies = [
 
 [[package]]
 name = "efp"
-version = "0.2.5"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.2.5#f6791367b094ae506dae0561931ea74dd76df2b2"
+version = "0.2.6"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.2.6#10c4d839c9e7db73f13ba5183d3c34eeafbea9bc"
 dependencies = [
  "efp-sys",
 ]
 
 [[package]]
 name = "efp-sys"
-version = "0.2.5"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.2.5#f6791367b094ae506dae0561931ea74dd76df2b2"
+version = "0.2.6"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.2.6#10c4d839c9e7db73f13ba5183d3c34eeafbea9bc"
 dependencies = [
  "bindgen",
  "cmake",
@@ -1969,7 +1969,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2417,7 +2417,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2672,8 +2672,8 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-efp"
-version = "0.2.5"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.2.5#f6791367b094ae506dae0561931ea74dd76df2b2"
+version = "0.2.6"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.2.6#10c4d839c9e7db73f13ba5183d3c34eeafbea9bc"
 dependencies = [
  "efp",
  "glib",
@@ -3510,7 +3510,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -5871,7 +5871,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5930,7 +5930,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6929,7 +6929,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

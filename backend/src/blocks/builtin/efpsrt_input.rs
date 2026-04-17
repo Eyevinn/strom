@@ -23,12 +23,13 @@
 //! (e.g. CUDAMemory from nvh264dec) for downstream elements.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::events::EventBroadcaster;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
+use strom_types::{block::*, element::ElementPadRef, FlowId, PropertyValue, *};
 use tracing::{debug, error, warn};
 
 /// EFP/SRT Input block builder.
@@ -147,6 +148,20 @@ impl BlockBuilder for EfpSrtInputBuilder {
             })
             .unwrap_or(DEFAULT_EFP_HOL_TIMEOUT);
 
+        let normalize_segment = properties
+            .get("normalize_segment")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "auto".to_string());
+        if !matches!(normalize_segment.as_str(), "auto" | "always" | "never") {
+            return Err(BlockBuildError::InvalidProperty(format!(
+                "normalize_segment must be one of 'auto', 'always', 'never' (got '{}')",
+                normalize_segment
+            )));
+        }
+
         let num_video_tracks = properties
             .get("num_video_tracks")
             .and_then(|v| match v {
@@ -201,10 +216,19 @@ impl BlockBuilder for EfpSrtInputBuilder {
             .map_err(|e| BlockBuildError::ElementCreation(format!("efpdemux: {}", e)))?;
         demux_element.set_property("bucket-timeout", bucket_timeout);
         demux_element.set_property("hol-timeout", hol_timeout);
+        if demux_element.has_property("normalize-segment") {
+            demux_element.set_property_from_str("normalize-segment", &normalize_segment);
+        } else {
+            warn!(
+                "EFP demuxer does not expose 'normalize-segment' (requires gst-plugin-efp >= 0.2.6); \
+                 ignoring normalize_segment={}",
+                normalize_segment
+            );
+        }
 
         debug!(
-            "EFP demuxer configured: bucket-timeout={}, hol-timeout={}",
-            bucket_timeout, hol_timeout
+            "EFP demuxer configured: bucket-timeout={}, hol-timeout={}, normalize-segment={}",
+            bucket_timeout, hol_timeout, normalize_segment
         );
 
         let mut elements = vec![
@@ -399,10 +423,26 @@ impl BlockBuilder for EfpSrtInputBuilder {
             mode_label, num_video_tracks, num_audio_tracks
         );
 
+        // If the operator asked for `never`, absolute PTS must survive as running-time.
+        // That only works when the pipeline clock is globally meaningful (realtime/TAI
+        // or a network clock). Monotonic pipeline clock + normalize=never = nonsense
+        // timestamps — warn the operator at pipeline-start.
+        let bus_message_handler = if normalize_segment == "never" {
+            let instance_id_for_handler = instance_id.to_string();
+            let demux_weak = demux_element.downgrade();
+            Some(Box::new(
+                move |bus: &gst::Bus, _flow_id: FlowId, _events: EventBroadcaster| {
+                    connect_clock_check_handler(bus, instance_id_for_handler, demux_weak)
+                },
+            ) as crate::blocks::BusMessageConnectFn)
+        } else {
+            None
+        };
+
         Ok(BlockBuildResult {
             elements,
             internal_links,
-            bus_message_handler: None,
+            bus_message_handler,
             pad_properties: HashMap::new(),
         })
     }
@@ -612,6 +652,69 @@ fn link_passthrough_video(
     Ok(())
 }
 
+/// Connect a handler that inspects the pipeline clock once the pipeline enters
+/// Playing, and warns if the operator chose `normalize_segment=never` while
+/// running on a monotonic clock. That combination produces running-times
+/// anchored to a sender-local wallclock with a receiver-local monotonic base
+/// — i.e. nonsense — and is almost always a configuration error.
+fn connect_clock_check_handler(
+    bus: &gst::Bus,
+    instance_id: String,
+    demux: gst::glib::WeakRef<gst::Element>,
+) -> gst::glib::SignalHandlerId {
+    use gst::MessageView;
+    let already_checked = Arc::new(AtomicBool::new(false));
+    bus.connect_message(Some("state-changed"), move |_bus, msg| {
+        if already_checked.load(Ordering::SeqCst) {
+            return;
+        }
+        let state_changed = match msg.view() {
+            MessageView::StateChanged(sc) => sc,
+            _ => return,
+        };
+        if state_changed.current() != gst::State::Playing {
+            return;
+        }
+        // Only care about the pipeline's state change, not individual elements.
+        let src = match msg.src() {
+            Some(s) => s,
+            None => return,
+        };
+        if src.downcast_ref::<gst::Pipeline>().is_none() {
+            return;
+        }
+        let Some(demux) = demux.upgrade() else {
+            return;
+        };
+        let Some(clock) = demux.clock() else {
+            return;
+        };
+        let type_name = clock.type_().name();
+        let is_monotonic = match type_name {
+            "GstPtpClock" | "GstNtpClock" | "GstNetClientClock" => false,
+            "GstSystemClock" => matches!(
+                clock.property::<gst::ClockType>("clock-type"),
+                gst::ClockType::Monotonic
+            ),
+            _ => false,
+        };
+        already_checked.store(true, Ordering::SeqCst);
+        if is_monotonic {
+            warn!(
+                "EFPSRT Input {}: normalize_segment=never but pipeline clock is monotonic ({}). \
+                 Absolute PTS won't map to a meaningful running-time. Configure the pipeline \
+                 with a realtime/NTP/PTP clock, or set normalize_segment=auto.",
+                instance_id, type_name
+            );
+        } else {
+            debug!(
+                "EFPSRT Input {}: normalize_segment=never running on clock '{}' — OK",
+                instance_id, type_name
+            );
+        }
+    })
+}
+
 /// Get metadata for EFP/SRT input blocks (for UI/API).
 pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![efpsrt_input_definition()]
@@ -693,6 +796,38 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 live: false,
             },
             ExposedProperty {
+                name: "normalize_segment".to_string(),
+                label: "Normalize Segment".to_string(),
+                description: "How to set segment.start on outgoing pads. 'auto' (default) \
+                    picks based on the pipeline clock: monotonic → normalize, \
+                    realtime/TAI/NTP/PTP → pass absolute PTS through. 'always' forces \
+                    normalization (legacy). 'never' preserves absolute PTS — required \
+                    for cross-source synchronization.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "auto".to_string(),
+                            label: Some("Auto (based on pipeline clock)".to_string()),
+                        },
+                        EnumValue {
+                            value: "always".to_string(),
+                            label: Some("Always normalize".to_string()),
+                        },
+                        EnumValue {
+                            value: "never".to_string(),
+                            label: Some("Never (preserve absolute PTS)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("auto".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "normalize_segment".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
                 name: "keep_listening".to_string(),
                 label: "Keep Listening".to_string(),
                 description: "Keep SRT source alive after disconnect, allowing reconnection (default: true)".to_string(),
@@ -758,5 +893,100 @@ fn efpsrt_input_definition() -> BlockDefinition {
             height: Some(2.0),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gstreamer as gst;
+
+    fn init_gst() {
+        let _ = gst::init();
+    }
+
+    fn efpdemux_available() -> bool {
+        let registry = gst::Registry::get();
+        registry
+            .find_feature("efpdemux", gst::ElementFactory::static_type())
+            .is_some()
+    }
+
+    fn build_with_normalize_segment(value: &str) -> Result<BlockBuildResult, BlockBuildError> {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "normalize_segment".to_string(),
+            PropertyValue::String(value.to_string()),
+        );
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        EfpSrtInputBuilder.build("test_instance", &properties, &ctx)
+    }
+
+    fn find_demux(result: &BlockBuildResult) -> gst::Element {
+        result
+            .elements
+            .iter()
+            .find(|(id, _)| id.ends_with(":efpdemux"))
+            .map(|(_, e)| e.clone())
+            .expect("block result must contain an efpdemux element")
+    }
+
+    #[test]
+    fn normalize_segment_never_is_applied_to_demux() {
+        init_gst();
+        if !efpdemux_available() {
+            eprintln!("efpdemux plugin not available — skipping");
+            return;
+        }
+        let result = build_with_normalize_segment("never").expect("build should succeed");
+        let demux = find_demux(&result);
+        let mode: i32 = demux
+            .property_value("normalize-segment")
+            .get()
+            .unwrap_or(-1);
+        // Matches the enum ordering in gst-plugin-efp: Auto=0, Always=1, Never=2.
+        assert_eq!(
+            mode, 2,
+            "normalize_segment=never must set demux property to Never"
+        );
+    }
+
+    #[test]
+    fn normalize_segment_auto_is_default() {
+        init_gst();
+        if !efpdemux_available() {
+            eprintln!("efpdemux plugin not available — skipping");
+            return;
+        }
+        let ctx = BlockBuildContext::new(vec![], "all".to_string());
+        let result = EfpSrtInputBuilder
+            .build("test_instance", &HashMap::new(), &ctx)
+            .expect("build should succeed with no properties");
+        let demux = find_demux(&result);
+        let mode: i32 = demux
+            .property_value("normalize-segment")
+            .get()
+            .unwrap_or(-1);
+        assert_eq!(mode, 0, "default normalize_segment must be Auto");
+    }
+
+    #[test]
+    fn normalize_segment_invalid_value_errors() {
+        init_gst();
+        let result = build_with_normalize_segment("sometimes");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("invalid value should produce InvalidProperty, got Ok"),
+        };
+        match err {
+            BlockBuildError::InvalidProperty(msg) => {
+                assert!(
+                    msg.contains("normalize_segment"),
+                    "error should mention the offending property, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected InvalidProperty, got {:?}", other),
+        }
     }
 }
