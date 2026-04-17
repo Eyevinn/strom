@@ -39,6 +39,9 @@ impl PipelineManager {
         let dynamic_webrtcbins: crate::blocks::DynamicWebrtcbinStore =
             Arc::new(Mutex::new(HashMap::new()));
 
+        // Create shared thread config for session pipelines (populated in start())
+        let session_thread_config = crate::gst::SessionThreadConfig::new();
+
         let probe_manager =
             crate::gst::buffer_age_probe::ProbeManager::new(flow.id, events.clone());
 
@@ -57,6 +60,7 @@ impl PipelineManager {
             thread_priority_state: None,
             thread_registry: None,
             assigned_cpus: None,
+            session_thread_config: session_thread_config.clone(),
             cached_state: std::sync::Arc::new(std::sync::RwLock::new(PipelineState::Null)),
             qos_aggregator: QoSAggregator::new(),
             qos_broadcast_task: None,
@@ -93,6 +97,7 @@ impl PipelineManager {
                     ice_transport_policy,
                     dynamic_webrtcbins,
                     whip_registry,
+                    session_thread_config,
                 )
                 .await;
                 info!("expand_blocks completed");

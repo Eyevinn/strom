@@ -14,7 +14,9 @@ pub mod whep_probe;
 
 pub use discovery::ElementDiscovery;
 pub use pipeline::{PipelineError, PipelineManager};
-pub use thread_priority::{setup_thread_priority_handler, ThreadPriorityState};
+pub use thread_priority::{
+    setup_thread_priority_handler, SessionThreadConfig, ThreadPriorityState,
+};
 pub use thumbnail::ThumbnailError;
 pub use thumbnail_tap::{new_tap_store, ThumbnailTap, ThumbnailTapConfig, ThumbnailTapStore};
 pub use transitions::{TransitionController, TransitionError, TransitionType};

@@ -10,7 +10,7 @@
 <body style="display: flex; flex-direction: column; align-items: center;">
     <div class="container">
         <div style="position: relative; margin-bottom: 8px;">
-            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v7</span>
+            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v11</span>
             <h1 style="text-align: center; margin: 0;">WHEP Player at <span id="hostAddress"></span></h1>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em; position: absolute; right: 0; top: 50%; transform: translateY(-50%);">All streams</a>
         </div>
@@ -49,7 +49,37 @@
 
         <div class="status disconnected" id="status" style="margin-top: 16px;">Not connected</div>
 
+        <div id="statsPanel" class="stats-panel" style="display: none;">
+            <table class="stats-table">
+                <thead>
+                    <tr><th></th><th>Audio</th><th>Video</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td class="stats-label">Bitrate</td><td id="stat-audio-bitrate">-</td><td id="stat-video-bitrate">-</td></tr>
+                    <tr><td class="stats-label">Jitter buffer</td><td id="stat-audio-jbuf">-</td><td id="stat-video-jbuf">-</td></tr>
+                    <tr><td class="stats-label">Jitter</td><td id="stat-audio-jitter">-</td><td id="stat-video-jitter">-</td></tr>
+                    <tr><td class="stats-label">Packet loss</td><td id="stat-audio-loss">-</td><td id="stat-video-loss">-</td></tr>
+                    <tr><td class="stats-label">Codec</td><td id="stat-audio-codec">-</td><td id="stat-video-codec">-</td></tr>
+                    <tr><td class="stats-label">Resolution</td><td>-</td><td id="stat-video-res">-</td></tr>
+                    <tr><td class="stats-label">FPS</td><td>-</td><td id="stat-video-fps">-</td></tr>
+                    <tr><td class="stats-label">Frames dropped</td><td>-</td><td id="stat-video-dropped">-</td></tr>
+                    <tr><td class="stats-label">Nack / PLI</td><td>-</td><td id="stat-video-nack-pli">-</td></tr>
+                </tbody>
+            </table>
+            <div class="stats-row">
+                <span class="stats-label">RTT</span>
+                <span id="stat-rtt">-</span>
+            </div>
+            <div class="stats-row">
+                <span class="stats-label">A/V sync offset</span>
+                <span id="stat-av-sync">-</span>
+            </div>
+        </div>
+
         <div style="display: flex; align-items: center; gap: 6px; margin-top: 16px; margin-bottom: 4px;">
+            <input type="checkbox" id="statsMode" data-storage-key="whep-stats" onchange="toggleStatsMode()" style="margin: 0; width: auto;">
+            <label for="statsMode" style="color: #666; font-size: 0.8em; cursor: pointer; margin: 0;">Stats</label>
+            <span style="color: #3d3d3d; margin: 0 2px;">|</span>
             <input type="checkbox" id="debugMode" data-storage-key="whep-debug" onchange="toggleDebugMode(); whepDebugMode = this.checked;" style="margin: 0; width: auto;">
             <label for="debugMode" style="color: #666; font-size: 0.8em; cursor: pointer; margin: 0;">Debug</label>
             <button onclick="copyLog()" style="padding: 2px 6px; white-space: nowrap;">Copy log</button>
@@ -185,6 +215,10 @@
                         log('Autoplay blocked: ' + e.message, 'warning');
                     });
                 },
+                onStats: (stats) => {
+                    if (myConnectionId !== connectionId) return;
+                    updateStatsPanel(stats);
+                },
                 onConnected: async () => {
                     if (myConnectionId !== connectionId) return; // Stale
                     cancelReconnect(); // Cancel any pending reconnect timer!
@@ -210,6 +244,10 @@
                         }, 2000);
                     }
                     log('Connected successfully', 'success');
+                    // Start stats overlay if checkbox is on
+                    if (document.getElementById('statsMode').checked && connection) {
+                        connection.startStatsOverlay();
+                    }
                 },
                 onMediaStatus: (hasAudio, hasVideo) => {
                     if (myConnectionId !== connectionId) return; // Stale
@@ -376,13 +414,87 @@
             document.getElementById('meterFill').style.width = '0%';
         }
 
+        function toggleStatsMode() {
+            const checkbox = document.getElementById('statsMode');
+            const enabled = checkbox.checked;
+            try { localStorage.setItem('whep-stats', enabled); } catch (e) {}
+            document.getElementById('statsPanel').style.display = enabled ? 'block' : 'none';
+            if (enabled && connection && connection.isConnected()) {
+                connection.startStatsOverlay();
+            } else if (!enabled && connection) {
+                connection.stopStatsOverlay();
+            }
+        }
+
+        function formatMs(val) {
+            if (val == null) return '-';
+            return val.toFixed(1) + ' ms';
+        }
+
+        function formatLoss(lost, received) {
+            if (received == null || received === 0) return '-';
+            const rate = ((lost / (lost + received)) * 100).toFixed(1);
+            return lost + ' (' + rate + '%)';
+        }
+
+        function updateStatsPanel(stats) {
+            if (!document.getElementById('statsMode').checked) return;
+
+            if (stats.audio) {
+                setText('stat-audio-bitrate', stats.audio.bitrate != null ? stats.audio.bitrate + ' kbps' : '-');
+                setText('stat-audio-jbuf', formatMs(stats.audio.jitterBufferDelay));
+                setText('stat-audio-jitter', formatMs(stats.audio.jitter));
+                setText('stat-audio-loss', formatLoss(stats.audio.packetsLost, stats.audio.packetsReceived));
+                setText('stat-audio-codec', stats.audio.codec || '-');
+            }
+
+            if (stats.video) {
+                setText('stat-video-bitrate', stats.video.bitrate != null ? stats.video.bitrate + ' kbps' : '-');
+                setText('stat-video-jbuf', formatMs(stats.video.jitterBufferDelay));
+                setText('stat-video-jitter', formatMs(stats.video.jitter));
+                setText('stat-video-loss', formatLoss(stats.video.packetsLost, stats.video.packetsReceived));
+                setText('stat-video-codec', stats.video.codec || '-');
+                setText('stat-video-res', stats.video.frameWidth && stats.video.frameHeight
+                    ? stats.video.frameWidth + 'x' + stats.video.frameHeight : '-');
+                setText('stat-video-fps', stats.video.fps != null ? stats.video.fps + '' : '-');
+                setText('stat-video-dropped', stats.video.framesDropped + '');
+                setText('stat-video-nack-pli', stats.video.nackCount + ' / ' + stats.video.pliCount);
+            }
+
+            if (stats.transport) {
+                setText('stat-rtt', formatMs(stats.transport.rtt));
+            }
+
+            // A/V sync offset - highlight if too large
+            const syncEl = document.getElementById('stat-av-sync');
+            if (stats.avSyncOffset != null) {
+                const absOffset = Math.abs(stats.avSyncOffset);
+                syncEl.textContent = stats.avSyncOffset.toFixed(1) + ' ms';
+                syncEl.className = absOffset > 80 ? 'stats-warn' : absOffset > 40 ? 'stats-caution' : '';
+            } else {
+                syncEl.textContent = '-';
+                syncEl.className = '';
+            }
+        }
+
+        function setText(id, text) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+        }
+
         // Auto-connect if endpoint is provided
         window.onload = () => {
             document.getElementById('hostAddress').textContent = location.host;
             document.title = 'WHEP Player | Strom | ' + location.host;
-            // Restore debug mode from previous session
+            // Restore debug and stats mode from previous session
             const debugRestored = restoreDebugMode('whep-debug');
             if (debugRestored) setWhepDebugMode(true);
+            try {
+                if (localStorage.getItem('whep-stats') === 'true') {
+                    document.getElementById('statsMode').checked = true;
+                    document.getElementById('statsPanel').style.display = 'block';
+                }
+            } catch (e) {}
             // Enumerate audio output devices
             deviceManager.enumerate();
             // Set endpoint from server-provided value
