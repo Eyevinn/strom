@@ -28,6 +28,15 @@ impl PipelineManager {
         self.thread_priority_state = Some(priority_state);
         info!("Thread priority handler installed");
 
+        // Populate session thread config so consumer-added callbacks can install
+        // sync handlers on dynamically created session pipelines (WHEP/WebRTC)
+        self.session_thread_config.populate(
+            self.properties.thread_priority,
+            self.assigned_cpus.clone(),
+            self.flow_id,
+            self.thread_registry.clone(),
+        );
+
         // Set up bus watch before starting
         info!("Setting up bus watch...");
         self.setup_bus_watch();

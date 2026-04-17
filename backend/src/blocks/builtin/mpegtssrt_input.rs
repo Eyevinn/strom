@@ -129,6 +129,26 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             })
             .unwrap_or(DEFAULT_SRT_LATENCY_MS);
 
+        // Get tsdemux latency (applies to tsdemux inside decodebin or in passthrough mode).
+        // GStreamer accepts -1..=i32::MAX; clamp to prevent i64→i32 truncation.
+        let tsdemux_latency = properties
+            .get("tsdemux_latency")
+            .and_then(|v| match v {
+                PropertyValue::UInt(u) => Some((*u).min(i32::MAX as u64) as i32),
+                PropertyValue::Int(i) => Some((*i).clamp(-1, i32::MAX as i64) as i32),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_TSDEMUX_LATENCY_MS);
+
+        // Get ignore-pcr setting (default true for live pipelines where SRT handles jitter)
+        let ignore_pcr = properties
+            .get("ignore_pcr")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(true);
+
         // Get number of video and audio tracks
         let num_video_tracks = properties
             .get("num_video_tracks")
@@ -159,8 +179,8 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         srtsrc.set_property("latency", latency);
 
         info!(
-            "SRT source configured: uri={}, latency={}ms",
-            srt_uri, latency
+            "SRT source configured: uri={}, latency={}ms, tsdemux_latency={}ms, ignore_pcr={}",
+            srt_uri, latency, tsdemux_latency, ignore_pcr
         );
 
         // Create demux/decode element
@@ -174,6 +194,27 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 .name(&id)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("decodebin: {}", e)))?;
+
+            // Catch tsdemux when decodebin creates it internally, and set its properties.
+            let instance_for_deep = instance_id.to_string();
+            element.connect("deep-element-added", false, move |args| {
+                let added: gst::Element = args[2].get().unwrap();
+                let factory = added.factory();
+                if let Some(f) = factory {
+                    if f.name() == "tsdemux" {
+                        added.set_property("latency", tsdemux_latency);
+                        if ignore_pcr && added.has_property("ignore-pcr") {
+                            added.set_property("ignore-pcr", true);
+                        }
+                        info!(
+                            "MPEGTSSRT Input {}: Set tsdemux latency={}ms, ignore-pcr={} (inside decodebin)",
+                            instance_for_deep, tsdemux_latency, ignore_pcr
+                        );
+                    }
+                }
+                None
+            });
+
             (id, element)
         } else {
             let id = format!("{}:tsdemux", instance_id);
@@ -181,6 +222,10 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 .name(&id)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("tsdemux: {}", e)))?;
+            element.set_property("latency", tsdemux_latency);
+            if ignore_pcr && element.has_property("ignore-pcr") {
+                element.set_property("ignore-pcr", true);
+            }
             (id, element)
         };
 
@@ -551,6 +596,32 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "latency".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "tsdemux_latency".to_string(),
+                label: "TS Demux Latency (ms)".to_string(),
+                description: "MPEG-TS demuxer latency in milliseconds. GStreamer defaults to 700ms for PCR synchronization; lower values reduce end-to-end latency in live pipelines.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(DEFAULT_TSDEMUX_LATENCY_MS as i64)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "tsdemux_latency".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "ignore_pcr".to_string(),
+                label: "Ignore PCR".to_string(),
+                description: "Ignore PCR (Program Clock Reference) timestamps in the MPEG-TS stream. Recommended for live pipelines where SRT already handles clock recovery and jitter. Disabling PCR avoids unnecessary timestamp adjustments.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ignore_pcr".to_string(),
                     transform: None,
                 },
                 live: false,

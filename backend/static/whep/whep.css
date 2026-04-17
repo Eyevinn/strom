@@ -123,6 +123,65 @@
     text-align: right;
 }
 
+/* Stats panel */
+.stats-panel {
+    margin-top: 16px;
+    padding: 12px;
+    background: #1b1b1b;
+    border: 1px solid #3d3d3d;
+    border-radius: 2px;
+    font-size: 11px;
+}
+
+.stats-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.stats-table th {
+    text-align: right;
+    color: #666;
+    font-weight: normal;
+    padding: 2px 8px;
+    font-size: 11px;
+}
+
+.stats-table th:first-child {
+    text-align: left;
+}
+
+.stats-table td {
+    padding: 2px 8px;
+    text-align: right;
+    color: #999;
+    font-variant-numeric: tabular-nums;
+}
+
+.stats-table .stats-label {
+    text-align: left;
+    color: #666;
+}
+
+.stats-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 8px;
+    color: #999;
+    font-variant-numeric: tabular-nums;
+}
+
+.stats-row .stats-label {
+    color: #666;
+}
+
+.stats-warn {
+    color: #cc7777;
+}
+
+.stats-caution {
+    color: #ccaa77;
+}
+
 /* Stream cards grid (streams page) */
 .streams-grid {
     display: grid;

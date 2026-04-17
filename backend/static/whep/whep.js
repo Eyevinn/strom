@@ -88,10 +88,17 @@ class WhepConnection {
         this.iceConfig = null;
         this.statsInterval = null;
         this._videoHealthInterval = null;
+        this._statsOverlayInterval = null;
         this._prevFramesDecoded = 0;
         this._prevPacketsLost = 0;
         this._frozenSince = 0;      // timestamp when freeze was first detected
         this._lossRecoveryPending = false;
+        // Previous snapshot for delta-based calculations (bitrate, fps, jitter buffer)
+        this._prevStatsSnapshot = null;
+        this._prevStatsTime = null;
+        // EMA-smoothed jitter buffer delays (reduces noise from 1s delta windows)
+        this._smoothedAudioJbuf = null;
+        this._smoothedVideoJbuf = null;
         // Short session ID for log correlation
         this._sessionId = Array.from(crypto.getRandomValues(new Uint8Array(3)),
             b => b.toString(16).padStart(2, '0')).join('');
@@ -570,6 +577,223 @@ class WhepConnection {
         }
     }
 
+    // Collect detailed WebRTC stats for the overlay panel.
+    // Returns a structured object with audio, video, and transport metrics.
+    async getDetailedStats() {
+        if (!this.peerConnection) return null;
+
+        try {
+            const stats = await this.peerConnection.getStats();
+            const now = performance.now();
+            const result = { audio: null, video: null, transport: null };
+
+            let audioBytesReceived = 0;
+            let videoBytesReceived = 0;
+            let audioJitterBufferDelay = 0;
+            let audioJitterBufferEmitted = 0;
+            let videoJitterBufferDelay = 0;
+            let videoJitterBufferEmitted = 0;
+
+            stats.forEach(report => {
+                if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+                    audioBytesReceived = report.bytesReceived || 0;
+                    audioJitterBufferDelay = report.jitterBufferDelay || 0;
+                    audioJitterBufferEmitted = report.jitterBufferEmittedCount || 0;
+                    result.audio = {
+                        jitter: report.jitter != null ? report.jitter * 1000 : null, // ms
+                        jitterBufferDelay: null, // computed below from deltas
+                        packetsReceived: report.packetsReceived || 0,
+                        packetsLost: report.packetsLost || 0,
+                        codec: null,
+                        bitrate: null,
+                        bytesReceived: audioBytesReceived,
+                        codecId: report.codecId || null,
+                        // Raw cumulative values for delta-based jitter buffer calculation
+                        _jbufDelayCum: audioJitterBufferDelay,
+                        _jbufEmittedCum: audioJitterBufferEmitted,
+                    };
+                }
+
+                if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                    videoBytesReceived = report.bytesReceived || 0;
+                    videoJitterBufferDelay = report.jitterBufferDelay || 0;
+                    videoJitterBufferEmitted = report.jitterBufferEmittedCount || 0;
+                    result.video = {
+                        jitter: report.jitter != null ? report.jitter * 1000 : null, // ms
+                        jitterBufferDelay: null, // computed below from deltas
+                        packetsReceived: report.packetsReceived || 0,
+                        packetsLost: report.packetsLost || 0,
+                        framesDecoded: report.framesDecoded || 0,
+                        framesDropped: report.framesDropped || 0,
+                        framesReceived: report.framesReceived || 0,
+                        frameWidth: report.frameWidth || null,
+                        frameHeight: report.frameHeight || null,
+                        nackCount: report.nackCount || 0,
+                        pliCount: report.pliCount || 0,
+                        firCount: report.firCount || 0,
+                        codec: null,
+                        bitrate: null,
+                        fps: null,
+                        bytesReceived: videoBytesReceived,
+                        codecId: report.codecId || null,
+                        // Raw cumulative values for delta-based jitter buffer calculation
+                        _jbufDelayCum: videoJitterBufferDelay,
+                        _jbufEmittedCum: videoJitterBufferEmitted,
+                    };
+                }
+
+                if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+                    result.transport = {
+                        rtt: report.currentRoundTripTime != null
+                            ? report.currentRoundTripTime * 1000 : null, // ms
+                    };
+                }
+            });
+
+            // Resolve codec names from codec reports
+            stats.forEach(report => {
+                if (report.type === 'codec') {
+                    if (result.audio && result.audio.codecId === report.id) {
+                        result.audio.codec = report.mimeType ? report.mimeType.replace('audio/', '') : null;
+                    }
+                    if (result.video && result.video.codecId === report.id) {
+                        result.video.codec = report.mimeType ? report.mimeType.replace('video/', '') : null;
+                    }
+                }
+            });
+
+            // Calculate delta-based metrics (bitrate, fps, jitter buffer) from previous snapshot.
+            // jitterBufferDelay and jitterBufferEmittedCount are cumulative counters —
+            // dividing cumulative totals gives a session-wide average dominated by initial
+            // buffering. Delta-based calculation shows the actual current jitter buffer level.
+            // EMA smoothing (alpha=0.3) reduces noise from 1-second delta windows.
+            const EMA_ALPHA = 0.3;
+            if (this._prevStatsSnapshot && this._prevStatsTime) {
+                const dt = (now - this._prevStatsTime) / 1000; // seconds
+                if (dt > 0) {
+                    if (result.audio && this._prevStatsSnapshot.audio) {
+                        const dBytes = result.audio.bytesReceived - this._prevStatsSnapshot.audio.bytesReceived;
+                        result.audio.bitrate = Math.round((dBytes * 8) / (dt * 1000)); // kbps
+                        const dJbuf = result.audio._jbufDelayCum - this._prevStatsSnapshot.audio._jbufDelayCum;
+                        const dEmitted = result.audio._jbufEmittedCum - this._prevStatsSnapshot.audio._jbufEmittedCum;
+                        if (dEmitted > 0) {
+                            const raw = (dJbuf / dEmitted) * 1000; // ms
+                            this._smoothedAudioJbuf = this._smoothedAudioJbuf != null
+                                ? EMA_ALPHA * raw + (1 - EMA_ALPHA) * this._smoothedAudioJbuf
+                                : raw;
+                            result.audio.jitterBufferDelay = this._smoothedAudioJbuf;
+                        }
+                    }
+                    if (result.video && this._prevStatsSnapshot.video) {
+                        const dBytes = result.video.bytesReceived - this._prevStatsSnapshot.video.bytesReceived;
+                        result.video.bitrate = Math.round((dBytes * 8) / (dt * 1000)); // kbps
+                        const dFrames = result.video.framesDecoded - this._prevStatsSnapshot.video.framesDecoded;
+                        result.video.fps = Math.round(dFrames / dt);
+                        const dJbuf = result.video._jbufDelayCum - this._prevStatsSnapshot.video._jbufDelayCum;
+                        const dEmitted = result.video._jbufEmittedCum - this._prevStatsSnapshot.video._jbufEmittedCum;
+                        if (dEmitted > 0) {
+                            const raw = (dJbuf / dEmitted) * 1000; // ms
+                            this._smoothedVideoJbuf = this._smoothedVideoJbuf != null
+                                ? EMA_ALPHA * raw + (1 - EMA_ALPHA) * this._smoothedVideoJbuf
+                                : raw;
+                            result.video.jitterBufferDelay = this._smoothedVideoJbuf;
+                        }
+                    }
+                }
+            }
+
+            // A/V sync estimate: difference in jitter buffer delays
+            if (result.audio && result.video &&
+                result.audio.jitterBufferDelay != null && result.video.jitterBufferDelay != null) {
+                result.avSyncOffset = result.audio.jitterBufferDelay - result.video.jitterBufferDelay; // ms
+            } else {
+                result.avSyncOffset = null;
+            }
+
+            this._prevStatsSnapshot = result;
+            this._prevStatsTime = now;
+
+            return result;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Start periodic stats collection for the overlay panel.
+    // Calls onStats callback every second with detailed metrics.
+    startStatsOverlay() {
+        this.stopStatsOverlay();
+        // Reset delta baseline so first reading gets bitrate on second tick
+        this._prevStatsSnapshot = null;
+        this._prevStatsTime = null;
+        this._smoothedAudioJbuf = null;
+        this._smoothedVideoJbuf = null;
+        this._statsRelayTick = 0;
+
+        this._statsOverlayInterval = setInterval(async () => {
+            if (!this.isConnected()) return;
+            const stats = await this.getDetailedStats();
+            if (stats && this.callbacks.onStats) {
+                this.callbacks.onStats(stats);
+            }
+            // Relay full stats to server every 5s (only when debug is also enabled)
+            this._statsRelayTick++;
+            if (stats && whepDebugMode && this._statsRelayTick % 5 === 0) {
+                this._relayStats(stats);
+            }
+        }, 1000);
+    }
+
+    stopStatsOverlay() {
+        if (this._statsOverlayInterval) {
+            clearInterval(this._statsOverlayInterval);
+            this._statsOverlayInterval = null;
+        }
+    }
+
+    // Relay structured media stats to the server via /api/client-log.
+    // Sent as a single JSON-formatted log line so the server can parse it.
+    _relayStats(stats) {
+        const s = {};
+        if (stats.audio) {
+            s.audio = {
+                bitrate_kbps: stats.audio.bitrate,
+                jitter_buffer_ms: stats.audio.jitterBufferDelay != null ? Math.round(stats.audio.jitterBufferDelay) : null,
+                jitter_ms: stats.audio.jitter != null ? +stats.audio.jitter.toFixed(1) : null,
+                packets_received: stats.audio.packetsReceived,
+                packets_lost: stats.audio.packetsLost,
+                codec: stats.audio.codec,
+            };
+        }
+        if (stats.video) {
+            s.video = {
+                bitrate_kbps: stats.video.bitrate,
+                jitter_buffer_ms: stats.video.jitterBufferDelay != null ? Math.round(stats.video.jitterBufferDelay) : null,
+                jitter_ms: stats.video.jitter != null ? +stats.video.jitter.toFixed(1) : null,
+                packets_received: stats.video.packetsReceived,
+                packets_lost: stats.video.packetsLost,
+                codec: stats.video.codec,
+                resolution: stats.video.frameWidth && stats.video.frameHeight
+                    ? stats.video.frameWidth + 'x' + stats.video.frameHeight : null,
+                fps: stats.video.fps,
+                frames_dropped: stats.video.framesDropped,
+                nack_count: stats.video.nackCount,
+                pli_count: stats.video.pliCount,
+            };
+        }
+        if (stats.transport) {
+            s.rtt_ms = stats.transport.rtt != null ? +stats.transport.rtt.toFixed(1) : null;
+        }
+        if (stats.avSyncOffset != null) {
+            s.av_sync_offset_ms = Math.round(stats.avSyncOffset);
+        }
+        fetch('/api/client-log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify([{ msg: '[MEDIA-STATS] ' + JSON.stringify(s), level: 'info' }]),
+        }).catch(() => {});
+    }
+
     _updateStatus() {
         if (!this.peerConnection) return;
         const state = this.peerConnection.iceConnectionState;
@@ -605,6 +829,7 @@ class WhepConnection {
             this.statsInterval = null;
         }
         this._stopVideoHealthMonitor();
+        this.stopStatsOverlay();
 
         if (this.peerConnection) {
             this.peerConnection.close();

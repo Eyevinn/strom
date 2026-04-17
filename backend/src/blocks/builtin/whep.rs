@@ -835,6 +835,17 @@ fn build_whepserversink(
 
     info!("WHEP Output mode: {:?}", mode);
 
+    // Timestamp offset in milliseconds. A negative value shifts playout earlier,
+    // reducing end-to-end latency for this output while maintaining A/V sync.
+    // Applied as ts-offset on clocksync and appsink inside whepserversink.
+    let ts_offset_ms = properties
+        .get("ts_offset_ms")
+        .and_then(|v| match v {
+            PropertyValue::Int(i) => Some(*i),
+            _ => None,
+        })
+        .unwrap_or(0);
+
     // Get endpoint_id (user-configurable, defaults to UUID)
     let endpoint_id = properties
         .get("endpoint_id")
@@ -908,6 +919,70 @@ fn build_whepserversink(
     let host_addr = format!("http://127.0.0.1:{}", internal_port);
     signaller.set_property("host-addr", &host_addr);
 
+    // Shift playout timing on clocksync and appsink inside whepserversink.
+    // A negative ts_offset_ms makes this output release buffers earlier:
+    //  - clocksync: negative ts-offset shifts its clock wait earlier
+    //  - appsink: negative ts-offset shifts BaseSink's clock wait earlier
+    //    (BaseSink formula: wait = running_time + latency + ts_offset)
+    // ts-offset does NOT affect the latency query, so pipeline latency is
+    // unchanged. Both elements keep sync=true — only the playout point shifts.
+    //
+    // Properties are applied via a deferred pad probe because webrtcsink's
+    // StreamProducer configures these elements AFTER deep-element-added fires,
+    // using direct C API calls that bypass g_object_notify.
+    if ts_offset_ms != 0 {
+        let ts_offset_ns = ts_offset_ms.saturating_mul(1_000_000);
+        let instance_id_for_ts = instance_id.to_string();
+
+        fn defer_ts_offset(element: &gst::Element, ts_offset_ns: i64, instance_id: &str) {
+            if let Some(pad) = element.static_pad("sink") {
+                let iid = instance_id.to_string();
+                let name = element.name().to_string();
+                pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, _info| {
+                    if let Some(el) = pad.parent_element() {
+                        el.set_property("ts-offset", ts_offset_ns);
+                        info!(
+                            "WHEP Output {}: Set ts-offset={}ns on {} (deferred)",
+                            iid, ts_offset_ns, name
+                        );
+                    }
+                    gst::PadProbeReturn::Remove
+                });
+            }
+        }
+
+        if let Ok(bin) = whepserversink.clone().downcast::<gst::Bin>() {
+            for element in bin.iterate_recurse().into_iter().flatten() {
+                let factory_name = element
+                    .factory()
+                    .map(|f| f.name().to_string())
+                    .unwrap_or_default();
+                if (factory_name == "clocksync" || factory_name == "appsink")
+                    && element.has_property("ts-offset")
+                {
+                    defer_ts_offset(&element, ts_offset_ns, &instance_id_for_ts);
+                }
+            }
+            bin.connect("deep-element-added", false, move |args| {
+                let added: gst::Element = args[2].get().unwrap();
+                let factory_name = added
+                    .factory()
+                    .map(|f| f.name().to_string())
+                    .unwrap_or_default();
+                if (factory_name == "clocksync" || factory_name == "appsink")
+                    && added.has_property("ts-offset")
+                {
+                    defer_ts_offset(&added, ts_offset_ns, &instance_id_for_ts);
+                }
+                None
+            });
+        }
+        info!(
+            "WHEP Output: ts-offset={}ms applied to clocksync and appsink elements",
+            ts_offset_ms
+        );
+    }
+
     // Configure audio/video caps based on mode.
     // Video caps will be set dynamically when we detect the input codec.
     if !mode.has_audio() {
@@ -916,6 +991,27 @@ fn build_whepserversink(
     if !mode.has_video() {
         whepserversink.set_property("video-caps", gst::Caps::new_empty());
     }
+
+    // Install thread priority on session pipelines via pad probes.
+    //
+    // consumer-pipeline-created fires BEFORE webrtcsink sets its bus sync handler,
+    // giving us the session pipeline to connect deep-element-added. Each element
+    // gets a one-shot EVENT_DOWNSTREAM probe that sets thread priority on the
+    // streaming thread.
+    //
+    // We cannot use a bus sync handler because webrtcsink's own handler returns
+    // BusSyncReply::Drop and routes all messages through an internal channel.
+    // Replacing it breaks session lifecycle (sessions never terminate).
+    let session_thread_config = ctx.session_thread_config();
+    whepserversink.connect("consumer-pipeline-created", false, move |values| {
+        if !session_thread_config.is_active() {
+            return None;
+        }
+        let consumer_id = values[1].get::<String>().unwrap_or_default();
+        let pipeline = values[2].get::<gst::Pipeline>().unwrap();
+        session_thread_config.install_on_session_pipeline(&pipeline, &consumer_id);
+        None
+    });
 
     // WORKAROUND #1: Relax transceiver codec-preferences BEFORE SDP offer is processed.
     //
@@ -2004,6 +2100,19 @@ fn whep_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "endpoint_id".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "ts_offset_ms".to_string(),
+                label: "TS Offset (ms)".to_string(),
+                description: "Timestamp offset for playout timing. A negative value (e.g. -200) makes this output release buffers earlier than the pipeline latency dictates. A/V sync is maintained — only the playout point shifts. Useful for multiview outputs that should display with minimal delay.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ts_offset_ms".to_string(),
                     transform: None,
                 },
                 live: false,

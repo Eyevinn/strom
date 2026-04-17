@@ -33,8 +33,12 @@ pub(super) fn make_audiomixer(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("audiomixer {}: {}", name, e)))?;
 
-    // start-time-selection=first: use first buffer's timestamp as start time
-    mixer.set_property_from_str("start-time-selection", "first");
+    // start-time-selection=zero: match compositor behaviour so A/V stay in sync
+    // when audio and video pass through separate aggregators.  Also avoids a
+    // GStreamer 1.26 race where the srcpad task can run before any buffer arrives,
+    // causing the aggregator to pick the absolute monotonic clock time as start
+    // time and wait for an impossibly far deadline.
+    mixer.set_property_from_str("start-time-selection", "zero");
 
     // latency: aggregator timeout in nanoseconds
     let latency_ns = latency_ms * 1_000_000;

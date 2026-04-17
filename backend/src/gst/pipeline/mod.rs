@@ -180,6 +180,9 @@ pub struct PipelineManager {
     /// CPU set assigned by AffinityManager for SingleCore affinity (None for Off).
     /// Contains all logical CPUs (hyperthreads) of the allocated physical core.
     assigned_cpus: Option<Vec<usize>>,
+    /// Shared thread config for dynamic session pipelines (WHEP/WebRTC).
+    /// Populated in start() so consumer-added callbacks can install sync handlers.
+    session_thread_config: crate::gst::SessionThreadConfig,
     /// Cached pipeline state to avoid querying async sinks during initialization
     cached_state: std::sync::Arc<std::sync::RwLock<PipelineState>>,
     /// QoS statistics aggregator (collects and periodically broadcasts QoS events)

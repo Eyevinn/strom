@@ -1,6 +1,7 @@
 //! Block builder trait for runtime GStreamer element creation.
 
 use crate::events::EventBroadcaster;
+use crate::gst::SessionThreadConfig;
 use crate::whip_registry::WhipRegistry;
 use crate::whip_session_manager::WhipEndpointConfig;
 use gstreamer as gst;
@@ -142,6 +143,8 @@ pub struct BlockBuildContext {
     whip_registry: Option<WhipRegistry>,
     /// Element signal setup functions queued for connection at pipeline start
     element_setups: RefCell<Vec<ElementSetupFn>>,
+    /// Thread priority config for dynamically created session pipelines (WHEP/WebRTC)
+    session_thread_config: SessionThreadConfig,
 }
 
 impl BlockBuildContext {
@@ -156,6 +159,7 @@ impl BlockBuildContext {
             dynamic_webrtcbins: Arc::new(Mutex::new(HashMap::new())),
             whip_registry: None,
             element_setups: RefCell::new(Vec::new()),
+            session_thread_config: SessionThreadConfig::new(),
         }
     }
 
@@ -165,6 +169,7 @@ impl BlockBuildContext {
         ice_transport_policy: String,
         dynamic_webrtcbins: DynamicWebrtcbinStore,
         whip_registry: Option<WhipRegistry>,
+        session_thread_config: SessionThreadConfig,
     ) -> Self {
         Self {
             whep_endpoints: RefCell::new(Vec::new()),
@@ -175,6 +180,7 @@ impl BlockBuildContext {
             dynamic_webrtcbins,
             whip_registry,
             element_setups: RefCell::new(Vec::new()),
+            session_thread_config,
         }
     }
 
@@ -187,6 +193,11 @@ impl BlockBuildContext {
     /// Get the WHIP endpoint registry (if available).
     pub fn whip_registry(&self) -> Option<&WhipRegistry> {
         self.whip_registry.as_ref()
+    }
+
+    /// Get the session thread config for installing thread priority on session pipelines.
+    pub fn session_thread_config(&self) -> SessionThreadConfig {
+        self.session_thread_config.clone()
     }
 
     /// Register a dynamically created webrtcbin (called from consumer-added callbacks).

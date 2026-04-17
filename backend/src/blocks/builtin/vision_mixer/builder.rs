@@ -291,6 +291,7 @@ fn build_gpu_pipeline(
     // Queue to decouple tee_pgm from the multiview compositor (separate thread)
     let q_pgm_mv_id = p.id("queue_pgm_mv");
     let queue_pgm_mv = elements::make_queue(&q_pgm_mv_id)?;
+    elements::suppress_latency_query(&queue_pgm_mv);
     elems.push((q_pgm_mv_id.clone(), queue_pgm_mv));
 
     // DSK input element chains (elements only, links to mixer added later after video inputs)
@@ -384,9 +385,9 @@ fn build_gpu_pipeline(
     let appsrc_overlay = gst_app::AppSrc::builder()
         .name(&appsrc_overlay_id)
         .format(gst::Format::Time)
-        .is_live(true)
+        .is_live(false)
         .automatic_eos(false)
-        .do_timestamp(false)
+        .do_timestamp(true)
         .max_buffers(2)
         .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();
@@ -605,6 +606,7 @@ fn build_cpu_pipeline(
     let queue_pgm_mv = elements::make_queue(&q_pgm_mv_id)?;
     queue_pgm_mv.set_property_from_str("leaky", "upstream");
     queue_pgm_mv.set_property("max-size-buffers", 1u32);
+    elements::suppress_latency_query(&queue_pgm_mv);
     let cf_pgm_mv_id = p.id("capsfilter_pgm_mv");
     let capsfilter_pgm_mv = gst::ElementFactory::make("capsfilter")
         .name(&cf_pgm_mv_id)
@@ -696,9 +698,9 @@ fn build_cpu_pipeline(
     let appsrc_overlay = gst_app::AppSrc::builder()
         .name(&appsrc_overlay_id)
         .format(gst::Format::Time)
-        .is_live(true)
+        .is_live(false)
         .automatic_eos(false)
-        .do_timestamp(false)
+        .do_timestamp(true)
         .max_buffers(2)
         .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();
@@ -1085,8 +1087,12 @@ fn setup_overlay_renderer(
 
     let block_id_for_timer = block_id.clone();
     let renderer_for_timer = Arc::clone(&renderer);
+    let mv_framerate = p.mv_framerate;
     ctx.register_element_setup(Box::new(move |_flow_id, _events| {
-        // Start 1Hz timer for clock updates; also pushes initial frame
-        overlay::start_overlay_timer(block_id_for_timer.clone(), renderer_for_timer.clone());
+        overlay::start_overlay_timer(
+            block_id_for_timer.clone(),
+            renderer_for_timer.clone(),
+            mv_framerate,
+        );
     }));
 }

@@ -2,8 +2,10 @@
 //!
 //! The overlay is rendered to a BGRA buffer and pushed via appsrc into the
 //! multiview compositor as a separate input pad. The compositor composites it
-//! in GPU/software as a texture at high zorder. Rendering only happens when
-//! state changes (~1/sec for clock, rare PGM/PVW switches).
+//! in GPU/software as a texture at high zorder. Buffers are pushed at the
+//! multiview framerate to keep the compositor fed; re-rendering only happens
+//! when state changes (PGM/PVW switches, clock tick). Non-dirty frames
+//! re-push the last pixel data in a zero-copy buffer (Arc refcount bump).
 
 use super::layout::OverlayLayout;
 use gstreamer as gst;
@@ -310,8 +312,9 @@ fn draw_label_centered(
 
 /// Renders the multiview overlay to BGRA buffers and pushes them via appsrc.
 ///
-/// The compositor holds the last buffer on the overlay pad until a new one
-/// arrives, so we only push when state changes. Zero per-frame cost.
+/// Pushes at the multiview framerate so the compositor always has a current
+/// buffer on the overlay pad. Only re-renders when state actually changes;
+/// otherwise re-pushes the last pixel data in a new zero-copy buffer.
 pub struct OverlayRenderer {
     pub appsrc: gst_app::AppSrc,
     caps: gst::Caps,
@@ -319,6 +322,9 @@ pub struct OverlayRenderer {
     width: i32,
     height: i32,
     surface: Option<cairo::ImageSurface>,
+    /// Last rendered pixel data, shared via Arc so repush can wrap it in a
+    /// new GstBuffer without copying the pixel bytes (only Arc refcount bump).
+    last_overlay_data: Option<Arc<[u8]>>,
     last_pgm: u64,
     last_pvw: u64,
     last_bg: u64,
@@ -346,6 +352,7 @@ impl OverlayRenderer {
             width,
             height,
             surface: None,
+            last_overlay_data: None,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
             last_bg: u64::MAX - 1,
@@ -354,7 +361,11 @@ impl OverlayRenderer {
         }
     }
 
-    /// Render overlay and push to appsrc if state changed. Returns true if pushed.
+    /// Render overlay if state changed, then push to appsrc.
+    ///
+    /// Always pushes a frame (re-pushing the last sample if nothing changed)
+    /// so the multiview compositor has a steady stream of overlay buffers and
+    /// does not stall waiting for the overlay pad.
     pub fn render_if_dirty(&mut self) -> bool {
         let pgm_packed = self.state.pgm_group_packed();
         let pvw_packed = self.state.pvw_group_packed();
@@ -363,40 +374,40 @@ impl OverlayRenderer {
         let (h, m, s) = self.state.wall_clock_hms();
         let clock_secs = h as u64 * 3600 + m as u64 * 60 + s as u64;
 
-        if self.last_pgm == pgm_packed
-            && self.last_pvw == pvw_packed
-            && self.last_bg == bg_packed
-            && self.last_ftb == ftb
-            && self.last_clock_secs == clock_secs
-        {
-            return false;
-        }
+        let dirty = self.last_pgm != pgm_packed
+            || self.last_pvw != pvw_packed
+            || self.last_bg != bg_packed
+            || self.last_ftb != ftb
+            || self.last_clock_secs != clock_secs;
 
-        let pgm_group = vision_mixer::unpack_source_group(pgm_packed);
-        let pvw_group = vision_mixer::unpack_source_group(pvw_packed);
-        let bg = self.state.background_input();
+        if dirty {
+            let pgm_group = vision_mixer::unpack_source_group(pgm_packed);
+            let pvw_group = vision_mixer::unpack_source_group(pvw_packed);
+            let bg = self.state.background_input();
 
-        let t0 = std::time::Instant::now();
-        let pushed = self.push_frame(&pgm_group, &pvw_group, bg, ftb, h, m, s);
-        let elapsed = t0.elapsed();
-        debug!(
-            "Overlay render+push: {:.1}ms (pgm={:?}, pvw={:?}, ftb={}, pushed={})",
-            elapsed.as_secs_f64() * 1000.0,
-            pgm_group,
-            pvw_group,
-            ftb,
+            let t0 = std::time::Instant::now();
+            let pushed = self.push_frame(&pgm_group, &pvw_group, bg, ftb, h, m, s);
+            let elapsed = t0.elapsed();
+            debug!(
+                "Overlay render+push: {:.1}ms (pgm={:?}, pvw={:?}, ftb={}, pushed={})",
+                elapsed.as_secs_f64() * 1000.0,
+                pgm_group,
+                pvw_group,
+                ftb,
+                pushed
+            );
+
+            if pushed {
+                self.last_pgm = pgm_packed;
+                self.last_pvw = pvw_packed;
+                self.last_bg = bg_packed;
+                self.last_ftb = ftb;
+                self.last_clock_secs = clock_secs;
+            }
             pushed
-        );
-
-        if pushed {
-            self.last_pgm = pgm_packed;
-            self.last_pvw = pvw_packed;
-            self.last_bg = bg_packed;
-            self.last_ftb = ftb;
-            self.last_clock_secs = clock_secs;
-            true
         } else {
-            false
+            // Not dirty — re-push the last sample to keep the compositor fed
+            self.repush_last_sample()
         }
     }
 
@@ -443,36 +454,35 @@ impl OverlayRenderer {
 
         let pushed = (|| -> Option<()> {
             let data = surface.data().ok()?;
-            let mut buffer = gst::Buffer::with_size(buf_size).ok()?;
-            {
-                let buf_ref = buffer.get_mut()?;
-                let mut map = buf_ref.map_writable().ok()?;
-                let dst = map.as_mut_slice();
-                // No R↔B swap needed — render_overlay uses swapped colors so that
-                // cairo's BGRA memory layout produces correct RGBA output directly.
-                if cairo_stride == row_bytes {
-                    dst[..buf_size].copy_from_slice(&data[..buf_size]);
-                } else {
-                    for y in 0..self.height as usize {
-                        let src = y * cairo_stride;
-                        let d = y * row_bytes;
-                        dst[d..d + row_bytes]
-                            .copy_from_slice(&data[src..src + row_bytes]);
-                    }
+            // Copy cairo pixel data into a Vec, then share via Arc<[u8]> so
+            // repush_last_sample can wrap it in a new buffer without copying.
+            let mut pixel_data = vec![0u8; buf_size];
+            // No R↔B swap needed — render_overlay uses swapped colors so that
+            // cairo's BGRA memory layout produces correct RGBA output directly.
+            if cairo_stride == row_bytes {
+                pixel_data[..buf_size].copy_from_slice(&data[..buf_size]);
+            } else {
+                for y in 0..self.height as usize {
+                    let src = y * cairo_stride;
+                    let d = y * row_bytes;
+                    pixel_data[d..d + row_bytes]
+                        .copy_from_slice(&data[src..src + row_bytes]);
                 }
             }
 
+            let shared_data: Arc<[u8]> = pixel_data.into();
+            self.last_overlay_data = Some(shared_data.clone());
+
             let t_copy = t0.elapsed();
 
-            // Set PTS=0 so the compositor renders the overlay immediately
-            // instead of waiting for the pipeline latency to elapse.
-            // The overlay is a static frame (borders/labels) that should
-            // reflect state changes instantly, not be synced to video time.
-            {
-                let buf_ref = buffer.get_mut()?;
-                buf_ref.set_pts(gst::ClockTime::ZERO);
-            }
+            // do-timestamp=true on the appsrc sets PTS to the current
+            // pipeline running time automatically. Do NOT set PTS=0 here —
+            // that makes the compositor see the overlay as perpetually stale,
+            // causing it to wait up to its full deadline on every frame.
 
+            // Buffer wraps the Arc'd data (no copy). Buffer refcount is 1 so
+            // BaseSrc can set PTS via do-timestamp without triggering a copy.
+            let buffer = gst::Buffer::from_slice(shared_data);
             let sample = gst::Sample::builder()
                 .buffer(&buffer)
                 .caps(&self.caps)
@@ -497,6 +507,24 @@ impl OverlayRenderer {
 
         self.surface = Some(surface);
         pushed
+    }
+
+    /// Re-push the last overlay frame without re-rendering.
+    ///
+    /// Creates a new GstBuffer wrapping the shared pixel data (Arc refcount
+    /// bump only — no pixel copy). The new buffer has refcount=1, so BaseSrc's
+    /// do-timestamp can set PTS without triggering make_writable copies.
+    fn repush_last_sample(&self) -> bool {
+        if let Some(ref data) = self.last_overlay_data {
+            let buffer = gst::Buffer::from_slice(data.clone());
+            let sample = gst::Sample::builder()
+                .buffer(&buffer)
+                .caps(&self.caps)
+                .build();
+            self.appsrc.push_sample(&sample).is_ok()
+        } else {
+            false
+        }
     }
 }
 
@@ -544,9 +572,20 @@ pub fn trigger_overlay_update(block_id: &str) {
     }
 }
 
-/// Start the 1Hz clock timer for overlay updates.
+/// Start the overlay push timer.
+///
+/// Pushes at the multiview framerate so the compositor always has a current
+/// buffer on the overlay pad. Only re-renders when state actually changes
+/// (PGM/PVW switch, clock tick); otherwise re-pushes the last sample.
 /// The thread stops when the renderer is unregistered (flow stop).
-pub fn start_overlay_timer(block_id: String, renderer: Arc<Mutex<OverlayRenderer>>) {
+pub fn start_overlay_timer(
+    block_id: String,
+    renderer: Arc<Mutex<OverlayRenderer>>,
+    mv_framerate: (i32, i32),
+) {
+    let frame_interval = std::time::Duration::from_nanos(
+        (mv_framerate.1 as u64 * 1_000_000_000) / mv_framerate.0.max(1) as u64,
+    );
     std::thread::Builder::new()
         .name(format!(
             "overlay-timer-{}",
@@ -575,8 +614,20 @@ pub fn start_overlay_timer(block_id: String, renderer: Arc<Mutex<OverlayRenderer
             if let Ok(mut r) = renderer.lock() {
                 r.render_if_dirty();
             }
+            // Deadline-based loop: advance by frame_interval per tick so that
+            // render/push time doesn't accumulate as drift.
+            let mut next_tick = std::time::Instant::now();
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                next_tick += frame_interval;
+                let now = std::time::Instant::now();
+                if next_tick > now {
+                    std::thread::sleep(next_tick - now);
+                } else if now - next_tick > frame_interval {
+                    // Fell behind by more than one frame (mutex contention,
+                    // system sleep, etc.) — skip missed ticks instead of
+                    // spinning a catch-up burst.
+                    next_tick = now;
+                }
                 if get_overlay_renderer(&block_id).is_none() {
                     debug!("Overlay timer stopping for {}", block_id);
                     break;

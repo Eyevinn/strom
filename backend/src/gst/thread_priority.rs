@@ -453,6 +453,198 @@ fn set_thread_cpu_affinity(_thread_id: u64, _cpus: &[usize]) -> Result<(), Strin
     Ok(())
 }
 
+/// Shared thread priority configuration for dynamically created session pipelines.
+///
+/// Created at block-build time (empty), populated in `PipelineManager::start()`,
+/// and read by signal callbacks when WebRTC sessions are created.
+///
+/// webrtcsink's internal session pipelines set their own bus sync handler
+/// (returning `BusSyncReply::Drop` and routing messages through an internal
+/// channel). We cannot replace or chain that handler without breaking session
+/// lifecycle. Instead, we use one-shot `EVENT_DOWNSTREAM` pad probes on each
+/// element's sink pad — the probe callback runs on the streaming thread,
+/// letting us set priority and register the thread in the same context a
+/// sync handler would.
+#[derive(Clone, Default)]
+pub struct SessionThreadConfig(Arc<std::sync::OnceLock<SessionThreadConfigInner>>);
+
+struct SessionThreadConfigInner {
+    priority: ThreadPriority,
+    assigned_cpus: Option<Vec<usize>>,
+    flow_id: FlowId,
+    thread_registry: Option<ThreadRegistry>,
+}
+
+impl SessionThreadConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Populate the config with thread priority settings.
+    /// Must be called before the pipeline reaches PLAYING (i.e. before sessions are created).
+    pub fn populate(
+        &self,
+        priority: ThreadPriority,
+        assigned_cpus: Option<Vec<usize>>,
+        flow_id: FlowId,
+        thread_registry: Option<ThreadRegistry>,
+    ) {
+        let _ = self.0.set(SessionThreadConfigInner {
+            priority,
+            assigned_cpus,
+            flow_id,
+            thread_registry,
+        });
+    }
+
+    /// Returns true if thread priority or registration is configured.
+    pub fn is_active(&self) -> bool {
+        let Some(config) = self.0.get() else {
+            return false;
+        };
+        !matches!(config.priority, ThreadPriority::Normal)
+            || config.assigned_cpus.is_some()
+            || config.thread_registry.is_some()
+    }
+
+    /// Install pad-probe-based thread priority on a session pipeline.
+    ///
+    /// Call this from the `consumer-pipeline-created` signal handler, which
+    /// fires before webrtcsink sets its own bus sync handler. We connect to
+    /// `deep-element-added` on the pipeline so that every element that is
+    /// added gets a one-shot `EVENT_DOWNSTREAM` probe on its sink pad. The
+    /// probe fires on the streaming thread — we set priority, CPU affinity,
+    /// and register the thread, then remove the probe.
+    pub fn install_on_session_pipeline(&self, pipeline: &gst::Pipeline, session_id: &str) {
+        let Some(config) = self.0.get() else {
+            warn!(
+                "SessionThreadConfig not yet populated when session {} was created",
+                session_id
+            );
+            return;
+        };
+
+        if !self.is_active() {
+            return;
+        }
+
+        info!(
+            "Installing pad-probe thread priority on session pipeline '{}' for session {} \
+             (priority: {:?}, cpus: {:?})",
+            pipeline.name(),
+            session_id,
+            config.priority,
+            config.assigned_cpus
+        );
+
+        let priority = config.priority;
+        let assigned_cpus = config.assigned_cpus.clone();
+        let flow_id = config.flow_id;
+        let thread_registry = config.thread_registry.clone();
+        let pipeline_name = pipeline.name().to_string();
+
+        // Track which native thread IDs have already been configured so we
+        // don't set priority twice when multiple pads share a thread.
+        let configured_threads: Arc<std::sync::Mutex<std::collections::HashSet<u64>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+
+        let if_bin = pipeline
+            .clone()
+            .upcast::<gst::Element>()
+            .downcast::<gst::Bin>();
+        let Ok(bin) = if_bin else {
+            return;
+        };
+
+        bin.connect("deep-element-added", false, move |args| {
+            let added: gst::Element = args[2].get().unwrap();
+
+            let sink_pad = added.static_pad("sink")?;
+
+            let priority = priority;
+            let assigned_cpus = assigned_cpus.clone();
+            let flow_id = flow_id;
+            let thread_registry = thread_registry.clone();
+            let pipeline_name = pipeline_name.clone();
+            let configured = configured_threads.clone();
+            let element_name = added.name().to_string();
+
+            sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, _info| {
+                let thread_id = get_current_thread_native_id();
+
+                // Skip if this thread was already configured (multiple pads
+                // can share the same streaming thread).
+                {
+                    let mut set = configured.lock().unwrap();
+                    if !set.insert(thread_id) {
+                        return gst::PadProbeReturn::Remove;
+                    }
+                }
+
+                // Set thread priority
+                if !matches!(priority, ThreadPriority::Normal) {
+                    match set_current_thread_priority(priority) {
+                        Ok(()) => {
+                            info!(
+                                "Set {:?} priority for session thread {} (element: {}, pipeline: {})",
+                                priority, thread_id, element_name, pipeline_name
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to set {:?} priority for session thread {} (element: {}, pipeline: {}): {}",
+                                priority, thread_id, element_name, pipeline_name, e
+                            );
+                        }
+                    }
+                }
+
+                // Set CPU affinity
+                let actual_pinned_cpus = if let Some(ref cpus) = assigned_cpus {
+                    match set_thread_cpu_affinity(thread_id, cpus) {
+                        Ok(()) => {
+                            info!(
+                                "Set CPU affinity {:?} for session thread {} (element: {}, pipeline: {})",
+                                cpus, thread_id, element_name, pipeline_name
+                            );
+                            Some(cpus.clone())
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to set CPU affinity for session thread {} (element: {}, pipeline: {}): {}",
+                                thread_id, element_name, pipeline_name, e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Register in thread registry
+                if let Some(ref registry) = thread_registry {
+                    let block_id = if element_name.contains(':') {
+                        element_name.split(':').next().map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+                    registry.register(
+                        thread_id,
+                        element_name.clone(),
+                        flow_id,
+                        block_id,
+                        actual_pinned_cpus,
+                    );
+                }
+
+                gst::PadProbeReturn::Remove
+            });
+
+            None
+        });
+    }
+}
+
 /// Remove the sync handler from the pipeline bus.
 pub fn remove_thread_priority_handler(pipeline: &gst::Pipeline) {
     if let Some(bus) = pipeline.bus() {

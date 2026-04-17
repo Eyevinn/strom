@@ -4,7 +4,7 @@ use crate::blocks::BlockBuildError;
 use crate::gpu;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Compositor backend selection result.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -149,6 +149,31 @@ pub fn make_element(factory: &str, name: &str) -> Result<gst::Element, BlockBuil
         .name(name)
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", factory, e)))
+}
+
+/// Suppress upstream latency queries on the sink pad of a queue element.
+///
+/// The PGM feed from the distribution compositor (mixer) is tee'd into the
+/// multiview compositor (mv_comp). Without this probe the latency query from
+/// mv_comp traverses back through mixer, causing the two compositors' latencies
+/// to stack. The probe answers the LATENCY query directly with min=0 so that
+/// mv_comp's peer latency is determined by its direct input paths instead.
+pub fn suppress_latency_query(queue: &gst::Element) {
+    let pad = queue
+        .static_pad("sink")
+        .expect("queue must have a sink pad");
+    pad.add_probe(gst::PadProbeType::QUERY_UPSTREAM, |_pad, info| {
+        if let Some(query) = info.query_mut() {
+            if let gst::QueryViewMut::Latency(latency) = query.view_mut() {
+                trace!(
+                    "Suppressed latency query on PGM->MV path (preventing compositor latency stacking)"
+                );
+                latency.set(true, gst::ClockTime::ZERO, None::<gst::ClockTime>);
+                return gst::PadProbeReturn::Handled;
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
 }
 
 fn backend_name(backend: CompositorBackend) -> &'static str {

@@ -25,7 +25,7 @@ impl StromApp {
 
         // Create sorted list to match the display order (by name)
         let mut sorted_flows: Vec<&Flow> = self.flows.iter().collect();
-        sorted_flows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        sorted_flows.sort_by_key(|a| a.name.to_lowercase());
 
         if let Some(current_id) = self.selected_flow_id {
             // Find position of current selection in sorted list
@@ -61,7 +61,7 @@ impl StromApp {
 
         // Create sorted list to match the display order (by name)
         let mut sorted_flows: Vec<&Flow> = self.flows.iter().collect();
-        sorted_flows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        sorted_flows.sort_by_key(|a| a.name.to_lowercase());
 
         if let Some(current_id) = self.selected_flow_id {
             // Find position of current selection in sorted list
