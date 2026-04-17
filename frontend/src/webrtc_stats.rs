@@ -122,9 +122,12 @@ pub fn show_compact(ui: &mut Ui, stats: &WebRtcStats) {
         0.0
     };
 
-    // Build compact status line (centered)
+    // Build compact status line. Offset from the left edge so the text
+    // clears the input port labels (V0/A0) that are drawn just inside
+    // the block rect.
     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
         ui.horizontal(|ui| {
+            ui.add_space(30.0);
             // Session count with color indicator
             let color = if connected_count == session_count && session_count > 0 {
                 Color32::from_rgb(0, 180, 0)

@@ -233,6 +233,10 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         // Fixed: 2025-12-01
         srtsink.set_property("sync", sync);
         srtsink.set_property("qos", true);
+        // async=false: don't block pipeline preroll waiting for the first buffer.
+        // In listener mode without a connected client, the sink would otherwise
+        // hold PAUSED->PLAYING indefinitely. Matches WHEP/WHIP/AES67 sinks.
+        srtsink.set_property("async", false);
 
         if has_auto_reconnect {
             info!(
