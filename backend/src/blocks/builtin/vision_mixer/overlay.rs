@@ -12,7 +12,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
 use strom_types::vision_mixer::{self, TIMEZONE_REFRESH_SECS};
@@ -79,6 +79,16 @@ pub struct VisionMixerOverlayState {
     tz_abbr_packed: AtomicU64,
     /// Elapsed seconds (from instant_base) when we next refresh timezone info.
     tz_next_refresh: AtomicU64,
+    /// Whether VU meters are rendered on the multiview overlay.
+    show_vu_meters: AtomicBool,
+    /// Quantized peak (0..255) per audio input; max of L/R. Drives the bar fill.
+    pub input_peak: Vec<AtomicU8>,
+    /// Quantized decay (0..255) per audio input; max of L/R. Drives the tick.
+    pub input_decay: Vec<AtomicU8>,
+    /// Quantized peak (0..255) for the PGM audio input; max of L/R.
+    pub pgm_peak: AtomicU8,
+    /// Quantized decay (0..255) for the PGM audio input; max of L/R.
+    pub pgm_decay: AtomicU8,
 }
 
 impl VisionMixerOverlayState {
@@ -89,6 +99,7 @@ impl VisionMixerOverlayState {
         pvw_input: usize,
         labels: Vec<String>,
         layout: OverlayLayout,
+        show_vu_meters: bool,
     ) -> Self {
         let now_sys = SystemTime::now();
         let now_instant = Instant::now();
@@ -116,7 +127,40 @@ impl VisionMixerOverlayState {
             tz_offset_secs: AtomicI64::new(offset_secs),
             tz_abbr_packed: AtomicU64::new(pack_tz_abbr(&tz_abbr)),
             tz_next_refresh: AtomicU64::new(TIMEZONE_REFRESH_SECS),
+            show_vu_meters: AtomicBool::new(show_vu_meters),
+            input_peak: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
+            input_decay: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
+            pgm_peak: AtomicU8::new(0),
+            pgm_decay: AtomicU8::new(0),
         }
+    }
+
+    /// Whether VU meters should be rendered.
+    pub fn show_vu_meters(&self) -> bool {
+        self.show_vu_meters.load(Ordering::Relaxed)
+    }
+
+    /// Toggle VU meter rendering.
+    pub fn set_show_vu_meters(&self, show: bool) {
+        self.show_vu_meters.store(show, Ordering::Relaxed);
+    }
+
+    /// Update a single input's peak + decay from the level handler (max of L/R).
+    pub fn set_input_levels(&self, index: usize, peak_db: f64, decay_db: f64) {
+        if let (Some(peak_slot), Some(decay_slot)) =
+            (self.input_peak.get(index), self.input_decay.get(index))
+        {
+            peak_slot.store(vision_mixer::quantize_db_to_u8(peak_db), Ordering::Relaxed);
+            decay_slot.store(vision_mixer::quantize_db_to_u8(decay_db), Ordering::Relaxed);
+        }
+    }
+
+    /// Update the PGM audio peak + decay.
+    pub fn set_pgm_levels(&self, peak_db: f64, decay_db: f64) {
+        self.pgm_peak
+            .store(vision_mixer::quantize_db_to_u8(peak_db), Ordering::Relaxed);
+        self.pgm_decay
+            .store(vision_mixer::quantize_db_to_u8(decay_db), Ordering::Relaxed);
     }
 
     /// Get the PGM source group as a Vec of indices.
@@ -268,6 +312,99 @@ const BG_B: f64 = 1.0; // fed to cairo B channel → outputs as R=1.0
 
 const GRAY: f64 = 0.5;
 
+/// Draw a vertical VU meter in the bottom-left of `container`.
+///
+/// The bar fills from the bottom up; the fill height is proportional to the
+/// quantized peak value. A thin white line marks the decay (slower-moving
+/// peak indicator). Bar color goes green → yellow → red following the
+/// VU_METER_*_DB thresholds.
+fn draw_vu_meter(
+    cr: &cairo::Context,
+    container: &super::layout::Rect,
+    peak: u8,
+    decay: u8,
+    scale: f64,
+) {
+    // Size: roughly a quarter of the container height, pinned to the bottom-left
+    // with a comfortable margin on the left and bottom.
+    let margin = 8.0 * scale;
+    let bar_h = (container.h * 0.25).max(10.0);
+    let bar_w = (container.w * 0.025).clamp(3.0 * scale, 10.0 * scale);
+    let x = container.x + margin;
+    let y = container.y + container.h - margin - bar_h;
+
+    // Dark translucent background rectangle.
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.6);
+    cr.rectangle(x, y, bar_w, bar_h);
+    let _ = cr.fill();
+
+    if peak > 0 {
+        let fill_frac = vision_mixer::u8_to_meter_fraction(peak);
+        let fill_h = bar_h * fill_frac;
+        // Color by peak level. The R/B channels are swapped here because the
+        // overlay surface is BGRA in memory but emitted as RGBA (see comment
+        // on the PVW/PGM color constants).
+        let peak_db = db_from_u8(peak);
+        let (cr_r, cr_g, cr_b) = if peak_db >= vision_mixer::VU_METER_RED_DB {
+            (0.0, 0.0, 1.0) // red output
+        } else if peak_db >= vision_mixer::VU_METER_YELLOW_DB {
+            (0.0, 0.9, 1.0) // yellow output
+        } else {
+            (0.0, 0.9, 0.0) // green output
+        };
+        cr.set_source_rgba(cr_r, cr_g, cr_b, 0.9);
+        cr.rectangle(x, y + bar_h - fill_h, bar_w, fill_h);
+        let _ = cr.fill();
+    }
+
+    // Decay tick — a short horizontal line at the decay position, lagging
+    // behind the peak to give a classic held-peak indicator.
+    if decay > 0 {
+        let decay_frac = vision_mixer::u8_to_meter_fraction(decay);
+        let decay_y = y + bar_h - bar_h * decay_frac;
+        let tick_h = (1.5 * scale).max(1.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+        cr.rectangle(x, decay_y - tick_h / 2.0, bar_w, tick_h);
+        let _ = cr.fill();
+    }
+
+    // Thin outline for legibility.
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+    cr.set_line_width((0.75 * scale).max(0.5));
+    cr.rectangle(x, y, bar_w, bar_h);
+    let _ = cr.stroke();
+}
+
+/// Inverse of quantize_db_to_u8: approximate dBFS for color-band selection.
+fn db_from_u8(v: u8) -> f64 {
+    let frac = vision_mixer::u8_to_meter_fraction(v);
+    vision_mixer::VU_METER_MIN_DB
+        + frac * (vision_mixer::VU_METER_MAX_DB - vision_mixer::VU_METER_MIN_DB)
+}
+
+/// Compute a cheap hash of all per-input + PGM meter values so the dirty check
+/// can detect meaningful level changes without re-rendering on every push.
+fn hash_meters(state: &VisionMixerOverlayState) -> u64 {
+    let mut h: u64 = 0x9E3779B97F4A7C15;
+    for slot in &state.input_peak {
+        h = h
+            .rotate_left(7)
+            .wrapping_add(slot.load(Ordering::Relaxed) as u64);
+    }
+    for slot in &state.input_decay {
+        h = h
+            .rotate_left(7)
+            .wrapping_add(slot.load(Ordering::Relaxed) as u64);
+    }
+    h = h
+        .rotate_left(7)
+        .wrapping_add(state.pgm_peak.load(Ordering::Relaxed) as u64);
+    h = h
+        .rotate_left(7)
+        .wrapping_add(state.pgm_decay.load(Ordering::Relaxed) as u64);
+    h
+}
+
 /// Helper to get text extents, returning (width, height) with a fallback.
 fn text_size(cr: &cairo::Context, text: &str) -> (f64, f64) {
     match cr.text_extents(text) {
@@ -330,6 +467,11 @@ pub struct OverlayRenderer {
     last_bg: u64,
     last_ftb: bool,
     last_clock_secs: u64,
+    /// Meter state hash from the last render; used to avoid re-rendering when
+    /// quantized levels haven't changed. Recomputed each tick when meters are on.
+    last_meters_hash: u64,
+    /// Whether meters were on at the last render.
+    last_show_vu: bool,
 }
 
 // SAFETY: OverlayRenderer is accessed via Mutex from the timer thread and API
@@ -358,6 +500,8 @@ impl OverlayRenderer {
             last_bg: u64::MAX - 1,
             last_ftb: false,
             last_clock_secs: u64::MAX,
+            last_meters_hash: u64::MAX,
+            last_show_vu: false,
         }
     }
 
@@ -373,12 +517,16 @@ impl OverlayRenderer {
         let ftb = self.state.ftb_active.load(Ordering::Relaxed);
         let (h, m, s) = self.state.wall_clock_hms();
         let clock_secs = h as u64 * 3600 + m as u64 * 60 + s as u64;
+        let show_vu = self.state.show_vu_meters();
+        let meters_hash = if show_vu { hash_meters(&self.state) } else { 0 };
 
         let dirty = self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
             || self.last_bg != bg_packed
             || self.last_ftb != ftb
-            || self.last_clock_secs != clock_secs;
+            || self.last_clock_secs != clock_secs
+            || self.last_show_vu != show_vu
+            || (show_vu && self.last_meters_hash != meters_hash);
 
         if dirty {
             let pgm_group = vision_mixer::unpack_source_group(pgm_packed);
@@ -403,6 +551,8 @@ impl OverlayRenderer {
                 self.last_bg = bg_packed;
                 self.last_ftb = ftb;
                 self.last_clock_secs = clock_secs;
+                self.last_show_vu = show_vu;
+                self.last_meters_hash = meters_hash;
             }
             pushed
         } else {
@@ -691,6 +841,65 @@ fn render_overlay(
         }
         cr.rectangle(r.x, r.y, r.w, r.h);
         let _ = cr.stroke();
+    }
+
+    // --- VU meters ---
+    if state.show_vu_meters() {
+        // Per-input meters: bottom-left of each thumbnail video rect.
+        for i in 0..layout.num_inputs.min(layout.thumbnail_rects.len()) {
+            let r = &layout.thumbnail_rects[i];
+            let peak = state
+                .input_peak
+                .get(i)
+                .map(|v| v.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            let decay = state
+                .input_decay
+                .get(i)
+                .map(|v| v.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            draw_vu_meter(cr, r, peak, decay, layout.scale);
+        }
+
+        // PVW meters: one per source in the group, each drawn in the
+        // bottom-left of its sub-tile. Sub-tiles follow the 1/2/3/4-source
+        // layout from `compute_group_sub_rects`.
+        if !pvw_group.is_empty() {
+            let rects = super::layout::compute_group_sub_rects(&layout.pvw_rect, pvw_group.len());
+            for (tile_rect, &src_idx) in rects.iter().zip(pvw_group.iter()) {
+                if let (Some(peak_slot), Some(decay_slot)) = (
+                    state.input_peak.get(src_idx),
+                    state.input_decay.get(src_idx),
+                ) {
+                    let peak = peak_slot.load(Ordering::Relaxed);
+                    let decay = decay_slot.load(Ordering::Relaxed);
+                    draw_vu_meter(cr, tile_rect, peak, decay, layout.scale);
+                }
+            }
+        }
+
+        // PGM meters:
+        //  - single source: one meter in the full PGM rect, driven by the
+        //    dedicated pgm_audio_in port (master PGM mix from the audio mixer).
+        //  - multi-source group: per-tile meters, each showing the
+        //    corresponding source's own audio input.
+        if pgm_group.len() <= 1 {
+            let pgm_peak = state.pgm_peak.load(Ordering::Relaxed);
+            let pgm_decay = state.pgm_decay.load(Ordering::Relaxed);
+            draw_vu_meter(cr, &layout.pgm_rect, pgm_peak, pgm_decay, layout.scale);
+        } else {
+            let rects = super::layout::compute_group_sub_rects(&layout.pgm_rect, pgm_group.len());
+            for (tile_rect, &src_idx) in rects.iter().zip(pgm_group.iter()) {
+                if let (Some(peak_slot), Some(decay_slot)) = (
+                    state.input_peak.get(src_idx),
+                    state.input_decay.get(src_idx),
+                ) {
+                    let peak = peak_slot.load(Ordering::Relaxed);
+                    let decay = decay_slot.load(Ordering::Relaxed);
+                    draw_vu_meter(cr, tile_rect, peak, decay, layout.scale);
+                }
+            }
+        }
     }
 
     // --- Input labels on thumbnails ---

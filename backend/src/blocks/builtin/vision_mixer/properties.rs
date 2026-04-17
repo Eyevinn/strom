@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 use strom_types::vision_mixer::{
-    DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, MAX_DSK_INPUTS, MAX_NUM_INPUTS, MIN_NUM_INPUTS,
+    DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, DEFAULT_SHOW_VU_METERS, MAX_DSK_INPUTS, MAX_NUM_INPUTS,
+    MIN_NUM_INPUTS,
 };
 use strom_types::PropertyValue;
 
@@ -96,6 +97,11 @@ pub fn parse_resolution(
     strom_types::parse_resolution_string(s).unwrap_or_else(|| {
         strom_types::parse_resolution_string(default).expect("default resolution must be valid")
     })
+}
+
+/// Parse the `show_vu_meters` flag from block properties.
+pub fn parse_show_vu_meters(properties: &HashMap<String, PropertyValue>) -> bool {
+    parse_bool(properties, "show_vu_meters", DEFAULT_SHOW_VU_METERS)
 }
 
 /// Parse a boolean property with a default.

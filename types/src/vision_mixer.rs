@@ -85,6 +85,39 @@ pub const OVERLAY_FRAMERATE: i32 = 30;
 /// Timezone refresh interval in seconds (for DST transitions).
 pub const TIMEZONE_REFRESH_SECS: u64 = 60;
 
+// --- VU meter constants ---
+
+/// Default for rendering VU meters on the multiview overlay.
+pub const DEFAULT_SHOW_VU_METERS: bool = true;
+
+/// Lowest dBFS value represented on the VU meter (below this = empty bar).
+pub const VU_METER_MIN_DB: f64 = -60.0;
+
+/// Highest dBFS value represented on the VU meter (0 dBFS = full bar).
+pub const VU_METER_MAX_DB: f64 = 0.0;
+
+/// dBFS threshold above which the VU bar turns yellow.
+pub const VU_METER_YELLOW_DB: f64 = -18.0;
+
+/// dBFS threshold above which the VU bar turns red.
+pub const VU_METER_RED_DB: f64 = -6.0;
+
+/// Level meter message interval in nanoseconds (100 ms).
+pub const VU_METER_INTERVAL_NS: u64 = 100_000_000;
+
+/// Quantize an RMS/peak value in dBFS to u8 (0 = silence, 255 = 0 dBFS).
+/// Used for lock-free atomic storage of per-input meter values.
+pub fn quantize_db_to_u8(db: f64) -> u8 {
+    let clamped = db.clamp(VU_METER_MIN_DB, VU_METER_MAX_DB);
+    let norm = (clamped - VU_METER_MIN_DB) / (VU_METER_MAX_DB - VU_METER_MIN_DB);
+    (norm * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Inverse of `quantize_db_to_u8` — maps u8 back to normalized 0.0..1.0 bar height.
+pub fn u8_to_meter_fraction(v: u8) -> f64 {
+    v as f64 / 255.0
+}
+
 // --- Transition animation constants ---
 
 /// Number of keyframes for easing curve interpolation.
