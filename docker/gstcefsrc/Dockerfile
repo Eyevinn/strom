@@ -21,7 +21,7 @@ ARG TARGETARCH
 # docs/CEF_SIGILL_CRASH.md). The shim interposes glibc's legacy int-based
 # mallinfo(), whose fields overflow when the CEF process arena > 2 GiB and
 # trigger a Chromium CHECK() on a failed checked_cast<size_t>.
-ARG CEF_VERSION=144.0.11+ge135be2+chromium-144.0.7559.97
+ARG CEF_VERSION=144.0.21+g4f5b28c+chromium-144.0.7559.248
 
 # Current gstcefsrc master (pinned to a full SHA for reproducibility).
 ARG GSTCEFSRC_REF=b63340852fc93b0ab67b07200e1ff44f59ba6769

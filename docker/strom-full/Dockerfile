@@ -13,7 +13,7 @@ ARG VERSION=latest
 FROM eyevinntechnology/strom:${VERSION}
 
 # gstcefsrc version (pinned to known-good version)
-ARG GSTCEFSRC_VERSION=144.0.12
+ARG GSTCEFSRC_VERSION=144.0.21
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive

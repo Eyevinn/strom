@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       cef_version:
-        description: 'CEF version (e.g., 144.0.11+ge135be2+chromium-144.0.7559.97)'
+        description: 'CEF version (e.g., 144.0.21+g4f5b28c+chromium-144.0.7559.248)'
         required: true
-        default: '144.0.11+ge135be2+chromium-144.0.7559.97'
+        default: '144.0.21+g4f5b28c+chromium-144.0.7559.248'
         type: string
       gstcefsrc_ref:
         description: 'gstcefsrc git ref (full 40-char commit SHA, tag, or branch). Must be a full SHA — GitHub uploadpack does not resolve short SHAs.'
