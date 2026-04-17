@@ -15,14 +15,17 @@
 
 ARG TARGETARCH
 
-# CEF 126 (Alloy runtime) — intentionally downgraded from 144 to avoid the
+# CEF 122 (Alloy runtime) — intentionally downgraded from 144 to avoid the
 # MemoryInfra SIGILL crash introduced when Chrome runtime became default in
-# CEF 127. See docs/CEF_SIGILL_CRASH.md.
-ARG CEF_VERSION=126.2.18+g3647d39+chromium-126.0.6478.183
+# CEF 127. We use 122 (not 126) because the pinned gstcefsrc commit was
+# tested against exactly this version; CEF 126 introduced an ABI change in
+# OnRenderProcessTerminated that breaks the build.
+# See docs/CEF_SIGILL_CRASH.md.
+ARG CEF_VERSION=122.1.13+gde5b724+chromium-122.0.6261.130
 
 # Pinned gstcefsrc commit — last upstream master commit that defaulted to
-# CEF 122 (parent of the CEF 130 bump `be42330b4a`). Later gstcefsrc masters
-# target Chrome-runtime-era CEF and require newer CEF ABI than 126 ships.
+# CEF 122 (parent of the CEF 130 bump `be42330b4a`). Upstream jumped straight
+# from 122 to 130, so no gstcefsrc commit was ever tested against 123-129.
 ARG GSTCEFSRC_REF=0e470f51fdb8afdd9e31ef0b3d75b26536b180e5
 
 FROM ubuntu:questing AS builder

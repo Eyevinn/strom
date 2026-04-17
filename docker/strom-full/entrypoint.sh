@@ -37,7 +37,7 @@ if nvidia-smi > /dev/null 2>&1; then
     #
     # MemoryInfra/PartitionAlloc SIGILL (exit code 132):
     # This crash is a Chrome-runtime regression (CEF 127+). We currently build
-    # against CEF 126 (Alloy runtime) specifically to avoid it, so the
+    # against CEF 122 (Alloy runtime) specifically to avoid it, so the
     # "disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials="
     # flags below are no-ops on Alloy but are kept as defense-in-depth in case
     # we ever move forward to a Chrome-runtime CEF. See docs/CEF_SIGILL_CRASH.md.
