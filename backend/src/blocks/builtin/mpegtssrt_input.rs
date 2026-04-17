@@ -129,12 +129,13 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             })
             .unwrap_or(DEFAULT_SRT_LATENCY_MS);
 
-        // Get tsdemux latency (applies to tsdemux inside decodebin or in passthrough mode)
+        // Get tsdemux latency (applies to tsdemux inside decodebin or in passthrough mode).
+        // GStreamer accepts -1..=i32::MAX; clamp to prevent i64→i32 truncation.
         let tsdemux_latency = properties
             .get("tsdemux_latency")
             .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as i32),
-                PropertyValue::Int(i) => Some(*i as i32),
+                PropertyValue::UInt(u) => Some((*u).min(i32::MAX as u64) as i32),
+                PropertyValue::Int(i) => Some((*i).clamp(-1, i32::MAX as i64) as i32),
                 _ => None,
             })
             .unwrap_or(DEFAULT_TSDEMUX_LATENCY_MS);

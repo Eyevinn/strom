@@ -931,7 +931,7 @@ fn build_whepserversink(
     // StreamProducer configures these elements AFTER deep-element-added fires,
     // using direct C API calls that bypass g_object_notify.
     if ts_offset_ms != 0 {
-        let ts_offset_ns = ts_offset_ms * 1_000_000;
+        let ts_offset_ns = ts_offset_ms.saturating_mul(1_000_000);
         let instance_id_for_ts = instance_id.to_string();
 
         fn defer_ts_offset(element: &gst::Element, ts_offset_ns: i64, instance_id: &str) {
