@@ -55,20 +55,23 @@ References:
 - CEF Forum: "Process hangs after switching to chrome runtime" (MemoryInfra SIGILL)
 - SharedImageManager::ProduceMemory errors reported around Chromium 124
 
-## Fix: Downgrade to CEF 126 (Alloy runtime)
+## Fix: Downgrade to CEF 122 (Alloy runtime)
 
 The root cause is the Chrome runtime, which became the default in CEF 127 and
-is mandatory from CEF 128 onwards (the Alloy bootstrap was removed). CEF 124
-and earlier, and CEF 125/126 under Alloy, do not exhibit the MemoryInfra SIGILL.
+is mandatory from CEF 128 onwards (the Alloy bootstrap was removed). CEF 126
+and earlier, under Alloy, do not exhibit the MemoryInfra SIGILL.
 
 We pin the build to:
 
-- **CEF `126.2.18+g3647d39+chromium-126.0.6478.183`** — latest stable CEF 126,
-  Alloy runtime default.
-- **gstcefsrc commit `0e470f51fdb8afdd9e31ef0b3d75b26536b180e5`** — last master commit that defaulted to
-  CEF 122, the parent of the CEF 130 bump (`be42330b4a`, 2024-10-02). Later
-  gstcefsrc masters track Chrome-runtime-era CEF and require a newer CEF ABI
-  than 126 ships.
+- **CEF `122.1.13+gde5b724+chromium-122.0.6261.130`** — latest stable CEF 122,
+  Alloy runtime default. This is the exact version the pinned gstcefsrc commit
+  was tested against. CEF 123-126 are also pre-Chrome-runtime but introduced
+  ABI changes (notably `OnRenderProcessTerminated` gaining `error_code` and
+  `error_string` parameters in CEF 126) that break this gstcefsrc commit.
+- **gstcefsrc commit `0e470f51fdb8afdd9e31ef0b3d75b26536b180e5`** — last master
+  commit that defaulted to CEF 122, the parent of the CEF 130 bump
+  (`be42330b4a`, 2024-10-02). Upstream gstcefsrc jumped straight from 122 to
+  130, so no commit was ever tested against CEF 123-129.
 
 Pinning lives in:
 
@@ -76,9 +79,9 @@ Pinning lives in:
 - `.github/workflows/build-gstcefsrc.yml` — `cef_version` and `gstcefsrc_ref`
   inputs.
 - `docker/strom-full/Dockerfile` — `ARG GSTCEFSRC_VERSION` must match the
-  short CEF version string (`126.2.18`) produced by the workflow.
+  short CEF version string (`122.1.13`) produced by the workflow.
 
-**Trade-off**: Chromium 126 is ~22 months old (released 2024-06-11). More than
+**Trade-off**: Chromium 122 is ~26 months old (released 2024-02-20). More than
 sufficient for HTML overlay rendering (CSS, WebGL, WebCodecs, View Transitions
 are all supported), but lacks security patches and bleeding-edge web platform
 features from 2024-2026. Acceptable for an internal overlay renderer running
