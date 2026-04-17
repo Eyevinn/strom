@@ -72,11 +72,7 @@ pub struct ProbeData {
 
 impl ProbeData {
     pub fn avg_age_ms(&self) -> u64 {
-        if self.sample_count > 0 {
-            self.sum_age_ms / self.sample_count
-        } else {
-            0
-        }
+        self.sum_age_ms.checked_div(self.sample_count).unwrap_or(0)
     }
 }
 

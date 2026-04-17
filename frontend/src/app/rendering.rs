@@ -579,8 +579,7 @@ impl StromApp {
                                         || f.name.to_lowercase().contains(&filter_lower)
                                 })
                                 .collect();
-                            sorted_flows
-                                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                            sorted_flows.sort_by_key(|a| a.name.to_lowercase());
 
                             if sorted_flows.is_empty() {
                                 ui.label("No matching flows");

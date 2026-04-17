@@ -848,7 +848,7 @@ impl StromApp {
         let ndi_available = self.discovery_page.ndi_available;
 
         // Sort sources alphabetically by name
-        sources.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        sources.sort_by_key(|a| a.name.to_lowercase());
 
         // Filter sources based on search
         let search_filter = self.ndi_search_filter.to_lowercase();
