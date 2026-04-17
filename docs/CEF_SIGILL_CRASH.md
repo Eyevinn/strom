@@ -65,7 +65,7 @@ We pin the build to:
 
 - **CEF `126.2.18+g3647d39+chromium-126.0.6478.183`** — latest stable CEF 126,
   Alloy runtime default.
-- **gstcefsrc commit `0e470f51fd`** — last master commit that defaulted to
+- **gstcefsrc commit `0e470f51fdb8afdd9e31ef0b3d75b26536b180e5`** — last master commit that defaulted to
   CEF 122, the parent of the CEF 130 bump (`be42330b4a`, 2024-10-02). Later
   gstcefsrc masters track Chrome-runtime-era CEF and require a newer CEF ABI
   than 126 ships.
