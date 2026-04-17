@@ -283,7 +283,7 @@ class WhipClient {
             await this.peerConnection.setLocalDescription(offer);
 
             // Wait for ICE gathering to complete (or timeout)
-            this._log('Waiting for ICE gathering (timeout: 2s)...');
+            this._log('Waiting for ICE gathering (timeout: 1s)...');
             const gatheringStartTime = Date.now();
 
             await new Promise((resolve) => {
@@ -292,9 +292,9 @@ class WhipClient {
                     return;
                 }
                 const timeout = setTimeout(() => {
-                    this._log('ICE gathering timeout after 2s', 'warning');
+                    this._log('ICE gathering timeout after 1s', 'warning');
                     resolve();
-                }, 2000);
+                }, 1000);
                 this.peerConnection.onicegatheringstatechange = () => {
                     if (this.peerConnection.iceGatheringState === 'complete') {
                         clearTimeout(timeout);
