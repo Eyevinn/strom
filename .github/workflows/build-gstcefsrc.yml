@@ -12,9 +12,9 @@ on:
         default: '126.2.18+g3647d39+chromium-126.0.6478.183'
         type: string
       gstcefsrc_ref:
-        description: 'gstcefsrc git ref (commit SHA, tag, or branch). Default pins to the last master commit that defaulted to CEF 122, compatible with CEF 126 (Alloy runtime).'
+        description: 'gstcefsrc git ref (full 40-char commit SHA, tag, or branch). Default pins to the last master commit that defaulted to CEF 122, compatible with CEF 126 (Alloy runtime). Must be a full SHA — GitHub uploadpack does not resolve short SHAs.'
         required: true
-        default: '0e470f51fd'
+        default: '0e470f51fdb8afdd9e31ef0b3d75b26536b180e5'
         type: string
       upload_to_release:
         description: 'Upload artifacts to GitHub release'

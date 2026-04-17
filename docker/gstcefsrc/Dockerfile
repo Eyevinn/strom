@@ -23,7 +23,7 @@ ARG CEF_VERSION=126.2.18+g3647d39+chromium-126.0.6478.183
 # Pinned gstcefsrc commit — last upstream master commit that defaulted to
 # CEF 122 (parent of the CEF 130 bump `be42330b4a`). Later gstcefsrc masters
 # target Chrome-runtime-era CEF and require newer CEF ABI than 126 ships.
-ARG GSTCEFSRC_REF=0e470f51fd
+ARG GSTCEFSRC_REF=0e470f51fdb8afdd9e31ef0b3d75b26536b180e5
 
 FROM ubuntu:questing AS builder
 
