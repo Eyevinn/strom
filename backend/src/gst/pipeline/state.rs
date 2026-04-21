@@ -120,6 +120,55 @@ impl PipelineManager {
         })
     }
 
+    /// Get detailed NTP clock information.
+    /// Returns None if the pipeline is not using an NTP clock.
+    pub fn get_ntp_info(&self) -> Option<strom_types::flow::NtpInfo> {
+        use gst::prelude::*;
+        use gstreamer_net::NetClientClock;
+        use strom_types::flow::NtpInfo;
+
+        let clock = self.ntp_clock.as_ref()?;
+        // NtpClock inherits from NetClientClock — upcast to access property accessors.
+        let net_client: &NetClientClock = clock.upcast_ref();
+
+        let server = net_client
+            .address()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let port = net_client.port() as u16;
+        let synced = clock.is_synced();
+        let minimum_update_interval_ns = net_client.minimum_update_interval();
+        let round_trip_limit_ns = net_client.round_trip_limit();
+
+        // Calibration: (internal_ref, external_ref, rate_num, rate_denom).
+        // external(internal) = ((internal - internal_ref) * rate_num / rate_denom) + external_ref.
+        // At the reference point, offset = external_ref - internal_ref.
+        let (internal_ref, external_ref, rate_num, rate_denom) = clock.calibration();
+        let (rate, offset_ns) = if rate_denom != 0 {
+            let rate = rate_num as f64 / rate_denom as f64;
+            let offset = external_ref.nseconds() as i64 - internal_ref.nseconds() as i64;
+            (Some(rate), Some(offset))
+        } else {
+            (None, None)
+        };
+
+        let last_update = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs());
+
+        Some(NtpInfo {
+            server,
+            port,
+            synced,
+            minimum_update_interval_ns,
+            round_trip_limit_ns,
+            rate,
+            offset_ns,
+            last_update,
+        })
+    }
+
     /// Get the underlying GStreamer pipeline (for debugging).
     pub fn pipeline(&self) -> &gst::Pipeline {
         &self.pipeline

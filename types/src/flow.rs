@@ -155,6 +155,36 @@ pub struct PtpInfo {
     pub stats: Option<PtpStats>,
 }
 
+/// NTP clock information (GStreamer GstNtpClock / NetClientClock).
+///
+/// Populated at read-time from the running NtpClock instance. Values are snapshots
+/// from the clock's internal state at the moment the flow was queried.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct NtpInfo {
+    /// Server hostname/IP the NtpClock is polling
+    pub server: String,
+    /// Server port
+    pub port: u16,
+    /// Whether the clock has collected enough observations to be considered stable
+    pub synced: bool,
+    /// Minimum update interval between polls, in nanoseconds (from clock property)
+    pub minimum_update_interval_ns: u64,
+    /// Maximum RTT for accepted samples, in nanoseconds (from clock property)
+    pub round_trip_limit_ns: u64,
+    /// Current calibration rate (external clock speed / local speed).
+    /// 1.0 = same speed, <1.0 = server slower than local, >1.0 = server faster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<f64>,
+    /// Current offset between external (server) and internal (local) clocks at
+    /// the calibration reference point, in nanoseconds. Positive = server ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_ns: Option<i64>,
+    /// Timestamp of last read (Unix seconds)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<u64>,
+}
+
 /// PTP clock synchronization statistics.
 ///
 /// Contains measurements from PTP clock synchronization including
@@ -213,14 +243,18 @@ impl GStreamerClockType {
             Self::Realtime => "System UTC wall clock. Jumps on leap seconds. Accuracy depends on however the OS clock is synchronized.",
             Self::Tai => "System TAI wall clock (linear, no leap seconds). Accuracy depends on however the OS clock is synchronized. Recommended for broadcast timing.",
             Self::Ptp => "Precision Time Protocol for synchronized multi-device setups",
-            Self::Ntp => "GStreamer polls a remote NTP server directly (independent of system clock)",
+            Self::Ntp => "Polls a remote NTP server directly (independent of the system clock)",
         }
     }
 
-    /// Whether this clock type uses direct media timing (base_time=0, start_time=NONE)
-    /// so that PTS corresponds directly to absolute clock time.
-    pub fn uses_direct_media_timing(&self) -> bool {
-        matches!(self, Self::Realtime | Self::Tai | Self::Ptp | Self::Ntp)
+    /// Whether this clock type delivers a wall-clock pipeline-clock value that
+    /// can be meaningfully used with direct media timing (`base_time=0`).
+    ///
+    /// - `Ptp`, `Tai`, `Realtime`, `Ntp`: yes — they expose wall-clock time.
+    /// - `Monotonic`: no — the clock value is seconds-since-boot with no
+    ///   external meaning, so wall-clock PTS is useless.
+    pub fn supports_wall_clock_pts(&self) -> bool {
+        matches!(self, Self::Ptp | Self::Tai | Self::Realtime | Self::Ntp)
     }
 
     /// Get all available clock types.
@@ -255,6 +289,21 @@ pub struct FlowProperties {
     /// NTP server port (only used when clock_type is NTP). Defaults to 123.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ntp_port: Option<u16>,
+    /// Force direct media timing (`base_time=0`, `start_time=NONE`) so buffer
+    /// PTS corresponds to absolute pipeline-clock time.
+    ///
+    /// - `Some(true)`: explicitly on.
+    /// - `Some(false)`: explicitly off.
+    /// - `None` (default): follow the clock-type default — `true` for `Ptp`
+    ///   (AES67 contract, RFC 7273 `mediaclk:direct=0`), `false` otherwise.
+    ///
+    /// Use this for narrow pipelines where every element cooperates with
+    /// wall-clock timing (PTP+AES67, or TAI disciplined by `ptp4l`/`phc2sys`
+    /// feeding AES67 with TAI timestamps). Avoid for general pipelines
+    /// (MPEG-TS demuxers, RTP jitter buffers, WHEP session sinks) that assume
+    /// `running_time` starts near 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_media_timing: Option<bool>,
     /// Clock synchronization status (updated by backend for running pipelines)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock_sync_status: Option<ClockSyncStatus>,
@@ -262,6 +311,10 @@ pub struct FlowProperties {
     /// PTP clock information (updated by backend when clock_type is PTP)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ptp_info: Option<PtpInfo>,
+
+    /// NTP clock information (updated by backend when clock_type is NTP)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntp_info: Option<NtpInfo>,
 
     /// Thread priority for GStreamer streaming threads
     /// Default is High (elevated but not realtime)
@@ -302,6 +355,17 @@ pub struct FlowProperties {
     /// ISO 8601 format with timezone
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+}
+
+impl FlowProperties {
+    /// Resolve the effective direct media timing setting for this flow.
+    ///
+    /// Uses `direct_media_timing` when explicitly set; otherwise falls back to
+    /// the clock-type default (`Ptp` → `true`, others → `false`).
+    pub fn effective_direct_media_timing(&self) -> bool {
+        self.direct_media_timing
+            .unwrap_or(matches!(self.clock_type, GStreamerClockType::Ptp))
+    }
 }
 
 /// A complete GStreamer pipeline definition.

@@ -24,33 +24,68 @@ impl ClocksPage {
     }
 
     /// Render the clocks page.
-    pub fn render(&mut self, ui: &mut Ui, ptp_stats: &PtpStatsStore, flows: &[strom_types::Flow]) {
-        // Collect domain information
+    pub fn render(
+        &mut self,
+        ui: &mut Ui,
+        ptp_stats: &PtpStatsStore,
+        flows: &[strom_types::Flow],
+        system_clock: Option<&strom_types::api::SystemClockInfo>,
+        system_clock_unsupported: bool,
+    ) {
         let domain_info = self.collect_domain_info(ptp_stats, flows);
+        let ntp_flows: Vec<&strom_types::Flow> = flows
+            .iter()
+            .filter(|f| f.properties.clock_type == strom_types::flow::GStreamerClockType::Ntp)
+            .collect();
 
-        if domain_info.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(50.0);
-                ui.heading("No PTP Clocks Configured");
-                ui.add_space(10.0);
-                ui.label("Configure a flow to use PTP clock type in flow properties.");
-                ui.add_space(10.0);
-                ui.label("PTP statistics will be available once configured,");
-                ui.label("regardless of whether the flow is running.");
+        // System clock section (always visible at top).
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                render_system_clock_panel(ui, system_clock, system_clock_unsupported);
+                ui.add_space(12.0);
+
+                // PTP domains section.
+                ui.separator();
+                ui.heading("PTP Domains");
+                ui.add_space(6.0);
+                if domain_info.is_empty() {
+                    ui.label(
+                        "No PTP clocks configured. Set a flow's clock type to PTP to see stats.",
+                    );
+                } else {
+                    self.render_ptp_section(ui, ptp_stats, flows, &domain_info);
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.heading("NTP Clocks");
+                ui.add_space(6.0);
+                if ntp_flows.is_empty() {
+                    ui.label("No NTP clocks configured.");
+                } else {
+                    render_ntp_section(ui, &ntp_flows);
+                }
             });
-            return;
-        }
+    }
 
-        // Split view: domain list on left, details on right
-        egui::Panel::left("ptp_domain_list")
-            .default_size(350.0)
-            .resizable(true)
-            .show_inside(ui, |ui| {
-                self.render_domain_list(ui, &domain_info);
+    /// Render the PTP domain list + details inline (no longer consumes the whole page).
+    fn render_ptp_section(
+        &mut self,
+        ui: &mut Ui,
+        ptp_stats: &PtpStatsStore,
+        flows: &[strom_types::Flow],
+        domain_info: &HashMap<u8, DomainInfo>,
+    ) {
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_min_width(320.0);
+                self.render_domain_list(ui, domain_info);
             });
-
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.render_details_panel(ui, ptp_stats, flows, &domain_info);
+            ui.separator();
+            ui.vertical(|ui| {
+                self.render_details_panel(ui, ptp_stats, flows, domain_info);
+            });
         });
     }
 
@@ -341,6 +376,159 @@ impl ClocksPage {
 impl Default for ClocksPage {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Render the kernel system-clock panel (TAI offset, NTP discipline, etc.).
+fn render_system_clock_panel(
+    ui: &mut Ui,
+    info: Option<&strom_types::api::SystemClockInfo>,
+    unsupported: bool,
+) {
+    ui.heading("System Clock");
+    ui.add_space(6.0);
+
+    if unsupported {
+        ui.colored_label(
+            Color32::GRAY,
+            "Kernel clock discipline info is not exposed on this platform (Linux only).",
+        );
+        return;
+    }
+
+    let Some(info) = info else {
+        ui.label("System clock state is not yet loaded…");
+        return;
+    };
+
+    let sync_color = if info.synchronized {
+        Color32::from_rgb(100, 255, 100)
+    } else {
+        Color32::from_rgb(255, 120, 100)
+    };
+    let sync_text = if info.synchronized {
+        "Synchronized"
+    } else {
+        "Unsynced"
+    };
+
+    ui.horizontal(|ui| {
+        ui.label("Status:");
+        ui.colored_label(sync_color, RichText::new(sync_text).strong());
+        ui.add_space(12.0);
+        ui.label("State:");
+        ui.label(&info.state);
+    });
+
+    egui::Grid::new("system_clock_grid")
+        .num_columns(2)
+        .spacing([14.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("TAI − UTC offset:");
+            ui.label(format!("{} s", info.tai_offset_sec));
+            ui.end_row();
+
+            ui.label("PLL active:");
+            ui.label(if info.pll_active { "yes" } else { "no" });
+            ui.end_row();
+
+            ui.label("Current offset:");
+            let offset_us = info.offset_ns as f64 / 1000.0;
+            ui.label(format!("{:.3} µs ({} ns)", offset_us, info.offset_ns));
+            ui.end_row();
+
+            ui.label("Frequency adj:");
+            ui.label(format!("{:+.3} ppm", info.frequency_ppm));
+            ui.end_row();
+
+            ui.label("Estimated error:");
+            ui.label(format!("{} µs", info.est_error_us));
+            ui.end_row();
+
+            ui.label("Max error:");
+            ui.label(format!("{} µs", info.max_error_us));
+            ui.end_row();
+        });
+}
+
+/// Render a compact per-flow panel for NTP clocks.
+fn render_ntp_section(ui: &mut Ui, ntp_flows: &[&strom_types::Flow]) {
+    for flow in ntp_flows {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&flow.name).strong());
+                ui.add_space(8.0);
+                if flow.running {
+                    ui.colored_label(Color32::from_rgb(100, 255, 100), "running");
+                } else {
+                    ui.colored_label(Color32::GRAY, "stopped");
+                }
+            });
+
+            if let Some(info) = &flow.properties.ntp_info {
+                let (color, text) = if info.synced {
+                    (Color32::from_rgb(100, 255, 100), "Synced")
+                } else {
+                    (Color32::from_rgb(255, 180, 100), "Not synced")
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Sync:");
+                    ui.colored_label(color, text);
+                });
+
+                egui::Grid::new(("ntp_grid", flow.id))
+                    .num_columns(2)
+                    .spacing([14.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Server:");
+                        ui.label(format!("{}:{}", info.server, info.port));
+                        ui.end_row();
+
+                        ui.label("Offset vs local:");
+                        if let Some(offset) = info.offset_ns {
+                            let offset_us = offset as f64 / 1000.0;
+                            ui.label(format!("{:.3} µs ({} ns)", offset_us, offset));
+                        } else {
+                            ui.label("-");
+                        }
+                        ui.end_row();
+
+                        ui.label("Rate:");
+                        if let Some(rate) = info.rate {
+                            ui.label(format!("{:.9}", rate));
+                        } else {
+                            ui.label("-");
+                        }
+                        ui.end_row();
+
+                        ui.label("Min update interval:");
+                        ui.label(format!(
+                            "{:.2} s",
+                            info.minimum_update_interval_ns as f64 / 1e9
+                        ));
+                        ui.end_row();
+
+                        ui.label("Round-trip limit:");
+                        ui.label(format!("{:.2} ms", info.round_trip_limit_ns as f64 / 1e6));
+                        ui.end_row();
+                    });
+            } else if flow.running {
+                ui.label("NTP clock stats not yet available");
+            } else {
+                // Show configured server from flow properties
+                let server = flow
+                    .properties
+                    .ntp_server
+                    .clone()
+                    .unwrap_or_else(|| "pool.ntp.org".to_string());
+                let port = flow.properties.ntp_port.unwrap_or(123);
+                ui.label(format!(
+                    "Configured server: {}:{} (start flow to see live stats)",
+                    server, port
+                ));
+            }
+        });
+        ui.add_space(6.0);
     }
 }
 

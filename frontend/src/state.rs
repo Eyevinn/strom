@@ -98,6 +98,11 @@ pub enum AppMessage {
     /// Network interfaces loaded from API
     NetworkInterfacesLoaded(Vec<strom_types::NetworkInterfaceInfo>),
 
+    /// System clock info loaded from backend
+    SystemClockLoaded(crate::api::SystemClockInfo),
+    /// System clock info not supported on this platform (backend returned 501)
+    SystemClockUnsupported,
+
     /// Available inter channels loaded from API
     AvailableChannelsLoaded(Vec<strom_types::api::AvailableOutput>),
 

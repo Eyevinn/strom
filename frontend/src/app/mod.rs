@@ -577,6 +577,9 @@ pub struct StromApp {
     properties_ntp_server_buffer: String,
     /// Temporary NTP port buffer for properties dialog
     properties_ntp_port_buffer: String,
+    /// Temporary direct media timing selection for properties dialog.
+    /// None = inherit from clock_type default; Some = explicit override.
+    properties_direct_media_timing_buffer: Option<bool>,
     /// Temporary thread priority for properties dialog
     properties_thread_priority_buffer: strom_types::flow::ThreadPriority,
     /// Temporary CPU affinity for properties dialog
@@ -685,6 +688,13 @@ pub struct StromApp {
     rtp_stats_cache: std::collections::HashMap<String, strom_types::api::FlowStatsResponse>,
     /// Last time stats was fetched (for periodic refresh)
     last_rtp_stats_fetch: instant::Instant,
+    /// Cached system clock state from kernel adjtimex
+    system_clock_info: Option<crate::api::SystemClockInfo>,
+    /// True if the backend reported the system clock endpoint is unsupported on
+    /// this platform (non-Linux). Drives the "not available" message.
+    system_clock_unsupported: bool,
+    /// Last time system clock was fetched (for periodic refresh while Clocks page is open)
+    last_system_clock_fetch: instant::Instant,
     /// Compositor layout editor (if open)
     compositor_editor: Option<CompositorEditor>,
     /// Mixer editor (if open)

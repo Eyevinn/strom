@@ -459,8 +459,6 @@ impl StromApp {
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.label(egui::RichText::new("Clocks").heading());
-                    ui.separator();
-                    ui.label("PTP clocks are shared per domain");
                 });
             });
     }
@@ -990,6 +988,8 @@ impl StromApp {
                                                     .ntp_port
                                                     .map(|p| p.to_string())
                                                     .unwrap_or_else(|| "123".to_string());
+                                                self.properties_direct_media_timing_buffer =
+                                                    flow.properties.direct_media_timing;
                                                 self.properties_thread_priority_buffer =
                                                     flow.properties.thread_priority;
                                                 self.properties_cpu_affinity_buffer =

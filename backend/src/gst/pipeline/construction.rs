@@ -66,6 +66,7 @@ impl PipelineManager {
             qos_broadcast_task: None,
             ptp_clock: None,
             ptp_stats: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            ntp_clock: None,
             ptp_stats_callback: None,
             dynamic_pad_tees: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
             whep_endpoints: Vec::new(),
@@ -491,24 +492,12 @@ impl PipelineManager {
                 );
                 self.ptp_stats_callback = Some(stats_callback);
                 info!("PTP statistics callback registered for domain {}", domain);
-
-                // For PTP clock with direct media timing (AES67 / RFC 7273):
-                // Set base_time to 0 and start_time to NONE.
-                // This makes RTP timestamps directly correspond to the PTP reference clock,
-                // which is required for mediaclk:direct=0 signaling.
-                //
-                // Combined with timestamp-offset=0 on the RTP payloader (set in aes67.rs),
-                // this ensures GStreamer generates RTP timestamps that directly reflect
-                // the pipeline clock time.
-                self.pipeline.set_base_time(gst::ClockTime::ZERO);
-                self.pipeline.set_start_time(gst::ClockTime::NONE);
-                info!(
-                    "Pipeline '{}' configured for PTP direct media timing: base_time=0, start_time=None",
-                    self.flow_name
-                );
             }
             GStreamerClockType::Monotonic => {
                 info!("Using Monotonic clock for pipeline '{}'", self.flow_name);
+                // SystemClock::obtain() returns the global singleton (default clock-type=MONOTONIC).
+                // Safe to reuse here because we never modify clock-type on the singleton —
+                // other clock types create fresh SystemClock instances below.
                 let clock = gst::SystemClock::obtain();
                 self.pipeline.use_clock(Some(&clock));
             }
@@ -517,29 +506,21 @@ impl PipelineManager {
                     "Using Realtime (UTC) clock for pipeline '{}'",
                     self.flow_name
                 );
-                let clock = gst::SystemClock::obtain();
-                clock.set_property_from_str("clock-type", "realtime");
+                // Create a NEW SystemClock instance instead of using the singleton;
+                // setting `clock-type` on the singleton would break every other pipeline
+                // that holds a reference to it (Monotonic flows would suddenly see UTC).
+                let clock: gst::SystemClock = glib::Object::builder()
+                    .property("clock-type", gst::ClockType::Realtime)
+                    .build();
                 self.pipeline.use_clock(Some(&clock));
-
-                self.pipeline.set_base_time(gst::ClockTime::ZERO);
-                self.pipeline.set_start_time(gst::ClockTime::NONE);
-                info!(
-                    "Pipeline '{}' configured for direct media timing (Realtime): base_time=0, start_time=None",
-                    self.flow_name
-                );
             }
             GStreamerClockType::Tai => {
                 info!("Using TAI clock for pipeline '{}'", self.flow_name);
-                let clock = gst::SystemClock::obtain();
-                clock.set_property_from_str("clock-type", "tai");
+                // Create a NEW SystemClock instance; see Realtime branch for rationale.
+                let clock: gst::SystemClock = glib::Object::builder()
+                    .property("clock-type", gst::ClockType::Tai)
+                    .build();
                 self.pipeline.use_clock(Some(&clock));
-
-                self.pipeline.set_base_time(gst::ClockTime::ZERO);
-                self.pipeline.set_start_time(gst::ClockTime::NONE);
-                info!(
-                    "Pipeline '{}' configured for direct media timing (TAI): base_time=0, start_time=None",
-                    self.flow_name
-                );
             }
             GStreamerClockType::Ntp => {
                 let server = self
@@ -560,14 +541,30 @@ impl PipelineManager {
                     gst::ClockTime::ZERO,
                 );
                 self.pipeline.use_clock(Some(&ntp_clock));
+                self.ntp_clock = Some(ntp_clock);
+            }
+        }
 
-                self.pipeline.set_base_time(gst::ClockTime::ZERO);
-                self.pipeline.set_start_time(gst::ClockTime::NONE);
-                info!(
-                    "Pipeline '{}' configured for direct media timing (NTP): base_time=0, start_time=None",
-                    self.flow_name
+        // Direct media timing (opt-in per flow). When enabled, the pipeline's
+        // base_time is forced to zero and start_time disabled so buffer PTS
+        // corresponds directly to the selected pipeline clock — required for
+        // AES67 (`mediaclk:direct=0`) whether the reference is PTP or a
+        // `phc2sys`-disciplined TAI system clock. Not appropriate for pipelines
+        // that include elements assuming `running_time` starts near zero
+        // (MPEG-TS demuxers, WHEP session sinks, etc.).
+        if self.properties.effective_direct_media_timing() {
+            if !self.properties.clock_type.supports_wall_clock_pts() {
+                warn!(
+                    "Pipeline '{}': direct_media_timing=true but clock_type={:?} does not expose a wall-clock; direct timing is unlikely to be useful here",
+                    self.flow_name, self.properties.clock_type
                 );
             }
+            self.pipeline.set_base_time(gst::ClockTime::ZERO);
+            self.pipeline.set_start_time(gst::ClockTime::NONE);
+            info!(
+                "Pipeline '{}' configured for direct media timing: base_time=0, start_time=None",
+                self.flow_name
+            );
         }
 
         Ok(())

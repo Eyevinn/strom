@@ -52,11 +52,13 @@ impl ElementQoSStats {
     }
 
     fn add_event(&mut self, proportion: f64, jitter: i64, processed: u64) {
-        self.event_count += 1;
+        self.event_count = self.event_count.saturating_add(1);
         self.sum_proportion += proportion;
         self.min_proportion = self.min_proportion.min(proportion);
         self.max_proportion = self.max_proportion.max(proportion);
-        self.sum_jitter += jitter;
+        // Saturating add: QoS jitter values can be huge when the pipeline clock is
+        // NTP/TAI (time since 1900/1970 in ns), and the running sum may overflow i64.
+        self.sum_jitter = self.sum_jitter.saturating_add(jitter);
         self.total_processed = processed; // Keep the latest value
     }
 
@@ -196,6 +198,8 @@ pub struct PipelineManager {
     /// PTP statistics callback handle (must be kept alive)
     #[allow(dead_code)]
     ptp_stats_callback: Option<gst_net::PtpStatisticsCallback>,
+    /// NTP clock reference (stored for querying calibration and sync status)
+    ntp_clock: Option<gst_net::NtpClock>,
     /// Dynamic pads that were auto-linked to tees because no link was defined
     /// Maps element_id -> {pad_name -> tee_element_name}
     /// These tees have allow-not-linked=true so unlinked streams don't block the pipeline
