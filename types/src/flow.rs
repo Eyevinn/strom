@@ -95,7 +95,8 @@ pub struct ThreadPriorityStatus {
 ///
 /// Maps to GStreamer's clock implementations:
 /// - `Monotonic`: SystemClock with GST_CLOCK_TYPE_MONOTONIC (default)
-/// - `Realtime`: SystemClock with GST_CLOCK_TYPE_REALTIME
+/// - `Realtime`: SystemClock with GST_CLOCK_TYPE_REALTIME (UTC wall clock)
+/// - `Tai`: SystemClock with GST_CLOCK_TYPE_TAI (linear atomic time, no leap seconds)
 /// - `Ptp`: PtpClock for IEEE 1588 PTP synchronization
 /// - `Ntp`: NtpClock for NTP synchronization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -105,11 +106,14 @@ pub enum GStreamerClockType {
     /// System monotonic clock (default, recommended for most use cases)
     #[default]
     Monotonic,
-    /// System realtime clock (wall clock time)
+    /// System realtime clock (UTC wall clock time, subject to leap seconds)
     Realtime,
+    /// System TAI clock (atomic time, linear — no leap seconds). Requires
+    /// the OS clock sync daemon to have set the kernel TAI-UTC offset.
+    Tai,
     /// Precision Time Protocol clock (IEEE 1588, for synchronized multi-device scenarios)
     Ptp,
-    /// Network Time Protocol clock
+    /// Network Time Protocol clock (GStreamer polls an NTP server directly)
     Ntp,
 }
 
@@ -191,11 +195,12 @@ impl PtpInfo {
 
 impl GStreamerClockType {
     /// Get the human-readable label for this clock type (for UI dropdowns).
-    /// Acronyms are capitalized (PTP, NTP).
+    /// Acronyms are capitalized (PTP, NTP, TAI).
     pub fn label(&self) -> &'static str {
         match self {
             Self::Monotonic => "Monotonic",
-            Self::Realtime => "Realtime",
+            Self::Realtime => "Realtime (UTC)",
+            Self::Tai => "TAI",
             Self::Ptp => "PTP",
             Self::Ntp => "NTP",
         }
@@ -205,15 +210,28 @@ impl GStreamerClockType {
     pub fn description(&self) -> &'static str {
         match self {
             Self::Monotonic => "Stable system clock, not affected by time changes (recommended)",
-            Self::Realtime => "Wall clock time, may jump if system time changes",
+            Self::Realtime => "System UTC wall clock. Jumps on leap seconds. Accuracy depends on however the OS clock is synchronized.",
+            Self::Tai => "System TAI wall clock (linear, no leap seconds). Accuracy depends on however the OS clock is synchronized. Recommended for broadcast timing.",
             Self::Ptp => "Precision Time Protocol for synchronized multi-device setups",
-            Self::Ntp => "Network Time Protocol",
+            Self::Ntp => "GStreamer polls a remote NTP server directly (independent of system clock)",
         }
+    }
+
+    /// Whether this clock type uses direct media timing (base_time=0, start_time=NONE)
+    /// so that PTS corresponds directly to absolute clock time.
+    pub fn uses_direct_media_timing(&self) -> bool {
+        matches!(self, Self::Realtime | Self::Tai | Self::Ptp | Self::Ntp)
     }
 
     /// Get all available clock types.
     pub fn all() -> &'static [GStreamerClockType] {
-        &[Self::Monotonic, Self::Realtime, Self::Ptp, Self::Ntp]
+        &[
+            Self::Monotonic,
+            Self::Realtime,
+            Self::Tai,
+            Self::Ptp,
+            Self::Ntp,
+        ]
     }
 }
 
@@ -234,6 +252,9 @@ pub struct FlowProperties {
     /// If not set but clock_type is NTP, will signal as "ntp=/traceable/"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ntp_server: Option<String>,
+    /// NTP server port (only used when clock_type is NTP). Defaults to 123.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntp_port: Option<u16>,
     /// Clock synchronization status (updated by backend for running pipelines)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock_sync_status: Option<ClockSyncStatus>,

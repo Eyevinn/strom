@@ -462,6 +462,7 @@ impl McpHandler {
                     flow.properties.clock_type = match clock_type_str {
                         "monotonic" => GStreamerClockType::Monotonic,
                         "realtime" => GStreamerClockType::Realtime,
+                        "tai" => GStreamerClockType::Tai,
                         "ptp" => GStreamerClockType::Ptp,
                         "ntp" => GStreamerClockType::Ntp,
                         _ => return Err(anyhow::anyhow!("Invalid clock_type: {}", clock_type_str)),

@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.9"
+    "version": "0.4.11"
   },
   "paths": {
     "/api/auth/status": {
@@ -5636,6 +5636,15 @@
             ],
             "description": "Timestamp when the flow was last modified (any change to flow config)\nISO 8601 format with timezone"
           },
+          "ntp_port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "NTP server port (only used when clock_type is NTP). Defaults to 123.",
+            "minimum": 0
+          },
           "ntp_server": {
             "type": [
               "string",
@@ -5735,10 +5744,11 @@
       },
       "GStreamerClockType": {
         "type": "string",
-        "description": "GStreamer clock type selection.\n\nMaps to GStreamer's clock implementations:\n- `Monotonic`: SystemClock with GST_CLOCK_TYPE_MONOTONIC (default)\n- `Realtime`: SystemClock with GST_CLOCK_TYPE_REALTIME\n- `Ptp`: PtpClock for IEEE 1588 PTP synchronization\n- `Ntp`: NtpClock for NTP synchronization",
+        "description": "GStreamer clock type selection.\n\nMaps to GStreamer's clock implementations:\n- `Monotonic`: SystemClock with GST_CLOCK_TYPE_MONOTONIC (default)\n- `Realtime`: SystemClock with GST_CLOCK_TYPE_REALTIME (UTC wall clock)\n- `Tai`: SystemClock with GST_CLOCK_TYPE_TAI (linear atomic time, no leap seconds)\n- `Ptp`: PtpClock for IEEE 1588 PTP synchronization\n- `Ntp`: NtpClock for NTP synchronization",
         "enum": [
           "monotonic",
           "realtime",
+          "tai",
           "ptp",
           "ntp"
         ]

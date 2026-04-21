@@ -513,27 +513,62 @@ impl PipelineManager {
                 self.pipeline.use_clock(Some(&clock));
             }
             GStreamerClockType::Realtime => {
-                info!("Using Realtime clock for pipeline '{}'", self.flow_name);
-                // For realtime, we'd need a custom clock implementation
-                // For now, use the system clock which is close to realtime
-                let clock = gst::SystemClock::obtain();
-                self.pipeline.use_clock(Some(&clock));
-            }
-            GStreamerClockType::Ntp => {
                 info!(
-                    "NTP clock requested for pipeline '{}' - using system clock as fallback",
+                    "Using Realtime (UTC) clock for pipeline '{}'",
                     self.flow_name
                 );
-                // NTP clock implementation would require additional setup
-                // For now, fall back to system clock
                 let clock = gst::SystemClock::obtain();
+                clock.set_property_from_str("clock-type", "realtime");
                 self.pipeline.use_clock(Some(&clock));
-                warn!("NTP clock not yet fully implemented, using system clock");
+
+                self.pipeline.set_base_time(gst::ClockTime::ZERO);
+                self.pipeline.set_start_time(gst::ClockTime::NONE);
+                info!(
+                    "Pipeline '{}' configured for direct media timing (Realtime): base_time=0, start_time=None",
+                    self.flow_name
+                );
+            }
+            GStreamerClockType::Tai => {
+                info!("Using TAI clock for pipeline '{}'", self.flow_name);
+                let clock = gst::SystemClock::obtain();
+                clock.set_property_from_str("clock-type", "tai");
+                self.pipeline.use_clock(Some(&clock));
+
+                self.pipeline.set_base_time(gst::ClockTime::ZERO);
+                self.pipeline.set_start_time(gst::ClockTime::NONE);
+                info!(
+                    "Pipeline '{}' configured for direct media timing (TAI): base_time=0, start_time=None",
+                    self.flow_name
+                );
+            }
+            GStreamerClockType::Ntp => {
+                let server = self
+                    .properties
+                    .ntp_server
+                    .clone()
+                    .unwrap_or_else(|| "pool.ntp.org".to_string());
+                let port = self.properties.ntp_port.unwrap_or(123);
+                info!(
+                    "Using NTP clock for pipeline '{}' (server={}, port={})",
+                    self.flow_name, server, port
+                );
+
+                let ntp_clock = gst_net::NtpClock::new(
+                    Some(&format!("strom-ntp-{}", self.flow_name)),
+                    &server,
+                    port as i32,
+                    gst::ClockTime::ZERO,
+                );
+                self.pipeline.use_clock(Some(&ntp_clock));
+
+                self.pipeline.set_base_time(gst::ClockTime::ZERO);
+                self.pipeline.set_start_time(gst::ClockTime::NONE);
+                info!(
+                    "Pipeline '{}' configured for direct media timing (NTP): base_time=0, start_time=None",
+                    self.flow_name
+                );
             }
         }
-
-        // Note: For non-PTP clocks, we let GStreamer manage base_time and start_time automatically.
-        // Only PTP clock (above) sets base_time=0 and start_time=None for AES67 direct media timing.
 
         Ok(())
     }

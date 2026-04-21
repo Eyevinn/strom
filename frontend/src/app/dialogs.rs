@@ -463,6 +463,27 @@ impl StromApp {
                     ui.label("The PTP domain for clock synchronization");
                 }
 
+                // Show NTP server/port fields only when NTP is selected
+                if matches!(
+                    self.properties_clock_type_buffer,
+                    strom_types::flow::GStreamerClockType::Ntp
+                ) {
+                    ui.add_space(10.0);
+                    ui.label("NTP Server");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.properties_ntp_server_buffer)
+                            .desired_width(250.0)
+                            .hint_text("pool.ntp.org"),
+                    );
+                    ui.label("NTP Port");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.properties_ntp_port_buffer)
+                            .desired_width(100.0)
+                            .hint_text("123"),
+                    );
+                    ui.label("GStreamer will poll this NTP server directly (independent of the system clock)");
+                }
+
                 // Show clock sync status for PTP/NTP clocks
                 if matches!(
                     self.properties_clock_type_buffer,
@@ -684,6 +705,27 @@ impl StromApp {
                                 strom_types::flow::GStreamerClockType::Ptp
                             ) {
                                 self.properties_ptp_domain_buffer.parse::<u8>().ok()
+                            } else {
+                                None
+                            };
+
+                            // Set NTP server/port if NTP clock is selected
+                            let is_ntp = matches!(
+                                self.properties_clock_type_buffer,
+                                strom_types::flow::GStreamerClockType::Ntp
+                            );
+                            flow.properties.ntp_server = if is_ntp {
+                                let trimmed = self.properties_ntp_server_buffer.trim();
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(trimmed.to_string())
+                                }
+                            } else {
+                                None
+                            };
+                            flow.properties.ntp_port = if is_ntp {
+                                self.properties_ntp_port_buffer.parse::<u16>().ok()
                             } else {
                                 None
                             };

@@ -573,6 +573,10 @@ pub struct StromApp {
     properties_clock_type_buffer: strom_types::flow::GStreamerClockType,
     /// Temporary PTP domain buffer for properties dialog
     properties_ptp_domain_buffer: String,
+    /// Temporary NTP server buffer for properties dialog
+    properties_ntp_server_buffer: String,
+    /// Temporary NTP port buffer for properties dialog
+    properties_ntp_port_buffer: String,
     /// Temporary thread priority for properties dialog
     properties_thread_priority_buffer: strom_types::flow::ThreadPriority,
     /// Temporary CPU affinity for properties dialog

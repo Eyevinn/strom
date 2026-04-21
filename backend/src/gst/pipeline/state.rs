@@ -269,7 +269,6 @@ impl PipelineManager {
     pub fn get_debug_info(&self) -> strom_types::api::FlowDebugInfo {
         use gst::prelude::*;
         use strom_types::api::FlowDebugInfo;
-        use strom_types::flow::GStreamerClockType;
 
         // Get pipeline clock
         let clock = self.pipeline.clock();
@@ -285,12 +284,7 @@ impl PipelineManager {
         };
 
         // Get clock type description
-        let clock_type = match self.properties.clock_type {
-            GStreamerClockType::Ptp => Some("PTP".to_string()),
-            GStreamerClockType::Monotonic => Some("Monotonic".to_string()),
-            GStreamerClockType::Realtime => Some("Realtime".to_string()),
-            GStreamerClockType::Ntp => Some("NTP".to_string()),
-        };
+        let clock_type = Some(self.properties.clock_type.label().to_string());
 
         // Get PTP grandmaster if using PTP clock
         let ptp_grandmaster = self.ptp_clock.as_ref().and_then(|ptp| {
