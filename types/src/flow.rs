@@ -269,6 +269,24 @@ impl GStreamerClockType {
     }
 }
 
+/// Lowercase wire name used by the MCP tool arguments and similar string APIs.
+/// `serde` handles these via `#[serde(rename_all = "snake_case")]` implicitly
+/// on the enum, but MCP consumers receive raw strings.
+impl std::str::FromStr for GStreamerClockType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "monotonic" => Ok(Self::Monotonic),
+            "realtime" => Ok(Self::Realtime),
+            "tai" => Ok(Self::Tai),
+            "ptp" => Ok(Self::Ptp),
+            "ntp" => Ok(Self::Ntp),
+            _ => Err(format!("Invalid clock_type: {}", s)),
+        }
+    }
+}
+
 /// Flow configuration properties.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -479,6 +497,29 @@ mod tests {
                 ct
             );
         }
+    }
+
+    #[test]
+    fn from_str_accepts_all_variants() {
+        use std::str::FromStr;
+        // MCP wire form matches serde's snake_case rename on this enum.
+        // Keep this table in sync with GStreamerClockType::all().
+        let cases: &[(&str, GStreamerClockType)] = &[
+            ("monotonic", GStreamerClockType::Monotonic),
+            ("realtime", GStreamerClockType::Realtime),
+            ("tai", GStreamerClockType::Tai),
+            ("ptp", GStreamerClockType::Ptp),
+            ("ntp", GStreamerClockType::Ntp),
+        ];
+        for (wire, expected) in cases {
+            assert_eq!(GStreamerClockType::from_str(wire).unwrap(), *expected);
+        }
+        // Every variant in ::all() must appear in the table above, otherwise
+        // a new variant lacks a FromStr mapping.
+        assert_eq!(cases.len(), GStreamerClockType::all().len());
+
+        assert!(GStreamerClockType::from_str("bogus").is_err());
+        assert!(GStreamerClockType::from_str("PTP").is_err());
     }
 
     #[test]

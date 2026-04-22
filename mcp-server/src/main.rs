@@ -349,14 +349,9 @@ impl McpServer {
                 // Update clock_type if provided
                 if let Some(clock_type_str) = args["clock_type"].as_str() {
                     use strom_types::flow::GStreamerClockType;
-                    properties.clock_type = match clock_type_str {
-                        "monotonic" => GStreamerClockType::Monotonic,
-                        "realtime" => GStreamerClockType::Realtime,
-                        "tai" => GStreamerClockType::Tai,
-                        "ptp" => GStreamerClockType::Ptp,
-                        "ntp" => GStreamerClockType::Ntp,
-                        _ => return Err(anyhow::anyhow!("Invalid clock_type: {}", clock_type_str)),
-                    };
+                    properties.clock_type = clock_type_str
+                        .parse::<GStreamerClockType>()
+                        .map_err(|e| anyhow::anyhow!(e))?;
                 }
 
                 info!("MCP: Updating properties for flow {}", flow_id);
