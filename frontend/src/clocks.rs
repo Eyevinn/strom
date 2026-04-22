@@ -39,13 +39,25 @@ impl ClocksPage {
             .collect();
 
         // System clock section (always visible at top).
+        // NTP is rendered before PTP: PTP's inner split-pane layout with graphs
+        // tends to stretch vertically, and placing NTP above it keeps the short
+        // NTP cards visible without scrolling.
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 render_system_clock_panel(ui, system_clock, system_clock_unsupported);
                 ui.add_space(12.0);
 
-                // PTP domains section.
+                ui.separator();
+                ui.heading("NTP Clocks");
+                ui.add_space(6.0);
+                if ntp_flows.is_empty() {
+                    ui.label("No NTP clocks configured.");
+                } else {
+                    render_ntp_section(ui, &ntp_flows);
+                }
+
+                ui.add_space(12.0);
                 ui.separator();
                 ui.heading("PTP Domains");
                 ui.add_space(6.0);
@@ -55,16 +67,6 @@ impl ClocksPage {
                     );
                 } else {
                     self.render_ptp_section(ui, ptp_stats, flows, &domain_info);
-                }
-
-                ui.add_space(12.0);
-                ui.separator();
-                ui.heading("NTP Clocks");
-                ui.add_space(6.0);
-                if ntp_flows.is_empty() {
-                    ui.label("No NTP clocks configured.");
-                } else {
-                    render_ntp_section(ui, &ntp_flows);
                 }
             });
     }
