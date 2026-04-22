@@ -12,6 +12,7 @@ pub mod mediaplayer;
 pub mod network;
 pub mod probes;
 pub mod sdp_transform;
+pub mod system_clock;
 pub mod version;
 pub mod vision_mixer_page;
 pub mod websocket;

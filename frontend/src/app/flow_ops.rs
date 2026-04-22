@@ -80,6 +80,28 @@ impl StromApp {
         });
     }
 
+    /// Fetch system clock synchronization state from the backend.
+    pub(super) fn fetch_system_clock_info(&self, ctx: &Context) {
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+        let ctx = ctx.clone();
+
+        spawn_task(async move {
+            match api.get_system_clock().await {
+                Ok(info) => {
+                    let _ = tx.send(AppMessage::SystemClockLoaded(info));
+                }
+                Err(crate::api::ApiError::Http(501, _)) => {
+                    let _ = tx.send(AppMessage::SystemClockUnsupported);
+                }
+                Err(_) => {
+                    // Transient network/decode error — leave previous state intact.
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
     /// Fetch RTP statistics and dynamic pads for the currently selected flow (if running).
     /// RTP stats are only fetched if the flow has blocks that produce them (e.g., AES67 Input).
     pub(super) fn fetch_rtp_stats_for_selected_flow(&self, ctx: &Context) {

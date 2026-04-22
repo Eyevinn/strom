@@ -95,7 +95,8 @@ pub struct ThreadPriorityStatus {
 ///
 /// Maps to GStreamer's clock implementations:
 /// - `Monotonic`: SystemClock with GST_CLOCK_TYPE_MONOTONIC (default)
-/// - `Realtime`: SystemClock with GST_CLOCK_TYPE_REALTIME
+/// - `Realtime`: SystemClock with GST_CLOCK_TYPE_REALTIME (UTC wall clock)
+/// - `Tai`: SystemClock with GST_CLOCK_TYPE_TAI (linear atomic time, no leap seconds)
 /// - `Ptp`: PtpClock for IEEE 1588 PTP synchronization
 /// - `Ntp`: NtpClock for NTP synchronization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -105,11 +106,14 @@ pub enum GStreamerClockType {
     /// System monotonic clock (default, recommended for most use cases)
     #[default]
     Monotonic,
-    /// System realtime clock (wall clock time)
+    /// System realtime clock (UTC wall clock time, subject to leap seconds)
     Realtime,
+    /// System TAI clock (atomic time, linear — no leap seconds). Requires
+    /// the OS clock sync daemon to have set the kernel TAI-UTC offset.
+    Tai,
     /// Precision Time Protocol clock (IEEE 1588, for synchronized multi-device scenarios)
     Ptp,
-    /// Network Time Protocol clock
+    /// Network Time Protocol clock (GStreamer polls an NTP server directly)
     Ntp,
 }
 
@@ -149,6 +153,36 @@ pub struct PtpInfo {
     /// PTP synchronization statistics (updated periodically)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<PtpStats>,
+}
+
+/// NTP clock information (GStreamer GstNtpClock / NetClientClock).
+///
+/// Populated at read-time from the running NtpClock instance. Values are snapshots
+/// from the clock's internal state at the moment the flow was queried.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct NtpInfo {
+    /// Server hostname/IP the NtpClock is polling
+    pub server: String,
+    /// Server port
+    pub port: u16,
+    /// Whether the clock has collected enough observations to be considered stable
+    pub synced: bool,
+    /// Minimum update interval between polls, in nanoseconds (from clock property)
+    pub minimum_update_interval_ns: u64,
+    /// Maximum RTT for accepted samples, in nanoseconds (from clock property)
+    pub round_trip_limit_ns: u64,
+    /// Current calibration rate (external clock speed / local speed).
+    /// 1.0 = same speed, <1.0 = server slower than local, >1.0 = server faster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<f64>,
+    /// Current offset between external (server) and internal (local) clocks at
+    /// the calibration reference point, in nanoseconds. Positive = server ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_ns: Option<i64>,
+    /// Timestamp of last read (Unix seconds)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<u64>,
 }
 
 /// PTP clock synchronization statistics.
@@ -191,11 +225,12 @@ impl PtpInfo {
 
 impl GStreamerClockType {
     /// Get the human-readable label for this clock type (for UI dropdowns).
-    /// Acronyms are capitalized (PTP, NTP).
+    /// Acronyms are capitalized (PTP, NTP, TAI).
     pub fn label(&self) -> &'static str {
         match self {
             Self::Monotonic => "Monotonic",
-            Self::Realtime => "Realtime",
+            Self::Realtime => "Realtime (UTC)",
+            Self::Tai => "TAI",
             Self::Ptp => "PTP",
             Self::Ntp => "NTP",
         }
@@ -205,15 +240,50 @@ impl GStreamerClockType {
     pub fn description(&self) -> &'static str {
         match self {
             Self::Monotonic => "Stable system clock, not affected by time changes (recommended)",
-            Self::Realtime => "Wall clock time, may jump if system time changes",
+            Self::Realtime => "System UTC wall clock. Jumps on leap seconds. Accuracy depends on however the OS clock is synchronized.",
+            Self::Tai => "System TAI wall clock (linear, no leap seconds). Accuracy depends on however the OS clock is synchronized. Recommended for broadcast timing.",
             Self::Ptp => "Precision Time Protocol for synchronized multi-device setups",
-            Self::Ntp => "Network Time Protocol",
+            Self::Ntp => "Polls a remote NTP server directly (independent of the system clock)",
         }
+    }
+
+    /// Whether this clock type delivers a wall-clock pipeline-clock value that
+    /// can be meaningfully used with direct media timing (`base_time=0`).
+    ///
+    /// - `Ptp`, `Tai`, `Realtime`, `Ntp`: yes — they expose wall-clock time.
+    /// - `Monotonic`: no — the clock value is seconds-since-boot with no
+    ///   external meaning, so wall-clock PTS is useless.
+    pub fn supports_wall_clock_pts(&self) -> bool {
+        matches!(self, Self::Ptp | Self::Tai | Self::Realtime | Self::Ntp)
     }
 
     /// Get all available clock types.
     pub fn all() -> &'static [GStreamerClockType] {
-        &[Self::Monotonic, Self::Realtime, Self::Ptp, Self::Ntp]
+        &[
+            Self::Monotonic,
+            Self::Realtime,
+            Self::Tai,
+            Self::Ptp,
+            Self::Ntp,
+        ]
+    }
+}
+
+/// Lowercase wire name used by the MCP tool arguments and similar string APIs.
+/// `serde` handles these via `#[serde(rename_all = "snake_case")]` implicitly
+/// on the enum, but MCP consumers receive raw strings.
+impl std::str::FromStr for GStreamerClockType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "monotonic" => Ok(Self::Monotonic),
+            "realtime" => Ok(Self::Realtime),
+            "tai" => Ok(Self::Tai),
+            "ptp" => Ok(Self::Ptp),
+            "ntp" => Ok(Self::Ntp),
+            _ => Err(format!("Invalid clock_type: {}", s)),
+        }
     }
 }
 
@@ -234,6 +304,24 @@ pub struct FlowProperties {
     /// If not set but clock_type is NTP, will signal as "ntp=/traceable/"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ntp_server: Option<String>,
+    /// NTP server port (only used when clock_type is NTP). Defaults to 123.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntp_port: Option<u16>,
+    /// Force direct media timing (`base_time=0`, `start_time=NONE`) so buffer
+    /// PTS corresponds to absolute pipeline-clock time.
+    ///
+    /// - `Some(true)`: explicitly on.
+    /// - `Some(false)`: explicitly off.
+    /// - `None` (default): follow the clock-type default — `true` for `Ptp`
+    ///   (AES67 contract, RFC 7273 `mediaclk:direct=0`), `false` otherwise.
+    ///
+    /// Use this for narrow pipelines where every element cooperates with
+    /// wall-clock timing (PTP+AES67, or TAI disciplined by `ptp4l`/`phc2sys`
+    /// feeding AES67 with TAI timestamps). Avoid for general pipelines
+    /// (MPEG-TS demuxers, RTP jitter buffers, WHEP session sinks) that assume
+    /// `running_time` starts near 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_media_timing: Option<bool>,
     /// Clock synchronization status (updated by backend for running pipelines)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock_sync_status: Option<ClockSyncStatus>,
@@ -241,6 +329,10 @@ pub struct FlowProperties {
     /// PTP clock information (updated by backend when clock_type is PTP)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ptp_info: Option<PtpInfo>,
+
+    /// NTP clock information (updated by backend when clock_type is NTP)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntp_info: Option<NtpInfo>,
 
     /// Thread priority for GStreamer streaming threads
     /// Default is High (elevated but not realtime)
@@ -281,6 +373,17 @@ pub struct FlowProperties {
     /// ISO 8601 format with timezone
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+}
+
+impl FlowProperties {
+    /// Resolve the effective direct media timing setting for this flow.
+    ///
+    /// Uses `direct_media_timing` when explicitly set; otherwise falls back to
+    /// the clock-type default (`Ptp` → `true`, others → `false`).
+    pub fn effective_direct_media_timing(&self) -> bool {
+        self.direct_media_timing
+            .unwrap_or(matches!(self.clock_type, GStreamerClockType::Ptp))
+    }
 }
 
 /// A complete GStreamer pipeline definition.
@@ -354,5 +457,85 @@ impl Flow {
     pub fn set_gst_state(&mut self, state: Option<PipelineState>) {
         self.running = state.is_some_and(|s| s.is_active());
         self.gst_state = state;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supports_wall_clock_pts_matches_clock_types() {
+        assert!(GStreamerClockType::Ptp.supports_wall_clock_pts());
+        assert!(GStreamerClockType::Tai.supports_wall_clock_pts());
+        assert!(GStreamerClockType::Realtime.supports_wall_clock_pts());
+        assert!(GStreamerClockType::Ntp.supports_wall_clock_pts());
+        assert!(!GStreamerClockType::Monotonic.supports_wall_clock_pts());
+    }
+
+    #[test]
+    fn effective_direct_media_timing_defaults_to_ptp_only() {
+        let ptp = FlowProperties {
+            clock_type: GStreamerClockType::Ptp,
+            ..Default::default()
+        };
+        assert!(ptp.effective_direct_media_timing());
+
+        for ct in [
+            GStreamerClockType::Monotonic,
+            GStreamerClockType::Realtime,
+            GStreamerClockType::Tai,
+            GStreamerClockType::Ntp,
+        ] {
+            let props = FlowProperties {
+                clock_type: ct,
+                ..Default::default()
+            };
+            assert!(
+                !props.effective_direct_media_timing(),
+                "{:?} should default to false",
+                ct
+            );
+        }
+    }
+
+    #[test]
+    fn from_str_accepts_all_variants() {
+        use std::str::FromStr;
+        // MCP wire form matches serde's snake_case rename on this enum.
+        // Keep this table in sync with GStreamerClockType::all().
+        let cases: &[(&str, GStreamerClockType)] = &[
+            ("monotonic", GStreamerClockType::Monotonic),
+            ("realtime", GStreamerClockType::Realtime),
+            ("tai", GStreamerClockType::Tai),
+            ("ptp", GStreamerClockType::Ptp),
+            ("ntp", GStreamerClockType::Ntp),
+        ];
+        for (wire, expected) in cases {
+            assert_eq!(GStreamerClockType::from_str(wire).unwrap(), *expected);
+        }
+        // Every variant in ::all() must appear in the table above, otherwise
+        // a new variant lacks a FromStr mapping.
+        assert_eq!(cases.len(), GStreamerClockType::all().len());
+
+        assert!(GStreamerClockType::from_str("bogus").is_err());
+        assert!(GStreamerClockType::from_str("PTP").is_err());
+    }
+
+    #[test]
+    fn effective_direct_media_timing_respects_explicit_override() {
+        let ptp_off = FlowProperties {
+            clock_type: GStreamerClockType::Ptp,
+            direct_media_timing: Some(false),
+            ..Default::default()
+        };
+        assert!(!ptp_off.effective_direct_media_timing());
+
+        let tai_on = FlowProperties {
+            clock_type: GStreamerClockType::Tai,
+            direct_media_timing: Some(true),
+            ..Default::default()
+        };
+        assert!(tai_on.effective_direct_media_timing());
     }
 }

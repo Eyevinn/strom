@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.9"
+    "version": "0.4.11"
   },
   "paths": {
     "/api/auth/status": {
@@ -3684,6 +3684,31 @@
         }
       }
     },
+    "/api/system/clock": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get system clock synchronization state",
+        "description": "Returns the current kernel time-discipline state as reported by\n`ntp_adjtime(2)`. This includes the TAI-UTC offset, PLL status,\ncurrent offset being applied, and frequency adjustment — the same\ninformation used by chrony, ntpd and systemd-timesyncd.\n\nUseful for diagnosing flows that use `Realtime` or `Tai` pipeline\nclocks, where the accuracy depends on how the OS clock is being\nsynchronized.",
+        "operationId": "get_system_clock",
+        "responses": {
+          "200": {
+            "description": "System clock state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemClockInfo"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to read system clock state"
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "tags": [
@@ -5625,6 +5650,13 @@
             ],
             "description": "Human-readable description (multiline text)"
           },
+          "direct_media_timing": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Force direct media timing (`base_time=0`, `start_time=NONE`) so buffer\nPTS corresponds to absolute pipeline-clock time.\n\n- `Some(true)`: explicitly on.\n- `Some(false)`: explicitly off.\n- `None` (default): follow the clock-type default — `true` for `Ptp`\n  (AES67 contract, RFC 7273 `mediaclk:direct=0`), `false` otherwise.\n\nUse this for narrow pipelines where every element cooperates with\nwall-clock timing (PTP+AES67, or TAI disciplined by `ptp4l`/`phc2sys`\nfeeding AES67 with TAI timestamps). Avoid for general pipelines\n(MPEG-TS demuxers, RTP jitter buffers, WHEP session sinks) that assume\n`running_time` starts near 0."
+          },
           "ephemeral": {
             "type": "boolean",
             "description": "When true, the flow is not persisted to storage. Useful for temporary or\nAPI-created flows that should not survive a server restart."
@@ -5635,6 +5667,26 @@
               "null"
             ],
             "description": "Timestamp when the flow was last modified (any change to flow config)\nISO 8601 format with timezone"
+          },
+          "ntp_info": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NtpInfo",
+                "description": "NTP clock information (updated by backend when clock_type is NTP)"
+              }
+            ]
+          },
+          "ntp_port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "NTP server port (only used when clock_type is NTP). Defaults to 123.",
+            "minimum": 0
           },
           "ntp_server": {
             "type": [
@@ -5735,10 +5787,11 @@
       },
       "GStreamerClockType": {
         "type": "string",
-        "description": "GStreamer clock type selection.\n\nMaps to GStreamer's clock implementations:\n- `Monotonic`: SystemClock with GST_CLOCK_TYPE_MONOTONIC (default)\n- `Realtime`: SystemClock with GST_CLOCK_TYPE_REALTIME\n- `Ptp`: PtpClock for IEEE 1588 PTP synchronization\n- `Ntp`: NtpClock for NTP synchronization",
+        "description": "GStreamer clock type selection.\n\nMaps to GStreamer's clock implementations:\n- `Monotonic`: SystemClock with GST_CLOCK_TYPE_MONOTONIC (default)\n- `Realtime`: SystemClock with GST_CLOCK_TYPE_REALTIME (UTC wall clock)\n- `Tai`: SystemClock with GST_CLOCK_TYPE_TAI (linear atomic time, no leap seconds)\n- `Ptp`: PtpClock for IEEE 1588 PTP synchronization\n- `Ntp`: NtpClock for NTP synchronization",
         "enum": [
           "monotonic",
           "realtime",
+          "tai",
           "ptp",
           "ntp"
         ]
@@ -6357,6 +6410,70 @@
               "$ref": "#/components/schemas/NetworkInterfaceInfo"
             },
             "description": "List of network interfaces"
+          }
+        }
+      },
+      "NtpInfo": {
+        "type": "object",
+        "description": "NTP clock information (GStreamer GstNtpClock / NetClientClock).\n\nPopulated at read-time from the running NtpClock instance. Values are snapshots\nfrom the clock's internal state at the moment the flow was queried.",
+        "required": [
+          "server",
+          "port",
+          "synced",
+          "minimum_update_interval_ns",
+          "round_trip_limit_ns"
+        ],
+        "properties": {
+          "last_update": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Timestamp of last read (Unix seconds)",
+            "minimum": 0
+          },
+          "minimum_update_interval_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minimum update interval between polls, in nanoseconds (from clock property)",
+            "minimum": 0
+          },
+          "offset_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Current offset between external (server) and internal (local) clocks at\nthe calibration reference point, in nanoseconds. Positive = server ahead."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Server port",
+            "minimum": 0
+          },
+          "rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Current calibration rate (external clock speed / local speed).\n1.0 = same speed, <1.0 = server slower than local, >1.0 = server faster."
+          },
+          "round_trip_limit_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum RTT for accepted samples, in nanoseconds (from clock property)",
+            "minimum": 0
+          },
+          "server": {
+            "type": "string",
+            "description": "Server hostname/IP the NtpClock is polling"
+          },
+          "synced": {
+            "type": "boolean",
+            "description": "Whether the clock has collected enough observations to be considered stable"
           }
         }
       },
@@ -9321,6 +9438,68 @@
         "description": "Event types that can be broadcast to all connected clients.",
         "discriminator": {
           "propertyName": "type"
+        }
+      },
+      "SystemClockInfo": {
+        "type": "object",
+        "description": "System clock synchronization information.\n\nReads the kernel's `ntp_adjtime()` state (same information used by chrony,\nntpd, systemd-timesyncd, etc.) and reports how the system clock is being\ndisciplined. Relevant for flows using Realtime or TAI pipeline clocks.",
+        "required": [
+          "tai_offset_sec",
+          "state",
+          "synchronized",
+          "pll_active",
+          "offset_ns",
+          "frequency_ppm",
+          "max_error_us",
+          "est_error_us"
+        ],
+        "properties": {
+          "est_error_us": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Estimated error, in microseconds."
+          },
+          "frequency_ppm": {
+            "type": "number",
+            "format": "double",
+            "description": "Current frequency adjustment in parts-per-million."
+          },
+          "last_update": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Timestamp when this info was read (Unix seconds).",
+            "minimum": 0
+          },
+          "max_error_us": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum error estimate, in microseconds."
+          },
+          "offset_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Current time offset being applied to the clock, in nanoseconds."
+          },
+          "pll_active": {
+            "type": "boolean",
+            "description": "Whether PLL discipline is active (STA_PLL)."
+          },
+          "state": {
+            "type": "string",
+            "description": "High-level state from `ntp_adjtime()` return value.\nOne of: `ok`, `ins` (leap insert pending), `del`, `oop`, `wait`, `error` (unsynced)."
+          },
+          "synchronized": {
+            "type": "boolean",
+            "description": "Whether the kernel considers the clock synchronized (STA_UNSYNC not set)."
+          },
+          "tai_offset_sec": {
+            "type": "integer",
+            "format": "int32",
+            "description": "TAI - UTC offset in seconds (typically 37 as of 2026).\nSet by the clock sync daemon so that `CLOCK_TAI` is correct."
+          }
         }
       },
       "SystemInfo": {

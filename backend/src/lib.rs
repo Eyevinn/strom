@@ -40,6 +40,7 @@ pub mod sharing;
 pub mod state;
 pub mod stats;
 pub mod storage;
+pub mod system_clock;
 pub mod system_monitor;
 pub mod thread_registry;
 pub mod tls;
@@ -226,6 +227,7 @@ pub async fn create_app_with_config(
             axum::routing::delete(api::blocks::delete_block),
         )
         .route("/version", get(api::version::get_version))
+        .route("/system/clock", get(api::system_clock::get_system_clock))
         .route("/ws", get(api::websocket::websocket_handler))
         // gst-launch-1.0 import/export
         .route("/gst-launch/parse", post(api::gst_launch::parse_gst_launch))

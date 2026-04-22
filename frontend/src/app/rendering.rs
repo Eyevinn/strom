@@ -127,7 +127,7 @@ impl StromApp {
                             self.current_page == AppPage::Clocks,
                             egui::RichText::new("Clocks").size(16.0),
                         )
-                        .on_hover_text("PTP clock synchronization")
+                        .on_hover_text("System, PTP, and NTP clock status")
                         .clicked()
                     {
                         self.current_page = AppPage::Clocks;
@@ -459,8 +459,6 @@ impl StromApp {
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.label(egui::RichText::new("Clocks").heading());
-                    ui.separator();
-                    ui.label("PTP clocks are shared per domain");
                 });
             });
     }
@@ -861,6 +859,16 @@ impl StromApp {
                                         ui.label(format!("PTP Domain: {}", domain));
                                     }
 
+                                    if matches!(
+                                        flow.properties.clock_type,
+                                        strom_types::flow::GStreamerClockType::Ntp
+                                    ) {
+                                        if let Some(server) = &flow.properties.ntp_server {
+                                            let port = flow.properties.ntp_port.unwrap_or(123);
+                                            ui.label(format!("NTP Server: {}:{}", server, port));
+                                        }
+                                    }
+
                                     if let Some(sync_status) = flow.properties.clock_sync_status {
                                         use strom_types::flow::ClockSyncStatus;
                                         let status_text = match sync_status {
@@ -970,6 +978,18 @@ impl StromApp {
                                                     .ptp_domain
                                                     .map(|d| d.to_string())
                                                     .unwrap_or_else(|| "0".to_string());
+                                                self.properties_ntp_server_buffer = flow
+                                                    .properties
+                                                    .ntp_server
+                                                    .clone()
+                                                    .unwrap_or_default();
+                                                self.properties_ntp_port_buffer = flow
+                                                    .properties
+                                                    .ntp_port
+                                                    .map(|p| p.to_string())
+                                                    .unwrap_or_else(|| "123".to_string());
+                                                self.properties_direct_media_timing_buffer =
+                                                    flow.properties.direct_media_timing;
                                                 self.properties_thread_priority_buffer =
                                                     flow.properties.thread_priority;
                                                 self.properties_cpu_affinity_buffer =

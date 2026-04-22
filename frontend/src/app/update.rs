@@ -1150,6 +1150,14 @@ impl eframe::App for StromApp {
                     tracing::info!("Network interfaces loaded: {} interfaces", interfaces.len());
                     self.network_interfaces = interfaces;
                 }
+                AppMessage::SystemClockLoaded(info) => {
+                    self.system_clock_info = Some(info);
+                    self.system_clock_unsupported = false;
+                }
+                AppMessage::SystemClockUnsupported => {
+                    self.system_clock_unsupported = true;
+                    self.system_clock_info = None;
+                }
                 AppMessage::LogLevelLoaded { current, default } => {
                     self.log_level_current = Some(current);
                     self.log_level_default = Some(default);
@@ -1333,6 +1341,16 @@ impl eframe::App for StromApp {
             // Poll thumbnail blocks in running flows
             self.poll_block_thumbnails(ui.ctx());
             self.check_block_thumbnails(ui.ctx());
+        }
+
+        // Periodically fetch system clock state while the Clocks page is visible.
+        // Skip polling if we've already learned the backend doesn't support it.
+        if matches!(self.current_page, AppPage::Clocks)
+            && !self.system_clock_unsupported
+            && self.last_system_clock_fetch.elapsed() > std::time::Duration::from_secs(2)
+        {
+            self.last_system_clock_fetch = instant::Instant::now();
+            self.fetch_system_clock_info(ui.ctx());
         }
 
         // Handle keyboard shortcuts
@@ -1833,7 +1851,13 @@ impl eframe::App for StromApp {
                     }
                     AppPage::Clocks => {
                         CentralPanel::default().show_inside(ui, |ui| {
-                            self.clocks_page.render(ui, &self.ptp_stats, &self.flows);
+                            self.clocks_page.render(
+                                ui,
+                                &self.ptp_stats,
+                                &self.flows,
+                                self.system_clock_info.as_ref(),
+                                self.system_clock_unsupported,
+                            );
                         });
                     }
                     AppPage::Media => {

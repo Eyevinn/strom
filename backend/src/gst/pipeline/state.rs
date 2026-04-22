@@ -120,6 +120,59 @@ impl PipelineManager {
         })
     }
 
+    /// Get detailed NTP clock information.
+    /// Returns None if the pipeline is not using an NTP clock.
+    pub fn get_ntp_info(&self) -> Option<strom_types::flow::NtpInfo> {
+        use gst::prelude::*;
+        use gstreamer_net::NetClientClock;
+        use strom_types::flow::NtpInfo;
+
+        let clock = self.ntp_clock.as_ref()?;
+        // NtpClock inherits from NetClientClock — upcast to access property accessors.
+        let net_client: &NetClientClock = clock.upcast_ref();
+
+        let server = net_client
+            .address()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let port = net_client.port() as u16;
+        let synced = clock.is_synced();
+        let minimum_update_interval_ns = net_client.minimum_update_interval();
+        let round_trip_limit_ns = net_client.round_trip_limit();
+
+        // Calibration: (internal_ref, external_ref, rate_num, rate_denom).
+        // external(internal) = ((internal - internal_ref) * rate_num / rate_denom) + external_ref.
+        // At the reference point, offset = external_ref - internal_ref.
+        let (internal_ref, external_ref, rate_num, rate_denom) = clock.calibration();
+        let (rate, offset_ns) = if rate_denom != 0 {
+            let rate = rate_num as f64 / rate_denom as f64;
+            // Widen via i128 before subtraction: NTP-absolute nanosecond values
+            // can approach i64::MAX, and a direct `as i64` on either operand
+            // would wrap before we ever got to subtract.
+            let diff = external_ref.nseconds() as i128 - internal_ref.nseconds() as i128;
+            let offset = diff.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+            (Some(rate), Some(offset))
+        } else {
+            (None, None)
+        };
+
+        let last_update = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs());
+
+        Some(NtpInfo {
+            server,
+            port,
+            synced,
+            minimum_update_interval_ns,
+            round_trip_limit_ns,
+            rate,
+            offset_ns,
+            last_update,
+        })
+    }
+
     /// Get the underlying GStreamer pipeline (for debugging).
     pub fn pipeline(&self) -> &gst::Pipeline {
         &self.pipeline
@@ -269,7 +322,6 @@ impl PipelineManager {
     pub fn get_debug_info(&self) -> strom_types::api::FlowDebugInfo {
         use gst::prelude::*;
         use strom_types::api::FlowDebugInfo;
-        use strom_types::flow::GStreamerClockType;
 
         // Get pipeline clock
         let clock = self.pipeline.clock();
@@ -285,12 +337,7 @@ impl PipelineManager {
         };
 
         // Get clock type description
-        let clock_type = match self.properties.clock_type {
-            GStreamerClockType::Ptp => Some("PTP".to_string()),
-            GStreamerClockType::Monotonic => Some("Monotonic".to_string()),
-            GStreamerClockType::Realtime => Some("Realtime".to_string()),
-            GStreamerClockType::Ntp => Some("NTP".to_string()),
-        };
+        let clock_type = Some(self.properties.clock_type.label().to_string());
 
         // Get PTP grandmaster if using PTP clock
         let ptp_grandmaster = self.ptp_clock.as_ref().and_then(|ptp| {

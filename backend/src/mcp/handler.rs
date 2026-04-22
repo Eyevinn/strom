@@ -459,13 +459,9 @@ impl McpHandler {
 
                 // Update clock_type if provided
                 if let Some(clock_type_str) = args["clock_type"].as_str() {
-                    flow.properties.clock_type = match clock_type_str {
-                        "monotonic" => GStreamerClockType::Monotonic,
-                        "realtime" => GStreamerClockType::Realtime,
-                        "ptp" => GStreamerClockType::Ptp,
-                        "ntp" => GStreamerClockType::Ntp,
-                        _ => return Err(anyhow::anyhow!("Invalid clock_type: {}", clock_type_str)),
-                    };
+                    flow.properties.clock_type = clock_type_str
+                        .parse::<GStreamerClockType>()
+                        .map_err(|e| anyhow::anyhow!(e))?;
                 }
 
                 state.upsert_flow(flow.clone()).await?;

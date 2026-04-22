@@ -592,6 +592,37 @@ impl SystemInfo {
     }
 }
 
+/// System clock synchronization information.
+///
+/// Reads the kernel's `ntp_adjtime()` state (same information used by chrony,
+/// ntpd, systemd-timesyncd, etc.) and reports how the system clock is being
+/// disciplined. Relevant for flows using Realtime or TAI pipeline clocks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SystemClockInfo {
+    /// TAI - UTC offset in seconds (typically 37 as of 2026).
+    /// Set by the clock sync daemon so that `CLOCK_TAI` is correct.
+    pub tai_offset_sec: i32,
+    /// High-level state from `ntp_adjtime()` return value.
+    /// One of: `ok`, `ins` (leap insert pending), `del`, `oop`, `wait`, `error` (unsynced).
+    pub state: String,
+    /// Whether the kernel considers the clock synchronized (STA_UNSYNC not set).
+    pub synchronized: bool,
+    /// Whether PLL discipline is active (STA_PLL).
+    pub pll_active: bool,
+    /// Current time offset being applied to the clock, in nanoseconds.
+    pub offset_ns: i64,
+    /// Current frequency adjustment in parts-per-million.
+    pub frequency_ppm: f64,
+    /// Maximum error estimate, in microseconds.
+    pub max_error_us: i64,
+    /// Estimated error, in microseconds.
+    pub est_error_us: i64,
+    /// Timestamp when this info was read (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<u64>,
+}
+
 /// Authentication status response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]

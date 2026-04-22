@@ -12,10 +12,10 @@ use strom_types::api::{
     OverlayAlphaRequest, OverlayAlphaResponse, PadPropertiesResponse, ParseGstLaunchRequest,
     ParseGstLaunchResponse, ProbeInfo, ProbeResponse, RenameMediaRequest, RtpStreamStats,
     SelectPreviewRequest, SelectPreviewResponse, ServerMessage, SetBackgroundRequest,
-    SetBackgroundResponse, SetGstLogLevelRequest, SetLogLevelRequest, SourceFlowInfo, SystemInfo,
-    TransitionResponse, TransportStats, TriggerTransitionRequest, UpdateFlowPropertiesRequest,
-    UpdatePadPropertyRequest, UpdatePropertyRequest, VisionMixerState, WebRtcConnectionStats,
-    WebRtcStats, WebRtcStatsResponse,
+    SetBackgroundResponse, SetGstLogLevelRequest, SetLogLevelRequest, SourceFlowInfo,
+    SystemClockInfo, SystemInfo, TransitionResponse, TransportStats, TriggerTransitionRequest,
+    UpdateFlowPropertiesRequest, UpdatePadPropertyRequest, UpdatePropertyRequest, VisionMixerState,
+    WebRtcConnectionStats, WebRtcStats, WebRtcStatsResponse,
 };
 use strom_types::auth::{LoginRequest, LoginResponse};
 use strom_types::block::{
@@ -90,6 +90,7 @@ use utoipa::OpenApi;
         crate::api::gst_launch::export_gst_launch,
         crate::api::network::list_interfaces,
         crate::api::version::get_version,
+        crate::api::system_clock::get_system_clock,
         crate::api::logging::get_log_level,
         crate::api::logging::set_log_level,
         crate::api::logging::get_gst_log_level,
@@ -180,6 +181,7 @@ use utoipa::OpenApi;
             ExternalPads,
             ExternalPad,
             SystemInfo,
+            SystemClockInfo,
             LogLevelResponse,
             SetLogLevelRequest,
             GstLogLevelResponse,
