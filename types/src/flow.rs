@@ -441,3 +441,60 @@ impl Flow {
         self.gst_state = state;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supports_wall_clock_pts_matches_clock_types() {
+        assert!(GStreamerClockType::Ptp.supports_wall_clock_pts());
+        assert!(GStreamerClockType::Tai.supports_wall_clock_pts());
+        assert!(GStreamerClockType::Realtime.supports_wall_clock_pts());
+        assert!(GStreamerClockType::Ntp.supports_wall_clock_pts());
+        assert!(!GStreamerClockType::Monotonic.supports_wall_clock_pts());
+    }
+
+    #[test]
+    fn effective_direct_media_timing_defaults_to_ptp_only() {
+        let ptp = FlowProperties {
+            clock_type: GStreamerClockType::Ptp,
+            ..Default::default()
+        };
+        assert!(ptp.effective_direct_media_timing());
+
+        for ct in [
+            GStreamerClockType::Monotonic,
+            GStreamerClockType::Realtime,
+            GStreamerClockType::Tai,
+            GStreamerClockType::Ntp,
+        ] {
+            let props = FlowProperties {
+                clock_type: ct,
+                ..Default::default()
+            };
+            assert!(
+                !props.effective_direct_media_timing(),
+                "{:?} should default to false",
+                ct
+            );
+        }
+    }
+
+    #[test]
+    fn effective_direct_media_timing_respects_explicit_override() {
+        let ptp_off = FlowProperties {
+            clock_type: GStreamerClockType::Ptp,
+            direct_media_timing: Some(false),
+            ..Default::default()
+        };
+        assert!(!ptp_off.effective_direct_media_timing());
+
+        let tai_on = FlowProperties {
+            clock_type: GStreamerClockType::Tai,
+            direct_media_timing: Some(true),
+            ..Default::default()
+        };
+        assert!(tai_on.effective_direct_media_timing());
+    }
+}

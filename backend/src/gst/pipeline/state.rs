@@ -146,7 +146,11 @@ impl PipelineManager {
         let (internal_ref, external_ref, rate_num, rate_denom) = clock.calibration();
         let (rate, offset_ns) = if rate_denom != 0 {
             let rate = rate_num as f64 / rate_denom as f64;
-            let offset = external_ref.nseconds() as i64 - internal_ref.nseconds() as i64;
+            // Widen via i128 before subtraction: NTP-absolute nanosecond values
+            // can approach i64::MAX, and a direct `as i64` on either operand
+            // would wrap before we ever got to subtract.
+            let diff = external_ref.nseconds() as i128 - internal_ref.nseconds() as i128;
+            let offset = diff.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
             (Some(rate), Some(offset))
         } else {
             (None, None)

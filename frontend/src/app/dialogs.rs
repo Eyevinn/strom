@@ -483,44 +483,48 @@ impl StromApp {
                     );
                 }
 
-                // Direct media timing selector (Auto / On / Off).
-                ui.add_space(10.0);
-                ui.label("Direct Media Timing");
-                let is_ptp = matches!(
-                    self.properties_clock_type_buffer,
-                    strom_types::flow::GStreamerClockType::Ptp
-                );
-                let effective_default = if is_ptp { "On" } else { "Off" };
-                let current_label = match self.properties_direct_media_timing_buffer {
-                    None => format!("Auto ({} for this clock type)", effective_default),
-                    Some(true) => "On".to_string(),
-                    Some(false) => "Off".to_string(),
-                };
-                egui::ComboBox::from_id_salt("direct_media_timing_selector")
-                    .selected_text(current_label)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.properties_direct_media_timing_buffer,
-                            None,
-                            format!("Auto ({} for this clock type)", effective_default),
-                        );
-                        ui.selectable_value(
-                            &mut self.properties_direct_media_timing_buffer,
-                            Some(true),
-                            "On",
-                        );
-                        ui.selectable_value(
-                            &mut self.properties_direct_media_timing_buffer,
-                            Some(false),
-                            "Off",
-                        );
-                    });
-                ui.label(
-                    "Forces base_time=0, start_time=NONE. Required for AES67 \
-                     (mediaclk:direct=0). Auto turns On for PTP, Off otherwise. \
-                     Do not enable on flows with MPEG-TS demuxers, WHEP sinks, \
-                     or other elements that assume running_time starts near 0.",
-                );
+                // Direct media timing selector (Auto / On / Off). Only meaningful
+                // for wall-clock types — Monotonic has no external reference, so
+                // base_time=0 would pin PTS to boot time.
+                if self.properties_clock_type_buffer.supports_wall_clock_pts() {
+                    ui.add_space(10.0);
+                    ui.label("Direct Media Timing");
+                    let is_ptp = matches!(
+                        self.properties_clock_type_buffer,
+                        strom_types::flow::GStreamerClockType::Ptp
+                    );
+                    let effective_default = if is_ptp { "On" } else { "Off" };
+                    let current_label = match self.properties_direct_media_timing_buffer {
+                        None => format!("Auto ({} for this clock type)", effective_default),
+                        Some(true) => "On".to_string(),
+                        Some(false) => "Off".to_string(),
+                    };
+                    egui::ComboBox::from_id_salt("direct_media_timing_selector")
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.properties_direct_media_timing_buffer,
+                                None,
+                                format!("Auto ({} for this clock type)", effective_default),
+                            );
+                            ui.selectable_value(
+                                &mut self.properties_direct_media_timing_buffer,
+                                Some(true),
+                                "On",
+                            );
+                            ui.selectable_value(
+                                &mut self.properties_direct_media_timing_buffer,
+                                Some(false),
+                                "Off",
+                            );
+                        });
+                    ui.label(
+                        "Forces base_time=0, start_time=NONE. Required for AES67 \
+                         (mediaclk:direct=0). Auto turns On for PTP, Off otherwise. \
+                         Do not enable on flows with MPEG-TS demuxers, WHEP sinks, \
+                         or other elements that assume running_time starts near 0.",
+                    );
+                }
 
                 // Show clock sync status for PTP/NTP clocks
                 if matches!(
