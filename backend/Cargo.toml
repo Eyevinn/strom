@@ -125,7 +125,7 @@ crossterm = "0.29"
 # Network discovery
 socket2 = "0.6"      # Multicast socket options for SAP
 flate2 = "1.1"       # Zlib decompression for SAP
-mdns-sd = "0.18"     # mDNS service discovery (RAVENNA, NDI, etc.)
+mdns-sd = "0.19"     # mDNS service discovery (RAVENNA, NDI, etc.)
 hostname = "0.4"     # Cross-platform hostname detection
 
 # GUI (native frontend) - use --features no-gui to disable
