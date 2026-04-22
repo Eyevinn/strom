@@ -127,7 +127,7 @@ impl StromApp {
                             self.current_page == AppPage::Clocks,
                             egui::RichText::new("Clocks").size(16.0),
                         )
-                        .on_hover_text("PTP clock synchronization")
+                        .on_hover_text("System, PTP, and NTP clock status")
                         .clicked()
                     {
                         self.current_page = AppPage::Clocks;

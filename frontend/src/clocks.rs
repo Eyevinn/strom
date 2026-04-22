@@ -451,39 +451,57 @@ fn render_system_clock_panel(
         });
 }
 
-/// Render a compact per-flow panel for NTP clocks.
+/// Render one card per unique NTP endpoint (server:port), listing every flow
+/// that references it. GStreamer shares an NtpClock instance across flows that
+/// target the same endpoint, so the calibration/sync state is identical — one
+/// card per clock, not per flow.
 fn render_ntp_section(ui: &mut Ui, ntp_flows: &[&strom_types::Flow]) {
+    let mut groups: Vec<((String, u16), Vec<&strom_types::Flow>)> = Vec::new();
     for flow in ntp_flows {
+        let key = (
+            flow.properties
+                .ntp_server
+                .clone()
+                .unwrap_or_else(|| "pool.ntp.org".to_string()),
+            flow.properties.ntp_port.unwrap_or(123),
+        );
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, flows)) => flows.push(flow),
+            None => groups.push((key, vec![flow])),
+        }
+    }
+
+    for ((server, port), flows) in &groups {
+        // Pick the first running flow with live ntp_info as the stats representative.
+        let stats = flows
+            .iter()
+            .find_map(|f| f.properties.ntp_info.as_ref().map(|info| (f, info)));
+
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&flow.name).strong());
+                ui.label(RichText::new(format!("{}:{}", server, port)).strong());
                 ui.add_space(8.0);
-                if flow.running {
-                    ui.colored_label(Color32::from_rgb(100, 255, 100), "running");
-                } else {
-                    ui.colored_label(Color32::GRAY, "stopped");
+                match stats {
+                    Some((_, info)) if info.synced => {
+                        ui.colored_label(Color32::from_rgb(100, 255, 100), "Synced");
+                    }
+                    Some(_) => {
+                        ui.colored_label(Color32::from_rgb(255, 180, 100), "Not synced");
+                    }
+                    None if flows.iter().any(|f| f.running) => {
+                        ui.colored_label(Color32::GRAY, "Stats loading");
+                    }
+                    None => {
+                        ui.colored_label(Color32::GRAY, "Stopped");
+                    }
                 }
             });
 
-            if let Some(info) = &flow.properties.ntp_info {
-                let (color, text) = if info.synced {
-                    (Color32::from_rgb(100, 255, 100), "Synced")
-                } else {
-                    (Color32::from_rgb(255, 180, 100), "Not synced")
-                };
-                ui.horizontal(|ui| {
-                    ui.label("Sync:");
-                    ui.colored_label(color, text);
-                });
-
-                egui::Grid::new(("ntp_grid", flow.id))
+            if let Some((rep_flow, info)) = stats {
+                egui::Grid::new(("ntp_grid", rep_flow.id))
                     .num_columns(2)
                     .spacing([14.0, 4.0])
                     .show(ui, |ui| {
-                        ui.label("Server:");
-                        ui.label(format!("{}:{}", info.server, info.port));
-                        ui.end_row();
-
                         ui.label("Offset vs local:");
                         if let Some(offset) = info.offset_ns {
                             let offset_us = offset as f64 / 1000.0;
@@ -512,21 +530,23 @@ fn render_ntp_section(ui: &mut Ui, ntp_flows: &[&strom_types::Flow]) {
                         ui.label(format!("{:.2} ms", info.round_trip_limit_ns as f64 / 1e6));
                         ui.end_row();
                     });
-            } else if flow.running {
-                ui.label("NTP clock stats not yet available");
-            } else {
-                // Show configured server from flow properties
-                let server = flow
-                    .properties
-                    .ntp_server
-                    .clone()
-                    .unwrap_or_else(|| "pool.ntp.org".to_string());
-                let port = flow.properties.ntp_port.unwrap_or(123);
-                ui.label(format!(
-                    "Configured server: {}:{} (start flow to see live stats)",
-                    server, port
-                ));
+            } else if !flows.iter().any(|f| f.running) {
+                ui.label("Start a flow to see live stats");
             }
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("Used by").weak());
+            ui.horizontal_wrapped(|ui| {
+                for flow in flows {
+                    let (color, suffix) = if flow.running {
+                        (Color32::from_rgb(100, 255, 100), "running")
+                    } else {
+                        (Color32::GRAY, "stopped")
+                    };
+                    ui.label(&flow.name);
+                    ui.colored_label(color, format!("({})", suffix));
+                }
+            });
         });
         ui.add_space(6.0);
     }
