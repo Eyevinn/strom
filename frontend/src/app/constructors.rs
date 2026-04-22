@@ -153,7 +153,7 @@ impl StromApp {
             last_rtp_stats_fetch: instant::Instant::now(),
             system_clock_info: None,
             system_clock_unsupported: false,
-            last_system_clock_fetch: instant::Instant::now() - std::time::Duration::from_secs(10),
+            last_system_clock_fetch: None,
 
             compositor_editor: None,
             mixer_editor: None,
@@ -327,7 +327,7 @@ impl StromApp {
             last_rtp_stats_fetch: instant::Instant::now(),
             system_clock_info: None,
             system_clock_unsupported: false,
-            last_system_clock_fetch: instant::Instant::now() - std::time::Duration::from_secs(10),
+            last_system_clock_fetch: None,
 
             compositor_editor: None,
             mixer_editor: None,

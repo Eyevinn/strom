@@ -1347,9 +1347,11 @@ impl eframe::App for StromApp {
         // Skip polling if we've already learned the backend doesn't support it.
         if matches!(self.current_page, AppPage::Clocks)
             && !self.system_clock_unsupported
-            && self.last_system_clock_fetch.elapsed() > std::time::Duration::from_secs(2)
+            && self
+                .last_system_clock_fetch
+                .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(2))
         {
-            self.last_system_clock_fetch = instant::Instant::now();
+            self.last_system_clock_fetch = Some(instant::Instant::now());
             self.fetch_system_clock_info(ui.ctx());
         }
 

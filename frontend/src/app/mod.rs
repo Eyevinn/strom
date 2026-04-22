@@ -693,8 +693,9 @@ pub struct StromApp {
     /// True if the backend reported the system clock endpoint is unsupported on
     /// this platform (non-Linux). Drives the "not available" message.
     system_clock_unsupported: bool,
-    /// Last time system clock was fetched (for periodic refresh while Clocks page is open)
-    last_system_clock_fetch: instant::Instant,
+    /// Last time system clock was fetched (for periodic refresh while Clocks page is open).
+    /// `None` means never fetched — triggers an immediate fetch on first Clocks page visit.
+    last_system_clock_fetch: Option<instant::Instant>,
     /// Compositor layout editor (if open)
     compositor_editor: Option<CompositorEditor>,
     /// Mixer editor (if open)
