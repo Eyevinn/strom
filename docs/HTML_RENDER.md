@@ -133,10 +133,49 @@ The entrypoint script automatically:
 
 - Starts Xvfb on display `:99`
 - Disables CEF sandbox (required for Docker root user)
-- Disables GPU (Xvfb is software-only)
+- Uses software rendering for CEF by default (see GPU mode below for opt-in)
 - Configures CEF cache and logging
 
 No manual configuration is needed - just run the container and use `cefsrc` in your pipelines.
+
+### GPU mode (opt-in, experimental)
+
+CEF can be routed through the host NVIDIA GPU via ANGLE/Vulkan by setting
+`STROM_CEF_GPU=1`. The software default is kept because:
+
+- GPU mode has a roughly 50% CPU floor per `cefsrc` at 1080p30, independent of
+  page content (continuous Vulkan command-buffer submits and compositor work).
+- Software mode is near-zero-cost for idle or static pages — Chromium elides
+  paint when nothing changes, and `cefsrc` emits duplicate buffers cheaply.
+
+GPU mode pays off when the renderer is the bottleneck: canvas-heavy animations,
+WebGL/3D scenes, or very high resolutions. For example, a 1080p30 wind-map
+(canvas + continuous simulation) drops from ~95% CPU to ~57% CPU with GPU mode
+on an RTX 3090; the same simple static page goes from ~1% CPU to ~53%.
+
+**Enabling GPU mode:**
+
+```bash
+docker run --gpus all \
+  -e STROM_CEF_GPU=1 \
+  -e NVIDIA_DRIVER_CAPABILITIES=all \
+  -v /usr/share/vulkan/icd.d/nvidia_icd.json:/usr/share/vulkan/icd.d/nvidia_icd.json:ro \
+  --network host \
+  eyevinntechnology/strom-full:latest
+```
+
+Requirements:
+
+- NVIDIA driver on the host and `nvidia-container-toolkit` installed
+- `--gpus all` to pass the device into the container
+- `NVIDIA_DRIVER_CAPABILITIES=all` so the toolkit mounts the full lib set
+  (including `libGLX_nvidia.so.0`)
+- Bind-mount of the host's `nvidia_icd.json` — the container toolkit does not
+  mount the Vulkan ICD JSON automatically on all setups
+
+The entrypoint prints `CEF GPU mode enabled (STROM_CEF_GPU=1) - ANGLE/Vulkan
+on NVIDIA` when the GPU path activates, and warns if `STROM_CEF_GPU=1` is set
+but no GPU is visible in the container.
 
 ## Troubleshooting
 
@@ -168,10 +207,18 @@ Messages like "Failed to connect to the bus" are benign warnings - DBus is not a
 
 ### High CPU usage
 
-CEF renders pages continuously. For static content, consider:
-- Using simpler HTML/CSS
-- Reducing resolution if full HD isn't needed
-- Setting appropriate framerate in your pipeline
+CEF renders pages continuously. For software mode the biggest levers are:
+- **Resolution** — rendering at the target output size instead of 1080p is the
+  single biggest win for software mode. 640x360 uses roughly 3x less CPU than
+  1920x1080 because paint, compositor and BGRA transport all scale with pixel
+  count. Pass width/height via `cefsrc` or a downstream capsfilter.
+- **Framerate** — dropping from 30 to 15 fps roughly halves compositor and
+  transport cost, but page-internal JS loops continue at the browser's own
+  cadence unless the page is strictly `requestAnimationFrame`-driven.
+- **Content complexity** — simpler HTML/CSS. Canvas simulations and heavy
+  WebGL are CPU-bound in software mode.
+
+For genuinely canvas/WebGL-heavy pages, consider GPU mode (see above) instead.
 
 ## Building gstcefsrc
 
@@ -191,7 +238,7 @@ The build uses Ubuntu Questing to match the strom base image's glibc version.
 ## Limitations
 
 - **Docker only**: CEF requires X11, which the strom-full image provides via Xvfb
-- **Software rendering**: GPU acceleration is disabled in Docker; rendering is CPU-based
+- **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
 
