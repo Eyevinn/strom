@@ -1671,16 +1671,16 @@ dependencies = [
 
 [[package]]
 name = "efp"
-version = "0.2.6"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.2.6#10c4d839c9e7db73f13ba5183d3c34eeafbea9bc"
+version = "0.3.0"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.3.0#fbb24bbfe3d05463d9f8ccec9fb8949e40b96812"
 dependencies = [
  "efp-sys",
 ]
 
 [[package]]
 name = "efp-sys"
-version = "0.2.6"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.2.6#10c4d839c9e7db73f13ba5183d3c34eeafbea9bc"
+version = "0.3.0"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.3.0#fbb24bbfe3d05463d9f8ccec9fb8949e40b96812"
 dependencies = [
  "bindgen",
  "cmake",
@@ -2672,8 +2672,8 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-efp"
-version = "0.2.6"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.2.6#10c4d839c9e7db73f13ba5183d3c34eeafbea9bc"
+version = "0.3.0"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.3.0#fbb24bbfe3d05463d9f8ccec9fb8949e40b96812"
 dependencies = [
  "efp",
  "glib",
@@ -6683,7 +6683,7 @@ dependencies = [
 
 [[package]]
 name = "strom"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "agua-gst",
  "anyhow",
@@ -6758,7 +6758,7 @@ dependencies = [
 
 [[package]]
 name = "strom-frontend"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "base64",
  "chrono",
@@ -6794,7 +6794,7 @@ dependencies = [
 
 [[package]]
 name = "strom-mcp-server"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "anyhow",
  "reqwest 0.13.2",
@@ -6808,7 +6808,7 @@ dependencies = [
 
 [[package]]
 name = "strom-types"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "garde",
  "serde",
