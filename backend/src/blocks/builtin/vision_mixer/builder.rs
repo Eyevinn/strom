@@ -6,6 +6,7 @@ use super::overlay::{self, OverlayRenderer, VisionMixerOverlayState};
 use super::properties;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::events::EventBroadcaster;
+use crate::gpu;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -647,12 +648,17 @@ fn build_cpu_pipeline(
     elems.push((cf_pgm_mv_id.clone(), capsfilter_pgm_mv));
 
     // DSK input element chains (links to mixer added later after video inputs)
+    let vc_factory = gpu::video_convert_mode().element_name();
     for i in 0..p.num_dsk_inputs {
         let q_id = p.id(&format!("queue_dsk_{}", i));
         let vc_id_dsk = p.id(&format!("videoconvert_dsk_{}", i));
 
         let queue = elements::make_queue(&q_id)?;
-        let videoconvert = elements::make_element("videoconvert", &vc_id_dsk)?;
+        // Uses autovideoconvert on hosts with working CUDA-GL interop, plain
+        // videoconvert elsewhere — same pattern as videoenc/videoformat. Needed
+        // so that upstream GPU-memory sources (e.g. nvh264dec from efpsrt_input)
+        // negotiate correctly against the CPU compositor backend.
+        let videoconvert = elements::make_element(vc_factory, &vc_id_dsk)?;
 
         elems.push((q_id.clone(), queue));
         elems.push((vc_id_dsk.clone(), videoconvert));
@@ -738,7 +744,7 @@ fn build_cpu_pipeline(
     let q_overlay_id = p.id("queue_overlay");
     let queue_overlay = elements::make_queue(&q_overlay_id)?;
     let vc_overlay_id = p.id("videoconvert_overlay");
-    let videoconvert_overlay = elements::make_element("videoconvert", &vc_overlay_id)?;
+    let videoconvert_overlay = elements::make_element(vc_factory, &vc_overlay_id)?;
 
     elems.push((appsrc_overlay_id.clone(), appsrc_overlay.clone().upcast()));
     elems.push((q_overlay_id.clone(), queue_overlay));
@@ -792,7 +798,7 @@ fn build_cpu_pipeline(
         let tee_id = p.id(&format!("tee_{}", i));
 
         let queue = elements::make_queue(&q_id)?;
-        let videoconvert = elements::make_element("videoconvert", &vc_in_id)?;
+        let videoconvert = elements::make_element(vc_factory, &vc_in_id)?;
         let tee = elements::make_tee(&tee_id)?;
 
         elems.push((q_id.clone(), queue));
