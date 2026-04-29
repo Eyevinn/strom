@@ -640,7 +640,10 @@ impl AppState {
         };
         if pipeline_active {
             if let Err(e) = self.stop_flow(id).await {
-                warn!("Failed to stop flow {} before delete: {}", id, e);
+                error!(
+                    "Failed to stop flow {} before delete: {} — pipeline resources may leak",
+                    id, e
+                );
             }
         }
 
