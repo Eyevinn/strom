@@ -450,21 +450,21 @@ jobs:
 
       - name: Run Clippy
         run: |
-          cargo clippy --package strom --features nvidia -- -D warnings
+          cargo clippy --package strom --features efp,nvidia -- -D warnings
           cargo clippy --package strom-mcp-server -- -D warnings
         env:
           RUSTC_WRAPPER: sccache
 
       - name: Run tests
         run: |
-          cargo test --package strom --features nvidia
+          cargo test --package strom --features efp,nvidia
           cargo test --package strom-mcp-server
         env:
           RUSTC_WRAPPER: sccache
 
       - name: Build
         run: |
-          cargo build --release --package strom
+          cargo build --release --package strom --features efp
           cargo build --release --package strom-mcp-server
         env:
           RUSTC_WRAPPER: sccache
