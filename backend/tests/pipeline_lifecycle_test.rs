@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
+use strom::state::AppState;
+use strom::storage::JsonFileStorage;
 use strom_types::{Flow, Link};
 use tempfile::NamedTempFile;
 
@@ -160,5 +162,83 @@ async fn test_leak_detection_catches_circular_reference() {
         pipeline_weak.upgrade().is_some(),
         "Pipeline was finalized despite circular reference — \
          leak detection would miss real leaks!"
+    );
+}
+
+/// Regression test for the delete-without-stop leak: deleting a flow that has
+/// an active pipeline must fully release the pipeline (encoders, sockets,
+/// element refs). Before the fix in delete_flow, the PipelineManager stayed
+/// in AppState.pipelines after deletion and orphaned NVENC sessions / sockets
+/// would accumulate until process exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_delete_running_flow_releases_pipeline() {
+    gstreamer::init().unwrap();
+
+    let storage_file = NamedTempFile::new().unwrap();
+    let blocks_file = NamedTempFile::new().unwrap();
+    let storage = JsonFileStorage::new(storage_file.path());
+
+    let state = AppState::new(
+        storage,
+        blocks_file.path(),
+        std::env::temp_dir(),
+        vec![],
+        "all".to_string(),
+        vec![],
+    );
+
+    let flow = build_test_flow("delete_running_flow_test");
+    let flow_id = flow.id;
+    state.upsert_flow(flow).await.expect("upsert_flow failed");
+
+    state.start_flow(&flow_id).await.expect("start_flow failed");
+
+    // Capture weak refs to the running pipeline before deletion
+    let (pipeline_weak, element_weak_refs) = {
+        let pipelines = state.pipelines_read().await;
+        let manager = pipelines
+            .get(&flow_id)
+            .expect("Pipeline should be active after start_flow");
+        (manager.pipeline_weak(), manager.element_weak_refs())
+    };
+    assert!(
+        pipeline_weak.upgrade().is_some(),
+        "Pipeline should be alive before delete"
+    );
+    assert!(
+        !element_weak_refs.is_empty(),
+        "Pipeline should have elements"
+    );
+
+    // Delete WITHOUT calling stop_flow first — this is the path the UI takes
+    let deleted = state
+        .delete_flow(&flow_id)
+        .await
+        .expect("delete_flow failed");
+    assert!(deleted, "delete_flow should report the flow was deleted");
+
+    // Pipeline must no longer be tracked in AppState
+    {
+        let pipelines = state.pipelines_read().await;
+        assert!(
+            !pipelines.contains_key(&flow_id),
+            "Pipeline still in AppState.pipelines after delete — orphaned manager"
+        );
+    }
+
+    // And every GStreamer object must be finalized — surviving refs would
+    // mean a leaked encoder / socket / thread that no API path can release.
+    assert!(
+        pipeline_weak.upgrade().is_none(),
+        "Pipeline still alive after delete_flow — resources leaked"
+    );
+    let leaked: Vec<_> = element_weak_refs
+        .iter()
+        .filter_map(|(name, weak)| weak.upgrade().map(|_| name.clone()))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "Elements still alive after delete_flow: {:?}",
+        leaked
     );
 }

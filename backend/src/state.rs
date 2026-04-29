@@ -631,6 +631,22 @@ impl AppState {
             return Ok(false);
         }
 
+        // Stop the pipeline first if it is still running. Without this, the
+        // PipelineManager stays in self.inner.pipelines after the flow record
+        // is gone, with no API path left to reach it.
+        let pipeline_active = {
+            let pipelines = self.inner.pipelines.read().await;
+            pipelines.contains_key(id)
+        };
+        if pipeline_active {
+            if let Err(e) = self.stop_flow(id).await {
+                error!(
+                    "Failed to stop flow {} before delete: {} — pipeline resources may leak",
+                    id, e
+                );
+            }
+        }
+
         // Delete from storage first (skip for ephemeral flows)
         let is_ephemeral = {
             let flows = self.inner.flows.read().await;
@@ -1363,6 +1379,12 @@ impl AppState {
                 // Clean up vision mixer overlay state
                 if block.block_definition_id == "builtin.vision_mixer" {
                     crate::blocks::builtin::vision_mixer::overlay::unregister_overlay_state(
+                        &block.id,
+                    );
+                    // Without this, the overlay-timer-* thread keeps polling the
+                    // renderer registry, holds a strong AppSrc ref, and prevents
+                    // the pipeline (and its NiceAgent) from finalizing.
+                    crate::blocks::builtin::vision_mixer::overlay::unregister_overlay_renderer(
                         &block.id,
                     );
                 }

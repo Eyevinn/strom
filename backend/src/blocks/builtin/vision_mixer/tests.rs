@@ -111,3 +111,75 @@ fn test_parse_initial_pgm_clamped() {
     props.insert("initial_pgm_input".to_string(), PropertyValue::UInt(99));
     assert_eq!(properties::parse_initial_pgm(&props, 4), 3); // max index = 3
 }
+
+/// `overlay_states` and `overlay_renderers` share the same lifecycle:
+/// they are populated together in `build_overlay` and must be cleared
+/// together by the cleanup branch in `state.rs::stop_flow`. If you add
+/// another per-block registry in this module, mirror its unregister call
+/// in that branch and extend this test.
+#[test]
+fn overlay_registries_round_trip() {
+    use super::overlay::{
+        get_overlay_renderer, get_overlay_state, register_overlay_renderer, register_overlay_state,
+        unregister_overlay_renderer, unregister_overlay_state, OverlayRenderer,
+        VisionMixerOverlayState,
+    };
+    use gstreamer as gst;
+    use gstreamer_app as gst_app;
+    use std::sync::{Arc, Mutex};
+
+    gst::init().unwrap();
+
+    let block_id = "test-vm-overlay-cleanup-block-id";
+
+    let lo = layout::compute_layout(1280, 720, 4);
+    let state = Arc::new(VisionMixerOverlayState::new(
+        4,
+        0,
+        0,
+        1,
+        vec!["A".into(), "B".into(), "C".into(), "D".into()],
+        lo,
+        false,
+    ));
+
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .field("width", 1280i32)
+        .field("height", 720i32)
+        .field("framerate", gst::Fraction::new(50, 1))
+        .build();
+    let appsrc = gst_app::AppSrc::builder().caps(&caps).build();
+
+    let renderer = Arc::new(Mutex::new(OverlayRenderer::new(
+        appsrc,
+        caps,
+        Arc::clone(&state),
+        1280,
+        720,
+    )));
+
+    register_overlay_state(block_id, Arc::clone(&state));
+    register_overlay_renderer(block_id, Arc::clone(&renderer));
+
+    assert!(
+        get_overlay_state(block_id).is_some(),
+        "state should be registered"
+    );
+    assert!(
+        get_overlay_renderer(block_id).is_some(),
+        "renderer should be registered"
+    );
+
+    unregister_overlay_state(block_id);
+    unregister_overlay_renderer(block_id);
+
+    assert!(
+        get_overlay_state(block_id).is_none(),
+        "state must be cleaned (otherwise API still sees stale block)"
+    );
+    assert!(
+        get_overlay_renderer(block_id).is_none(),
+        "renderer must be cleaned (otherwise overlay-timer-* thread leaks)"
+    );
+}
