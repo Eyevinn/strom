@@ -68,19 +68,23 @@ jobs:
             target: x86_64-unknown-linux-gnu
             glibc: "2.31"
             binary_ext: ""
+            features: "efp"
           - os: ubuntu-24.04-arm
             platform: linux-arm64
             target: aarch64-unknown-linux-gnu
             glibc: "2.31"
             binary_ext: ""
+            features: "efp"
           - os: windows-latest
             platform: windows
             target: x86_64-pc-windows-msvc
             binary_ext: ".exe"
+            features: ""
           - os: macos-latest
             platform: macos
             target: aarch64-apple-darwin
             binary_ext: ""
+            features: "efp"
     steps:
       - uses: actions/checkout@v5
 
@@ -187,14 +191,19 @@ jobs:
           shared-key: release-${{ matrix.platform }}
           cache-on-failure: true
 
-      # Linux: Build with zigbuild for glibc compatibility (EFP enabled on Linux only)
+      # Linux: Build with zigbuild for glibc compatibility
       - name: Build backend (Linux - glibc ${{ matrix.glibc }})
         if: startsWith(matrix.platform, 'linux')
         env:
           RUSTFLAGS: "-L /usr/lib/${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu' || 'x86_64-linux-gnu' }}"
         run: |
           set -e
-          cargo zigbuild --release --package strom --features efp --target ${{ matrix.target }}.${{ matrix.glibc }}
+          FEATURES="${{ matrix.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo zigbuild --release --package strom --features "$FEATURES" --target ${{ matrix.target }}.${{ matrix.glibc }}
+          else
+            cargo zigbuild --release --package strom --target ${{ matrix.target }}.${{ matrix.glibc }}
+          fi
           cargo zigbuild --release --package strom-mcp-server --target ${{ matrix.target }}.${{ matrix.glibc }}
 
       # Non-Linux: Build with regular cargo
@@ -203,7 +212,12 @@ jobs:
         shell: bash
         run: |
           set -e
-          cargo build --release --package strom --target ${{ matrix.target }}
+          FEATURES="${{ matrix.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo build --release --package strom --features "$FEATURES" --target ${{ matrix.target }}
+          else
+            cargo build --release --package strom --target ${{ matrix.target }}
+          fi
           cargo build --release --package strom-mcp-server --target ${{ matrix.target }}
 
       - name: Upload backend binary
