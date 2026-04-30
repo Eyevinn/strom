@@ -56,10 +56,10 @@ pub async fn list_whip_endpoints(State(state): State<AppState>) -> impl IntoResp
     axum::Json(list).into_response()
 }
 
-/// Receive client-side log messages from the WHIP ingest page.
+/// Receive client-side log messages from any browser page (WHIP, WHEP, clocks, …).
 ///
 /// Accepts a JSON array of log entries and writes them to the server log
-/// prefixed with `[WHIP-CLIENT]` so they can be correlated with server-side events.
+/// prefixed with `[CLIENT]` so they can be correlated with server-side events.
 #[utoipa::path(
     post,
     path = "/api/client-log",
@@ -71,10 +71,10 @@ pub async fn list_whip_endpoints(State(state): State<AppState>) -> impl IntoResp
 pub async fn client_log(JsonBody(entries): JsonBody<Vec<ClientLogEntry>>) -> impl IntoResponse {
     for entry in &entries {
         match entry.level.as_deref().unwrap_or("info") {
-            "error" => error!("[WHIP-CLIENT] {}", entry.msg),
-            "warning" | "warn" => warn!("[WHIP-CLIENT] {}", entry.msg),
-            "debug" => debug!("[WHIP-CLIENT] {}", entry.msg),
-            _ => info!("[WHIP-CLIENT] {}", entry.msg),
+            "error" => error!("[CLIENT] {}", entry.msg),
+            "warning" | "warn" => warn!("[CLIENT] {}", entry.msg),
+            "debug" => debug!("[CLIENT] {}", entry.msg),
+            _ => info!("[CLIENT] {}", entry.msg),
         }
     }
     StatusCode::NO_CONTENT
