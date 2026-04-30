@@ -64,7 +64,7 @@ impl StromApp {
     /// Render per-pad probe values vertically. Call after the header separator.
     /// Returns true if any probes were rendered (so callers can add spacing).
     pub(crate) fn render_probe_details(&self, ui: &mut egui::Ui, element_id: &str) -> bool {
-        let probes: Vec<(String, u64, u64, u64)> = self
+        let mut probes: Vec<(String, u64, u64, u64)> = self
             .buffer_age_data
             .get_probes_for_element(element_id)
             .iter()
@@ -77,6 +77,11 @@ impl StromApp {
                 )
             })
             .collect();
+
+        // Probes come from a HashMap, so iteration order is undefined. Sort by
+        // pad name so labels render in a stable, intuitive grouping (A0..An,
+        // PGM*, V0..Vn).
+        probes.sort_by(|a, b| a.0.cmp(&b.0));
 
         if probes.is_empty() {
             return false;

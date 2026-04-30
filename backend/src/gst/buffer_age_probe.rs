@@ -160,6 +160,9 @@ struct ProbeState {
     probe_id: String,
     flow_id: FlowId,
     element_id: String,
+    /// Human-friendly pad label sent in events. For block-level probes this is
+    /// the external pad's label/name (e.g. "V0", "audio_in_0"). For probes on
+    /// standalone elements it falls back to the GStreamer pad name (e.g. "sink").
     pad_name: String,
     /// GStreamer pad probe ID (for removal)
     gst_probe_id: Option<gst::PadProbeId>,
@@ -273,22 +276,30 @@ impl ProbeManager {
     /// - `pipeline`: the GStreamer pipeline (to obtain clock/base_time)
     /// - `element`: the GStreamer element whose pad we probe
     /// - `element_id`: the strom element_id (for events)
-    /// - `pad_name`: name of the pad to probe
+    /// - `pad_name`: name of the GStreamer pad to attach to (used for resolution)
+    /// - `display_pad_name`: human-friendly pad label sent in events. Pass
+    ///   `None` to fall back to the resolved GStreamer pad name (typical for
+    ///   standalone elements). For block-level probes, pass the external pad's
+    ///   label or name so the UI can distinguish multiple inputs that share
+    ///   the same internal pad name (e.g. all "sink").
     /// - `sample_interval`: measure every Nth buffer (default 1)
     /// - `timeout_secs`: auto-remove after this many seconds (default 60)
+    #[allow(clippy::too_many_arguments)]
     pub fn activate(
         &self,
         pipeline: &gst::Pipeline,
         element: &gst::Element,
         element_id: String,
         pad_name: String,
+        display_pad_name: Option<String>,
         sample_interval: u32,
         timeout_secs: u32,
     ) -> Result<String, String> {
         let pad = resolve_pad(element, &pad_name)?;
 
-        // Use the actual pad name (may differ from requested name)
-        let pad_name = pad.name().to_string();
+        // For events: the caller-supplied display label, or the resolved
+        // GStreamer pad name as fallback.
+        let pad_name = display_pad_name.unwrap_or_else(|| pad.name().to_string());
 
         let probe_id = Uuid::new_v4().to_string();
         let sample_interval = sample_interval.max(1);
@@ -376,11 +387,18 @@ impl ProbeManager {
 
     /// Activate probes on all sink pads of an element.
     /// Returns the list of probe IDs created.
+    ///
+    /// `display_pad_name` provides a human-friendly label that is used in
+    /// events for every probe attached here. Pass `Some` for block-level
+    /// activations (so the UI can identify the external input by its label
+    /// rather than the internal "sink" pad name); pass `None` for standalone
+    /// elements to fall back to the GStreamer pad name per pad.
     pub fn activate_all_sinks(
         &self,
         pipeline: &gst::Pipeline,
         element: &gst::Element,
         element_id: String,
+        display_pad_name: Option<String>,
         sample_interval: u32,
         timeout_secs: u32,
     ) -> Result<Vec<String>, String> {
@@ -405,6 +423,7 @@ impl ProbeManager {
                 element,
                 element_id.clone(),
                 pad_name.clone(),
+                display_pad_name.clone(),
                 sample_interval,
                 timeout_secs,
             ) {
@@ -448,17 +467,19 @@ impl ProbeManager {
                 continue;
             }
             for pad in sink_pads {
+                let pad_name = pad.name().to_string();
                 match self.attach_automatic_probe(
                     pipeline,
                     element,
                     element_id.clone(),
-                    pad.name().to_string(),
+                    pad_name.clone(),
+                    None,
                 ) {
                     Ok(_) => count += 1,
                     Err(e) => {
                         debug!(
                             element = %element_id,
-                            pad = %pad.name(),
+                            pad = %pad_name,
                             error = %e,
                             "Skipping automatic probe"
                         );
@@ -502,12 +523,21 @@ impl ProbeManager {
                     }
                 };
 
-                // Probe the specific internal pad that receives external input
+                // Probe the specific internal pad that receives external
+                // input. The internal pad name (often "sink") is used to
+                // resolve the GStreamer pad; the external pad's label or name
+                // is what we display in events so the UI can distinguish
+                // multiple inputs that all share the same internal pad name.
+                let display_pad_name = input_pad
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| input_pad.name.clone());
                 match self.attach_automatic_probe(
                     pipeline,
                     element,
                     block.id.clone(),
                     input_pad.internal_pad_name.clone(),
+                    Some(display_pad_name),
                 ) {
                     Ok(_) => count += 1,
                     Err(e) => {
@@ -529,16 +559,22 @@ impl ProbeManager {
     }
 
     /// Attach a single automatic probe to a pad.
+    ///
+    /// `display_pad_name` overrides the pad name reported in events. Pass
+    /// `None` to fall back to the resolved GStreamer pad name (used for
+    /// standalone elements); pass `Some(label)` for block-level probes so
+    /// the UI can identify the external input by its user-visible label.
     fn attach_automatic_probe(
         &self,
         pipeline: &gst::Pipeline,
         element: &gst::Element,
         element_id: String,
         pad_name: String,
+        display_pad_name: Option<String>,
     ) -> Result<String, String> {
         let pad = resolve_pad(element, &pad_name)?;
 
-        let pad_name = pad.name().to_string();
+        let pad_name = display_pad_name.unwrap_or_else(|| pad.name().to_string());
         let probe_id = format!("auto-{}", Uuid::new_v4());
 
         let slot = Arc::new(ProbeSlot::new());
@@ -766,6 +802,7 @@ mod tests {
             &sink,
             "sink".to_string(),
             "sink".to_string(),
+            None,
             1,
             60,
         );
@@ -803,6 +840,7 @@ mod tests {
             &sink,
             "s1".to_string(),
             "sink".to_string(),
+            None,
             1,
             60,
         )
@@ -812,6 +850,7 @@ mod tests {
             &sink,
             "s2".to_string(),
             "sink".to_string(),
+            None,
             1,
             60,
         )
@@ -841,6 +880,7 @@ mod tests {
             &sink,
             "manual".to_string(),
             "sink".to_string(),
+            None,
             1,
             60,
         )
