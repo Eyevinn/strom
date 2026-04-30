@@ -44,9 +44,11 @@ pub async fn activate_probe(
     let timeout_secs = req.timeout_secs.unwrap_or(60);
 
     // Resolve block input pads BEFORE taking the pipeline lock.
-    // For blocks: look up external input pads -> internal element IDs to probe.
+    // For blocks: look up external input pads -> internal element IDs to probe,
+    // along with each external pad's display label (so events can distinguish
+    // inputs that share the same internal "sink" pad name).
     // For standalone elements: empty list (handled below with find_gst_element).
-    let block_input_element_ids: Vec<String> = {
+    let block_input_element_ids: Vec<(String, String)> = {
         let flows = state.get_flows().await;
         let block_def_id = flows
             .iter()
@@ -57,7 +59,12 @@ pub async fn activate_probe(
                 let inputs = b.computed_external_pads.as_ref().map(|p| {
                     p.inputs
                         .iter()
-                        .map(|pad| format!("{}:{}", req.element_id, pad.internal_element_id))
+                        .map(|pad| {
+                            let element_key =
+                                format!("{}:{}", req.element_id, pad.internal_element_id);
+                            let display = pad.label.clone().unwrap_or_else(|| pad.name.clone());
+                            (element_key, display)
+                        })
                         .collect::<Vec<_>>()
                 });
                 (b.block_definition_id.clone(), inputs)
@@ -73,7 +80,12 @@ pub async fn activate_probe(
                     d.external_pads
                         .inputs
                         .iter()
-                        .map(|pad| format!("{}:{}", req.element_id, pad.internal_element_id))
+                        .map(|pad| {
+                            let element_key =
+                                format!("{}:{}", req.element_id, pad.internal_element_id);
+                            let display = pad.label.clone().unwrap_or_else(|| pad.name.clone());
+                            (element_key, display)
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -99,39 +111,49 @@ pub async fn activate_probe(
 
     let pipeline = manager.pipeline().clone();
 
-    // Collect GStreamer elements to probe (clone to release borrow on manager)
-    let elements_to_probe: Vec<gst::Element> = if block_input_element_ids.is_empty() {
-        // Standalone element
-        match manager.find_gst_element(&req.element_id) {
-            Some(el) => vec![el.clone()],
-            None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!(ErrorResponse::new(format!(
-                        "Element or block '{}' not found",
-                        req.element_id
-                    )))),
-                )
-                    .into_response();
+    // Collect (element, display_pad_name) pairs to probe (clone elements to
+    // release borrow on manager). For standalone the display name is None so
+    // each pad is labeled with its own GStreamer pad name; for blocks it is
+    // the external pad's label so the UI can tell sibling inputs apart.
+    let elements_to_probe: Vec<(gst::Element, Option<String>)> =
+        if block_input_element_ids.is_empty() {
+            // Standalone element
+            match manager.find_gst_element(&req.element_id) {
+                Some(el) => vec![(el.clone(), None)],
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!(ErrorResponse::new(format!(
+                            "Element or block '{}' not found",
+                            req.element_id
+                        )))),
+                    )
+                        .into_response();
+                }
             }
-        }
-    } else {
-        // Block: collect internal elements for each input port
-        block_input_element_ids
-            .iter()
-            .filter_map(|id| manager.find_gst_element(id).cloned())
-            .collect()
-    };
+        } else {
+            // Block: collect internal elements for each input port, paired
+            // with the external pad's display label.
+            block_input_element_ids
+                .iter()
+                .filter_map(|(id, label)| {
+                    manager
+                        .find_gst_element(id)
+                        .map(|el| (el.clone(), Some(label.clone())))
+                })
+                .collect()
+        };
 
     let probe_manager = manager.probe_manager();
     let mut all_probe_ids = Vec::new();
     let mut last_error = None;
 
-    for el in &elements_to_probe {
+    for (el, display_pad_name) in &elements_to_probe {
         match probe_manager.activate_all_sinks(
             &pipeline,
             el,
             req.element_id.clone(),
+            display_pad_name.clone(),
             sample_interval,
             timeout_secs,
         ) {
