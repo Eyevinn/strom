@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.11"
+    "version": "0.4.12"
   },
   "paths": {
     "/api/auth/status": {
@@ -295,8 +295,8 @@
         "tags": [
           "whip"
         ],
-        "summary": "Receive client-side log messages from the WHIP ingest page.",
-        "description": "Accepts a JSON array of log entries and writes them to the server log\nprefixed with `[WHIP-CLIENT]` so they can be correlated with server-side events.",
+        "summary": "Receive client-side log messages from any browser page (WHIP, WHEP, clocks, …).",
+        "description": "Accepts a JSON array of log entries and writes them to the server log\nprefixed with `[CLIENT]` so they can be correlated with server-side events.",
         "operationId": "client_log",
         "responses": {
           "204": {
