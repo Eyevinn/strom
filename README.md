@@ -129,15 +129,21 @@ cargo install trunk
 | Feature | Description | Extra dependencies |
 |---------|-------------|-------------------|
 | `nvidia` | NVIDIA GPU monitoring (default) | None |
-| `efp` | EFP/SRT input and output blocks | `cmake`, `libclang-dev` (Linux) |
+| `efp` | EFP/SRT input and output blocks | `cmake`, `libclang-dev` (Linux) / `cmake` (macOS, via Homebrew) |
 
 ```bash
 # Build with EFP support (Linux)
 sudo apt install cmake libclang-dev
 cargo run --release --features efp
+
+# Build with EFP support (macOS)
+brew install cmake
+cargo run --release --features efp
 ```
 
-EFP support is currently Linux-only. Pre-built Linux releases and Docker images include EFP by default.
+Pre-built Linux and macOS binaries, plus the Docker images, include the
+`efp` feature by default. Windows binaries currently ship without EFP
+because `gst-plugin-efp` has not been validated on that platform yet.
 
 #### Run
 
@@ -303,7 +309,7 @@ Create reusable components from element groups:
 - **WHEP Input** - Receives audio/video via WebRTC WHEP protocol
 - **WHIP Input** - Hosts a WHIP server for browser/encoder ingest
 - **MPEG-TS/SRT Input** - Receives MPEG Transport Stream over SRT with decode or passthrough modes
-- **EFP/SRT Input** - Receives EFP (Elastic Frame Protocol) over SRT with decode or passthrough modes *(Linux only, requires `efp` feature)*
+- **EFP/SRT Input** - Receives EFP (Elastic Frame Protocol) over SRT with decode or passthrough modes *(Linux + macOS, requires `efp` feature)*
 - **DeckLink Video/Audio Input** - Captures from Blackmagic DeckLink SDI/HDMI cards
 - **NDI Input** - Receives video/audio via NewTek NDI protocol
 - **Inter Input** - Subscribes to streams from other flows (inter-pipeline routing)
@@ -313,7 +319,7 @@ Create reusable components from element groups:
 - **WHIP Output** - Sends audio via WebRTC WHIP protocol
 - **WHEP Output** - Serves audio/video streams via WebRTC WHEP with built-in player pages
 - **MPEG-TS/SRT Output** - Muxes audio/video to MPEG Transport Stream over SRT
-- **EFP/SRT Output** - Muxes audio/video to EFP over SRT *(Linux only, requires `efp` feature)*
+- **EFP/SRT Output** - Muxes audio/video to EFP over SRT *(Linux + macOS, requires `efp` feature)*
 - **DeckLink Video/Audio Output** - Outputs to Blackmagic DeckLink SDI/HDMI cards
 - **NDI Output** - Sends video/audio via NewTek NDI protocol
 - **Inter Output** - Publishes streams for other flows to consume
