@@ -381,6 +381,127 @@ impl Default for ClocksPage {
     }
 }
 
+/// Plain-language explanations for each metric in the system-clock panel,
+/// shown on hover so non-experts can interpret the kernel's NTP state.
+const TIP_STATUS: &str = "Whether the kernel considers the system clock disciplined.\n\
+    \"Synchronized\" only means the STA_UNSYNC bit is clear — it does NOT guarantee \
+    accuracy. Always read it together with Max error and TAI − UTC offset.";
+const TIP_STATE: &str = "Raw return value from ntp_adjtime():\n\
+    • ok — normal operation\n\
+    • ins / del — leap-second insertion/deletion pending\n\
+    • oop / wait — leap second in progress\n\
+    • error — clock is not disciplined";
+const TIP_TAI: &str = "Leap-second offset between TAI and UTC, set by the discipline \
+    daemon (chrony/ntpd/systemd-timesyncd).\n\n\
+    Expected: 37 s (as of 2026).\n\
+    0 s = the daemon has not configured leap seconds, so CLOCK_TAI cannot be \
+    trusted as a global time source. Fix by enabling chrony's leapsectz or \
+    installing tzdata-leaps.";
+const TIP_PLL: &str = "Whether the kernel's phase-locked loop is actively steering the clock.\n\n\
+    yes — ntpd / chrony in kernel-PLL mode are feeding updates.\n\
+    no — systemd-timesyncd or chrony in SHM/userspace mode is fine; \
+    discipline still happens but bypasses STA_PLL. Don't worry about this on its own.";
+const TIP_OFFSET: &str = "Phase correction the kernel still has to apply, NOT the measured \
+    error against the reference.\n\n\
+    Two normal cases:\n\
+    • Non-zero with PLL active = ntpd/chrony writes an offset, the kernel's PLL \
+    slews it toward 0 over a few seconds. ±100 µs typical, ±1 ms acceptable.\n\
+    • Exactly 0 with PLL inactive = daemon disciplines via frequency only \
+    (systemd-timesyncd, chrony in SHM mode). The kernel never receives a phase \
+    correction, so this field stays at 0 by design — read est_error / max_error \
+    for accuracy instead.\n\n\
+    Sustained large values (>1 ms with PLL active) indicate drift or a poor source.";
+const TIP_FREQ: &str = "Frequency compensation the kernel applies to keep the CPU's local \
+    crystal in tune, in parts-per-million.\n\n\
+    Typical range: ±50 ppm for a stable machine.\n\
+    Stays roughly constant once the daemon has converged. \
+    Values close to ±500 ppm mean the daemon is saturated and the host clock is way off.";
+const TIP_EST_ERR: &str = "Kernel's best-case error estimate.\n\n\
+    Some daemons (chrony, ntpd) populate this; others \
+    (systemd-timesyncd) leave it at 0.\n\
+    A value of 0 here does NOT mean perfect sync — judge accuracy from \
+    Max error and Current offset instead.";
+const TIP_MAX_ERR: &str = "Kernel's worst-case error estimate. Behaves as a sawtooth: \
+    grows linearly between daemon updates (at MAXFREQ, ~500 µs per second), \
+    then resets when the daemon feeds a fresh estimate.\n\n\
+    What to read from it:\n\
+    • Peak value = how stale the kernel's view is just before each update.\n\
+    • A small peak (a few ms) and short cycle (1–10 s) = daemon is healthy and polling often.\n\
+    • A large peak (>500 ms) = daemon has stopped feeding updates; the kernel has no idea \
+    what time it is.\n\
+    • A frozen value that never resets = daemon dead or never started.";
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum HealthLevel {
+    Healthy,
+    Degraded,
+    Bad,
+}
+
+struct ClockHealth {
+    level: HealthLevel,
+    findings: Vec<String>,
+}
+
+fn assess_clock_health(info: &strom_types::api::SystemClockInfo) -> ClockHealth {
+    let mut level = HealthLevel::Healthy;
+    let mut findings = Vec::new();
+    let bump = |to: HealthLevel, level: &mut HealthLevel| {
+        if to > *level {
+            *level = to;
+        }
+    };
+
+    if !info.synchronized || info.state == "error" {
+        bump(HealthLevel::Bad, &mut level);
+        findings.push(
+            "Kernel reports the clock is NOT synchronized — discipline source missing or failing."
+                .into(),
+        );
+    }
+
+    if info.tai_offset_sec == 0 {
+        bump(HealthLevel::Degraded, &mut level);
+        findings.push(
+            "TAI − UTC offset is 0. The discipline daemon has not configured leap seconds, \
+             so CLOCK_TAI cannot be trusted as a global time source. \
+             Expected value as of 2026 is 37 s."
+                .into(),
+        );
+    } else if info.tai_offset_sec != 37 {
+        findings.push(format!(
+            "TAI − UTC offset is {} s (expected 37 as of 2026). \
+             OK if your discipline source is authoritative on leap seconds.",
+            info.tai_offset_sec
+        ));
+    }
+
+    let max_err_ms = info.max_error_us as f64 / 1000.0;
+    if max_err_ms > 500.0 {
+        bump(HealthLevel::Degraded, &mut level);
+        findings.push(format!(
+            "Max error estimate is {:.0} ms — kernel is uncertain about sync quality. \
+             A healthy disciplined clock stays under 100 ms.",
+            max_err_ms
+        ));
+    }
+
+    let offset_us_abs = info.offset_ns.abs() as f64 / 1000.0;
+    if offset_us_abs > 1000.0 {
+        bump(HealthLevel::Degraded, &mut level);
+        findings.push(format!(
+            "Current offset is {:.0} µs (>1 ms) — large correction in flight, sync is drifting.",
+            offset_us_abs
+        ));
+    }
+
+    if findings.is_empty() {
+        findings.push("No issues detected. Clock looks well disciplined.".into());
+    }
+
+    ClockHealth { level, findings }
+}
+
 /// Render the kernel system-clock panel (TAI offset, NTP discipline, etc.).
 fn render_system_clock_panel(
     ui: &mut Ui,
@@ -414,41 +535,94 @@ fn render_system_clock_panel(
         "Unsynced"
     };
 
+    let health = assess_clock_health(info);
+    let (health_color, health_text) = match health.level {
+        HealthLevel::Healthy => (Color32::from_rgb(100, 255, 100), "Healthy"),
+        HealthLevel::Degraded => (Color32::from_rgb(255, 200, 100), "Degraded"),
+        HealthLevel::Bad => (Color32::from_rgb(255, 120, 100), "Unsynced"),
+    };
+    let health_findings = health.findings.clone();
+    let health_summary = match health.level {
+        HealthLevel::Healthy => "All checks pass.",
+        HealthLevel::Degraded => {
+            "Clock is being disciplined but at least one metric is outside the healthy range. \
+             See details below."
+        }
+        HealthLevel::Bad => "Clock is not synchronized. Media timestamps will not be reliable.",
+    };
+
     ui.horizontal(|ui| {
-        ui.label("Status:");
-        ui.colored_label(sync_color, RichText::new(sync_text).strong());
-        ui.add_space(12.0);
-        ui.label("State:");
-        ui.label(&info.state);
+        ui.label("Health:");
+        ui.colored_label(health_color, RichText::new(health_text).strong())
+            .on_hover_ui(|ui| {
+                ui.set_max_width(420.0);
+                ui.label(RichText::new(health_summary).strong());
+                ui.add_space(4.0);
+                for f in &health_findings {
+                    ui.label(format!("• {}", f));
+                }
+            });
     });
+    ui.add_space(2.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Status:").on_hover_text(TIP_STATUS);
+        ui.colored_label(sync_color, RichText::new(sync_text).strong())
+            .on_hover_text(TIP_STATUS);
+        ui.add_space(12.0);
+        ui.label("State:").on_hover_text(TIP_STATE);
+        ui.label(&info.state).on_hover_text(TIP_STATE);
+    });
+
+    let warn = Color32::from_rgb(255, 200, 100);
 
     egui::Grid::new("system_clock_grid")
         .num_columns(2)
         .spacing([14.0, 4.0])
         .show(ui, |ui| {
-            ui.label("TAI − UTC offset:");
-            ui.label(format!("{} s", info.tai_offset_sec));
+            ui.label("TAI − UTC offset:").on_hover_text(TIP_TAI);
+            let tai_text = format!("{} s", info.tai_offset_sec);
+            if info.tai_offset_sec == 0 {
+                ui.colored_label(warn, &tai_text).on_hover_text(TIP_TAI);
+            } else {
+                ui.label(&tai_text).on_hover_text(TIP_TAI);
+            }
             ui.end_row();
 
-            ui.label("PLL active:");
-            ui.label(if info.pll_active { "yes" } else { "no" });
+            ui.label("PLL active:").on_hover_text(TIP_PLL);
+            ui.label(if info.pll_active { "yes" } else { "no" })
+                .on_hover_text(TIP_PLL);
             ui.end_row();
 
-            ui.label("Current offset:");
+            ui.label("Current offset:").on_hover_text(TIP_OFFSET);
             let offset_us = info.offset_ns as f64 / 1000.0;
-            ui.label(format!("{:.3} µs ({} ns)", offset_us, info.offset_ns));
+            let offset_text = format!("{:.3} µs ({} ns)", offset_us, info.offset_ns);
+            if info.offset_ns.abs() > 1_000_000 {
+                ui.colored_label(warn, &offset_text)
+                    .on_hover_text(TIP_OFFSET);
+            } else {
+                ui.label(&offset_text).on_hover_text(TIP_OFFSET);
+            }
             ui.end_row();
 
-            ui.label("Frequency adj:");
-            ui.label(format!("{:+.3} ppm", info.frequency_ppm));
+            ui.label("Frequency adj:").on_hover_text(TIP_FREQ);
+            ui.label(format!("{:+.3} ppm", info.frequency_ppm))
+                .on_hover_text(TIP_FREQ);
             ui.end_row();
 
-            ui.label("Estimated error:");
-            ui.label(format!("{} µs", info.est_error_us));
+            ui.label("Estimated error:").on_hover_text(TIP_EST_ERR);
+            ui.label(format!("{} µs", info.est_error_us))
+                .on_hover_text(TIP_EST_ERR);
             ui.end_row();
 
-            ui.label("Max error:");
-            ui.label(format!("{} µs", info.max_error_us));
+            ui.label("Max error:").on_hover_text(TIP_MAX_ERR);
+            let max_err_text = format!("{} µs", info.max_error_us);
+            if info.max_error_us > 500_000 {
+                ui.colored_label(warn, &max_err_text)
+                    .on_hover_text(TIP_MAX_ERR);
+            } else {
+                ui.label(&max_err_text).on_hover_text(TIP_MAX_ERR);
+            }
             ui.end_row();
         });
 }
