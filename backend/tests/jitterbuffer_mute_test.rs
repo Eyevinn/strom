@@ -175,6 +175,7 @@ fn run_jitterbuffer_test(
 
 /// Verify that the packet_spacing bug causes a stall WITHOUT the workaround.
 #[test]
+#[ignore = "GStreamer version-dependent: bug may be fixed in the installed version"]
 fn test_jitterbuffer_stalls_without_drop_on_latency() {
     let total = run_jitterbuffer_test(50, 10.0, 2, 2, 100, false);
 
