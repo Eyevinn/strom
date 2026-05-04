@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.12"
+    "version": "0.4.13-dev"
   },
   "paths": {
     "/api/auth/status": {
@@ -9885,7 +9885,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Optional ramp duration in milliseconds. Currently only honored for\naudio `volume`-element `volume` updates — when set, the value is\ninterpolated per-sample over the given duration to avoid zipper\nnoise on fader drags or to match an auto-transition duration.\nWhen omitted, a short default ramp is used for `volume`; other\nproperties are set immediately.",
+            "description": "Optional ramp duration in milliseconds. Currently honored for audio\n`volume`-element `volume` and `mute` updates — when set, `volume` is\ninterpolated per-sample over the given duration (anti-zipper / fade)\nand `mute=true` is preceded by a fade-out of the same length while\n`mute=false` is followed by a 0→pre_mute fade-in. Useful for\nbroadcast-style on-air / off-air route transitions (e.g. 500 ms).\nWhen omitted, a short default ramp is used for `volume`/`mute`; other\nproperties are set immediately.",
             "minimum": 0
           },
           "value": {

@@ -23,7 +23,7 @@ use gstreamer::prelude::*;
 use gstreamer_controller::prelude::*;
 use gstreamer_controller::{DirectControlBinding, InterpolationControlSource, InterpolationMode};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -52,6 +52,12 @@ pub struct VolumeRampManager {
     /// Pre-mute volume per element id, captured when entering mute so we can
     /// restore it on unmute.
     pre_mute: Mutex<HashMap<String, f64>>,
+    /// Per-element generation counter, bumped on every `apply_mute` call. The
+    /// delayed `mute=true` toggle scheduled by `apply_mute(true, ramp_ms)`
+    /// captures the generation at scheduling time and bails out on fire if it
+    /// has been superseded — so a fast unmute cancels a still-pending mute.
+    /// Wrapped in `Arc` so the spawned tokio task can own a handle.
+    mute_gen: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl VolumeRampManager {
@@ -59,6 +65,7 @@ impl VolumeRampManager {
         Self {
             sources: Mutex::new(HashMap::new()),
             pre_mute: Mutex::new(HashMap::new()),
+            mute_gen: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -190,7 +197,9 @@ impl VolumeRampManager {
 
     /// Toggle `mute` with anti-click protection. Ramps `volume` toward zero
     /// before `mute=true` is applied (masking the discontinuity click), and
-    /// restores the pre-mute volume on unmute.
+    /// restores the pre-mute volume on unmute. `ramp_ms` controls both the
+    /// pre-mute fade-out and the post-unmute fade-in — short values (≤50ms)
+    /// behave like a click guard, longer values produce broadcast-style fades.
     ///
     /// Falls back to a direct `set_property` if the pipeline doesn't have a
     /// running stream-time yet.
@@ -199,8 +208,20 @@ impl VolumeRampManager {
         element: &gst::Element,
         element_id: &str,
         target_mute: bool,
-        anticlick_ms: u32,
+        ramp_ms: u32,
     ) -> bool {
+        // Bump generation up front so any in-flight scheduled `mute=true`
+        // toggle (from a previous apply_mute(true, …)) sees a stale value
+        // when it fires and bails out. Both directions invalidate stale
+        // pending toggles — a second mute(true) replaces the first, and
+        // mute(false) cancels a pending mute(true).
+        let current_gen = {
+            let mut gens = self.mute_gen.lock().unwrap();
+            let g = gens.entry(element_id.to_string()).or_insert(0);
+            *g = g.wrapping_add(1);
+            *g
+        };
+
         if target_mute {
             // Capture pre-mute volume only if not already muted (avoid
             // overwriting on repeat-mute).
@@ -216,7 +237,7 @@ impl VolumeRampManager {
             }
 
             // Ramp to silence first.
-            if !self.apply_volume_ramp(element, element_id, 0.0, anticlick_ms) {
+            if !self.apply_volume_ramp(element, element_id, 0.0, ramp_ms) {
                 element.set_property("mute", true);
                 return true;
             }
@@ -226,16 +247,29 @@ impl VolumeRampManager {
             // A small extra margin (5ms) ensures the volume control source
             // has reached zero before mute kicks in — otherwise the hard
             // zeroing of the volume array would still produce a click.
+            // The captured generation is checked on fire: if a newer
+            // apply_mute call has bumped it, this scheduled toggle is stale
+            // and must not run (e.g. unmute arrived mid-fade).
             let element_weak = element.downgrade();
             let element_id_owned = element_id.to_string();
-            let delay = Duration::from_millis(anticlick_ms as u64 + 5);
+            let delay = Duration::from_millis(ramp_ms as u64 + 5);
+            let mute_gen = self.mute_gen.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
+                let still_current =
+                    mute_gen.lock().unwrap().get(&element_id_owned).copied() == Some(current_gen);
+                if !still_current {
+                    debug!(
+                        "volume_ramp[{}]: scheduled mute=true superseded, skipping",
+                        element_id_owned
+                    );
+                    return;
+                }
                 if let Some(elem) = element_weak.upgrade() {
                     elem.set_property("mute", true);
                     debug!(
-                        "volume_ramp[{}]: mute=true applied after anti-click ramp",
-                        element_id_owned
+                        "volume_ramp[{}]: mute=true applied after {}ms fade-out",
+                        element_id_owned, ramp_ms
                     );
                 }
             });
@@ -256,7 +290,7 @@ impl VolumeRampManager {
             // and a normal apply_volume_ramp would produce a flat ramp
             // (instant unmute = click). Forcing start=0 guarantees a real
             // 0→target fade-in.
-            if !self.apply_volume_ramp_from(element, element_id, 0.0, target, anticlick_ms) {
+            if !self.apply_volume_ramp_from(element, element_id, 0.0, target, ramp_ms) {
                 element.set_property("volume", target);
             }
         }
@@ -265,9 +299,15 @@ impl VolumeRampManager {
 
     /// Drop all cached control sources. Bindings are owned by the elements
     /// and are released when the pipeline drops; this just releases our side.
+    /// Also bumps every element's generation so any in-flight scheduled
+    /// `mute=true` toggle from a now-stopped pipeline becomes a no-op.
     pub fn clear(&self) {
         self.sources.lock().unwrap().clear();
         self.pre_mute.lock().unwrap().clear();
+        let mut gens = self.mute_gen.lock().unwrap();
+        for v in gens.values_mut() {
+            *v = v.wrapping_add(1);
+        }
     }
 }
 

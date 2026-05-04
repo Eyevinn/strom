@@ -12,8 +12,11 @@ impl PipelineManager {
     /// Set a property on an element.
     ///
     /// `ramp_ms` is consulted only for routes that support smooth interpolation
-    /// (currently audio `volume`-element `volume`/`mute`). Other properties are
-    /// set immediately regardless. `None` selects the per-route default ramp.
+    /// (currently audio `volume`-element `volume` and `mute`). Other properties
+    /// are set immediately regardless. `None` selects the per-route default
+    /// ramp (short anti-zipper for `volume`, short anti-click for `mute`); a
+    /// caller can request a longer broadcast-style fade by passing an explicit
+    /// duration (e.g. 500 ms for a route mute on-air/off-air).
     pub(super) fn set_property(
         &self,
         element: &gst::Element,
@@ -50,7 +53,7 @@ impl PipelineManager {
                         element,
                         element_id,
                         *v,
-                        MUTE_ANTICLICK_RAMP_MS,
+                        ramp_ms.unwrap_or(MUTE_ANTICLICK_RAMP_MS),
                     ) =>
                 {
                     return Ok(());
@@ -183,8 +186,8 @@ impl PipelineManager {
     /// Validates that the property can be changed in the current pipeline state.
     ///
     /// `ramp_ms` is consulted only for routes that support smooth interpolation
-    /// (currently audio `volume`-element `volume`). For other properties it is
-    /// silently ignored.
+    /// (currently audio `volume`-element `volume` and `mute`). For other
+    /// properties it is silently ignored.
     pub fn update_element_property(
         &self,
         element_id: &str,
