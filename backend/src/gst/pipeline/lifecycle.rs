@@ -206,6 +206,10 @@ impl PipelineManager {
             task.abort();
         }
 
+        // Drop cached volume control sources. The bindings themselves are
+        // owned by the elements and released when the pipeline goes to NULL.
+        self.volume_ramps.clear();
+
         // Run set_state on a dedicated OS thread to avoid "Cannot start a runtime
         // from within a runtime" panics. Some GStreamer elements (e.g. whipserversrc)
         // internally call block_on() during state transitions, which is incompatible

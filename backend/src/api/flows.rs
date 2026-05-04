@@ -958,7 +958,13 @@ pub async fn update_element_property(
     ValidatedJson(req): ValidatedJson<UpdatePropertyRequest>,
 ) -> Result<Json<ElementPropertiesResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
-        .update_element_property(&flow_id, &element_id, &req.property_name, req.value)
+        .update_element_property(
+            &flow_id,
+            &element_id,
+            &req.property_name,
+            req.value,
+            req.ramp_ms,
+        )
         .await
         .map_err(|e| {
             error!("Failed to update property: {}", e);

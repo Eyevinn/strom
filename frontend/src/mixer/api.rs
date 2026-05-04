@@ -99,6 +99,7 @@ impl MixerEditor {
             _ => return,
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:{}", self.block_id, element_suffix);
@@ -106,7 +107,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, &gst_prop, value)
+                .update_element_property(&flow_id, &element_id, &gst_prop, value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -146,6 +147,7 @@ impl MixerEditor {
             _ => return,
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:eq_{}", self.block_id, index);
@@ -153,7 +155,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, &gst_prop, value)
+                .update_element_property(&flow_id, &element_id, &gst_prop, value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -235,6 +237,7 @@ impl MixerEditor {
             _ => return,
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:{}", self.block_id, element_suffix);
@@ -242,7 +245,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, &gst_prop, value)
+                .update_element_property(&flow_id, &element_id, &gst_prop, value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -275,6 +278,7 @@ impl MixerEditor {
             _ => return,
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:main_eq", self.block_id);
@@ -282,7 +286,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, &gst_prop, value)
+                .update_element_property(&flow_id, &element_id, &gst_prop, value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -367,6 +371,7 @@ impl MixerEditor {
             _ => return,
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:{}", self.block_id, element_suffix);
@@ -375,7 +380,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, &gst_prop, value)
+                .update_element_property(&flow_id, &element_id, &gst_prop, value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -403,6 +408,7 @@ impl MixerEditor {
             self.main_fader as f64
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:main_volume", self.block_id);
@@ -411,7 +417,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value)
+                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -433,6 +439,7 @@ impl MixerEditor {
             self.main_fader as f64
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:main_volume", self.block_id);
@@ -441,7 +448,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value)
+                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -464,6 +471,7 @@ impl MixerEditor {
 
         let level = self.channels[ch_idx].aux_sends[aux_idx] as f64;
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:aux_send_{}_{}", self.block_id, ch_idx, aux_idx);
@@ -472,7 +480,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value)
+                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -493,6 +501,7 @@ impl MixerEditor {
         let to_grp = self.channels[ch_idx].to_grp;
         let num_groups = self.num_groups;
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let block_id = self.block_id.clone();
@@ -511,6 +520,7 @@ impl MixerEditor {
                     &to_main_id,
                     "volume",
                     PropertyValue::Float(to_main_vol),
+                    ramp_ms,
                 )
                 .await
             {
@@ -534,6 +544,7 @@ impl MixerEditor {
                         &to_grp_id,
                         "volume",
                         PropertyValue::Float(route_sg_vol),
+                        ramp_ms,
                     )
                     .await
                 {
@@ -580,6 +591,7 @@ impl MixerEditor {
             self.groups[sg_idx].fader as f64
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:group{}_volume", self.block_id, sg_idx);
@@ -588,7 +600,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value)
+                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -610,6 +622,7 @@ impl MixerEditor {
             self.groups[sg_idx].fader as f64
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:group{}_volume", self.block_id, sg_idx);
@@ -618,7 +631,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value)
+                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -646,6 +659,7 @@ impl MixerEditor {
             self.aux_masters[aux_idx].fader as f64
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:aux{}_volume", self.block_id, aux_idx);
@@ -654,7 +668,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value)
+                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);
@@ -676,6 +690,7 @@ impl MixerEditor {
             self.aux_masters[aux_idx].fader as f64
         };
 
+        let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
         let element_id = format!("{}:aux{}_volume", self.block_id, aux_idx);
@@ -684,7 +699,7 @@ impl MixerEditor {
 
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value)
+                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
                 .await
             {
                 tracing::warn!("Mixer API update failed: {}", e);

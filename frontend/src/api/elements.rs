@@ -101,12 +101,18 @@ impl ApiClient {
     }
 
     /// Update a property on a live element in a running flow.
+    ///
+    /// `ramp_ms` is honored by the backend only for properties that support
+    /// smooth interpolation (currently audio `volume`-element `volume`).
+    /// Other properties ignore it; callers can safely pass `None` or always
+    /// pass their preferred fade duration.
     pub async fn update_element_property(
         &self,
         flow_id: &FlowId,
         element_id: &str,
         property_name: &str,
         value: strom_types::PropertyValue,
+        ramp_ms: Option<u32>,
     ) -> ApiResult<()> {
         use strom_types::api::UpdatePropertyRequest;
         use tracing::info;
@@ -116,13 +122,14 @@ impl ApiClient {
             self.base_url, flow_id, element_id
         );
         info!(
-            "Updating element property: {} on {} in flow {}",
-            property_name, element_id, flow_id
+            "Updating element property: {} on {} in flow {} (ramp_ms={:?})",
+            property_name, element_id, flow_id, ramp_ms
         );
 
         let request = UpdatePropertyRequest {
             property_name: property_name.to_string(),
             value,
+            ramp_ms,
         };
 
         let response = self

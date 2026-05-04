@@ -546,7 +546,7 @@ impl McpHandler {
                 );
                 let flow_uuid: strom_types::FlowId = flow_id.parse()?;
                 state
-                    .update_element_property(&flow_uuid, element_id, property_name, value)
+                    .update_element_property(&flow_uuid, element_id, property_name, value, None)
                     .await?;
                 json!({
                     "success": true,

@@ -1429,16 +1429,20 @@ impl AppState {
     }
 
     /// Update a property on a running pipeline element.
+    ///
+    /// `ramp_ms` is honored for properties that support smooth interpolation
+    /// (currently audio `volume`-element `volume`); ignored for others.
     pub async fn update_element_property(
         &self,
         flow_id: &FlowId,
         element_id: &str,
         property_name: &str,
         value: PropertyValue,
+        ramp_ms: Option<u32>,
     ) -> Result<(), PipelineError> {
         info!(
-            "Updating property {}.{} in flow {}",
-            element_id, property_name, flow_id
+            "Updating property {}.{} in flow {} (ramp_ms={:?})",
+            element_id, property_name, flow_id, ramp_ms
         );
 
         let pipelines = self.inner.pipelines.read().await;
@@ -1447,7 +1451,7 @@ impl AppState {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
 
-        manager.update_element_property(element_id, property_name, &value)?;
+        manager.update_element_property(element_id, property_name, &value, ramp_ms)?;
 
         // Broadcast property change event
         self.inner.events.broadcast(StromEvent::PropertyChanged {

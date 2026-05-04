@@ -134,6 +134,28 @@ impl MixerEditor {
                                 None => {}
                             }
                             ui.checkbox(&mut self.live_updates, "Live");
+                            // Fade duration applied to volume/mute updates.
+                            // Sent as ramp_ms in PATCH; eliminates zipper noise on
+                            // fader drag and matches auto-transition durations on
+                            // explicit fades. 20ms is the safe default; > 50ms
+                            // switches the backend to a dB-linear curve.
+                            ui.add(
+                                egui::DragValue::new(&mut self.fade_ms)
+                                    .range(0..=5000)
+                                    .suffix(" ms")
+                                    .speed(1.0),
+                            )
+                            .on_hover_text(
+                                "Fade duration applied to volume and mute changes.\n\
+                                 20 ms (default): zipper-free fader drag.\n\
+                                 > 50 ms: switches to a dB-linear curve.\n\
+                                 Up to 5000 ms for explicit fades / auto-transition match.",
+                            );
+                            ui.label(
+                                egui::RichText::new("Fade")
+                                    .small()
+                                    .color(Color32::from_gray(120)),
+                            );
                             if ui.button(format!("{} Save", egui_phosphor::regular::FLOPPY_DISK)).clicked() {
                                 self.save_requested = true;
                                 self.status = "Saving mixer state...".to_string();

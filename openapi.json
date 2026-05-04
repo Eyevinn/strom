@@ -9879,6 +9879,15 @@
             "type": "string",
             "description": "The name of the property to update"
           },
+          "ramp_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional ramp duration in milliseconds. Currently only honored for\naudio `volume`-element `volume` updates — when set, the value is\ninterpolated per-sample over the given duration to avoid zipper\nnoise on fader drags or to match an auto-transition duration.\nWhen omitted, a short default ramp is used for `volume`; other\nproperties are set immediately.",
+            "minimum": 0
+          },
           "value": {
             "$ref": "#/components/schemas/PropertyValue",
             "description": "The new value for the property"

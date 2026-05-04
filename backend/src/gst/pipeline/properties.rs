@@ -1,24 +1,63 @@
 use super::{PipelineError, PipelineManager};
+use crate::gst::volume_ramp::VolumeRampManager;
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
+use strom_types::mixer::{DEFAULT_VOLUME_RAMP_MS, MUTE_ANTICLICK_RAMP_MS};
 use strom_types::{PipelineState, PropertyValue};
 use tracing::{debug, info};
 
 impl PipelineManager {
     /// Set a property on an element.
+    ///
+    /// `ramp_ms` is consulted only for routes that support smooth interpolation
+    /// (currently audio `volume`-element `volume`/`mute`). Other properties are
+    /// set immediately regardless. `None` selects the per-route default ramp.
     pub(super) fn set_property(
         &self,
         element: &gst::Element,
         element_id: &str,
         prop_name: &str,
         prop_value: &PropertyValue,
+        ramp_ms: Option<u32>,
     ) -> Result<(), PipelineError> {
         debug!(
-            "Setting property: {}.{} = {:?}",
-            element_id, prop_name, prop_value
+            "Setting property: {}.{} = {:?} (ramp_ms={:?})",
+            element_id, prop_name, prop_value, ramp_ms
         );
+
+        // Audio volume element: route through the ramp manager to avoid
+        // zipper noise (volume) and click artifacts (mute). The match
+        // guards have side effects (they install a control source / schedule
+        // the mute toggle) and short-circuit when ramp setup succeeds; on
+        // failure (e.g. pipeline not yet running) we fall through to the
+        // direct `set_property` path below.
+        if VolumeRampManager::is_volume_element(element) {
+            match (prop_name, prop_value) {
+                ("volume", PropertyValue::Float(v))
+                    if self.volume_ramps.apply_volume_ramp(
+                        element,
+                        element_id,
+                        *v,
+                        ramp_ms.unwrap_or(DEFAULT_VOLUME_RAMP_MS),
+                    ) =>
+                {
+                    return Ok(());
+                }
+                ("mute", PropertyValue::Bool(v))
+                    if self.volume_ramps.apply_mute(
+                        element,
+                        element_id,
+                        *v,
+                        MUTE_ANTICLICK_RAMP_MS,
+                    ) =>
+                {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
 
         // Set property based on type
         match prop_value {
@@ -142,15 +181,20 @@ impl PipelineManager {
 
     /// Update a property on a live element in the pipeline.
     /// Validates that the property can be changed in the current pipeline state.
+    ///
+    /// `ramp_ms` is consulted only for routes that support smooth interpolation
+    /// (currently audio `volume`-element `volume`). For other properties it is
+    /// silently ignored.
     pub fn update_element_property(
         &self,
         element_id: &str,
         property_name: &str,
         value: &PropertyValue,
+        ramp_ms: Option<u32>,
     ) -> Result<(), PipelineError> {
         debug!(
-            "Updating property {}.{} to {:?} on running pipeline",
-            element_id, property_name, value
+            "Updating property {}.{} to {:?} on running pipeline (ramp_ms={:?})",
+            element_id, property_name, value, ramp_ms
         );
 
         // Get element reference
@@ -181,7 +225,7 @@ impl PipelineManager {
         if translations.is_empty() {
             // No translation needed, use original property
             self.validate_property_mutability(element, element_id, property_name, state)?;
-            self.set_property(element, element_id, property_name, value)?;
+            self.set_property(element, element_id, property_name, value, ramp_ms)?;
         } else {
             for (translated_name, translated_value) in &translations {
                 debug!(
@@ -189,7 +233,13 @@ impl PipelineManager {
                     element_id, property_name, element_id, translated_name
                 );
                 self.validate_property_mutability(element, element_id, translated_name, state)?;
-                self.set_property(element, element_id, translated_name, translated_value)?;
+                self.set_property(
+                    element,
+                    element_id,
+                    translated_name,
+                    translated_value,
+                    ramp_ms,
+                )?;
             }
         }
 

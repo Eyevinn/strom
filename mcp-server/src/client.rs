@@ -194,6 +194,7 @@ impl StromClient {
         let request = UpdatePropertyRequest {
             property_name: property_name.to_string(),
             value,
+            ramp_ms: None,
         };
         let response: ElementPropertiesResponse = self
             .with_auth(self.client.patch(&url))

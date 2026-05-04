@@ -50,3 +50,14 @@ pub const MIN_KNEE_LINEAR: f64 = 0.0631;
 // ── Latency / live defaults ─────────────────────────────────────────
 pub const DEFAULT_LATENCY_MS: u64 = 30;
 pub const DEFAULT_MIN_UPSTREAM_LATENCY_MS: u64 = 30;
+
+// ── Volume ramp / anti-zipper defaults ──────────────────────────────
+/// Default ramp duration applied to `volume`-element `volume` updates
+/// when no explicit `ramp_ms` is provided. Eliminates zipper noise from
+/// fader-drag updates without making the fader feel laggy.
+pub const DEFAULT_VOLUME_RAMP_MS: u32 = 20;
+
+/// Anti-click ramp applied automatically when `mute` is toggled. Not
+/// user-configurable — short enough to feel instant, long enough to
+/// prevent the discontinuity click of a hard mute.
+pub const MUTE_ANTICLICK_RAMP_MS: u32 = 10;

@@ -267,6 +267,11 @@ pub struct MixerEditor {
 
     /// Live updates enabled
     live_updates: bool,
+    /// Fade duration in milliseconds applied to volume/mute updates.
+    /// Sent as `ramp_ms` in PATCH requests; backend ignores it for
+    /// non-volume properties. Higher values produce slower fades —
+    /// useful when matching an auto-transition duration.
+    fade_ms: u32,
     /// Last update time (for throttling)
     last_update: instant::Instant,
     /// Save requested (checked by app to persist properties)
