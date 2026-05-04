@@ -293,6 +293,65 @@ async fn clear_drops_cache_and_subsequent_ramps_work() {
     );
 }
 
+/// Long mute fades honor the caller-supplied ramp_ms instead of the legacy
+/// hardcoded 10 ms anti-click. A 200 ms mute should still have the volume
+/// well above zero at +50 ms (the old behavior would have hit zero in ~10 ms).
+#[tokio::test(flavor = "multi_thread")]
+async fn long_mute_ramp_takes_full_duration() {
+    let p = TestPipe::new();
+    let mgr = VolumeRampManager::new();
+
+    assert!(mgr.apply_volume_ramp(&p.volume, "v", 1.0, 50));
+    settle(80).await;
+
+    // Long fade-out before mute.
+    assert!(mgr.apply_mute(&p.volume, "v", true, 200));
+
+    // ~50 ms in: well below 1.0 (fade is dB-linear) but not yet silent.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mid = p.vol();
+    assert!(
+        !p.mute(),
+        "mute=true must not land before the fade-out has finished"
+    );
+    assert!(
+        mid > 0.01,
+        "at +50 ms of a 200 ms fade, volume must still be audible (got {})",
+        mid
+    );
+
+    // After the full duration plus the 5 ms grace, mute=true is applied.
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    assert!(p.mute(), "mute=true should land after the 200 ms fade-out");
+}
+
+/// Cancel-guard: a mid-fade unmute must cancel the pending `mute=true`
+/// toggle scheduled by the long fade-out, otherwise that toggle would land
+/// after the unmute and silently kill the route.
+#[tokio::test(flavor = "multi_thread")]
+async fn unmute_during_long_mute_fade_cancels_pending_toggle() {
+    let p = TestPipe::new();
+    let mgr = VolumeRampManager::new();
+
+    assert!(mgr.apply_volume_ramp(&p.volume, "v", 1.0, 50));
+    settle(80).await;
+
+    // Start a long fade-out — schedules mute=true at +200 ms.
+    assert!(mgr.apply_mute(&p.volume, "v", true, 200));
+
+    // Unmute well before the scheduled mute=true would fire.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(mgr.apply_mute(&p.volume, "v", false, 50));
+
+    // Wait past the original 200 ms+grace window. The previously-scheduled
+    // mute=true must have observed the bumped generation and bailed out.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        !p.mute(),
+        "stale scheduled mute=true must be cancelled by an intervening unmute"
+    );
+}
+
 /// `is_volume_element` correctly distinguishes the volume element from
 /// other audio elements that happen to expose a `volume` property.
 #[tokio::test(flavor = "multi_thread")]

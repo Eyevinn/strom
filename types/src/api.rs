@@ -83,11 +83,13 @@ pub struct UpdatePropertyRequest {
     /// The new value for the property
     #[cfg_attr(feature = "validation", garde(skip))]
     pub value: PropertyValue,
-    /// Optional ramp duration in milliseconds. Currently only honored for
-    /// audio `volume`-element `volume` updates — when set, the value is
-    /// interpolated per-sample over the given duration to avoid zipper
-    /// noise on fader drags or to match an auto-transition duration.
-    /// When omitted, a short default ramp is used for `volume`; other
+    /// Optional ramp duration in milliseconds. Currently honored for audio
+    /// `volume`-element `volume` and `mute` updates — when set, `volume` is
+    /// interpolated per-sample over the given duration (anti-zipper / fade)
+    /// and `mute=true` is preceded by a fade-out of the same length while
+    /// `mute=false` is followed by a 0→pre_mute fade-in. Useful for
+    /// broadcast-style on-air / off-air route transitions (e.g. 500 ms).
+    /// When omitted, a short default ramp is used for `volume`/`mute`; other
     /// properties are set immediately.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "validation", garde(range(max = 60000)))]
