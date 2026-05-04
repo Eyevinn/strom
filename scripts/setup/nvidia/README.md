@@ -232,6 +232,32 @@ docker: Error response from daemon: could not select device driver "" with capab
 ./install-nvidia-container-toolkit.sh
 ```
 
+### Container loses GPU after `systemctl daemon-reload`
+
+**Symptom:** A container that was running fine suddenly fails with:
+```
+nvidia-smi: Failed to initialize NVML: Unknown Error
+```
+or GStreamer pipelines fail with `Could not initialize supporting library` /
+`Failed to open encoder` on `nvh264enc` / `nvh265enc`. The host's
+`nvidia-smi` still works fine.
+
+**Cause:** Docker's default systemd cgroup driver lets systemd revoke device
+cgroup permissions on `daemon-reload` (or any unit reload involving GPU
+references). The container keeps running but its `/dev/nvidia*` access is
+gone. Tracked in
+[NVIDIA/nvidia-container-toolkit#48](https://github.com/NVIDIA/nvidia-container-toolkit/issues/48).
+
+**Solution:** `install-nvidia-container-toolkit.sh` applies both NVIDIA-recommended
+mitigations automatically:
+1. Sets `"exec-opts": ["native.cgroupdriver=cgroupfs"]` in `/etc/docker/daemon.json`
+   so device cgroups are managed by Docker directly, not via systemd
+2. Installs `/etc/udev/rules.d/71-nvidia-dev-char.rules` which keeps
+   `/dev/char/<major>:<minor>` symlinks present for `runc` device injection
+
+**Recovery if you hit this on an unfixed host:** `docker restart <container>`
+restores GPU access immediately. Then run the install script for a permanent fix.
+
 ### GStreamer GL plugins not found
 
 **Symptom:** `glupload`, `gldownload` elements not available.
