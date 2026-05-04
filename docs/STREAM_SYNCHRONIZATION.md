@@ -44,8 +44,16 @@ override. It cannot be used for cross-source sync, because its zero is
 
 ### Setting a non-default clock
 
-You can set the clock on the pipeline before it reaches PLAYING. Example (in
-code):
+The flow's `clock_type` property controls which clock is installed before the
+pipeline transitions to PLAYING. Pick it from the Flow Properties dialog in
+the UI (Monotonic / Realtime / TAI / PTP / NTP). The wiring lives in
+`backend/src/gst/pipeline/construction.rs::configure_clock` — that function
+is the canonical reference for what each value does, including the
+`direct_media_timing` interaction (forces `base_time=0, start_time=NONE`,
+required for AES67 and useful for EFP cross-source PTS alignment).
+
+If you'd rather set the clock from code (e.g. for a test harness), the
+underlying calls are:
 
 ```rust
 use gstreamer::prelude::*;
@@ -58,10 +66,6 @@ pipeline.use_clock(Some(&clock));
 
 For PTP, replace with `gst::PtpClock::new(Some("eth0"), 0)`. For NTP, use
 `gst::NtpClock::new(None, "ntp.server.example", 123, gst::ClockTime::ZERO)`.
-
-Strom does not currently expose a per-flow clock selector in the UI. If you
-need one, the pipeline is built in `backend/src/gst/pipeline`; the clock must
-be installed after the pipeline is constructed but before `set_state(Playing)`.
 
 ## `normalize_segment` on EFP inputs
 
