@@ -31,9 +31,10 @@ pub mod whip;
 // Re-export commonly used types
 pub use block::{
     common_video_framerate_enum_values, common_video_pixel_format_enum_values,
-    common_video_resolution_enum_values, parse_resolution_string, BlockDefinition, BlockInstance,
-    BlockListResponse, BlockResponse, CreateBlockRequest, EnumValue, ExposedProperty, ExternalPad,
-    ExternalPads, PropertyMapping, PropertyType, COMMON_VIDEO_RESOLUTIONS,
+    common_video_resolution_enum_values, decklink_video_format_enum_values,
+    parse_resolution_string, BlockDefinition, BlockInstance, BlockListResponse, BlockResponse,
+    CreateBlockRequest, EnumValue, ExposedProperty, ExternalPad, ExternalPads, PropertyMapping,
+    PropertyType, COMMON_VIDEO_RESOLUTIONS, DECKLINK_VIDEO_FORMATS,
     DEFAULT_AES67_INPUT_BUFFER_DURATION_MS, DEFAULT_EFP_BUCKET_TIMEOUT, DEFAULT_EFP_HOL_TIMEOUT,
     DEFAULT_EFP_MTU, DEFAULT_OPUS_BITRATE, DEFAULT_OPUS_COMPLEXITY, DEFAULT_SRT_INPUT_URI,
     DEFAULT_SRT_LATENCY_MS, DEFAULT_SRT_OUTPUT_URI,

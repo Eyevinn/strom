@@ -48,6 +48,22 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             })
             .unwrap_or("sdi");
 
+        let video_format = properties
+            .get("video_format")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .unwrap_or("auto");
+
+        let drop_no_signal_frames = properties
+            .get("drop_no_signal_frames")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
         // Create elements with namespaced IDs
         // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
         // Note: We always use "videoconvert" as the element ID for consistent external pad references,
@@ -63,6 +79,8 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             .property("device-number", device_number)
             .property_from_str("mode", mode)
             .property_from_str("connection", connection)
+            .property_from_str("video-format", video_format)
+            .property("drop-no-signal-frames", drop_no_signal_frames)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkvideosrc: {}", e)))?;
 
@@ -82,8 +100,8 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
         info!(
-            "DeckLink Video Input configured: device={}, mode={}, connection={}",
-            device_number, mode, connection
+            "DeckLink Video Input configured: device={}, mode={}, connection={}, video-format={}, drop-no-signal-frames={}",
+            device_number, mode, connection, video_format, drop_no_signal_frames
         );
 
         // Chain: decklinkvideosrc -> videoconvert -> capsfilter
@@ -544,6 +562,34 @@ fn decklink_video_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "connection".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "video_format".to_string(),
+                label: "Video Format".to_string(),
+                description: "Pixel format from the SDI/HDMI input. Use 'auto' unless a fixed mode is set; 10-bit YUV (v210) is the broadcast-grade choice.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: decklink_video_format_enum_values(),
+                },
+                default_value: Some(PropertyValue::String("auto".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "video_format".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "drop_no_signal_frames".to_string(),
+                label: "Drop No-Signal Frames".to_string(),
+                description: "Drop frames the card flags as having no input signal instead of forwarding black/test-pattern downstream. Recommended for ingest so the encoder doesn't ship filler over SRT when the source is unplugged.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "drop_no_signal_frames".to_string(),
                     transform: None,
                 },
                 live: false,

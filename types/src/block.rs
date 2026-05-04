@@ -467,6 +467,32 @@ pub fn common_video_framerate_enum_values(include_empty: bool) -> Vec<EnumValue>
     values
 }
 
+/// Pixel formats accepted by `decklinkvideosrc` and `decklinkvideosink`'s
+/// `video-format` property. These are GstDecklinkVideoFormat enum nicks, not
+/// GStreamer caps `format=` strings — see `COMMON_VIDEO_PIXEL_FORMATS` for the
+/// caps-format equivalents.
+pub const DECKLINK_VIDEO_FORMATS: &[(&str, &str)] = &[
+    ("auto", "Auto"),
+    ("8bit-yuv", "8-bit YUV (UYVY)"),
+    ("10bit-yuv", "10-bit YUV (v210)"),
+    ("8bit-argb", "8-bit ARGB"),
+    ("8bit-bgra", "8-bit BGRA"),
+    ("10bit-rgb", "10-bit RGB (r210)"),
+    ("12bit-rgb", "12-bit RGB"),
+    ("12bit-rgble", "12-bit RGB LE"),
+];
+
+/// Get DeckLink video formats as `EnumValue` list for block properties.
+pub fn decklink_video_format_enum_values() -> Vec<EnumValue> {
+    DECKLINK_VIDEO_FORMATS
+        .iter()
+        .map(|(value, label)| EnumValue {
+            value: (*value).to_string(),
+            label: Some((*label).to_string()),
+        })
+        .collect()
+}
+
 /// Parse a resolution string like "1920x1080" into (width, height).
 /// Returns None if parsing fails.
 pub fn parse_resolution_string(s: &str) -> Option<(u32, u32)> {
