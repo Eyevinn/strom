@@ -488,7 +488,28 @@ impl BlockBuilder for EfpSrtOutputBuilder {
                     };
 
                     let result = if caps_name == "audio/x-raw" {
-                        build_raw_audio_chain(&bin, &mux, pad, &instance_id_clone, track_index)
+                        let channels = structure.get::<i32>("channels").unwrap_or(2).max(1);
+                        if channels > 8 {
+                            // opusenc tops out at 8 channels via Vorbis-family mapping; beyond
+                            // that we'd need explicit channel-mapping-family=255 wiring on every
+                            // hop. Multi-channel SDI ingest is better served by splitting into
+                            // stereo pairs upstream — until that exists, fall back to private-data.
+                            warn!(
+                                "EFPSRT {}: audio track {} has {} channels (> 8); skipping opus encode and routing as private data. \
+                                 Receiver must understand the raw caps.",
+                                instance_id_clone, track_index, channels
+                            );
+                            build_direct_audio_chain(&mux, pad, &instance_id_clone, track_index)
+                        } else {
+                            build_raw_audio_chain(
+                                &bin,
+                                &mux,
+                                pad,
+                                &instance_id_clone,
+                                track_index,
+                                channels,
+                            )
+                        }
                     } else if caps_name == "audio/x-opus" {
                         build_opus_passthrough_chain(
                             &bin,
@@ -548,6 +569,7 @@ fn build_raw_audio_chain(
     identity_src_pad: &gst::Pad,
     instance_id: &str,
     track_index: usize,
+    channels: i32,
 ) -> Result<(), String> {
     let audioconvert_name = format!("{}:audio_convert_{}", instance_id, track_index);
     let audioresample_name = format!("{}:audio_resample_{}", instance_id, track_index);
@@ -568,6 +590,14 @@ fn build_raw_audio_chain(
         .name(&encoder_name)
         .build()
         .map_err(|e| format!("opusenc: {}", e))?;
+
+    // Apply project Opus defaults. DEFAULT_OPUS_BITRATE is the per-stereo-pair
+    // budget; multi-channel inputs scale linearly so a 5.1 source isn't squeezed
+    // through the stereo budget. opusenc accepts 500..=512000.
+    let pairs = ((channels + 1) / 2).max(1);
+    let bitrate = (DEFAULT_OPUS_BITRATE.saturating_mul(pairs)).clamp(500, 512_000);
+    encoder.set_property("bitrate", bitrate);
+    encoder.set_property("complexity", DEFAULT_OPUS_COMPLEXITY);
 
     let parser = gst::ElementFactory::make("opusparse")
         .name(&parser_name)
@@ -621,8 +651,13 @@ fn build_raw_audio_chain(
         .map_err(|e| format!("link parser -> mux: {:?}", e))?;
 
     info!(
-        "EFPSRT {}: Audio chain linked (track {}): identity -> audioconvert -> audioresample -> opusenc -> opusparse -> efpmux ({})",
-        instance_id, track_index, mux_sink.name()
+        "EFPSRT {}: Audio chain linked (track {}): identity -> audioconvert -> audioresample -> opusenc(channels={}, bitrate={} bps, complexity={}) -> opusparse -> efpmux ({})",
+        instance_id,
+        track_index,
+        channels,
+        bitrate,
+        DEFAULT_OPUS_COMPLEXITY,
+        mux_sink.name()
     );
 
     Ok(())
