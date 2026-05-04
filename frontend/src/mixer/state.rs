@@ -33,6 +33,7 @@ impl MixerEditor {
             status: String::new(),
             error: None,
             live_updates: true,
+            fade_ms: strom_types::mixer::DEFAULT_VOLUME_RAMP_MS,
             last_update: instant::Instant::now(),
             save_requested: false,
             is_reset: false,

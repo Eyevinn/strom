@@ -1638,6 +1638,7 @@ impl StromApp {
                                         &update.element_id,
                                         &update.property_name,
                                         update.value,
+                                        None,
                                     )
                                     .await
                                 {

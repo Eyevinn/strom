@@ -78,6 +78,7 @@ impl PipelineManager {
             probe_manager,
             blocks: flow.blocks.clone(),
             block_definitions: HashMap::new(),
+            volume_ramps: crate::gst::volume_ramp::VolumeRampManager::new(),
         };
 
         // Expand blocks into GStreamer elements
@@ -317,7 +318,10 @@ impl PipelineManager {
             );
         }
         for (prop_name, prop_value) in &element_def.properties {
-            self.set_property(&element, &element_def.id, prop_name, prop_value)?;
+            // Pipeline isn't running yet — no stream-time available — so any
+            // volume_ramp routing inside set_property falls back to a direct
+            // set. Pass None to make that explicit.
+            self.set_property(&element, &element_def.id, prop_name, prop_value, None)?;
         }
 
         // Store pad properties for later application (after pads are created)

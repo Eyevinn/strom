@@ -223,6 +223,10 @@ pub struct PipelineManager {
     blocks: Vec<BlockInstance>,
     /// Block definitions for blocks used in this flow (resolved at construction time)
     block_definitions: HashMap<String, BlockDefinition>,
+    /// Per-element control sources for smooth volume/mute transitions on
+    /// audio `volume` elements. Eliminates zipper noise on fader drags and
+    /// click artifacts on mute toggles.
+    volume_ramps: crate::gst::volume_ramp::VolumeRampManager,
 }
 
 impl Drop for PipelineManager {
