@@ -347,7 +347,9 @@ mod unit_tests {
 
     #[test]
     fn db_amp_round_trip() {
-        for amp in [0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 10.0] {
+        // Values at or below LOG_DB_FLOOR map to silence by design and are
+        // not expected to round-trip — see `db_handles_zero_and_below_floor`.
+        for amp in [0.01, 0.1, 0.5, 1.0, 2.0, 10.0] {
             let db = amp_to_db(amp);
             let back = db_to_amp(db);
             assert!(
