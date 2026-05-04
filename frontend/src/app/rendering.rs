@@ -296,6 +296,18 @@ impl StromApp {
                 let flow_info = self.current_flow().map(|f| (f.id, f.running));
 
                 if let Some((flow_id, running)) = flow_info {
+                    if ui
+                        .button(format!("{} Debug Graph", egui_phosphor::regular::GRAPH))
+                        .on_hover_text(format!(
+                            "View pipeline debug graph ({})",
+                            Self::format_shortcut("Ctrl+D")
+                        ))
+                        .clicked()
+                    {
+                        let url = self.api.get_debug_graph_url(flow_id);
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
+                    }
+
                     ui.separator();
 
                     let (state_text, state_color) = if running {
@@ -382,18 +394,6 @@ impl StromApp {
                         .clicked()
                     {
                         self.stop_flow(ui.ctx());
-                    }
-
-                    if ui
-                        .button(format!("{} Debug Graph", egui_phosphor::regular::GRAPH))
-                        .on_hover_text(format!(
-                            "View pipeline debug graph ({})",
-                            Self::format_shortcut("Ctrl+D")
-                        ))
-                        .clicked()
-                    {
-                        let url = self.api.get_debug_graph_url(flow_id);
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
                     }
 
                     // Show flow uptime on the right side (only for running flows)
