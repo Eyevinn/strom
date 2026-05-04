@@ -10,44 +10,13 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 pub(super) fn mixer_definition() -> BlockDefinition {
     // Generate channel properties
     let mut exposed_properties = vec![
-        // Global: number of channels
+        // Global: number of channels (1..=MAX_CHANNELS, clamped on parse)
         ExposedProperty {
             name: "num_channels".to_string(),
             label: "Channels".to_string(),
-            description: "Number of input channels".to_string(),
-            property_type: PropertyType::Enum {
-                values: vec![
-                    EnumValue {
-                        value: "2".to_string(),
-                        label: Some("2".to_string()),
-                    },
-                    EnumValue {
-                        value: "4".to_string(),
-                        label: Some("4".to_string()),
-                    },
-                    EnumValue {
-                        value: "8".to_string(),
-                        label: Some("8".to_string()),
-                    },
-                    EnumValue {
-                        value: "12".to_string(),
-                        label: Some("12".to_string()),
-                    },
-                    EnumValue {
-                        value: "16".to_string(),
-                        label: Some("16".to_string()),
-                    },
-                    EnumValue {
-                        value: "24".to_string(),
-                        label: Some("24".to_string()),
-                    },
-                    EnumValue {
-                        value: "32".to_string(),
-                        label: Some("32".to_string()),
-                    },
-                ],
-            },
-            default_value: Some(PropertyValue::String("8".to_string())),
+            description: format!("Number of input channels (1 to {})", MAX_CHANNELS),
+            property_type: PropertyType::UInt,
+            default_value: Some(PropertyValue::UInt(DEFAULT_CHANNELS as u64)),
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: "num_channels".to_string(),
@@ -95,36 +64,13 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
         },
-        // Number of aux buses
+        // Number of aux buses (0..=MAX_AUX_BUSES, clamped on parse)
         ExposedProperty {
             name: "num_aux_buses".to_string(),
             label: "Aux Buses".to_string(),
-            description: "Number of aux send buses (0-4)".to_string(),
-            property_type: PropertyType::Enum {
-                values: vec![
-                    EnumValue {
-                        value: "0".to_string(),
-                        label: Some("None".to_string()),
-                    },
-                    EnumValue {
-                        value: "1".to_string(),
-                        label: Some("1".to_string()),
-                    },
-                    EnumValue {
-                        value: "2".to_string(),
-                        label: Some("2".to_string()),
-                    },
-                    EnumValue {
-                        value: "3".to_string(),
-                        label: Some("3".to_string()),
-                    },
-                    EnumValue {
-                        value: "4".to_string(),
-                        label: Some("4".to_string()),
-                    },
-                ],
-            },
-            default_value: Some(PropertyValue::String("0".to_string())),
+            description: format!("Number of aux send buses (0 to {})", MAX_AUX_BUSES),
+            property_type: PropertyType::UInt,
+            default_value: Some(PropertyValue::UInt(0)),
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: "num_aux_buses".to_string(),
@@ -132,36 +78,13 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
         },
-        // Number of groups
+        // Number of groups (0..=MAX_GROUPS, clamped on parse)
         ExposedProperty {
             name: "num_groups".to_string(),
             label: "Groups".to_string(),
-            description: "Number of group buses (0-4)".to_string(),
-            property_type: PropertyType::Enum {
-                values: vec![
-                    EnumValue {
-                        value: "0".to_string(),
-                        label: Some("None".to_string()),
-                    },
-                    EnumValue {
-                        value: "1".to_string(),
-                        label: Some("1".to_string()),
-                    },
-                    EnumValue {
-                        value: "2".to_string(),
-                        label: Some("2".to_string()),
-                    },
-                    EnumValue {
-                        value: "3".to_string(),
-                        label: Some("3".to_string()),
-                    },
-                    EnumValue {
-                        value: "4".to_string(),
-                        label: Some("4".to_string()),
-                    },
-                ],
-            },
-            default_value: Some(PropertyValue::String("0".to_string())),
+            description: format!("Number of group buses (0 to {})", MAX_GROUPS),
+            property_type: PropertyType::UInt,
+            default_value: Some(PropertyValue::UInt(0)),
             mapping: PropertyMapping {
                 element_id: "_block".to_string(),
                 property_name: "num_groups".to_string(),
