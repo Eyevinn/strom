@@ -41,7 +41,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 tracing-appender = "0.2.5"
-utoipa = { version = "5.4", features = ["axum_extras", "uuid"] }
+utoipa = { version = "5.5", features = ["axum_extras", "uuid"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 garde = { version = "0.22", features = ["derive"] }
 
