@@ -52,7 +52,7 @@ pub const DEFAULT_PGM_FRAMERATE: &str = "30/1";
 pub const DEFAULT_MULTIVIEW_FRAMERATE: &str = "30/1";
 
 /// Whether to download GPU memory to system memory on output (GPU path only).
-pub const DEFAULT_GL_DOWNLOAD: bool = true;
+pub const DEFAULT_GL_DOWNLOAD: bool = false;
 
 // --- Z-order constants for compositor pads ---
 
