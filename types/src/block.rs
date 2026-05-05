@@ -16,6 +16,51 @@ pub struct EnumValue {
     pub label: Option<String>,
 }
 
+/// Stream content selector for blocks that handle both audio and video.
+///
+/// Used by blocks like WHEP, WHIP, and DeckLink Input to indicate which
+/// kinds of media tracks the block should expose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum StreamMode {
+    /// Audio only
+    Audio,
+    /// Video only
+    Video,
+    /// Both audio and video
+    #[default]
+    AudioVideo,
+}
+
+impl StreamMode {
+    pub fn has_audio(&self) -> bool {
+        matches!(self, StreamMode::Audio | StreamMode::AudioVideo)
+    }
+
+    pub fn has_video(&self) -> bool {
+        matches!(self, StreamMode::Video | StreamMode::AudioVideo)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StreamMode::Audio => "audio",
+            StreamMode::Video => "video",
+            StreamMode::AudioVideo => "audio_video",
+        }
+    }
+
+    /// Parse a stream mode from a string. Unknown values fall back to `Video`
+    /// (preserves the historical WHEP default).
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "audio" => StreamMode::Audio,
+            "audio_video" => StreamMode::AudioVideo,
+            _ => StreamMode::Video,
+        }
+    }
+}
+
 /// Property type enumeration for exposed properties
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

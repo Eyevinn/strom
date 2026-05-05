@@ -1,28 +1,102 @@
 //! Blackmagic DeckLink SDI/HDMI capture and playback block builders.
 //!
-//! Provides separate video and audio input/output blocks for Blackmagic DeckLink cards.
+//! Provides two combined blocks — one input, one output — both selectable
+//! between `audio_video`, `video`, or `audio` via the `stream_mode` property:
+//!
+//! - **DeckLink Input** — always creates `decklinkvideosrc` because the plugin
+//!   requires it for `decklinkaudiosrc` to operate on the same device. In
+//!   `audio` mode the video src is drained internally to a `fakesink`.
+//! - **DeckLink Output** — always creates `decklinkvideosink` for the mirrored
+//!   constraint on the playback side. In `audio` mode the videosink is fed
+//!   internally by a `videotestsrc` (black, 1920x1080@25 UYVY) so it can reach
+//!   PLAYING.
+//!
+//! No format conversion elements are inserted on either side — peer blocks must
+//! accept (input) or deliver (output) the card's native pixel/audio formats.
+//!
 //! Uses GStreamer's DeckLink plugin (gst-plugins-bad) for hardware integration.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gpu::video_convert_mode;
 use gstreamer as gst;
 use std::collections::HashMap;
-use strom_types::{block::*, element::ElementPadRef, EnumValue, PropertyValue, *};
+use strom_types::{
+    block::{StreamMode, *},
+    element::ElementPadRef,
+    EnumValue, MediaType, PropertyValue,
+};
 use tracing::info;
 
-/// DeckLink Video Input block builder.
-pub struct DeckLinkVideoInputBuilder;
+/// DeckLink Input block builder.
+///
+/// Combined video + audio capture. The `stream_mode` property controls which pads
+/// are exposed (`audio_video`, `video`, `audio`). `decklinkvideosrc` is always
+/// created internally — required by the DeckLink GStreamer plugin even when only
+/// audio is consumed externally.
+pub struct DeckLinkInputBuilder;
 
-impl BlockBuilder for DeckLinkVideoInputBuilder {
+impl BlockBuilder for DeckLinkInputBuilder {
+    fn get_external_pads(
+        &self,
+        properties: &HashMap<String, PropertyValue>,
+    ) -> Option<ExternalPads> {
+        let mode = properties
+            .get("stream_mode")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(StreamMode::parse(s)),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let mut outputs = Vec::new();
+        if mode.has_video() {
+            outputs.push(ExternalPad {
+                label: if mode.has_audio() {
+                    Some("V".to_string())
+                } else {
+                    None
+                },
+                name: "video_out".to_string(),
+                media_type: MediaType::Video,
+                internal_element_id: "decklinkvideosrc".to_string(),
+                internal_pad_name: "src".to_string(),
+            });
+        }
+        if mode.has_audio() {
+            outputs.push(ExternalPad {
+                label: if mode.has_video() {
+                    Some("A".to_string())
+                } else {
+                    None
+                },
+                name: "audio_out".to_string(),
+                media_type: MediaType::Audio,
+                internal_element_id: "decklinkaudiosrc".to_string(),
+                internal_pad_name: "src".to_string(),
+            });
+        }
+
+        Some(ExternalPads {
+            inputs: vec![],
+            outputs,
+        })
+    }
+
     fn build(
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("Building DeckLink Video Input block: {}", instance_id);
+        info!("Building DeckLink Input block: {}", instance_id);
 
-        // Parse properties
+        let stream_mode = properties
+            .get("stream_mode")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(StreamMode::parse(s)),
+                _ => None,
+            })
+            .unwrap_or_default();
+
         let device_number = properties
             .get("device_number")
             .and_then(|v| match v {
@@ -32,7 +106,7 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             })
             .unwrap_or(0);
 
-        let mode = properties
+        let video_mode = properties
             .get("mode")
             .and_then(|v| match v {
                 PropertyValue::String(s) => Some(s.as_str()),
@@ -46,7 +120,7 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
                 PropertyValue::String(s) => Some(s.as_str()),
                 _ => None,
             })
-            .unwrap_or("sdi");
+            .unwrap_or("auto");
 
         let video_format = properties
             .get("video_format")
@@ -64,171 +138,85 @@ impl BlockBuilder for DeckLinkVideoInputBuilder {
             })
             .unwrap_or(false);
 
-        // Create elements with namespaced IDs
-        // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
-        // Note: We always use "videoconvert" as the element ID for consistent external pad references,
-        // even when the actual GStreamer element is "autovideoconvert"
-        let convert_mode = video_convert_mode();
-        let convert_element_name = convert_mode.element_name();
         let videosrc_id = format!("{}:decklinkvideosrc", instance_id);
-        let videoconvert_id = format!("{}:videoconvert", instance_id);
-        let capsfilter_id = format!("{}:capsfilter", instance_id);
-
         let videosrc = gst::ElementFactory::make("decklinkvideosrc")
             .name(&videosrc_id)
             .property("device-number", device_number)
-            .property_from_str("mode", mode)
+            .property_from_str("mode", video_mode)
             .property_from_str("connection", connection)
             .property_from_str("video-format", video_format)
             .property("drop-no-signal-frames", drop_no_signal_frames)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkvideosrc: {}", e)))?;
 
-        let videoconvert = gst::ElementFactory::make(convert_element_name)
-            .name(&videoconvert_id)
-            .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
-            })?;
+        let mut elements: Vec<(String, gst::Element)> = vec![(videosrc_id.clone(), videosrc)];
+        let mut internal_links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
 
-        // Capsfilter with generic video/x-raw caps (no specific format restriction)
-        let caps = gst::Caps::builder("video/x-raw").build();
-        let capsfilter = gst::ElementFactory::make("capsfilter")
-            .name(&capsfilter_id)
-            .property("caps", &caps)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
-
-        info!(
-            "DeckLink Video Input configured: device={}, mode={}, connection={}, video-format={}, drop-no-signal-frames={}",
-            device_number, mode, connection, video_format, drop_no_signal_frames
-        );
-
-        // Chain: decklinkvideosrc -> videoconvert -> capsfilter
-        let internal_links = vec![
-            (
+        // Audio-only: the video src must still run, drain it to a fakesink so the
+        // pipeline can reach PLAYING. Without this, decklinkaudiosrc fails state
+        // change with "Audio src needs a video src for its operation".
+        if !stream_mode.has_video() {
+            let drain_id = format!("{}:video_drain", instance_id);
+            let drain = gst::ElementFactory::make("fakesink")
+                .name(&drain_id)
+                .property("sync", false)
+                .property("async", false)
+                .property("silent", true)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("fakesink (video_drain): {}", e))
+                })?;
+            internal_links.push((
                 ElementPadRef::pad(&videosrc_id, "src"),
-                ElementPadRef::pad(&videoconvert_id, "sink"),
-            ),
-            (
-                ElementPadRef::pad(&videoconvert_id, "src"),
-                ElementPadRef::pad(&capsfilter_id, "sink"),
-            ),
-        ];
+                ElementPadRef::pad(&drain_id, "sink"),
+            ));
+            elements.push((drain_id, drain));
+        }
 
-        Ok(BlockBuildResult {
-            elements: vec![
-                (videosrc_id, videosrc),
-                (videoconvert_id, videoconvert),
-                (capsfilter_id, capsfilter),
-            ],
-            internal_links,
-            bus_message_handler: None,
-            pad_properties: HashMap::new(),
-        })
-    }
-}
+        if stream_mode.has_audio() {
+            let audio_connection = properties
+                .get("audio_connection")
+                .and_then(|v| match v {
+                    PropertyValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("auto");
 
-/// DeckLink Audio Input block builder.
-pub struct DeckLinkAudioInputBuilder;
+            let audio_channels = properties
+                .get("audio_channels")
+                .and_then(|v| match v {
+                    PropertyValue::String(s) => Some(s.clone()),
+                    PropertyValue::UInt(u) => Some(u.to_string()),
+                    PropertyValue::Int(i) if *i > 0 => Some(i.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "2".to_string());
 
-impl BlockBuilder for DeckLinkAudioInputBuilder {
-    fn build(
-        &self,
-        instance_id: &str,
-        properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
-    ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("Building DeckLink Audio Input block: {}", instance_id);
+            let audiosrc_id = format!("{}:decklinkaudiosrc", instance_id);
+            let audiosrc = gst::ElementFactory::make("decklinkaudiosrc")
+                .name(&audiosrc_id)
+                .property("device-number", device_number)
+                .property_from_str("connection", audio_connection)
+                .property_from_str("channels", &audio_channels)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("decklinkaudiosrc: {}", e))
+                })?;
+            elements.push((audiosrc_id, audiosrc));
 
-        // Parse properties
-        let device_number = properties
-            .get("device_number")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as i32),
-                PropertyValue::Int(i) if *i >= 0 => Some(*i as i32),
-                _ => None,
-            })
-            .unwrap_or(0);
-
-        let connection = properties
-            .get("connection")
-            .and_then(|v| match v {
-                PropertyValue::String(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .unwrap_or("auto");
-
-        let channels = properties
-            .get("channels")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(u.to_string()),
-                PropertyValue::Int(i) if *i > 0 => Some(i.to_string()),
-                PropertyValue::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| "2".to_string());
-
-        // Create elements with namespaced IDs
-        let audiosrc_id = format!("{}:decklinkaudiosrc", instance_id);
-        let audioconvert_id = format!("{}:audioconvert", instance_id);
-        let audioresample_id = format!("{}:audioresample", instance_id);
-        let capsfilter_id = format!("{}:capsfilter", instance_id);
-
-        let audiosrc = gst::ElementFactory::make("decklinkaudiosrc")
-            .name(&audiosrc_id)
-            .property("device-number", device_number)
-            .property_from_str("connection", connection)
-            .property_from_str("channels", &channels)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkaudiosrc: {}", e)))?;
-
-        let audioconvert = gst::ElementFactory::make("audioconvert")
-            .name(&audioconvert_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
-
-        let audioresample = gst::ElementFactory::make("audioresample")
-            .name(&audioresample_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
-
-        // Capsfilter with generic audio/x-raw caps
-        let caps = gst::Caps::builder("audio/x-raw").build();
-        let capsfilter = gst::ElementFactory::make("capsfilter")
-            .name(&capsfilter_id)
-            .property("caps", &caps)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
+            info!(
+                "DeckLink Input audio: connection={}, channels={}",
+                audio_connection, audio_channels
+            );
+        }
 
         info!(
-            "DeckLink Audio Input configured: device={}, connection={}, channels={}",
-            device_number, connection, channels
+            "DeckLink Input configured: device={}, stream_mode={}, mode={}, connection={}, video-format={}, drop-no-signal-frames={}",
+            device_number, stream_mode.as_str(), video_mode, connection, video_format, drop_no_signal_frames
         );
 
-        // Chain: decklinkaudiosrc -> audioconvert -> audioresample -> capsfilter
-        let internal_links = vec![
-            (
-                ElementPadRef::pad(&audiosrc_id, "src"),
-                ElementPadRef::pad(&audioconvert_id, "sink"),
-            ),
-            (
-                ElementPadRef::pad(&audioconvert_id, "src"),
-                ElementPadRef::pad(&audioresample_id, "sink"),
-            ),
-            (
-                ElementPadRef::pad(&audioresample_id, "src"),
-                ElementPadRef::pad(&capsfilter_id, "sink"),
-            ),
-        ];
-
         Ok(BlockBuildResult {
-            elements: vec![
-                (audiosrc_id, audiosrc),
-                (audioconvert_id, audioconvert),
-                (audioresample_id, audioresample),
-                (capsfilter_id, capsfilter),
-            ],
+            elements,
             internal_links,
             bus_message_handler: None,
             pad_properties: HashMap::new(),
@@ -236,19 +224,84 @@ impl BlockBuilder for DeckLinkAudioInputBuilder {
     }
 }
 
-/// DeckLink Video Output block builder.
-pub struct DeckLinkVideoOutputBuilder;
+/// DeckLink Output block builder.
+///
+/// Combined video + audio playback. The `stream_mode` property controls which pads
+/// are exposed (`audio_video`, `video`, `audio`). `decklinkvideosink` is always
+/// created internally — required by the DeckLink GStreamer plugin even when only
+/// audio is sent externally. In audio-only mode an internal `videotestsrc` (black,
+/// 1920x1080@25 UYVY) drives the videosink so the pipeline can reach PLAYING.
+pub struct DeckLinkOutputBuilder;
 
-impl BlockBuilder for DeckLinkVideoOutputBuilder {
+/// Internal video mode used to drive `decklinkvideosink` when only audio is exposed.
+/// Lowest broadcast-quality progressive mode supported by virtually all DeckLink
+/// cards; the actual SDI output is irrelevant in this mode (just black frames).
+const AUDIO_ONLY_INTERNAL_MODE: &str = "1080p25";
+const AUDIO_ONLY_INTERNAL_FORMAT: &str = "8bit-yuv";
+
+impl BlockBuilder for DeckLinkOutputBuilder {
+    fn get_external_pads(
+        &self,
+        properties: &HashMap<String, PropertyValue>,
+    ) -> Option<ExternalPads> {
+        let mode = properties
+            .get("stream_mode")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(StreamMode::parse(s)),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let mut inputs = Vec::new();
+        if mode.has_video() {
+            inputs.push(ExternalPad {
+                label: if mode.has_audio() {
+                    Some("V".to_string())
+                } else {
+                    None
+                },
+                name: "video_in".to_string(),
+                media_type: MediaType::Video,
+                internal_element_id: "decklinkvideosink".to_string(),
+                internal_pad_name: "sink".to_string(),
+            });
+        }
+        if mode.has_audio() {
+            inputs.push(ExternalPad {
+                label: if mode.has_video() {
+                    Some("A".to_string())
+                } else {
+                    None
+                },
+                name: "audio_in".to_string(),
+                media_type: MediaType::Audio,
+                internal_element_id: "decklinkaudiosink".to_string(),
+                internal_pad_name: "sink".to_string(),
+            });
+        }
+
+        Some(ExternalPads {
+            inputs,
+            outputs: vec![],
+        })
+    }
+
     fn build(
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("Building DeckLink Video Output block: {}", instance_id);
+        info!("Building DeckLink Output block: {}", instance_id);
 
-        // Parse properties
+        let stream_mode = properties
+            .get("stream_mode")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(StreamMode::parse(s)),
+                _ => None,
+            })
+            .unwrap_or_default();
+
         let device_number = properties
             .get("device_number")
             .and_then(|v| match v {
@@ -258,120 +311,106 @@ impl BlockBuilder for DeckLinkVideoOutputBuilder {
             })
             .unwrap_or(0);
 
-        let mode = properties
-            .get("mode")
-            .and_then(|v| match v {
-                PropertyValue::String(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .unwrap_or("auto");
+        // In audio-only mode the videosink runs in a fixed internal mode regardless
+        // of the user's `mode`/`video_format` settings — those only apply when the
+        // video pad is actually wired up.
+        let (video_mode, video_format) = if stream_mode.has_video() {
+            let m = properties
+                .get("mode")
+                .and_then(|v| match v {
+                    PropertyValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("1080p25");
+            let f = properties
+                .get("video_format")
+                .and_then(|v| match v {
+                    PropertyValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("8bit-yuv");
+            (m, f)
+        } else {
+            (AUDIO_ONLY_INTERNAL_MODE, AUDIO_ONLY_INTERNAL_FORMAT)
+        };
 
-        // Create elements with namespaced IDs
-        // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
-        // Note: We always use "videoconvert" as the element ID for consistent external pad references,
-        // even when the actual GStreamer element is "autovideoconvert"
-        let convert_mode = video_convert_mode();
-        let convert_element_name = convert_mode.element_name();
-        let videoconvert_id = format!("{}:videoconvert", instance_id);
         let videosink_id = format!("{}:decklinkvideosink", instance_id);
-
-        let videoconvert = gst::ElementFactory::make(convert_element_name)
-            .name(&videoconvert_id)
-            .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
-            })?;
-
         let videosink = gst::ElementFactory::make("decklinkvideosink")
             .name(&videosink_id)
             .property("device-number", device_number)
-            .property_from_str("mode", mode)
+            .property_from_str("mode", video_mode)
+            .property_from_str("video-format", video_format)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkvideosink: {}", e)))?;
 
+        let mut elements: Vec<(String, gst::Element)> = vec![(videosink_id.clone(), videosink)];
+        let mut internal_links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
+
+        // Audio-only: feed videosink with black frames so it can reach PLAYING.
+        // (decklinkaudiosink requires decklinkvideosink to be running on the same device.)
+        if !stream_mode.has_video() {
+            let testsrc_id = format!("{}:video_filler", instance_id);
+            let capsfilter_id = format!("{}:video_filler_caps", instance_id);
+
+            let testsrc = gst::ElementFactory::make("videotestsrc")
+                .name(&testsrc_id)
+                .property_from_str("pattern", "black")
+                .property("is-live", true)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("videotestsrc (filler): {}", e))
+                })?;
+
+            // Caps must match the videosink's hardcoded internal mode.
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("format", "UYVY")
+                .field("width", 1920i32)
+                .field("height", 1080i32)
+                .field("framerate", gst::Fraction::new(25, 1))
+                .field("interlace-mode", "progressive")
+                .build();
+            let capsfilter = gst::ElementFactory::make("capsfilter")
+                .name(&capsfilter_id)
+                .property("caps", &caps)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("capsfilter (filler): {}", e))
+                })?;
+
+            internal_links.push((
+                ElementPadRef::pad(&testsrc_id, "src"),
+                ElementPadRef::pad(&capsfilter_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&capsfilter_id, "src"),
+                ElementPadRef::pad(&videosink_id, "sink"),
+            ));
+            elements.push((testsrc_id, testsrc));
+            elements.push((capsfilter_id, capsfilter));
+        }
+
+        if stream_mode.has_audio() {
+            let audiosink_id = format!("{}:decklinkaudiosink", instance_id);
+            let audiosink = gst::ElementFactory::make("decklinkaudiosink")
+                .name(&audiosink_id)
+                .property("device-number", device_number)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("decklinkaudiosink: {}", e))
+                })?;
+            elements.push((audiosink_id, audiosink));
+        }
+
         info!(
-            "DeckLink Video Output configured: device={}, mode={}",
-            device_number, mode
+            "DeckLink Output configured: device={}, stream_mode={}, mode={}, video-format={}",
+            device_number,
+            stream_mode.as_str(),
+            video_mode,
+            video_format
         );
 
-        // Chain: videoconvert -> decklinkvideosink
-        let internal_links = vec![(
-            ElementPadRef::pad(&videoconvert_id, "src"),
-            ElementPadRef::pad(&videosink_id, "sink"),
-        )];
-
         Ok(BlockBuildResult {
-            elements: vec![(videoconvert_id, videoconvert), (videosink_id, videosink)],
-            internal_links,
-            bus_message_handler: None,
-            pad_properties: HashMap::new(),
-        })
-    }
-}
-
-/// DeckLink Audio Output block builder.
-pub struct DeckLinkAudioOutputBuilder;
-
-impl BlockBuilder for DeckLinkAudioOutputBuilder {
-    fn build(
-        &self,
-        instance_id: &str,
-        properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
-    ) -> Result<BlockBuildResult, BlockBuildError> {
-        info!("Building DeckLink Audio Output block: {}", instance_id);
-
-        // Parse properties
-        let device_number = properties
-            .get("device_number")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as i32),
-                PropertyValue::Int(i) if *i >= 0 => Some(*i as i32),
-                _ => None,
-            })
-            .unwrap_or(0);
-
-        // Create elements with namespaced IDs
-        let audioconvert_id = format!("{}:audioconvert", instance_id);
-        let audioresample_id = format!("{}:audioresample", instance_id);
-        let audiosink_id = format!("{}:decklinkaudiosink", instance_id);
-
-        let audioconvert = gst::ElementFactory::make("audioconvert")
-            .name(&audioconvert_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audioconvert: {}", e)))?;
-
-        let audioresample = gst::ElementFactory::make("audioresample")
-            .name(&audioresample_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audioresample: {}", e)))?;
-
-        let audiosink = gst::ElementFactory::make("decklinkaudiosink")
-            .name(&audiosink_id)
-            .property("device-number", device_number)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkaudiosink: {}", e)))?;
-
-        info!("DeckLink Audio Output configured: device={}", device_number);
-
-        // Chain: audioconvert -> audioresample -> decklinkaudiosink
-        let internal_links = vec![
-            (
-                ElementPadRef::pad(&audioconvert_id, "src"),
-                ElementPadRef::pad(&audioresample_id, "sink"),
-            ),
-            (
-                ElementPadRef::pad(&audioresample_id, "src"),
-                ElementPadRef::pad(&audiosink_id, "sink"),
-            ),
-        ];
-
-        Ok(BlockBuildResult {
-            elements: vec![
-                (audioconvert_id, audioconvert),
-                (audioresample_id, audioresample),
-                (audiosink_id, audiosink),
-            ],
+            elements,
             internal_links,
             bus_message_handler: None,
             pad_properties: HashMap::new(),
@@ -381,12 +420,7 @@ impl BlockBuilder for DeckLinkAudioOutputBuilder {
 
 /// Get metadata for DeckLink blocks (for UI/API).
 pub fn get_blocks() -> Vec<BlockDefinition> {
-    vec![
-        decklink_video_input_definition(),
-        decklink_audio_input_definition(),
-        decklink_video_output_definition(),
-        decklink_audio_output_definition(),
-    ]
+    vec![decklink_input_definition(), decklink_output_definition()]
 }
 
 /// Common video mode enum values for DeckLink
@@ -489,14 +523,42 @@ fn video_mode_enum_values() -> Vec<EnumValue> {
     ]
 }
 
-/// Get DeckLink Video Input block definition.
-fn decklink_video_input_definition() -> BlockDefinition {
+/// Get DeckLink Input block definition (combined video + audio).
+fn decklink_input_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.decklink_video_input".to_string(),
-        name: "DeckLink Video Input".to_string(),
-        description: "Captures video from Blackmagic DeckLink SDI/HDMI card using decklinkvideosrc. Supports various video modes and connections.".to_string(),
+        id: "builtin.decklink_input".to_string(),
+        name: "DeckLink Input".to_string(),
+        description: "Captures video and/or audio from a Blackmagic DeckLink SDI/HDMI card. Outputs the card's native pixel and audio formats — no internal conversion. Use a downstream videoformat/audioformat block to convert if needed.".to_string(),
         category: "Inputs".to_string(),
         exposed_properties: vec![
+            ExposedProperty {
+                name: "stream_mode".to_string(),
+                label: "Stream Mode".to_string(),
+                description: "Which media tracks to expose: video only, audio only, or both. (decklinkvideosrc is always created internally — required by the DeckLink plugin even in audio-only mode.)".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "audio_video".to_string(),
+                            label: Some("Audio + Video".to_string()),
+                        },
+                        EnumValue {
+                            value: "video".to_string(),
+                            label: Some("Video only".to_string()),
+                        },
+                        EnumValue {
+                            value: "audio".to_string(),
+                            label: Some("Audio only".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("audio_video".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "stream_mode".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
             ExposedProperty {
                 name: "device_number".to_string(),
                 label: "Device Number".to_string(),
@@ -528,10 +590,14 @@ fn decklink_video_input_definition() -> BlockDefinition {
             },
             ExposedProperty {
                 name: "connection".to_string(),
-                label: "Connection Type".to_string(),
-                description: "Input connection type".to_string(),
+                label: "Video Connection".to_string(),
+                description: "Video input connection type".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
+                        EnumValue {
+                            value: "auto".to_string(),
+                            label: Some("Auto".to_string()),
+                        },
                         EnumValue {
                             value: "sdi".to_string(),
                             label: Some("SDI".to_string()),
@@ -553,12 +619,12 @@ fn decklink_video_input_definition() -> BlockDefinition {
                             label: Some("Composite".to_string()),
                         },
                         EnumValue {
-                            value: "s-video".to_string(),
+                            value: "svideo".to_string(),
                             label: Some("S-Video".to_string()),
                         },
                     ],
                 },
-                default_value: Some(PropertyValue::String("sdi".to_string())),
+                default_value: Some(PropertyValue::String("auto".to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "connection".to_string(),
@@ -569,7 +635,7 @@ fn decklink_video_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "video_format".to_string(),
                 label: "Video Format".to_string(),
-                description: "Pixel format from the SDI/HDMI input. Use 'auto' unless a fixed mode is set; 10-bit YUV (v210) is the broadcast-grade choice.".to_string(),
+                description: "Pixel format the card delivers. Native formats only — no conversion is performed. 'auto' lets the plugin pick based on mode (typically 8bit-yuv); 10bit-yuv (v210) is the broadcast-grade choice.".to_string(),
                 property_type: PropertyType::Enum {
                     values: decklink_video_format_enum_values(),
                 },
@@ -594,53 +660,10 @@ fn decklink_video_input_definition() -> BlockDefinition {
                 },
                 live: false,
             },
-        ],
-        external_pads: ExternalPads {
-            inputs: vec![],
-            outputs: vec![ExternalPad {
-                label: None,
-                name: "video_out".to_string(),
-                media_type: MediaType::Video,
-                internal_element_id: "capsfilter".to_string(),
-                internal_pad_name: "src".to_string(),
-            }],
-        },
-        built_in: true,
-        ui_metadata: Some(BlockUIMetadata {
-            icon: Some("📹".to_string()),
-            width: Some(2.0),
-            height: Some(1.5),
-            ..Default::default()
-        }),
-    }
-}
-
-/// Get DeckLink Audio Input block definition.
-fn decklink_audio_input_definition() -> BlockDefinition {
-    BlockDefinition {
-        id: "builtin.decklink_audio_input".to_string(),
-        name: "DeckLink Audio Input".to_string(),
-        description: "Captures audio from Blackmagic DeckLink SDI/HDMI card using decklinkaudiosrc. Supports embedded audio from SDI/HDMI.".to_string(),
-        category: "Inputs".to_string(),
-        exposed_properties: vec![
             ExposedProperty {
-                name: "device_number".to_string(),
-                label: "Device Number".to_string(),
-                description: "DeckLink device number (0-based index for multi-card systems)"
-                    .to_string(),
-                property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(0)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "device_number".to_string(),
-                    transform: None,
-                },
-                live: false,
-            },
-            ExposedProperty {
-                name: "connection".to_string(),
-                label: "Connection Type".to_string(),
-                description: "Audio input connection type".to_string(),
+                name: "audio_connection".to_string(),
+                label: "Audio Connection".to_string(),
+                description: "Audio input connection type. Only used when audio is exposed.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue {
@@ -652,27 +675,35 @@ fn decklink_audio_input_definition() -> BlockDefinition {
                             label: Some("Embedded (SDI/HDMI)".to_string()),
                         },
                         EnumValue {
-                            value: "aesebu".to_string(),
+                            value: "aes".to_string(),
                             label: Some("AES/EBU".to_string()),
                         },
                         EnumValue {
                             value: "analog".to_string(),
                             label: Some("Analog".to_string()),
                         },
+                        EnumValue {
+                            value: "analog-xlr".to_string(),
+                            label: Some("Analog (XLR)".to_string()),
+                        },
+                        EnumValue {
+                            value: "analog-rca".to_string(),
+                            label: Some("Analog (RCA)".to_string()),
+                        },
                     ],
                 },
                 default_value: Some(PropertyValue::String("auto".to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
-                    property_name: "connection".to_string(),
+                    property_name: "audio_connection".to_string(),
                     transform: None,
                 },
                 live: false,
             },
             ExposedProperty {
-                name: "channels".to_string(),
-                label: "Channels".to_string(),
-                description: "Number of audio channels".to_string(),
+                name: "audio_channels".to_string(),
+                label: "Audio Channels".to_string(),
+                description: "Number of audio channels to capture (48 kHz, S16LE/S32LE — chosen by downstream caps negotiation).".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue {
@@ -696,25 +727,37 @@ fn decklink_audio_input_definition() -> BlockDefinition {
                 default_value: Some(PropertyValue::String("2".to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
-                    property_name: "channels".to_string(),
+                    property_name: "audio_channels".to_string(),
                     transform: None,
                 },
                 live: false,
             },
         ],
+        // Static fallback — matches the default `audio_video` mode. The actual
+        // pads are computed dynamically in `DeckLinkInputBuilder::get_external_pads`
+        // based on the `stream_mode` property.
         external_pads: ExternalPads {
             inputs: vec![],
-            outputs: vec![ExternalPad {
-                label: None,
-                name: "audio_out".to_string(),
-                media_type: MediaType::Audio,
-                internal_element_id: "capsfilter".to_string(),
-                internal_pad_name: "src".to_string(),
-            }],
+            outputs: vec![
+                ExternalPad {
+                    label: Some("V".to_string()),
+                    name: "video_out".to_string(),
+                    media_type: MediaType::Video,
+                    internal_element_id: "decklinkvideosrc".to_string(),
+                    internal_pad_name: "src".to_string(),
+                },
+                ExternalPad {
+                    label: Some("A".to_string()),
+                    name: "audio_out".to_string(),
+                    media_type: MediaType::Audio,
+                    internal_element_id: "decklinkaudiosrc".to_string(),
+                    internal_pad_name: "src".to_string(),
+                },
+            ],
         },
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
-            icon: Some("🎵".to_string()),
+            icon: Some("📹".to_string()),
             width: Some(2.0),
             height: Some(1.5),
             ..Default::default()
@@ -722,15 +765,42 @@ fn decklink_audio_input_definition() -> BlockDefinition {
     }
 }
 
-/// Get DeckLink Video Output block definition.
-fn decklink_video_output_definition() -> BlockDefinition {
+/// Get DeckLink Output block definition (combined video + audio).
+fn decklink_output_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.decklink_video_output".to_string(),
-        name: "DeckLink Video Output".to_string(),
-        description: "Outputs video to Blackmagic DeckLink SDI/HDMI card using decklinkvideosink."
-            .to_string(),
+        id: "builtin.decklink_output".to_string(),
+        name: "DeckLink Output".to_string(),
+        description: "Outputs video and/or audio to a Blackmagic DeckLink SDI/HDMI card. Accepts the card's native pixel and audio formats only — no internal conversion. In audio-only mode the videosink is internally driven with black frames so it can reach PLAYING.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
+            ExposedProperty {
+                name: "stream_mode".to_string(),
+                label: "Stream Mode".to_string(),
+                description: "Which media tracks to expose: video only, audio only, or both. (decklinkvideosink is always created internally — required by the DeckLink plugin even in audio-only mode.)".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "audio_video".to_string(),
+                            label: Some("Audio + Video".to_string()),
+                        },
+                        EnumValue {
+                            value: "video".to_string(),
+                            label: Some("Video only".to_string()),
+                        },
+                        EnumValue {
+                            value: "audio".to_string(),
+                            label: Some("Audio only".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("audio_video".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "stream_mode".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
             ExposedProperty {
                 name: "device_number".to_string(),
                 label: "Device Number".to_string(),
@@ -748,11 +818,11 @@ fn decklink_video_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "mode".to_string(),
                 label: "Video Mode".to_string(),
-                description: "Video mode (resolution and framerate)".to_string(),
+                description: "Output video mode (resolution and framerate). Ignored in audio-only mode.".to_string(),
                 property_type: PropertyType::Enum {
                     values: video_mode_enum_values(),
                 },
-                default_value: Some(PropertyValue::String("auto".to_string())),
+                default_value: Some(PropertyValue::String("1080p25".to_string())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "mode".to_string(),
@@ -760,61 +830,46 @@ fn decklink_video_output_definition() -> BlockDefinition {
                 },
                 live: false,
             },
+            ExposedProperty {
+                name: "video_format".to_string(),
+                label: "Video Format".to_string(),
+                description: "Pixel format the card expects. Native formats only — no conversion is performed; upstream must deliver this exact format. Ignored in audio-only mode.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: decklink_video_format_enum_values(),
+                },
+                default_value: Some(PropertyValue::String("8bit-yuv".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "video_format".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
         ],
+        // Static fallback — matches the default `audio_video` mode. Actual pads
+        // are computed dynamically in `DeckLinkOutputBuilder::get_external_pads`.
         external_pads: ExternalPads {
-            inputs: vec![ExternalPad {
-                label: None,
-                name: "video_in".to_string(),
-                media_type: MediaType::Video,
-                internal_element_id: "videoconvert".to_string(),
-                internal_pad_name: "sink".to_string(),
-            }],
+            inputs: vec![
+                ExternalPad {
+                    label: Some("V".to_string()),
+                    name: "video_in".to_string(),
+                    media_type: MediaType::Video,
+                    internal_element_id: "decklinkvideosink".to_string(),
+                    internal_pad_name: "sink".to_string(),
+                },
+                ExternalPad {
+                    label: Some("A".to_string()),
+                    name: "audio_in".to_string(),
+                    media_type: MediaType::Audio,
+                    internal_element_id: "decklinkaudiosink".to_string(),
+                    internal_pad_name: "sink".to_string(),
+                },
+            ],
             outputs: vec![],
         },
         built_in: true,
         ui_metadata: Some(BlockUIMetadata {
             icon: Some("📺".to_string()),
-            width: Some(2.0),
-            height: Some(1.5),
-            ..Default::default()
-        }),
-    }
-}
-
-/// Get DeckLink Audio Output block definition.
-fn decklink_audio_output_definition() -> BlockDefinition {
-    BlockDefinition {
-        id: "builtin.decklink_audio_output".to_string(),
-        name: "DeckLink Audio Output".to_string(),
-        description: "Outputs audio to Blackmagic DeckLink SDI/HDMI card using decklinkaudiosink. Audio is embedded in SDI/HDMI output.".to_string(),
-        category: "Outputs".to_string(),
-        exposed_properties: vec![ExposedProperty {
-            name: "device_number".to_string(),
-            label: "Device Number".to_string(),
-            description: "DeckLink device number (0-based index for multi-card systems)"
-                .to_string(),
-            property_type: PropertyType::UInt,
-            default_value: Some(PropertyValue::UInt(0)),
-            mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: "device_number".to_string(),
-                transform: None,
-            },
-            live: false,
-        }],
-        external_pads: ExternalPads {
-            inputs: vec![ExternalPad {
-                label: None,
-                name: "audio_in".to_string(),
-                media_type: MediaType::Audio,
-                internal_element_id: "audioconvert".to_string(),
-                internal_pad_name: "sink".to_string(),
-            }],
-            outputs: vec![],
-        },
-        built_in: true,
-        ui_metadata: Some(BlockUIMetadata {
-            icon: Some("🔊".to_string()),
             width: Some(2.0),
             height: Some(1.5),
             ..Default::default()

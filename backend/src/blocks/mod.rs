@@ -8,7 +8,7 @@ pub mod storage;
 
 pub use builder::{
     BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, BusMessageConnectFn,
-    DynamicWebrtcbinStore, ElementSetupFn, WhepEndpointInfo, WhepStreamMode, WhipEndpointInfo,
+    DynamicWebrtcbinStore, ElementSetupFn, WhepEndpointInfo, WhipEndpointInfo,
 };
 pub use registry::BlockRegistry;
 

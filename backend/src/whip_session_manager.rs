@@ -7,12 +7,13 @@
 //! Dead sessions (ICE disconnect, pipeline error) are automatically cleaned up
 //! via a background task that receives cleanup requests through an mpsc channel.
 
-use crate::blocks::{DynamicWebrtcbinStore, WhepStreamMode};
+use crate::blocks::DynamicWebrtcbinStore;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
+use strom_types::block::StreamMode;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -23,7 +24,7 @@ use tracing::{debug, info, warn};
 pub struct WhipEndpointConfig {
     pub instance_id: String,
     pub endpoint_id: String,
-    pub mode: WhepStreamMode,
+    pub mode: StreamMode,
     pub stun_server: Option<String>,
     pub turn_server: Option<String>,
     pub ice_transport_policy: String,

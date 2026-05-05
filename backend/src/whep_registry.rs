@@ -3,9 +3,9 @@
 //! Maps endpoint IDs to internal localhost ports for WHEP Output blocks.
 //! The axum proxy uses this to route requests to the correct whepserversink instance.
 
-use crate::blocks::WhepStreamMode;
 use std::collections::HashMap;
 use std::sync::Arc;
+use strom_types::block::StreamMode;
 use tokio::sync::RwLock;
 
 /// Information about a registered WHEP endpoint.
@@ -14,7 +14,7 @@ pub struct WhepEndpointEntry {
     /// Internal localhost port where whepserversink is listening
     pub port: u16,
     /// Stream mode (audio, video, or both)
-    pub mode: WhepStreamMode,
+    pub mode: StreamMode,
 }
 
 /// Registry mapping endpoint IDs to internal ports.
@@ -38,7 +38,7 @@ impl WhepRegistry {
         &self,
         endpoint_id: String,
         port: u16,
-        mode: WhepStreamMode,
+        mode: StreamMode,
     ) -> Result<(), String> {
         let mut map = self.inner.write().await;
         if map.contains_key(&endpoint_id) {
