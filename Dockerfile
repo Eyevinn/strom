@@ -64,8 +64,15 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
     # Install Zig for cross-compilation
     ZIG_VERSION="0.13.0" && \
     ZIG_ARCH=$(case ${BUILDARCH} in amd64) echo "x86_64" ;; arm64) echo "aarch64" ;; esac) && \
+    ZIG_SHA256=$(case ${ZIG_ARCH} in \
+        x86_64) echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea" ;; \
+        aarch64) echo "041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556" ;; \
+    esac) && \
     ZIG_TARBALL="zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" && \
-    curl -L "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" -o "/tmp/${ZIG_TARBALL}" && \
+    curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+        "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" \
+        -o "/tmp/${ZIG_TARBALL}" && \
+    echo "${ZIG_SHA256}  /tmp/${ZIG_TARBALL}" | sha256sum -c && \
     tar -xf "/tmp/${ZIG_TARBALL}" -C /usr/local && \
     mv /usr/local/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /usr/local/zig && \
     ln -s /usr/local/zig/zig /usr/local/bin/zig && \

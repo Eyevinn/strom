@@ -28,9 +28,16 @@ else
     ZIG_VERSION="0.13.0"
     ZIG_TARBALL="zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
     ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}"
+    if [ "$ZIG_ARCH" = "x86_64" ]; then
+        ZIG_SHA256="d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea"
+    else
+        ZIG_SHA256="041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556"
+    fi
 
     echo "Downloading Zig ${ZIG_VERSION} for ${ZIG_ARCH}..."
-    curl -L "$ZIG_URL" -o "/tmp/${ZIG_TARBALL}"
+    curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+        "$ZIG_URL" -o "/tmp/${ZIG_TARBALL}"
+    echo "${ZIG_SHA256}  /tmp/${ZIG_TARBALL}" | sha256sum -c
 
     echo "Extracting to ~/.local/zig..."
     mkdir -p ~/.local
