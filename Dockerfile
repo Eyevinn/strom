@@ -68,17 +68,33 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
         x86_64) echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea" ;; \
         aarch64) echo "041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556" ;; \
     esac) && \
+    CZB_VERSION="0.22.3" && \
+    CZB_SHA256=$(case ${ZIG_ARCH} in \
+        x86_64) echo "6a014d41ba41ca4b69ca4c4819b9f78a41b0197b5d486904e31c1244e3686190" ;; \
+        aarch64) echo "6f86a78cf8be222ac08a68a944ffd8a1ef9d455c504097f0ffbd8bcfbe434a55" ;; \
+    esac) && \
     ZIG_TARBALL="zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" && \
-    curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+    # Prefer community mirror (faster, not throttled); fall back to upstream
+    (curl -L --fail --retry 3 --retry-all-errors --retry-delay 2 \
+        "https://zigmirror.hryx.net/zig/${ZIG_TARBALL}" \
+        -o "/tmp/${ZIG_TARBALL}" || \
+     curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
         "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}" \
-        -o "/tmp/${ZIG_TARBALL}" && \
+        -o "/tmp/${ZIG_TARBALL}") && \
     echo "${ZIG_SHA256}  /tmp/${ZIG_TARBALL}" | sha256sum -c && \
     tar -xf "/tmp/${ZIG_TARBALL}" -C /usr/local && \
     mv /usr/local/zig-linux-${ZIG_ARCH}-${ZIG_VERSION} /usr/local/zig && \
     ln -s /usr/local/zig/zig /usr/local/bin/zig && \
     rm "/tmp/${ZIG_TARBALL}" && \
-    # Install cargo-zigbuild
-    cargo install --locked cargo-zigbuild && \
+    # Install cargo-zigbuild from prebuilt binary (avoids ~10 min compile)
+    CZB_TARGET="${ZIG_ARCH}-unknown-linux-gnu" && \
+    curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+        "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CZB_VERSION}/cargo-zigbuild-${CZB_TARGET}.tar.xz" \
+        -o "/tmp/cargo-zigbuild.tar.xz" && \
+    echo "${CZB_SHA256}  /tmp/cargo-zigbuild.tar.xz" | sha256sum -c && \
+    tar -xf /tmp/cargo-zigbuild.tar.xz -C /tmp && \
+    install -m 0755 "/tmp/cargo-zigbuild-${CZB_TARGET}/cargo-zigbuild" /root/.cargo/bin/cargo-zigbuild && \
+    rm -rf /tmp/cargo-zigbuild.tar.xz "/tmp/cargo-zigbuild-${CZB_TARGET}" && \
     # Add Rust ARM64 target
     rustup target add aarch64-unknown-linux-gnu && \
     # Setup multi-arch for ARM64 (matching setup-arm64-cross.sh)

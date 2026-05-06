@@ -182,19 +182,40 @@ jobs:
           path: /tmp/zig.tar.xz
           key: zig-0.13.0-linux-x86_64
 
+      - name: Cache cargo-zigbuild tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/cargo-zigbuild.tar.xz
+          key: cargo-zigbuild-0.22.3-linux-x86_64
+
       - name: Install Zig and cargo-zigbuild
         run: |
           ZIG_VERSION="0.13.0"
           ZIG_SHA256="d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea"
+          # Prefer community mirror (faster, not throttled); fall back to upstream
+          ZIG_PRIMARY="https://zigmirror.hryx.net/zig/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          ZIG_FALLBACK="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
           if [ ! -s /tmp/zig.tar.xz ] || ! echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c --quiet; then
+            curl -L --fail --retry 3 --retry-all-errors --retry-delay 2 \
+              -o /tmp/zig.tar.xz "$ZIG_PRIMARY" || \
             curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
-              -o /tmp/zig.tar.xz \
-              "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+              -o /tmp/zig.tar.xz "$ZIG_FALLBACK"
             echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c
           fi
           sudo tar -xJ -C /usr/local -f /tmp/zig.tar.xz
           sudo ln -sf /usr/local/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
-          cargo install --locked cargo-zigbuild
+
+          # cargo-zigbuild: download prebuilt binary (cargo install would compile from source, ~10 min)
+          CZB_VERSION="0.22.3"
+          CZB_SHA256="6a014d41ba41ca4b69ca4c4819b9f78a41b0197b5d486904e31c1244e3686190"
+          CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CZB_VERSION}/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz"
+          if [ ! -s /tmp/cargo-zigbuild.tar.xz ] || ! echo "${CZB_SHA256}  /tmp/cargo-zigbuild.tar.xz" | sha256sum -c --quiet; then
+            curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+              -o /tmp/cargo-zigbuild.tar.xz "$CZB_URL"
+            echo "${CZB_SHA256}  /tmp/cargo-zigbuild.tar.xz" | sha256sum -c
+          fi
+          tar -xJ -C /tmp -f /tmp/cargo-zigbuild.tar.xz
+          install -m 0755 /tmp/cargo-zigbuild-x86_64-unknown-linux-gnu/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
         env:
           RUSTC_WRAPPER: sccache
 
@@ -275,19 +296,38 @@ jobs:
           path: /tmp/zig.tar.xz
           key: zig-0.13.0-linux-aarch64
 
+      - name: Cache cargo-zigbuild tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/cargo-zigbuild.tar.xz
+          key: cargo-zigbuild-0.22.3-linux-aarch64
+
       - name: Install Zig and cargo-zigbuild
         run: |
           ZIG_VERSION="0.13.0"
           ZIG_SHA256="041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556"
+          ZIG_PRIMARY="https://zigmirror.hryx.net/zig/zig-linux-aarch64-${ZIG_VERSION}.tar.xz"
+          ZIG_FALLBACK="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-aarch64-${ZIG_VERSION}.tar.xz"
           if [ ! -s /tmp/zig.tar.xz ] || ! echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c --quiet; then
+            curl -L --fail --retry 3 --retry-all-errors --retry-delay 2 \
+              -o /tmp/zig.tar.xz "$ZIG_PRIMARY" || \
             curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
-              -o /tmp/zig.tar.xz \
-              "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-aarch64-${ZIG_VERSION}.tar.xz"
+              -o /tmp/zig.tar.xz "$ZIG_FALLBACK"
             echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c
           fi
           sudo tar -xJ -C /usr/local -f /tmp/zig.tar.xz
           sudo ln -sf /usr/local/zig-linux-aarch64-${ZIG_VERSION}/zig /usr/local/bin/zig
-          cargo install --locked cargo-zigbuild
+
+          CZB_VERSION="0.22.3"
+          CZB_SHA256="6f86a78cf8be222ac08a68a944ffd8a1ef9d455c504097f0ffbd8bcfbe434a55"
+          CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CZB_VERSION}/cargo-zigbuild-aarch64-unknown-linux-gnu.tar.xz"
+          if [ ! -s /tmp/cargo-zigbuild.tar.xz ] || ! echo "${CZB_SHA256}  /tmp/cargo-zigbuild.tar.xz" | sha256sum -c --quiet; then
+            curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+              -o /tmp/cargo-zigbuild.tar.xz "$CZB_URL"
+            echo "${CZB_SHA256}  /tmp/cargo-zigbuild.tar.xz" | sha256sum -c
+          fi
+          tar -xJ -C /tmp -f /tmp/cargo-zigbuild.tar.xz
+          install -m 0755 /tmp/cargo-zigbuild-aarch64-unknown-linux-gnu/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
         env:
           RUSTC_WRAPPER: sccache
 
