@@ -213,20 +213,43 @@ services:
 
 ## Using DeckLink in Strom
 
-### DeckLink Video Input Block
+Strom exposes two DeckLink blocks — one input, one output — each combined for
+video and audio. Pick `audio_video`, `video`, or `audio` via the `Stream Mode`
+property; the block exposes only the pads relevant to the selected mode.
 
-In the Strom UI, add a "DeckLink Video Input" block and configure:
+Neither block performs format conversion. Peer blocks must accept (input) or
+deliver (output) the card's native pixel format — `8bit-yuv` (UYVY), `10bit-yuv`
+(v210), `8bit-argb`, `8bit-bgra`, or `10bit-rgb` — and 48 kHz S16LE/S32LE audio.
+Use a downstream `Video Format` / `Audio Format` block to convert if needed.
 
+### DeckLink Input Block
+
+Add a "DeckLink Input" block and configure:
+
+- **Stream Mode**: `Audio + Video`, `Video only`, or `Audio only`
 - **Device Number**: Which DeckLink device to use (0, 1, 2, ...)
-- **Mode**: Video format (e.g., `1080p50`, `1080i50`, `2160p50`)
-- **Connection**: Input connector (`sdi`, `hdmi`, `optical-sdi`)
+- **Video Mode**: Video format (e.g., `1080p50`, `1080i50`, `2160p50`, `auto`)
+- **Video Connection**: Input connector (`auto`, `sdi`, `hdmi`, `optical-sdi`, ...)
+- **Video Format**: Pixel format the card delivers (`auto`, `8bit-yuv`, `10bit-yuv`, ...)
+- **Drop No-Signal Frames**: Drop frames flagged as no-signal instead of forwarding black
+- **Audio Connection**: Audio source (`auto`, `embedded`, `aes`, `analog`, `analog-xlr`, `analog-rca`)
+- **Audio Channels**: `2`, `8`, `16`, or `max`
 
-### DeckLink Video Output Block
+In `Audio only` mode `decklinkvideosrc` is still created internally and drained
+to a `fakesink` — required for `decklinkaudiosrc` to operate.
 
-Add a "DeckLink Video Output" block and configure:
+### DeckLink Output Block
 
+Add a "DeckLink Output" block and configure:
+
+- **Stream Mode**: `Audio + Video`, `Video only`, or `Audio only`
 - **Device Number**: Which DeckLink device to use
-- **Mode**: Output video format
+- **Video Mode**: Output video format (e.g., `1080p25`, `1080p50`, `2160p50`)
+- **Video Format**: Pixel format the card expects (`8bit-yuv`, `10bit-yuv`, ...)
+
+In `Audio only` mode `decklinkvideosink` is still created internally and fed
+black frames at 1080p25/UYVY — required for `decklinkaudiosink` to operate. The
+`Video Mode` and `Video Format` properties are ignored in this case.
 
 ### Testing Inside Container
 

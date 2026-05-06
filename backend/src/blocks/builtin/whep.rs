@@ -9,9 +9,7 @@
 //!
 //! Handles dynamic pad creation by linking new audio streams to a liveadder mixer.
 
-use crate::blocks::{
-    BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, WhepStreamMode,
-};
+use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -19,6 +17,7 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use strom_types::block::StreamMode;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -48,7 +47,7 @@ impl BlockBuilder for WHEPOutputBuilder {
         let mode = properties
             .get("mode")
             .and_then(|v| match v {
-                PropertyValue::String(s) => Some(WhepStreamMode::parse(s)),
+                PropertyValue::String(s) => Some(StreamMode::parse(s)),
                 _ => None,
             })
             .unwrap_or_default();
@@ -828,7 +827,7 @@ fn build_whepserversink(
     let mode = properties
         .get("mode")
         .and_then(|v| match v {
-            PropertyValue::String(s) => Some(WhepStreamMode::parse(s)),
+            PropertyValue::String(s) => Some(StreamMode::parse(s)),
             _ => None,
         })
         .unwrap_or_default();

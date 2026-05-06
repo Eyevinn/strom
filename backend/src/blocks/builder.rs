@@ -8,7 +8,11 @@ use gstreamer as gst;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use strom_types::{block::ExternalPads, element::ElementPadRef, FlowId, PropertyValue};
+use strom_types::{
+    block::{ExternalPads, StreamMode},
+    element::ElementPadRef,
+    FlowId, PropertyValue,
+};
 use thiserror::Error;
 
 /// Storage for dynamically created webrtcbin elements (e.g., from webrtcsink/whepserversink).
@@ -55,44 +59,6 @@ pub type BusWatchSetupFn = BusMessageConnectFn;
 /// The GStreamer element(s) to connect signals on are captured in the closure during build time.
 pub type ElementSetupFn = Box<dyn FnOnce(FlowId, EventBroadcaster) + Send + Sync>;
 
-/// Stream mode for WHEP endpoints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WhepStreamMode {
-    /// Audio only
-    Audio,
-    /// Video only
-    Video,
-    /// Both audio and video
-    #[default]
-    AudioVideo,
-}
-
-impl WhepStreamMode {
-    pub fn has_audio(&self) -> bool {
-        matches!(self, WhepStreamMode::Audio | WhepStreamMode::AudioVideo)
-    }
-
-    pub fn has_video(&self) -> bool {
-        matches!(self, WhepStreamMode::Video | WhepStreamMode::AudioVideo)
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            WhepStreamMode::Audio => "audio",
-            WhepStreamMode::Video => "video",
-            WhepStreamMode::AudioVideo => "audio_video",
-        }
-    }
-
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "audio" => WhepStreamMode::Audio,
-            "audio_video" => WhepStreamMode::AudioVideo,
-            _ => WhepStreamMode::Video,
-        }
-    }
-}
-
 /// WHIP endpoint registration info (for WHIP Input blocks).
 #[derive(Debug, Clone)]
 pub struct WhipEndpointInfo {
@@ -103,7 +69,7 @@ pub struct WhipEndpointInfo {
     /// The internal localhost port where whipserversrc is listening
     pub internal_port: u16,
     /// Stream mode (audio, video, or both)
-    pub mode: WhepStreamMode,
+    pub mode: StreamMode,
 }
 
 /// WHEP endpoint registration info.
@@ -116,7 +82,7 @@ pub struct WhepEndpointInfo {
     /// The internal localhost port where whepserversink is listening
     pub internal_port: u16,
     /// Stream mode (audio, video, or both)
-    pub mode: WhepStreamMode,
+    pub mode: StreamMode,
 }
 
 /// Context provided to block builders during build.
@@ -274,7 +240,7 @@ impl BlockBuildContext {
         block_id: &str,
         endpoint_id: &str,
         port: u16,
-        mode: WhepStreamMode,
+        mode: StreamMode,
     ) {
         self.whep_endpoints.borrow_mut().push(WhepEndpointInfo {
             block_id: block_id.to_string(),
@@ -299,7 +265,7 @@ impl BlockBuildContext {
         block_id: &str,
         endpoint_id: &str,
         port: u16,
-        mode: WhepStreamMode,
+        mode: StreamMode,
     ) {
         self.whip_endpoints.borrow_mut().push(WhipEndpointInfo {
             block_id: block_id.to_string(),
