@@ -24,13 +24,23 @@ else
         exit 1
     fi
 
-    # Download latest Zig (or specify a version)
+    # Download Zig — prefer community mirror (faster), fall back to upstream
     ZIG_VERSION="0.13.0"
     ZIG_TARBALL="zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
-    ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}"
+    ZIG_PRIMARY="https://zigmirror.hryx.net/zig/${ZIG_TARBALL}"
+    ZIG_FALLBACK="https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}"
+    if [ "$ZIG_ARCH" = "x86_64" ]; then
+        ZIG_SHA256="d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea"
+    else
+        ZIG_SHA256="041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556"
+    fi
 
     echo "Downloading Zig ${ZIG_VERSION} for ${ZIG_ARCH}..."
-    curl -L "$ZIG_URL" -o "/tmp/${ZIG_TARBALL}"
+    curl -L --fail --retry 3 --retry-all-errors --retry-delay 2 \
+        "$ZIG_PRIMARY" -o "/tmp/${ZIG_TARBALL}" || \
+    curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+        "$ZIG_FALLBACK" -o "/tmp/${ZIG_TARBALL}"
+    echo "${ZIG_SHA256}  /tmp/${ZIG_TARBALL}" | sha256sum -c
 
     echo "Extracting to ~/.local/zig..."
     mkdir -p ~/.local
@@ -48,12 +58,26 @@ else
     echo "✓ Zig installed: $(zig version)"
 fi
 
-# 2. Install cargo-zigbuild
+# 2. Install cargo-zigbuild — use prebuilt binary (avoids ~10 min compile)
 echo "Installing cargo-zigbuild..."
 if command -v cargo-zigbuild &> /dev/null; then
     echo "✓ cargo-zigbuild already installed"
 else
-    cargo install --locked cargo-zigbuild
+    CZB_VERSION="0.22.3"
+    CZB_TARGET="${ZIG_ARCH}-unknown-linux-gnu"
+    if [ "$ZIG_ARCH" = "x86_64" ]; then
+        CZB_SHA256="6a014d41ba41ca4b69ca4c4819b9f78a41b0197b5d486904e31c1244e3686190"
+    else
+        CZB_SHA256="6f86a78cf8be222ac08a68a944ffd8a1ef9d455c504097f0ffbd8bcfbe434a55"
+    fi
+    CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CZB_VERSION}/cargo-zigbuild-${CZB_TARGET}.tar.xz"
+    curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+        "$CZB_URL" -o /tmp/cargo-zigbuild.tar.xz
+    echo "${CZB_SHA256}  /tmp/cargo-zigbuild.tar.xz" | sha256sum -c
+    tar -xf /tmp/cargo-zigbuild.tar.xz -C /tmp
+    mkdir -p ~/.cargo/bin
+    install -m 0755 "/tmp/cargo-zigbuild-${CZB_TARGET}/cargo-zigbuild" ~/.cargo/bin/cargo-zigbuild
+    rm -rf /tmp/cargo-zigbuild.tar.xz "/tmp/cargo-zigbuild-${CZB_TARGET}"
     echo "✓ cargo-zigbuild installed"
 fi
 
