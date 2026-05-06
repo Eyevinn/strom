@@ -233,6 +233,25 @@ impl<'a> PipelineParams<'a> {
         }
         builder.build()
     }
+
+    /// Build PGM output caps for the GL-memory passthrough path.
+    /// Constrains framerate/resolution without forcing a download to system memory.
+    fn pgm_caps_glmem(&self) -> gst::Caps {
+        let s = format!(
+            "video/x-raw(memory:GLMemory),width={},height={},framerate={}/{},pixel-aspect-ratio=1/1",
+            self.pgm_w, self.pgm_h, self.pgm_framerate.0, self.pgm_framerate.1
+        );
+        s.parse().expect("valid GL memory caps for PGM")
+    }
+
+    /// Build multiview output caps for the GL-memory passthrough path.
+    fn mv_caps_glmem(&self) -> gst::Caps {
+        let s = format!(
+            "video/x-raw(memory:GLMemory),width={},height={},framerate={}/{},pixel-aspect-ratio=1/1",
+            self.mv_w, self.mv_h, self.mv_framerate.0, self.mv_framerate.1
+        );
+        s.parse().expect("valid GL memory caps for MV")
+    }
 }
 
 // ============================================================================
@@ -264,7 +283,9 @@ fn build_gpu_pipeline(
     // --- Distribution output chain ---
     // queue_post_dist decouples the compositor from downstream processing.
     // With gl_download=true:  mixer → queue_post_dist → tee_pgm → gldownload → capsfilter → queue_dist_out
-    // With gl_download=false: mixer → queue_post_dist → tee_pgm → queue_dist_out (GL memory passthrough)
+    // With gl_download=false: mixer → queue_post_dist → tee_pgm → capsfilter(GLMemory) → queue_dist_out
+    // The capsfilter on the false path enforces pgm_framerate/resolution while
+    // keeping memory in GL — without it, the framerate property is silently ignored.
     let q_post_dist_id = p.id("queue_post_dist");
     let queue_post_dist = elements::make_queue(&q_post_dist_id)?;
     let tee_pgm_id = p.id("tee_pgm");
@@ -307,8 +328,22 @@ fn build_gpu_pipeline(
             ElementPadRef::pad(&q_dist_out_id, "sink"),
         ));
     } else {
+        // GL passthrough: insert capsfilter with GLMemory feature so pgm_framerate
+        // is enforced without a download. The compositor's src pad will negotiate
+        // to this rate via downstream caps propagation.
+        let cf_dist_id = p.id("capsfilter_dist");
+        let capsfilter_dist = gst::ElementFactory::make("capsfilter")
+            .name(&cf_dist_id)
+            .property("caps", p.pgm_caps_glmem())
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter_dist: {}", e)))?;
+        elems.push((cf_dist_id.clone(), capsfilter_dist));
         links.push((
             ElementPadRef::pad(&tee_pgm_id, "src_0"),
+            ElementPadRef::pad(&cf_dist_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&cf_dist_id, "src"),
             ElementPadRef::pad(&q_dist_out_id, "sink"),
         ));
     }
@@ -347,7 +382,9 @@ fn build_gpu_pipeline(
     // --- Multiview output chain ---
     // queue_post_mv decouples the compositor from downstream processing.
     // With gl_download=true:  mv_comp → queue_post_mv → gldownload → capsfilter → tee_mv → queue_mv_out
-    // With gl_download=false: mv_comp → queue_post_mv → tee_mv → queue_mv_out (GL memory passthrough)
+    // With gl_download=false: mv_comp → queue_post_mv → capsfilter(GLMemory) → tee_mv → queue_mv_out
+    // The capsfilter on the false path enforces multiview_framerate/resolution while
+    // keeping memory in GL — without it, the framerate property is silently ignored.
     let q_post_mv_id = p.id("queue_post_mv");
     let queue_post_mv = elements::make_queue(&q_post_mv_id)?;
     let tee_mv_id = p.id("tee_mv");
@@ -388,8 +425,21 @@ fn build_gpu_pipeline(
             ElementPadRef::pad(&tee_mv_id, "sink"),
         ));
     } else {
+        // GL passthrough: insert capsfilter with GLMemory feature so mv_framerate
+        // is enforced without a download.
+        let cf_mv_id = p.id("capsfilter_mv");
+        let capsfilter_mv = gst::ElementFactory::make("capsfilter")
+            .name(&cf_mv_id)
+            .property("caps", p.mv_caps_glmem())
+            .build()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter_mv: {}", e)))?;
+        elems.push((cf_mv_id.clone(), capsfilter_mv));
         links.push((
             ElementPadRef::pad(&q_post_mv_id, "src"),
+            ElementPadRef::pad(&cf_mv_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&cf_mv_id, "src"),
             ElementPadRef::pad(&tee_mv_id, "sink"),
         ));
     }
