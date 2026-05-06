@@ -138,14 +138,47 @@ impl BlockBuilder for DeckLinkInputBuilder {
             })
             .unwrap_or(false);
 
+        let profile = properties
+            .get("profile")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .unwrap_or("default");
+
+        // -1 means "use device-number instead". Higher priority than device-number
+        // when set to a real persistent ID.
+        let persistent_id = properties
+            .get("persistent_id")
+            .and_then(|v| match v {
+                PropertyValue::Int(i) => Some(*i),
+                PropertyValue::UInt(u) => Some(*u as i64),
+                _ => None,
+            })
+            .unwrap_or(-1);
+
+        // do-timestamp = true makes the source apply the pipeline clock to each
+        // buffer's PTS. Required for absolute timestamping setups (e.g. TAI
+        // pipeline clock + EFP/SRT 64-bit absolute timestamps).
+        let do_timestamp = properties
+            .get("do_timestamp")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
         let videosrc_id = format!("{}:decklinkvideosrc", instance_id);
         let videosrc = gst::ElementFactory::make("decklinkvideosrc")
             .name(&videosrc_id)
             .property("device-number", device_number)
+            .property("persistent-id", persistent_id)
             .property_from_str("mode", video_mode)
             .property_from_str("connection", connection)
             .property_from_str("video-format", video_format)
+            .property_from_str("profile", profile)
             .property("drop-no-signal-frames", drop_no_signal_frames)
+            .property("do-timestamp", do_timestamp)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkvideosrc: {}", e)))?;
 
@@ -196,8 +229,10 @@ impl BlockBuilder for DeckLinkInputBuilder {
             let audiosrc = gst::ElementFactory::make("decklinkaudiosrc")
                 .name(&audiosrc_id)
                 .property("device-number", device_number)
+                .property("persistent-id", persistent_id)
                 .property_from_str("connection", audio_connection)
                 .property_from_str("channels", &audio_channels)
+                .property("do-timestamp", do_timestamp)
                 .build()
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("decklinkaudiosrc: {}", e))
@@ -211,8 +246,8 @@ impl BlockBuilder for DeckLinkInputBuilder {
         }
 
         info!(
-            "DeckLink Input configured: device={}, stream_mode={}, mode={}, connection={}, video-format={}, drop-no-signal-frames={}",
-            device_number, stream_mode.as_str(), video_mode, connection, video_format, drop_no_signal_frames
+            "DeckLink Input configured: device={}, persistent-id={}, profile={}, stream_mode={}, mode={}, connection={}, video-format={}, drop-no-signal-frames={}, do-timestamp={}",
+            device_number, persistent_id, profile, stream_mode.as_str(), video_mode, connection, video_format, drop_no_signal_frames, do_timestamp
         );
 
         Ok(BlockBuildResult {
@@ -656,6 +691,47 @@ fn decklink_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "drop_no_signal_frames".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "profile".to_string(),
+                label: "Sub-Device Profile".to_string(),
+                description: "Sub-device profile for cards that support multiple (Quad 2, Duo 2, 8K Pro). 'default' keeps whatever profile is configured in Desktop Video Setup. Setting a profile from here lets the flow control sub-device layout without requiring a manual GUI change on the host.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: decklink_profile_enum_values(),
+                },
+                default_value: Some(PropertyValue::String("default".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "profile".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "persistent_id".to_string(),
+                label: "Persistent ID".to_string(),
+                description: "DeckLink persistent device ID — stable across reboots, profile changes, and PCIe re-enumeration. Higher priority than 'Device Number' when set to a non-default value. Use -1 (default) to fall back to device-number selection.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(-1)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "persistent_id".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "do_timestamp".to_string(),
+                label: "Apply Pipeline Clock to Buffers".to_string(),
+                description: "When enabled, the source applies the pipeline clock to each buffer's PTS at capture. Required for absolute-timestamp setups (e.g. TAI pipeline clock + EFP/SRT 64-bit absolute timestamps). Default off keeps GStreamer's default behaviour where the source's own stream-time is used.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "do_timestamp".to_string(),
                     transform: None,
                 },
                 live: false,

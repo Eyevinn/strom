@@ -538,6 +538,30 @@ pub fn decklink_video_format_enum_values() -> Vec<EnumValue> {
         .collect()
 }
 
+/// DeckLink sub-device profiles, as accepted by `decklinkvideosrc.profile`
+/// (GstDecklinkProfileId enum nicks). Used on cards that support multiple
+/// profiles (Quad 2, Duo 2, 8K Pro). `default` keeps whatever profile is
+/// already configured in Desktop Video Setup.
+pub const DECKLINK_PROFILES: &[(&str, &str)] = &[
+    ("default", "Default (don't change)"),
+    ("one-sub-device-full", "One sub-device, Full-Duplex"),
+    ("one-sub-device-half", "One sub-device, Half-Duplex"),
+    ("two-sub-devices-full", "Two sub-devices, Full-Duplex"),
+    ("two-sub-devices-half", "Two sub-devices, Half-Duplex"),
+    ("four-sub-devices-half", "Four sub-devices, Half-Duplex"),
+];
+
+/// Get DeckLink profiles as `EnumValue` list for block properties.
+pub fn decklink_profile_enum_values() -> Vec<EnumValue> {
+    DECKLINK_PROFILES
+        .iter()
+        .map(|(value, label)| EnumValue {
+            value: (*value).to_string(),
+            label: Some((*label).to_string()),
+        })
+        .collect()
+}
+
 /// Parse a resolution string like "1920x1080" into (width, height).
 /// Returns None if parsing fails.
 pub fn parse_resolution_string(s: &str) -> Option<(u32, u32)> {
