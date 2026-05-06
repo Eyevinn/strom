@@ -102,18 +102,38 @@ jobs:
           targets: ${{ matrix.target }}
 
       # Linux: Install Zig and cargo-zigbuild for glibc 2.31 compatibility
+      - name: Determine Zig arch (Linux)
+        if: startsWith(matrix.platform, 'linux')
+        shell: bash
+        run: |
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "aarch64" ]; then
+            echo "ZIG_ARCH=aarch64" >> $GITHUB_ENV
+            echo "ZIG_SHA256=041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556" >> $GITHUB_ENV
+          else
+            echo "ZIG_ARCH=x86_64" >> $GITHUB_ENV
+            echo "ZIG_SHA256=d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea" >> $GITHUB_ENV
+          fi
+
+      - name: Cache Zig tarball (Linux)
+        if: startsWith(matrix.platform, 'linux')
+        uses: actions/cache@v4
+        with:
+          path: /tmp/zig.tar.xz
+          key: zig-0.13.0-linux-${{ env.ZIG_ARCH }}
+
       - name: Install Zig and cargo-zigbuild (Linux)
         if: startsWith(matrix.platform, 'linux')
         shell: bash
         run: |
           ZIG_VERSION="0.13.0"
-          ARCH=$(uname -m)
-          if [ "$ARCH" = "aarch64" ]; then
-            ZIG_ARCH="aarch64"
-          else
-            ZIG_ARCH="x86_64"
+          if [ ! -s /tmp/zig.tar.xz ] || ! echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c --quiet; then
+            curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \
+              -o /tmp/zig.tar.xz \
+              "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz"
+            echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c
           fi
-          curl -L "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | sudo tar -xJ -C /usr/local
+          sudo tar -xJ -C /usr/local -f /tmp/zig.tar.xz
           sudo ln -sf /usr/local/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig /usr/local/bin/zig
           zig version
           cargo install --locked cargo-zigbuild
