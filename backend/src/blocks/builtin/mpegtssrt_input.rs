@@ -701,6 +701,18 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 live: false,
             },
             ExposedProperty {
+                name: "decode".to_string(),
+                label: "Decode".to_string(),
+                description: "Decode video/audio streams (true) or pass through encoded elementary streams (false)".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "decode".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },            ExposedProperty {
                 name: "tsdemux_latency".to_string(),
                 label: "TS Demux Latency (ms)".to_string(),
                 description: "MPEG-TS demuxer latency in milliseconds. GStreamer defaults to 700ms for PCR synchronization; lower values reduce end-to-end latency in live pipelines.".to_string(),
@@ -722,19 +734,6 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "ignore_pcr".to_string(),
-                    transform: None,
-                },
-                live: false,
-            },
-            ExposedProperty {
-                name: "decode".to_string(),
-                label: "Decode".to_string(),
-                description: "Decode video/audio streams (true) or pass through encoded elementary streams (false)".to_string(),
-                property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "decode".to_string(),
                     transform: None,
                 },
                 live: false,
