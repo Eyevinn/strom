@@ -202,9 +202,33 @@ impl BlockBuilder for EfpSrtInputBuilder {
             srtsrc.set_property("keep-listening", keep_listening);
         }
 
+        let auto_reconnect = properties
+            .get("auto_reconnect")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(true);
+
+        if srtsrc.has_property("auto-reconnect") {
+            srtsrc.set_property("auto-reconnect", auto_reconnect);
+        }
+
+        let wait_for_connection = properties
+            .get("wait_for_connection")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        if srtsrc.has_property("wait-for-connection") {
+            srtsrc.set_property("wait-for-connection", wait_for_connection);
+        }
+
         debug!(
-            "SRT source configured: uri={}, latency={}ms, keep-listening={}",
-            srt_uri, latency, keep_listening
+            "SRT source configured: uri={}, latency={}ms, keep-listening={}, auto-reconnect={}, wait-for-connection={}",
+            srt_uri, latency, keep_listening, auto_reconnect, wait_for_connection
         );
 
         // Always use efpdemux directly. In decode mode, explicit decoder elements
@@ -836,6 +860,32 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "keep_listening".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "auto_reconnect".to_string(),
+                label: "Auto Reconnect".to_string(),
+                description: "Automatically reconnect when the SRT connection fails (default: true). Combines with keep-listening to keep the source resilient across network drops without flow restart.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "auto_reconnect".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "wait_for_connection".to_string(),
+                label: "Wait For Connection".to_string(),
+                description: "Block the stream until a peer connects (default: false). Upstream srtsrc default is true; we override to false to match the output blocks and avoid deadlocking pipeline state changes.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "wait_for_connection".to_string(),
                     transform: None,
                 },
                 live: false,
