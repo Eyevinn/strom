@@ -178,9 +178,45 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         srtsrc.set_property("uri", &srt_uri);
         srtsrc.set_property("latency", latency);
 
+        let keep_listening = properties
+            .get("keep_listening")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_SRT_KEEP_LISTENING);
+
+        if srtsrc.has_property("keep-listening") {
+            srtsrc.set_property("keep-listening", keep_listening);
+        }
+
+        let auto_reconnect = properties
+            .get("auto_reconnect")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_SRT_AUTO_RECONNECT);
+
+        if srtsrc.has_property("auto-reconnect") {
+            srtsrc.set_property("auto-reconnect", auto_reconnect);
+        }
+
+        let wait_for_connection = properties
+            .get("wait_for_connection")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_SRT_WAIT_FOR_CONNECTION);
+
+        if srtsrc.has_property("wait-for-connection") {
+            srtsrc.set_property("wait-for-connection", wait_for_connection);
+        }
+
         info!(
-            "SRT source configured: uri={}, latency={}ms, tsdemux_latency={}ms, ignore_pcr={}",
-            srt_uri, latency, tsdemux_latency, ignore_pcr
+            "SRT source configured: uri={}, latency={}ms, tsdemux_latency={}ms, ignore_pcr={}, keep-listening={}, auto-reconnect={}, wait-for-connection={}",
+            srt_uri, latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
         );
 
         // Create demux/decode element
@@ -573,6 +609,31 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
         category: "Inputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
+                name: "num_video_tracks".to_string(),
+                label: "Number of Video Tracks".to_string(),
+                description: "Number of video output tracks".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(1)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_video_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "num_audio_tracks".to_string(),
+                label: "Number of Audio Tracks".to_string(),
+                description: "Number of audio output tracks".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(1)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_audio_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },            ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
                 description: "SRT URI (e.g., 'srt://:4000?mode=listener' or 'srt://192.0.2.1:4000?mode=caller')".to_string(),
@@ -601,6 +662,57 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 live: false,
             },
             ExposedProperty {
+                name: "wait_for_connection".to_string(),
+                label: "Wait For Connection".to_string(),
+                description: "Block the stream until a peer connects (default: false). Same default across all SRT input/output blocks.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_WAIT_FOR_CONNECTION)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "wait_for_connection".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "auto_reconnect".to_string(),
+                label: "Auto Reconnect".to_string(),
+                description: "Automatically reconnect when connection fails (default: true). Same default across all SRT input/output blocks.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_AUTO_RECONNECT)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "auto_reconnect".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "keep_listening".to_string(),
+                label: "Keep Listening".to_string(),
+                description: "Keep SRT source alive after peer disconnect so reconnects don't require a flow restart (default: true). Same default across all SRT input/output blocks (where applicable).".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_KEEP_LISTENING)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "keep_listening".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "decode".to_string(),
+                label: "Decode".to_string(),
+                description: "Decode video/audio streams (true) or pass through encoded elementary streams (false)".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "decode".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },            ExposedProperty {
                 name: "tsdemux_latency".to_string(),
                 label: "TS Demux Latency (ms)".to_string(),
                 description: "MPEG-TS demuxer latency in milliseconds. GStreamer defaults to 700ms for PCR synchronization; lower values reduce end-to-end latency in live pipelines.".to_string(),
@@ -622,45 +734,6 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "ignore_pcr".to_string(),
-                    transform: None,
-                },
-                live: false,
-            },
-            ExposedProperty {
-                name: "decode".to_string(),
-                label: "Decode".to_string(),
-                description: "Decode video/audio streams (true) or pass through encoded elementary streams (false)".to_string(),
-                property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "decode".to_string(),
-                    transform: None,
-                },
-                live: false,
-            },
-            ExposedProperty {
-                name: "num_video_tracks".to_string(),
-                label: "Number of Video Tracks".to_string(),
-                description: "Number of video output tracks".to_string(),
-                property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(1)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "num_video_tracks".to_string(),
-                    transform: None,
-                },
-                live: false,
-            },
-            ExposedProperty {
-                name: "num_audio_tracks".to_string(),
-                label: "Number of Audio Tracks".to_string(),
-                description: "Number of audio output tracks".to_string(),
-                property_type: PropertyType::UInt,
-                default_value: Some(PropertyValue::UInt(1)),
-                mapping: PropertyMapping {
-                    element_id: "_block".to_string(),
-                    property_name: "num_audio_tracks".to_string(),
                     transform: None,
                 },
                 live: false,
