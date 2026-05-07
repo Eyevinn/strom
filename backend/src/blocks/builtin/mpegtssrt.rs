@@ -134,23 +134,21 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             })
             .unwrap_or(DEFAULT_SRT_LATENCY_MS);
 
-        // Get wait_for_connection (optional, default false per notes.txt)
         let wait_for_connection = properties
             .get("wait_for_connection")
             .and_then(|v| match v {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(false);
+            .unwrap_or(DEFAULT_SRT_WAIT_FOR_CONNECTION);
 
-        // Get auto_reconnect (optional, default true per notes.txt)
         let auto_reconnect = properties
             .get("auto_reconnect")
             .and_then(|v| match v {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(true);
+            .unwrap_or(DEFAULT_SRT_AUTO_RECONNECT);
 
         // Get sync (optional, default true)
         // sync=false is useful for transcoding workloads where timestamps may be discontinuous
@@ -901,9 +899,9 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
                 label: "Wait For Connection".to_string(),
-                description: "Block the stream until a client connects (default: false)".to_string(),
+                description: "Block the stream until a peer connects (default: false). Same default across all SRT input/output blocks.".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(false)),
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_WAIT_FOR_CONNECTION)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "wait_for_connection".to_string(),
@@ -914,9 +912,9 @@ fn mpegtssrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
                 label: "Auto Reconnect".to_string(),
-                description: "Automatically reconnect when connection fails (default: true)".to_string(),
+                description: "Automatically reconnect when connection fails (default: true). Same default across all SRT input/output blocks.".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_AUTO_RECONNECT)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "auto_reconnect".to_string(),

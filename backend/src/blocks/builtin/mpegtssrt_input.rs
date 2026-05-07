@@ -184,7 +184,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(true);
+            .unwrap_or(DEFAULT_SRT_KEEP_LISTENING);
 
         if srtsrc.has_property("keep-listening") {
             srtsrc.set_property("keep-listening", keep_listening);
@@ -196,7 +196,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(true);
+            .unwrap_or(DEFAULT_SRT_AUTO_RECONNECT);
 
         if srtsrc.has_property("auto-reconnect") {
             srtsrc.set_property("auto-reconnect", auto_reconnect);
@@ -208,7 +208,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(false);
+            .unwrap_or(DEFAULT_SRT_WAIT_FOR_CONNECTION);
 
         if srtsrc.has_property("wait-for-connection") {
             srtsrc.set_property("wait-for-connection", wait_for_connection);
@@ -678,9 +678,9 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "keep_listening".to_string(),
                 label: "Keep Listening".to_string(),
-                description: "Keep SRT source alive after disconnect, allowing reconnection (default: true).".to_string(),
+                description: "Keep SRT source alive after peer disconnect so reconnects don't require a flow restart (default: true). Same default across all SRT input/output blocks (where applicable).".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_KEEP_LISTENING)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "keep_listening".to_string(),
@@ -691,9 +691,9 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
                 label: "Auto Reconnect".to_string(),
-                description: "Automatically reconnect when the SRT connection fails (default: true). Combines with keep-listening to keep the source resilient across network drops without flow restart.".to_string(),
+                description: "Automatically reconnect when connection fails (default: true). Same default across all SRT input/output blocks.".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_AUTO_RECONNECT)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "auto_reconnect".to_string(),
@@ -704,9 +704,9 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
                 label: "Wait For Connection".to_string(),
-                description: "Block the stream until a peer connects (default: false). Upstream srtsrc default is true; we override to false to match the output blocks and avoid deadlocking pipeline state changes.".to_string(),
+                description: "Block the stream until a peer connects (default: false). Same default across all SRT input/output blocks.".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(false)),
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_WAIT_FOR_CONNECTION)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "wait_for_connection".to_string(),

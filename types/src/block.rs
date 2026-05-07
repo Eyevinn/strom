@@ -352,6 +352,20 @@ pub const DEFAULT_SRT_INPUT_URI: &str = "srt://127.0.0.1:5000?mode=caller";
 /// Default SRT latency in milliseconds.
 pub const DEFAULT_SRT_LATENCY_MS: i32 = 125;
 
+/// Default for the SRT `keep-listening` property on inputs/outputs:
+/// stay alive across peer disconnects so reconnects don't need a flow restart.
+pub const DEFAULT_SRT_KEEP_LISTENING: bool = true;
+
+/// Default for the SRT `auto-reconnect` property on inputs/outputs:
+/// reconnect automatically on connection failure.
+pub const DEFAULT_SRT_AUTO_RECONNECT: bool = true;
+
+/// Default for the SRT `wait-for-connection` property on inputs/outputs:
+/// do NOT block pipeline state changes waiting for a peer. Upstream srtsrc
+/// defaults to `true` but that deadlocks PAUSED→PLAYING when the peer is
+/// offline; we override to `false` consistently across all SRT blocks.
+pub const DEFAULT_SRT_WAIT_FOR_CONNECTION: bool = false;
+
 /// Default tsdemux latency in milliseconds.
 /// GStreamer's default is 700ms (for PCR synchronization). We use 0ms for
 /// live pipelines because this property only affects the reported latency in

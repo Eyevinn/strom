@@ -128,7 +128,7 @@ impl BlockBuilder for EfpSrtOutputBuilder {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(false);
+            .unwrap_or(DEFAULT_SRT_WAIT_FOR_CONNECTION);
 
         let auto_reconnect = properties
             .get("auto_reconnect")
@@ -136,7 +136,7 @@ impl BlockBuilder for EfpSrtOutputBuilder {
                 PropertyValue::Bool(b) => Some(*b),
                 _ => None,
             })
-            .unwrap_or(true);
+            .unwrap_or(DEFAULT_SRT_AUTO_RECONNECT);
 
         let sync = properties
             .get("sync")
@@ -807,9 +807,9 @@ fn efpsrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
                 label: "Wait For Connection".to_string(),
-                description: "Block the stream until a client connects (default: false)".to_string(),
+                description: "Block the stream until a peer connects (default: false). Same default across all SRT input/output blocks.".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(false)),
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_WAIT_FOR_CONNECTION)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "wait_for_connection".to_string(),
@@ -820,9 +820,9 @@ fn efpsrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
                 label: "Auto Reconnect".to_string(),
-                description: "Automatically reconnect when connection fails (default: true)".to_string(),
+                description: "Automatically reconnect when connection fails (default: true). Same default across all SRT input/output blocks.".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
+                default_value: Some(PropertyValue::Bool(DEFAULT_SRT_AUTO_RECONNECT)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "auto_reconnect".to_string(),
