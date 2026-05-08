@@ -209,6 +209,20 @@ impl PipelineManager {
         // Get current pipeline state
         let state = self.get_state();
 
+        // Time Offset block: `offset_ms` is not an element property but a
+        // pad-offset. Intercept and apply directly, then trigger a latency
+        // recalc so downstream sinks resync. The interceptor logs the new
+        // value at debug; we don't double-log here.
+        if crate::blocks::builtin::time_offset::try_apply_live_offset(
+            element,
+            element_id,
+            property_name,
+            value,
+        ) {
+            let _ = self.pipeline.recalculate_latency();
+            return Ok(());
+        }
+
         // Translate property name/value for elements that need conversion.
         // Mixer lsp-rs elements use different property names than LV2 conventions.
         // AudioGain stores gain in dB but GStreamer volume element expects linear.

@@ -23,6 +23,7 @@ pub mod ndi;
 pub mod recorder;
 pub mod spectrum;
 pub mod thumbnail;
+pub mod time_offset;
 pub mod videoenc;
 pub mod videoformat;
 pub mod vision_mixer;
@@ -102,6 +103,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
     // Add Thumbnail blocks
     blocks.extend(thumbnail::get_blocks());
 
+    // Add Time Offset block (generic timestamp shifter)
+    blocks.extend(time_offset::get_blocks());
+
     // Add VideoEncoder blocks
     blocks.extend(videoenc::get_blocks());
 
@@ -154,6 +158,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.recorder" => Some(Arc::new(recorder::RecorderBuilder)),
         "builtin.spectrum" => Some(Arc::new(spectrum::SpectrumBuilder)),
         "builtin.thumbnail" => Some(Arc::new(thumbnail::ThumbnailBuilder)),
+        "builtin.time_offset" => Some(Arc::new(time_offset::TimeOffsetBuilder)),
         "builtin.videoenc" => Some(Arc::new(videoenc::VideoEncBuilder)),
         "builtin.videoformat" => Some(Arc::new(videoformat::VideoFormatBuilder)),
         "builtin.vision_mixer" => Some(Arc::new(vision_mixer::VisionMixerBuilder)),
