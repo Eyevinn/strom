@@ -18,7 +18,10 @@
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
+use gstreamer::prelude::*;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use strom_types::{
     block::{StreamMode, *},
     element::ElementPadRef,
@@ -138,6 +141,14 @@ impl BlockBuilder for DeckLinkInputBuilder {
             })
             .unwrap_or(false);
 
+        let synchronized_capture = properties
+            .get("synchronized_capture")
+            .and_then(|v| match v {
+                PropertyValue::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
         let videosrc_id = format!("{}:decklinkvideosrc", instance_id);
         let videosrc = gst::ElementFactory::make("decklinkvideosrc")
             .name(&videosrc_id)
@@ -148,6 +159,27 @@ impl BlockBuilder for DeckLinkInputBuilder {
             .property("drop-no-signal-frames", drop_no_signal_frames)
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("decklinkvideosrc: {}", e)))?;
+
+        // BMD synced capture groups only work for inputs armed atomically as
+        // a unit, which means all members must live in the same pipeline. We
+        // derive the capture group ID from the flow ID so two synchronized_
+        // capture blocks in the same flow always land in the same group, and
+        // can never collide with another flow's group on the same card.
+        // The capture-group property only exists on our patched plugin; if
+        // the runtime has the stock plugin we just skip silently.
+        if synchronized_capture && videosrc.has_property("capture-group") {
+            let flow_id = properties
+                .get("_flow_id")
+                .and_then(|v| match v {
+                    PropertyValue::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            let mut hasher = DefaultHasher::new();
+            flow_id.hash(&mut hasher);
+            let group_id = ((hasher.finish() & 0x7FFF_FFFF) as i32).max(0);
+            videosrc.set_property("capture-group", group_id);
+        }
 
         let mut elements: Vec<(String, gst::Element)> = vec![(videosrc_id.clone(), videosrc)];
         let mut internal_links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
@@ -202,6 +234,7 @@ impl BlockBuilder for DeckLinkInputBuilder {
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("decklinkaudiosrc: {}", e))
                 })?;
+
             elements.push((audiosrc_id, audiosrc));
 
             info!(
@@ -656,6 +689,19 @@ fn decklink_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "drop_no_signal_frames".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "synchronized_capture".to_string(),
+                label: "Synchronized Capture".to_string(),
+                description: "Sample-align frames with other DeckLink Input blocks in this flow that also have synchronized capture enabled. The hardware arms all members atomically so their frames share a common time origin — useful for cross-port audio cancellation, mixing, or multi-camera capture from a single card. Requires a card supporting BMDDeckLinkSupportsSynchronizeToCaptureGroup (e.g. Quad 2, 8K Pro) and the patched gst-plugins-bad decklink plugin; silently ignored on stock builds or unsupported cards. Capture groups are flow-scoped: blocks in different flows cannot share a group (BMD's hardware-level sync requires all members to be armed in the same start cycle, which only happens within one pipeline). KNOWN BMD DRIVER QUIRK: stopping a synchronized-capture pipeline blocks for ~12 s before the stop completes; this is a Blackmagic driver-internal timeout reproducible in their own SDK examples, not a strom bug. Subsequent restart works normally.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "synchronized_capture".to_string(),
                     transform: None,
                 },
                 live: false,
