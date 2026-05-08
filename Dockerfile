@@ -174,6 +174,10 @@ fi
 FROM ubuntu:questing AS runtime
 WORKDIR /app
 
+# TARGETARCH is set automatically by docker buildx (e.g. amd64, arm64).
+# We use it to fetch the right architecture of our patched GStreamer plugins.
+ARG TARGETARCH
+
 # Install GStreamer runtime dependencies
 # Note: Ubuntu Plucky (25.04) reached EOL before the nvcodec fix (Bug #2109413) was released.
 # Ubuntu Questing (25.10) includes the fix in gstreamer1.0-plugins-bad 1.26.3+.
@@ -204,6 +208,21 @@ RUN apt-get update && apt-get install -y \
         ca-certificates \
         dbus \
         avahi-daemon \
+    && rm -rf /var/lib/apt/lists/*
+
+# Override the distro-shipped decklink plugin with our patched build, which
+# adds the `capture-group` property to decklinkvideosrc for synchronized
+# capture group support (see tools/patched-gstreamer-plugins/README.md).
+# The patched .so is forward-ABI-compatible with the runtime gstreamer 1.26
+# in this image because it was built against the 1.22 ABI.
+ARG PATCHED_PLUGINS_TAG=patched-plugins-v1.0-gst1.22.12
+ARG PATCHED_PLUGINS_REPO=Eyevinn/strom
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && curl -fsSL \
+        "https://github.com/${PATCHED_PLUGINS_REPO}/releases/download/${PATCHED_PLUGINS_TAG}/libgstdecklink-linux-${TARGETARCH}.so" \
+        -o "/usr/lib/$(uname -m)-linux-gnu/gstreamer-1.0/libgstdecklink.so" \
+    && apt-get remove -y curl \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the compiled binaries from backend-builder to /app
