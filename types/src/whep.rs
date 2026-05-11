@@ -11,12 +11,14 @@ use utoipa::ToSchema;
 pub struct WhepStreamInfo {
     /// Unique identifier for the WHEP endpoint
     pub endpoint_id: String,
-    /// Stream mode (e.g., "video", "audio", "video+audio")
-    pub mode: String,
-    /// Whether the stream includes audio
-    pub has_audio: bool,
-    /// Whether the stream includes video
-    pub has_video: bool,
+    /// Number of independent audio tracks exposed by this endpoint (0 = audio
+    /// disabled). Clients should add this many recvonly audio transceivers in
+    /// their offer.
+    pub num_audio_tracks: usize,
+    /// Number of independent video tracks exposed by this endpoint (0 = video
+    /// disabled). Clients should add this many recvonly video transceivers in
+    /// their offer.
+    pub num_video_tracks: usize,
 }
 
 /// Response structure for the streams list endpoint.

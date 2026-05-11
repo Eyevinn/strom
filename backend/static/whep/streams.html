@@ -129,8 +129,15 @@
             card.className = 'stream-card';
             card.id = 'card-' + stream.endpoint_id;
 
-            const modeLabel = stream.mode === 'audio_video' ? 'Audio + Video' :
-                             stream.mode === 'video' ? 'Video' : 'Audio';
+            const numAudio = typeof stream.num_audio_tracks === 'number' ? stream.num_audio_tracks : 0;
+            const numVideo = typeof stream.num_video_tracks === 'number' ? stream.num_video_tracks : 0;
+            const audioLabel = numAudio === 0 ? null
+                : numAudio === 1 ? 'Audio'
+                : numAudio + 'x Audio';
+            const videoLabel = numVideo === 0 ? null
+                : numVideo === 1 ? 'Video'
+                : numVideo + 'x Video';
+            const modeLabel = [videoLabel, audioLabel].filter(Boolean).join(' + ') || 'None';
 
             const fullWhepUrl = window.location.protocol + '//' + window.location.host + '/whep/' + encodeURIComponent(stream.endpoint_id);
 

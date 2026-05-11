@@ -43,41 +43,65 @@ impl BlockBuilder for WHEPOutputBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
-        // Get mode from properties
-        let mode = properties
-            .get("mode")
-            .and_then(|v| match v {
-                PropertyValue::String(s) => Some(StreamMode::parse(s)),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let (num_audio_tracks, num_video_tracks) = resolve_track_counts(properties);
+        let has_video = num_video_tracks > 0;
+        let has_audio = num_audio_tracks > 0;
 
         let mut inputs = Vec::new();
 
-        if mode.has_video() {
+        for slot in 0..num_video_tracks {
+            // Slot 0 keeps the unsuffixed names (video_in / video_queue) so
+            // existing flows continue to link without modification when
+            // num_video_tracks grows past 1.
+            let (pad_name, queue_id) = if slot == 0 {
+                ("video_in".to_string(), "video_queue".to_string())
+            } else {
+                (
+                    format!("video_in_{}", slot),
+                    format!("video_queue_{}", slot),
+                )
+            };
+
+            let label = if has_audio || num_video_tracks > 1 {
+                Some(format!("V{}", slot))
+            } else {
+                None
+            };
+
             inputs.push(ExternalPad {
-                label: if mode.has_audio() {
-                    Some("V0".to_string())
-                } else {
-                    None
-                },
-                name: "video_in".to_string(),
+                label,
+                name: pad_name,
                 media_type: MediaType::Video,
-                internal_element_id: "video_queue".to_string(),
+                internal_element_id: queue_id,
                 internal_pad_name: "sink".to_string(),
             });
         }
 
-        if mode.has_audio() {
+        for slot in 0..num_audio_tracks {
+            // Slot 0 keeps the unsuffixed names (audio_in / audio_queue) so
+            // existing flows continue to link without modification when
+            // num_audio_tracks grows past 1. Other blocks use audio_in_0 for
+            // slot 0; this asymmetry is deliberate for backwards compat.
+            let (pad_name, queue_id) = if slot == 0 {
+                ("audio_in".to_string(), "audio_queue".to_string())
+            } else {
+                (
+                    format!("audio_in_{}", slot),
+                    format!("audio_queue_{}", slot),
+                )
+            };
+
+            let label = if has_video || num_audio_tracks > 1 {
+                Some(format!("A{}", slot))
+            } else {
+                None
+            };
+
             inputs.push(ExternalPad {
-                label: if mode.has_video() {
-                    Some("A0".to_string())
-                } else {
-                    None
-                },
-                name: "audio_in".to_string(),
+                label,
+                name: pad_name,
                 media_type: MediaType::Audio,
-                internal_element_id: "audio_queue".to_string(),
+                internal_element_id: queue_id,
                 internal_pad_name: "sink".to_string(),
             });
         }
@@ -87,6 +111,60 @@ impl BlockBuilder for WHEPOutputBuilder {
             outputs: vec![],
         })
     }
+}
+
+/// Resolve audio and video track counts from block properties.
+///
+/// Returns `(num_audio_tracks, num_video_tracks)`. 0 means the media type is
+/// disabled on this endpoint; 1..=8 produces that many request pads.
+///
+/// Resolution order per media type:
+/// 1. Explicit `num_audio_tracks` / `num_video_tracks` property (clamped to 0..=8).
+/// 2. Legacy `mode` enum (`"audio"` / `"video"` / `"audio_video"`): translated
+///    to 0 or 1 based on which media types it enabled. Allows old flows saved
+///    before the count-based API to keep working.
+/// 3. Default `1` when no property is present, matching the previous behaviour
+///    where a missing `mode` was treated as audio+video.
+fn resolve_track_counts(properties: &HashMap<String, PropertyValue>) -> (usize, usize) {
+    let explicit_audio = explicit_track_count(properties, "num_audio_tracks");
+    let explicit_video = explicit_track_count(properties, "num_video_tracks");
+    let legacy_mode = properties.get("mode").and_then(|v| match v {
+        PropertyValue::String(s) => Some(StreamMode::parse(s)),
+        _ => None,
+    });
+
+    let num_audio = match (explicit_audio, &legacy_mode) {
+        (Some(n), _) => n,
+        (None, Some(m)) => {
+            if m.has_audio() {
+                1
+            } else {
+                0
+            }
+        }
+        (None, None) => 1,
+    };
+    let num_video = match (explicit_video, &legacy_mode) {
+        (Some(n), _) => n,
+        (None, Some(m)) => {
+            if m.has_video() {
+                1
+            } else {
+                0
+            }
+        }
+        (None, None) => 1,
+    };
+
+    (num_audio, num_video)
+}
+
+fn explicit_track_count(properties: &HashMap<String, PropertyValue>, name: &str) -> Option<usize> {
+    properties.get(name).and_then(|v| match v {
+        PropertyValue::UInt(u) => Some((*u as usize).min(8)),
+        PropertyValue::Int(i) => Some((*i).clamp(0, 8) as usize),
+        _ => None,
+    })
 }
 
 impl BlockBuilder for WHEPInputBuilder {
@@ -823,16 +901,18 @@ fn build_whepserversink(
 ) -> Result<BlockBuildResult, BlockBuildError> {
     info!("Building WHEP Output using whepserversink (server mode)");
 
-    // Get mode (audio, video, or audio_video)
-    let mode = properties
-        .get("mode")
-        .and_then(|v| match v {
-            PropertyValue::String(s) => Some(StreamMode::parse(s)),
-            _ => None,
-        })
-        .unwrap_or_default();
+    // Number of audio/video tracks to expose. Each track gets its own
+    // audio_in / video_in pad, queue and request pad on whepserversink
+    // (audio_0, audio_1, ..., video_0, video_1, ...). 0 disables the media
+    // type on this endpoint.
+    let (num_audio_tracks, num_video_tracks) = resolve_track_counts(properties);
+    let has_audio = num_audio_tracks > 0;
+    let has_video = num_video_tracks > 0;
 
-    info!("WHEP Output mode: {:?}", mode);
+    info!(
+        "WHEP Output: num_audio_tracks={}, num_video_tracks={}",
+        num_audio_tracks, num_video_tracks
+    );
 
     // Timestamp offset in milliseconds. A negative value shifts playout earlier,
     // reducing end-to-end latency for this output while maintaining A/V sync.
@@ -982,12 +1062,12 @@ fn build_whepserversink(
         );
     }
 
-    // Configure audio/video caps based on mode.
+    // Configure audio/video caps based on which media types are enabled.
     // Video caps will be set dynamically when we detect the input codec.
-    if !mode.has_audio() {
+    if !has_audio {
         whepserversink.set_property("audio-caps", gst::Caps::new_empty());
     }
-    if !mode.has_video() {
+    if !has_video {
         whepserversink.set_property("video-caps", gst::Caps::new_empty());
     }
 
@@ -1290,239 +1370,302 @@ fn build_whepserversink(
     let mut internal_links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
 
     // Create audio processing elements if mode includes audio.
-    // Uses a queue as entry point (same pattern as video) linked directly to
-    // whepserversink. A caps probe detects the audio format and sets audio-caps:
-    // - Encoded audio (opus etc.): whepserversink passes through directly
-    // - Raw audio: whepserversink runs codec discovery and encodes internally
-    if mode.has_audio() {
-        let audio_queue_id = format!("{}:audio_queue", instance_id);
-        let audio_queue = gst::ElementFactory::make("queue")
-            .name(&audio_queue_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("audio_queue: {}", e)))?;
-
-        // Dynamic audio caps detection (same pattern as video caps probe)
-        let whepserversink_weak = whepserversink.downgrade();
+    // For num_audio_tracks > 1 we expose multiple audio_in pads, each with its own
+    // queue wired to a distinct request pad (audio_0, audio_1, ...) on
+    // whepserversink. The audio-caps property on whepserversink is global, so only
+    // the first queue's caps probe drives it — all audio inputs must share the
+    // same format (all Opus or all raw). Mixed formats are not supported.
+    if has_audio {
+        // Shared latch: only the first input that sees a caps event sets audio-caps.
         let audio_caps_set = Arc::new(AtomicBool::new(false));
-        let audio_caps_set_clone = audio_caps_set.clone();
-        let instance_id_owned = instance_id.to_string();
 
-        let audio_queue_sink = audio_queue.static_pad("sink").expect("queue has sink pad");
-        audio_queue_sink.add_probe(
-            gst::PadProbeType::EVENT_DOWNSTREAM,
-            move |_pad, info| {
-                if audio_caps_set_clone.load(Ordering::SeqCst) {
-                    return gst::PadProbeReturn::Pass;
-                }
+        for slot in 0..num_audio_tracks {
+            // Slot 0 keeps the unsuffixed element id for backwards compatibility
+            // with existing flows (matches get_external_pads above).
+            let audio_queue_id = if slot == 0 {
+                format!("{}:audio_queue", instance_id)
+            } else {
+                format!("{}:audio_queue_{}", instance_id, slot)
+            };
+            let audio_queue = gst::ElementFactory::make("queue")
+                .name(&audio_queue_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("audio_queue (slot {}): {}", slot, e))
+                })?;
 
+            let whepserversink_weak = whepserversink.downgrade();
+            let audio_caps_set_clone = audio_caps_set.clone();
+            let instance_id_owned = instance_id.to_string();
+
+            let audio_queue_sink = audio_queue.static_pad("sink").expect("queue has sink pad");
+            audio_queue_sink.add_probe(
+                gst::PadProbeType::EVENT_DOWNSTREAM,
+                move |_pad, info| {
+                    if let Some(gst::PadProbeData::Event(ref event)) = info.data {
+                        if event.type_() == gst::EventType::Caps {
+                            // Atomically claim the latch — only one probe wins
+                            // and proceeds to set audio-caps; the rest pass.
+                            if audio_caps_set_clone
+                                .compare_exchange(
+                                    false,
+                                    true,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_err()
+                            {
+                                return gst::PadProbeReturn::Pass;
+                            }
+
+                            if let gst::EventView::Caps(caps_event) = event.view() {
+                                let caps = caps_event.caps();
+                                if let Some(structure) = caps.structure(0) {
+                                    let caps_name = structure.name().as_str();
+
+                                    let audio_caps: Option<gst::Caps> = match caps_name {
+                                        "audio/x-opus" => {
+                                            debug!(
+                                                "WHEP Output {} (slot {}): Detected Opus input, setting audio-caps",
+                                                instance_id_owned, slot
+                                            );
+                                            Some(gst::Caps::builder("audio/x-opus").build())
+                                        }
+                                        "audio/x-raw" => {
+                                            debug!(
+                                                "WHEP Output {} (slot {}): Detected raw audio, using default audio-caps",
+                                                instance_id_owned, slot
+                                            );
+                                            None
+                                        }
+                                        _ => {
+                                            warn!(
+                                                "WHEP Output {} (slot {}): Unknown audio format '{}', using default",
+                                                instance_id_owned, slot, caps_name
+                                            );
+                                            None
+                                        }
+                                    };
+
+                                    if let Some(caps) = audio_caps {
+                                        if let Some(whepserversink) = whepserversink_weak.upgrade()
+                                        {
+                                            whepserversink.set_property("audio-caps", &caps);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    gst::PadProbeReturn::Pass
+                },
+            );
+
+            // Audio link: queue -> whepserversink (audio_<slot> request pad)
+            internal_links.push((
+                ElementPadRef::pad(&audio_queue_id, "src"),
+                ElementPadRef::pad(&whepserversink_id, format!("audio_{}", slot)),
+            ));
+
+            elements.push((audio_queue_id, audio_queue));
+        }
+
+        info!(
+            "WHEP Output {}: configured {} audio track(s)",
+            instance_id, num_audio_tracks
+        );
+    }
+
+    // Create video processing elements if mode includes video.
+    // For num_video_tracks > 1 we expose multiple video_in pads, each with its own
+    // queue wired to a distinct request pad (video_0, video_1, ...) on
+    // whepserversink. The video-caps property on whepserversink is global, so only
+    // the first queue's caps probe drives it — all video inputs must share the
+    // same codec.
+    if has_video {
+        // Shared latch: only the first input that sees a caps event sets video-caps.
+        let video_caps_set = Arc::new(AtomicBool::new(false));
+
+        for slot in 0..num_video_tracks {
+            // Slot 0 keeps the unsuffixed element id for backwards compatibility
+            // with existing flows (matches get_external_pads above).
+            let video_queue_id = if slot == 0 {
+                format!("{}:video_queue", instance_id)
+            } else {
+                format!("{}:video_queue_{}", instance_id, slot)
+            };
+            let video_queue = gst::ElementFactory::make("queue")
+                .name(&video_queue_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("video_queue (slot {}): {}", slot, e))
+                })?;
+
+            // Dynamic video codec detection: detect input codec and set video-caps
+            // on whepserversink before discovery runs. Works with any codec
+            // (H264, H265, VP9, AV1, raw). Only the first slot to see a caps
+            // event sets the global video-caps property — the rest pass through.
+            let whepserversink_weak = whepserversink.downgrade();
+            let video_caps_set_clone = video_caps_set.clone();
+            let instance_id_owned = instance_id.to_string();
+
+            let video_queue_sink = video_queue.static_pad("sink").expect("queue has sink pad");
+            video_queue_sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
                 if let Some(gst::PadProbeData::Event(ref event)) = info.data {
                     if event.type_() == gst::EventType::Caps {
+                        // Atomically claim the latch — only one probe wins
+                        // and proceeds to set video-caps; the rest pass.
+                        if video_caps_set_clone
+                            .compare_exchange(
+                                false,
+                                true,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            )
+                            .is_err()
+                        {
+                            return gst::PadProbeReturn::Pass;
+                        }
+
                         if let gst::EventView::Caps(caps_event) = event.view() {
                             let caps = caps_event.caps();
                             if let Some(structure) = caps.structure(0) {
-                                let caps_name = structure.name().as_str();
+                                let codec_name = structure.name().as_str();
 
-                                let audio_caps: Option<gst::Caps> = match caps_name {
-                                    "audio/x-opus" => {
-                                        debug!(
-                                            "WHEP Output {}: Detected Opus input, setting audio-caps",
-                                            instance_id_owned
+                                // Map input caps to webrtc-compatible caps.
+                                // For pre-encoded video, restrict to that codec only.
+                                // For raw video, offer modern codecs (exclude VP8).
+                                let video_caps: Option<gst::Caps> = match codec_name {
+                                    "video/x-h264" => {
+                                        info!(
+                                            "WHEP Output {} (slot {}): Detected H.264 input, setting video-caps",
+                                            instance_id_owned, slot
                                         );
-                                        Some(gst::Caps::builder("audio/x-opus").build())
+                                        Some(gst::Caps::builder("video/x-h264").build())
                                     }
-                                    "audio/x-raw" => {
-                                        debug!(
-                                            "WHEP Output {}: Detected raw audio, using default audio-caps",
-                                            instance_id_owned
+                                    "video/x-h265" => {
+                                        info!(
+                                            "WHEP Output {} (slot {}): Detected H.265 input, setting video-caps",
+                                            instance_id_owned, slot
                                         );
-                                        None
+                                        Some(gst::Caps::builder("video/x-h265").build())
+                                    }
+                                    "video/x-vp9" => {
+                                        info!(
+                                            "WHEP Output {} (slot {}): Detected VP9 input, setting video-caps",
+                                            instance_id_owned, slot
+                                        );
+                                        Some(gst::Caps::builder("video/x-vp9").build())
+                                    }
+                                    "video/x-av1" => {
+                                        info!(
+                                            "WHEP Output {} (slot {}): Detected AV1 input, setting video-caps",
+                                            instance_id_owned, slot
+                                        );
+                                        Some(gst::Caps::builder("video/x-av1").build())
+                                    }
+                                    "video/x-raw" => {
+                                        info!(
+                                            "WHEP Output {} (slot {}): Detected raw video input, setting video-caps to H.264/H.265/VP9/AV1",
+                                            instance_id_owned, slot
+                                        );
+                                        let mut caps = gst::Caps::new_empty();
+                                        {
+                                            let caps_mut = caps.get_mut().unwrap();
+                                            caps_mut.append(gst::Caps::builder("video/x-h264").build());
+                                            caps_mut.append(gst::Caps::builder("video/x-h265").build());
+                                            caps_mut.append(gst::Caps::builder("video/x-vp9").build());
+                                            caps_mut.append(gst::Caps::builder("video/x-av1").build());
+                                        }
+                                        Some(caps)
                                     }
                                     _ => {
                                         warn!(
-                                            "WHEP Output {}: Unknown audio format '{}', using default",
-                                            instance_id_owned, caps_name
+                                            "WHEP Output {} (slot {}): Unknown video codec '{}', using default",
+                                            instance_id_owned, slot, codec_name
                                         );
                                         None
                                     }
                                 };
 
-                                if let Some(caps) = audio_caps {
+                                if let Some(caps) = video_caps {
                                     if let Some(whepserversink) = whepserversink_weak.upgrade() {
-                                        whepserversink.set_property("audio-caps", &caps);
+                                        whepserversink.set_property("video-caps", &caps);
                                     }
                                 }
-                                audio_caps_set_clone.store(true, Ordering::SeqCst);
                             }
                         }
                     }
                 }
                 gst::PadProbeReturn::Pass
-            },
-        );
+            });
 
-        // Audio link: queue -> whepserversink (audio_0 request pad)
-        // whepserversink handles both raw audio (encodes internally) and
-        // pre-encoded audio (passes through) based on audio-caps.
-        internal_links.push((
-            ElementPadRef::pad(&audio_queue_id, "src"),
-            ElementPadRef::pad(&whepserversink_id, "audio_0"),
-        ));
-
-        elements.push((audio_queue_id, audio_queue));
-    }
-
-    // Create video queue and link to whepserversink if mode includes video
-    if mode.has_video() {
-        let video_queue_id = format!("{}:video_queue", instance_id);
-
-        let video_queue = gst::ElementFactory::make("queue")
-            .name(&video_queue_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("video_queue: {}", e)))?;
-
-        // Dynamic video codec detection: Add a pad probe to detect input codec
-        // and set video-caps on whepserversink before discovery runs.
-        // This allows the WHEP block to work with any codec (H264, H265, VP9, AV1, raw).
-        let whepserversink_weak = whepserversink.downgrade();
-        let caps_set = Arc::new(AtomicBool::new(false));
-        let caps_set_clone = caps_set.clone();
-
-        let video_queue_sink = video_queue.static_pad("sink").expect("queue has sink pad");
-        video_queue_sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
-            // Only process CAPS events, and only once
-            if caps_set_clone.load(Ordering::SeqCst) {
-                return gst::PadProbeReturn::Pass;
-            }
-
-            if let Some(gst::PadProbeData::Event(ref event)) = info.data {
-                if event.type_() == gst::EventType::Caps {
-                    if let gst::EventView::Caps(caps_event) = event.view() {
-                        let caps = caps_event.caps();
-                        if let Some(structure) = caps.structure(0) {
-                            let codec_name = structure.name().as_str();
-
-                            // Map input caps to webrtc-compatible caps
-                            // For pre-encoded video, restrict to that codec only
-                            // For raw video, don't set video-caps (let webrtcsink use defaults)
-                            let video_caps: Option<gst::Caps> = match codec_name {
-                                "video/x-h264" => {
-                                    info!("WHEP Output: Detected H.264 input, setting video-caps");
-                                    Some(gst::Caps::builder("video/x-h264").build())
-                                }
-                                "video/x-h265" => {
-                                    info!("WHEP Output: Detected H.265 input, setting video-caps");
-                                    Some(gst::Caps::builder("video/x-h265").build())
-                                }
-                                "video/x-vp9" => {
-                                    info!("WHEP Output: Detected VP9 input, setting video-caps");
-                                    Some(gst::Caps::builder("video/x-vp9").build())
-                                }
-                                "video/x-av1" => {
-                                    info!("WHEP Output: Detected AV1 input, setting video-caps");
-                                    Some(gst::Caps::builder("video/x-av1").build())
-                                }
-                                "video/x-raw" => {
-                                    // Raw video - offer modern codecs (H.264 preferred), exclude VP8
-                                    info!(
-                                        "WHEP Output: Detected raw video input, setting video-caps to H.264/H.265/VP9/AV1"
-                                    );
-                                    let mut caps = gst::Caps::new_empty();
-                                    {
-                                        let caps_mut = caps.get_mut().unwrap();
-                                        caps_mut.append(gst::Caps::builder("video/x-h264").build());
-                                        caps_mut.append(gst::Caps::builder("video/x-h265").build());
-                                        caps_mut.append(gst::Caps::builder("video/x-vp9").build());
-                                        caps_mut.append(gst::Caps::builder("video/x-av1").build());
+            // Normalize H.264/H.265 caps before they reach webrtcsink.
+            // h264parse progressively adds fields (coded-picture-structure, chroma-format,
+            // bit-depth-luma, bit-depth-chroma) as it parses the stream. webrtcsink's
+            // input_caps_change_allowed() doesn't account for these and rejects them as
+            // "renegotiation". This probe removes those fields from CAPS events to
+            // prevent false renegotiation errors. Applied per-slot.
+            let queue_src_pad = video_queue.static_pad("src").expect("queue has src pad");
+            queue_src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+                if let Some(gst::PadProbeData::Event(ref event)) = info.data {
+                    if event.type_() == gst::EventType::Caps {
+                        if let gst::EventView::Caps(caps_event) = event.view() {
+                            let caps = caps_event.caps();
+                            if let Some(structure) = caps.structure(0) {
+                                if structure.name() == "video/x-h264"
+                                    || structure.name() == "video/x-h265"
+                                {
+                                    let mut new_caps = caps.copy();
+                                    if let Some(s) = new_caps.make_mut().structure_mut(0) {
+                                        s.remove_fields([
+                                            "coded-picture-structure",
+                                            "chroma-format",
+                                            "bit-depth-luma",
+                                            "bit-depth-chroma",
+                                        ]);
                                     }
-                                    Some(caps)
+                                    let new_event = gst::event::Caps::new(&new_caps);
+                                    info.data = Some(gst::PadProbeData::Event(new_event));
                                 }
-                                _ => {
-                                    warn!(
-                                        "WHEP Output: Unknown video codec '{}', using default",
-                                        codec_name
-                                    );
-                                    None
-                                }
-                            };
-
-                            if let Some(caps) = video_caps {
-                                if let Some(whepserversink) = whepserversink_weak.upgrade() {
-                                    whepserversink.set_property("video-caps", &caps);
-                                }
-                            }
-                            caps_set_clone.store(true, Ordering::SeqCst);
-                        }
-                    }
-                }
-            }
-            gst::PadProbeReturn::Pass
-        });
-
-        // Skip additional parsing - feed directly to whepserversink.
-        // webrtcsink handles codec discovery internally. Adding our own parser
-        // caused issues because webrtcsink's internal discovery pipeline creates
-        // its own parser that converts stream format, losing codec_data.
-        //
-        // For pre-encoded video, we rely on:
-        // 1. Upstream parser (in VideoEncoder block) with config-interval=1 for H.264
-        // 2. Dynamic video-caps detection (probe above sets caps based on input codec)
-        info!("WHEP Output: Passing video directly to whepserversink (no additional parsing)");
-
-        // Add a pad probe to normalize H.264 caps before they reach webrtcsink.
-        // h264parse progressively adds fields (coded-picture-structure, chroma-format,
-        // bit-depth-luma, bit-depth-chroma) as it parses the stream. webrtcsink's
-        // input_caps_change_allowed() doesn't account for these and rejects them as "renegotiation".
-        // This probe removes those fields from CAPS events to prevent false renegotiation errors.
-        let queue_src_pad = video_queue.static_pad("src").expect("queue has src pad");
-        queue_src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
-            if let Some(gst::PadProbeData::Event(ref event)) = info.data {
-                if event.type_() == gst::EventType::Caps {
-                    if let gst::EventView::Caps(caps_event) = event.view() {
-                        let caps = caps_event.caps();
-                        if let Some(structure) = caps.structure(0) {
-                            if structure.name() == "video/x-h264"
-                                || structure.name() == "video/x-h265"
-                            {
-                                // Create new caps without h264parse/h265parse-specific fields
-                                let mut new_caps = caps.copy();
-                                if let Some(s) = new_caps.make_mut().structure_mut(0) {
-                                    s.remove_fields([
-                                        "coded-picture-structure",
-                                        "chroma-format",
-                                        "bit-depth-luma",
-                                        "bit-depth-chroma",
-                                    ]);
-                                }
-                                // Replace the event with one containing cleaned caps
-                                let new_event = gst::event::Caps::new(&new_caps);
-                                info.data = Some(gst::PadProbeData::Event(new_event));
                             }
                         }
                     }
                 }
-            }
-            gst::PadProbeReturn::Ok
-        });
+                gst::PadProbeReturn::Ok
+            });
 
-        // Video link: queue -> whepserversink (video_0 request pad)
-        internal_links.push((
-            ElementPadRef::pad(&video_queue_id, "src"),
-            ElementPadRef::pad(&whepserversink_id, "video_0"),
-        ));
+            // Video link: queue -> whepserversink (video_<slot> request pad)
+            internal_links.push((
+                ElementPadRef::pad(&video_queue_id, "src"),
+                ElementPadRef::pad(&whepserversink_id, format!("video_{}", slot)),
+            ));
 
-        elements.push((video_queue_id, video_queue));
+            elements.push((video_queue_id, video_queue));
+        }
+
+        info!(
+            "WHEP Output {}: configured {} video track(s)",
+            instance_id, num_video_tracks
+        );
     }
 
     // Add whepserversink last (after audio/video processing elements)
     elements.push((whepserversink_id.clone(), whepserversink));
 
     info!(
-        "WHEP Output configured: endpoint_id='{}', internal_host={}, stun={:?}, turn={:?}, mode={:?}",
-        endpoint_id, host_addr, stun_server, turn_server, mode
+        "WHEP Output configured: endpoint_id='{}', internal_host={}, stun={:?}, turn={:?}, audio_tracks={}, video_tracks={}",
+        endpoint_id, host_addr, stun_server, turn_server, num_audio_tracks, num_video_tracks
     );
 
     // Register WHEP endpoint with the build context
-    ctx.register_whep_endpoint(instance_id, &endpoint_id, internal_port, mode);
+    ctx.register_whep_endpoint(
+        instance_id,
+        &endpoint_id,
+        internal_port,
+        num_audio_tracks,
+        num_video_tracks,
+    );
 
     Ok(BlockBuildResult {
         elements,
@@ -2059,33 +2202,31 @@ fn whep_output_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.whep_output".to_string(),
         name: "WHEP Output".to_string(),
-        description: "Hosts a WHEP server endpoint. Clients can connect via WHEP to receive the WebRTC stream. Access at /api/whep/{endpoint_id}".to_string(),
+        description: "Hosts a WHEP server endpoint. Clients can connect via WHEP to receive the WebRTC stream. Access at /api/whep/{endpoint_id}. Set Number of Video/Audio Tracks to 0 to disable that media type.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
             ExposedProperty {
-                name: "mode".to_string(),
-                label: "Stream Mode".to_string(),
-                description: "What media to stream: audio only, video only, or both".to_string(),
-                property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue {
-                            value: "audio".to_string(),
-                            label: Some("Audio Only".to_string()),
-                        },
-                        EnumValue {
-                            value: "video".to_string(),
-                            label: Some("Video Only".to_string()),
-                        },
-                        EnumValue {
-                            value: "audio_video".to_string(),
-                            label: Some("Audio + Video".to_string()),
-                        },
-                    ],
-                },
-                default_value: Some(PropertyValue::String("audio_video".to_string())),
+                name: "num_video_tracks".to_string(),
+                label: "Number of Video Tracks".to_string(),
+                description: "Number of video input tracks (0 disables video on this endpoint).".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(1)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
-                    property_name: "mode".to_string(),
+                    property_name: "num_video_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "num_audio_tracks".to_string(),
+                label: "Number of Audio Tracks".to_string(),
+                description: "Number of audio input tracks (0 disables audio on this endpoint).".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(1)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_audio_tracks".to_string(),
                     transform: None,
                 },
                 live: false,
@@ -2117,8 +2258,9 @@ fn whep_output_definition() -> BlockDefinition {
                 live: false,
             },
         ],
-        // Note: external_pads here are the static defaults for audio_video mode (the default).
-        // The actual pads are determined dynamically by WHEPOutputBuilder::get_external_pads() based on mode.
+        // Note: external_pads here are the static defaults (1 video + 1 audio).
+        // The actual pads are determined dynamically by WHEPOutputBuilder::get_external_pads()
+        // based on num_audio_tracks / num_video_tracks (and the legacy mode property if present).
         external_pads: ExternalPads {
             inputs: vec![
                 ExternalPad {
@@ -2145,5 +2287,169 @@ fn whep_output_definition() -> BlockDefinition {
             height: Some(1.5),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a property map. `legacy_mode` populates the old "mode" enum
+    /// (`Some("audio")` etc.) to exercise the migration path; pass `None` for
+    /// new flows. Count values pass through `num_audio_tracks` /
+    /// `num_video_tracks`.
+    fn props(
+        legacy_mode: Option<&str>,
+        num_audio_tracks: Option<i64>,
+        num_video_tracks: Option<i64>,
+    ) -> HashMap<String, PropertyValue> {
+        let mut p = HashMap::new();
+        if let Some(m) = legacy_mode {
+            p.insert("mode".to_string(), PropertyValue::String(m.to_string()));
+        }
+        if let Some(c) = num_audio_tracks {
+            p.insert("num_audio_tracks".to_string(), PropertyValue::Int(c));
+        }
+        if let Some(c) = num_video_tracks {
+            p.insert("num_video_tracks".to_string(), PropertyValue::Int(c));
+        }
+        p
+    }
+
+    fn audio_pad_names(pads: &ExternalPads) -> Vec<String> {
+        pads.inputs
+            .iter()
+            .filter(|p| matches!(p.media_type, MediaType::Audio))
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    fn video_pad_names(pads: &ExternalPads) -> Vec<String> {
+        pads.inputs
+            .iter()
+            .filter(|p| matches!(p.media_type, MediaType::Video))
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn external_pads_default_is_one_video_and_one_audio() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(None, None, None))
+            .expect("expected pads");
+        assert_eq!(audio_pad_names(&pads), vec!["audio_in"]);
+        assert_eq!(video_pad_names(&pads), vec!["video_in"]);
+    }
+
+    #[test]
+    fn external_pads_zero_audio_disables_audio() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(None, Some(0), None))
+            .expect("expected pads");
+        assert!(audio_pad_names(&pads).is_empty());
+        assert_eq!(video_pad_names(&pads), vec!["video_in"]);
+    }
+
+    #[test]
+    fn external_pads_zero_video_disables_video() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(None, None, Some(0)))
+            .expect("expected pads");
+        assert!(video_pad_names(&pads).is_empty());
+        assert_eq!(audio_pad_names(&pads), vec!["audio_in"]);
+    }
+
+    #[test]
+    fn external_pads_count_clamped_to_max_eight() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(None, Some(99), Some(99)))
+            .expect("expected pads");
+        assert_eq!(audio_pad_names(&pads).len(), 8);
+        assert_eq!(video_pad_names(&pads).len(), 8);
+    }
+
+    #[test]
+    fn external_pads_count_clamped_to_min_zero() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(None, Some(-5), Some(-1)))
+            .expect("expected pads");
+        assert!(audio_pad_names(&pads).is_empty());
+        assert!(video_pad_names(&pads).is_empty());
+    }
+
+    #[test]
+    fn external_pads_audio_count_four() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(None, Some(4), Some(0)))
+            .expect("expected pads");
+        // Slot 0 keeps the unsuffixed name; subsequent slots are suffixed.
+        assert_eq!(
+            audio_pad_names(&pads),
+            vec!["audio_in", "audio_in_1", "audio_in_2", "audio_in_3"],
+        );
+        assert!(video_pad_names(&pads).is_empty());
+    }
+
+    #[test]
+    fn external_pads_video_count_four() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(None, Some(0), Some(4)))
+            .expect("expected pads");
+        assert_eq!(
+            video_pad_names(&pads),
+            vec!["video_in", "video_in_1", "video_in_2", "video_in_3"],
+        );
+        assert!(audio_pad_names(&pads).is_empty());
+    }
+
+    #[test]
+    fn external_pads_video_three_with_audio_one() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(None, Some(1), Some(3)))
+            .expect("expected pads");
+        assert_eq!(
+            video_pad_names(&pads),
+            vec!["video_in", "video_in_1", "video_in_2"],
+        );
+        assert_eq!(audio_pad_names(&pads), vec!["audio_in"]);
+    }
+
+    // --- Legacy mode migration ---
+
+    #[test]
+    fn legacy_mode_audio_video_with_no_counts_yields_one_plus_one() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(Some("audio_video"), None, None))
+            .expect("expected pads");
+        assert_eq!(audio_pad_names(&pads), vec!["audio_in"]);
+        assert_eq!(video_pad_names(&pads), vec!["video_in"]);
+    }
+
+    #[test]
+    fn legacy_mode_audio_only_with_no_counts_disables_video() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(Some("audio"), None, None))
+            .expect("expected pads");
+        assert_eq!(audio_pad_names(&pads), vec!["audio_in"]);
+        assert!(video_pad_names(&pads).is_empty());
+    }
+
+    #[test]
+    fn legacy_mode_video_only_with_no_counts_disables_audio() {
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(Some("video"), None, None))
+            .expect("expected pads");
+        assert_eq!(video_pad_names(&pads), vec!["video_in"]);
+        assert!(audio_pad_names(&pads).is_empty());
+    }
+
+    #[test]
+    fn explicit_counts_override_legacy_mode() {
+        // Counts are authoritative when present; legacy mode is ignored.
+        let pads = WHEPOutputBuilder
+            .get_external_pads(&props(Some("audio"), Some(2), Some(3)))
+            .expect("expected pads");
+        assert_eq!(audio_pad_names(&pads).len(), 2);
+        assert_eq!(video_pad_names(&pads).len(), 3);
     }
 }

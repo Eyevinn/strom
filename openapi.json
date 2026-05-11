@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.13-dev"
+    "version": "0.4.13-dev4"
   },
   "paths": {
     "/api/auth/status": {
@@ -10046,26 +10046,23 @@
         "description": "Response structure for a WHEP stream.",
         "required": [
           "endpoint_id",
-          "mode",
-          "has_audio",
-          "has_video"
+          "num_audio_tracks",
+          "num_video_tracks"
         ],
         "properties": {
           "endpoint_id": {
             "type": "string",
             "description": "Unique identifier for the WHEP endpoint"
           },
-          "has_audio": {
-            "type": "boolean",
-            "description": "Whether the stream includes audio"
+          "num_audio_tracks": {
+            "type": "integer",
+            "description": "Number of independent audio tracks exposed by this endpoint (0 = audio\ndisabled). Clients should add this many recvonly audio transceivers in\ntheir offer.",
+            "minimum": 0
           },
-          "has_video": {
-            "type": "boolean",
-            "description": "Whether the stream includes video"
-          },
-          "mode": {
-            "type": "string",
-            "description": "Stream mode (e.g., \"video\", \"audio\", \"video+audio\")"
+          "num_video_tracks": {
+            "type": "integer",
+            "description": "Number of independent video tracks exposed by this endpoint (0 = video\ndisabled). Clients should add this many recvonly video transceivers in\ntheir offer.",
+            "minimum": 0
           }
         }
       },

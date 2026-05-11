@@ -81,8 +81,10 @@ pub struct WhepEndpointInfo {
     pub endpoint_id: String,
     /// The internal localhost port where whepserversink is listening
     pub internal_port: u16,
-    /// Stream mode (audio, video, or both)
-    pub mode: StreamMode,
+    /// Number of independent audio tracks exposed by this endpoint (0 = no audio)
+    pub num_audio_tracks: usize,
+    /// Number of independent video tracks exposed by this endpoint (0 = no video)
+    pub num_video_tracks: usize,
 }
 
 /// Context provided to block builders during build.
@@ -240,13 +242,15 @@ impl BlockBuildContext {
         block_id: &str,
         endpoint_id: &str,
         port: u16,
-        mode: StreamMode,
+        num_audio_tracks: usize,
+        num_video_tracks: usize,
     ) {
         self.whep_endpoints.borrow_mut().push(WhepEndpointInfo {
             block_id: block_id.to_string(),
             endpoint_id: endpoint_id.to_string(),
             internal_port: port,
-            mode,
+            num_audio_tracks,
+            num_video_tracks,
         });
     }
 

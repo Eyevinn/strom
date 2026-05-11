@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use strom_types::block::StreamMode;
 use tokio::sync::RwLock;
 
 /// Information about a registered WHEP endpoint.
@@ -13,8 +12,10 @@ use tokio::sync::RwLock;
 pub struct WhepEndpointEntry {
     /// Internal localhost port where whepserversink is listening
     pub port: u16,
-    /// Stream mode (audio, video, or both)
-    pub mode: StreamMode,
+    /// Number of audio tracks exposed by this endpoint (0 = no audio)
+    pub num_audio_tracks: usize,
+    /// Number of video tracks exposed by this endpoint (0 = no video)
+    pub num_video_tracks: usize,
 }
 
 /// Registry mapping endpoint IDs to internal ports.
@@ -31,14 +32,15 @@ impl WhepRegistry {
         }
     }
 
-    /// Register an endpoint with its internal port and stream mode.
+    /// Register an endpoint with its internal port and track counts.
     ///
     /// Returns an error if an endpoint with the same ID is already registered.
     pub async fn register(
         &self,
         endpoint_id: String,
         port: u16,
-        mode: StreamMode,
+        num_audio_tracks: usize,
+        num_video_tracks: usize,
     ) -> Result<(), String> {
         let mut map = self.inner.write().await;
         if map.contains_key(&endpoint_id) {
@@ -47,7 +49,14 @@ impl WhepRegistry {
                 endpoint_id
             ));
         }
-        map.insert(endpoint_id, WhepEndpointEntry { port, mode });
+        map.insert(
+            endpoint_id,
+            WhepEndpointEntry {
+                port,
+                num_audio_tracks,
+                num_video_tracks,
+            },
+        );
         Ok(())
     }
 

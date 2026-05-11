@@ -361,9 +361,8 @@ pub async fn list_whep_streams(State(state): State<AppState>) -> axum::Json<Whep
         .into_iter()
         .map(|(endpoint_id, entry)| WhepStreamInfo {
             endpoint_id,
-            mode: entry.mode.as_str().to_string(),
-            has_audio: entry.mode.has_audio(),
-            has_video: entry.mode.has_video(),
+            num_audio_tracks: entry.num_audio_tracks,
+            num_video_tracks: entry.num_video_tracks,
         })
         .collect();
 
