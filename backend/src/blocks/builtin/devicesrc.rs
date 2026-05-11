@@ -27,7 +27,10 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{
-    block::{StreamMode, *},
+    block::{
+        common_video_framerate_enum_values, common_video_resolution_enum_values,
+        parse_resolution_string, StreamMode, *,
+    },
     element::ElementPadRef,
     MediaType, PropertyValue,
 };
@@ -92,7 +95,13 @@ impl BlockBuilder for LocalInputBuilder {
 
         if stream_mode.has_video() {
             let video_device_id = read_string(properties, "video_device").unwrap_or_default();
+            let resolution = read_string(properties, "video_resolution")
+                .and_then(|s| parse_resolution_string(&s));
+            let framerate =
+                read_string(properties, "video_framerate").and_then(|s| parse_fraction_string(&s));
+
             let videosrc_id = format!("{}:videosrc", instance_id);
+            let videosrc_caps_id = format!("{}:videosrc_caps", instance_id);
             let videoconvert_id = format!("{}:videoconvert", instance_id);
             let videocaps_id = format!("{}:videocapsfilter", instance_id);
 
@@ -103,6 +112,26 @@ impl BlockBuilder for LocalInputBuilder {
                 &videosrc_id,
                 "autovideosrc",
             )?;
+
+            // Pre-convert capsfilter: lets the source negotiate the requested
+            // resolution / framerate at capture-time (AVFoundation, v4l2 and
+            // Media Foundation all pick the closest matching mode) rather
+            // than always running at the device's default mode and paying a
+            // software downscale in videoconvert.
+            let mut src_caps_builder = gst::Caps::builder("video/x-raw");
+            if let Some((w, h)) = resolution {
+                src_caps_builder = src_caps_builder
+                    .field("width", w as i32)
+                    .field("height", h as i32);
+            }
+            if let Some(fr) = framerate {
+                src_caps_builder = src_caps_builder.field("framerate", fr);
+            }
+            let videosrc_caps = gst::ElementFactory::make("capsfilter")
+                .name(&videosrc_caps_id)
+                .property("caps", src_caps_builder.build())
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("videosrc_caps: {}", e)))?;
 
             let convert_element_name = video_convert_mode().element_name();
             let videoconvert = gst::ElementFactory::make(convert_element_name)
@@ -121,6 +150,10 @@ impl BlockBuilder for LocalInputBuilder {
 
             internal_links.push((
                 ElementPadRef::pad(&videosrc_id, "src"),
+                ElementPadRef::pad(&videosrc_caps_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&videosrc_caps_id, "src"),
                 ElementPadRef::pad(&videoconvert_id, "sink"),
             ));
             internal_links.push((
@@ -129,13 +162,19 @@ impl BlockBuilder for LocalInputBuilder {
             ));
 
             elements.push((videosrc_id, videosrc));
+            elements.push((videosrc_caps_id, videosrc_caps));
             elements.push((videoconvert_id, videoconvert));
             elements.push((videocaps_id, videocaps));
         }
 
         if stream_mode.has_audio() {
             let audio_device_id = read_string(properties, "audio_device").unwrap_or_default();
+            let rate = read_string(properties, "audio_rate").and_then(|s| s.parse::<i32>().ok());
+            let channels =
+                read_string(properties, "audio_channels").and_then(|s| s.parse::<i32>().ok());
+
             let audiosrc_id = format!("{}:audiosrc", instance_id);
+            let audiosrc_caps_id = format!("{}:audiosrc_caps", instance_id);
             let audioconvert_id = format!("{}:audioconvert", instance_id);
             let audioresample_id = format!("{}:audioresample", instance_id);
             let audiocaps_id = format!("{}:audiocapsfilter", instance_id);
@@ -147,6 +186,24 @@ impl BlockBuilder for LocalInputBuilder {
                 &audiosrc_id,
                 "autoaudiosrc",
             )?;
+
+            // Pre-convert capsfilter: lets the source negotiate the requested
+            // sample rate / channel count directly. Sample-rate conversion
+            // and channel mixing still go through audioresample/audioconvert
+            // downstream, but only when the device truly can't deliver the
+            // requested format.
+            let mut audio_src_caps = gst::Caps::builder("audio/x-raw");
+            if let Some(r) = rate {
+                audio_src_caps = audio_src_caps.field("rate", r);
+            }
+            if let Some(c) = channels {
+                audio_src_caps = audio_src_caps.field("channels", c);
+            }
+            let audiosrc_caps = gst::ElementFactory::make("capsfilter")
+                .name(&audiosrc_caps_id)
+                .property("caps", audio_src_caps.build())
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("audiosrc_caps: {}", e)))?;
 
             let audioconvert = gst::ElementFactory::make("audioconvert")
                 .name(&audioconvert_id)
@@ -167,6 +224,10 @@ impl BlockBuilder for LocalInputBuilder {
 
             internal_links.push((
                 ElementPadRef::pad(&audiosrc_id, "src"),
+                ElementPadRef::pad(&audiosrc_caps_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&audiosrc_caps_id, "src"),
                 ElementPadRef::pad(&audioconvert_id, "sink"),
             ));
             internal_links.push((
@@ -179,6 +240,7 @@ impl BlockBuilder for LocalInputBuilder {
             ));
 
             elements.push((audiosrc_id, audiosrc));
+            elements.push((audiosrc_caps_id, audiosrc_caps));
             elements.push((audioconvert_id, audioconvert));
             elements.push((audioresample_id, audioresample));
             elements.push((audiocaps_id, audiocaps));
@@ -284,6 +346,20 @@ fn read_string(properties: &HashMap<String, PropertyValue>, key: &str) -> Option
     })
 }
 
+/// Parse a `"N/D"` framerate string (e.g. `"30/1"`, `"30000/1001"`) into a
+/// `gst::Fraction`. Matches the format produced by
+/// `common_video_framerate_enum_values()` so the dropdown values plug
+/// straight into a capsfilter.
+fn parse_fraction_string(s: &str) -> Option<gst::Fraction> {
+    let (num, den) = s.split_once('/')?;
+    let num: i32 = num.parse().ok()?;
+    let den: i32 = den.parse().ok()?;
+    if den == 0 {
+        return None;
+    }
+    Some(gst::Fraction::new(num, den))
+}
+
 /// Get metadata for the Local Input block (for UI/API).
 pub fn get_blocks() -> Vec<BlockDefinition> {
     vec![local_input_definition()]
@@ -346,6 +422,100 @@ fn local_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "audio_device".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "video_resolution".to_string(),
+                label: "Video Resolution".to_string(),
+                description: "Resolution to request from the video source. The platform plugin (AVFoundation/v4l2/Media Foundation) picks the closest matching capture mode. Empty leaves it to the device default — often the highest mode the camera supports, which can be expensive.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: common_video_resolution_enum_values(true),
+                },
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "video_resolution".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "video_framerate".to_string(),
+                label: "Video Framerate".to_string(),
+                description: "Framerate to request from the video source. Plugin picks the closest mode. Empty = device default.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: common_video_framerate_enum_values(true),
+                },
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "video_framerate".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "audio_rate".to_string(),
+                label: "Audio Sample Rate".to_string(),
+                description: "Sample rate (Hz) requested from the audio source. audioresample handles conversion if the device can't deliver it natively. Empty = device default.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: String::new(),
+                            label: Some("-".to_string()),
+                        },
+                        EnumValue {
+                            value: "48000".to_string(),
+                            label: Some("48 kHz".to_string()),
+                        },
+                        EnumValue {
+                            value: "44100".to_string(),
+                            label: Some("44.1 kHz".to_string()),
+                        },
+                        EnumValue {
+                            value: "32000".to_string(),
+                            label: Some("32 kHz".to_string()),
+                        },
+                        EnumValue {
+                            value: "16000".to_string(),
+                            label: Some("16 kHz".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "audio_rate".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "audio_channels".to_string(),
+                label: "Audio Channels".to_string(),
+                description: "Number of channels requested from the audio source. Empty = device default (pro interfaces often expose 8+ channels by default).".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: String::new(),
+                            label: Some("-".to_string()),
+                        },
+                        EnumValue {
+                            value: "1".to_string(),
+                            label: Some("1 (Mono)".to_string()),
+                        },
+                        EnumValue {
+                            value: "2".to_string(),
+                            label: Some("2 (Stereo)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "audio_channels".to_string(),
                     transform: None,
                 },
                 live: false,
