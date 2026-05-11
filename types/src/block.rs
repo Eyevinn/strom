@@ -78,6 +78,12 @@ pub enum PropertyType {
     },
     /// Network interface selector - frontend fetches available interfaces from API
     NetworkInterface,
+    /// Local video source device selector — frontend fetches the live
+    /// Video/Source device list from `/api/discovery/devices?category=video_source`.
+    VideoDevice,
+    /// Local audio source device selector — frontend fetches the live
+    /// Audio/Source device list from `/api/discovery/devices?category=audio_source`.
+    AudioDevice,
 }
 
 /// Block definition - metadata for creating block instances.

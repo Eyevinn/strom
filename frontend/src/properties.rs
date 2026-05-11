@@ -131,6 +131,20 @@ pub struct BlockInspectorResult {
     pub vision_mixer_url: Option<(FlowId, String)>,
     /// Live property updates to send to running pipeline elements
     pub live_property_updates: Vec<LivePropertyUpdate>,
+    /// Inspector rendered a VideoDevice/AudioDevice property — caller should
+    /// trigger device discovery if the cache is stale (TTL handled in the app).
+    pub local_devices_needed: bool,
+    /// Inspector requested a forced re-scan of capture devices (↻ button).
+    pub local_devices_refresh_requested: bool,
+}
+
+/// Side-channel collected by the property editor when it renders a
+/// VideoDevice / AudioDevice picker — bubbled back up so the App can
+/// trigger device discovery and ↻ refresh calls.
+#[derive(Default)]
+pub(crate) struct DevicePickerActions {
+    pub needed: bool,
+    pub refresh_requested: bool,
 }
 
 /// Property inspector panel.
@@ -455,6 +469,8 @@ impl PropertyInspector {
         rtp_stats: Option<&strom_types::api::FlowStatsResponse>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
+        video_devices: &[strom_types::discovery::DeviceResponse],
+        audio_devices: &[strom_types::discovery::DeviceResponse],
         qr_inline: &mut Option<(String, String)>,
         qr_cache: &mut crate::qr::QrCache,
         recorder_filename: Option<&str>,
@@ -464,6 +480,7 @@ impl PropertyInspector {
     ) -> BlockInspectorResult {
         let block_id = block.id.clone();
         let mut result = BlockInspectorResult::default();
+        let mut device_picker_actions = DevicePickerActions::default();
 
         ui.push_id("selected_inspector", |ui| {
             // Outer scroll area for entire block inspector
@@ -811,7 +828,10 @@ impl PropertyInspector {
                                     flow_id,
                                     network_interfaces,
                                     available_channels,
+                                    video_devices,
+                                    audio_devices,
                                     taken_endpoint_ids,
+                                    &mut device_picker_actions,
                                 );
 
                                 // For live properties, send updates directly to the pipeline
@@ -1237,6 +1257,8 @@ impl PropertyInspector {
             }); // outer ScrollArea
         });
 
+        result.local_devices_needed = device_picker_actions.needed;
+        result.local_devices_refresh_requested = device_picker_actions.refresh_requested;
         result
     }
 
@@ -1380,6 +1402,7 @@ impl PropertyInspector {
             .iter()
             .find(|p| p.name == "num_inputs")
         {
+            let mut sink = DevicePickerActions::default();
             Self::show_exposed_property(
                 ui,
                 block,
@@ -1388,7 +1411,10 @@ impl PropertyInspector {
                 flow_id,
                 network_interfaces,
                 available_channels,
+                &[],
+                &[],
                 &std::collections::HashSet::new(),
+                &mut sink,
             );
         }
 
@@ -1400,6 +1426,7 @@ impl PropertyInspector {
                 .iter()
                 .find(|p| p.name == prop_name)
             {
+                let mut sink = DevicePickerActions::default();
                 Self::show_exposed_property(
                     ui,
                     block,
@@ -1408,7 +1435,10 @@ impl PropertyInspector {
                     flow_id,
                     network_interfaces,
                     available_channels,
+                    &[],
+                    &[],
                     &std::collections::HashSet::new(),
+                    &mut sink,
                 );
             }
         }
@@ -1423,6 +1453,7 @@ impl PropertyInspector {
             .iter()
             .find(|p| p.name == "num_outputs")
         {
+            let mut sink = DevicePickerActions::default();
             Self::show_exposed_property(
                 ui,
                 block,
@@ -1431,7 +1462,10 @@ impl PropertyInspector {
                 flow_id,
                 network_interfaces,
                 available_channels,
+                &[],
+                &[],
                 &std::collections::HashSet::new(),
+                &mut sink,
             );
         }
 
@@ -1443,6 +1477,7 @@ impl PropertyInspector {
                 .iter()
                 .find(|p| p.name == prop_name)
             {
+                let mut sink = DevicePickerActions::default();
                 Self::show_exposed_property(
                     ui,
                     block,
@@ -1451,7 +1486,10 @@ impl PropertyInspector {
                     flow_id,
                     network_interfaces,
                     available_channels,
+                    &[],
+                    &[],
                     &std::collections::HashSet::new(),
+                    &mut sink,
                 );
             }
         }
@@ -1462,6 +1500,7 @@ impl PropertyInspector {
 
     /// Show an exposed property editor. Returns true if the value was changed.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn show_exposed_property(
         ui: &mut Ui,
         block: &mut BlockInstance,
@@ -1470,7 +1509,10 @@ impl PropertyInspector {
         _flow_id: Option<strom_types::FlowId>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
+        video_devices: &[strom_types::discovery::DeviceResponse],
+        audio_devices: &[strom_types::discovery::DeviceResponse],
         taken_endpoint_ids: &std::collections::HashSet<String>,
+        device_picker_actions: &mut DevicePickerActions,
     ) -> bool {
         let prop_name = &exposed_prop.name;
         let display_label = &exposed_prop.label;
@@ -1604,6 +1646,26 @@ impl PropertyInspector {
                                     ui,
                                     &mut value,
                                     network_interfaces,
+                                )
+                            }
+                            strom_types::block::PropertyType::VideoDevice => {
+                                device_picker_actions.needed = true;
+                                Self::show_local_device_editor(
+                                    ui,
+                                    &mut value,
+                                    video_devices,
+                                    "video source",
+                                    device_picker_actions,
+                                )
+                            }
+                            strom_types::block::PropertyType::AudioDevice => {
+                                device_picker_actions.needed = true;
+                                Self::show_local_device_editor(
+                                    ui,
+                                    &mut value,
+                                    audio_devices,
+                                    "audio source",
+                                    device_picker_actions,
                                 )
                             }
                             _ => {
@@ -2048,6 +2110,66 @@ impl PropertyInspector {
         } else {
             false
         }
+    }
+
+    /// Show a picker for a local Video/Source or Audio/Source GStreamer
+    /// device (USB capture cards, built-in cameras, pro audio interfaces,
+    /// virtual sources, ...). Empty string = OS default
+    /// (autovideosrc/autoaudiosrc on the backend).
+    fn show_local_device_editor(
+        ui: &mut Ui,
+        value: &mut PropertyValue,
+        devices: &[strom_types::discovery::DeviceResponse],
+        kind_label: &str,
+        actions: &mut DevicePickerActions,
+    ) -> bool {
+        let PropertyValue::String(s) = value else {
+            return false;
+        };
+        let mut changed = false;
+
+        ui.horizontal(|ui| {
+            let selected_display = if s.is_empty() {
+                format!("OS default ({})", kind_label)
+            } else {
+                devices
+                    .iter()
+                    .find(|d| d.id == *s)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| format!("{} (not found — refresh)", s))
+            };
+
+            egui::ComboBox::from_id_salt(ui.next_auto_id())
+                .selected_text(selected_display)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(s.is_empty(), format!("OS default ({})", kind_label))
+                        .clicked()
+                    {
+                        s.clear();
+                        changed = true;
+                    }
+                    if devices.is_empty() {
+                        ui.label("(no devices discovered yet)");
+                    }
+                    for d in devices {
+                        if ui.selectable_label(*s == d.id, &d.name).clicked() {
+                            *s = d.id.clone();
+                            changed = true;
+                        }
+                    }
+                });
+
+            if ui
+                .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
+                .on_hover_text("Re-scan local devices")
+                .clicked()
+            {
+                actions.refresh_requested = true;
+            }
+        });
+
+        changed
     }
 
     /// Show a dB gain slider for the AudioGain block.

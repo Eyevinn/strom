@@ -120,12 +120,13 @@ impl DeviceDiscovery {
         let monitor = gst::DeviceMonitor::new();
 
         // Add filters for device types we care about.
-        // Audio/Video device enumeration is disabled — it triggers heavy
-        // hardware probing (WASAPI, DirectSound, etc.) that is slow on Windows
-        // and not needed for our use case (network source discovery).
-        // monitor.add_filter(Some("Audio/Source"), None);
-        // monitor.add_filter(Some("Audio/Sink"), None);
-        // monitor.add_filter(Some("Video/Source"), None);
+        // Audio/Source + Video/Source are needed by the Camera/Mic Input block
+        // to populate its device picker. On Windows the underlying providers
+        // (WASAPI, DirectSound, MF) do hardware probing on enumeration which
+        // adds a small one-time cost at startup; this is the trade-off for
+        // letting users pick local capture devices from the UI.
+        monitor.add_filter(Some("Audio/Source"), None);
+        monitor.add_filter(Some("Video/Source"), None);
         monitor.add_filter(Some("Source/Network"), None);
 
         // Get the bus for device events
@@ -208,6 +209,17 @@ impl DeviceDiscovery {
     pub async fn get_device(&self, id: &str) -> Option<DiscoveredDevice> {
         let devices = self.devices.read().await;
         devices.get(id).cloned()
+    }
+
+    /// Compute the discovery ID for a `gst::Device` using the same hash inputs
+    /// (device class, provider, display name) as `DiscoveredDevice::generate_id`.
+    /// Used by block builders to match a user-selected device id back to the
+    /// underlying `gst::Device` returned from a `gst::DeviceMonitor`.
+    pub fn device_id_for(device: &gst::Device) -> String {
+        let class = device.device_class().to_string();
+        let provider = Self::get_provider_name(device, &class);
+        let name = device.display_name().to_string();
+        DiscoveredDevice::generate_id(&class, &provider, &name)
     }
 
     /// Get provider name from device properties or infer from device class.

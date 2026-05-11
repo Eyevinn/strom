@@ -203,6 +203,86 @@ impl StromApp {
         &self.network_interfaces
     }
 
+    /// Load local capture devices (cameras + microphones) from the backend
+    /// when the cache is empty or older than `ttl`. Triggered from the
+    /// properties panel when a `VideoDevice`/`AudioDevice` field is rendered.
+    /// `force` bypasses the TTL (used by the refresh button).
+    pub(crate) fn load_local_devices(
+        &mut self,
+        ctx: egui::Context,
+        force: bool,
+        ttl: std::time::Duration,
+    ) {
+        let fresh = self
+            .devices_last_loaded
+            .map(|t| t.elapsed() < ttl)
+            .unwrap_or(false);
+        if !force && fresh {
+            return;
+        }
+        if self.video_devices_loading && self.audio_devices_loading {
+            return;
+        }
+        self.devices_last_loaded = Some(instant::Instant::now());
+
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+
+        if force {
+            let api_refresh = api.clone();
+            spawn_task(async move {
+                if let Err(e) = api_refresh.refresh_devices().await {
+                    tracing::warn!("refresh_devices failed: {}", e);
+                }
+            });
+        }
+
+        if !self.video_devices_loading {
+            self.video_devices_loading = true;
+            let api = api.clone();
+            let tx = tx.clone();
+            let ctx = ctx.clone();
+            spawn_task(async move {
+                match api.list_devices("video_source").await {
+                    Ok(devices) => {
+                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
+                            category: strom_types::discovery::DeviceCategory::VideoSource,
+                            devices,
+                        });
+                    }
+                    Err(e) => tracing::warn!("list_devices(video_source) failed: {}", e),
+                }
+                ctx.request_repaint();
+            });
+        }
+
+        if !self.audio_devices_loading {
+            self.audio_devices_loading = true;
+            spawn_task(async move {
+                match api.list_devices("audio_source").await {
+                    Ok(devices) => {
+                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
+                            category: strom_types::discovery::DeviceCategory::AudioSource,
+                            devices,
+                        });
+                    }
+                    Err(e) => tracing::warn!("list_devices(audio_source) failed: {}", e),
+                }
+                ctx.request_repaint();
+            });
+        }
+    }
+
+    /// Get cached local video capture devices.
+    pub fn video_devices(&self) -> &[strom_types::discovery::DeviceResponse] {
+        &self.video_devices
+    }
+
+    /// Get cached local audio capture devices.
+    pub fn audio_devices(&self) -> &[strom_types::discovery::DeviceResponse] {
+        &self.audio_devices
+    }
+
     /// Load available inter channels from the backend (for InterInput channel dropdown).
     pub(super) fn load_available_channels(&mut self, ctx: egui::Context) {
         if self.available_channels_loaded {

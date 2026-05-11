@@ -6933,6 +6933,20 @@
             "enum": [
               "networkinterface"
             ]
+          },
+          {
+            "type": "string",
+            "description": "Local video source device selector — frontend fetches the live\nVideo/Source device list from `/api/discovery/devices?category=video_source`.",
+            "enum": [
+              "videodevice"
+            ]
+          },
+          {
+            "type": "string",
+            "description": "Local audio source device selector — frontend fetches the live\nAudio/Source device list from `/api/discovery/devices?category=audio_source`.",
+            "enum": [
+              "audiodevice"
+            ]
           }
         ],
         "description": "Property type enumeration for exposed properties"

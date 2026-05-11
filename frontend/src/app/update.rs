@@ -1150,6 +1150,19 @@ impl eframe::App for StromApp {
                     tracing::info!("Network interfaces loaded: {} interfaces", interfaces.len());
                     self.network_interfaces = interfaces;
                 }
+                AppMessage::LocalDevicesLoaded { category, devices } => match category {
+                    strom_types::discovery::DeviceCategory::VideoSource => {
+                        tracing::info!("Video devices loaded: {} device(s)", devices.len());
+                        self.video_devices = devices;
+                        self.video_devices_loading = false;
+                    }
+                    strom_types::discovery::DeviceCategory::AudioSource => {
+                        tracing::info!("Audio devices loaded: {} device(s)", devices.len());
+                        self.audio_devices = devices;
+                        self.audio_devices_loading = false;
+                    }
+                    _ => {}
+                },
                 AppMessage::SystemClockLoaded(info) => {
                     self.system_clock_info = Some(info);
                     self.system_clock_unsupported = false;

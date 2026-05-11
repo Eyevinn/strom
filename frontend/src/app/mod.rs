@@ -602,6 +602,16 @@ pub struct StromApp {
     network_interfaces: Vec<strom_types::NetworkInterfaceInfo>,
     /// Whether network interfaces have been loaded
     network_interfaces_loaded: bool,
+    /// Cached local video capture devices (Local Input block picker)
+    video_devices: Vec<strom_types::discovery::DeviceResponse>,
+    /// Cached local audio capture devices (Local Input block picker)
+    audio_devices: Vec<strom_types::discovery::DeviceResponse>,
+    /// In-flight flag for video device fetch
+    video_devices_loading: bool,
+    /// In-flight flag for audio device fetch
+    audio_devices_loading: bool,
+    /// Last time the device lists were fetched (used as a TTL to avoid spamming the API)
+    devices_last_loaded: Option<instant::Instant>,
     /// Current log filter string from backend
     log_level_current: Option<String>,
     /// Default log filter string the server started with
