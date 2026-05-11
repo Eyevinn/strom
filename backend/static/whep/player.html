@@ -10,7 +10,7 @@
 <body style="display: flex; flex-direction: column; align-items: center;">
     <div class="container">
         <div style="position: relative; margin-bottom: 8px;">
-            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v11</span>
+            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v15</span>
             <h1 style="text-align: center; margin: 0;">WHEP Player at <span id="hostAddress"></span></h1>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em; position: absolute; right: 0; top: 50%; transform: translateY(-50%);">All streams</a>
         </div>
@@ -32,6 +32,11 @@
             <div class="video-container" id="videoContainer" style="max-width: 720px;">
                 <video id="video" autoplay muted playsinline controls></video>
             </div>
+            <div id="videoTrackGroup" style="display: none; width: 100%; max-width: 400px;">
+                <label style="color: #888; font-size: 12px;">Video track:
+                    <select id="videoTrackSelect" style="width: auto; padding: 4px 8px;" onchange="onVideoTrackChange()"></select>
+                </label>
+            </div>
             <div class="audio-indicator" id="audioIndicator">
                 <div class="meter-bar"><div class="meter-fill" id="meterFill"></div></div>
             </div>
@@ -39,6 +44,11 @@
                 <button class="mute-btn muted" id="muteBtn" onclick="toggleMute()" title="Toggle mute">&#128263;</button>
                 <input type="range" class="volume-slider" id="volumeSlider" min="0" max="100" value="100" oninput="setVolume(this.value)">
                 <span class="volume-label" id="volumeLabel">100%</span>
+            </div>
+            <div id="audioTrackGroup" style="display: none; width: 100%; max-width: 400px;">
+                <label style="color: #888; font-size: 12px;">Audio track:
+                    <select id="audioTrackSelect" style="width: auto; padding: 4px 8px;" onchange="onAudioTrackChange()"></select>
+                </label>
             </div>
             <div id="audioOutputGroup" style="display: none; width: 100%; max-width: 400px;">
                 <label style="color: #888; font-size: 12px;">Output:
@@ -102,6 +112,10 @@
         let hasAudioStream = false;
         let audioTrack = null;   // Stored for adding to video stream in A+V mode
         let audioMeter = null;   // Audio level meter (AnalyserNode + animation)
+        let availableAudioTracks = []; // Multi-audio: tracks received so far
+        let selectedAudioIndex = 0;    // Which track index is currently routed to the audio element
+        let availableVideoTracks = []; // Multi-video: tracks received so far
+        let selectedVideoIndex = 0;    // Which track index is currently routed to the video element
         const MAX_RECONNECT_ATTEMPTS = 15;
         const RECONNECT_DELAY = 10000;
 
@@ -126,6 +140,126 @@
             const video = document.getElementById('video');
             const ok = await deviceManager.setAudioOutput(deviceId, audio, video);
             if (ok) log('Switched audio output');
+        }
+
+        // Look up num_audio_tracks / num_video_tracks for the given endpoint URL
+        // by querying the streams API. The endpoint URL has the form
+        // /whep/{endpoint_id}. Returns { numAudioTracks, numVideoTracks }.
+        async function fetchTrackCounts(endpointUrl) {
+            try {
+                const id = endpointUrl.replace(/^.*\/whep\//, '').replace(/\/$/, '');
+                if (!id) return { numAudioTracks: 1, numVideoTracks: 1 };
+                const res = await fetch('/api/whep-streams');
+                if (!res.ok) return { numAudioTracks: 1, numVideoTracks: 1 };
+                const data = await res.json();
+                const match = (data.streams || []).find(s => s.endpoint_id === id);
+                if (match) {
+                    const a = typeof match.num_audio_tracks === 'number' && match.num_audio_tracks > 0
+                        ? match.num_audio_tracks : 1;
+                    const v = typeof match.num_video_tracks === 'number' && match.num_video_tracks > 0
+                        ? match.num_video_tracks : 1;
+                    return { numAudioTracks: a, numVideoTracks: v };
+                }
+            } catch (e) {
+                log('Failed to fetch track counts: ' + e.message, 'warning');
+            }
+            return { numAudioTracks: 1, numVideoTracks: 1 };
+        }
+
+        function refreshAudioTrackDropdown() {
+            const group = document.getElementById('audioTrackGroup');
+            const select = document.getElementById('audioTrackSelect');
+            // Slot-indexed array — null slots have not yet received a track.
+            const filledCount = availableAudioTracks.filter(t => t != null).length;
+            if (filledCount <= 1) {
+                group.style.display = 'none';
+                return;
+            }
+            // Preserve selection if the slot is still populated.
+            const previous = select.value;
+            select.innerHTML = '';
+            availableAudioTracks.forEach((track, slot) => {
+                if (!track) return;
+                const opt = document.createElement('option');
+                opt.value = String(slot);
+                opt.textContent = 'A' + slot + (track.label ? ' (' + track.label + ')' : '');
+                select.appendChild(opt);
+            });
+            if (previous && availableAudioTracks[Number(previous)]) {
+                select.value = previous;
+            } else {
+                select.value = String(selectedAudioIndex);
+            }
+            group.style.display = 'block';
+        }
+
+        function applySelectedAudioTrack() {
+            const track = availableAudioTracks[selectedAudioIndex];
+            if (!track) return;
+            const audio = document.getElementById('audio');
+            const stream = new MediaStream([track]);
+            audio.srcObject = stream;
+            audio.play().catch(() => {});
+            // Restart the meter on the new track.
+            startAudioMeter(track);
+        }
+
+        function onAudioTrackChange() {
+            const select = document.getElementById('audioTrackSelect');
+            const idx = Number(select.value);
+            if (Number.isNaN(idx) || idx < 0 || idx >= availableAudioTracks.length) return;
+            if (!availableAudioTracks[idx]) return;
+            selectedAudioIndex = idx;
+            applySelectedAudioTrack();
+            log('Switched to audio track A' + idx);
+        }
+
+        function refreshVideoTrackDropdown() {
+            const group = document.getElementById('videoTrackGroup');
+            const select = document.getElementById('videoTrackSelect');
+            const filledCount = availableVideoTracks.filter(t => t != null).length;
+            if (filledCount <= 1) {
+                group.style.display = 'none';
+                return;
+            }
+            const previous = select.value;
+            select.innerHTML = '';
+            availableVideoTracks.forEach((track, slot) => {
+                if (!track) return;
+                const opt = document.createElement('option');
+                opt.value = String(slot);
+                opt.textContent = 'V' + slot + (track.label ? ' (' + track.label + ')' : '');
+                select.appendChild(opt);
+            });
+            if (previous && availableVideoTracks[Number(previous)]) {
+                select.value = previous;
+            } else {
+                select.value = String(selectedVideoIndex);
+            }
+            group.style.display = 'block';
+        }
+
+        function applySelectedVideoTrack() {
+            const track = availableVideoTracks[selectedVideoIndex];
+            if (!track) return;
+            const video = document.getElementById('video');
+            // In multi-video mode the dropdown owns the video element source.
+            // Build a video-only stream (audio routing is handled separately by
+            // the audio element / audio-track dropdown).
+            video.srcObject = new MediaStream([track]);
+            setElementClass('videoContainer', 'active', true);
+            video.muted = true;
+            video.play().catch(() => {});
+        }
+
+        function onVideoTrackChange() {
+            const select = document.getElementById('videoTrackSelect');
+            const idx = Number(select.value);
+            if (Number.isNaN(idx) || idx < 0 || idx >= availableVideoTracks.length) return;
+            if (!availableVideoTracks[idx]) return;
+            selectedVideoIndex = idx;
+            applySelectedVideoTrack();
+            log('Switched to video track V' + idx);
         }
 
         function scheduleReconnect(reason) {
@@ -162,7 +296,7 @@
             }
         }
 
-        function doConnect(isReconnect = false) {
+        async function doConnect(isReconnect = false) {
             const endpoint = document.getElementById('endpoint').value.trim();
             if (!endpoint) {
                 log('Please enter a WHEP endpoint URL', 'error');
@@ -184,14 +318,35 @@
                 connection = null;
             }
 
+            // Reset multi-track state for the new connection.
+            availableAudioTracks = [];
+            selectedAudioIndex = 0;
+            availableVideoTracks = [];
+            selectedVideoIndex = 0;
+            document.getElementById('audioTrackGroup').style.display = 'none';
+            document.getElementById('videoTrackGroup').style.display = 'none';
+
             document.getElementById('connectBtn').disabled = true;
             document.getElementById('disconnectBtn').disabled = false;
             setStatus('status', isReconnect ? 'Reconnecting...' : 'Connecting...', 'connecting');
             log(isReconnect ? 'Reconnecting to ' + endpoint : 'Connecting to ' + endpoint);
 
+            // Look up how many audio/video tracks this endpoint exposes.
+            const { numAudioTracks, numVideoTracks } = await fetchTrackCounts(endpoint);
+            if (myConnectionId !== connectionId) return; // User started a new connect while we awaited
+            const multiAudio = numAudioTracks > 1;
+            const multiVideo = numVideoTracks > 1;
+            if (multiAudio) {
+                log('Endpoint exposes ' + numAudioTracks + ' audio tracks');
+            }
+            if (multiVideo) {
+                log('Endpoint exposes ' + numVideoTracks + ' video tracks');
+            }
+
             connection = new WhepConnection(endpoint, {
                 onAudioTrack: (stream) => {
                     if (myConnectionId !== connectionId) return; // Stale
+                    if (multiAudio) return; // Multi-audio path handled by onAudioTracks
                     audioTrack = stream.getAudioTracks()[0];
                     startAudioMeter(audioTrack);
                     // Set on audio element for now; if video arrives,
@@ -200,20 +355,59 @@
                     audio.srcObject = stream;
                     audio.play().catch(() => {});
                 },
+                onAudioTracks: (tracks) => {
+                    if (myConnectionId !== connectionId) return; // Stale
+                    availableAudioTracks = tracks;
+                    if (!multiAudio) return;
+                    refreshAudioTrackDropdown();
+                    // Route the currently-selected track to the audio element.
+                    // If the selected slot is empty (e.g. tracks arriving in
+                    // a different order), fall back to the first filled slot.
+                    if (selectedAudioIndex >= availableAudioTracks.length ||
+                        !availableAudioTracks[selectedAudioIndex]) {
+                        const firstFilled = availableAudioTracks.findIndex(t => t != null);
+                        selectedAudioIndex = firstFilled >= 0 ? firstFilled : 0;
+                    }
+                    applySelectedAudioTrack();
+                },
                 onVideoTrack: (stream) => {
                     if (myConnectionId !== connectionId) return; // Stale
-                    // Add audio track to video stream so built-in controls
-                    // handle both audio and video
-                    if (audioTrack) {
-                        stream.addTrack(audioTrack);
-                    }
+                    if (multiVideo) return; // Multi-video path handled by onVideoTracks
                     const video = document.getElementById('video');
-                    video.srcObject = stream;
+                    // In multi-audio mode the dropdown is the only audio source,
+                    // so build a video-only stream to keep audio off the video
+                    // element entirely (defends against same-MSID delivery and
+                    // accidental unmute via the controls UI).
+                    let videoStream;
+                    if (multiAudio) {
+                        videoStream = new MediaStream(stream.getVideoTracks());
+                    } else {
+                        videoStream = stream;
+                        if (audioTrack) {
+                            videoStream.addTrack(audioTrack);
+                        }
+                    }
+                    video.srcObject = videoStream;
                     setElementClass('videoContainer', 'active', true);
                     video.muted = true;
                     video.play().catch(e => {
                         log('Autoplay blocked: ' + e.message, 'warning');
                     });
+                },
+                onVideoTracks: (tracks) => {
+                    if (myConnectionId !== connectionId) return; // Stale
+                    availableVideoTracks = tracks;
+                    if (!multiVideo) return;
+                    refreshVideoTrackDropdown();
+                    // Route the currently-selected track to the video element.
+                    // Fall back to the first filled slot if the selected one
+                    // hasn't arrived yet.
+                    if (selectedVideoIndex >= availableVideoTracks.length ||
+                        !availableVideoTracks[selectedVideoIndex]) {
+                        const firstFilled = availableVideoTracks.findIndex(t => t != null);
+                        selectedVideoIndex = firstFilled >= 0 ? firstFilled : 0;
+                    }
+                    applySelectedVideoTrack();
                 },
                 onStats: (stats) => {
                     if (myConnectionId !== connectionId) return;
@@ -253,9 +447,11 @@
                     if (myConnectionId !== connectionId) return; // Stale
                     const isAudioOnly = hasAudio && !hasVideo;
                     setElementClass('audioIndicator', 'active', hasAudio);
-                    setElementClass('audioControls', 'active', isAudioOnly);
+                    // In multi-audio we always need the mute/volume controls
+                    // for the selected track, even when video is also present.
+                    setElementClass('audioControls', 'active', isAudioOnly || multiAudio);
                     hasAudioStream = hasAudio;
-                    if (hasVideo) {
+                    if (hasVideo && !multiAudio) {
                         // Audio is on the video element now, clear the
                         // separate audio element
                         document.getElementById('audio').srcObject = null;
@@ -284,6 +480,12 @@
                     setElementClass('videoContainer', 'active', false);
                     hasAudioStream = false;
                     audioTrack = null;
+                    availableAudioTracks = [];
+                    selectedAudioIndex = 0;
+                    availableVideoTracks = [];
+                    selectedVideoIndex = 0;
+                    document.getElementById('audioTrackGroup').style.display = 'none';
+                    document.getElementById('videoTrackGroup').style.display = 'none';
                     stopAudioMeter();
                     updateAudioOutputDropdown();
                     document.getElementById('audio').srcObject = null;
@@ -309,7 +511,7 @@
                     if (myConnectionId !== connectionId) return; // Stale
                     log(msg, type || '');
                 }
-            });
+            }, { numAudioTracks, numVideoTracks });
 
             connection.connect();
         }
@@ -330,6 +532,12 @@
             setElementClass('videoContainer', 'active', false);
             hasAudioStream = false;
             audioTrack = null;
+            availableAudioTracks = [];
+            selectedAudioIndex = 0;
+            availableVideoTracks = [];
+            selectedVideoIndex = 0;
+            document.getElementById('audioTrackGroup').style.display = 'none';
+            document.getElementById('videoTrackGroup').style.display = 'none';
             stopAudioMeter();
             updateAudioOutputDropdown();
             document.getElementById('audio').srcObject = null;

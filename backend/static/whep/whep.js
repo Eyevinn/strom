@@ -76,13 +76,27 @@ function parseIceCandidate(candidateStr) {
 }
 
 class WhepConnection {
-    constructor(endpoint, callbacks = {}) {
+    constructor(endpoint, callbacks = {}, options = {}) {
         this.endpoint = endpoint;
         this.callbacks = callbacks;
+        // Number of recvonly audio/video transceivers to add in the offer. The
+        // server can answer with up to this many m= sections of each kind.
+        this.numAudioTracks = Math.max(1, options.numAudioTracks || 1);
+        this.numVideoTracks = Math.max(1, options.numVideoTracks || 1);
         this.peerConnection = null;
         this.resourceUrl = null;
         this.hasAudio = false;
         this.hasVideo = false;
+        // Slot-indexed audio/video tracks: index N corresponds to transceiver N
+        // (and therefore audio_in / audio_in_N on the backend pad). Slots that
+        // have not yet received a track contain null. This is more robust than
+        // arrival order, which relies on SDP m-line ordering being preserved.
+        this.audioTracks = [];
+        this.videoTracks = [];
+        // Transceivers we created for audio/video, kept so we can map an
+        // incoming ontrack event back to the slot we asked for.
+        this.audioTransceivers = [];
+        this.videoTransceivers = [];
         this.localCandidates = [];
         this.remoteCandidates = [];
         this.iceConfig = null;
@@ -131,6 +145,10 @@ class WhepConnection {
     async connect() {
         this.hasAudio = false;
         this.hasVideo = false;
+        this.audioTracks = new Array(this.numAudioTracks).fill(null);
+        this.videoTracks = new Array(this.numVideoTracks).fill(null);
+        this.audioTransceivers = [];
+        this.videoTransceivers = [];
         this.localCandidates = [];
         this.remoteCandidates = [];
 
@@ -216,13 +234,68 @@ class WhepConnection {
                 this._log('Track received: kind=' + event.track.kind + ' id=' + event.track.id);
                 if (event.track.kind === 'audio') {
                     this.hasAudio = true;
-                    if (this.callbacks.onAudioTrack) {
+                    // Map back to the slot we asked for via the transceiver
+                    // identity, so UI labels A0/A1/... line up with backend pads
+                    // even if the answer SDP reorders m-sections.
+                    let slot = this.audioTransceivers.indexOf(event.transceiver);
+                    let isFirst;
+                    if (slot >= 0 && slot < this.audioTracks.length) {
+                        isFirst = this.audioTracks.every(t => t == null);
+                        this.audioTracks[slot] = event.track;
+                    } else {
+                        // Fallback: transceiver not in our list — fill the first
+                        // empty slot, otherwise append. Should not happen with
+                        // a spec-compliant server.
+                        this._log('Audio track from unknown transceiver, falling back to first empty slot', 'warning');
+                        const firstEmpty = this.audioTracks.indexOf(null);
+                        isFirst = this.audioTracks.every(t => t == null);
+                        if (firstEmpty >= 0) {
+                            this.audioTracks[firstEmpty] = event.track;
+                        } else {
+                            this.audioTracks.push(event.track);
+                        }
+                    }
+                    // First audio track is delivered via onAudioTrack for backwards
+                    // compatibility with single-audio UIs (stream cards).
+                    if (isFirst && this.callbacks.onAudioTrack) {
                         this.callbacks.onAudioTrack(event.streams[0]);
+                    }
+                    // Notify on every audio track so multi-audio UIs can populate
+                    // their selectors as tracks arrive. Array is slot-indexed and
+                    // may contain null entries for slots not yet delivered.
+                    if (this.callbacks.onAudioTracks) {
+                        this.callbacks.onAudioTracks(this.audioTracks.slice());
                     }
                 } else if (event.track.kind === 'video') {
                     this.hasVideo = true;
-                    if (this.callbacks.onVideoTrack) {
+                    // Map back to the slot we asked for via the transceiver
+                    // identity, so UI labels V0/V1/... line up with backend pads
+                    // even if the answer SDP reorders m-sections.
+                    let slot = this.videoTransceivers.indexOf(event.transceiver);
+                    let isFirst;
+                    if (slot >= 0 && slot < this.videoTracks.length) {
+                        isFirst = this.videoTracks.every(t => t == null);
+                        this.videoTracks[slot] = event.track;
+                    } else {
+                        this._log('Video track from unknown transceiver, falling back to first empty slot', 'warning');
+                        const firstEmpty = this.videoTracks.indexOf(null);
+                        isFirst = this.videoTracks.every(t => t == null);
+                        if (firstEmpty >= 0) {
+                            this.videoTracks[firstEmpty] = event.track;
+                        } else {
+                            this.videoTracks.push(event.track);
+                        }
+                    }
+                    // First video track is delivered via onVideoTrack for
+                    // backwards compatibility with single-video UIs.
+                    if (isFirst && this.callbacks.onVideoTrack) {
                         this.callbacks.onVideoTrack(event.streams[0]);
+                    }
+                    // Notify on every video track so multi-video UIs can populate
+                    // their selectors as tracks arrive. Array is slot-indexed and
+                    // may contain null entries for slots not yet delivered.
+                    if (this.callbacks.onVideoTracks) {
+                        this.callbacks.onVideoTracks(this.videoTracks.slice());
                     }
                 }
                 this._updateStatus();
@@ -262,10 +335,25 @@ class WhepConnection {
                 }
             };
 
-            // Create both audio and video transceivers - server decides what to send
-            this._log('Adding transceivers (audio + video, recvonly)');
-            this.peerConnection.addTransceiver('audio', { direction: 'recvonly' });
-            this.peerConnection.addTransceiver('video', { direction: 'recvonly' });
+            // Create transceivers - server decides what to send. Add
+            // numAudioTracks + numVideoTracks recvonly transceivers so the
+            // server can answer with that many m= sections of each kind. Keep
+            // references so ontrack can map an incoming track to the slot we
+            // asked for.
+            this._log('Adding transceivers (audio x' + this.numAudioTracks +
+                ' + video x' + this.numVideoTracks + ', recvonly)');
+            this.audioTransceivers = [];
+            for (let i = 0; i < this.numAudioTracks; i++) {
+                this.audioTransceivers.push(
+                    this.peerConnection.addTransceiver('audio', { direction: 'recvonly' })
+                );
+            }
+            this.videoTransceivers = [];
+            for (let i = 0; i < this.numVideoTracks; i++) {
+                this.videoTransceivers.push(
+                    this.peerConnection.addTransceiver('video', { direction: 'recvonly' })
+                );
+            }
 
             const offer = await this.peerConnection.createOffer();
             // Enable Opus stereo - Chrome defaults to mono which breaks stereo audio
@@ -838,6 +926,10 @@ class WhepConnection {
         this.resourceUrl = null;
         this.hasAudio = false;
         this.hasVideo = false;
+        this.audioTracks = [];
+        this.videoTracks = [];
+        this.audioTransceivers = [];
+        this.videoTransceivers = [];
     }
 
     isConnected() {
