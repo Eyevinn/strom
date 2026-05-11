@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 impl PipelineManager {
     /// Create a new pipeline from a flow definition.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         flow: &Flow,
         events: EventBroadcaster,
@@ -21,6 +22,7 @@ impl PipelineManager {
         ice_transport_policy: String,
         whip_registry: Option<WhipRegistry>,
         media_path: std::path::PathBuf,
+        local_devices: crate::discovery::device::GstDeviceMap,
     ) -> Result<Self, PipelineError> {
         info!("Creating pipeline for flow: {} ({})", flow.name, flow.id);
         info!(
@@ -100,6 +102,7 @@ impl PipelineManager {
                     dynamic_webrtcbins,
                     whip_registry,
                     session_thread_config,
+                    local_devices,
                 )
                 .await;
                 info!("expand_blocks completed");

@@ -71,6 +71,7 @@ async fn test_pipeline_cleanup_after_stop_and_drop() {
         "all".to_string(),
         None,
         media_path,
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     )
     .expect("Failed to create PipelineManager");
 
@@ -135,6 +136,7 @@ async fn test_leak_detection_catches_circular_reference() {
         "all".to_string(),
         None,
         media_path,
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     )
     .expect("Failed to create PipelineManager");
 

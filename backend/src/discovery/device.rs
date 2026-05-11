@@ -7,10 +7,18 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
+
+/// Sync, shareable map of discovery-id → live `gst::Device` handle.
+/// Mirrored alongside `DiscoveredDevice` so block builders (which run on
+/// blocking threads where we can't await an async lock) can resolve a
+/// device id to the underlying `GstDevice` without starting a transient
+/// `DeviceMonitor` of their own — that was crashing on macOS in
+/// `gst_device_provider_stop`.
+pub type GstDeviceMap = Arc<Mutex<HashMap<String, gst::Device>>>;
 
 pub use strom_types::discovery::{DeviceCategory, DeviceResponse};
 
@@ -69,8 +77,13 @@ impl DiscoveredDevice {
 
 /// Device discovery service using GStreamer DeviceMonitor.
 pub struct DeviceDiscovery {
-    /// Discovered devices.
+    /// Discovered devices (metadata, serialisable via API).
     devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
+    /// Live `gst::Device` handles keyed by the same id. Kept in a sync
+    /// `Mutex` so block builders running on blocking threads can do a
+    /// non-async lookup. Shared with the event loop so add/remove keeps
+    /// it in step with `devices`.
+    gst_devices: GstDeviceMap,
     /// GStreamer DeviceMonitor.
     monitor: Option<gst::DeviceMonitor>,
     /// Shutdown flag for the event loop.
@@ -84,10 +97,22 @@ impl DeviceDiscovery {
     pub fn new() -> Self {
         Self {
             devices: Arc::new(RwLock::new(HashMap::new())),
+            gst_devices: Arc::new(Mutex::new(HashMap::new())),
             monitor: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             running: false,
         }
+    }
+
+    /// Get a shared handle to the live `gst::Device` map.
+    /// Block builders clone this and read from it synchronously.
+    pub fn gst_device_map(&self) -> GstDeviceMap {
+        self.gst_devices.clone()
+    }
+
+    /// Look up a live `gst::Device` by its discovery id.
+    pub fn get_gst_device(&self, id: &str) -> Option<gst::Device> {
+        self.gst_devices.lock().ok()?.get(id).cloned()
     }
 
     /// Check if a specific device provider is available.
@@ -154,9 +179,10 @@ impl DeviceDiscovery {
 
         // Spawn task to handle device events
         let devices = self.devices.clone();
+        let gst_devices = self.gst_devices.clone();
         let shutdown = self.shutdown.clone();
         tokio::spawn(async move {
-            Self::run_event_loop(bus, devices, shutdown).await;
+            Self::run_event_loop(bus, devices, gst_devices, shutdown).await;
         });
 
         Ok(())
@@ -181,6 +207,9 @@ impl DeviceDiscovery {
         // Clear devices
         let mut devices = self.devices.write().await;
         devices.clear();
+        if let Ok(mut gst_devices) = self.gst_devices.lock() {
+            gst_devices.clear();
+        }
     }
 
     /// Get all discovered devices.
@@ -324,14 +353,20 @@ impl DeviceDiscovery {
         }
 
         devices
-            .entry(id)
+            .entry(id.clone())
             .and_modify(|d| d.last_seen = now)
             .or_insert(discovered);
+        drop(devices);
+
+        if let Ok(mut gst_devices) = self.gst_devices.lock() {
+            gst_devices.insert(id, device.clone());
+        }
     }
 
     /// Handle a device removed event.
     async fn handle_device_removed(
         devices: &Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
+        gst_devices: &GstDeviceMap,
         device: &gst::Device,
     ) {
         let display_name = device.display_name().to_string();
@@ -344,12 +379,16 @@ impl DeviceDiscovery {
         if devices.remove(&id).is_some() {
             info!("Device removed: {}", display_name);
         }
+        if let Ok(mut gst_devices) = gst_devices.lock() {
+            gst_devices.remove(&id);
+        }
     }
 
     /// Run the event loop for device monitor bus messages.
     async fn run_event_loop(
         bus: gst::Bus,
         devices: Arc<RwLock<HashMap<String, DiscoveredDevice>>>,
+        gst_devices: GstDeviceMap,
         shutdown: Arc<AtomicBool>,
     ) {
         loop {
@@ -427,13 +466,18 @@ impl DeviceDiscovery {
                     }
 
                     devices_guard
-                        .entry(id)
+                        .entry(id.clone())
                         .and_modify(|d| d.last_seen = now)
                         .or_insert(discovered);
+                    drop(devices_guard);
+
+                    if let Ok(mut gst_devices_guard) = gst_devices.lock() {
+                        gst_devices_guard.insert(id, device);
+                    }
                 }
                 gst::MessageView::DeviceRemoved(device_removed) => {
                     let device = device_removed.device();
-                    Self::handle_device_removed(&devices, &device).await;
+                    Self::handle_device_removed(&devices, &gst_devices, &device).await;
                 }
                 _ => {}
             }

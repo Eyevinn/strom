@@ -22,7 +22,6 @@
 //! `audio`) the same way the DeckLink and WHEP blocks do.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::discovery::device::DeviceDiscovery;
 use crate::gpu::video_convert_mode;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -32,7 +31,7 @@ use strom_types::{
     element::ElementPadRef,
     MediaType, PropertyValue,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 /// Local Input block builder.
 pub struct LocalInputBuilder;
@@ -82,7 +81,7 @@ impl BlockBuilder for LocalInputBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         info!("Building Local Input block: {}", instance_id);
 
@@ -98,6 +97,7 @@ impl BlockBuilder for LocalInputBuilder {
             let videocaps_id = format!("{}:videocapsfilter", instance_id);
 
             let videosrc = make_source(
+                ctx,
                 MediaType::Video,
                 &video_device_id,
                 &videosrc_id,
@@ -141,6 +141,7 @@ impl BlockBuilder for LocalInputBuilder {
             let audiocaps_id = format!("{}:audiocapsfilter", instance_id);
 
             let audiosrc = make_source(
+                ctx,
                 MediaType::Audio,
                 &audio_device_id,
                 &audiosrc_id,
@@ -194,15 +195,22 @@ impl BlockBuilder for LocalInputBuilder {
 
 /// Build a source element for the given media type.
 ///
-/// If `device_id` is non-empty, look it up via a short-lived `GstDeviceMonitor`
-/// filtered to the matching capture class and create the source from the
-/// resulting `GstDevice` (`Device::create_element()`) — that wires in the
-/// platform-specific device-path property automatically.
+/// If `device_id` is non-empty, look up the live `gst::Device` from the
+/// long-running `DeviceDiscovery` (shared via `BlockBuildContext`) and call
+/// `Device::create_element()` — that bakes in the platform-specific
+/// device-path property automatically.
 ///
 /// If `device_id` is empty, create `fallback_element_name` (typically
 /// `autovideosrc`/`autoaudiosrc`) so the block still works without an
 /// explicit selection.
+///
+/// **Why not spin up a transient `gst::DeviceMonitor` here?** That was the
+/// original implementation, and it crashed inside `gst_device_provider_stop`
+/// on macOS (SIGSEGV with pointer-authentication failure) when the AVFoundation
+/// / CoreAudio providers were torn down right after enumeration. Reusing the
+/// app-lifetime monitor sidesteps the buggy stop path entirely.
 fn make_source(
+    ctx: &BlockBuildContext,
     media: MediaType,
     device_id: &str,
     element_id: &str,
@@ -217,7 +225,7 @@ fn make_source(
             });
     }
 
-    let filter_class = match media {
+    let device_kind = match media {
         MediaType::Video => "Video/Source",
         MediaType::Audio => "Audio/Source",
         _ => {
@@ -228,39 +236,17 @@ fn make_source(
         }
     };
 
-    let monitor = gst::DeviceMonitor::new();
-    monitor.add_filter(Some(filter_class), None);
-    if let Err(e) = monitor.start() {
-        warn!(
-            "Failed to start DeviceMonitor while resolving '{}' device '{}': {} — falling back to {}",
-            filter_class, device_id, e, fallback_element_name
-        );
-        return gst::ElementFactory::make(fallback_element_name)
-            .name(element_id)
-            .build()
-            .map_err(|e| {
-                BlockBuildError::ElementCreation(format!("{}: {}", fallback_element_name, e))
-            });
-    }
-
-    let devices = monitor.devices();
-    let matched = devices
-        .iter()
-        .find(|d| DeviceDiscovery::device_id_for(d) == device_id)
-        .cloned();
-    monitor.stop();
-
-    let device = matched.ok_or_else(|| {
+    let device = ctx.local_device(device_id).ok_or_else(|| {
         BlockBuildError::InvalidConfiguration(format!(
             "{} device '{}' not found — refresh /api/discovery/devices and pick a current id",
-            filter_class, device_id
+            device_kind, device_id
         ))
     })?;
 
     let element = device.create_element(Some(element_id)).map_err(|e| {
         BlockBuildError::ElementCreation(format!(
             "create_element for {} device '{}' ({}): {}",
-            filter_class,
+            device_kind,
             device.display_name(),
             device_id,
             e
@@ -269,7 +255,7 @@ fn make_source(
 
     info!(
         "Local Input: bound {} pad to device '{}' (id={}, factory={})",
-        filter_class,
+        device_kind,
         device.display_name(),
         device_id,
         element

@@ -59,6 +59,7 @@ pub async fn expand_blocks(
     dynamic_webrtcbins: DynamicWebrtcbinStore,
     whip_registry: Option<WhipRegistry>,
     session_thread_config: SessionThreadConfig,
+    local_devices: crate::discovery::device::GstDeviceMap,
 ) -> Result<ExpandedPipeline, PipelineError> {
     let mut gst_elements = Vec::new();
     let mut all_links = Vec::new();
@@ -73,6 +74,7 @@ pub async fn expand_blocks(
         dynamic_webrtcbins,
         whip_registry,
         session_thread_config,
+        local_devices,
     );
 
     debug!("Expanding {} block instance(s)", blocks.len());
@@ -354,6 +356,7 @@ mod tests {
             dynamic_webrtcbins,
             None,
             crate::gst::SessionThreadConfig::new(),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         )
         .await;
         assert!(result.is_ok());

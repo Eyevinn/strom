@@ -1404,6 +1404,22 @@ impl DiscoveryService {
             device_guard.refresh().await;
         }
     }
+
+    /// Shared handle to the live `gst::Device` map maintained by the
+    /// background `DeviceMonitor`. Block builders clone this so they can
+    /// resolve a device id → `GstDevice` synchronously without spinning up
+    /// their own monitor (which crashes inside `gst_device_provider_stop`
+    /// on macOS — see commit history on `feat/local-input-block`).
+    /// Returns an empty handle if device discovery hasn't started yet.
+    pub async fn local_device_map(&self) -> crate::discovery::device::GstDeviceMap {
+        let device_lock = self.inner.device_discovery.read().await;
+        if let Some(device) = device_lock.as_ref() {
+            let device_guard = device.read().await;
+            device_guard.gst_device_map()
+        } else {
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+        }
+    }
 }
 
 impl Default for DiscoveryService {
