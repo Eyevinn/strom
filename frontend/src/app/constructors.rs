@@ -7,6 +7,7 @@ use crate::mediaplayer::{MediaPlayerDataStore, SeekThrottle};
 use crate::meter::MeterDataStore;
 use crate::palette::ElementPalette;
 use crate::spectrum::SpectrumDataStore;
+use crate::srt_stats::SrtStatsStore;
 use crate::state::{AppStateChannels, ConnectionState};
 use crate::system_monitor::SystemMonitorStore;
 use crate::thread_monitor::ThreadMonitorStore;
@@ -122,6 +123,7 @@ impl StromApp {
             mediaplayer_data: MediaPlayerDataStore::new(),
             seek_throttle: SeekThrottle::new(),
             webrtc_stats: WebRtcStatsStore::new(),
+            srt_stats: SrtStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
             thread_monitor: ThreadMonitorStore::new(),
             ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
@@ -134,6 +136,7 @@ impl StromApp {
             thread_sort_direction: crate::system_monitor::SortDirection::default(),
             pending_thread_nav_action: None,
             last_webrtc_poll: instant::Instant::now(),
+            last_srt_poll: instant::Instant::now(),
             settings: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, APP_SETTINGS_KEY))
@@ -301,6 +304,7 @@ impl StromApp {
             mediaplayer_data: MediaPlayerDataStore::new(),
             seek_throttle: SeekThrottle::new(),
             webrtc_stats: WebRtcStatsStore::new(),
+            srt_stats: SrtStatsStore::new(),
             system_monitor: SystemMonitorStore::new(),
             thread_monitor: ThreadMonitorStore::new(),
             ptp_stats: crate::ptp_monitor::PtpStatsStore::new(),
@@ -313,6 +317,7 @@ impl StromApp {
             thread_sort_direction: crate::system_monitor::SortDirection::default(),
             pending_thread_nav_action: None,
             last_webrtc_poll: instant::Instant::now(),
+            last_srt_poll: instant::Instant::now(),
             settings: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, APP_SETTINGS_KEY))

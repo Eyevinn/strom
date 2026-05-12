@@ -60,6 +60,12 @@ pub enum AppMessage {
         stats: strom_types::api::WebRtcStats,
     },
 
+    /// SRT stats loaded for a flow
+    SrtStatsLoaded {
+        flow_id: strom_types::FlowId,
+        stats: strom_types::api::SrtStats,
+    },
+
     /// Flow operation completed successfully
     FlowOperationSuccess(String),
     /// Flow operation failed

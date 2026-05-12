@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::AuthStatusResponse;
+use crate::srt_stats::is_srt_block_def;
 use crate::state::AppMessage;
 use egui::Context;
 impl StromApp {
@@ -401,6 +402,53 @@ impl StromApp {
                 Err(e) => {
                     // Don't log errors for flows without WebRTC elements
                     tracing::trace!("No WebRTC stats for flow {}: {}", flow_id, e);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Poll SRT stats for the currently selected flow if it has SRT input/output blocks.
+    /// Called periodically (every second) — mirrors `poll_webrtc_stats`.
+    pub(super) fn poll_srt_stats(&mut self, ctx: &Context) {
+        let flow_id = match self.selected_flow_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let flow = self.flows.iter().find(|f| f.id == flow_id);
+        let is_running = flow.map(|f| f.running).unwrap_or(false);
+        if !is_running {
+            return;
+        }
+
+        let has_srt_blocks = flow
+            .map(|f| {
+                f.blocks
+                    .iter()
+                    .any(|b| is_srt_block_def(&b.block_definition_id))
+            })
+            .unwrap_or(false);
+        if !has_srt_blocks {
+            return;
+        }
+
+        let api = self.api.clone();
+        let tx = self.channels.sender();
+        let ctx = ctx.clone();
+
+        spawn_task(async move {
+            match api.get_srt_stats(flow_id).await {
+                Ok(stats) => {
+                    tracing::debug!(
+                        "Fetched SRT stats for flow {}: {} connections",
+                        flow_id,
+                        stats.connections.len()
+                    );
+                    let _ = tx.send(AppMessage::SrtStatsLoaded { flow_id, stats });
+                }
+                Err(e) => {
+                    tracing::trace!("No SRT stats for flow {}: {}", flow_id, e);
                 }
             }
             ctx.request_repaint();

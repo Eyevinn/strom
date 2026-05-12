@@ -301,6 +301,7 @@ impl eframe::App for StromApp {
                             self.qos_stats.clear_flow(&flow_id);
                             self.buffer_age_data.clear_flow(&flow_id);
                             self.webrtc_stats.clear_flow(&flow_id);
+                            self.srt_stats.clear_flow(&flow_id);
                             self.flow_start_times.remove(&flow_id);
                             self.needs_refresh = true;
                         }
@@ -310,6 +311,7 @@ impl eframe::App for StromApp {
                             self.qos_stats.clear_flow(&flow_id);
                             self.buffer_age_data.clear_flow(&flow_id);
                             self.webrtc_stats.clear_flow(&flow_id);
+                            self.srt_stats.clear_flow(&flow_id);
                             self.recorder_filenames
                                 .retain(|(fid, _), _| *fid != flow_id);
                             self.recorder_start_times
@@ -1075,6 +1077,14 @@ impl eframe::App for StromApp {
                     );
                     self.webrtc_stats.update(flow_id, stats);
                 }
+                AppMessage::SrtStatsLoaded { flow_id, stats } => {
+                    tracing::debug!(
+                        "SRT stats loaded for flow {}: {} connections",
+                        flow_id,
+                        stats.connections.len()
+                    );
+                    self.srt_stats.update(flow_id, stats);
+                }
                 AppMessage::FlowOperationSuccess(message) => {
                     tracing::info!("Flow operation succeeded: {}", message);
                     self.status = message;
@@ -1346,6 +1356,13 @@ impl eframe::App for StromApp {
                     self.webrtc_stats
                         .evict_stale(std::time::Duration::from_secs(3));
                     self.last_webrtc_poll = instant::Instant::now();
+                }
+
+                if self.last_srt_poll.elapsed() >= poll_interval {
+                    self.poll_srt_stats(ui.ctx());
+                    self.srt_stats
+                        .evict_stale(std::time::Duration::from_secs(3));
+                    self.last_srt_poll = instant::Instant::now();
                 }
             }
 

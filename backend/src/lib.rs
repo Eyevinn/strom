@@ -137,6 +137,7 @@ pub async fn create_app_with_config(
             "/flows/{id}/webrtc-stats",
             get(api::flows::get_webrtc_stats),
         )
+        .route("/flows/{id}/srt-stats", get(api::flows::get_srt_stats))
         .route(
             "/flows/{flow_id}/blocks/{block_id}/sdp",
             get(api::flows::get_block_sdp),

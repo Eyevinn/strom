@@ -29,6 +29,7 @@ use crate::meter::MeterDataStore;
 use crate::mixer::MixerEditor;
 use crate::palette::ElementPalette;
 use crate::spectrum::SpectrumDataStore;
+use crate::srt_stats::SrtStatsStore;
 use crate::state::{AppStateChannels, ConnectionState};
 use crate::system_monitor::SystemMonitorStore;
 use crate::thread_monitor::ThreadMonitorStore;
@@ -642,6 +643,8 @@ pub struct StromApp {
     seek_throttle: SeekThrottle,
     /// WebRTC stats storage for all WebRTC connections
     webrtc_stats: WebRtcStatsStore,
+    /// SRT stats storage for all SRT inputs/outputs
+    srt_stats: SrtStatsStore,
     /// System monitoring statistics
     system_monitor: SystemMonitorStore,
     /// Thread CPU monitoring statistics
@@ -666,6 +669,8 @@ pub struct StromApp {
     pending_thread_nav_action: Option<crate::system_monitor::ThreadNavigationAction>,
     /// Last time WebRTC stats were polled
     last_webrtc_poll: instant::Instant,
+    /// Last time SRT stats were polled
+    last_srt_poll: instant::Instant,
     /// Persisted settings (theme, zoom, etc.)
     settings: AppSettings,
     /// Whether we need to apply settings in the first update frame (workaround for iOS)

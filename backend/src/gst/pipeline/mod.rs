@@ -6,6 +6,7 @@ mod effects;
 mod lifecycle;
 mod linking;
 mod properties;
+mod srt;
 mod state;
 mod webrtc;
 

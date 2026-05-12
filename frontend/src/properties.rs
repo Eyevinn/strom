@@ -466,6 +466,7 @@ impl PropertyInspector {
         latency_data_store: &crate::latency::LatencyDataStore,
         mediaplayer_data_store: &crate::mediaplayer::MediaPlayerDataStore,
         webrtc_stats_store: &crate::webrtc_stats::WebRtcStatsStore,
+        srt_stats_store: &crate::srt_stats::SrtStatsStore,
         rtp_stats: Option<&strom_types::api::FlowStatsResponse>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
@@ -1148,6 +1149,45 @@ impl PropertyInspector {
                                 );
                                 ui.add_space(4.0);
                                 ui.small("Start the flow to see WebRTC statistics.");
+                            }
+                        } else {
+                            ui.colored_label(
+                                Color32::from_rgb(200, 200, 100),
+                                "⚠ No flow selected",
+                            );
+                        }
+                    }
+
+                    // Show SRT statistics for SRT input/output blocks
+                    if crate::srt_stats::is_srt_block_def(&definition.id) {
+                        ui.separator();
+                        ui.heading("📊 SRT Statistics");
+                        ui.add_space(4.0);
+
+                        if let Some(flow_id) = flow_id {
+                            if let Some((block_stats, filtered_rates)) =
+                                srt_stats_store.snapshot_for_block(&flow_id, &block.id)
+                            {
+                                let rates_opt = if filtered_rates.is_empty() {
+                                    None
+                                } else {
+                                    Some(&filtered_rates)
+                                };
+                                crate::srt_stats::show_full(ui, &block_stats, rates_opt);
+                            } else if srt_stats_store.get(&flow_id).is_some() {
+                                ui.colored_label(
+                                    Color32::from_rgb(200, 200, 100),
+                                    "⚠ No SRT element data yet",
+                                );
+                                ui.add_space(4.0);
+                                ui.small("SRT statistics appear once the pipeline is running.");
+                            } else {
+                                ui.colored_label(
+                                    Color32::from_rgb(200, 200, 100),
+                                    "⚠ SRT statistics not available",
+                                );
+                                ui.add_space(4.0);
+                                ui.small("Start the flow to see SRT statistics.");
                             }
                         } else {
                             ui.colored_label(
