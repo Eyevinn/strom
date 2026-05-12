@@ -240,15 +240,47 @@ impl DeviceDiscovery {
         devices.get(id).cloned()
     }
 
-    /// Compute the discovery ID for a `gst::Device` using the same hash inputs
-    /// (device class, provider, display name) as `DiscoveredDevice::generate_id`.
-    /// Used by block builders to match a user-selected device id back to the
-    /// underlying `gst::Device` returned from a `gst::DeviceMonitor`.
+    /// Compute the discovery ID for a `gst::Device`.
+    ///
+    /// Prefers persistent identifiers in this priority order:
+    ///
+    /// 1. `device.path` — Pulse, WASAPI, ALSA (hardware-path string)
+    /// 2. `object.path` — PipeWire
+    /// 3. `api.v4l2.path` — Linux v4l2 device node (e.g. `/dev/video0`)
+    /// 4. `device.serial` — USB serial number when the provider exposes one
+    /// 5. Falls back to `display_name` if none of the above is present
+    ///    (matches the previous behaviour).
+    ///
+    /// Hashed together with the device class so an audio device and a
+    /// video device that happen to share a path key still get distinct
+    /// ids. Used by block builders to map a user-saved device id back to
+    /// the live `gst::Device` returned by the long-running monitor.
     pub fn device_id_for(device: &gst::Device) -> String {
         let class = device.device_class().to_string();
         let provider = Self::get_provider_name(device, &class);
-        let name = device.display_name().to_string();
-        DiscoveredDevice::generate_id(&class, &provider, &name)
+        let display = device.display_name().to_string();
+        let key = Self::stable_key(device).unwrap_or_else(|| display.clone());
+        DiscoveredDevice::generate_id(&class, &provider, &key)
+    }
+
+    /// Return the first persistent device-identifier property found on
+    /// `device`, or `None` if all are missing (in which case callers
+    /// should fall back to `display_name`).
+    fn stable_key(device: &gst::Device) -> Option<String> {
+        let props = device.properties()?;
+        for key in [
+            "device.path",
+            "object.path",
+            "api.v4l2.path",
+            "device.serial",
+        ] {
+            if let Ok(v) = props.get::<String>(key) {
+                if !v.is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+        None
     }
 
     /// Get provider name from device properties or infer from device class.
@@ -326,7 +358,7 @@ impl DeviceDiscovery {
             debug!("Device properties for {}: {:?}", display_name, properties);
         }
 
-        let id = DiscoveredDevice::generate_id(&device_class, &provider, &display_name);
+        let id = Self::device_id_for(device);
         let now = Instant::now();
 
         let discovered = DiscoveredDevice {
@@ -370,10 +402,7 @@ impl DeviceDiscovery {
         device: &gst::Device,
     ) {
         let display_name = device.display_name().to_string();
-        let device_class = device.device_class().to_string();
-        let provider = Self::get_provider_name(device, &device_class);
-
-        let id = DiscoveredDevice::generate_id(&device_class, &provider, &display_name);
+        let id = Self::device_id_for(device);
 
         let mut devices = devices.write().await;
         if devices.remove(&id).is_some() {
@@ -441,7 +470,7 @@ impl DeviceDiscovery {
                         }
                     }
 
-                    let id = DiscoveredDevice::generate_id(&device_class, &provider, &display_name);
+                    let id = Self::device_id_for(&device);
                     let now = Instant::now();
 
                     let discovered = DiscoveredDevice {

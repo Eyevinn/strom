@@ -32,13 +32,14 @@
 //!   to `video/x-raw | image/jpeg` and put a `jpegdec` (or `decodebin`)
 //!   between the source and `videoconvert` when JPEG is negotiated.
 //!
-//! - **Device id stability:** [`crate::discovery::device::DeviceDiscovery::device_id_for`]
-//!   hashes `(device_class, provider, display_name)`. When two devices have
-//!   the same display name (e.g. two identical USB cams) the ids collide;
-//!   on Windows MF the name may also include numeric suffixes ("USB Camera
-//!   (2)") that shift when other devices are plugged. Prefer
-//!   `device.path` / `object.path` / `api.v4l2.path` (already collected in
-//!   `handle_device_added`) before falling back to `display_name`.
+//! - **Device id stability (best-effort):**
+//!   [`crate::discovery::device::DeviceDiscovery::device_id_for`] prefers
+//!   `device.path` / `object.path` / `api.v4l2.path` / `device.serial`
+//!   before falling back to `display_name`, which covers most desktop
+//!   providers (Pulse / WASAPI / v4l2 / PipeWire). On providers that
+//!   expose *none* of those keys the id remains derived from
+//!   `display_name`, so identical-name duplicates can still collide
+//!   there — uncommon in practice but worth knowing.
 //!
 //! - **`Device::create_element(Some(name))` on Windows:** some MF/KS
 //!   providers historically dislike having a name passed at create time.
@@ -690,5 +691,196 @@ fn local_input_definition() -> BlockDefinition {
             height: Some(1.5),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prop_string(s: &str) -> PropertyValue {
+        PropertyValue::String(s.to_string())
+    }
+
+    // --- read_stream_mode ---
+
+    #[test]
+    fn stream_mode_audio_video() {
+        let mut p = HashMap::new();
+        p.insert("stream_mode".to_string(), prop_string("audio_video"));
+        assert_eq!(read_stream_mode(&p), StreamMode::AudioVideo);
+    }
+
+    #[test]
+    fn stream_mode_video_only() {
+        let mut p = HashMap::new();
+        p.insert("stream_mode".to_string(), prop_string("video"));
+        assert_eq!(read_stream_mode(&p), StreamMode::Video);
+    }
+
+    #[test]
+    fn stream_mode_audio_only() {
+        let mut p = HashMap::new();
+        p.insert("stream_mode".to_string(), prop_string("audio"));
+        assert_eq!(read_stream_mode(&p), StreamMode::Audio);
+    }
+
+    #[test]
+    fn stream_mode_unknown_falls_back_to_audio_video() {
+        // Regression test: legacy StreamMode::parse falls back to Video,
+        // but for Local Input we want AudioVideo so the block keeps
+        // working with both pads. Verifies the local fallback override.
+        let mut p = HashMap::new();
+        p.insert("stream_mode".to_string(), prop_string("garbled"));
+        assert_eq!(read_stream_mode(&p), StreamMode::AudioVideo);
+    }
+
+    #[test]
+    fn stream_mode_missing_uses_default() {
+        let p = HashMap::new();
+        assert_eq!(read_stream_mode(&p), StreamMode::default());
+    }
+
+    // --- read_string ---
+
+    #[test]
+    fn read_string_returns_none_for_empty() {
+        let mut p = HashMap::new();
+        p.insert("k".to_string(), prop_string(""));
+        assert_eq!(read_string(&p, "k"), None);
+    }
+
+    #[test]
+    fn read_string_returns_value() {
+        let mut p = HashMap::new();
+        p.insert("k".to_string(), prop_string("hello"));
+        assert_eq!(read_string(&p, "k"), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn read_string_returns_none_for_missing() {
+        let p = HashMap::new();
+        assert_eq!(read_string(&p, "k"), None);
+    }
+
+    // --- read_bool ---
+
+    #[test]
+    fn read_bool_true() {
+        let mut p = HashMap::new();
+        p.insert("k".to_string(), PropertyValue::Bool(true));
+        assert!(read_bool(&p, "k"));
+    }
+
+    #[test]
+    fn read_bool_false() {
+        let mut p = HashMap::new();
+        p.insert("k".to_string(), PropertyValue::Bool(false));
+        assert!(!read_bool(&p, "k"));
+    }
+
+    #[test]
+    fn read_bool_missing_defaults_false() {
+        let p = HashMap::new();
+        assert!(!read_bool(&p, "k"));
+    }
+
+    #[test]
+    fn read_bool_non_bool_value_defaults_false() {
+        let mut p = HashMap::new();
+        p.insert("k".to_string(), prop_string("true"));
+        // PropertyValue::String("true") is NOT PropertyValue::Bool(true) —
+        // we don't coerce, callers should send the right type.
+        assert!(!read_bool(&p, "k"));
+    }
+
+    // --- parse_fraction_string ---
+
+    #[test]
+    fn fraction_simple() {
+        assert_eq!(
+            parse_fraction_string("30/1"),
+            Some(gst::Fraction::new(30, 1))
+        );
+    }
+
+    #[test]
+    fn fraction_drop_frame() {
+        assert_eq!(
+            parse_fraction_string("30000/1001"),
+            Some(gst::Fraction::new(30000, 1001))
+        );
+    }
+
+    #[test]
+    fn fraction_zero_denominator_rejected() {
+        assert_eq!(parse_fraction_string("30/0"), None);
+    }
+
+    #[test]
+    fn fraction_garbage_rejected() {
+        assert_eq!(parse_fraction_string(""), None);
+        assert_eq!(parse_fraction_string("abc"), None);
+        assert_eq!(parse_fraction_string("30"), None);
+        assert_eq!(parse_fraction_string("30/"), None);
+        assert_eq!(parse_fraction_string("/1"), None);
+    }
+
+    // --- get_external_pads ---
+
+    fn pads_for_mode(mode: &str) -> ExternalPads {
+        let mut p = HashMap::new();
+        p.insert("stream_mode".to_string(), prop_string(mode));
+        LocalInputBuilder.get_external_pads(&p).expect("pads")
+    }
+
+    #[test]
+    fn pads_audio_video_has_both_outputs() {
+        let pads = pads_for_mode("audio_video");
+        assert!(pads.inputs.is_empty(), "Local Input has no input pads");
+        assert_eq!(pads.outputs.len(), 2);
+        let names: Vec<&str> = pads.outputs.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"video_out"));
+        assert!(names.contains(&"audio_out"));
+        // Both pads carry a V/A label when audio+video are both present.
+        for pad in &pads.outputs {
+            assert!(pad.label.is_some(), "AV mode should label both pads");
+        }
+    }
+
+    #[test]
+    fn pads_video_only_has_one_output_no_label() {
+        let pads = pads_for_mode("video");
+        assert_eq!(pads.outputs.len(), 1);
+        assert_eq!(pads.outputs[0].name, "video_out");
+        assert_eq!(pads.outputs[0].media_type, MediaType::Video);
+        // Single-mode: no need for a V/A label.
+        assert!(pads.outputs[0].label.is_none());
+    }
+
+    #[test]
+    fn pads_audio_only_has_one_output_no_label() {
+        let pads = pads_for_mode("audio");
+        assert_eq!(pads.outputs.len(), 1);
+        assert_eq!(pads.outputs[0].name, "audio_out");
+        assert_eq!(pads.outputs[0].media_type, MediaType::Audio);
+        assert!(pads.outputs[0].label.is_none());
+    }
+
+    #[test]
+    fn pads_internal_element_ids_match_build_chain() {
+        // The external-pad `internal_element_id` strings have to match
+        // the actual element IDs `build()` produces (after the
+        // instance-id prefix), otherwise external links resolve to
+        // nothing and the flow won't run.
+        let pads = pads_for_mode("audio_video");
+        for pad in &pads.outputs {
+            match pad.media_type {
+                MediaType::Video => assert_eq!(pad.internal_element_id, "videocapsfilter"),
+                MediaType::Audio => assert_eq!(pad.internal_element_id, "audiocapsfilter"),
+                _ => panic!("unexpected media type {:?}", pad.media_type),
+            }
+            assert_eq!(pad.internal_pad_name, "src");
+        }
     }
 }
