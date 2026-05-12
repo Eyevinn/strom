@@ -48,6 +48,34 @@
 //! - **Bare-ALSA Linux** (no Pulse/PipeWire) won't enumerate audio sources
 //!   via the standard `Audio/Source` filter. Niche on desktop; relevant for
 //!   embedded / headless servers.
+//!
+//! # Multichannel audio
+//!
+//! The block can request any channel count supported by the chosen device
+//! via the `audio_channels` property (1/2/4/6/8/16/default). What you
+//! actually get depends on how the OS exposes the device:
+//!
+//! - **macOS CoreAudio:** native multichannel works directly; aggregate
+//!   devices created in *Audio MIDI Setup* show up as one device with the
+//!   total channel count.
+//! - **Linux ALSA / PipeWire:** native multichannel works. Pulse may
+//!   downmix to stereo depending on the device profile. Pure JACK servers
+//!   (jackd) are *not* enumerated by `GstDeviceMonitor` — the stock
+//!   `gst-plugin-good` jack module only registers `jackaudiosrc`/sink
+//!   elements, no device provider. Modern Linux setups typically run
+//!   PipeWire with `pw-jack` for JACK-style routing, which *does*
+//!   register a device provider and thus shows up in the picker.
+//! - **Windows WASAPI:** most pro audio drivers expose a multichannel card
+//!   as separate stereo *devices* (1/2, 3/4, 5/6, ...). Pick the pair you
+//!   want and keep `audio_channels=2`. For true multichannel you need
+//!   either WASAPI exclusive mode (`wasapi_exclusive_mode=true`) or a
+//!   third-party ASIO GStreamer plugin (`gstasio` / equivalent) — once
+//!   loaded, ASIO devices appear automatically in the picker just like
+//!   any other `GstDevice`.
+//!
+//! The design is plugin-agnostic: any provider registered with
+//! `GstDeviceMonitor` (PipeWire, third-party ASIO, ...) is picked up
+//! without changes here.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu::video_convert_mode;
@@ -200,6 +228,7 @@ impl BlockBuilder for LocalInputBuilder {
             let rate = read_string(properties, "audio_rate").and_then(|s| s.parse::<i32>().ok());
             let channels =
                 read_string(properties, "audio_channels").and_then(|s| s.parse::<i32>().ok());
+            let wasapi_exclusive = read_bool(properties, "wasapi_exclusive_mode");
 
             let audiosrc_id = format!("{}:audiosrc", instance_id);
             let audiosrc_caps_id = format!("{}:audiosrc_caps", instance_id);
@@ -214,6 +243,27 @@ impl BlockBuilder for LocalInputBuilder {
                 &audiosrc_id,
                 "autoaudiosrc",
             )?;
+
+            // Best-effort: ask Windows WASAPI to claim the device in
+            // exclusive mode. wasapisrc (legacy) exposes `exclusive`;
+            // wasapi2src (modern) exposes `low-latency` which behaves
+            // similarly for our purposes (bypasses the system mixer).
+            // No-op on other platforms / element types.
+            if wasapi_exclusive {
+                if audiosrc.has_property("exclusive") {
+                    audiosrc.set_property("exclusive", true);
+                    info!(
+                        "Local Input: enabled WASAPI exclusive mode on {}",
+                        audiosrc_id
+                    );
+                } else if audiosrc.has_property("low-latency") {
+                    audiosrc.set_property("low-latency", true);
+                    info!(
+                        "Local Input: enabled wasapi2src low-latency on {}",
+                        audiosrc_id
+                    );
+                }
+            }
 
             // Pre-convert capsfilter: lets the source negotiate the requested
             // sample rate / channel count directly. Sample-rate conversion
@@ -374,6 +424,13 @@ fn read_string(properties: &HashMap<String, PropertyValue>, key: &str) -> Option
     })
 }
 
+fn read_bool(properties: &HashMap<String, PropertyValue>, key: &str) -> bool {
+    properties
+        .get(key)
+        .map(|v| matches!(v, PropertyValue::Bool(true)))
+        .unwrap_or(false)
+}
+
 /// Parse a `"N/D"` framerate string (e.g. `"30/1"`, `"30000/1001"`) into a
 /// `gst::Fraction`. Matches the format produced by
 /// `common_video_framerate_enum_values()` so the dropdown values plug
@@ -523,7 +580,7 @@ fn local_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "audio_channels".to_string(),
                 label: "Audio Channels".to_string(),
-                description: "Number of channels requested from the audio source. Empty = device default (pro interfaces often expose 8+ channels by default).".to_string(),
+                description: "Number of channels requested from the audio source. Empty = device default. Pro audio cards / ASIO / PipeWire / CoreAudio can expose 4/6/8/16-channel multichannel streams in one go; many WASAPI drivers instead split a multichannel card into separate stereo devices (1/2, 3/4, ...) — in that case pick the right device and keep this at 2.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue {
@@ -538,12 +595,41 @@ fn local_input_definition() -> BlockDefinition {
                             value: "2".to_string(),
                             label: Some("2 (Stereo)".to_string()),
                         },
+                        EnumValue {
+                            value: "4".to_string(),
+                            label: Some("4 (Quad)".to_string()),
+                        },
+                        EnumValue {
+                            value: "6".to_string(),
+                            label: Some("6 (5.1)".to_string()),
+                        },
+                        EnumValue {
+                            value: "8".to_string(),
+                            label: Some("8 (7.1)".to_string()),
+                        },
+                        EnumValue {
+                            value: "16".to_string(),
+                            label: Some("16".to_string()),
+                        },
                     ],
                 },
                 default_value: Some(PropertyValue::String(String::new())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "audio_channels".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "wasapi_exclusive_mode".to_string(),
+                label: "WASAPI Exclusive Mode".to_string(),
+                description: "Windows only. Ask WASAPI to claim the audio device in exclusive mode, bypassing the system mixer. Required for accessing the full hardware-native channel layout on pro audio cards via wasapi/wasapi2src. No-op on macOS / Linux / non-WASAPI sources. Default off.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "wasapi_exclusive_mode".to_string(),
                     transform: None,
                 },
                 live: false,
