@@ -104,6 +104,49 @@ pub fn try_apply_live_offset(
     true
 }
 
+fn is_offset_element(element_id: &str) -> bool {
+    element_id.ends_with(OFFSET_ELEMENT_ID_TAIL)
+}
+
+fn read_offset_ms(element: &gst::Element) -> Option<PropertyValue> {
+    let src_pad = element.static_pad("src")?;
+    let ns = src_pad.offset();
+    Some(PropertyValue::Float(ns as f64 / 1_000_000.0))
+}
+
+/// Mirror of `try_apply_live_offset` for the read path. Returns the current
+/// `offset_ms` value derived from the src pad's offset if the element belongs
+/// to a Time Offset block and `prop_name == "offset_ms"`. Returns `None`
+/// otherwise so the caller falls through to the default element-property read.
+pub fn try_read_live_offset(
+    element: &gst::Element,
+    element_id: &str,
+    prop_name: &str,
+) -> Option<PropertyValue> {
+    if prop_name != "offset_ms" {
+        return None;
+    }
+    if !is_offset_element(element_id) {
+        return None;
+    }
+    read_offset_ms(element)
+}
+
+/// Returns the synthetic `(offset_ms, value)` entry to merge into a Time
+/// Offset block's element-property listing. The underlying `identity`
+/// element does not expose `offset_ms` as a GStreamer property — it lives
+/// on the src pad — so callers listing all properties need this to surface
+/// the block's exposed value.
+pub fn live_offset_property_entry(
+    element: &gst::Element,
+    element_id: &str,
+) -> Option<(String, PropertyValue)> {
+    if !is_offset_element(element_id) {
+        return None;
+    }
+    read_offset_ms(element).map(|v| ("offset_ms".to_string(), v))
+}
+
 fn build_offset(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
@@ -277,6 +320,85 @@ mod tests {
             &PropertyValue::Float(50.0),
         );
         assert!(!handled);
+    }
+
+    #[test]
+    fn live_read_returns_current_pad_offset() {
+        init();
+        let element = gst::ElementFactory::make("identity")
+            .name("blk1:offset_identity")
+            .build()
+            .expect("identity");
+        element.static_pad("src").unwrap().set_offset(75_000_000);
+
+        let value = try_read_live_offset(&element, "blk1:offset_identity", "offset_ms")
+            .expect("should return value for matching element/prop");
+        assert!(matches!(value, PropertyValue::Float(v) if (v - 75.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn live_read_reflects_apply() {
+        init();
+        let element = gst::ElementFactory::make("identity")
+            .name("blk1:offset_identity")
+            .build()
+            .expect("identity");
+
+        assert!(try_apply_live_offset(
+            &element,
+            "blk1:offset_identity",
+            "offset_ms",
+            &PropertyValue::Float(-30.0),
+        ));
+
+        let value = try_read_live_offset(&element, "blk1:offset_identity", "offset_ms")
+            .expect("should round-trip the applied offset");
+        assert!(matches!(value, PropertyValue::Float(v) if (v - (-30.0)).abs() < 1e-9));
+    }
+
+    #[test]
+    fn live_read_skips_non_offset_element() {
+        init();
+        let element = gst::ElementFactory::make("identity")
+            .name("blk1:something_else")
+            .build()
+            .expect("identity");
+        assert!(try_read_live_offset(&element, "blk1:something_else", "offset_ms").is_none());
+    }
+
+    #[test]
+    fn live_read_skips_other_property() {
+        init();
+        let element = gst::ElementFactory::make("identity")
+            .name("blk1:offset_identity")
+            .build()
+            .expect("identity");
+        assert!(try_read_live_offset(&element, "blk1:offset_identity", "other_prop").is_none());
+    }
+
+    #[test]
+    fn property_entry_yields_offset_ms_for_offset_element() {
+        init();
+        let element = gst::ElementFactory::make("identity")
+            .name("blk1:offset_identity")
+            .build()
+            .expect("identity");
+        element.static_pad("src").unwrap().set_offset(42_000_000);
+
+        let (name, value) = live_offset_property_entry(&element, "blk1:offset_identity")
+            .expect("should produce an entry for offset elements");
+        assert_eq!(name, "offset_ms");
+        assert!(matches!(value, PropertyValue::Float(v) if (v - 42.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn property_entry_skips_non_offset_element() {
+        init();
+        let element = gst::ElementFactory::make("identity")
+            .name("blk1:something_else")
+            .build()
+            .expect("identity");
+        assert!(live_offset_property_entry(&element, "blk1:something_else").is_none());
     }
 
     #[test]

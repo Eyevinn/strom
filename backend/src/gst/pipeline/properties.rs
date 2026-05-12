@@ -279,6 +279,17 @@ impl PipelineManager {
             .get(element_id)
             .ok_or_else(|| PipelineError::ElementNotFound(element_id.to_string()))?;
 
+        // Time Offset block: `offset_ms` is a pad-offset rather than an
+        // element property — mirror the write-path interceptor so the value
+        // can be read back via the same API.
+        if let Some(v) = crate::blocks::builtin::time_offset::try_read_live_offset(
+            element,
+            element_id,
+            property_name,
+        ) {
+            return Ok(v);
+        }
+
         // Get property spec to determine type
         let pspec =
             element
@@ -408,6 +419,14 @@ impl PipelineManager {
             if let Ok(value) = self.get_element_property(element_id, &name) {
                 properties.insert(name, value);
             }
+        }
+
+        // Surface synthetic block properties that don't live on the element
+        // itself (e.g. Time Offset's `offset_ms`, which is a pad-offset).
+        if let Some((name, value)) =
+            crate::blocks::builtin::time_offset::live_offset_property_entry(element, element_id)
+        {
+            properties.insert(name, value);
         }
 
         Ok(properties)
