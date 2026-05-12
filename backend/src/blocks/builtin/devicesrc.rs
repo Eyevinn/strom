@@ -20,6 +20,34 @@
 //!
 //! `stream_mode` chooses which pads are exposed (`audio_video`, `video`,
 //! `audio`) the same way the DeckLink and WHEP blocks do.
+//!
+//! # Cross-platform notes (verified on macOS; Linux/Windows untested as of 2026-05)
+//!
+//! The design is platform-agnostic but there are a few known follow-ups
+//! before we can declare parity with macOS:
+//!
+//! - **MJPEG webcams on Linux v4l2:** the pre-convert capsfilter is
+//!   `video/x-raw` only. USB webcams that deliver `image/jpeg` natively
+//!   above 720p will fail caps negotiation. Fix is to widen the source caps
+//!   to `video/x-raw | image/jpeg` and put a `jpegdec` (or `decodebin`)
+//!   between the source and `videoconvert` when JPEG is negotiated.
+//!
+//! - **Device id stability:** [`crate::discovery::device::DeviceDiscovery::device_id_for`]
+//!   hashes `(device_class, provider, display_name)`. When two devices have
+//!   the same display name (e.g. two identical USB cams) the ids collide;
+//!   on Windows MF the name may also include numeric suffixes ("USB Camera
+//!   (2)") that shift when other devices are plugged. Prefer
+//!   `device.path` / `object.path` / `api.v4l2.path` (already collected in
+//!   `handle_device_added`) before falling back to `display_name`.
+//!
+//! - **`Device::create_element(Some(name))` on Windows:** some MF/KS
+//!   providers historically dislike having a name passed at create time.
+//!   If issues appear, fall back to `create_element(None)` followed by
+//!   `set_property("name", ...)`.
+//!
+//! - **Bare-ALSA Linux** (no Pulse/PipeWire) won't enumerate audio sources
+//!   via the standard `Audio/Source` filter. Niche on desktop; relevant for
+//!   embedded / headless servers.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu::video_convert_mode;
