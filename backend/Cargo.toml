@@ -109,7 +109,7 @@ rust-embed = { version = "8.0", features = ["debug-embed"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # System monitoring
-sysinfo = "0.38"
+sysinfo = "0.39"
 nvml-wrapper = { version = "0.12", optional = true }
 parking_lot = "0.12"
 
