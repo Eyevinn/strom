@@ -2651,9 +2651,9 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-audiofx"
-version = "0.15.0"
+version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22a1dbe6fefc71f2f242224a8f2c2ef270d3724b494135470feed2e045c4fa2a"
+checksum = "355f0eb1e52f7069d62382b131334a8042d19c81e3e8c0198cce31ef33f38a40"
 dependencies = [
  "anyhow",
  "atomic_refcell",
@@ -3510,7 +3510,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
