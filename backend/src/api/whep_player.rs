@@ -395,7 +395,7 @@ fn filter_unsupported_h264_profiles(sdp: &str, endpoint_id: &str) -> String {
             all_pts
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             "WHEP offer for endpoint '{}': all H264 profile-level-ids supported: {:?}",
             endpoint_id,
             all_pts
@@ -418,7 +418,7 @@ fn filter_unsupported_h264_profiles(sdp: &str, endpoint_id: &str) -> String {
                 })
             })
             .collect();
-        tracing::info!(
+        tracing::debug!(
             "WHEP offer for endpoint '{}': all rtpmap codecs: {:?}",
             endpoint_id,
             codecs
@@ -452,7 +452,7 @@ pub async fn whep_endpoint_proxy(
     // Log the raw SDP offer the browser sent, then the SDP after our
     // profile-level-id filter, and finally the SDP answer from webrtcsink.
     // Lets us trace exactly what each side advertises.
-    tracing::info!(
+    tracing::debug!(
         "WHEP SDP OFFER (raw) for '{}' [{} bytes]:\n{}",
         endpoint_id,
         body.len(),
@@ -472,7 +472,7 @@ pub async fn whep_endpoint_proxy(
     // strom process.
     let body = filter_unsupported_h264_profiles(&body, &endpoint_id);
 
-    tracing::info!(
+    tracing::debug!(
         "WHEP SDP OFFER (after strip) for '{}' [{} bytes]:\n{}",
         endpoint_id,
         body.len(),
@@ -532,7 +532,7 @@ pub async fn whep_endpoint_proxy(
 
             // DIAGNOSTIC: log the SDP answer webrtcsink returned (before our
             // post-processing).
-            tracing::info!(
+            tracing::debug!(
                 "WHEP SDP ANSWER (raw) for '{}' status={} [{} bytes]:\n{}",
                 endpoint_id,
                 status.as_u16(),
@@ -552,7 +552,7 @@ pub async fn whep_endpoint_proxy(
                 let answer = String::from_utf8_lossy(&body_bytes).into_owned();
                 let rewritten = strip_h265_fmtp_level_id(&answer);
                 if rewritten != answer {
-                    tracing::info!(
+                    tracing::debug!(
                         "WHEP SDP ANSWER (final) for '{}' [{} bytes]:\n{}",
                         endpoint_id,
                         rewritten.len(),
