@@ -2683,9 +2683,9 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-inter"
-version = "0.15.0"
+version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e6b51f6dfc696ba4cfa606ab33a38dff3b735961415c6630c12f90946da3a2e"
+checksum = "54fc01cdd32edc34faf182c277b3dbe2367e83645006c6265c0447e96017407a"
 dependencies = [
  "anyhow",
  "gst-plugin-version-helper",
