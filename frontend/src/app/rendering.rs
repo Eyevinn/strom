@@ -1440,6 +1440,7 @@ impl StromApp {
                             &self.latency_data,
                             &self.mediaplayer_data,
                             &self.webrtc_stats,
+                            &self.srt_stats,
                             rtp_stats,
                             &self.network_interfaces,
                             &self.available_channels,
@@ -1975,6 +1976,37 @@ impl StromApp {
                                 );
                             }
                         }
+                    }
+
+                    // Setup dynamic content for SRT input/output blocks.
+                    let srt_blocks: Vec<_> = self
+                        .graph
+                        .blocks
+                        .iter()
+                        .filter(|b| crate::srt_stats::is_srt_block_def(&b.block_definition_id))
+                        .map(|b| b.id.clone())
+                        .collect();
+
+                    for block_id in srt_blocks {
+                        let Some((stats_for_block, filtered_rates)) =
+                            self.srt_stats.snapshot_for_block(&flow_id, &block_id)
+                        else {
+                            continue;
+                        };
+                        self.graph.set_block_content(
+                            block_id,
+                            crate::graph::BlockContentInfo {
+                                additional_height: 25.0,
+                                render_callback: Some(Box::new(move |ui, _rect| {
+                                    let rates_opt = if filtered_rates.is_empty() {
+                                        None
+                                    } else {
+                                        Some(&filtered_rates)
+                                    };
+                                    crate::srt_stats::show_compact(ui, &stats_for_block, rates_opt);
+                                })),
+                            },
+                        );
                     }
 
                     // Setup dynamic content for Media Player blocks

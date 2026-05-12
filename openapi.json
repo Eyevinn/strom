@@ -2755,6 +2755,59 @@
         }
       }
     },
+    "/api/flows/{id}/srt-stats": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Get SRT statistics from a running flow.",
+        "description": "Returns statistics for every `srtsink` (output) and `srtsrc` (input) element in\nthe pipeline. Each entry is keyed by element name (e.g. `<block_id>:srtsink`),\nso the frontend can filter the response per SRT block.",
+        "operationId": "get_srt_stats",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SRT statistics retrieved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SrtStatsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow not running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/flows/{id}/start": {
       "post": {
         "tags": [
@@ -7440,6 +7493,258 @@
               "$ref": "#/components/schemas/AvailableOutput"
             },
             "description": "Available outputs from this flow"
+          }
+        }
+      },
+      "SrtCallerStats": {
+        "type": "object",
+        "description": "Stats for a single SRT caller/peer.\n\nFields are grouped by direction so that consumers don't have to guess which\ncounter applies to which role. A `srtsink` populates the sender-side fields\nand leaves the receiver-side ones empty; a `srtsrc` does the opposite. Link\nmetrics (RTT, bandwidth, negotiated latency) apply to both directions.",
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Peer address (`ip:port`), when known."
+          },
+          "bandwidth_mbps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Estimated link bandwidth between the two endpoints (Mbps)."
+          },
+          "bytes_received": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Total bytes received.",
+            "minimum": 0
+          },
+          "bytes_sent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Total bytes sent.",
+            "minimum": 0
+          },
+          "negotiated_latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Negotiated SRT latency (ms).",
+            "minimum": 0
+          },
+          "packets_received": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Total packets received.",
+            "minimum": 0
+          },
+          "packets_received_dropped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Packets skipped by the receiver due to TSBPD timeout.",
+            "minimum": 0
+          },
+          "packets_received_lost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Packets the receiver detected as missing.",
+            "minimum": 0
+          },
+          "packets_received_retransmitted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Packets received that were retransmissions of earlier lost packets.",
+            "minimum": 0
+          },
+          "packets_retransmitted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Packets the sender retransmitted in response to NAKs.",
+            "minimum": 0
+          },
+          "packets_sent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Total packets sent.",
+            "minimum": 0
+          },
+          "packets_sent_dropped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Packets dropped locally before transmission (TLPKTDROP).",
+            "minimum": 0
+          },
+          "packets_sent_lost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Packets lost on the wire and reported by NAK from the peer.",
+            "minimum": 0
+          },
+          "recv_buf_level_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Receiver buffer fill level (ms).",
+            "minimum": 0
+          },
+          "recv_rate_mbps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Instantaneous receive rate (Mbps)."
+          },
+          "rtt_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Smoothed round-trip time (ms)."
+          },
+          "send_rate_mbps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Instantaneous send rate (Mbps)."
+          },
+          "snd_buf_level_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Sender buffer fill level (ms).",
+            "minimum": 0
+          }
+        }
+      },
+      "SrtConnectionStats": {
+        "type": "object",
+        "description": "Stats for a single SRT element (srtsrc or srtsink).",
+        "required": [
+          "role",
+          "connected",
+          "callers"
+        ],
+        "properties": {
+          "callers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SrtCallerStats"
+            },
+            "description": "Per-caller stats. Always contains one entry for caller/rendezvous mode and the\nsingle peer of a caller-mode srtsrc; may contain zero or many entries for\nlistener mode (one per connected caller)."
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "True when at least one caller is exchanging data."
+          },
+          "mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SrtMode",
+                "description": "Connection mode (`caller`/`listener`/`rendezvous`)."
+              }
+            ]
+          },
+          "role": {
+            "$ref": "#/components/schemas/SrtRole",
+            "description": "Element role — determines which side of `SrtCallerStats` is populated."
+          }
+        }
+      },
+      "SrtMode": {
+        "type": "string",
+        "description": "SRT connection mode (matches the `mode` enum nicks exposed by the SRT plugin).",
+        "enum": [
+          "caller",
+          "listener",
+          "rendezvous"
+        ]
+      },
+      "SrtRole": {
+        "type": "string",
+        "description": "Direction in which an SRT element transports data.",
+        "enum": [
+          "sink",
+          "source"
+        ]
+      },
+      "SrtStats": {
+        "type": "object",
+        "description": "SRT statistics for a flow. Covers both srtsink (outputs) and srtsrc (inputs).",
+        "required": [
+          "connections"
+        ],
+        "properties": {
+          "connections": {
+            "type": "object",
+            "description": "Stats for each SRT element, keyed by element name (`block_id:srtsrc`/`block_id:srtsink`).",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SrtConnectionStats"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SrtStatsResponse": {
+        "type": "object",
+        "description": "Response containing SRT statistics.",
+        "required": [
+          "flow_id",
+          "stats"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "stats": {
+            "$ref": "#/components/schemas/SrtStats"
           }
         }
       },

@@ -6702,6 +6702,7 @@ dependencies = [
  "flate2",
  "futures",
  "garde",
+ "gio",
  "gst-plugin-audiofx",
  "gst-plugin-efp",
  "gst-plugin-inter",

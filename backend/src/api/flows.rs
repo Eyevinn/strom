@@ -15,8 +15,9 @@ use strom_types::{
         AnimateInputRequest, AvailableOutput, AvailableSourcesResponse, DynamicPadsResponse,
         ElementPropertiesResponse, ErrorResponse, FlowDebugInfo, FlowListResponse, FlowResponse,
         FlowStatsResponse, LatencyResponse, PadPropertiesResponse, SourceFlowInfo,
-        TransitionResponse, TriggerTransitionRequest, UpdateFlowPropertiesRequest,
-        UpdatePadPropertyRequest, UpdatePropertyRequest, WebRtcStatsResponse,
+        SrtStatsResponse, TransitionResponse, TriggerTransitionRequest,
+        UpdateFlowPropertiesRequest, UpdatePadPropertyRequest, UpdatePropertyRequest,
+        WebRtcStatsResponse,
     },
     Flow, FlowId,
 };
@@ -1218,6 +1219,41 @@ pub async fn get_webrtc_stats(
     })?;
 
     Ok(Json(WebRtcStatsResponse { flow_id: id, stats }))
+}
+
+/// Get SRT statistics from a running flow.
+///
+/// Returns statistics for every `srtsink` (output) and `srtsrc` (input) element in
+/// the pipeline. Each entry is keyed by element name (e.g. `<block_id>:srtsink`),
+/// so the frontend can filter the response per SRT block.
+#[utoipa::path(
+    get,
+    path = "/api/flows/{id}/srt-stats",
+    tag = "flows",
+    params(
+        ("id" = String, Path, description = "Flow ID (UUID)")
+    ),
+    responses(
+        (status = 200, description = "SRT statistics retrieved", body = SrtStatsResponse),
+        (status = 404, description = "Flow not running", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn get_srt_stats(
+    State(state): State<AppState>,
+    Path(id): Path<FlowId>,
+) -> Result<Json<SrtStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let stats = state.get_srt_stats(&id).await.map_err(|e| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::with_details(
+                "Pipeline not running",
+                e.to_string(),
+            )),
+        )
+    })?;
+
+    Ok(Json(SrtStatsResponse { flow_id: id, stats }))
 }
 
 /// Get pipeline latency for a running flow.

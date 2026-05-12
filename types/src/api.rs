@@ -418,6 +418,169 @@ pub struct WebRtcStatsResponse {
 }
 
 // ============================================================================
+// SRT Stats Types
+// ============================================================================
+
+/// Direction in which an SRT element transports data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SrtRole {
+    /// Outgoing SRT (`srtsink` — this element sends data).
+    Sink,
+    /// Incoming SRT (`srtsrc` — this element receives data).
+    Source,
+}
+
+impl SrtRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SrtRole::Sink => "sink",
+            SrtRole::Source => "source",
+        }
+    }
+}
+
+impl std::fmt::Display for SrtRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// SRT connection mode (matches the `mode` enum nicks exposed by the SRT plugin).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SrtMode {
+    Caller,
+    Listener,
+    Rendezvous,
+}
+
+impl SrtMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SrtMode::Caller => "caller",
+            SrtMode::Listener => "listener",
+            SrtMode::Rendezvous => "rendezvous",
+        }
+    }
+
+    /// Parse from the enum nick the gst-plugins-bad SRT plugin exposes.
+    pub fn from_nick(nick: &str) -> Option<Self> {
+        match nick {
+            "caller" => Some(SrtMode::Caller),
+            "listener" => Some(SrtMode::Listener),
+            "rendezvous" => Some(SrtMode::Rendezvous),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SrtMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// SRT statistics for a flow. Covers both srtsink (outputs) and srtsrc (inputs).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SrtStats {
+    /// Stats for each SRT element, keyed by element name (`block_id:srtsrc`/`block_id:srtsink`).
+    pub connections: HashMap<String, SrtConnectionStats>,
+}
+
+/// Stats for a single SRT element (srtsrc or srtsink).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SrtConnectionStats {
+    /// Element role — determines which side of `SrtCallerStats` is populated.
+    pub role: SrtRole,
+    /// Connection mode (`caller`/`listener`/`rendezvous`).
+    pub mode: Option<SrtMode>,
+    /// True when at least one caller is exchanging data.
+    pub connected: bool,
+    /// Per-caller stats. Always contains one entry for caller/rendezvous mode and the
+    /// single peer of a caller-mode srtsrc; may contain zero or many entries for
+    /// listener mode (one per connected caller).
+    pub callers: Vec<SrtCallerStats>,
+}
+
+impl Default for SrtConnectionStats {
+    fn default() -> Self {
+        Self {
+            role: SrtRole::Sink,
+            mode: None,
+            connected: false,
+            callers: Vec::new(),
+        }
+    }
+}
+
+/// Stats for a single SRT caller/peer.
+///
+/// Fields are grouped by direction so that consumers don't have to guess which
+/// counter applies to which role. A `srtsink` populates the sender-side fields
+/// and leaves the receiver-side ones empty; a `srtsrc` does the opposite. Link
+/// metrics (RTT, bandwidth, negotiated latency) apply to both directions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SrtCallerStats {
+    /// Peer address (`ip:port`), when known.
+    pub address: Option<String>,
+
+    // ---- Link metrics (apply to both sender and receiver) ----
+    /// Smoothed round-trip time (ms).
+    pub rtt_ms: Option<f64>,
+    /// Estimated link bandwidth between the two endpoints (Mbps).
+    pub bandwidth_mbps: Option<f64>,
+    /// Negotiated SRT latency (ms).
+    pub negotiated_latency_ms: Option<u32>,
+
+    // ---- Sender metrics (populated by srtsink) ----
+    /// Total packets sent.
+    pub packets_sent: Option<u64>,
+    /// Packets lost on the wire and reported by NAK from the peer.
+    pub packets_sent_lost: Option<u64>,
+    /// Packets dropped locally before transmission (TLPKTDROP).
+    pub packets_sent_dropped: Option<u64>,
+    /// Packets the sender retransmitted in response to NAKs.
+    pub packets_retransmitted: Option<u64>,
+    /// Total bytes sent.
+    pub bytes_sent: Option<u64>,
+    /// Instantaneous send rate (Mbps).
+    pub send_rate_mbps: Option<f64>,
+    /// Sender buffer fill level (ms).
+    pub snd_buf_level_ms: Option<u32>,
+
+    // ---- Receiver metrics (populated by srtsrc) ----
+    /// Total packets received.
+    pub packets_received: Option<u64>,
+    /// Packets the receiver detected as missing.
+    pub packets_received_lost: Option<u64>,
+    /// Packets skipped by the receiver due to TSBPD timeout.
+    pub packets_received_dropped: Option<u64>,
+    /// Packets received that were retransmissions of earlier lost packets.
+    pub packets_received_retransmitted: Option<u64>,
+    /// Total bytes received.
+    pub bytes_received: Option<u64>,
+    /// Instantaneous receive rate (Mbps).
+    pub recv_rate_mbps: Option<f64>,
+    /// Receiver buffer fill level (ms).
+    pub recv_buf_level_ms: Option<u32>,
+}
+
+/// Response containing SRT statistics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SrtStatsResponse {
+    #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+    pub flow_id: FlowId,
+    pub stats: SrtStats,
+}
+
+// ============================================================================
 // Statistics API Types
 // ============================================================================
 
