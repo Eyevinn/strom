@@ -109,6 +109,15 @@ impl BlockBuilder for VideoEncBuilder {
             })
             .unwrap_or(60);
 
+        let profile = properties
+            .get("profile")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .unwrap_or("auto")
+            .to_string();
+
         // Create elements
         // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
         // Note: We always use "videoconvert" as the element ID for consistent external pad references,
@@ -156,7 +165,7 @@ impl BlockBuilder for VideoEncBuilder {
         info!("Added {} parser for proper stream formatting", parser_name);
 
         // Create capsfilter with codec-specific caps
-        let caps_str = get_codec_caps_string(codec);
+        let caps_str = get_codec_caps_string(codec, &profile);
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
         })?;
@@ -533,6 +542,15 @@ fn set_encoder_properties(
             let realtime = matches!(quality_preset, "ultrafast" | "fast");
             encoder.set_property_from_str("realtime", if realtime { "true" } else { "false" });
         }
+        // VideoToolbox defaults to allow-frame-reordering=true, which emits
+        // B-frames. B-frames cause non-monotonic PTS in decode order —
+        // rtph264pay uses PTS for RTP timestamps, so the RTP stream becomes
+        // invalid and WebRTC clients (Chrome desktop especially) fail to
+        // decode. Disable unconditionally: VT HW produces good quality at
+        // streaming bitrates without B-frames.
+        if encoder.has_property("allow-frame-reordering") {
+            encoder.set_property("allow-frame-reordering", false);
+        }
     } else if encoder_name.starts_with("v4l2") {
         // V4L2 encoders (Raspberry Pi, embedded Linux)
         // V4L2 encoders use extra-controls structure for bitrate (bits per second)
@@ -702,11 +720,24 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
     }
 }
 
-/// Get codec-specific caps string for capsfilter.
-fn get_codec_caps_string(codec: Codec) -> String {
+/// Get codec-specific caps string for capsfilter, given a profile selection.
+///
+/// `profile` is the user's chosen value or "auto". "auto" resolves to the
+/// most WebRTC-compatible profile for the codec: baseline for H.264 (matches
+/// webrtcsink's hardcoded SDP `profile-level-id=42001f`), main for H.265 (the
+/// 8-bit 4:2:0 profile every WebRTC H.265 decoder supports). For non-WebRTC
+/// downstreams (SRT, MPEG-TS, file output) users can pick a higher profile
+/// for better quality.
+fn get_codec_caps_string(codec: Codec, profile: &str) -> String {
     match codec {
-        Codec::H264 => "video/x-h264,alignment=au".to_string(),
-        Codec::H265 => "video/x-h265,alignment=au".to_string(),
+        Codec::H264 => {
+            let p = if profile == "auto" { "baseline" } else { profile };
+            format!("video/x-h264,alignment=au,profile={}", p)
+        }
+        Codec::H265 => {
+            let p = if profile == "auto" { "main" } else { profile };
+            format!("video/x-h265,alignment=au,profile={}", p)
+        }
         Codec::AV1 => "video/x-av1".to_string(),
         Codec::VP9 => "video/x-vp9".to_string(),
     }
@@ -741,6 +772,28 @@ fn videoenc_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "codec".to_string(),
+                    transform: None,
+                },
+                live: false,
+            },
+            ExposedProperty {
+                name: "profile".to_string(),
+                label: "Profile".to_string(),
+                description: "Codec profile to constrain encoder output. \"auto\" picks the most WebRTC-compatible profile (H.264=baseline, H.265=main) — required for WHEP output to Chrome desktop/iOS Safari. Override only for non-WebRTC pipelines (SRT/MPEG-TS/file) where higher profiles give better quality.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue { value: "auto".to_string(), label: Some("Auto (WebRTC-compatible)".to_string()) },
+                        EnumValue { value: "baseline".to_string(), label: Some("Baseline (H.264)".to_string()) },
+                        EnumValue { value: "constrained-baseline".to_string(), label: Some("Constrained Baseline (H.264)".to_string()) },
+                        EnumValue { value: "main".to_string(), label: Some("Main (H.264 / H.265)".to_string()) },
+                        EnumValue { value: "high".to_string(), label: Some("High (H.264)".to_string()) },
+                        EnumValue { value: "high-10".to_string(), label: Some("High 10-bit (H.264 / H.265 Main 10)".to_string()) },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("auto".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "profile".to_string(),
                     transform: None,
                 },
                 live: false,

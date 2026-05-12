@@ -1201,8 +1201,16 @@ fn build_whepserversink(
                     // Only add first occurrence of each codec type
                     if seen_codecs.insert(codec_name.to_string()) {
                         let mut new_structure = structure.to_owned();
+                        // H.264 / AV1
                         new_structure.remove_field("profile-level-id");
                         new_structure.remove_field("profile");
+                        new_structure.remove_field("level-idx");
+                        new_structure.remove_field("tier");
+                        // H.265
+                        new_structure.remove_field("profile-id");
+                        new_structure.remove_field("tier-flag");
+                        new_structure.remove_field("level-id");
+                        new_structure.remove_field("tx-mode");
                         new_caps.get_mut().unwrap().append_structure(new_structure);
                     }
                 }
@@ -1243,6 +1251,13 @@ fn build_whepserversink(
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let payloader = values[3].get::<gst::Element>().unwrap();
 
+        info!(
+            "WHEP Output: payloader-setup fired: consumer_id={}, payloader={} (factory={})",
+            consumer_id,
+            payloader.name(),
+            payloader.factory().map(|f| f.name().to_string()).unwrap_or_else(|| "unknown".to_string())
+        );
+
         // Helper: walk downstream capsfilters from a pad and strip profile fields
         fn strip_downstream_capsfilters(start_pad: &gst::Pad, consumer_id: &str) -> u32 {
             let mut count = 0u32;
@@ -1256,13 +1271,23 @@ fn build_whepserversink(
                     if is_capsfilter {
                         let caps: gst::Caps = element.property("caps");
                         if let Some(s) = caps.structure(0) {
-                            if s.has_field("profile-level-id") || s.has_field("profile") {
+                            if s.has_field("profile-level-id")
+                                || s.has_field("profile")
+                                || s.has_field("profile-id")
+                                || s.has_field("tier-flag")
+                                || s.has_field("level-id")
+                                || s.has_field("tx-mode")
+                            {
                                 let mut new_caps = gst::Caps::new_empty();
                                 for i in 0..caps.size() {
                                     if let Some(structure) = caps.structure(i) {
                                         let mut ns = structure.to_owned();
                                         ns.remove_field("profile-level-id");
                                         ns.remove_field("profile");
+                                        ns.remove_field("profile-id");
+                                        ns.remove_field("tier-flag");
+                                        ns.remove_field("level-id");
+                                        ns.remove_field("tx-mode");
                                         new_caps.merge_structure(ns);
                                     }
                                 }
@@ -1312,13 +1337,23 @@ fn build_whepserversink(
                         element.connect_notify(Some("caps"), move |el, _| {
                             let caps: gst::Caps = el.property("caps");
                             if let Some(s) = caps.structure(0) {
-                                if s.has_field("profile-level-id") || s.has_field("profile") {
+                                if s.has_field("profile-level-id")
+                                    || s.has_field("profile")
+                                    || s.has_field("profile-id")
+                                    || s.has_field("tier-flag")
+                                    || s.has_field("level-id")
+                                    || s.has_field("tx-mode")
+                                {
                                     let mut new_caps = gst::Caps::new_empty();
                                     for i in 0..caps.size() {
                                         if let Some(structure) = caps.structure(i) {
                                             let mut ns = structure.to_owned();
                                             ns.remove_field("profile-level-id");
                                             ns.remove_field("profile");
+                                            ns.remove_field("profile-id");
+                                            ns.remove_field("tier-flag");
+                                            ns.remove_field("level-id");
+                                            ns.remove_field("tx-mode");
                                             new_caps.merge_structure(ns);
                                         }
                                     }
