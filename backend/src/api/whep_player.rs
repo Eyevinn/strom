@@ -180,7 +180,7 @@ fn renumber_low_h265_payload_types(sdp: &str, endpoint_id: &str) -> String {
             } else {
                 ""
             };
-            let core = rest.trim_end_matches(|c: char| c == '\r' || c == '\n');
+            let core = rest.trim_end_matches(['\r', '\n']);
             let parts: Vec<&str> = core.split(' ').collect();
             let mut rewritten: Vec<String> = Vec::with_capacity(parts.len());
             for (idx, p) in parts.iter().enumerate() {
