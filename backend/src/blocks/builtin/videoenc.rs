@@ -560,11 +560,34 @@ fn set_encoder_properties(
         let cpu_used = map_quality_preset_av1enc(quality_preset);
         encoder.set_property_from_str("cpu-used", &cpu_used.to_string());
     } else if encoder_name == "vp9enc" {
-        // libvpx VP9: target-bitrate in kbps
-        encoder.set_property_from_str("target-bitrate", &bitrate_str);
+        // libvpx VP9: target-bitrate is in BITS/SEC, not kbps —
+        // verified via `gst-inspect-1.0 vp9enc` on GStreamer 1.28:
+        //   target-bitrate : Target bitrate (in bits/sec) ... Default: 256000
+        // The block exposes bitrate in kbps so multiply by 1000.
+        let bitrate_bps = bitrate.saturating_mul(1000);
+        encoder.set_property_from_str("target-bitrate", &bitrate_bps.to_string());
         // VP9: cpu-used (0=slowest, 5=fastest for realtime)
         let cpu_used = map_quality_preset_vp9enc(quality_preset);
         encoder.set_property_from_str("cpu-used", &cpu_used.to_string());
+
+        // libvpx VP9 needs explicit realtime knobs — defaults are tuned for
+        // off-line "best quality" and burn entire CPUs on M1 / multi-core:
+        //  - deadline default = 1_000_000 µs ("best quality"). At 30 fps the
+        //    encoder gets up to 1 s per frame and uses it all → ~10–100×
+        //    slower than the realtime mode (deadline=1).
+        //  - lag-in-frames default = 25 → look-ahead adds ~833 ms latency
+        //    on 30 fps plus extra CPU for the look-ahead analysis.
+        //  - row-mt default = false → only frame-level parallelism even
+        //    with threads=8. Enabling row-mt gives ~2-3× speedup on
+        //    multi-core CPUs.
+        // For non-realtime presets we leave the defaults alone.
+        if matches!(quality_preset, "ultrafast" | "fast") {
+            encoder.set_property("deadline", 1i64);
+            encoder.set_property("lag-in-frames", 0i32);
+            if encoder.has_property("row-mt") {
+                encoder.set_property("row-mt", true);
+            }
+        }
     }
 
     // Keyframe interval (GOP size) - try different property names
