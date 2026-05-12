@@ -440,4 +440,65 @@ mod tests {
         assert_eq!(parsed.packets_received, Some(99));
         assert_eq!(parsed.negotiated_latency_ms, Some(250));
     }
+
+    #[test]
+    fn caller_is_active_counts_only_real_activity() {
+        // The `connected` flag is the user-visible chip in the UI, so the
+        // heuristic that backs it deserves explicit coverage. A caller with
+        // packets or bytes flowing in either direction is active; one with
+        // only link metrics filled in is not (libsrt populates rtt-ms /
+        // bandwidth-mbps eagerly even before the first buffer).
+        assert!(!caller_is_active(&SrtCallerStats::default()));
+
+        let link_only = SrtCallerStats {
+            rtt_ms: Some(2.0),
+            bandwidth_mbps: Some(500.0),
+            ..Default::default()
+        };
+        assert!(
+            !caller_is_active(&link_only),
+            "link-only metrics shouldn't imply activity"
+        );
+
+        let sent_some = SrtCallerStats {
+            packets_sent: Some(10),
+            ..link_only.clone()
+        };
+        assert!(caller_is_active(&sent_some));
+
+        let recv_some = SrtCallerStats {
+            bytes_received: Some(1),
+            ..Default::default()
+        };
+        assert!(caller_is_active(&recv_some));
+    }
+
+    #[test]
+    fn has_any_data_detects_populated_callers() {
+        // Top-level fall-through path in `collect_element_stats` only inserts
+        // a single-caller entry when the top-level structure has at least one
+        // recognised field. This test guards that decision.
+        assert!(!has_any_data(&SrtCallerStats::default()));
+
+        let only_link = SrtCallerStats {
+            rtt_ms: Some(1.0),
+            ..Default::default()
+        };
+        assert!(has_any_data(&only_link));
+
+        let only_bytes = SrtCallerStats {
+            bytes_sent: Some(42),
+            ..Default::default()
+        };
+        assert!(has_any_data(&only_bytes));
+
+        let only_address = SrtCallerStats {
+            address: Some("198.51.100.5:5000".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            !has_any_data(&only_address),
+            "address alone is not enough — we'd display an empty caller row"
+        );
+    }
 }
