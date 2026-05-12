@@ -1415,6 +1415,11 @@ impl StromApp {
                         ids
                     };
 
+                    // Snapshot immutable state we'll pass into show_block
+                    // BEFORE taking the mutable borrow on self.graph below —
+                    // otherwise the borrow checker rejects the call.
+                    let local_devices_loading = self.local_devices_loading();
+
                     // Then get mutable reference to block
                     if let (Some(block), Some(def)) =
                         (self.graph.get_selected_block_mut(), definition_opt)
@@ -1443,6 +1448,9 @@ impl StromApp {
                             rtp_stats,
                             &self.network_interfaces,
                             &self.available_channels,
+                            &self.video_devices,
+                            &self.audio_devices,
+                            local_devices_loading,
                             &mut self.qr_inline,
                             &mut self.qr_cache,
                             recorder_filename,
@@ -1450,6 +1458,24 @@ impl StromApp {
                             block_thumbnail,
                             &taken_endpoint_ids,
                         );
+
+                        // Trigger device discovery whenever a Local Input block's
+                        // properties are rendered. 10 s TTL keeps repeated panel
+                        // opens cheap; the ↻ button forces a re-scan.
+                        if result.local_devices_needed {
+                            self.load_local_devices(
+                                ui.ctx().clone(),
+                                false,
+                                std::time::Duration::from_secs(10),
+                            );
+                        }
+                        if result.local_devices_refresh_requested {
+                            self.load_local_devices(
+                                ui.ctx().clone(),
+                                true,
+                                std::time::Duration::from_secs(0),
+                            );
+                        }
 
                         // Handle deletion request
                         if result.delete_requested {

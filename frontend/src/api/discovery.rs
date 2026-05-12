@@ -39,6 +39,61 @@ impl ApiClient {
         Ok(interfaces)
     }
 
+    /// List discovered local capture devices in a given category
+    /// (e.g. `"video_source"`, `"audio_source"`). Backed by the GStreamer
+    /// `DeviceMonitor` running on the backend.
+    pub async fn list_devices(
+        &self,
+        category: &str,
+    ) -> ApiResult<Vec<strom_types::discovery::DeviceResponse>> {
+        use tracing::info;
+
+        let url = format!("{}/discovery/devices?category={}", self.base_url, category);
+        info!("Fetching {} devices from: {}", category, url);
+
+        let response = self
+            .with_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error fetching devices: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+
+        let devices: Vec<strom_types::discovery::DeviceResponse> =
+            response.json().await.map_err(|e| {
+                tracing::error!("Failed to parse device list: {}", e);
+                ApiError::Decode(e.to_string())
+            })?;
+
+        info!("Loaded {} {} device(s)", devices.len(), category);
+        Ok(devices)
+    }
+
+    /// Trigger a re-scan of local capture devices on the backend
+    /// (`POST /api/discovery/devices/refresh`).
+    pub async fn refresh_devices(&self) -> ApiResult<()> {
+        let url = format!("{}/discovery/devices/refresh", self.base_url);
+        let response = self
+            .with_auth(self.client.post(&url))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+        Ok(())
+    }
+
     /// Get available inter-pipeline channels.
     ///
     /// Returns channels published by running flows with InterOutput blocks.

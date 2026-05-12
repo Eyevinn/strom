@@ -321,6 +321,7 @@ mod tests {
             "all".to_string(),
             None,
             std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         );
         assert!(manager.is_ok());
     }
@@ -339,6 +340,7 @@ mod tests {
             "all".to_string(),
             None,
             std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         )
         .unwrap();
 
@@ -375,6 +377,7 @@ mod tests {
             "all".to_string(),
             None,
             std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         );
         assert!(manager.is_err());
     }
@@ -429,6 +432,7 @@ mod tests {
             "all".to_string(),
             None,
             std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         );
         assert!(manager.is_ok());
 
@@ -455,6 +459,7 @@ mod tests {
             "all".to_string(),
             None,
             std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         )
         .unwrap();
 

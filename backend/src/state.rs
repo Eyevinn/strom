@@ -801,6 +801,12 @@ impl AppState {
             }
         }
 
+        // Snapshot the live local-device map so the Local Input block can
+        // resolve a chosen device id without starting a transient
+        // DeviceMonitor inside its build() (which crashes inside
+        // gst_device_provider_stop on macOS).
+        let local_devices = self.inner.discovery.local_device_map().await;
+
         // Create pipeline with event broadcaster and block registry
         info!("Creating PipelineManager (this may block)...");
         let mut manager = PipelineManager::new(
@@ -811,6 +817,7 @@ impl AppState {
             self.inner.ice_transport_policy.clone(),
             Some(self.inner.whip_registry.clone()),
             self.inner.media_path.clone(),
+            local_devices,
         )?;
         info!("PipelineManager created successfully");
 

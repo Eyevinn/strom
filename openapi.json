@@ -6933,6 +6933,28 @@
             "enum": [
               "networkinterface"
             ]
+          },
+          {
+            "type": "object",
+            "description": "Local capture/playback device selector. Frontend fetches the live\ndevice list from `/api/discovery/devices?category=<category>` and\nrenders a dropdown of `DeviceResponse`s.",
+            "required": [
+              "device"
+            ],
+            "properties": {
+              "device": {
+                "type": "object",
+                "description": "Local capture/playback device selector. Frontend fetches the live\ndevice list from `/api/discovery/devices?category=<category>` and\nrenders a dropdown of `DeviceResponse`s.",
+                "required": [
+                  "category"
+                ],
+                "properties": {
+                  "category": {
+                    "$ref": "#/components/schemas/DeviceCategory",
+                    "description": "Which `DeviceCategory` to fetch and display (video source,\naudio source, audio sink, network source)."
+                  }
+                }
+              }
+            }
           }
         ],
         "description": "Property type enumeration for exposed properties"

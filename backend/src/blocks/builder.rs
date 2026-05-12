@@ -1,5 +1,6 @@
 //! Block builder trait for runtime GStreamer element creation.
 
+use crate::discovery::device::GstDeviceMap;
 use crate::events::EventBroadcaster;
 use crate::gst::SessionThreadConfig;
 use crate::whip_registry::WhipRegistry;
@@ -113,6 +114,11 @@ pub struct BlockBuildContext {
     element_setups: RefCell<Vec<ElementSetupFn>>,
     /// Thread priority config for dynamically created session pipelines (WHEP/WebRTC)
     session_thread_config: SessionThreadConfig,
+    /// Live `gst::Device` map shared with the long-running `DeviceDiscovery`.
+    /// Builders look up local capture devices through this instead of
+    /// starting transient `DeviceMonitor` instances (which crash on
+    /// macOS — see Local Input block).
+    local_devices: GstDeviceMap,
 }
 
 impl BlockBuildContext {
@@ -128,6 +134,7 @@ impl BlockBuildContext {
             whip_registry: None,
             element_setups: RefCell::new(Vec::new()),
             session_thread_config: SessionThreadConfig::new(),
+            local_devices: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -138,6 +145,7 @@ impl BlockBuildContext {
         dynamic_webrtcbins: DynamicWebrtcbinStore,
         whip_registry: Option<WhipRegistry>,
         session_thread_config: SessionThreadConfig,
+        local_devices: GstDeviceMap,
     ) -> Self {
         Self {
             whep_endpoints: RefCell::new(Vec::new()),
@@ -149,7 +157,15 @@ impl BlockBuildContext {
             whip_registry,
             element_setups: RefCell::new(Vec::new()),
             session_thread_config,
+            local_devices,
         }
+    }
+
+    /// Look up a live local `gst::Device` (Video/Source or Audio/Source) by
+    /// the same id that `/api/discovery/devices` returns.
+    /// Returns `None` if no such device is currently known.
+    pub fn local_device(&self, id: &str) -> Option<gst::Device> {
+        self.local_devices.lock().ok()?.get(id).cloned()
     }
 
     /// Get the shared dynamic webrtcbin store.

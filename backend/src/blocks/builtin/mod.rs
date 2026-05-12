@@ -7,6 +7,7 @@ pub mod audiogain;
 pub mod audiorouter;
 pub mod compositor;
 pub mod decklink;
+pub mod devicesrc;
 #[cfg(feature = "efp")]
 pub mod efpsrt;
 #[cfg(feature = "efp")]
@@ -58,6 +59,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
 
     // Add DeckLink blocks
     blocks.extend(decklink::get_blocks());
+
+    // Add Local Input block (local video/audio sources via native OS APIs)
+    blocks.extend(devicesrc::get_blocks());
 
     // Add EFP/SRT blocks
     #[cfg(feature = "efp")]
@@ -140,6 +144,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.compositor" => Some(Arc::new(compositor::CompositorBuilder)),
         "builtin.decklink_input" => Some(Arc::new(decklink::DeckLinkInputBuilder)),
         "builtin.decklink_output" => Some(Arc::new(decklink::DeckLinkOutputBuilder)),
+        "builtin.local_input" => Some(Arc::new(devicesrc::LocalInputBuilder)),
         "builtin.inter_output" => Some(Arc::new(inter::InterOutputBuilder)),
         "builtin.inter_input" => Some(Arc::new(inter::InterInputBuilder)),
         "builtin.latency" => Some(Arc::new(latency::LatencyBuilder)),

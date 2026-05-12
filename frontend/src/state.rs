@@ -98,6 +98,12 @@ pub enum AppMessage {
     /// Network interfaces loaded from API
     NetworkInterfacesLoaded(Vec<strom_types::NetworkInterfaceInfo>),
 
+    /// Local capture devices loaded from API (one category at a time).
+    LocalDevicesLoaded {
+        category: strom_types::discovery::DeviceCategory,
+        devices: Vec<strom_types::discovery::DeviceResponse>,
+    },
+
     /// System clock info loaded from backend
     SystemClockLoaded(crate::api::SystemClockInfo),
     /// System clock info not supported on this platform (backend returned 501)

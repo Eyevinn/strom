@@ -1,6 +1,6 @@
 //! Block definitions and instances for reusable element groupings.
 
-use crate::{MediaType, PropertyValue};
+use crate::{discovery::DeviceCategory, MediaType, PropertyValue};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap};
 
@@ -78,6 +78,14 @@ pub enum PropertyType {
     },
     /// Network interface selector - frontend fetches available interfaces from API
     NetworkInterface,
+    /// Local capture/playback device selector. Frontend fetches the live
+    /// device list from `/api/discovery/devices?category=<category>` and
+    /// renders a dropdown of `DeviceResponse`s.
+    Device {
+        /// Which `DeviceCategory` to fetch and display (video source,
+        /// audio source, audio sink, network source).
+        category: DeviceCategory,
+    },
 }
 
 /// Block definition - metadata for creating block instances.
