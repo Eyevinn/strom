@@ -471,6 +471,7 @@ impl PropertyInspector {
         available_channels: &[strom_types::api::AvailableOutput],
         video_devices: &[strom_types::discovery::DeviceResponse],
         audio_devices: &[strom_types::discovery::DeviceResponse],
+        local_devices_loading: bool,
         qr_inline: &mut Option<(String, String)>,
         qr_cache: &mut crate::qr::QrCache,
         recorder_filename: Option<&str>,
@@ -830,6 +831,7 @@ impl PropertyInspector {
                                     available_channels,
                                     video_devices,
                                     audio_devices,
+                                    local_devices_loading,
                                     taken_endpoint_ids,
                                     &mut device_picker_actions,
                                 );
@@ -1413,6 +1415,7 @@ impl PropertyInspector {
                 available_channels,
                 &[],
                 &[],
+                false,
                 &std::collections::HashSet::new(),
                 &mut sink,
             );
@@ -1437,6 +1440,7 @@ impl PropertyInspector {
                     available_channels,
                     &[],
                     &[],
+                    false,
                     &std::collections::HashSet::new(),
                     &mut sink,
                 );
@@ -1464,6 +1468,7 @@ impl PropertyInspector {
                 available_channels,
                 &[],
                 &[],
+                false,
                 &std::collections::HashSet::new(),
                 &mut sink,
             );
@@ -1488,6 +1493,7 @@ impl PropertyInspector {
                     available_channels,
                     &[],
                     &[],
+                    false,
                     &std::collections::HashSet::new(),
                     &mut sink,
                 );
@@ -1500,7 +1506,6 @@ impl PropertyInspector {
 
     /// Show an exposed property editor. Returns true if the value was changed.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn show_exposed_property(
         ui: &mut Ui,
         block: &mut BlockInstance,
@@ -1511,6 +1516,7 @@ impl PropertyInspector {
         available_channels: &[strom_types::api::AvailableOutput],
         video_devices: &[strom_types::discovery::DeviceResponse],
         audio_devices: &[strom_types::discovery::DeviceResponse],
+        local_devices_loading: bool,
         taken_endpoint_ids: &std::collections::HashSet<String>,
         device_picker_actions: &mut DevicePickerActions,
     ) -> bool {
@@ -1648,23 +1654,30 @@ impl PropertyInspector {
                                     network_interfaces,
                                 )
                             }
-                            strom_types::block::PropertyType::VideoDevice => {
+                            strom_types::block::PropertyType::Device { category } => {
                                 device_picker_actions.needed = true;
+                                use strom_types::discovery::DeviceCategory;
+                                let (devices, kind_label): (&[_], &str) = match category {
+                                    DeviceCategory::VideoSource => {
+                                        (video_devices, "video source")
+                                    }
+                                    DeviceCategory::AudioSource => {
+                                        (audio_devices, "audio source")
+                                    }
+                                    // No UI lists for these yet — picker will
+                                    // show an empty list with the refresh
+                                    // button, which is intentional until we
+                                    // wire up extra fetches.
+                                    DeviceCategory::AudioSink
+                                    | DeviceCategory::NetworkSource
+                                    | DeviceCategory::Other => (&[], "device"),
+                                };
                                 Self::show_local_device_editor(
                                     ui,
                                     &mut value,
-                                    video_devices,
-                                    "video source",
-                                    device_picker_actions,
-                                )
-                            }
-                            strom_types::block::PropertyType::AudioDevice => {
-                                device_picker_actions.needed = true;
-                                Self::show_local_device_editor(
-                                    ui,
-                                    &mut value,
-                                    audio_devices,
-                                    "audio source",
+                                    devices,
+                                    kind_label,
+                                    local_devices_loading,
                                     device_picker_actions,
                                 )
                             }
@@ -2112,15 +2125,16 @@ impl PropertyInspector {
         }
     }
 
-    /// Show a picker for a local Video/Source or Audio/Source GStreamer
-    /// device (USB capture cards, built-in cameras, pro audio interfaces,
-    /// virtual sources, ...). Empty string = OS default
+    /// Show a picker for a local capture/playback device (Video/Source,
+    /// Audio/Source, ...). Empty string = OS default
     /// (autovideosrc/autoaudiosrc on the backend).
+    #[allow(clippy::too_many_arguments)]
     fn show_local_device_editor(
         ui: &mut Ui,
         value: &mut PropertyValue,
         devices: &[strom_types::discovery::DeviceResponse],
         kind_label: &str,
+        loading: bool,
         actions: &mut DevicePickerActions,
     ) -> bool {
         let PropertyValue::String(s) = value else {
@@ -2150,7 +2164,14 @@ impl PropertyInspector {
                         changed = true;
                     }
                     if devices.is_empty() {
-                        ui.label("(no devices discovered yet)");
+                        if loading {
+                            ui.add_enabled(false, egui::Label::new("Scanning…"));
+                        } else {
+                            ui.add_enabled(
+                                false,
+                                egui::Label::new(format!("(no {} devices found)", kind_label)),
+                            );
+                        }
                     }
                     for d in devices {
                         if ui.selectable_label(*s == d.id, &d.name).clicked() {
@@ -2160,11 +2181,17 @@ impl PropertyInspector {
                     }
                 });
 
-            if ui
-                .small_button(egui_phosphor::regular::ARROWS_CLOCKWISE)
-                .on_hover_text("Re-scan local devices")
-                .clicked()
-            {
+            let refresh = ui
+                .add_enabled(
+                    !loading,
+                    egui::Button::new(egui_phosphor::regular::ARROWS_CLOCKWISE).small(),
+                )
+                .on_hover_text(if loading {
+                    "Scanning local devices…"
+                } else {
+                    "Re-scan local devices"
+                });
+            if refresh.clicked() {
                 actions.refresh_requested = true;
             }
         });

@@ -1415,6 +1415,11 @@ impl StromApp {
                         ids
                     };
 
+                    // Snapshot immutable state we'll pass into show_block
+                    // BEFORE taking the mutable borrow on self.graph below —
+                    // otherwise the borrow checker rejects the call.
+                    let local_devices_loading = self.local_devices_loading();
+
                     // Then get mutable reference to block
                     if let (Some(block), Some(def)) =
                         (self.graph.get_selected_block_mut(), definition_opt)
@@ -1445,6 +1450,7 @@ impl StromApp {
                             &self.available_channels,
                             &self.video_devices,
                             &self.audio_devices,
+                            local_devices_loading,
                             &mut self.qr_inline,
                             &mut self.qr_cache,
                             recorder_filename,

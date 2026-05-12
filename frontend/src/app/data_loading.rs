@@ -205,8 +205,12 @@ impl StromApp {
 
     /// Load local capture devices (cameras + microphones) from the backend
     /// when the cache is empty or older than `ttl`. Triggered from the
-    /// properties panel when a `VideoDevice`/`AudioDevice` field is rendered.
+    /// properties panel when a `Device { category }` field is rendered.
     /// `force` bypasses the TTL (used by the refresh button).
+    ///
+    /// `devices_last_loaded` is *not* set here — it is updated when the
+    /// `LocalDevicesLoaded` message arrives (see `app::update`), so a
+    /// failing fetch doesn't lock out retries for the TTL window.
     pub(crate) fn load_local_devices(
         &mut self,
         ctx: egui::Context,
@@ -223,7 +227,6 @@ impl StromApp {
         if self.video_devices_loading && self.audio_devices_loading {
             return;
         }
-        self.devices_last_loaded = Some(instant::Instant::now());
 
         let api = self.api.clone();
         let tx = self.channels.sender();
@@ -250,7 +253,13 @@ impl StromApp {
                             devices,
                         });
                     }
-                    Err(e) => tracing::warn!("list_devices(video_source) failed: {}", e),
+                    Err(e) => {
+                        tracing::warn!("list_devices(video_source) failed: {}", e);
+                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
+                            category: strom_types::discovery::DeviceCategory::VideoSource,
+                            devices: Vec::new(),
+                        });
+                    }
                 }
                 ctx.request_repaint();
             });
@@ -266,11 +275,23 @@ impl StromApp {
                             devices,
                         });
                     }
-                    Err(e) => tracing::warn!("list_devices(audio_source) failed: {}", e),
+                    Err(e) => {
+                        tracing::warn!("list_devices(audio_source) failed: {}", e);
+                        let _ = tx.send(AppMessage::LocalDevicesLoaded {
+                            category: strom_types::discovery::DeviceCategory::AudioSource,
+                            devices: Vec::new(),
+                        });
+                    }
                 }
                 ctx.request_repaint();
             });
         }
+    }
+
+    /// Whether a local-device fetch is in flight for either category —
+    /// used by the picker UI to distinguish "loading" from "empty".
+    pub fn local_devices_loading(&self) -> bool {
+        self.video_devices_loading || self.audio_devices_loading
     }
 
     /// Get cached local video capture devices.

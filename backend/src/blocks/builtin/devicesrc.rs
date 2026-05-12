@@ -90,7 +90,7 @@ use strom_types::{
     element::ElementPadRef,
     MediaType, PropertyValue,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 /// Local Input block builder.
 pub struct LocalInputBuilder;
@@ -408,13 +408,26 @@ fn make_source(
 }
 
 fn read_stream_mode(properties: &HashMap<String, PropertyValue>) -> StreamMode {
-    properties
-        .get("stream_mode")
-        .and_then(|v| match v {
-            PropertyValue::String(s) => Some(StreamMode::parse(s)),
-            _ => None,
-        })
-        .unwrap_or_default()
+    // StreamMode::parse falls back to Video on unknown strings (legacy
+    // WHEP behaviour). Local Input has no historical "video-only" default
+    // — for us audio_video is the natural fallback, so handle unknown
+    // values explicitly with a warning instead of silently downgrading
+    // to video-only.
+    match properties.get("stream_mode") {
+        Some(PropertyValue::String(s)) => match s.as_str() {
+            "audio_video" => StreamMode::AudioVideo,
+            "video" => StreamMode::Video,
+            "audio" => StreamMode::Audio,
+            other => {
+                warn!(
+                    "Local Input: unknown stream_mode '{}' — defaulting to audio_video",
+                    other
+                );
+                StreamMode::AudioVideo
+            }
+        },
+        _ => StreamMode::default(),
+    }
 }
 
 fn read_string(properties: &HashMap<String, PropertyValue>, key: &str) -> Option<String> {
@@ -489,7 +502,9 @@ fn local_input_definition() -> BlockDefinition {
                 name: "video_device".to_string(),
                 label: "Video Source".to_string(),
                 description: "Local Video/Source device to capture from (built-in cameras, USB capture cards, HDMI/SDI grabbers, virtual sources, ...). Picked from the live device list — leave empty to use the OS default (autovideosrc).".to_string(),
-                property_type: PropertyType::VideoDevice,
+                property_type: PropertyType::Device {
+                    category: strom_types::discovery::DeviceCategory::VideoSource,
+                },
                 default_value: Some(PropertyValue::String(String::new())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
@@ -502,7 +517,9 @@ fn local_input_definition() -> BlockDefinition {
                 name: "audio_device".to_string(),
                 label: "Audio Source".to_string(),
                 description: "Local Audio/Source device to capture from (built-in inputs, professional audio interfaces, USB grabbers, virtual sources, ...). Picked from the live device list — leave empty to use the OS default (autoaudiosrc).".to_string(),
-                property_type: PropertyType::AudioDevice,
+                property_type: PropertyType::Device {
+                    category: strom_types::discovery::DeviceCategory::AudioSource,
+                },
                 default_value: Some(PropertyValue::String(String::new())),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
@@ -549,7 +566,19 @@ fn local_input_definition() -> BlockDefinition {
                     values: vec![
                         EnumValue {
                             value: String::new(),
-                            label: Some("-".to_string()),
+                            label: Some("Default (device)".to_string()),
+                        },
+                        EnumValue {
+                            value: "192000".to_string(),
+                            label: Some("192 kHz".to_string()),
+                        },
+                        EnumValue {
+                            value: "96000".to_string(),
+                            label: Some("96 kHz".to_string()),
+                        },
+                        EnumValue {
+                            value: "88200".to_string(),
+                            label: Some("88.2 kHz".to_string()),
                         },
                         EnumValue {
                             value: "48000".to_string(),
@@ -585,7 +614,7 @@ fn local_input_definition() -> BlockDefinition {
                     values: vec![
                         EnumValue {
                             value: String::new(),
-                            label: Some("-".to_string()),
+                            label: Some("Default (device)".to_string()),
                         },
                         EnumValue {
                             value: "1".to_string(),

@@ -145,8 +145,8 @@ impl DeviceDiscovery {
         let monitor = gst::DeviceMonitor::new();
 
         // Add filters for device types we care about.
-        // Audio/Source + Video/Source are needed by the Camera/Mic Input block
-        // to populate its device picker. On Windows the underlying providers
+        // Audio/Source + Video/Source are needed by the Local Input block to
+        // populate its device picker. On Windows the underlying providers
         // (WASAPI, DirectSound, MF) do hardware probing on enumeration which
         // adds a small one-time cost at startup; this is the trade-off for
         // letting users pick local capture devices from the UI.

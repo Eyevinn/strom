@@ -1150,19 +1150,29 @@ impl eframe::App for StromApp {
                     tracing::info!("Network interfaces loaded: {} interfaces", interfaces.len());
                     self.network_interfaces = interfaces;
                 }
-                AppMessage::LocalDevicesLoaded { category, devices } => match category {
-                    strom_types::discovery::DeviceCategory::VideoSource => {
-                        tracing::info!("Video devices loaded: {} device(s)", devices.len());
-                        self.video_devices = devices;
-                        self.video_devices_loading = false;
+                AppMessage::LocalDevicesLoaded { category, devices } => {
+                    match category {
+                        strom_types::discovery::DeviceCategory::VideoSource => {
+                            tracing::info!("Video devices loaded: {} device(s)", devices.len());
+                            self.video_devices = devices;
+                            self.video_devices_loading = false;
+                        }
+                        strom_types::discovery::DeviceCategory::AudioSource => {
+                            tracing::info!("Audio devices loaded: {} device(s)", devices.len());
+                            self.audio_devices = devices;
+                            self.audio_devices_loading = false;
+                        }
+                        _ => {}
                     }
-                    strom_types::discovery::DeviceCategory::AudioSource => {
-                        tracing::info!("Audio devices loaded: {} device(s)", devices.len());
-                        self.audio_devices = devices;
-                        self.audio_devices_loading = false;
+                    // Mark caches as fresh once both fetches have settled.
+                    // This way a failing fetch (which now sends an empty
+                    // result rather than dropping silently) doesn't lock
+                    // the TTL retry window — the timestamp only advances
+                    // when no fetch is in flight.
+                    if !self.video_devices_loading && !self.audio_devices_loading {
+                        self.devices_last_loaded = Some(instant::Instant::now());
                     }
-                    _ => {}
-                },
+                }
                 AppMessage::SystemClockLoaded(info) => {
                     self.system_clock_info = Some(info);
                     self.system_clock_unsupported = false;
