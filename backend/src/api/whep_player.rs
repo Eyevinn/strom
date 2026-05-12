@@ -309,9 +309,7 @@ fn remove_fmtp_field(params: &str, key: &str) -> String {
     out.push_str(&params[..idx]);
     out.push_str(&params[idx + removed_total_len..]);
     // Clean up double `;;` or leading `;` artifacts left after removal.
-    out.replace(";;", ";")
-        .trim_start_matches(';')
-        .to_string()
+    out.replace(";;", ";").trim_start_matches(';').to_string()
 }
 
 /// Decide whether an H.264 profile-level-id (6 hex chars: profile_idc + iop +
@@ -338,14 +336,14 @@ fn is_supported_h264_profile_level_id(value: &str) -> bool {
     //   0x04 constraint_set5_flag  -> "progressive-high" / "constrained-high"
     let bad_high_constraints = (profile_iop & 0x1C) != 0;
     match profile_idc {
-        66 => true,                            // baseline / constrained-baseline
-        77 => (profile_iop & 0x10) == 0,       // main (not main-intra)
-        88 => false,                           // extended — not in webrtcsink whitelist
-        100 => !bad_high_constraints,          // high (block constrained/progressive/intra)
-        110 => !bad_high_constraints,          // high-10
-        122 => !bad_high_constraints,          // high-4:2:2
-        244 => !bad_high_constraints,          // high-4:4:4
-        _ => false,                            // scalable, multiview, stereo, etc.
+        66 => true,                      // baseline / constrained-baseline
+        77 => (profile_iop & 0x10) == 0, // main (not main-intra)
+        88 => false,                     // extended — not in webrtcsink whitelist
+        100 => !bad_high_constraints,    // high (block constrained/progressive/intra)
+        110 => !bad_high_constraints,    // high-10
+        122 => !bad_high_constraints,    // high-4:2:2
+        244 => !bad_high_constraints,    // high-4:4:4
+        _ => false,                      // scalable, multiview, stereo, etc.
     }
 }
 
@@ -545,10 +543,7 @@ pub async fn whep_endpoint_proxy(
             // which exceeds what most browser HW HEVC decoders support
             // (typically up to 5.1). With no level-id, browsers default to
             // a sane level that matches the actual stream the encoder emits.
-            let body_bytes = if body_bytes
-                .windows(5)
-                .any(|w| w == b"H265/")
-            {
+            let body_bytes = if body_bytes.windows(5).any(|w| w == b"H265/") {
                 let answer = String::from_utf8_lossy(&body_bytes).into_owned();
                 let rewritten = strip_h265_fmtp_level_id(&answer);
                 if rewritten != answer {

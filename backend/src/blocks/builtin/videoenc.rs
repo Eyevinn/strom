@@ -731,7 +731,11 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
 fn get_codec_caps_string(codec: Codec, profile: &str) -> String {
     match codec {
         Codec::H264 => {
-            let p = if profile == "auto" { "baseline" } else { profile };
+            let p = if profile == "auto" {
+                "baseline"
+            } else {
+                profile
+            };
             format!("video/x-h264,alignment=au,profile={}", p)
         }
         Codec::H265 => {
