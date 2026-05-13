@@ -60,4 +60,4 @@ pub const DEFAULT_VOLUME_RAMP_MS: u32 = 20;
 /// Anti-click ramp applied automatically when `mute` is toggled. Not
 /// user-configurable — short enough to feel instant, long enough to
 /// prevent the discontinuity click of a hard mute.
-pub const MUTE_ANTICLICK_RAMP_MS: u32 = 10;
+pub const MUTE_ANTICLICK_RAMP_MS: u32 = 30;
