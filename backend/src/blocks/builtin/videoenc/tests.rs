@@ -198,7 +198,11 @@ fn test_encoder_selection_software_only() {
 #[test]
 fn test_get_codec_caps_string() {
     assert_eq!(
-        get_codec_caps_string(Codec::H264, "auto"),
+        get_codec_caps_string(Codec::H264, "none"),
+        "video/x-h264,alignment=au"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H264, "baseline"),
         "video/x-h264,alignment=au,profile=baseline"
     );
     assert_eq!(
@@ -206,15 +210,27 @@ fn test_get_codec_caps_string() {
         "video/x-h264,alignment=au,profile=high"
     );
     assert_eq!(
-        get_codec_caps_string(Codec::H265, "auto"),
+        get_codec_caps_string(Codec::H264, "high-4:4:4"),
+        "video/x-h264,alignment=au,profile=high-4:4:4"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H265, "main-422-10"),
+        "video/x-h265,alignment=au,profile=main-422-10"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H265, "none"),
+        "video/x-h265,alignment=au"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H265, "main"),
         "video/x-h265,alignment=au,profile=main"
     );
     assert_eq!(
         get_codec_caps_string(Codec::H265, "main-10"),
         "video/x-h265,alignment=au,profile=main-10"
     );
-    assert_eq!(get_codec_caps_string(Codec::AV1, "auto"), "video/x-av1");
-    assert_eq!(get_codec_caps_string(Codec::VP9, "auto"), "video/x-vp9");
+    assert_eq!(get_codec_caps_string(Codec::AV1, "none"), "video/x-av1");
+    assert_eq!(get_codec_caps_string(Codec::VP9, "none"), "video/x-vp9");
 }
 
 /// Test that we can create and configure available encoders without panicking
