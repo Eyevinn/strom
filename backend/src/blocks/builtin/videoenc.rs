@@ -21,7 +21,9 @@ use crate::gpu::video_convert_mode;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom_types::{block::*, element::ElementPadRef, EnumValue, PropertyValue, *};
+use strom_types::{
+    block::*, element::ElementPadRef, videoenc::Profile, EnumValue, PropertyValue, *,
+};
 use tracing::{info, warn};
 
 /// Video Encoder block builder.
@@ -109,14 +111,7 @@ impl BlockBuilder for VideoEncBuilder {
             })
             .unwrap_or(60);
 
-        let profile = properties
-            .get("profile")
-            .and_then(|v| match v {
-                PropertyValue::String(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .unwrap_or("auto")
-            .to_string();
+        let profile = parse_profile(properties);
 
         // Create elements
         // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
@@ -165,7 +160,7 @@ impl BlockBuilder for VideoEncBuilder {
         info!("Added {} parser for proper stream formatting", parser_name);
 
         // Create capsfilter with codec-specific caps
-        let caps_str = get_codec_caps_string(codec, &profile);
+        let caps_str = get_codec_caps_string(codec, profile);
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
             BlockBuildError::InvalidConfiguration(format!("Invalid caps: {}", caps_str))
         })?;
@@ -745,27 +740,44 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
 
 /// Get codec-specific caps string for capsfilter, given a profile selection.
 ///
-/// `profile` is either `"none"` — omit the profile field so the encoder
-/// negotiates freely with downstream — or an explicit codec profile name
-/// (`"baseline"`, `"constrained-baseline"`, `"main"`, `"high"`, `"high-10"`,
-/// `"main-10"`, `"main-422-10"`, …) that gets pinned on the capsfilter.
-fn get_codec_caps_string(codec: Codec, profile: &str) -> String {
+/// For H.264/H.265: pins `profile=<name>` on the capsfilter unless `profile`
+/// is [`Profile::None`], in which case no profile field is added and the
+/// encoder negotiates freely with downstream.
+/// For AV1/VP9: profile is ignored — caps only contain the codec media type.
+fn get_codec_caps_string(codec: Codec, profile: Profile) -> String {
     match codec {
-        Codec::H264 => {
-            if profile == "none" {
-                return "video/x-h264,alignment=au".to_string();
-            }
-            format!("video/x-h264,alignment=au,profile={}", profile)
-        }
-        Codec::H265 => {
-            if profile == "none" {
-                return "video/x-h265,alignment=au".to_string();
-            }
-            format!("video/x-h265,alignment=au,profile={}", profile)
-        }
+        Codec::H264 => match profile.as_caps_str() {
+            None => "video/x-h264,alignment=au".to_string(),
+            Some(p) => format!("video/x-h264,alignment=au,profile={}", p),
+        },
+        Codec::H265 => match profile.as_caps_str() {
+            None => "video/x-h265,alignment=au".to_string(),
+            Some(p) => format!("video/x-h265,alignment=au,profile={}", p),
+        },
         Codec::AV1 => "video/x-av1".to_string(),
         Codec::VP9 => "video/x-vp9".to_string(),
     }
+}
+
+/// Parse the `profile` property. Unknown / missing values fall back to the
+/// enum's `Default` (no profile constraint).
+fn parse_profile(properties: &HashMap<String, PropertyValue>) -> Profile {
+    properties
+        .get("profile")
+        .and_then(|v| match v {
+            PropertyValue::String(s) => {
+                let parsed = Profile::from_property_str(s);
+                if parsed.is_none() {
+                    warn!(
+                        "videoenc: invalid profile value '{}', falling back to default",
+                        s
+                    );
+                }
+                parsed
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Get metadata for VideoEncoder block (for UI/API).
@@ -806,26 +818,11 @@ fn videoenc_definition() -> BlockDefinition {
                 label: "Profile".to_string(),
                 description: "Codec profile pinned on the encoder's output capsfilter. \"none\" (default) omits the profile field, letting the encoder negotiate freely with downstream — works with any downstream and is the right choice unless something specifically requires a pinned profile. Pick an explicit profile only when the downstream needs it. H.264 profiles begin with baseline/main/high; H.265 profiles begin with main.".to_string(),
                 property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue { value: "none".to_string(), label: Some("None (no constraint)".to_string()) },
-                        EnumValue { value: "constrained-baseline".to_string(), label: Some("Constrained Baseline (H.264)".to_string()) },
-                        EnumValue { value: "baseline".to_string(), label: Some("Baseline (H.264)".to_string()) },
-                        EnumValue { value: "main".to_string(), label: Some("Main (H.264 / H.265)".to_string()) },
-                        EnumValue { value: "high".to_string(), label: Some("High (H.264)".to_string()) },
-                        EnumValue { value: "high-10".to_string(), label: Some("High 10-bit (H.264)".to_string()) },
-                        EnumValue { value: "high-4:2:2".to_string(), label: Some("High 4:2:2 (H.264, 8/10-bit)".to_string()) },
-                        EnumValue { value: "high-4:4:4".to_string(), label: Some("High 4:4:4 (H.264)".to_string()) },
-                        EnumValue { value: "main-10".to_string(), label: Some("Main 10 (H.265, 10-bit 4:2:0)".to_string()) },
-                        EnumValue { value: "main-12".to_string(), label: Some("Main 12 (H.265, 12-bit 4:2:0)".to_string()) },
-                        EnumValue { value: "main-422-10".to_string(), label: Some("Main 4:2:2 10 (H.265)".to_string()) },
-                        EnumValue { value: "main-422-12".to_string(), label: Some("Main 4:2:2 12 (H.265)".to_string()) },
-                        EnumValue { value: "main-444".to_string(), label: Some("Main 4:4:4 (H.265)".to_string()) },
-                        EnumValue { value: "main-444-10".to_string(), label: Some("Main 4:4:4 10 (H.265)".to_string()) },
-                        EnumValue { value: "main-444-12".to_string(), label: Some("Main 4:4:4 12 (H.265)".to_string()) },
-                        EnumValue { value: "main-still-picture".to_string(), label: Some("Main Still Picture (H.265)".to_string()) },
-                    ],
+                    values: Profile::block_enum_values(),
                 },
-                default_value: Some(PropertyValue::String("none".to_string())),
+                default_value: Some(PropertyValue::String(
+                    Profile::default().as_property_str().to_string(),
+                )),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "profile".to_string(),
