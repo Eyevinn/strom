@@ -198,23 +198,77 @@ fn test_encoder_selection_software_only() {
 #[test]
 fn test_get_codec_caps_string() {
     assert_eq!(
-        get_codec_caps_string(Codec::H264, "auto"),
+        get_codec_caps_string(Codec::H264, Profile::None),
+        "video/x-h264,alignment=au"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H264, Profile::Baseline),
         "video/x-h264,alignment=au,profile=baseline"
     );
     assert_eq!(
-        get_codec_caps_string(Codec::H264, "high"),
+        get_codec_caps_string(Codec::H264, Profile::High),
         "video/x-h264,alignment=au,profile=high"
     );
     assert_eq!(
-        get_codec_caps_string(Codec::H265, "auto"),
+        get_codec_caps_string(Codec::H264, Profile::High444),
+        "video/x-h264,alignment=au,profile=high-4:4:4"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H265, Profile::Main422_10),
+        "video/x-h265,alignment=au,profile=main-422-10"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H265, Profile::None),
+        "video/x-h265,alignment=au"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H265, Profile::Main),
         "video/x-h265,alignment=au,profile=main"
     );
     assert_eq!(
-        get_codec_caps_string(Codec::H265, "main-10"),
+        get_codec_caps_string(Codec::H265, Profile::Main10),
         "video/x-h265,alignment=au,profile=main-10"
     );
-    assert_eq!(get_codec_caps_string(Codec::AV1, "auto"), "video/x-av1");
-    assert_eq!(get_codec_caps_string(Codec::VP9, "auto"), "video/x-vp9");
+    assert_eq!(
+        get_codec_caps_string(Codec::AV1, Profile::None),
+        "video/x-av1"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::VP9, Profile::None),
+        "video/x-vp9"
+    );
+}
+
+#[test]
+fn test_parse_profile_invalid_value_falls_back_to_default() {
+    let mut props = HashMap::new();
+    props.insert(
+        "profile".to_string(),
+        PropertyValue::String("auto".to_string()),
+    );
+    assert_eq!(parse_profile(&props), Profile::default());
+
+    props.insert(
+        "profile".to_string(),
+        PropertyValue::String("garbage".to_string()),
+    );
+    assert_eq!(parse_profile(&props), Profile::default());
+}
+
+#[test]
+fn test_parse_profile_missing_falls_back_to_default() {
+    let props = HashMap::new();
+    assert_eq!(parse_profile(&props), Profile::default());
+}
+
+#[test]
+fn test_parse_profile_valid_value() {
+    let mut props = HashMap::new();
+    props.insert(
+        "profile".to_string(),
+        PropertyValue::String("main-422-10".to_string()),
+    );
+    assert_eq!(parse_profile(&props), Profile::Main422_10);
 }
 
 /// Test that we can create and configure available encoders without panicking
