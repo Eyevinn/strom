@@ -457,6 +457,34 @@ impl MixerEditor {
         });
     }
 
+    /// Push the solo bus master fader to `pfl_master_vol` via API.
+    pub(super) fn update_solo_master_fader(&mut self, ctx: &Context) {
+        if !self.live_updates || !self.pipeline_running {
+            return;
+        }
+        if self.last_update.elapsed().as_millis() < 50 {
+            return;
+        }
+        self.last_update = instant::Instant::now();
+
+        let ramp_ms = Some(self.fade_ms);
+        let api = self.api.clone();
+        let flow_id = self.flow_id;
+        let element_id = format!("{}:pfl_master_vol", self.block_id);
+        let value = PropertyValue::Float(self.solo_master_fader as f64);
+        let ctx = ctx.clone();
+
+        crate::app::spawn_task(async move {
+            if let Err(e) = api
+                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
+                .await
+            {
+                tracing::warn!("Mixer API update failed: {}", e);
+            }
+            ctx.request_repaint();
+        });
+    }
+
     /// Update aux send level via API.
     pub(super) fn update_aux_send(&mut self, ctx: &Context, ch_idx: usize, aux_idx: usize) {
         if !self.live_updates || !self.pipeline_running {

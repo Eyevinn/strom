@@ -23,6 +23,13 @@ impl BlockBuilder for MixerBuilder {
         let num_channels = parse_num_channels(properties);
         let num_aux_buses = parse_num_aux_buses(properties);
         let num_groups = parse_num_groups(properties);
+        // Label the solo output port "PFL" or "AFL" based on solo_mode so the
+        // graph view matches what the user sees in the mixer strip header.
+        let solo_label = if get_string_prop(properties, "solo_mode", "pfl") == "afl" {
+            "AFL"
+        } else {
+            "PFL"
+        };
         // Create input pads dynamically
         let inputs = (0..num_channels)
             .map(|i| ExternalPad {
@@ -45,10 +52,10 @@ impl BlockBuilder for MixerBuilder {
                 internal_element_id: "main_out_tee".to_string(),
                 internal_pad_name: "src_%u".to_string(),
             },
-            // PFL output (always present)
+            // Solo output (PFL or AFL depending on solo_mode; always present)
             ExternalPad {
                 name: "pfl_out".to_string(),
-                label: Some("PFL".to_string()),
+                label: Some(solo_label.to_string()),
                 media_type: MediaType::Audio,
                 internal_element_id: "pfl_out_tee".to_string(),
                 internal_pad_name: "src_%u".to_string(),
@@ -751,7 +758,7 @@ impl BlockBuilder for MixerBuilder {
                 let aux_pre = get_bool_prop(
                     properties,
                     &format!("ch{}_aux{}_pre", ch_num, aux + 1),
-                    aux < 2, // Default: aux 1-2 pre-fader, aux 3-4 post-fader
+                    aux < 2, // Default: aux 1-2 pre-fader (monitor/IEM), rest post-fader (FX)
                 );
 
                 let aux_send_id = format!("{}:aux_send_{}_{}", instance_id, ch, aux);

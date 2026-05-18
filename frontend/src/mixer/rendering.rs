@@ -16,76 +16,57 @@ impl MixerEditor {
         self.handle_keyboard(ui, ctx);
         self.strip_interacted = false;
 
-        let available_height = ui.available_height();
-        let detail_panel_height = if self.selection.is_some() { 220.0 } else { 0.0 };
-        let status_bar_height = 30.0;
-        let channel_area_height = (available_height
-            - BUS_ROW_MIN_HEIGHT
-            - detail_panel_height
-            - status_bar_height
-            - 16.0)
-            .max(300.0);
-
-        // Outer vertical scroll wraps the entire mixer
+        // Outer vertical scroll wraps the entire mixer.
+        // Each row is sized to its content so the bus-master row sits flush
+        // against the channel strips above, rather than being pushed to the
+        // bottom of the window by an expanded channel-area allocation.
         egui::ScrollArea::vertical()
             .id_salt("mixer_v_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     // ── Row 1: Channel strips ──
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width(), channel_area_height),
-                        egui::Layout::left_to_right(egui::Align::Min),
-                        |ui| {
-                            egui::ScrollArea::horizontal()
-                                .id_salt("ch_h_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        for i in 0..self.channels.len() {
-                                            let meter_key =
-                                                format!("{}:meter:{}", self.block_id, i + 1);
-                                            let meter_data =
-                                                meter_store.get(&self.flow_id, &meter_key);
-                                            self.render_channel_strip(ui, ctx, i, meter_data);
-                                            ui.add_space(STRIP_GAP);
-                                        }
-                                    });
-                                });
-                        },
-                    );
+                    egui::ScrollArea::horizontal()
+                        .id_salt("ch_h_scroll")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for i in 0..self.channels.len() {
+                                    let meter_key = format!("{}:meter:{}", self.block_id, i + 1);
+                                    let meter_data = meter_store.get(&self.flow_id, &meter_key);
+                                    self.render_channel_strip(ui, ctx, i, meter_data);
+                                    ui.add_space(STRIP_GAP);
+                                }
+                            });
+                        });
 
                     ui.separator();
 
                     // ── Row 2: Bus masters (aux + groups + main) ──
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width(), BUS_ROW_MIN_HEIGHT),
-                        egui::Layout::left_to_right(egui::Align::Min),
-                        |ui| {
-                            egui::ScrollArea::horizontal()
-                                .id_salt("bus_h_scroll")
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        if self.num_aux_buses > 0 {
-                                            self.render_aux_masters(ui, ctx, meter_store);
-                                            ui.add_space(8.0);
-                                            ui.separator();
-                                            ui.add_space(8.0);
-                                        }
+                    egui::ScrollArea::horizontal()
+                        .id_salt("bus_h_scroll")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if self.num_aux_buses > 0 {
+                                    self.render_aux_masters(ui, ctx, meter_store);
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.add_space(8.0);
+                                }
 
-                                        if self.num_groups > 0 {
-                                            self.render_group_strips(ui, ctx, meter_store);
-                                            ui.add_space(8.0);
-                                            ui.separator();
-                                            ui.add_space(8.0);
-                                        }
+                                if self.num_groups > 0 {
+                                    self.render_group_strips(ui, ctx, meter_store);
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.add_space(8.0);
+                                }
 
-                                        self.render_main_strip(ui, ctx, meter_store);
-                                    });
-                                });
-                        },
-                    );
+                                self.render_solo_master_strip(ui, ctx, meter_store);
+                                ui.add_space(4.0);
+                                self.render_main_strip(ui, ctx, meter_store);
+                            });
+                        });
 
                     // ── Row 3: Detail panel (Gate/Comp/EQ) ──
                     if self.selection.is_some() {
@@ -115,13 +96,15 @@ impl MixerEditor {
                         } else if !self.status.is_empty() {
                             ui.label(&self.status);
                         }
-                        // Keyboard shortcuts legend
+                        // Keyboard shortcuts legend (P toggles PFL or AFL based on solo_mode)
+                        let legend = format!(
+                            "1-0: Select ch | M: Mute | P: {} | Esc: Deselect | Arrows: Fader/Pan",
+                            self.solo_label(),
+                        );
                         ui.label(
-                            egui::RichText::new(
-                                "1-0: Select ch | M: Mute | P: PFL | Esc: Deselect | Arrows: Fader/Pan",
-                            )
-                            .small()
-                            .color(Color32::from_gray(90)),
+                            egui::RichText::new(legend)
+                                .small()
+                                .color(Color32::from_gray(90)),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             match &self.selection {
@@ -156,11 +139,20 @@ impl MixerEditor {
                                     .small()
                                     .color(Color32::from_gray(120)),
                             );
-                            if ui.button(format!("{} Save", egui_phosphor::regular::FLOPPY_DISK)).clicked() {
+                            if ui
+                                .button(format!("{} Save", egui_phosphor::regular::FLOPPY_DISK))
+                                .clicked()
+                            {
                                 self.save_requested = true;
                                 self.status = "Saving mixer state...".to_string();
                             }
-                            if ui.button(format!("{} Reset All", egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE)).clicked() {
+                            if ui
+                                .button(format!(
+                                    "{} Reset All",
+                                    egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE
+                                ))
+                                .clicked()
+                            {
                                 self.reset_to_defaults();
                                 self.save_requested = true;
                                 self.status = "Reset to defaults, saving...".to_string();
@@ -337,86 +329,112 @@ impl MixerEditor {
                     });
 
                     // ── Aux send knobs ──
+                    // Wrap to a new row every 4 knobs so a strip with many aux
+                    // buses doesn't spill horizontally past the strip width.
+                    const AUX_PER_ROW: usize = 4;
                     if self.num_aux_buses > 0 {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 1.0;
-                            for aux_idx in 0..self.num_aux_buses.min(MAX_AUX_BUSES) {
-                                let response = self.render_knob(ui, index, aux_idx);
-                                if response.double_clicked() {
-                                    self.bypass_throttle();
-                                    self.update_aux_send(ctx, index, aux_idx);
-                                } else if response.dragged() {
-                                    self.active_control = ActiveControl::AuxSend(index, aux_idx);
-                                    self.update_aux_send(ctx, index, aux_idx);
-                                } else if response.drag_stopped() {
-                                    self.active_control = ActiveControl::None;
+                        let total_aux = self.num_aux_buses.min(MAX_AUX_BUSES);
+                        for row_start in (0..total_aux).step_by(AUX_PER_ROW) {
+                            let row_end = (row_start + AUX_PER_ROW).min(total_aux);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 1.0;
+                                for aux_idx in row_start..row_end {
+                                    let response = self.render_knob(ui, index, aux_idx);
+                                    if response.double_clicked() {
+                                        self.bypass_throttle();
+                                        self.update_aux_send(ctx, index, aux_idx);
+                                    } else if response.dragged() {
+                                        self.active_control =
+                                            ActiveControl::AuxSend(index, aux_idx);
+                                        self.update_aux_send(ctx, index, aux_idx);
+                                    } else if response.drag_stopped() {
+                                        self.active_control = ActiveControl::None;
+                                    }
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
 
                     // ── Routing buttons (M + group numbers) ──
+                    // M and the group buttons are laid out as a single
+                    // left-to-right sequence; we wrap to a new row every 4
+                    // buttons (matching the aux-knob wrap) so a strip with
+                    // many subgroups doesn't spill horizontally.
+                    const ROUTING_PER_ROW: usize = 4;
                     {
-                        let num_dest = 1 + self.num_groups;
+                        let num_groups = self.num_groups.min(MAX_GROUPS);
+                        let num_dest = 1 + num_groups;
+                        let row_size = num_dest.clamp(1, ROUTING_PER_ROW);
                         let btn_w =
-                            (strip_inner - 4.0 - (num_dest as f32 - 1.0) * 2.0) / num_dest as f32;
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            // Main
-                            let to_main = self.channels[index].to_main;
-                            let fill = if to_main {
-                                Color32::from_rgb(70, 110, 70)
-                            } else {
-                                Color32::from_rgb(48, 48, 52)
-                            };
-                            let text_col = if to_main {
-                                Color32::WHITE
-                            } else {
-                                Color32::from_gray(100)
-                            };
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("M").small().color(text_col),
-                                    )
-                                    .fill(fill)
-                                    .min_size(Vec2::new(btn_w, SMALL_BTN_H)),
-                                )
-                                .clicked()
-                            {
-                                self.channels[index].to_main = !to_main;
-                                self.update_routing(ctx, index);
-                            }
-                            // Groups
-                            for g in 0..self.num_groups.min(MAX_GROUPS) {
-                                let on = self.channels[index].to_grp[g];
-                                let fill = if on {
-                                    Color32::from_rgb(140, 90, 140)
-                                } else {
-                                    Color32::from_rgb(48, 48, 52)
-                                };
-                                let text_col = if on {
-                                    Color32::WHITE
-                                } else {
-                                    Color32::from_gray(100)
-                                };
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            egui::RichText::new(format!("{}", g + 1))
-                                                .small()
-                                                .color(text_col),
-                                        )
-                                        .fill(fill)
-                                        .min_size(Vec2::new(btn_w, SMALL_BTN_H)),
-                                    )
-                                    .clicked()
-                                {
-                                    self.channels[index].to_grp[g] = !on;
-                                    self.update_routing(ctx, index);
+                            (strip_inner - 4.0 - (row_size as f32 - 1.0) * 2.0) / row_size as f32;
+
+                        // Build a flat list of routing buttons: (label, on, on-color)
+                        // index 0 = Main, 1..=num_groups = groups
+                        for row_start in (0..num_dest).step_by(ROUTING_PER_ROW) {
+                            let row_end = (row_start + ROUTING_PER_ROW).min(num_dest);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                for slot in row_start..row_end {
+                                    if slot == 0 {
+                                        // Main destination
+                                        let to_main = self.channels[index].to_main;
+                                        let fill = if to_main {
+                                            Color32::from_rgb(70, 110, 70)
+                                        } else {
+                                            Color32::from_rgb(48, 48, 52)
+                                        };
+                                        let text_col = if to_main {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_gray(100)
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("M")
+                                                        .small()
+                                                        .color(text_col),
+                                                )
+                                                .fill(fill)
+                                                .min_size(Vec2::new(btn_w, SMALL_BTN_H)),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.channels[index].to_main = !to_main;
+                                            self.update_routing(ctx, index);
+                                        }
+                                    } else {
+                                        let g = slot - 1;
+                                        let on = self.channels[index].to_grp[g];
+                                        let fill = if on {
+                                            Color32::from_rgb(140, 90, 140)
+                                        } else {
+                                            Color32::from_rgb(48, 48, 52)
+                                        };
+                                        let text_col = if on {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_gray(100)
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(format!("{}", g + 1))
+                                                        .small()
+                                                        .color(text_col),
+                                                )
+                                                .fill(fill)
+                                                .min_size(Vec2::new(btn_w, SMALL_BTN_H)),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.channels[index].to_grp[g] = !on;
+                                            self.update_routing(ctx, index);
+                                        }
+                                    }
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
 
                     // ── LCD display ──
@@ -493,23 +511,24 @@ impl MixerEditor {
                         self.update_channel_property(ctx, index, "mute");
                     }
 
-                    // ── PFL button ──
-                    let pfl_color = if channel_pfl {
+                    // ── Solo (PFL/AFL) button ──
+                    let solo_color = if channel_pfl {
                         Color32::from_rgb(200, 200, 0)
                     } else {
                         Color32::from_rgb(48, 48, 52)
                     };
-                    let pfl_text_col = if channel_pfl {
+                    let solo_text_col = if channel_pfl {
                         Color32::BLACK
                     } else {
                         Color32::from_gray(100)
                     };
+                    let solo_label = self.solo_label();
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("PFL").small().color(pfl_text_col),
+                                egui::RichText::new(solo_label).small().color(solo_text_col),
                             )
-                            .fill(pfl_color)
+                            .fill(solo_color)
                             .min_size(Vec2::new(strip_inner - 4.0, BTN_H)),
                         )
                         .clicked()
@@ -742,6 +761,118 @@ impl MixerEditor {
         {
             self.strip_interacted = true;
         }
+    }
+
+    /// Render the solo bus master strip (PFL or AFL, depending on `solo_mode`).
+    ///
+    /// Drives `pfl_master_vol` and receives metering from `pfl_level`. The
+    /// strip has only a header + LCD + fader/meter — no mute/select since
+    /// the backend has no solo mute property and the solo bus has no
+    /// processing detail panel.
+    pub(super) fn render_solo_master_strip(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &Context,
+        meter_store: &MeterDataStore,
+    ) {
+        let solo_meter_key = format!("{}:meter:pfl", self.block_id);
+        let solo_meter_data = meter_store.get(&self.flow_id, &solo_meter_key);
+        let label = self.solo_label();
+
+        egui::Frame::default()
+            .fill(Color32::from_rgb(50, 48, 32))
+            .corner_radius(CornerRadius::same(3))
+            .inner_margin(STRIP_MARGIN)
+            .show(ui, |ui| {
+                ui.set_min_width(BUS_STRIP_INNER);
+                ui.set_max_width(BUS_STRIP_INNER);
+
+                ui.vertical_centered(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+
+                    ui.label(
+                        egui::RichText::new(label)
+                            .strong()
+                            .size(12.0)
+                            .color(Color32::from_rgb(220, 200, 100)),
+                    );
+
+                    self.render_lcd(
+                        ui,
+                        &format_db(self.solo_master_fader),
+                        BUS_STRIP_INNER - 4.0,
+                        LCD_H,
+                    );
+
+                    ui.add_space(2.0);
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), BUS_FADER_HEIGHT),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            self.render_stereo_meter(ui, solo_meter_data, BUS_FADER_HEIGHT);
+                            ui.add_space(1.0);
+                            self.render_db_scale(ui, BUS_FADER_HEIGHT);
+                            ui.add_space(1.0);
+
+                            let mut fader_db = linear_to_db(self.solo_master_fader as f64) as f32;
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(20.0, BUS_FADER_HEIGHT),
+                                Sense::click_and_drag(),
+                            );
+                            if response.double_clicked() {
+                                if (fader_db - 0.0).abs() < 0.5 {
+                                    self.solo_master_fader = 0.0;
+                                    fader_db = -60.0;
+                                } else {
+                                    self.solo_master_fader = 1.0;
+                                    fader_db = 0.0;
+                                }
+                                self.bypass_throttle();
+                                self.update_solo_master_fader(ctx);
+                            } else if response.dragged() {
+                                let delta = -response.drag_delta().y;
+                                let db_per_pixel = 66.0 / (BUS_FADER_HEIGHT - 10.0);
+                                fader_db = (fader_db + delta * db_per_pixel).clamp(-60.0, 6.0);
+                                self.solo_master_fader = db_to_linear_f32(fader_db);
+                                self.update_solo_master_fader(ctx);
+                            } else if response.drag_stopped() {
+                                self.update_solo_master_fader(ctx);
+                            }
+                            let painter = ui.painter();
+                            let track_rect = Rect::from_center_size(
+                                rect.center(),
+                                Vec2::new(4.0, BUS_FADER_HEIGHT - 10.0),
+                            );
+                            painter.rect_filled(
+                                track_rect,
+                                CornerRadius::same(2),
+                                Color32::from_gray(55),
+                            );
+                            let handle_y = db_to_y(fader_db, rect.min.y, rect.max.y);
+                            let handle_rect = Rect::from_center_size(
+                                egui::pos2(rect.center().x, handle_y),
+                                Vec2::new(14.0, 30.0),
+                            );
+                            let handle_color = if response.dragged() {
+                                Color32::from_rgb(230, 200, 80)
+                            } else if response.hovered() {
+                                Color32::from_rgb(210, 195, 130)
+                            } else {
+                                Color32::from_rgb(175, 165, 110)
+                            };
+                            painter.rect_filled(handle_rect, CornerRadius::same(3), handle_color);
+                            painter.line_segment(
+                                [
+                                    egui::pos2(handle_rect.left() + 2.0, handle_y),
+                                    egui::pos2(handle_rect.right() - 2.0, handle_y),
+                                ],
+                                Stroke::new(1.5, Color32::from_gray(40)),
+                            );
+                        },
+                    );
+                });
+            });
     }
 
     /// Render the group strips section (compact, for bus row).

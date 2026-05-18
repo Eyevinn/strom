@@ -467,6 +467,11 @@ impl MixerEditor {
             Color32::from_rgb(20, 20, 20),
         );
 
+        // Always draw the dim zone background so the meter shows the colored
+        // sectors (green/yellow/orange/red) even when no signal has arrived.
+        draw_meter_zones_background(painter, left_rect);
+        draw_meter_zones_background(painter, right_rect);
+
         if let Some(data) = meter_data {
             // Get L/R peak values (or use same for both if mono)
             let (left_peak, right_peak) = if data.peak.len() >= 2 {
@@ -477,33 +482,10 @@ impl MixerEditor {
                 return;
             };
 
-            let bottom_y = db_to_y(-60.0, rect.min.y, rect.max.y);
-
-            // Draw left channel
-            let left_level = db_to_level(left_peak);
-            let left_top_y = db_to_y(left_peak as f32, rect.min.y, rect.max.y);
-            let left_bar_rect = Rect::from_min_max(
-                egui::pos2(left_rect.min.x, left_top_y),
-                egui::pos2(left_rect.max.x, bottom_y),
-            );
-            painter.rect_filled(
-                left_bar_rect,
-                CornerRadius::same(2),
-                level_to_color(left_level),
-            );
-
-            // Draw right channel
-            let right_level = db_to_level(right_peak);
-            let right_top_y = db_to_y(right_peak as f32, rect.min.y, rect.max.y);
-            let right_bar_rect = Rect::from_min_max(
-                egui::pos2(right_rect.min.x, right_top_y),
-                egui::pos2(right_rect.max.x, bottom_y),
-            );
-            painter.rect_filled(
-                right_bar_rect,
-                CornerRadius::same(2),
-                level_to_color(right_level),
-            );
+            // Light up each zone from the bottom up to the peak. Each zone
+            // keeps its own colour, matching the standalone VU meter block.
+            draw_meter_zones_lit(painter, left_rect, left_peak as f32);
+            draw_meter_zones_lit(painter, right_rect, right_peak as f32);
 
             // Draw decay lines if available
             if data.decay.len() >= 2 {

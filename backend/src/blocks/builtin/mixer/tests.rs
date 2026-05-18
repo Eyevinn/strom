@@ -82,7 +82,7 @@ fn test_parse_num_channels_clamped() {
     let mut props = HashMap::new();
     props.insert(
         "num_channels".to_string(),
-        PropertyValue::String("100".to_string()),
+        PropertyValue::String("9999".to_string()),
     );
     assert_eq!(parse_num_channels(&props), MAX_CHANNELS);
 

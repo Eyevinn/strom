@@ -50,8 +50,6 @@ const MIN_STRIP_INNER: f32 = 42.0;
 const BUS_FADER_HEIGHT: f32 = 120.0;
 /// Fixed inner width for bus master strips
 const BUS_STRIP_INNER: f32 = 52.0;
-/// Minimum height for the bus master row
-const BUS_ROW_MIN_HEIGHT: f32 = 200.0;
 
 /// A single channel strip in the mixer.
 #[derive(Debug, Clone)]
@@ -234,6 +232,12 @@ pub struct MixerEditor {
     main_fader: f32,
     /// Main mute
     main_mute: bool,
+    /// Solo bus master level (drives `pfl_master_vol`)
+    solo_master_fader: f32,
+    /// Solo mode: "pfl" (pre-fader) or "afl" (after-fader).
+    /// Drives the solo-button label, the keyboard legend, the solo strip
+    /// header, and the `pfl_out` port label on the backend.
+    solo_mode: String,
     /// Main bus compressor enabled
     main_comp_enabled: bool,
     /// Main bus compressor threshold (dB)
@@ -287,6 +291,18 @@ pub struct MixerEditor {
 }
 
 impl MixerEditor {
+    /// Display label for the solo bus / per-channel solo button — "PFL" when
+    /// `solo_mode == "pfl"`, "AFL" otherwise.
+    pub(super) fn solo_label(&self) -> &'static str {
+        if self.solo_mode == "afl" {
+            "AFL"
+        } else {
+            "PFL"
+        }
+    }
+}
+
+impl MixerEditor {
     /// Get the block ID.
     pub fn block_id(&self) -> &str {
         &self.block_id
@@ -318,14 +334,18 @@ impl MixerEditor {
         self.is_reset
     }
 
-    /// Compute the usable inner width of a strip based on number of aux buses.
-    /// The aux knob row is typically the widest element.
+    /// Compute the usable inner width of a strip.
+    ///
+    /// The aux knob row wraps every 4 knobs (see `AUX_PER_ROW` in
+    /// `rendering.rs`), so the strip only needs to be wide enough for one
+    /// row's worth of knobs — capped at 4 — rather than scaling with the
+    /// total aux count.
     fn strip_inner(&self) -> f32 {
         if self.num_aux_buses == 0 {
             return MIN_STRIP_INNER;
         }
-        let knob_row =
-            self.num_aux_buses as f32 * KNOB_SIZE + (self.num_aux_buses as f32 - 1.0) * 2.0;
+        let per_row = self.num_aux_buses.min(4) as f32;
+        let knob_row = per_row * KNOB_SIZE + (per_row - 1.0).max(0.0) * 2.0;
         knob_row.max(MIN_STRIP_INNER)
     }
 }

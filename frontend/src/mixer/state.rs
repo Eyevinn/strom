@@ -18,6 +18,8 @@ impl MixerEditor {
             active_control: ActiveControl::None,
             main_fader: DEFAULT_FADER,
             main_mute: false,
+            solo_master_fader: DEFAULT_FADER,
+            solo_mode: "pfl".to_string(),
             main_comp_enabled: false,
             main_comp_threshold: DEFAULT_COMP_THRESHOLD,
             main_comp_ratio: DEFAULT_COMP_RATIO,
@@ -51,6 +53,14 @@ impl MixerEditor {
         }
         if let Some(PropertyValue::Bool(b)) = properties.get("main_mute") {
             self.main_mute = *b;
+        }
+
+        // Solo bus master + mode (PFL/AFL)
+        if let Some(PropertyValue::Float(f)) = properties.get("pfl_level") {
+            self.solo_master_fader = *f as f32;
+        }
+        if let Some(PropertyValue::String(s)) = properties.get("solo_mode") {
+            self.solo_mode = s.clone();
         }
 
         // Load main bus processing
@@ -342,6 +352,19 @@ impl MixerEditor {
         // Main bus
         set_f!("main_fader".to_string(), self.main_fader, DEFAULT_FADER);
         set_b!("main_mute".to_string(), self.main_mute, false);
+
+        // Solo bus (master fader + mode)
+        set_f!(
+            "pfl_level".to_string(),
+            self.solo_master_fader,
+            DEFAULT_FADER
+        );
+        if self.solo_mode != "pfl" {
+            props.insert(
+                "solo_mode".to_string(),
+                PropertyValue::String(self.solo_mode.clone()),
+            );
+        }
         set_b!(
             "main_comp_enabled".to_string(),
             self.main_comp_enabled,
@@ -514,6 +537,9 @@ impl MixerEditor {
         // Main bus
         self.main_fader = DEFAULT_FADER;
         self.main_mute = false;
+        self.solo_master_fader = DEFAULT_FADER;
+        // solo_mode is intentionally NOT reset — it's a structural choice
+        // (which bus the solo path taps from), not a value to flatten.
         self.main_comp_enabled = false;
         self.main_comp_threshold = DEFAULT_COMP_THRESHOLD;
         self.main_comp_ratio = DEFAULT_COMP_RATIO;
