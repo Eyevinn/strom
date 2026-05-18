@@ -543,7 +543,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                     ch, aux
                 ),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(aux <= 2)), // aux 1-2 pre (monitor/IEM), rest post (FX)
+                default_value: Some(PropertyValue::Bool(false)), // all aux sends default post-fader
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: format!("ch{}_aux{}_pre", ch, aux),
