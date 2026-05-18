@@ -505,8 +505,18 @@ impl MixerEditor {
                     self.render_lcd(ui, &display_text, strip_inner - 4.0, LCD_H);
 
                     // ── Pan knob (centered within the strip) ──
-                    let pan_response =
-                        centered_row(ui, PAN_KNOB_SIZE, |ui| self.render_pan_knob(ui, index));
+                    // Explicit add_space padding avoids any centered-layout
+                    // ambiguity since this is a single fixed-size child.
+                    let pan_response = ui
+                        .horizontal(|ui| {
+                            let avail = ui.available_width();
+                            let pad = ((avail - PAN_KNOB_SIZE) / 2.0).max(0.0);
+                            if pad > 0.0 {
+                                ui.add_space(pad);
+                            }
+                            self.render_pan_knob(ui, index)
+                        })
+                        .inner;
                     if pan_response.double_clicked() {
                         self.bypass_throttle();
                         self.update_channel_property(ctx, index, "pan");
