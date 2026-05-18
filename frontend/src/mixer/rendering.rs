@@ -1,5 +1,47 @@
 use super::*;
 
+/// Center small fixed-size children horizontally on their own row.
+///
+/// Allocates `(ui.available_width(), height)` and lays out children with
+/// `left_to_right(Center).with_main_align(Center).with_main_justify(false)`
+/// — children keep their natural widths and the *group* is centered on the
+/// row's main axis. Critical for rows of knobs where justification would
+/// otherwise spread the knobs apart with empty space between them.
+fn centered_row<R>(ui: &mut Ui, height: f32, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        egui::Vec2::new(width, height),
+        egui::Layout::left_to_right(egui::Align::Center)
+            .with_main_align(egui::Align::Center)
+            .with_main_justify(false),
+        add_contents,
+    )
+    .inner
+}
+
+/// Add a non-interactive header label horizontally centered in the strip.
+fn centered_label(ui: &mut Ui, rich_text: egui::RichText) {
+    let h = ui.spacing().interact_size.y;
+    centered_row(ui, h, |ui| {
+        // Extend wrap-mode keeps short labels at their natural width so the
+        // surrounding centered-and-justified layout actually centers them.
+        ui.add(egui::Label::new(rich_text).wrap_mode(egui::TextWrapMode::Extend));
+    });
+}
+
+/// Same as `centered_label` but for click-sensitive labels (e.g. the
+/// channel-strip name that can be double-clicked to enter edit mode).
+fn centered_clickable_label(ui: &mut Ui, rich_text: egui::RichText) -> egui::Response {
+    let h = ui.spacing().interact_size.y;
+    centered_row(ui, h, |ui| {
+        ui.add(
+            egui::Label::new(rich_text)
+                .wrap_mode(egui::TextWrapMode::Extend)
+                .sense(egui::Sense::click()),
+        )
+    })
+}
+
 impl MixerEditor {
     /// Show the mixer in fullscreen mode.
     pub fn show_fullscreen(&mut self, ui: &mut Ui, ctx: &Context, meter_store: &MeterDataStore) {
@@ -16,95 +58,107 @@ impl MixerEditor {
         self.handle_keyboard(ui, ctx);
         self.strip_interacted = false;
 
-        // Outer vertical scroll wraps the entire mixer.
-        // Each row is sized to its content so the bus-master row sits flush
-        // against the channel strips above, rather than being pushed to the
-        // bottom of the window by an expanded channel-area allocation.
-        egui::ScrollArea::vertical()
-            .id_salt("mixer_v_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    // ── Row 1: Channel strips ──
-                    egui::ScrollArea::horizontal()
-                        .id_salt("ch_h_scroll")
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                for i in 0..self.channels.len() {
-                                    let meter_key = format!("{}:meter:{}", self.block_id, i + 1);
-                                    let meter_data = meter_store.get(&self.flow_id, &meter_key);
-                                    self.render_channel_strip(ui, ctx, i, meter_data);
-                                    ui.add_space(STRIP_GAP);
-                                }
-                            });
-                        });
+        // Split the available height into a scrollable content area (strips
+        // + bus row + detail panel) at the top and a fixed status/footer
+        // row pinned to the bottom. The strips and bus row remain docked
+        // together at the top of the content area.
+        let footer_h: f32 = 32.0;
+        let total_h = ui.available_height();
+        let content_h = (total_h - footer_h - 4.0).max(120.0);
 
-                    ui.separator();
-
-                    // ── Row 2: Bus masters (aux + groups + main) ──
-                    egui::ScrollArea::horizontal()
-                        .id_salt("bus_h_scroll")
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                if self.num_aux_buses > 0 {
-                                    self.render_aux_masters(ui, ctx, meter_store);
-                                    ui.add_space(8.0);
-                                    ui.separator();
-                                    ui.add_space(8.0);
-                                }
-
-                                if self.num_groups > 0 {
-                                    self.render_group_strips(ui, ctx, meter_store);
-                                    ui.add_space(8.0);
-                                    ui.separator();
-                                    ui.add_space(8.0);
-                                }
-
-                                self.render_solo_master_strip(ui, ctx, meter_store);
-                                ui.add_space(4.0);
-                                self.render_main_strip(ui, ctx, meter_store);
-                            });
-                        });
-
-                    // ── Row 3: Detail panel (Gate/Comp/EQ) ──
-                    if self.selection.is_some() {
-                        ui.separator();
-                        let detail_resp = ui.scope(|ui| {
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), content_h),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("mixer_v_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            // ── Row 1: Channel strips ──
                             egui::ScrollArea::horizontal()
-                                .id_salt("detail_h_scroll")
-                                .auto_shrink([false, false])
+                                .id_salt("ch_h_scroll")
+                                .auto_shrink([false, true])
                                 .show(ui, |ui| {
-                                    self.render_detail_panel(ui, ctx);
+                                    ui.horizontal(|ui| {
+                                        for i in 0..self.channels.len() {
+                                            let meter_key =
+                                                format!("{}:meter:{}", self.block_id, i + 1);
+                                            let meter_data =
+                                                meter_store.get(&self.flow_id, &meter_key);
+                                            self.render_channel_strip(ui, ctx, i, meter_data);
+                                            ui.add_space(STRIP_GAP);
+                                        }
+                                    });
                                 });
-                        });
-                        if ui.input(|i| i.pointer.any_pressed()) {
-                            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                                if detail_resp.response.rect.contains(pos) {
-                                    self.strip_interacted = true;
+
+                            ui.separator();
+
+                            // ── Row 2: Bus masters (aux + groups + monitor + main) ──
+                            egui::ScrollArea::horizontal()
+                                .id_salt("bus_h_scroll")
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        if self.num_aux_buses > 0 {
+                                            self.render_aux_masters(ui, ctx, meter_store);
+                                            ui.add_space(8.0);
+                                            ui.separator();
+                                            ui.add_space(8.0);
+                                        }
+
+                                        if self.num_groups > 0 {
+                                            self.render_group_strips(ui, ctx, meter_store);
+                                            ui.add_space(8.0);
+                                            ui.separator();
+                                            ui.add_space(8.0);
+                                        }
+
+                                        self.render_monitor_master_strip(ui, ctx, meter_store);
+                                        ui.add_space(4.0);
+                                        self.render_main_strip(ui, ctx, meter_store);
+                                    });
+                                });
+
+                            // ── Row 3: Detail panel (Gate/Comp/EQ) ──
+                            if self.selection.is_some() {
+                                ui.separator();
+                                let detail_resp = ui.scope(|ui| {
+                                    egui::ScrollArea::horizontal()
+                                        .id_salt("detail_h_scroll")
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            self.render_detail_panel(ui, ctx);
+                                        });
+                                });
+                                if ui.input(|i| i.pointer.any_pressed()) {
+                                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                                        if detail_resp.response.rect.contains(pos) {
+                                            self.strip_interacted = true;
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    }
+                        });
+                    });
+            },
+        );
 
-                    // ── Status bar ──
-                    ui.separator();
-                    let status_resp = ui.horizontal(|ui| {
+        // ── Status bar (pinned to bottom of window) ──
+        ui.separator();
+        let status_resp = ui.horizontal(|ui| {
                         if let Some(error) = &self.error {
                             ui.colored_label(Color32::RED, error);
                         } else if !self.status.is_empty() {
                             ui.label(&self.status);
                         }
-                        // Keyboard shortcuts legend (P toggles PFL or AFL based on solo_mode)
-                        let legend = format!(
-                            "1-0: Select ch | M: Mute | P: {} | Esc: Deselect | Arrows: Fader/Pan",
-                            self.solo_label(),
-                        );
+                        // Keyboard shortcuts legend
                         ui.label(
-                            egui::RichText::new(legend)
-                                .small()
-                                .color(Color32::from_gray(90)),
+                            egui::RichText::new(
+                                "1-0: Select ch | M: Mute | P: PFL | A: AFL | Esc: Deselect | Arrows: Fader/Pan",
+                            )
+                            .small()
+                            .color(Color32::from_gray(90)),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             match &self.selection {
@@ -159,20 +213,18 @@ impl MixerEditor {
                             }
                         });
                     });
-                    if ui.input(|i| i.pointer.any_pressed()) {
-                        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                            if status_resp.response.rect.contains(pos) {
-                                self.strip_interacted = true;
-                            }
-                        }
-                    }
+        if ui.input(|i| i.pointer.any_pressed()) {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                if status_resp.response.rect.contains(pos) {
+                    self.strip_interacted = true;
+                }
+            }
+        }
 
-                    // ── Background click to deselect ──
-                    if ui.input(|i| i.pointer.any_pressed()) && !self.strip_interacted {
-                        self.selection = None;
-                    }
-                });
-            });
+        // ── Background click to deselect ──
+        if ui.input(|i| i.pointer.any_pressed()) && !self.strip_interacted {
+            self.selection = None;
+        }
     }
 
     /// Render a single channel strip.
@@ -205,8 +257,7 @@ impl MixerEditor {
             .corner_radius(CornerRadius::same(3))
             .inner_margin(STRIP_MARGIN)
             .show(ui, |ui| {
-                ui.set_min_width(strip_inner);
-                ui.set_max_width(strip_inner);
+                ui.set_width(strip_inner);
 
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -225,13 +276,11 @@ impl MixerEditor {
                         // Auto-focus when first shown
                         response.request_focus();
                     } else {
-                        let label_response = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&self.channels[index].label)
-                                    .strong()
-                                    .size(11.0),
-                            )
-                            .sense(Sense::click()),
+                        let label_response = centered_clickable_label(
+                            ui,
+                            egui::RichText::new(&self.channels[index].label)
+                                .strong()
+                                .size(11.0),
                         );
                         if label_response.double_clicked() {
                             self.editing_label = Some(index);
@@ -329,14 +378,16 @@ impl MixerEditor {
                     });
 
                     // ── Aux send knobs ──
-                    // Wrap to a new row every 4 knobs so a strip with many aux
-                    // buses doesn't spill horizontally past the strip width.
+                    // Wrap to a new row every 4 knobs and center each row
+                    // within the strip — `centered_row` allocates a fixed
+                    // (strip_inner, KNOB_SIZE) area with main-axis centering
+                    // so the last (possibly short) row is centered too.
                     const AUX_PER_ROW: usize = 4;
                     if self.num_aux_buses > 0 {
                         let total_aux = self.num_aux_buses.min(MAX_AUX_BUSES);
                         for row_start in (0..total_aux).step_by(AUX_PER_ROW) {
                             let row_end = (row_start + AUX_PER_ROW).min(total_aux);
-                            ui.horizontal(|ui| {
+                            centered_row(ui, KNOB_SIZE, |ui| {
                                 ui.spacing_mut().item_spacing.x = 1.0;
                                 for aux_idx in row_start..row_end {
                                     let response = self.render_knob(ui, index, aux_idx);
@@ -453,8 +504,9 @@ impl MixerEditor {
                     };
                     self.render_lcd(ui, &display_text, strip_inner - 4.0, LCD_H);
 
-                    // ── Pan knob ──
-                    let pan_response = self.render_pan_knob(ui, index);
+                    // ── Pan knob (centered within the strip) ──
+                    let pan_response =
+                        centered_row(ui, PAN_KNOB_SIZE, |ui| self.render_pan_knob(ui, index));
                     if pan_response.double_clicked() {
                         self.bypass_throttle();
                         self.update_channel_property(ctx, index, "pan");
@@ -511,30 +563,66 @@ impl MixerEditor {
                         self.update_channel_property(ctx, index, "mute");
                     }
 
-                    // ── Solo (PFL/AFL) button ──
-                    let solo_color = if channel_pfl {
-                        Color32::from_rgb(200, 200, 0)
-                    } else {
-                        Color32::from_rgb(48, 48, 52)
-                    };
-                    let solo_text_col = if channel_pfl {
-                        Color32::BLACK
-                    } else {
-                        Color32::from_gray(100)
-                    };
-                    let solo_label = self.solo_label();
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(solo_label).small().color(solo_text_col),
-                            )
-                            .fill(solo_color)
-                            .min_size(Vec2::new(strip_inner - 4.0, BTN_H)),
-                        )
-                        .clicked()
+                    // ── PFL + AFL buttons (independent solo sends, stacked) ──
                     {
-                        self.channels[index].pfl = !self.channels[index].pfl;
-                        self.update_channel_property(ctx, index, "pfl");
+                        let channel_afl = self.channels[index].afl;
+                        let mut solo_changed: Option<&'static str> = None;
+
+                        // PFL — pre-fader listen
+                        let pfl_fill = if channel_pfl {
+                            Color32::from_rgb(200, 200, 0)
+                        } else {
+                            Color32::from_rgb(48, 48, 52)
+                        };
+                        let pfl_text = if channel_pfl {
+                            Color32::BLACK
+                        } else {
+                            Color32::from_gray(100)
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("PFL").small().color(pfl_text),
+                                )
+                                .fill(pfl_fill)
+                                .min_size(Vec2::new(strip_inner - 4.0, BTN_H)),
+                            )
+                            .clicked()
+                        {
+                            self.channels[index].pfl = !self.channels[index].pfl;
+                            solo_changed = Some("pfl");
+                        }
+
+                        // AFL — after-fader listen
+                        let afl_fill = if channel_afl {
+                            Color32::from_rgb(160, 200, 80)
+                        } else {
+                            Color32::from_rgb(48, 48, 52)
+                        };
+                        let afl_text = if channel_afl {
+                            Color32::BLACK
+                        } else {
+                            Color32::from_gray(100)
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("AFL").small().color(afl_text),
+                                )
+                                .fill(afl_fill)
+                                .min_size(Vec2::new(strip_inner - 4.0, BTN_H)),
+                            )
+                            .clicked()
+                        {
+                            self.channels[index].afl = !self.channels[index].afl;
+                            solo_changed = Some("afl");
+                        }
+
+                        if let Some(prop) = solo_changed {
+                            self.update_channel_property(ctx, index, prop);
+                            // Switch the monitor source whenever any PFL/AFL toggles.
+                            self.update_monitor_gates(ctx);
+                        }
                     }
 
                     // ── Select button ──
@@ -602,8 +690,7 @@ impl MixerEditor {
             .corner_radius(CornerRadius::same(3))
             .inner_margin(STRIP_MARGIN)
             .show(ui, |ui| {
-                ui.set_min_width(BUS_STRIP_INNER);
-                ui.set_max_width(BUS_STRIP_INNER);
+                ui.set_width(BUS_STRIP_INNER);
 
                 let bg_rect = ui.available_rect_before_wrap();
                 let bg_response =
@@ -615,7 +702,8 @@ impl MixerEditor {
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
 
-                    ui.label(
+                    centered_label(
+                        ui,
                         egui::RichText::new("MAIN")
                             .strong()
                             .size(12.0)
@@ -763,43 +851,59 @@ impl MixerEditor {
         }
     }
 
-    /// Render the solo bus master strip (PFL or AFL, depending on `solo_mode`).
+    /// Render the Monitor bus master strip.
     ///
-    /// Drives `pfl_master_vol` and receives metering from `pfl_level`. The
-    /// strip has only a header + LCD + fader/meter — no mute/select since
-    /// the backend has no solo mute property and the solo bus has no
-    /// processing detail panel.
-    pub(super) fn render_solo_master_strip(
+    /// The Monitor bus follows Main when no PFL/AFL is engaged anywhere on
+    /// the desk, and switches to the solo mix as soon as any channel
+    /// engages PFL or AFL. Drives `monitor_master_vol` and receives metering
+    /// from `monitor_level`.
+    pub(super) fn render_monitor_master_strip(
         &mut self,
         ui: &mut Ui,
         ctx: &Context,
         meter_store: &MeterDataStore,
     ) {
-        let solo_meter_key = format!("{}:meter:pfl", self.block_id);
-        let solo_meter_data = meter_store.get(&self.flow_id, &solo_meter_key);
-        let label = self.solo_label();
+        let meter_key = format!("{}:meter:monitor", self.block_id);
+        let meter_data = meter_store.get(&self.flow_id, &meter_key);
+        let solo_active = self.any_solo_active();
+        let source_hint = if solo_active { "SOLO" } else { "MAIN" };
 
         egui::Frame::default()
-            .fill(Color32::from_rgb(50, 48, 32))
+            .fill(Color32::from_rgb(32, 48, 50))
             .corner_radius(CornerRadius::same(3))
             .inner_margin(STRIP_MARGIN)
             .show(ui, |ui| {
-                ui.set_min_width(BUS_STRIP_INNER);
-                ui.set_max_width(BUS_STRIP_INNER);
+                ui.set_width(BUS_STRIP_INNER);
 
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
 
-                    ui.label(
-                        egui::RichText::new(label)
+                    // Header row: "MON" with a tiny MAIN/SOLO indicator next
+                    // to it, centered as a pair within the strip width.
+                    {
+                        let mon_rt = egui::RichText::new("MON")
                             .strong()
                             .size(12.0)
-                            .color(Color32::from_rgb(220, 200, 100)),
-                    );
+                            .color(Color32::from_rgb(120, 210, 220));
+                        let hint_rt =
+                            egui::RichText::new(source_hint)
+                                .small()
+                                .color(if solo_active {
+                                    Color32::from_rgb(230, 200, 80)
+                                } else {
+                                    Color32::from_gray(140)
+                                });
+                        let row_h = ui.spacing().interact_size.y;
+                        centered_row(ui, row_h, |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.add(egui::Label::new(mon_rt).wrap_mode(egui::TextWrapMode::Extend));
+                            ui.add(egui::Label::new(hint_rt).wrap_mode(egui::TextWrapMode::Extend));
+                        });
+                    }
 
                     self.render_lcd(
                         ui,
-                        &format_db(self.solo_master_fader),
+                        &format_db(self.monitor_fader),
                         BUS_STRIP_INNER - 4.0,
                         LCD_H,
                     );
@@ -810,34 +914,34 @@ impl MixerEditor {
                         Vec2::new(ui.available_width(), BUS_FADER_HEIGHT),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            self.render_stereo_meter(ui, solo_meter_data, BUS_FADER_HEIGHT);
+                            self.render_stereo_meter(ui, meter_data, BUS_FADER_HEIGHT);
                             ui.add_space(1.0);
                             self.render_db_scale(ui, BUS_FADER_HEIGHT);
                             ui.add_space(1.0);
 
-                            let mut fader_db = linear_to_db(self.solo_master_fader as f64) as f32;
+                            let mut fader_db = linear_to_db(self.monitor_fader as f64) as f32;
                             let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(20.0, BUS_FADER_HEIGHT),
                                 Sense::click_and_drag(),
                             );
                             if response.double_clicked() {
                                 if (fader_db - 0.0).abs() < 0.5 {
-                                    self.solo_master_fader = 0.0;
+                                    self.monitor_fader = 0.0;
                                     fader_db = -60.0;
                                 } else {
-                                    self.solo_master_fader = 1.0;
+                                    self.monitor_fader = 1.0;
                                     fader_db = 0.0;
                                 }
                                 self.bypass_throttle();
-                                self.update_solo_master_fader(ctx);
+                                self.update_monitor_master_fader(ctx);
                             } else if response.dragged() {
                                 let delta = -response.drag_delta().y;
                                 let db_per_pixel = 66.0 / (BUS_FADER_HEIGHT - 10.0);
                                 fader_db = (fader_db + delta * db_per_pixel).clamp(-60.0, 6.0);
-                                self.solo_master_fader = db_to_linear_f32(fader_db);
-                                self.update_solo_master_fader(ctx);
+                                self.monitor_fader = db_to_linear_f32(fader_db);
+                                self.update_monitor_master_fader(ctx);
                             } else if response.drag_stopped() {
-                                self.update_solo_master_fader(ctx);
+                                self.update_monitor_master_fader(ctx);
                             }
                             let painter = ui.painter();
                             let track_rect = Rect::from_center_size(
@@ -855,11 +959,11 @@ impl MixerEditor {
                                 Vec2::new(14.0, 30.0),
                             );
                             let handle_color = if response.dragged() {
-                                Color32::from_rgb(230, 200, 80)
+                                Color32::from_rgb(120, 210, 220)
                             } else if response.hovered() {
-                                Color32::from_rgb(210, 195, 130)
+                                Color32::from_rgb(180, 215, 220)
                             } else {
-                                Color32::from_rgb(175, 165, 110)
+                                Color32::from_rgb(140, 175, 180)
                             };
                             painter.rect_filled(handle_rect, CornerRadius::same(3), handle_color);
                             painter.line_segment(
@@ -871,6 +975,40 @@ impl MixerEditor {
                             );
                         },
                     );
+
+                    ui.add_space(2.0);
+
+                    // ── Clear: release every active PFL/AFL across all channels ──
+                    let (clear_fill, clear_text) = if solo_active {
+                        (Color32::from_rgb(180, 80, 80), Color32::WHITE)
+                    } else {
+                        (Color32::from_rgb(48, 48, 52), Color32::from_gray(110))
+                    };
+                    let clear_button =
+                        egui::Button::new(egui::RichText::new("Clear").small().color(clear_text))
+                            .fill(clear_fill)
+                            .min_size(Vec2::new(BUS_STRIP_INNER - 4.0, BTN_H));
+                    let clear_resp = ui
+                        .add_enabled(solo_active, clear_button)
+                        .on_hover_text("Clear all active PFL and AFL");
+                    if clear_resp.clicked() {
+                        let mut changed_indices: Vec<usize> = Vec::new();
+                        for (i, ch) in self.channels.iter_mut().enumerate() {
+                            if ch.pfl || ch.afl {
+                                ch.pfl = false;
+                                ch.afl = false;
+                                changed_indices.push(i);
+                            }
+                        }
+                        for i in changed_indices {
+                            // Push both volumes to 0 so the backend sees the
+                            // release on each per-channel solo send.
+                            self.update_channel_property(ctx, i, "pfl");
+                            self.update_channel_property(ctx, i, "afl");
+                        }
+                        // Flip the monitor gates back to follow Main.
+                        self.update_monitor_gates(ctx);
+                    }
                 });
             });
     }
@@ -895,13 +1033,13 @@ impl MixerEditor {
                 .corner_radius(CornerRadius::same(3))
                 .inner_margin(STRIP_MARGIN)
                 .show(ui, |ui| {
-                    ui.set_min_width(BUS_STRIP_INNER);
-                    ui.set_max_width(BUS_STRIP_INNER);
+                    ui.set_width(BUS_STRIP_INNER);
 
                     ui.vertical_centered(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
 
-                        ui.label(
+                        centered_label(
+                            ui,
                             egui::RichText::new(format!("GRP{}", sg_idx + 1))
                                 .strong()
                                 .size(11.0)
@@ -995,13 +1133,13 @@ impl MixerEditor {
                 .corner_radius(CornerRadius::same(3))
                 .inner_margin(STRIP_MARGIN)
                 .show(ui, |ui| {
-                    ui.set_min_width(BUS_STRIP_INNER);
-                    ui.set_max_width(BUS_STRIP_INNER);
+                    ui.set_width(BUS_STRIP_INNER);
 
                     ui.vertical_centered(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
 
-                        ui.label(
+                        centered_label(
+                            ui,
                             egui::RichText::new(format!("AUX{}", aux_idx + 1))
                                 .strong()
                                 .size(11.0)

@@ -33,7 +33,7 @@ pub(super) fn connect_mixer_meter_handler(
 
     let level_prefix = format!("{}:level_", instance_id);
     let main_level_id = format!("{}:main_level", instance_id);
-    let pfl_level_id = format!("{}:pfl_level", instance_id);
+    let monitor_level_id = format!("{}:monitor_level", instance_id);
     let aux_level_prefix = format!("{}:aux", instance_id);
     let group_level_prefix = format!("{}:group", instance_id);
 
@@ -66,10 +66,10 @@ pub(super) fn connect_mixer_meter_handler(
                             return;
                         }
 
-                        // Check if this is the PFL level meter
-                        if source_name == pfl_level_id {
-                            trace!("Mixer PFL meter: rms={:?}, peak={:?}", rms, peak);
-                            let element_id = format!("{}:meter:pfl", instance_id);
+                        // Check if this is the monitor bus level meter
+                        if source_name == monitor_level_id {
+                            trace!("Mixer monitor meter: rms={:?}, peak={:?}", rms, peak);
+                            let element_id = format!("{}:meter:monitor", instance_id);
                             events.broadcast(StromEvent::MeterData {
                                 flow_id,
                                 element_id,

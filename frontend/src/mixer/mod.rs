@@ -66,8 +66,10 @@ struct ChannelStrip {
     fader: f32,
     /// Mute state
     mute: bool,
-    /// PFL (Pre-Fader Listen) state
+    /// PFL (Pre-Fader Listen) state — taps signal before fader/mute
     pfl: bool,
+    /// AFL (After-Fader Listen) state — taps signal after fader/mute/pan
+    afl: bool,
     /// Route to main mix
     to_main: bool,
     /// Route to groups (up to 4)
@@ -140,6 +142,7 @@ impl ChannelStrip {
             fader: DEFAULT_FADER,
             mute: false,
             pfl: false,
+            afl: false,
             to_main: true,
             to_grp: [false; MAX_GROUPS],
             aux_sends: [0.0; MAX_AUX_BUSES],
@@ -232,12 +235,10 @@ pub struct MixerEditor {
     main_fader: f32,
     /// Main mute
     main_mute: bool,
-    /// Solo bus master level (drives `pfl_master_vol`)
-    solo_master_fader: f32,
-    /// Solo mode: "pfl" (pre-fader) or "afl" (after-fader).
-    /// Drives the solo-button label, the keyboard legend, the solo strip
-    /// header, and the `pfl_out` port label on the backend.
-    solo_mode: String,
+    /// Monitor bus master level (drives `monitor_master_vol`).
+    /// The monitor bus follows Main when no PFL/AFL is engaged anywhere,
+    /// and switches to the solo mix as soon as any channel toggles PFL or AFL.
+    monitor_fader: f32,
     /// Main bus compressor enabled
     main_comp_enabled: bool,
     /// Main bus compressor threshold (dB)
@@ -291,14 +292,12 @@ pub struct MixerEditor {
 }
 
 impl MixerEditor {
-    /// Display label for the solo bus / per-channel solo button — "PFL" when
-    /// `solo_mode == "pfl"`, "AFL" otherwise.
-    pub(super) fn solo_label(&self) -> &'static str {
-        if self.solo_mode == "afl" {
-            "AFL"
-        } else {
-            "PFL"
-        }
+    /// True if any channel currently has PFL or AFL engaged.
+    /// Drives the monitor bus source-switching gates (`solo_to_mon` /
+    /// `main_to_mon`) — when any solo is active the monitor listens to
+    /// the solo mix, otherwise it follows the main output.
+    pub(super) fn any_solo_active(&self) -> bool {
+        self.channels.iter().any(|c| c.pfl || c.afl)
     }
 }
 
