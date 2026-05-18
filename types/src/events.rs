@@ -363,14 +363,6 @@ pub enum StromEvent {
         block_id: String,
         active: bool,
     },
-    /// Vision mixer background source changed
-    VisionMixerBackgroundChanged {
-        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
-        flow_id: FlowId,
-        block_id: String,
-        /// Background source index, or null if cleared.
-        background_input: Option<usize>,
-    },
 }
 
 impl StromEvent {
@@ -795,16 +787,6 @@ impl StromEvent {
                     block_id,
                     flow_id,
                     if *active { "ON" } else { "OFF" }
-                )
-            }
-            StromEvent::VisionMixerBackgroundChanged {
-                flow_id,
-                block_id,
-                background_input,
-            } => {
-                format!(
-                    "Vision mixer {} in flow {}: BG {:?}",
-                    block_id, flow_id, background_input
                 )
             }
         }

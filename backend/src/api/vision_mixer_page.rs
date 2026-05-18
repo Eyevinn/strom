@@ -111,6 +111,7 @@ async fn render_vision_mixer_page(
     let num_inputs = vm_props::parse_num_inputs(&vm_block.properties);
     let labels = vm_props::parse_input_labels(&vm_block.properties, num_inputs);
     let num_dsk_inputs = vm_props::parse_num_dsk_inputs(&vm_block.properties);
+    let num_pips = vm_props::parse_num_pips(&vm_block.properties);
 
     // Get current state from live overlay state or fall back to defaults
     let overlay = overlay::get_overlay_state(block_id);
@@ -139,8 +140,25 @@ async fn render_vision_mixer_page(
                 .collect()
         })
         .unwrap_or_else(|| vec![true; num_dsk_inputs]);
-    let background_input: Option<usize> = overlay.as_ref().and_then(|s| s.background_input());
     let overlay_alpha = overlay.as_ref().map(|s| s.overlay_alpha()).unwrap_or(1.0);
+
+    // Per-PiP runtime state (bg + overlays) — fall back to block properties if pipeline isn't built yet.
+    let pips: Vec<serde_json::Value> = (0..num_pips)
+        .map(|i| {
+            let (bg, overlays) = if let Some(s) = overlay.as_ref() {
+                (s.pip_bg_input(i), s.pip_overlay_inputs(i))
+            } else {
+                let bg = vm_props::parse_pip_bg(&vm_block.properties, i, num_inputs);
+                (
+                    bg,
+                    vm_props::parse_pip_overlays(&vm_block.properties, i, num_inputs, bg),
+                )
+            };
+            serde_json::json!({ "bg": bg, "overlays": overlays })
+        })
+        .collect();
+    let pvw_pip: Option<usize> = overlay.as_ref().and_then(|s| s.pvw_pip());
+    let pgm_pip: Option<usize> = overlay.as_ref().and_then(|s| s.pgm_pip());
 
     // Build a single JSON config object (safe injection via <script type="application/json">)
     let config = serde_json::json!({
@@ -155,8 +173,11 @@ async fn render_vision_mixer_page(
         "num_dsk_inputs": num_dsk_inputs,
         "ftb_active": ftb_active,
         "dsk_states": dsk_states,
-        "background_input": background_input,
         "overlay_alpha": overlay_alpha,
+        "num_pips": num_pips,
+        "pips": pips,
+        "pvw_pip": pvw_pip,
+        "pgm_pip": pgm_pip,
     });
 
     let html = VISION_MIXER_HTML.replace("{{VM_CONFIG_JSON}}", &config.to_string());

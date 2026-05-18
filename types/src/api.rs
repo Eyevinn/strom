@@ -135,6 +135,18 @@ pub struct TransitionResponse {
     pub transition_type: String,
     /// Duration of the transition in milliseconds
     pub duration_ms: u64,
+    /// PGM input group after the take. Empty when PGM is a PiP source.
+    #[serde(default)]
+    pub program_inputs: Vec<usize>,
+    /// PVW input group after the take. Empty when PVW is a PiP source.
+    #[serde(default)]
+    pub preview_inputs: Vec<usize>,
+    /// PiP index on PGM after the take, or None if PGM is an input group.
+    #[serde(default)]
+    pub program_pip: Option<usize>,
+    /// PiP index on PVW after the take, or None if PVW is an input group.
+    #[serde(default)]
+    pub preview_pip: Option<usize>,
 }
 
 /// Request to animate a single input's position/size.
@@ -1077,12 +1089,34 @@ impl MediaOperationResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct SelectPreviewRequest {
-    /// Index of the input to set as preview (0-based)
+    /// Index of the input to set as preview (0-based). Used when `source` is None.
     pub input: usize,
-    /// If true, toggle the input in/out of the current PVW group (shift+click).
-    /// If false (default), replace the PVW group with just this input.
+    /// Optional source string ("input:N" or "pip:N"). When present, overrides `input`.
+    /// Use "pip:N" to put a PiP composition on preview.
     #[serde(default)]
-    pub multi: bool,
+    pub source: Option<String>,
+}
+
+/// Request to update a PiP composition (background source + overlay sources).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct UpdatePipConfigRequest {
+    /// Background input index. Omit/null for no bg.
+    #[serde(default)]
+    pub bg: Option<usize>,
+    /// Overlay input indices, auto-tiled in order on top of the bg.
+    #[serde(default)]
+    pub overlays: Vec<usize>,
+}
+
+/// Response after updating a PiP composition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct UpdatePipConfigResponse {
+    pub message: String,
+    pub pip_idx: usize,
+    pub bg: Option<usize>,
+    pub overlays: Vec<usize>,
 }
 
 /// Response after selecting a preview source.
@@ -1098,6 +1132,12 @@ pub struct SelectPreviewResponse {
     pub preview_inputs: Vec<usize>,
     /// Full ordered PGM source group.
     pub program_inputs: Vec<usize>,
+    /// PiP index currently displayed on PVW, or None if PVW is an input group.
+    #[serde(default)]
+    pub preview_pip: Option<usize>,
+    /// PiP index currently displayed on PGM, or None.
+    #[serde(default)]
+    pub program_pip: Option<usize>,
 }
 
 /// Current state of a vision mixer block.
@@ -1110,23 +1150,6 @@ pub struct VisionMixerState {
     pub program_inputs: Vec<usize>,
     pub num_inputs: usize,
     pub input_labels: Vec<String>,
-}
-
-/// Request to set or clear the background source on a vision mixer block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct SetBackgroundRequest {
-    /// Source index to use as background (0-based), or null to clear.
-    pub input: Option<usize>,
-}
-
-/// Response after setting/clearing the background source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct SetBackgroundResponse {
-    pub message: String,
-    /// Current background source index, or null if none.
-    pub background_input: Option<usize>,
 }
 
 /// Request to set the multiview overlay alpha on a vision mixer block.

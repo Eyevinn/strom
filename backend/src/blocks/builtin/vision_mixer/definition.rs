@@ -189,6 +189,39 @@ fn vision_mixer_definition() -> BlockDefinition {
             },
             live: false,
         },
+        // Initial PGM source — overrides initial_pgm_input when non-empty.
+        // Format: "input:N" or "pip:N".
+        ExposedProperty {
+            name: "initial_pgm_source".to_string(),
+            label: "Initial PGM Source".to_string(),
+            description:
+                "Initial PGM source as 'input:N' or 'pip:N'. Empty falls back to Initial PGM Input."
+                    .to_string(),
+            property_type: PropertyType::String,
+            default_value: Some(PropertyValue::String(String::new())),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: "initial_pgm_source".to_string(),
+                transform: None,
+            },
+            live: false,
+        },
+        // Initial PVW source — overrides initial_pvw_input when non-empty.
+        ExposedProperty {
+            name: "initial_pvw_source".to_string(),
+            label: "Initial PVW Source".to_string(),
+            description:
+                "Initial PVW source as 'input:N' or 'pip:N'. Empty falls back to Initial Preview Input."
+                    .to_string(),
+            property_type: PropertyType::String,
+            default_value: Some(PropertyValue::String(String::new())),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: "initial_pvw_source".to_string(),
+                transform: None,
+            },
+            live: false,
+        },
         // Output pixel format
         ExposedProperty {
             name: "output_format".to_string(),
@@ -295,6 +328,73 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+        });
+    }
+
+    // Number of PiP tiles
+    {
+        let mut pip_values = vec![EnumValue {
+            value: "0".to_string(),
+            label: Some("None".to_string()),
+        }];
+        for i in 1..=MAX_NUM_PIPS {
+            pip_values.push(EnumValue {
+                value: i.to_string(),
+                label: Some(format!("{} PiP", i)),
+            });
+        }
+        exposed_properties.push(ExposedProperty {
+            name: "num_pips".to_string(),
+            label: "PiP Tiles".to_string(),
+            description:
+                "Number of Picture-in-Picture tiles rendered virtually in the multiview grid"
+                    .to_string(),
+            property_type: PropertyType::Enum { values: pip_values },
+            default_value: Some(PropertyValue::String(DEFAULT_NUM_PIPS.to_string())),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: "num_pips".to_string(),
+                transform: None,
+            },
+            live: false,
+        });
+    }
+
+    // Per-PiP bg/insert source selection (live).
+    for i in 0..MAX_NUM_PIPS {
+        exposed_properties.push(ExposedProperty {
+            name: format!("pip_{}_bg_input", i),
+            label: format!("PiP {} Background", i + 1),
+            description: format!(
+                "Input index used as the background of PiP {}. Leave empty for no background.",
+                i + 1
+            ),
+            property_type: PropertyType::String,
+            default_value: Some(PropertyValue::String(String::new())),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("pip_{}_bg_input", i),
+                transform: None,
+            },
+            live: true,
+        });
+        exposed_properties.push(ExposedProperty {
+            name: format!("pip_{}_overlays", i),
+            label: format!("PiP {} Overlays", i + 1),
+            description: format!(
+                "Comma-separated input indices overlaid on the bg of PiP {} (auto-tiled, up to {} sources)",
+                i + 1,
+                MAX_PIP_OVERLAYS
+            ),
+            property_type: PropertyType::String,
+            // Sensible default: one overlay (input 1) so a freshly enabled PiP shows something.
+            default_value: Some(PropertyValue::String("1".to_string())),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("pip_{}_overlays", i),
+                transform: None,
+            },
+            live: true,
         });
     }
 

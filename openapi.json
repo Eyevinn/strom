@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.13-dev4"
+    "version": "0.5.1"
   },
   "paths": {
     "/api/auth/status": {
@@ -806,67 +806,6 @@
           },
           "404": {
             "description": "Flow not running or block not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/flows/{flow_id}/blocks/{block_id}/background": {
-      "post": {
-        "tags": [
-          "flows"
-        ],
-        "summary": "Set or clear the background source on a vision mixer block.",
-        "operationId": "set_background",
-        "parameters": [
-          {
-            "name": "flow_id",
-            "in": "path",
-            "description": "Flow ID (UUID)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "block_id",
-            "in": "path",
-            "description": "Vision mixer block instance ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SetBackgroundRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Background source set/cleared",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SetBackgroundResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
             "content": {
               "application/json": {
                 "schema": {
@@ -1710,6 +1649,88 @@
           },
           "500": {
             "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/vision-mixer/pip/{pip_idx}": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Update a PiP composition (background + overlay inputs) on a vision mixer block.",
+        "description": "The change is applied live to all places where the PiP is currently visible:\nthe multiview PiP thumbnail tile, plus PGM/PVW if either bus is showing this PiP.",
+        "operationId": "update_pip_config",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pip_idx",
+            "in": "path",
+            "description": "PiP index (0-based)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePipConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "PiP config updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatePipConfigResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow or block not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -7263,12 +7284,15 @@
         "properties": {
           "input": {
             "type": "integer",
-            "description": "Index of the input to set as preview (0-based)",
+            "description": "Index of the input to set as preview (0-based). Used when `source` is None.",
             "minimum": 0
           },
-          "multi": {
-            "type": "boolean",
-            "description": "If true, toggle the input in/out of the current PVW group (shift+click).\nIf false (default), replace the PVW group with just this input."
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional source string (\"input:N\" or \"pip:N\"). When present, overrides `input`.\nUse \"pip:N\" to put a PiP composition on preview."
           }
         }
       },
@@ -7299,6 +7323,14 @@
             },
             "description": "Full ordered PVW source group."
           },
+          "preview_pip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PiP index currently displayed on PVW, or None if PVW is an input group.",
+            "minimum": 0
+          },
           "program_input": {
             "type": "integer",
             "description": "First source in the PGM group (backward compat).",
@@ -7311,6 +7343,14 @@
               "minimum": 0
             },
             "description": "Full ordered PGM source group."
+          },
+          "program_pip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PiP index currently displayed on PGM, or None.",
+            "minimum": 0
           }
         }
       },
@@ -7413,40 +7453,6 @@
         "description": "Messages sent from server to client via WebSocket.",
         "discriminator": {
           "propertyName": "type"
-        }
-      },
-      "SetBackgroundRequest": {
-        "type": "object",
-        "description": "Request to set or clear the background source on a vision mixer block.",
-        "properties": {
-          "input": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "description": "Source index to use as background (0-based), or null to clear.",
-            "minimum": 0
-          }
-        }
-      },
-      "SetBackgroundResponse": {
-        "type": "object",
-        "description": "Response after setting/clearing the background source.",
-        "required": [
-          "message"
-        ],
-        "properties": {
-          "background_input": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "description": "Current background source index, or null if none.",
-            "minimum": 0
-          },
-          "message": {
-            "type": "string"
-          }
         }
       },
       "SetGstLogLevelRequest": {
@@ -9719,47 +9725,6 @@
                 ]
               }
             }
-          },
-          {
-            "type": "object",
-            "description": "Vision mixer background source changed",
-            "required": [
-              "data",
-              "type"
-            ],
-            "properties": {
-              "data": {
-                "type": "object",
-                "description": "Vision mixer background source changed",
-                "required": [
-                  "flow_id",
-                  "block_id"
-                ],
-                "properties": {
-                  "background_input": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "Background source index, or null if cleared.",
-                    "minimum": 0
-                  },
-                  "block_id": {
-                    "type": "string"
-                  },
-                  "flow_id": {
-                    "type": "string",
-                    "format": "uuid"
-                  }
-                }
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "VisionMixerBackgroundChanged"
-                ]
-              }
-            }
           }
         ],
         "description": "Event types that can be broadcast to all connected clients.",
@@ -10086,6 +10051,38 @@
             "type": "string",
             "description": "Success message"
           },
+          "preview_inputs": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "PVW input group after the take. Empty when PVW is a PiP source."
+          },
+          "preview_pip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PiP index on PVW after the take, or None if PVW is an input group.",
+            "minimum": 0
+          },
+          "program_inputs": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "PGM input group after the take. Empty when PGM is a PiP source."
+          },
+          "program_pip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PiP index on PGM after the take, or None if PGM is an input group.",
+            "minimum": 0
+          },
           "transition_type": {
             "type": "string",
             "description": "The type of transition that was triggered"
@@ -10191,6 +10188,60 @@
           "value": {
             "$ref": "#/components/schemas/PropertyValue",
             "description": "The new value for the property"
+          }
+        }
+      },
+      "UpdatePipConfigRequest": {
+        "type": "object",
+        "description": "Request to update a PiP composition (background source + overlay sources).",
+        "properties": {
+          "bg": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Background input index. Omit/null for no bg.",
+            "minimum": 0
+          },
+          "overlays": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Overlay input indices, auto-tiled in order on top of the bg."
+          }
+        }
+      },
+      "UpdatePipConfigResponse": {
+        "type": "object",
+        "description": "Response after updating a PiP composition.",
+        "required": [
+          "message",
+          "pip_idx",
+          "overlays"
+        ],
+        "properties": {
+          "bg": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "overlays": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "pip_idx": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       },

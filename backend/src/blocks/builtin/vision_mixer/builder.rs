@@ -93,8 +93,11 @@ impl BlockBuilder for VisionMixerBuilder {
         ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         let num_inputs = properties::parse_num_inputs(props);
+        let num_pips = properties::parse_num_pips(props);
         let pgm_input = properties::parse_initial_pgm(props, num_inputs);
         let pvw_input = properties::parse_initial_pvw(props, num_inputs);
+        let pgm_source = properties::parse_initial_pgm_source(props, num_inputs, num_pips);
+        let pvw_source = properties::parse_initial_pvw_source(props, num_inputs, num_pips);
         let labels = properties::parse_input_labels(props, num_inputs);
         let latency_ms = properties::parse_u64(props, "latency", vision_mixer::DEFAULT_LATENCY_MS);
         let min_upstream_ms = properties::parse_u64(
@@ -125,6 +128,20 @@ impl BlockBuilder for VisionMixerBuilder {
 
         let num_dsk_inputs = properties::parse_num_dsk_inputs(props);
 
+        let pip_bg_inputs: Vec<Option<usize>> = (0..num_pips)
+            .map(|i| properties::parse_pip_bg(props, i, num_inputs))
+            .collect();
+        let pip_overlays: Vec<Vec<usize>> = (0..num_pips)
+            .map(|i| {
+                properties::parse_pip_overlays(
+                    props,
+                    i,
+                    num_inputs,
+                    pip_bg_inputs.get(i).copied().flatten(),
+                )
+            })
+            .collect();
+
         let output_format = properties::parse_output_format(props);
         let gl_download =
             properties::parse_bool(props, "gl_download", vision_mixer::DEFAULT_GL_DOWNLOAD);
@@ -150,8 +167,13 @@ impl BlockBuilder for VisionMixerBuilder {
             instance_id,
             num_inputs,
             num_dsk_inputs,
+            num_pips,
             pgm_input,
             pvw_input,
+            pgm_source,
+            pvw_source,
+            pip_bg_inputs: &pip_bg_inputs,
+            pip_overlays: &pip_overlays,
             labels: &labels,
             latency_ms,
             min_upstream_ms,
@@ -179,8 +201,13 @@ struct PipelineParams<'a> {
     instance_id: &'a str,
     num_inputs: usize,
     num_dsk_inputs: usize,
+    num_pips: usize,
     pgm_input: usize,
     pvw_input: usize,
+    pgm_source: strom_types::vision_mixer::Source,
+    pvw_source: strom_types::vision_mixer::Source,
+    pip_bg_inputs: &'a [Option<usize>],
+    pip_overlays: &'a [Vec<usize>],
     labels: &'a [String],
     latency_ms: u64,
     min_upstream_ms: u64,
@@ -278,7 +305,7 @@ fn build_gpu_pipeline(
     elems.push((mv_comp_id.clone(), mv_comp));
 
     // Compute multiview layout
-    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs);
+    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs, p.num_pips);
 
     // --- Distribution output chain ---
     // queue_post_dist decouples the compositor from downstream processing.
@@ -516,6 +543,12 @@ fn build_gpu_pipeline(
         elems.push((q_thumb_id.clone(), elements::make_queue(&q_thumb_id)?));
         elems.push((q_pvw_id.clone(), elements::make_queue(&q_pvw_id)?));
 
+        // One queue per PiP tile per input — feeds the virtual PiP thumbnail pads on mv_comp.
+        for pip_idx in 0..p.num_pips {
+            let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
+            elems.push((q_pip_id.clone(), elements::make_queue(&q_pip_id)?));
+        }
+
         // queue → glupload → glcolorconvert → tee
         links.push((
             ElementPadRef::pad(&q_id, "src"),
@@ -592,8 +625,28 @@ fn build_gpu_pipeline(
         ));
     }
 
+    // PiP candidates: for each PiP tile p_idx, each input i gets one mv_comp pad
+    // at sink_{2N+1 + p_idx*N + i}. Pad role (bg/insert/hidden) is decided by
+    // alpha+geometry in build_pad_properties.
+    for pip_idx in 0..p.num_pips {
+        for i in 0..p.num_inputs {
+            let tee_id = p.id(&format!("tee_{}", i));
+            let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
+            let tee_src = format!("src_{}", 3 + pip_idx);
+            let sink_idx = 2 * p.num_inputs + 1 + pip_idx * p.num_inputs + i;
+            links.push((
+                ElementPadRef::pad(&tee_id, &tee_src),
+                ElementPadRef::pad(&q_pip_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&q_pip_id, "src"),
+                ElementPadRef::pad(&mv_comp_id, format!("sink_{}", sink_idx)),
+            ));
+        }
+    }
+
     // Overlay pad: glupload_overlay → mv_comp (must be last link to get correct pad index)
-    let overlay_pad_idx = 2 * p.num_inputs + 1;
+    let overlay_pad_idx = 2 * p.num_inputs + 1 + p.num_pips * p.num_inputs;
     links.push((
         ElementPadRef::pad(&up_overlay_id, "src"),
         ElementPadRef::pad(&mv_comp_id, format!("sink_{}", overlay_pad_idx)),
@@ -646,7 +699,7 @@ fn build_cpu_pipeline(
     elems.push((mixer_id.clone(), dist_comp));
     elems.push((mv_comp_id.clone(), mv_comp));
 
-    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs);
+    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs, p.num_pips);
 
     // --- Distribution output chain: mixer → capsfilter_dist → tee_pgm → queue_dist_out ---
     // DSK inputs are composited on the main mixer (same as GPU path).
@@ -905,6 +958,12 @@ fn build_cpu_pipeline(
         elems.push((q_dist_id.clone(), elements::make_queue(&q_dist_id)?));
         elems.push((q_thumb_id.clone(), elements::make_queue(&q_thumb_id)?));
         elems.push((q_pvw_id.clone(), elements::make_queue(&q_pvw_id)?));
+
+        // One queue per PiP tile per input — feeds the virtual PiP thumbnail pads on mv_comp.
+        for pip_idx in 0..p.num_pips {
+            let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
+            elems.push((q_pip_id.clone(), elements::make_queue(&q_pip_id)?));
+        }
     }
 
     // --- Compositor links (grouped by compositor, order matters) ---
@@ -961,8 +1020,28 @@ fn build_cpu_pipeline(
         ));
     }
 
+    // PiP candidates: for each PiP tile p_idx, each input i gets one mv_comp pad
+    // at sink_{2N+1 + p_idx*N + i}. Pad role (bg/insert/hidden) is decided by
+    // alpha+geometry in build_pad_properties.
+    for pip_idx in 0..p.num_pips {
+        for i in 0..p.num_inputs {
+            let tee_id = p.id(&format!("tee_{}", i));
+            let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
+            let tee_src = format!("src_{}", 3 + pip_idx);
+            let sink_idx = 2 * p.num_inputs + 1 + pip_idx * p.num_inputs + i;
+            links.push((
+                ElementPadRef::pad(&tee_id, &tee_src),
+                ElementPadRef::pad(&q_pip_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&q_pip_id, "src"),
+                ElementPadRef::pad(&mv_comp_id, format!("sink_{}", sink_idx)),
+            ));
+        }
+    }
+
     // Overlay pad: last overlay element → mv_comp (must be last link for correct pad index)
-    let overlay_pad_idx = 2 * p.num_inputs + 1;
+    let overlay_pad_idx = 2 * p.num_inputs + 1 + p.num_pips * p.num_inputs;
     links.push((
         ElementPadRef::pad(&overlay_last_id, "src"),
         ElementPadRef::pad(&mv_comp_id, format!("sink_{}", overlay_pad_idx)),
@@ -1180,18 +1259,107 @@ fn build_pad_properties(
     let mv_comp_id = p.id("mv_comp");
 
     // --- Distribution compositor pad properties ---
-    // Each input fills the full PGM canvas; only the active PGM input is visible (alpha=1)
+    // Each input has its alpha/geometry set based on the initial PGM source:
+    //   Source::Input(active) → sink_active fills the canvas (alpha=1), others hidden
+    //   Source::Pip(p)        → bg input fills the canvas, overlays auto-tile on top
+    use strom_types::vision_mixer::Source;
+    let canvas_w = p.pgm_w as i32;
+    let canvas_h = p.pgm_h as i32;
+    // Source aspect for PiP-tile cell math (assumes inputs share the PGM aspect,
+    // which is typical for broadcast workflows). compute_pip_overlay_rects sizes
+    // each tile to this aspect so `keep-aspect-ratio` pads fill cleanly without
+    // transparent letterbox bands letting the bg peek through.
+    let pgm_aspect = if canvas_h > 0 {
+        canvas_w as f64 / canvas_h as f64
+    } else {
+        16.0 / 9.0
+    };
+    let dist_overlay_rects: Vec<(i32, i32, i32, i32)> = match p.pgm_source {
+        Source::Pip(pip_idx) => {
+            let n_overlays = p.pip_overlays.get(pip_idx).map(Vec::len).unwrap_or(0);
+            strom_types::vision_mixer::compute_pip_overlay_rects(
+                0, 0, canvas_w, canvas_h, n_overlays, pgm_aspect,
+            )
+        }
+        _ => Vec::new(),
+    };
+
     let dist_pads = pad_props.entry(mixer_id).or_default();
     for i in 0..p.num_inputs {
         let pad_name = format!("sink_{}", i);
         let props = dist_pads.entry(pad_name).or_default();
-        let alpha = if i == p.pgm_input { 1.0 } else { 0.0 };
+
+        // All pads use sizing-policy="keep-aspect-ratio" — `compute_pip_overlay_rects`
+        // already sizes each tile to match the source aspect, so the source fills the
+        // cell exactly without transparent letterbox bands.
+        let (x, y, w, h, alpha, zorder, sizing) = match p.pgm_source {
+            Source::Input(active) => {
+                let alpha = if i == active { 1.0 } else { 0.0 };
+                (
+                    0,
+                    0,
+                    canvas_w,
+                    canvas_h,
+                    alpha,
+                    vision_mixer::DIST_PGM_ZORDER as u64,
+                    "keep-aspect-ratio",
+                )
+            }
+            Source::Pip(pip_idx) => {
+                let bg = p.pip_bg_inputs.get(pip_idx).copied().flatten();
+                let overlays = p
+                    .pip_overlays
+                    .get(pip_idx)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let overlay_slot = overlays.iter().position(|&v| v == i);
+                if Some(i) == bg {
+                    (
+                        0,
+                        0,
+                        canvas_w,
+                        canvas_h,
+                        1.0,
+                        vision_mixer::DIST_PGM_ZORDER as u64,
+                        "keep-aspect-ratio",
+                    )
+                } else if let Some(slot) = overlay_slot {
+                    let (ox, oy, ow, oh) = dist_overlay_rects
+                        .get(slot)
+                        .copied()
+                        .unwrap_or((0, 0, 1, 1));
+                    (
+                        ox,
+                        oy,
+                        ow,
+                        oh,
+                        1.0,
+                        vision_mixer::DIST_PIP_OVERLAY_ZORDER as u64,
+                        "keep-aspect-ratio",
+                    )
+                } else {
+                    (
+                        0,
+                        0,
+                        canvas_w,
+                        canvas_h,
+                        0.0,
+                        vision_mixer::DIST_PGM_ZORDER as u64,
+                        "keep-aspect-ratio",
+                    )
+                }
+            }
+        };
+
         props.insert("alpha".to_string(), PropertyValue::Float(alpha));
-        props.insert("width".to_string(), PropertyValue::Int(p.pgm_w as i64));
-        props.insert("height".to_string(), PropertyValue::Int(p.pgm_h as i64));
+        props.insert("xpos".to_string(), PropertyValue::Int(x as i64));
+        props.insert("ypos".to_string(), PropertyValue::Int(y as i64));
+        props.insert("width".to_string(), PropertyValue::Int(w as i64));
+        props.insert("height".to_string(), PropertyValue::Int(h as i64));
+        props.insert("zorder".to_string(), PropertyValue::UInt(zorder));
         props.insert(
             "sizing-policy".to_string(),
-            PropertyValue::String("keep-aspect-ratio".to_string()),
+            PropertyValue::String(sizing.to_string()),
         );
     }
 
@@ -1256,35 +1424,175 @@ fn build_pad_properties(
     }
 
     // PVW big display candidate pads: sink_{N+1}..sink_{2N}
+    // Same dual treatment as the dist compositor: an Input source activates one
+    // pad at the PVW rect; a Pip source uses bg+overlays auto-tiled inside the
+    // PVW rect.
+    let pvw_rect = layout::pvw_pad_position(mv_layout);
+    let (pvw_x, pvw_y, pvw_w, pvw_h) = pvw_rect;
+    let pvw_overlay_rects: Vec<(i32, i32, i32, i32)> = match p.pvw_source {
+        Source::Pip(pip_idx) => {
+            let n_overlays = p.pip_overlays.get(pip_idx).map(Vec::len).unwrap_or(0);
+            strom_types::vision_mixer::compute_pip_overlay_rects(
+                pvw_x, pvw_y, pvw_w, pvw_h, n_overlays, pgm_aspect,
+            )
+        }
+        _ => Vec::new(),
+    };
+
     for i in 0..p.num_inputs {
         let pad_name = format!("sink_{}", p.num_inputs + 1 + i);
         let props = mv_pads.entry(pad_name).or_default();
 
-        let (x, y, w, h) = if i == p.pvw_input {
-            layout::pvw_pad_position(mv_layout)
-        } else {
-            (0, 0, 1, 1) // hidden
+        let (x, y, w, h, alpha, zorder, sizing) = match p.pvw_source {
+            Source::Input(active) => {
+                if i == active {
+                    (
+                        pvw_x,
+                        pvw_y,
+                        pvw_w,
+                        pvw_h,
+                        1.0,
+                        vision_mixer::MV_BIG_DISPLAY_ZORDER as u64,
+                        "keep-aspect-ratio",
+                    )
+                } else {
+                    (
+                        0,
+                        0,
+                        1,
+                        1,
+                        0.0,
+                        vision_mixer::MV_BIG_DISPLAY_ZORDER as u64,
+                        "keep-aspect-ratio",
+                    )
+                }
+            }
+            Source::Pip(pip_idx) => {
+                let bg = p.pip_bg_inputs.get(pip_idx).copied().flatten();
+                let overlays = p
+                    .pip_overlays
+                    .get(pip_idx)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if Some(i) == bg {
+                    (
+                        pvw_x,
+                        pvw_y,
+                        pvw_w,
+                        pvw_h,
+                        1.0,
+                        vision_mixer::MV_BIG_DISPLAY_ZORDER as u64,
+                        "keep-aspect-ratio",
+                    )
+                } else if let Some(slot) = overlays.iter().position(|&v| v == i) {
+                    let (ox, oy, ow, oh) =
+                        pvw_overlay_rects.get(slot).copied().unwrap_or((0, 0, 1, 1));
+                    (
+                        ox,
+                        oy,
+                        ow,
+                        oh,
+                        1.0,
+                        vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER as u64,
+                        "keep-aspect-ratio",
+                    )
+                } else {
+                    (
+                        0,
+                        0,
+                        1,
+                        1,
+                        0.0,
+                        vision_mixer::MV_BIG_DISPLAY_ZORDER as u64,
+                        "keep-aspect-ratio",
+                    )
+                }
+            }
         };
-        let alpha = if i == p.pvw_input { 1.0 } else { 0.0 };
 
         props.insert("xpos".to_string(), PropertyValue::Int(x as i64));
         props.insert("ypos".to_string(), PropertyValue::Int(y as i64));
         props.insert("width".to_string(), PropertyValue::Int(w as i64));
         props.insert("height".to_string(), PropertyValue::Int(h as i64));
         props.insert("alpha".to_string(), PropertyValue::Float(alpha));
-        props.insert(
-            "zorder".to_string(),
-            PropertyValue::UInt(vision_mixer::MV_BIG_DISPLAY_ZORDER as u64),
-        );
+        props.insert("zorder".to_string(), PropertyValue::UInt(zorder));
         props.insert(
             "sizing-policy".to_string(),
-            PropertyValue::String("keep-aspect-ratio".to_string()),
+            PropertyValue::String(sizing.to_string()),
         );
+    }
+
+    // PiP candidate pads: sink_{2N+1 + pip_idx*N + i}. One per (PiP tile, input).
+    // For each PiP tile, the bg input fills the tile (low zorder) and the overlay
+    // inputs are auto-tiled in sub-rects on top (higher zorder, same as `groups`
+    // logic via `compute_group_rects`). All other PiP pads stay alpha=0.
+    for pip_idx in 0..p.num_pips {
+        let bg_input = p.pip_bg_inputs.get(pip_idx).copied().flatten();
+        let overlay_inputs = p
+            .pip_overlays
+            .get(pip_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let (bg_x, bg_y, bg_w, bg_h) = layout::pip_bg_pad_position(mv_layout, pip_idx);
+        let overlay_rects =
+            layout::pip_overlay_pad_positions(mv_layout, pip_idx, overlay_inputs.len(), pgm_aspect);
+
+        for i in 0..p.num_inputs {
+            let sink_idx = 2 * p.num_inputs + 1 + pip_idx * p.num_inputs + i;
+            let pad_name = format!("sink_{}", sink_idx);
+            let props = mv_pads.entry(pad_name).or_default();
+
+            let overlay_slot = overlay_inputs.iter().position(|&v| v == i);
+
+            let (x, y, w, h, alpha, zorder, sizing) = if Some(i) == bg_input {
+                (
+                    bg_x,
+                    bg_y,
+                    bg_w,
+                    bg_h,
+                    1.0,
+                    vision_mixer::MV_PIP_BG_ZORDER as u64,
+                    "keep-aspect-ratio",
+                )
+            } else if let Some(slot) = overlay_slot {
+                let (ox, oy, ow, oh) = overlay_rects.get(slot).copied().unwrap_or((0, 0, 1, 1));
+                (
+                    ox,
+                    oy,
+                    ow,
+                    oh,
+                    1.0,
+                    vision_mixer::MV_PIP_OVERLAY_ZORDER as u64,
+                    "keep-aspect-ratio",
+                )
+            } else {
+                (
+                    0,
+                    0,
+                    1,
+                    1,
+                    0.0,
+                    vision_mixer::MV_PIP_BG_ZORDER as u64,
+                    "keep-aspect-ratio",
+                )
+            };
+
+            props.insert("xpos".to_string(), PropertyValue::Int(x as i64));
+            props.insert("ypos".to_string(), PropertyValue::Int(y as i64));
+            props.insert("width".to_string(), PropertyValue::Int(w as i64));
+            props.insert("height".to_string(), PropertyValue::Int(h as i64));
+            props.insert("alpha".to_string(), PropertyValue::Float(alpha));
+            props.insert("zorder".to_string(), PropertyValue::UInt(zorder));
+            props.insert(
+                "sizing-policy".to_string(),
+                PropertyValue::String(sizing.to_string()),
+            );
+        }
     }
 
     // --- Overlay pad: fullscreen, highest zorder ---
     {
-        let overlay_pad_name = format!("sink_{}", 2 * p.num_inputs + 1);
+        let overlay_pad_name = format!("sink_{}", 2 * p.num_inputs + 1 + p.num_pips * p.num_inputs);
         let props = mv_pads.entry(overlay_pad_name).or_default();
         props.insert("xpos".to_string(), PropertyValue::Int(0));
         props.insert("ypos".to_string(), PropertyValue::Int(0));
@@ -1312,14 +1620,42 @@ fn setup_overlay_renderer(
     mv_layout: &layout::OverlayLayout,
     ctx: &BlockBuildContext,
 ) -> Arc<VisionMixerOverlayState> {
+    let pip_initial = overlay::PipInitialState {
+        num_pips: p.num_pips,
+        pip_bgs: (0..p.num_pips)
+            .map(|i| p.pip_bg_inputs.get(i).copied().flatten())
+            .collect(),
+        pip_overlays: (0..p.num_pips)
+            .map(|i| p.pip_overlays.get(i).cloned().unwrap_or_default())
+            .collect(),
+        pgm_pip: p.pgm_source.as_pip(),
+        pvw_pip: p.pvw_source.as_pip(),
+    };
+
+    // pgm_group/pvw_group must match what the compositor actually renders.
+    // For a single Input source it's that input; for a PiP source the legacy
+    // group reflects the PiP's bg input so transitions and overlay rendering
+    // stay consistent (Take from PiP-PGM falls back to bg-as-single-input).
+    let initial_pgm_input = p
+        .pgm_source
+        .as_pip()
+        .and_then(|p_idx| pip_initial.pip_bgs.get(p_idx).copied().flatten())
+        .unwrap_or(p.pgm_input);
+    let initial_pvw_input = p
+        .pvw_source
+        .as_pip()
+        .and_then(|p_idx| pip_initial.pip_bgs.get(p_idx).copied().flatten())
+        .unwrap_or(p.pvw_input);
+
     let overlay_state = Arc::new(VisionMixerOverlayState::new(
         p.num_inputs,
         p.num_dsk_inputs,
-        p.pgm_input,
-        p.pvw_input,
+        initial_pgm_input,
+        initial_pvw_input,
         p.labels.to_vec(),
         mv_layout.clone(),
         p.show_vu_meters,
+        pip_initial,
     ));
 
     // Register the overlay state so the API layer can access it

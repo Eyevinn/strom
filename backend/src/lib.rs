@@ -175,16 +175,16 @@ pub async fn create_app_with_config(
             post(api::flows::select_preview),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/vision-mixer/pip/{pip_idx}",
+            post(api::flows::update_pip_config),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/overlay-alpha",
             post(api::flows::set_overlay_alpha),
         )
         .route(
             "/flows/{flow_id}/blocks/{block_id}/dsk",
             post(api::flows::toggle_dsk),
-        )
-        .route(
-            "/flows/{flow_id}/blocks/{block_id}/background",
-            post(api::flows::set_background),
         )
         .route(
             "/flows/{flow_id}/blocks/{block_id}/ftb",

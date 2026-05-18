@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 use strom_types::vision_mixer::{
-    DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, DEFAULT_SHOW_VU_METERS, MAX_DSK_INPUTS, MAX_NUM_INPUTS,
-    MIN_NUM_INPUTS,
+    Source, DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, DEFAULT_NUM_PIPS, DEFAULT_SHOW_VU_METERS,
+    MAX_DSK_INPUTS, MAX_NUM_INPUTS, MAX_NUM_PIPS, MAX_PIP_OVERLAYS, MIN_NUM_INPUTS,
 };
 use strom_types::PropertyValue;
 
@@ -21,6 +21,91 @@ pub fn parse_num_dsk_inputs(properties: &HashMap<String, PropertyValue>) -> usiz
         .min(MAX_DSK_INPUTS)
 }
 
+/// Parse the number of PiP tiles from block properties.
+pub fn parse_num_pips(properties: &HashMap<String, PropertyValue>) -> usize {
+    properties
+        .get("num_pips")
+        .and_then(|v| match v {
+            PropertyValue::String(s) => s.parse::<usize>().ok(),
+            PropertyValue::UInt(n) => Some(*n as usize),
+            PropertyValue::Int(n) => Some(*n as usize),
+            _ => None,
+        })
+        .unwrap_or(DEFAULT_NUM_PIPS)
+        .min(MAX_NUM_PIPS)
+}
+
+/// Parse the background input index for PiP `pip_idx`. Returns `None` when the
+/// property is missing or set to an empty string ("no bg" — the PiP is a pure
+/// tile layout with overlays only). A numeric value is clamped to a valid input.
+pub fn parse_pip_bg(
+    properties: &HashMap<String, PropertyValue>,
+    pip_idx: usize,
+    num_inputs: usize,
+) -> Option<usize> {
+    let key = format!("pip_{}_bg_input", pip_idx);
+    let raw = match properties.get(&key)? {
+        PropertyValue::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return None;
+            }
+            t.parse::<usize>().ok()?
+        }
+        PropertyValue::UInt(n) => *n as usize,
+        PropertyValue::Int(n) if *n >= 0 => *n as usize,
+        _ => return None,
+    };
+    if num_inputs == 0 {
+        return None;
+    }
+    Some(raw.min(num_inputs - 1))
+}
+
+/// Parse the overlay input list for PiP `pip_idx`.
+///
+/// Format: comma-separated input indices, e.g. `"1,2,3"`. Whitespace is ignored.
+/// Each index is clamped to a valid input. Indices are deduplicated (preserving
+/// first-occurrence order), bg is filtered out (a bg input can't also be an
+/// overlay), and the list is truncated to [`MAX_PIP_OVERLAYS`].
+pub fn parse_pip_overlays(
+    properties: &HashMap<String, PropertyValue>,
+    pip_idx: usize,
+    num_inputs: usize,
+    bg: Option<usize>,
+) -> Vec<usize> {
+    let raw = match properties.get(&format!("pip_{}_overlays", pip_idx)) {
+        Some(PropertyValue::String(s)) => s.clone(),
+        _ => return Vec::new(),
+    };
+    if num_inputs == 0 {
+        return Vec::new();
+    }
+    let max_idx = num_inputs - 1;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for tok in raw.split(',') {
+        let t = tok.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let Ok(idx) = t.parse::<usize>() else {
+            continue;
+        };
+        let clamped = idx.min(max_idx);
+        if Some(clamped) == bg {
+            continue;
+        }
+        if seen.insert(clamped) {
+            out.push(clamped);
+            if out.len() >= MAX_PIP_OVERLAYS {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Parse the number of inputs from block properties, clamped to valid range.
 pub fn parse_num_inputs(properties: &HashMap<String, PropertyValue>) -> usize {
     properties
@@ -33,6 +118,51 @@ pub fn parse_num_inputs(properties: &HashMap<String, PropertyValue>) -> usize {
         })
         .unwrap_or(DEFAULT_NUM_INPUTS)
         .clamp(MIN_NUM_INPUTS, MAX_NUM_INPUTS)
+}
+
+/// Parse the initial PGM source from block properties.
+///
+/// Prefers the new string property `initial_pgm_source` ("input:N" or "pip:N").
+/// Falls back to the legacy [`parse_initial_pgm`] (UInt input index) when the
+/// string is empty or unparseable. Resulting indices are clamped to the available
+/// inputs/PiPs; if a Pip(p) refers to a non-existent PiP it falls back to Input(0).
+pub fn parse_initial_pgm_source(
+    properties: &HashMap<String, PropertyValue>,
+    num_inputs: usize,
+    num_pips: usize,
+) -> Source {
+    parse_source_with_fallback(properties, "initial_pgm_source", num_inputs, num_pips)
+        .unwrap_or_else(|| Source::Input(parse_initial_pgm(properties, num_inputs)))
+}
+
+/// Parse the initial PVW source from block properties (see [`parse_initial_pgm_source`]).
+pub fn parse_initial_pvw_source(
+    properties: &HashMap<String, PropertyValue>,
+    num_inputs: usize,
+    num_pips: usize,
+) -> Source {
+    parse_source_with_fallback(properties, "initial_pvw_source", num_inputs, num_pips)
+        .unwrap_or_else(|| Source::Input(parse_initial_pvw(properties, num_inputs)))
+}
+
+fn parse_source_with_fallback(
+    properties: &HashMap<String, PropertyValue>,
+    key: &str,
+    num_inputs: usize,
+    num_pips: usize,
+) -> Option<Source> {
+    let raw = match properties.get(key) {
+        Some(PropertyValue::String(s)) if !s.is_empty() => s,
+        _ => return None,
+    };
+    let parsed: Source = raw.parse().ok()?;
+    match parsed {
+        Source::Input(i) if num_inputs > 0 => Some(Source::Input(i.min(num_inputs - 1))),
+        Source::Pip(p) if num_pips > 0 && p < num_pips => Some(Source::Pip(p)),
+        // Invalid PiP index → fall back to first input.
+        Source::Pip(_) if num_inputs > 0 => Some(Source::Input(0)),
+        _ => None,
+    }
 }
 
 /// Parse the initial PGM input index from block properties.

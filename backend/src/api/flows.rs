@@ -1493,6 +1493,13 @@ pub async fn trigger_transition(
             )
         })?;
 
+    // Read authoritative post-take state so the operator UI can sync (incl. PiP).
+    let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id);
+    let program_inputs = overlay.as_ref().map(|s| s.pgm_group()).unwrap_or_default();
+    let preview_inputs = overlay.as_ref().map(|s| s.pvw_group()).unwrap_or_default();
+    let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
+    let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
+
     Ok(Json(TransitionResponse {
         message: format!(
             "Transition {} started: input {} -> {}",
@@ -1500,6 +1507,10 @@ pub async fn trigger_transition(
         ),
         transition_type: req.transition_type,
         duration_ms: req.duration_ms,
+        program_inputs,
+        preview_inputs,
+        program_pip,
+        preview_pip,
     }))
 }
 
@@ -1524,13 +1535,58 @@ pub async fn select_preview(
     Path((flow_id, block_id)): Path<(FlowId, String)>,
     Json(req): Json<strom_types::api::SelectPreviewRequest>,
 ) -> Result<Json<strom_types::api::SelectPreviewResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use strom_types::vision_mixer::Source;
+
+    // Parse `source` if provided; falls back to legacy `input` field.
+    let parsed_source: Option<Source> = req.source.as_deref().and_then(|s| s.parse().ok());
+
+    if let Some(Source::Pip(pip_idx)) = parsed_source {
+        info!(
+            "Selecting preview to PiP {} on vision mixer {} in flow {}",
+            pip_idx, block_id, flow_id
+        );
+        state
+            .select_vision_mixer_pip_for_preview(&flow_id, &block_id, pip_idx)
+            .await
+            .map_err(|e| {
+                error!("Failed to select PiP preview: {}", e);
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_details(
+                        "Failed to select PiP preview",
+                        e.to_string(),
+                    )),
+                )
+            })?;
+
+        // Read back authoritative state for response.
+        let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id);
+        let pvw_group = overlay.as_ref().map(|s| s.pvw_group()).unwrap_or_default();
+        let pgm_group = overlay.as_ref().map(|s| s.pgm_group()).unwrap_or_default();
+        return Ok(Json(strom_types::api::SelectPreviewResponse {
+            message: format!("Preview set to PiP {}", pip_idx),
+            preview_input: pvw_group.first().copied().unwrap_or(0),
+            program_input: pgm_group.first().copied().unwrap_or(0),
+            preview_inputs: pvw_group,
+            program_inputs: pgm_group,
+            preview_pip: Some(pip_idx),
+            program_pip: overlay.as_ref().and_then(|s| s.pgm_pip()),
+        }));
+    }
+
+    // Legacy path: input index (either from `input` field or parsed Source::Input).
+    let input = match parsed_source {
+        Some(Source::Input(i)) => i,
+        _ => req.input,
+    };
+
     info!(
-        "Selecting preview input {} (multi={}) on vision mixer {} in flow {}",
-        req.input, req.multi, block_id, flow_id
+        "Selecting preview input {} on vision mixer {} in flow {}",
+        input, block_id, flow_id
     );
 
     let (pvw_group, pgm_group) = state
-        .select_vision_mixer_preview(&flow_id, &block_id, req.input, req.multi)
+        .select_vision_mixer_preview(&flow_id, &block_id, input)
         .await
         .map_err(|e| {
             error!("Failed to select preview: {}", e);
@@ -1543,60 +1599,78 @@ pub async fn select_preview(
             )
         })?;
 
+    let pgm_pip = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
+        .as_ref()
+        .and_then(|s| s.pgm_pip());
+
     Ok(Json(strom_types::api::SelectPreviewResponse {
         message: format!("Preview set to {:?}", pvw_group),
         preview_input: pvw_group.first().copied().unwrap_or(0),
         program_input: pgm_group.first().copied().unwrap_or(0),
         preview_inputs: pvw_group,
         program_inputs: pgm_group,
+        preview_pip: None,
+        program_pip: pgm_pip,
     }))
 }
 
-/// Set or clear the background source on a vision mixer block.
+/// Update a PiP composition (background + overlay inputs) on a vision mixer block.
+///
+/// The change is applied live to all places where the PiP is currently visible:
+/// the multiview PiP thumbnail tile, plus PGM/PVW if either bus is showing this PiP.
 #[utoipa::path(
     post,
-    path = "/api/flows/{flow_id}/blocks/{block_id}/background",
+    path = "/api/flows/{flow_id}/blocks/{block_id}/vision-mixer/pip/{pip_idx}",
     tag = "flows",
     params(
         ("flow_id" = String, Path, description = "Flow ID (UUID)"),
-        ("block_id" = String, Path, description = "Vision mixer block instance ID")
+        ("block_id" = String, Path, description = "Vision mixer block instance ID"),
+        ("pip_idx" = usize, Path, description = "PiP index (0-based)")
     ),
-    request_body = strom_types::api::SetBackgroundRequest,
+    request_body = strom_types::api::UpdatePipConfigRequest,
     responses(
-        (status = 200, description = "Background source set/cleared", body = strom_types::api::SetBackgroundResponse),
+        (status = 200, description = "PiP config updated", body = strom_types::api::UpdatePipConfigResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 404, description = "Flow or block not found", body = ErrorResponse),
     )
 )]
-pub async fn set_background(
+pub async fn update_pip_config(
     State(state): State<AppState>,
-    Path((flow_id, block_id)): Path<(FlowId, String)>,
-    Json(req): Json<strom_types::api::SetBackgroundRequest>,
-) -> Result<Json<strom_types::api::SetBackgroundResponse>, (StatusCode, Json<ErrorResponse>)> {
+    Path((flow_id, block_id, pip_idx)): Path<(FlowId, String, usize)>,
+    Json(req): Json<strom_types::api::UpdatePipConfigRequest>,
+) -> Result<Json<strom_types::api::UpdatePipConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
     info!(
-        "Setting background {:?} on vision mixer {} in flow {}",
-        req.input, block_id, flow_id
+        "Updating PiP {} on vision mixer {} in flow {}: bg={:?}, overlays={:?}",
+        pip_idx, block_id, flow_id, req.bg, req.overlays
     );
-
-    let bg = state
-        .set_vision_mixer_background(&flow_id, &block_id, req.input)
+    state
+        .apply_vision_mixer_pip_config(&flow_id, &block_id, pip_idx, req.bg, req.overlays.clone())
         .await
         .map_err(|e| {
-            error!("Failed to set background: {}", e);
+            error!("Failed to update PiP config: {}", e);
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::with_details(
-                    "Failed to set background",
+                    "Failed to update PiP config",
                     e.to_string(),
                 )),
             )
         })?;
 
-    Ok(Json(strom_types::api::SetBackgroundResponse {
-        message: match bg {
-            Some(idx) => format!("Background set to input {}", idx),
-            None => "Background cleared".to_string(),
-        },
-        background_input: bg,
+    // Read back authoritative state.
+    let (bg, overlays) = if let Some(s) =
+        crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
+    {
+        (s.pip_bg_input(pip_idx), s.pip_overlay_inputs(pip_idx))
+    } else {
+        (req.bg, req.overlays)
+    };
+
+    Ok(Json(strom_types::api::UpdatePipConfigResponse {
+        message: format!("PiP {} updated", pip_idx),
+        pip_idx,
+        bg,
+        overlays,
     }))
 }
 

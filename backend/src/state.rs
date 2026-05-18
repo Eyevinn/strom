@@ -1618,7 +1618,6 @@ impl AppState {
         flow_id: &FlowId,
         block_instance_id: &str,
         input: usize,
-        multi: bool,
     ) -> Result<(Vec<usize>, Vec<usize>), PipelineError> {
         let pipelines = self.inner.pipelines.read().await;
 
@@ -1632,7 +1631,7 @@ impl AppState {
             .await;
 
         let (pvw_group, pgm_group) =
-            manager.select_vision_mixer_preview(block_instance_id, input, num_inputs, multi)?;
+            manager.select_vision_mixer_preview(block_instance_id, input, num_inputs)?;
 
         drop(pipelines);
 
@@ -1651,6 +1650,38 @@ impl AppState {
         Ok((pvw_group, pgm_group))
     }
 
+    /// Select a PiP composition as the preview source on a vision mixer block.
+    pub async fn select_vision_mixer_pip_for_preview(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        pip_idx: usize,
+    ) -> Result<(), PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+        manager.select_vision_mixer_pip_for_preview(block_instance_id, pip_idx)?;
+        Ok(())
+    }
+
+    /// Update a PiP composition (bg + overlays) on a vision mixer block at runtime.
+    pub async fn apply_vision_mixer_pip_config(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        pip_idx: usize,
+        bg: Option<usize>,
+        overlays: Vec<usize>,
+    ) -> Result<(), PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+        manager.apply_vision_mixer_pip_config(block_instance_id, pip_idx, bg, overlays)?;
+        Ok(())
+    }
+
     /// Get num_inputs for a vision mixer block from the flow definition.
     async fn get_vision_mixer_num_inputs(
         &self,
@@ -1664,31 +1695,6 @@ impl AppState {
             .and_then(|flow| flow.blocks.iter().find(|b| b.id == block_instance_id))
             .map(|block| vm_props::parse_num_inputs(&block.properties))
             .unwrap_or(4)
-    }
-
-    /// Set or clear the background source on a vision mixer block.
-    pub async fn set_vision_mixer_background(
-        &self,
-        flow_id: &FlowId,
-        block_instance_id: &str,
-        input: Option<usize>,
-    ) -> Result<Option<usize>, PipelineError> {
-        let pipelines = self.inner.pipelines.read().await;
-        let manager = pipelines.get(flow_id).ok_or_else(|| {
-            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-        })?;
-        manager.set_vision_mixer_background(block_instance_id, input)?;
-        drop(pipelines);
-
-        self.inner
-            .events
-            .broadcast(StromEvent::VisionMixerBackgroundChanged {
-                flow_id: *flow_id,
-                block_id: block_instance_id.to_string(),
-                background_input: input,
-            });
-
-        Ok(input)
     }
 
     /// Toggle a DSK (Downstream Keyer) layer on a vision mixer block.

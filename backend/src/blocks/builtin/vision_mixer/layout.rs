@@ -52,6 +52,8 @@ pub struct OverlayLayout {
     pub canvas_height: f64,
     /// Number of active inputs.
     pub num_inputs: usize,
+    /// Number of PiP tiles rendered virtually in the grid.
+    pub num_pips: usize,
 
     /// PVW large display area (top-left).
     pub pvw_rect: Rect,
@@ -62,9 +64,16 @@ pub struct OverlayLayout {
     pub thumbnail_rects: Vec<Rect>,
     /// Full thumbnail slot rectangles (video + label area, used for borders).
     pub thumbnail_slot_rects: Vec<Rect>,
+    /// PiP tile video rectangles. Placed in the grid after the input thumbnails
+    /// (slot index `num_inputs + pip_idx`).
+    pub pip_tile_rects: Vec<Rect>,
+    /// Full PiP tile slot rectangles (video + label area, used for borders).
+    pub pip_tile_slot_rects: Vec<Rect>,
 
     /// Label text positions (below each thumbnail).
     pub label_positions: Vec<Point>,
+    /// Label text positions for each PiP tile (below the tile video area).
+    pub pip_label_positions: Vec<Point>,
     /// PVW label position.
     pub pvw_label_pos: Point,
     /// PGM label position.
@@ -93,8 +102,16 @@ const TOP_ROW_HEIGHT_FRACTION: f64 = 0.48;
 /// Height fraction for each thumbnail row.
 const THUMB_ROW_HEIGHT_FRACTION: f64 = 0.235;
 
-/// Compute the multiview layout for a given canvas size and input count.
-pub fn compute_layout(canvas_width: u32, canvas_height: u32, num_inputs: usize) -> OverlayLayout {
+/// Compute the multiview layout for a given canvas size, input count, and PiP-tile count.
+///
+/// PiP tiles share the thumbnail grid: they are placed at slot indices
+/// `num_inputs..num_inputs + num_pips`.
+pub fn compute_layout(
+    canvas_width: u32,
+    canvas_height: u32,
+    num_inputs: usize,
+    num_pips: usize,
+) -> OverlayLayout {
     let cw = canvas_width as f64;
     let ch = canvas_height as f64;
     let scale = ch / 720.0;
@@ -116,25 +133,39 @@ pub fn compute_layout(canvas_width: u32, canvas_height: u32, num_inputs: usize) 
     let mut thumbnail_rects = Vec::with_capacity(num_inputs);
     let mut thumbnail_slot_rects = Vec::with_capacity(num_inputs);
     let mut label_positions = Vec::with_capacity(num_inputs);
+    let mut pip_tile_rects = Vec::with_capacity(num_pips);
+    let mut pip_tile_slot_rects = Vec::with_capacity(num_pips);
+    let mut pip_label_positions = Vec::with_capacity(num_pips);
 
     let label_font_size = thumb_h * 0.10;
     // Reserve space below the video for the label
     let label_area_h = label_font_size * 1.6;
     let video_h = thumb_h - label_area_h;
 
-    for i in 0..num_inputs {
+    // Same slot geometry for inputs and PiPs — they share the grid.
+    let slot_rect = |i: usize| -> (f64, f64) {
         let row = i / THUMBNAILS_PER_ROW;
         let col = i % THUMBNAILS_PER_ROW;
-
         let x = gap + col as f64 * (thumb_w + gap);
         let y = thumb_y_start + row as f64 * (thumb_h + gap);
+        (x, y)
+    };
 
-        // Video sits at the top of the slot
+    for i in 0..num_inputs {
+        let (x, y) = slot_rect(i);
         thumbnail_rects.push(Rect::new(x, y, thumb_w, video_h));
-        // Full slot includes video + label area (used for borders)
         thumbnail_slot_rects.push(Rect::new(x, y, thumb_w, thumb_h));
-        // Label centered in the label area below the video
         label_positions.push(Point {
+            x: x + thumb_w / 2.0,
+            y: y + video_h + label_area_h / 2.0 + label_font_size * 0.35,
+        });
+    }
+
+    for i in 0..num_pips {
+        let (x, y) = slot_rect(num_inputs + i);
+        pip_tile_rects.push(Rect::new(x, y, thumb_w, video_h));
+        pip_tile_slot_rects.push(Rect::new(x, y, thumb_w, thumb_h));
+        pip_label_positions.push(Point {
             x: x + thumb_w / 2.0,
             y: y + video_h + label_area_h / 2.0 + label_font_size * 0.35,
         });
@@ -146,11 +177,15 @@ pub fn compute_layout(canvas_width: u32, canvas_height: u32, num_inputs: usize) 
         canvas_width: cw,
         canvas_height: ch,
         num_inputs,
+        num_pips,
         pvw_rect,
         pgm_rect,
         thumbnail_rects,
         thumbnail_slot_rects,
+        pip_tile_rects,
+        pip_tile_slot_rects,
         label_positions,
+        pip_label_positions,
         pvw_label_pos: Point {
             x: pvw_rect.x + pvw_rect.w / 2.0,
             y: pvw_rect.y + pvw_rect.h - header_font_size * 0.6,
@@ -187,6 +222,38 @@ pub fn pvw_pad_position(layout: &OverlayLayout) -> (i32, i32, i32, i32) {
 /// Compute compositor pad position for a PGM big display slot.
 pub fn pgm_pad_position(layout: &OverlayLayout) -> (i32, i32, i32, i32) {
     layout.pgm_rect.as_ints()
+}
+
+/// Compositor pad position for the PiP background pad — fills the whole PiP tile.
+/// Returns a `(0, 0, 1, 1)` sentinel rect if the PiP index is out of range.
+pub fn pip_bg_pad_position(layout: &OverlayLayout, pip_idx: usize) -> (i32, i32, i32, i32) {
+    layout
+        .pip_tile_rects
+        .get(pip_idx)
+        .map(Rect::as_ints)
+        .unwrap_or((0, 0, 1, 1))
+}
+
+/// Compute auto-tiled overlay sub-rectangles inside a PiP tile, preserving
+/// `source_aspect` so the rendered source fills each cell without transparent
+/// letterbox bands. See [`strom_types::vision_mixer::compute_pip_overlay_rects`].
+pub fn pip_overlay_pad_positions(
+    layout: &OverlayLayout,
+    pip_idx: usize,
+    count: usize,
+    source_aspect: f64,
+) -> Vec<(i32, i32, i32, i32)> {
+    let Some(tile) = layout.pip_tile_rects.get(pip_idx) else {
+        return Vec::new();
+    };
+    strom_types::vision_mixer::compute_pip_overlay_rects(
+        tile.x as i32,
+        tile.y as i32,
+        tile.w as i32,
+        tile.h as i32,
+        count,
+        source_aspect,
+    )
 }
 
 /// Compute sub-rectangles for a source group within a container Rect.

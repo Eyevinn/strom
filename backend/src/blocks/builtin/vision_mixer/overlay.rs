@@ -53,8 +53,17 @@ pub struct VisionMixerOverlayState {
     pgm_group: AtomicU64,
     /// Packed PVW source group (up to 4 source indices). See `vision_mixer::pack_source_group`.
     pvw_group: AtomicU64,
-    /// Background source index (u64::MAX = no background).
-    background_input: AtomicU64,
+    /// PiP currently shown on PGM (u64::MAX = PGM is an input group, not a PiP).
+    /// Set at build time from `initial_pgm_source`; cleared/changed via runtime API.
+    pgm_pip: AtomicU64,
+    /// PiP currently shown on PVW (u64::MAX = PVW is an input group, not a PiP).
+    pvw_pip: AtomicU64,
+    /// Current PiP bg input (u64::MAX = no bg). One entry per configured PiP.
+    pub pip_bg: Vec<AtomicU64>,
+    /// Current PiP overlays (input indices). One Mutex<Vec> per configured PiP.
+    pub pip_overlays: Vec<std::sync::Mutex<Vec<usize>>>,
+    /// Number of configured PiP tiles (also `pip_bg.len()` / `pip_overlays.len()`).
+    pub num_pips: usize,
     /// Number of inputs.
     pub num_inputs: usize,
     /// Whether Fade to Black is active.
@@ -91,7 +100,25 @@ pub struct VisionMixerOverlayState {
     pub pgm_decay: AtomicU8,
 }
 
+/// Initial PiP runtime state passed to [`VisionMixerOverlayState::new`].
+///
+/// `pip_bgs` and `pip_overlays` must have length `num_pips`. `pgm_pip` / `pvw_pip`
+/// are `Some(idx)` if the corresponding bus starts in PiP mode.
+#[derive(Default)]
+pub struct PipInitialState {
+    pub num_pips: usize,
+    pub pip_bgs: Vec<Option<usize>>,
+    pub pip_overlays: Vec<Vec<usize>>,
+    pub pgm_pip: Option<usize>,
+    pub pvw_pip: Option<usize>,
+}
+
+/// Sentinel used in [`VisionMixerOverlayState::pgm_pip`] / `pvw_pip` for
+/// "this bus is an input group, not a PiP".
+pub const NO_PIP: u64 = u64::MAX;
+
 impl VisionMixerOverlayState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_inputs: usize,
         num_dsk_inputs: usize,
@@ -100,6 +127,7 @@ impl VisionMixerOverlayState {
         labels: Vec<String>,
         layout: OverlayLayout,
         show_vu_meters: bool,
+        pip: PipInitialState,
     ) -> Self {
         let now_sys = SystemTime::now();
         let now_instant = Instant::now();
@@ -109,10 +137,30 @@ impl VisionMixerOverlayState {
             .as_secs();
         let (offset_secs, tz_abbr) = local_tz_info();
 
+        let pip_bg = (0..pip.num_pips)
+            .map(|i| {
+                let v = pip
+                    .pip_bgs
+                    .get(i)
+                    .copied()
+                    .unwrap_or(None)
+                    .map(|x| x as u64)
+                    .unwrap_or(NO_PIP);
+                AtomicU64::new(v)
+            })
+            .collect();
+        let pip_overlays = (0..pip.num_pips)
+            .map(|i| std::sync::Mutex::new(pip.pip_overlays.get(i).cloned().unwrap_or_default()))
+            .collect();
+
         Self {
             pgm_group: AtomicU64::new(vision_mixer::pack_single_source(pgm_input)),
             pvw_group: AtomicU64::new(vision_mixer::pack_single_source(pvw_input)),
-            background_input: AtomicU64::new(vision_mixer::NO_BACKGROUND),
+            pgm_pip: AtomicU64::new(pip.pgm_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
+            pvw_pip: AtomicU64::new(pip.pvw_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
+            pip_bg,
+            pip_overlays,
+            num_pips: pip.num_pips,
             num_inputs,
             ftb_active: AtomicBool::new(false),
             overlay_alpha: AtomicU64::new(1.0f64.to_bits()),
@@ -132,6 +180,88 @@ impl VisionMixerOverlayState {
             input_decay: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
             pgm_peak: AtomicU8::new(0),
             pgm_decay: AtomicU8::new(0),
+        }
+    }
+
+    /// Returns the PiP index currently displayed on PGM, or `None` if PGM
+    /// is an input group.
+    pub fn pgm_pip(&self) -> Option<usize> {
+        let v = self.pgm_pip.load(Ordering::Relaxed);
+        if v == NO_PIP {
+            None
+        } else {
+            Some(v as usize)
+        }
+    }
+
+    /// Returns the PiP index currently displayed on PVW, or `None` if PVW
+    /// is an input group.
+    pub fn pvw_pip(&self) -> Option<usize> {
+        let v = self.pvw_pip.load(Ordering::Relaxed);
+        if v == NO_PIP {
+            None
+        } else {
+            Some(v as usize)
+        }
+    }
+
+    /// Set PGM to be a PiP (or clear it back to input-group mode with `None`).
+    pub fn set_pgm_pip(&self, pip_idx: Option<usize>) {
+        self.pgm_pip.store(
+            pip_idx.map(|x| x as u64).unwrap_or(NO_PIP),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Set PVW to be a PiP (or clear it back to input-group mode with `None`).
+    pub fn set_pvw_pip(&self, pip_idx: Option<usize>) {
+        self.pvw_pip.store(
+            pip_idx.map(|x| x as u64).unwrap_or(NO_PIP),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Packed PGM-pip atomic value (for dirty checking).
+    pub fn pgm_pip_packed(&self) -> u64 {
+        self.pgm_pip.load(Ordering::Relaxed)
+    }
+
+    /// Packed PVW-pip atomic value (for dirty checking).
+    pub fn pvw_pip_packed(&self) -> u64 {
+        self.pvw_pip.load(Ordering::Relaxed)
+    }
+
+    /// Get the bg input for a configured PiP (None if PiP doesn't exist or has no bg).
+    pub fn pip_bg_input(&self, pip_idx: usize) -> Option<usize> {
+        let v = self.pip_bg.get(pip_idx)?.load(Ordering::Relaxed);
+        if v == NO_PIP {
+            None
+        } else {
+            Some(v as usize)
+        }
+    }
+
+    /// Set the bg input for a configured PiP.
+    pub fn set_pip_bg_input(&self, pip_idx: usize, input: Option<usize>) {
+        if let Some(slot) = self.pip_bg.get(pip_idx) {
+            slot.store(input.map(|x| x as u64).unwrap_or(NO_PIP), Ordering::Relaxed);
+        }
+    }
+
+    /// Get the overlay input list for a configured PiP (empty if PiP doesn't exist).
+    pub fn pip_overlay_inputs(&self, pip_idx: usize) -> Vec<usize> {
+        self.pip_overlays
+            .get(pip_idx)
+            .and_then(|m| m.lock().ok().map(|v| v.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Replace the overlay input list for a configured PiP.
+    pub fn set_pip_overlay_inputs(&self, pip_idx: usize, overlays: Vec<usize>) {
+        if let Some(slot) = self.pip_overlays.get(pip_idx) {
+            if let Ok(mut v) = slot.lock() {
+                *v = overlays;
+            }
         }
     }
 
@@ -203,29 +333,6 @@ impl VisionMixerOverlayState {
     pub fn set_pvw_group(&self, indices: &[usize]) {
         self.pvw_group
             .store(vision_mixer::pack_source_group(indices), Ordering::Relaxed);
-    }
-
-    /// Get the background source index, or None if no background.
-    pub fn background_input(&self) -> Option<usize> {
-        let val = self.background_input.load(Ordering::Relaxed);
-        if val == vision_mixer::NO_BACKGROUND {
-            None
-        } else {
-            Some(val as usize)
-        }
-    }
-
-    /// Get the raw background atomic value (for dirty checking).
-    pub fn background_input_packed(&self) -> u64 {
-        self.background_input.load(Ordering::Relaxed)
-    }
-
-    /// Set or clear the background source.
-    pub fn set_background_input(&self, input: Option<usize>) {
-        let val = input
-            .map(|i| i as u64)
-            .unwrap_or(vision_mixer::NO_BACKGROUND);
-        self.background_input.store(val, Ordering::Relaxed);
     }
 
     /// Get the multiview overlay alpha (0.0–1.0).
@@ -306,9 +413,6 @@ const PGM_G: f64 = 0.0;
 const PGM_B: f64 = 1.0; // want B=0 in output → feed to cairo R channel
 
 // Yellow for background indicator: want output R=1.0, G=0.8, B=0
-const BG_R: f64 = 0.0; // fed to cairo R channel → outputs as B=0
-const BG_G: f64 = 0.8;
-const BG_B: f64 = 1.0; // fed to cairo B channel → outputs as R=1.0
 
 const GRAY: f64 = 0.5;
 
@@ -464,7 +568,6 @@ pub struct OverlayRenderer {
     last_overlay_data: Option<Arc<[u8]>>,
     last_pgm: u64,
     last_pvw: u64,
-    last_bg: u64,
     last_ftb: bool,
     last_clock_secs: u64,
     /// Meter state hash from the last render; used to avoid re-rendering when
@@ -472,6 +575,10 @@ pub struct OverlayRenderer {
     last_meters_hash: u64,
     /// Whether meters were on at the last render.
     last_show_vu: bool,
+    /// Previous PGM-on-PiP index packed (NO_PIP if PGM was an input group).
+    last_pgm_pip: u64,
+    /// Previous PVW-on-PiP index packed (NO_PIP if PVW was an input group).
+    last_pvw_pip: u64,
 }
 
 // SAFETY: OverlayRenderer is accessed via Mutex from the timer thread and API
@@ -497,11 +604,12 @@ impl OverlayRenderer {
             last_overlay_data: None,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
-            last_bg: u64::MAX - 1,
             last_ftb: false,
             last_clock_secs: u64::MAX,
             last_meters_hash: u64::MAX,
             last_show_vu: false,
+            last_pgm_pip: u64::MAX - 2,
+            last_pvw_pip: u64::MAX - 2,
         }
     }
 
@@ -513,8 +621,9 @@ impl OverlayRenderer {
     pub fn render_if_dirty(&mut self) -> bool {
         let pgm_packed = self.state.pgm_group_packed();
         let pvw_packed = self.state.pvw_group_packed();
-        let bg_packed = self.state.background_input_packed();
         let ftb = self.state.ftb_active.load(Ordering::Relaxed);
+        let pgm_pip_packed = self.state.pgm_pip_packed();
+        let pvw_pip_packed = self.state.pvw_pip_packed();
         let (h, m, s) = self.state.wall_clock_hms();
         let clock_secs = h as u64 * 3600 + m as u64 * 60 + s as u64;
         let show_vu = self.state.show_vu_meters();
@@ -522,8 +631,9 @@ impl OverlayRenderer {
 
         let dirty = self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
-            || self.last_bg != bg_packed
             || self.last_ftb != ftb
+            || self.last_pgm_pip != pgm_pip_packed
+            || self.last_pvw_pip != pvw_pip_packed
             || self.last_clock_secs != clock_secs
             || self.last_show_vu != show_vu
             || (show_vu && self.last_meters_hash != meters_hash);
@@ -531,10 +641,9 @@ impl OverlayRenderer {
         if dirty {
             let pgm_group = vision_mixer::unpack_source_group(pgm_packed);
             let pvw_group = vision_mixer::unpack_source_group(pvw_packed);
-            let bg = self.state.background_input();
 
             let t0 = std::time::Instant::now();
-            let pushed = self.push_frame(&pgm_group, &pvw_group, bg, ftb, h, m, s);
+            let pushed = self.push_frame(&pgm_group, &pvw_group, ftb, h, m, s);
             let elapsed = t0.elapsed();
             debug!(
                 "Overlay render+push: {:.1}ms (pgm={:?}, pvw={:?}, ftb={}, pushed={})",
@@ -548,8 +657,9 @@ impl OverlayRenderer {
             if pushed {
                 self.last_pgm = pgm_packed;
                 self.last_pvw = pvw_packed;
-                self.last_bg = bg_packed;
                 self.last_ftb = ftb;
+                self.last_pgm_pip = pgm_pip_packed;
+                self.last_pvw_pip = pvw_pip_packed;
                 self.last_clock_secs = clock_secs;
                 self.last_show_vu = show_vu;
                 self.last_meters_hash = meters_hash;
@@ -566,7 +676,6 @@ impl OverlayRenderer {
         &mut self,
         pgm_group: &[usize],
         pvw_group: &[usize],
-        bg: Option<usize>,
         ftb: bool,
         h: u32,
         m: u32,
@@ -592,7 +701,7 @@ impl OverlayRenderer {
             cr.set_operator(cairo::Operator::Clear);
             let _ = cr.paint();
             cr.set_operator(cairo::Operator::Over);
-            render_overlay(&self.state, &cr, pgm_group, pvw_group, bg, ftb, h, m, s);
+            render_overlay(&self.state, &cr, pgm_group, pvw_group, ftb, h, m, s);
         }
 
         let t_cairo = t0.elapsed();
@@ -801,7 +910,6 @@ fn render_overlay(
     cr: &cairo::Context,
     pgm_group: &[usize],
     pvw_group: &[usize],
-    bg: Option<usize>,
     ftb: bool,
     h: u32,
     m: u32,
@@ -828,17 +936,35 @@ fn render_overlay(
         let r = &layout.thumbnail_slot_rects[i];
         if pgm_group.contains(&i) {
             cr.set_source_rgb(PGM_R, PGM_G, PGM_B);
-            cr.set_line_width(layout.thumb_border_width);
         } else if pvw_group.contains(&i) {
             cr.set_source_rgb(PVW_R, PVW_G, PVW_B);
-            cr.set_line_width(layout.thumb_border_width);
-        } else if bg == Some(i) {
-            cr.set_source_rgb(BG_R, BG_G, BG_B);
-            cr.set_line_width(layout.thumb_border_width);
         } else {
             cr.set_source_rgb(GRAY, GRAY, GRAY);
-            cr.set_line_width(layout.thumb_border_width);
         }
+        cr.set_line_width(layout.thumb_border_width);
+        cr.rectangle(r.x, r.y, r.w, r.h);
+        let _ = cr.stroke();
+    }
+
+    // --- PiP tile borders ---
+    // Mirror the thumbnail color scheme: red if this PiP is on PGM, green if on
+    // PVW, gray otherwise. PGM wins over PVW if both somehow apply.
+    let pgm_pip_idx = state.pgm_pip();
+    let pvw_pip_idx = state.pvw_pip();
+    for (i, r) in layout
+        .pip_tile_slot_rects
+        .iter()
+        .take(layout.num_pips)
+        .enumerate()
+    {
+        if pgm_pip_idx == Some(i) {
+            cr.set_source_rgb(PGM_R, PGM_G, PGM_B);
+        } else if pvw_pip_idx == Some(i) {
+            cr.set_source_rgb(PVW_R, PVW_G, PVW_B);
+        } else {
+            cr.set_source_rgb(GRAY, GRAY, GRAY);
+        }
+        cr.set_line_width(layout.thumb_border_width);
         cr.rectangle(r.x, r.y, r.w, r.h);
         let _ = cr.stroke();
     }
@@ -923,24 +1049,26 @@ fn render_overlay(
         );
     }
 
-    // --- BG indicator on background source thumbnail ---
-    if let Some(bg_idx) = bg {
-        if bg_idx < layout.thumbnail_rects.len() {
-            let r = &layout.thumbnail_rects[bg_idx];
-            cr.set_font_size(layout.label_font_size * 0.8);
-            draw_label_centered(
-                cr,
-                "BG",
-                r.x + r.w / 2.0,
-                r.y + layout.label_font_size,
-                BG_R,
-                BG_G,
-                BG_B,
-                0.7,
-                2.0 * sc,
-                1.0 * sc,
-            );
-        }
+    // --- PiP tile labels (e.g. "PiP 1") ---
+    for (i, pos) in layout
+        .pip_label_positions
+        .iter()
+        .take(layout.num_pips)
+        .enumerate()
+    {
+        let label = format!("PiP {}", i + 1);
+        draw_label_centered(
+            cr,
+            &label,
+            pos.x,
+            pos.y,
+            0.0,
+            0.0,
+            0.0,
+            0.6,
+            2.0 * sc,
+            2.0 * sc,
+        );
     }
 
     // --- PVW / PGM header labels ---

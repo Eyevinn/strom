@@ -121,16 +121,6 @@
             box-shadow: 0 0 8px rgba(0, 255, 0, 0.3);
         }
 
-        .src-btn.bg-active {
-            border-color: #cc9900;
-            box-shadow: 0 0 6px rgba(204, 153, 0, 0.4);
-        }
-        .src-btn.bg-active::after {
-            content: ' BG';
-            font-size: 8px;
-            color: #cc9900;
-        }
-
         /* Transition section */
         .transition-panel {
             display: flex;
@@ -264,6 +254,88 @@
         }
         .duration-preset:hover { border-color: #666; color: #ccc; }
         .duration-preset.active { background: #444; color: #fff; border-color: #888; }
+
+        /* PiP controls (purple-ish to distinguish from regular inputs) */
+        .pip-btn {
+            flex: 1 1 0;
+            min-width: 36px;
+            height: 36px;
+            padding: 0 4px;
+            background: #2a1a3a;
+            border: 2px solid #5a3a7a;
+            border-radius: 4px;
+            color: #b18ad6;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            letter-spacing: 0.5px;
+        }
+        .pip-btn:focus { outline: none; }
+        .pip-btn:hover { border-color: #8a5acc; color: #d6b8ff; }
+        .pip-btn.pgm-active { background: #cc0000; border-color: #ee0000; color: #fff; }
+        .pip-btn.pvw-active { background: #006600; border-color: #00aa00; color: #fff; }
+
+        /* PiP config panel */
+        .pip-config-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding: 6px 16px;
+            background: #1a1320;
+            border-top: 1px solid #3a2350;
+        }
+        .pip-config-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 11px;
+            color: #aaa;
+        }
+        .pip-config-row .pip-config-label {
+            color: #b18ad6;
+            font-weight: 700;
+            min-width: 50px;
+        }
+        .pip-bg-select {
+            height: 26px;
+            background: #2a1a3a;
+            border: 1px solid #5a3a7a;
+            border-radius: 3px;
+            color: #ddd;
+            padding: 0 6px;
+            font-size: 12px;
+        }
+        .pip-overlay-chip {
+            width: 30px;
+            height: 26px;
+            background: #2a2a2a;
+            border: 1px solid #555;
+            border-radius: 3px;
+            color: #777;
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+        }
+        .pip-overlay-chip:hover { border-color: #888; color: #aaa; }
+        .pip-overlay-chip.active {
+            background: #5a3a7a;
+            border-color: #8a5acc;
+            color: #fff;
+        }
+        .pip-overlay-chip.disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
 
         /* Status bar */
         .status-bar {
@@ -434,6 +506,9 @@
             </div>
         </div>
 
+        <!-- PiP composition panel (populated when num_pips > 0) -->
+        <div class="pip-config-panel" id="pipConfigPanel" style="display:none;"></div>
+
         <!-- Transition controls -->
         <div class="transition-panel">
             <div class="transition-buttons">
@@ -466,7 +541,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">1-9,0 = PVW | G+N = Multi | B+N = BG | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -483,20 +558,27 @@
         let MULTIVIEW_ENDPOINT = _cfg.multiview_endpoint;
         const INPUT_LABELS = _cfg.input_labels;
         const NUM_DSK_INPUTS = _cfg.num_dsk_inputs || 0;
+        const NUM_PIPS = _cfg.num_pips || 0;
 
         // ---- State ----
         // Groups: ordered arrays of 0-based input indices (1-4 items each)
         let currentPgmGroup = _cfg.initial_pgm_group || [_cfg.initial_pgm];
         let currentPvwGroup = _cfg.initial_pvw_group || [_cfg.initial_pvw];
-        let currentBackground = _cfg.background_input != null ? _cfg.background_input : null;
         let dskEnabled = _cfg.dsk_states || [true, true, true, true];
+        // PiPs: array of { bg: int|null, overlays: int[] } per configured PiP.
+        let pipConfigs = (_cfg.pips || []).map(p => ({
+            bg: (p && p.bg != null) ? p.bg : null,
+            overlays: (p && Array.isArray(p.overlays)) ? p.overlays.slice() : []
+        }));
+        // Which PiP is currently shown on each bus (null = input group, not a PiP).
+        let currentPvwPip = (_cfg.pvw_pip != null) ? _cfg.pvw_pip : null;
+        let currentPgmPip = (_cfg.pgm_pip != null) ? _cfg.pgm_pip : null;
         let transitionType = 'fade';
         let transitionDurationMs = 1000;
         let transitioning = false;
         let ftbActive = _cfg.ftb_active || false;
         let overlayAlpha = _cfg.overlay_alpha != null ? _cfg.overlay_alpha : 1.0;
-        let groupMode = false;  // true while G is held down
-        let bgMode = false;     // true while B is held down
+        // groupMode removed — multi-input PVW is now expressed via PiPs.
         let controlsMinimized = localStorage.getItem('vm-controls-minimized') === 'true';
 
         function toggleMinimize() {
@@ -522,14 +604,15 @@
         }
 
         // ---- PVW/PGM selection ----
-        function selectPreview(input, multi) {
-            if (currentBackground === input) return;  // background source is exclusive
-            if (!multi && currentPgmGroup.length === 1 && currentPgmGroup[0] === input) return;
-            if (!multi && currentPvwGroup.length === 1 && currentPvwGroup[0] === input) return;
-            apiPost('/preview', { input, multi: !!multi })
+        function selectPreview(input) {
+            if (currentPgmGroup.length === 1 && currentPgmGroup[0] === input && currentPgmPip == null) return;
+            if (currentPvwGroup.length === 1 && currentPvwGroup[0] === input && currentPvwPip == null) return;
+            apiPost('/preview', { input })
                 .then(r => {
                     currentPvwGroup = r.preview_inputs || [r.preview_input];
                     currentPgmGroup = r.program_inputs || [r.program_input];
+                    currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
+                    currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
                     updateButtons();
                     const label = currentPvwGroup.map(i => i + 1).join('+');
                     setStatus('PVW: Input ' + label);
@@ -546,11 +629,16 @@
                 document.getElementById('autoBtn').classList.add('active');
             }
 
-            // Capture state before sending — swap immediately for responsive UI
+            // Capture state before sending — swap immediately for responsive UI.
+            // Includes PiP swap so the colored borders / PiP buttons reflect the new state.
             const fromGroup = [...currentPgmGroup];
             const toGroup = [...currentPvwGroup];
+            const fromPip = currentPgmPip;
+            const toPip = currentPvwPip;
             currentPgmGroup = toGroup;
             currentPvwGroup = fromGroup;
+            currentPgmPip = toPip;
+            currentPvwPip = fromPip;
             updateButtons();
 
             apiPost('/transition', {
@@ -559,6 +647,13 @@
                 transition_type: type,
                 duration_ms: durationMs
             }).then(r => {
+                // Reconcile from authoritative server state — covers any clamping
+                // / re-resolution the server did during the take.
+                if (r.program_inputs) currentPgmGroup = r.program_inputs;
+                if (r.preview_inputs) currentPvwGroup = r.preview_inputs;
+                currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
+                currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
+                updateButtons();
                 setStatus(r.message);
                 setTimeout(() => {
                     transitioning = false;
@@ -568,6 +663,8 @@
                 // Revert swap on error
                 currentPgmGroup = fromGroup;
                 currentPvwGroup = toGroup;
+                currentPgmPip = fromPip;
+                currentPvwPip = toPip;
                 updateButtons();
                 transitioning = false;
                 document.getElementById('autoBtn').classList.remove('active');
@@ -598,29 +695,6 @@
             const btn = document.getElementById('ftbBtn');
             btn.classList.toggle('ftb-active', ftbActive);
             btn.textContent = ftbActive ? 'FTB ON' : 'FTB';
-        }
-
-        // ---- Background source ----
-        function setBackground(input) {
-            // Toggle: if already background, clear it
-            const newBg = (currentBackground === input) ? null : input;
-            apiPost('/background', { input: newBg })
-                .then(r => {
-                    currentBackground = r.background_input;
-                    updateButtons();
-                    setStatus(r.message);
-                })
-                .catch(e => setStatus('Background error: ' + e.message));
-        }
-
-        function clearBackground() {
-            apiPost('/background', { input: null })
-                .then(r => {
-                    currentBackground = r.background_input;
-                    updateButtons();
-                    setStatus(r.message);
-                })
-                .catch(e => setStatus('Background error: ' + e.message));
         }
 
         // ---- DSK toggle ----
@@ -716,12 +790,16 @@
         // ---- UI update ----
         function updateButtons() {
             document.querySelectorAll('#pgmBus .src-btn').forEach((btn, i) => {
-                btn.classList.toggle('pgm-active', currentPgmGroup.includes(i));
-                btn.classList.toggle('bg-active', currentBackground === i);
+                btn.classList.toggle('pgm-active', currentPgmGroup.includes(i) && currentPgmPip == null);
             });
             document.querySelectorAll('#pvwBus .src-btn').forEach((btn, i) => {
-                btn.classList.toggle('pvw-active', currentPvwGroup.includes(i));
-                btn.classList.toggle('bg-active', currentBackground === i);
+                btn.classList.toggle('pvw-active', currentPvwGroup.includes(i) && currentPvwPip == null);
+            });
+            document.querySelectorAll('#pgmBus .pip-btn').forEach((btn, i) => {
+                btn.classList.toggle('pgm-active', currentPgmPip === i);
+            });
+            document.querySelectorAll('#pvwBus .pip-btn').forEach((btn, i) => {
+                btn.classList.toggle('pvw-active', currentPvwPip === i);
             });
         }
 
@@ -748,47 +826,160 @@
                 pgmBtn.title = label + (keyHint ? ' (' + keyHint + ')' : '');
                 pgmBus.appendChild(pgmBtn);
 
-                // PVW button (click = single select, shift+click = multi-toggle)
+                // PVW button (single select). Multi-source layouts are built via PiPs.
                 const pvwBtn = document.createElement('button');
                 pvwBtn.className = 'src-btn' + (currentPvwGroup.includes(i) ? ' pvw-active' : '');
                 pvwBtn.textContent = btnText;
-                pvwBtn.title = label + (keyHint ? ' (' + keyHint + ', hold G + ' + keyHint + ' multi)' : '');
-                pvwBtn.onclick = () => selectPreview(i, groupMode);
+                pvwBtn.title = label + (keyHint ? ' (' + keyHint + ')' : '');
+                pvwBtn.onclick = () => selectPreview(i);
                 pvwBus.appendChild(pvwBtn);
+            }
+
+            // PiP buttons after input buttons on both buses.
+            // Slot number continues after the input range so keyboard shortcuts
+            // line up: with 8 inputs, PiP1 is slot 9, PiP2 is slot 10 (key '0').
+            for (let p = 0; p < NUM_PIPS; p++) {
+                const slotNum = NUM_INPUTS + p + 1;
+                const labelText = slotNum + ' - PiP' + (p + 1);
+                const keyHint = slotNum <= 10 ? (slotNum === 10 ? '0' : String(slotNum)) : '';
+
+                const pgmPipBtn = document.createElement('button');
+                pgmPipBtn.className = 'pip-btn' + (currentPgmPip === p ? ' pgm-active' : '');
+                pgmPipBtn.textContent = labelText;
+                pgmPipBtn.title = 'PiP ' + (p + 1) + ' on PGM' + (keyHint ? ' (' + keyHint + ')' : '');
+                pgmBus.appendChild(pgmPipBtn);
+
+                const pvwPipBtn = document.createElement('button');
+                pvwPipBtn.className = 'pip-btn' + (currentPvwPip === p ? ' pvw-active' : '');
+                pvwPipBtn.textContent = labelText;
+                pvwPipBtn.title = 'Take PiP ' + (p + 1) + ' to PVW' + (keyHint ? ' (' + keyHint + ')' : '');
+                pvwPipBtn.onclick = () => selectPreviewPip(p);
+                pvwBus.appendChild(pvwPipBtn);
+            }
+        }
+
+        // ---- PiP composition controls ----
+        function selectPreviewPip(pipIdx) {
+            apiPost('/preview', { input: 0, source: 'pip:' + pipIdx })
+                .then(r => {
+                    currentPvwGroup = r.preview_inputs || [];
+                    currentPgmGroup = r.program_inputs || [];
+                    currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
+                    currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
+                    updateButtons();
+                    setStatus('PVW: PiP ' + (pipIdx + 1));
+                })
+                .catch(e => setStatus('Preview error: ' + e.message));
+        }
+
+        function postPipConfig(pipIdx) {
+            const cfg = pipConfigs[pipIdx];
+            return apiPost('/vision-mixer/pip/' + pipIdx, {
+                bg: cfg.bg,
+                overlays: cfg.overlays
+            }).then(r => {
+                // Server may clamp/dedupe — accept its response as truth.
+                pipConfigs[pipIdx] = { bg: r.bg, overlays: r.overlays || [] };
+                buildPipConfigPanel();
+                setStatus(r.message);
+            }).catch(e => setStatus('PiP config error: ' + e.message));
+        }
+
+        function setPipBg(pipIdx, bg) {
+            pipConfigs[pipIdx].bg = (bg === '' || bg === 'none') ? null : parseInt(bg, 10);
+            // Bg can't simultaneously be in overlays; remove if so.
+            pipConfigs[pipIdx].overlays = pipConfigs[pipIdx].overlays.filter(i => i !== pipConfigs[pipIdx].bg);
+            postPipConfig(pipIdx);
+        }
+
+        function togglePipOverlay(pipIdx, input) {
+            const cfg = pipConfigs[pipIdx];
+            if (cfg.bg === input) return; // bg can't be an overlay
+            const idx = cfg.overlays.indexOf(input);
+            if (idx >= 0) {
+                cfg.overlays.splice(idx, 1);
+            } else {
+                cfg.overlays.push(input);
+            }
+            postPipConfig(pipIdx);
+        }
+
+        function buildPipConfigPanel() {
+            const panel = document.getElementById('pipConfigPanel');
+            if (NUM_PIPS === 0) {
+                panel.style.display = 'none';
+                return;
+            }
+            panel.style.display = 'flex';
+            panel.innerHTML = '';
+
+            for (let p = 0; p < NUM_PIPS; p++) {
+                const cfg = pipConfigs[p] || { bg: null, overlays: [] };
+                const row = document.createElement('div');
+                row.className = 'pip-config-row';
+
+                const label = document.createElement('span');
+                label.className = 'pip-config-label';
+                label.textContent = 'PiP ' + (p + 1);
+                row.appendChild(label);
+
+                // BG dropdown
+                const bgWrap = document.createElement('span');
+                bgWrap.textContent = 'BG: ';
+                const bgSel = document.createElement('select');
+                bgSel.className = 'pip-bg-select';
+                const noneOpt = document.createElement('option');
+                noneOpt.value = '';
+                noneOpt.textContent = 'None';
+                bgSel.appendChild(noneOpt);
+                for (let i = 0; i < NUM_INPUTS; i++) {
+                    const o = document.createElement('option');
+                    o.value = String(i);
+                    o.textContent = INPUT_LABELS[i] || ('Input ' + (i + 1));
+                    if (cfg.bg === i) o.selected = true;
+                    bgSel.appendChild(o);
+                }
+                bgSel.onchange = () => setPipBg(p, bgSel.value);
+                bgWrap.appendChild(bgSel);
+                row.appendChild(bgWrap);
+
+                // Overlay chips
+                const ovWrap = document.createElement('span');
+                ovWrap.textContent = 'Overlays:';
+                ovWrap.style.marginLeft = '12px';
+                row.appendChild(ovWrap);
+
+                for (let i = 0; i < NUM_INPUTS; i++) {
+                    const chip = document.createElement('span');
+                    chip.className = 'pip-overlay-chip';
+                    if (cfg.bg === i) {
+                        chip.classList.add('disabled');
+                        chip.title = 'Used as background';
+                    } else {
+                        chip.onclick = () => togglePipOverlay(p, i);
+                    }
+                    if (cfg.overlays.includes(i)) chip.classList.add('active');
+                    chip.textContent = String(i + 1);
+                    row.appendChild(chip);
+                }
+
+                panel.appendChild(row);
             }
         }
 
         // ---- Keyboard shortcuts ----
-        // Hold G = group mode (multi-select), release G = normal mode
         document.addEventListener('keydown', (e) => {
             if (e.target.tagName === 'INPUT') return;
 
-            if ((e.key === 'g' || e.key === 'G') && !e.repeat) {
-                groupMode = true;
-                e.preventDefault();
-                return;
-            }
-
-            // Hold B = background mode (B + number sets background)
-            if ((e.key === 'b' || e.key === 'B') && !e.repeat) {
-                bgMode = true;
-                e.preventDefault();
-                return;
-            }
-
-            // 1-9, 0 = action depends on mode
-            if (e.key >= '1' && e.key <= '9') {
-                const input = parseInt(e.key) - 1;
-                if (input < NUM_INPUTS) {
-                    if (bgMode) { setBackground(input); }
-                    else { selectPreview(input, groupMode); }
+            // 1-9, 0 = select PVW. Slots continue past NUM_INPUTS into PiPs,
+            // so with 8 inputs key '9' picks PiP1 and key '0' picks PiP2.
+            if ((e.key >= '1' && e.key <= '9') || e.key === '0') {
+                const slot = e.key === '0' ? 9 : (parseInt(e.key) - 1);
+                if (slot < NUM_INPUTS) {
+                    selectPreview(slot);
+                } else if (slot < NUM_INPUTS + NUM_PIPS) {
+                    selectPreviewPip(slot - NUM_INPUTS);
                 }
-                e.preventDefault();
-                return;
-            }
-            if (e.key === '0' && NUM_INPUTS >= 10) {
-                if (bgMode) { setBackground(9); }
-                else { selectPreview(9, groupMode); }
                 e.preventDefault();
                 return;
             }
@@ -823,8 +1014,6 @@
         });
 
         document.addEventListener('keyup', (e) => {
-            if (e.key === 'g' || e.key === 'G') groupMode = false;
-            if (e.key === 'b' || e.key === 'B') bgMode = false;
         });
 
         // ---- Connection status helpers ----
@@ -923,7 +1112,6 @@
                 const cfg = JSON.parse(match[1]);
                 currentPgmGroup = cfg.initial_pgm_group || [cfg.initial_pgm];
                 currentPvwGroup = cfg.initial_pvw_group || [cfg.initial_pvw];
-                currentBackground = cfg.background_input != null ? cfg.background_input : null;
                 ftbActive = cfg.ftb_active || false;
                 dskEnabled = cfg.dsk_states || [true, true, true, true];
                 overlayAlpha = cfg.overlay_alpha != null ? cfg.overlay_alpha : 1.0;
@@ -978,13 +1166,6 @@
                             updateOverlayAlphaUi();
                         }
                     }
-                    if (event.type === 'VisionMixerBackgroundChanged' && event.data) {
-                        const d = event.data;
-                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
-                            currentBackground = d.background_input;
-                            updateButtons();
-                        }
-                    }
                 } catch {}
             };
 
@@ -1002,6 +1183,7 @@
             buildBuses();
             updateButtons();
             initDskUi();
+            buildPipConfigPanel();
             updateFtbButton();
             connectMultiview();
             connectWebSocket();
