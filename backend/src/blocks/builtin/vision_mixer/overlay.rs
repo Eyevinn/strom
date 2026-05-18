@@ -49,9 +49,10 @@ pub fn unregister_overlay_state(block_id: &str) {
 ///
 /// Updated atomically from the API thread; read lock-free from the streaming thread.
 pub struct VisionMixerOverlayState {
-    /// Packed PGM source group (up to 4 source indices). See `vision_mixer::pack_source_group`.
+    /// Current PGM input index, or [`NO_SOURCE`] when no input is on PGM
+    /// (e.g. PGM is a PiP composition — see [`Self::pgm_pip`]).
     pgm_group: AtomicU64,
-    /// Packed PVW source group (up to 4 source indices). See `vision_mixer::pack_source_group`.
+    /// Current PVW input index, or [`NO_SOURCE`] when PVW shows a PiP composition.
     pvw_group: AtomicU64,
     /// PiP currently shown on PGM (u64::MAX = PGM is an input group, not a PiP).
     /// Set at build time from `initial_pgm_source`; cleared/changed via runtime API.
@@ -117,6 +118,10 @@ pub struct PipInitialState {
 /// "this bus is an input group, not a PiP".
 pub const NO_PIP: u64 = u64::MAX;
 
+/// Sentinel for "no input source on this bus" in [`VisionMixerOverlayState::pgm_group`]
+/// / `pvw_group` (e.g. when the bus shows a PiP composition instead).
+pub const NO_SOURCE: u64 = u64::MAX;
+
 impl VisionMixerOverlayState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -154,8 +159,8 @@ impl VisionMixerOverlayState {
             .collect();
 
         Self {
-            pgm_group: AtomicU64::new(vision_mixer::pack_single_source(pgm_input)),
-            pvw_group: AtomicU64::new(vision_mixer::pack_single_source(pvw_input)),
+            pgm_group: AtomicU64::new(pgm_input as u64),
+            pvw_group: AtomicU64::new(pvw_input as u64),
             pgm_pip: AtomicU64::new(pip.pgm_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
             pvw_pip: AtomicU64::new(pip.pvw_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
             pip_bg,
@@ -293,46 +298,75 @@ impl VisionMixerOverlayState {
             .store(vision_mixer::quantize_db_to_u8(decay_db), Ordering::Relaxed);
     }
 
-    /// Get the PGM source group as a Vec of indices.
+    /// Get the PGM source group — a 1-element vec with the current PGM input,
+    /// or empty when PGM has no input (e.g. it's a PiP composition).
     pub fn pgm_group(&self) -> Vec<usize> {
-        vision_mixer::unpack_source_group(self.pgm_group.load(Ordering::Relaxed))
+        let v = self.pgm_group.load(Ordering::Relaxed);
+        if v == NO_SOURCE {
+            Vec::new()
+        } else {
+            vec![v as usize]
+        }
     }
 
-    /// Get the PVW source group as a Vec of indices.
+    /// Get the PVW source group (see [`Self::pgm_group`]).
     pub fn pvw_group(&self) -> Vec<usize> {
-        vision_mixer::unpack_source_group(self.pvw_group.load(Ordering::Relaxed))
+        let v = self.pvw_group.load(Ordering::Relaxed);
+        if v == NO_SOURCE {
+            Vec::new()
+        } else {
+            vec![v as usize]
+        }
     }
 
-    /// Get the packed PGM group value (for atomic comparison).
+    /// Raw atomic value (used for dirty-checking).
     pub fn pgm_group_packed(&self) -> u64 {
         self.pgm_group.load(Ordering::Relaxed)
     }
 
-    /// Get the packed PVW group value (for atomic comparison).
+    /// Raw atomic value (used for dirty-checking).
     pub fn pvw_group_packed(&self) -> u64 {
         self.pvw_group.load(Ordering::Relaxed)
     }
 
-    /// Get first PGM source index (backward compat).
+    /// Get PGM input index (returns 0 when no input is on PGM — fallback).
     pub fn pgm_first(&self) -> usize {
-        vision_mixer::group_first(self.pgm_group.load(Ordering::Relaxed))
+        let v = self.pgm_group.load(Ordering::Relaxed);
+        if v == NO_SOURCE {
+            0
+        } else {
+            v as usize
+        }
     }
 
-    /// Get first PVW source index (backward compat).
+    /// Get PVW input index (returns 0 when no input is on PVW — fallback).
     pub fn pvw_first(&self) -> usize {
-        vision_mixer::group_first(self.pvw_group.load(Ordering::Relaxed))
+        let v = self.pvw_group.load(Ordering::Relaxed);
+        if v == NO_SOURCE {
+            0
+        } else {
+            v as usize
+        }
     }
 
-    /// Set the PGM source group.
+    /// Set PGM input. Empty slice or omitted first element clears to NO_SOURCE.
     pub fn set_pgm_group(&self, indices: &[usize]) {
-        self.pgm_group
-            .store(vision_mixer::pack_source_group(indices), Ordering::Relaxed);
+        let v = indices
+            .first()
+            .copied()
+            .map(|i| i as u64)
+            .unwrap_or(NO_SOURCE);
+        self.pgm_group.store(v, Ordering::Relaxed);
     }
 
-    /// Set the PVW source group.
+    /// Set PVW input.
     pub fn set_pvw_group(&self, indices: &[usize]) {
-        self.pvw_group
-            .store(vision_mixer::pack_source_group(indices), Ordering::Relaxed);
+        let v = indices
+            .first()
+            .copied()
+            .map(|i| i as u64)
+            .unwrap_or(NO_SOURCE);
+        self.pvw_group.store(v, Ordering::Relaxed);
     }
 
     /// Get the multiview overlay alpha (0.0–1.0).
@@ -639,8 +673,18 @@ impl OverlayRenderer {
             || (show_vu && self.last_meters_hash != meters_hash);
 
         if dirty {
-            let pgm_group = vision_mixer::unpack_source_group(pgm_packed);
-            let pvw_group = vision_mixer::unpack_source_group(pvw_packed);
+            // pgm/pvw_packed is the raw AtomicU64 (single input idx or NO_SOURCE);
+            // expand to a Vec for the renderer (cairo loop iterates the group).
+            let pgm_group = if pgm_packed == NO_SOURCE {
+                Vec::new()
+            } else {
+                vec![pgm_packed as usize]
+            };
+            let pvw_group = if pvw_packed == NO_SOURCE {
+                Vec::new()
+            } else {
+                vec![pvw_packed as usize]
+            };
 
             let t0 = std::time::Instant::now();
             let pushed = self.push_frame(&pgm_group, &pvw_group, ftb, h, m, s);
@@ -987,45 +1031,23 @@ fn render_overlay(
             draw_vu_meter(cr, r, peak, decay, layout.scale);
         }
 
-        // PVW meters: one per source in the group, each drawn in the
-        // bottom-left of its sub-tile. Sub-tiles follow the 1/2/3/4-source
-        // layout from `compute_group_sub_rects`.
-        if !pvw_group.is_empty() {
-            let rects = super::layout::compute_group_sub_rects(&layout.pvw_rect, pvw_group.len());
-            for (tile_rect, &src_idx) in rects.iter().zip(pvw_group.iter()) {
-                if let (Some(peak_slot), Some(decay_slot)) = (
-                    state.input_peak.get(src_idx),
-                    state.input_decay.get(src_idx),
-                ) {
-                    let peak = peak_slot.load(Ordering::Relaxed);
-                    let decay = decay_slot.load(Ordering::Relaxed);
-                    draw_vu_meter(cr, tile_rect, peak, decay, layout.scale);
-                }
+        // PVW meter — one source max (groups removed). Draw the input's level
+        // across the full PVW rect.
+        if let Some(&src_idx) = pvw_group.first() {
+            if let (Some(peak_slot), Some(decay_slot)) = (
+                state.input_peak.get(src_idx),
+                state.input_decay.get(src_idx),
+            ) {
+                let peak = peak_slot.load(Ordering::Relaxed);
+                let decay = decay_slot.load(Ordering::Relaxed);
+                draw_vu_meter(cr, &layout.pvw_rect, peak, decay, layout.scale);
             }
         }
 
-        // PGM meters:
-        //  - single source: one meter in the full PGM rect, driven by the
-        //    dedicated pgm_audio_in port (master PGM mix from the audio mixer).
-        //  - multi-source group: per-tile meters, each showing the
-        //    corresponding source's own audio input.
-        if pgm_group.len() <= 1 {
-            let pgm_peak = state.pgm_peak.load(Ordering::Relaxed);
-            let pgm_decay = state.pgm_decay.load(Ordering::Relaxed);
-            draw_vu_meter(cr, &layout.pgm_rect, pgm_peak, pgm_decay, layout.scale);
-        } else {
-            let rects = super::layout::compute_group_sub_rects(&layout.pgm_rect, pgm_group.len());
-            for (tile_rect, &src_idx) in rects.iter().zip(pgm_group.iter()) {
-                if let (Some(peak_slot), Some(decay_slot)) = (
-                    state.input_peak.get(src_idx),
-                    state.input_decay.get(src_idx),
-                ) {
-                    let peak = peak_slot.load(Ordering::Relaxed);
-                    let decay = decay_slot.load(Ordering::Relaxed);
-                    draw_vu_meter(cr, tile_rect, peak, decay, layout.scale);
-                }
-            }
-        }
+        // PGM meter — master PGM mix from the audio mixer at the full PGM rect.
+        let pgm_peak = state.pgm_peak.load(Ordering::Relaxed);
+        let pgm_decay = state.pgm_decay.load(Ordering::Relaxed);
+        draw_vu_meter(cr, &layout.pgm_rect, pgm_peak, pgm_decay, layout.scale);
     }
 
     // --- Input labels on thumbnails ---

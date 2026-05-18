@@ -1524,8 +1524,8 @@ fn build_pad_properties(
 
     // PiP candidate pads: sink_{2N+1 + pip_idx*N + i}. One per (PiP tile, input).
     // For each PiP tile, the bg input fills the tile (low zorder) and the overlay
-    // inputs are auto-tiled in sub-rects on top (higher zorder, same as `groups`
-    // logic via `compute_group_rects`). All other PiP pads stay alpha=0.
+    // inputs are auto-tiled in sub-rects on top (higher zorder, see
+    // `compute_pip_overlay_rects`). All other PiP pads stay alpha=0.
     for pip_idx in 0..p.num_pips {
         let bg_input = p.pip_bg_inputs.get(pip_idx).copied().flatten();
         let overlay_inputs = p

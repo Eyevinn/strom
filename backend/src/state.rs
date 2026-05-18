@@ -1580,12 +1580,8 @@ impl AppState {
                     .broadcast(StromEvent::VisionMixerStateChanged {
                         flow_id: *flow_id,
                         block_id: block_id.to_string(),
-                        preview_input: strom_types::vision_mixer::group_first(
-                            strom_types::vision_mixer::pack_source_group(&new_pvw_group),
-                        ),
-                        program_input: strom_types::vision_mixer::group_first(
-                            strom_types::vision_mixer::pack_source_group(&new_pgm_group),
-                        ),
+                        preview_input: new_pvw_group.first().copied().unwrap_or(0),
+                        program_input: new_pgm_group.first().copied().unwrap_or(0),
                         preview_inputs: new_pvw_group,
                         program_inputs: new_pgm_group.clone(),
                     });

@@ -22,13 +22,16 @@ fn test_parse_num_inputs_valid() {
 }
 
 #[test]
-fn test_parse_num_inputs_clamped() {
+fn test_parse_num_inputs_clamped_to_max() {
     let mut props = HashMap::new();
     props.insert(
         "num_inputs".to_string(),
-        PropertyValue::String("20".to_string()),
+        PropertyValue::String("9999".to_string()),
     );
-    assert_eq!(properties::parse_num_inputs(&props), 10); // MAX
+    assert_eq!(
+        properties::parse_num_inputs(&props),
+        strom_types::vision_mixer::MAX_NUM_INPUTS
+    );
 }
 
 #[test]

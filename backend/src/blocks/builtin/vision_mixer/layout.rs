@@ -99,13 +99,16 @@ const GAP_FRACTION: f64 = 0.005;
 /// Height fraction for the top PVW/PGM row.
 const TOP_ROW_HEIGHT_FRACTION: f64 = 0.48;
 
-/// Height fraction for each thumbnail row.
-const THUMB_ROW_HEIGHT_FRACTION: f64 = 0.235;
+/// Default height per thumbnail row when ≤ 2 rows fit naturally below the top
+/// PVW/PGM band. Larger input counts shrink rows to fit the available height.
+const DEFAULT_THUMB_ROW_HEIGHT_FRACTION: f64 = 0.235;
 
 /// Compute the multiview layout for a given canvas size, input count, and PiP-tile count.
 ///
 /// PiP tiles share the thumbnail grid: they are placed at slot indices
-/// `num_inputs..num_inputs + num_pips`.
+/// `num_inputs..num_inputs + num_pips`. The grid uses [`THUMBNAILS_PER_ROW`]
+/// columns and as many rows as needed; row height scales down when extra rows
+/// don't fit at the default size.
 pub fn compute_layout(
     canvas_width: u32,
     canvas_height: u32,
@@ -124,9 +127,20 @@ pub fn compute_layout(
     let pvw_rect = Rect::new(gap, gap, half_w, top_h);
     let pgm_rect = Rect::new(gap * 2.0 + half_w, gap, half_w, top_h);
 
-    // Thumbnail rows start below the top row
+    // Thumbnail rows start below the top row.
     let thumb_y_start = gap * 2.0 + top_h;
-    let thumb_h = (ch * THUMB_ROW_HEIGHT_FRACTION).round();
+    let total_slots = num_inputs + num_pips;
+    let needed_rows = total_slots.div_ceil(THUMBNAILS_PER_ROW).max(1);
+    // Available vertical space for thumbnails (one gap above the first row,
+    // one between rows, and one below the last row).
+    let available_h = (ch - thumb_y_start - gap * (needed_rows as f64 + 1.0)).max(0.0);
+    let default_thumb_h = (ch * DEFAULT_THUMB_ROW_HEIGHT_FRACTION).round();
+    let max_thumb_h = if needed_rows == 0 {
+        default_thumb_h
+    } else {
+        (available_h / needed_rows as f64).floor()
+    };
+    let thumb_h = max_thumb_h.min(default_thumb_h).max(1.0);
     let thumb_w =
         ((cw - gap * (THUMBNAILS_PER_ROW as f64 + 1.0)) / THUMBNAILS_PER_ROW as f64).round();
 
@@ -140,7 +154,7 @@ pub fn compute_layout(
     let label_font_size = thumb_h * 0.10;
     // Reserve space below the video for the label
     let label_area_h = label_font_size * 1.6;
-    let video_h = thumb_h - label_area_h;
+    let video_h = (thumb_h - label_area_h).max(1.0);
 
     // Same slot geometry for inputs and PiPs — they share the grid.
     let slot_rect = |i: usize| -> (f64, f64) {
@@ -254,25 +268,4 @@ pub fn pip_overlay_pad_positions(
         count,
         source_aspect,
     )
-}
-
-/// Compute sub-rectangles for a source group within a container Rect.
-///
-/// Returns Vec<Rect> with one rectangle per group member, following the standard layout:
-/// - 1: fullscreen
-/// - 2: side-by-side
-/// - 3: 2 top + 1 bottom-left
-/// - 4: 2x2 grid
-pub fn compute_group_sub_rects(container: &Rect, count: usize) -> Vec<Rect> {
-    let rects = strom_types::vision_mixer::compute_group_rects(
-        container.x as i32,
-        container.y as i32,
-        container.w as i32,
-        container.h as i32,
-        count,
-    );
-    rects
-        .into_iter()
-        .map(|(x, y, w, h)| Rect::new(x as f64, y as f64, w as f64, h as f64))
-        .collect()
 }

@@ -1137,27 +1137,25 @@ fn pads_for_source(
         }
         out
     } else {
-        let rects = strom_types::vision_mixer::compute_group_rects(rx, ry, rw, rh, group.len());
+        // Single-input source — only first element of `group` is meaningful
+        // (multi-input groups removed; multi-source compositions are PiPs now).
         group
-            .iter()
-            .enumerate()
-            .map(|(slot, &idx)| {
-                let (x, y, w, h) = rects.get(slot).copied().unwrap_or((rx, ry, rw, rh));
-                PadTarget {
-                    pad_idx: pad_base + idx,
-                    x,
-                    y,
-                    w,
-                    h,
-                    zorder: bg_zorder,
-                }
+            .first()
+            .map(|&idx| PadTarget {
+                pad_idx: pad_base + idx,
+                x: rx,
+                y: ry,
+                w: rw,
+                h: rh,
+                zorder: bg_zorder,
             })
+            .into_iter()
             .collect()
     }
 }
 
-/// Apply an input-group layout (1..=4 tiled inputs from `compute_group_rects`) to a
-/// contiguous range of compositor sink pads. Pads not in the group are hidden.
+/// Apply a single-input source layout (fills the region) to a contiguous range
+/// of compositor sink pads. Pads not equal to the active input are hidden.
 fn apply_input_group_to_region(
     compositor: &gst::Element,
     pad_base: usize,
@@ -1167,18 +1165,17 @@ fn apply_input_group_to_region(
     fg_zorder: u32,
 ) {
     let (rx, ry, rw, rh) = region;
-    let rects = strom_types::vision_mixer::compute_group_rects(rx, ry, rw, rh, group.len());
+    let active = group.first().copied();
     for i in 0..num_inputs {
         let pad_name = format!("sink_{}", pad_base + i);
         let Some(pad) = find_pad(compositor, &pad_name) else {
             continue;
         };
-        if let Some(slot) = group.iter().position(|&v| v == i) {
-            let (x, y, w, h) = rects.get(slot).copied().unwrap_or((rx, ry, rw, rh));
-            pad.set_property("xpos", x);
-            pad.set_property("ypos", y);
-            pad.set_property("width", w);
-            pad.set_property("height", h);
+        if Some(i) == active {
+            pad.set_property("xpos", rx);
+            pad.set_property("ypos", ry);
+            pad.set_property("width", rw);
+            pad.set_property("height", rh);
             pad.set_property("alpha", 1.0f64);
             pad.set_property("zorder", fg_zorder);
         } else {
