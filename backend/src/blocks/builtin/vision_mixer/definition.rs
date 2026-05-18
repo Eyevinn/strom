@@ -49,7 +49,10 @@ fn vision_mixer_definition() -> BlockDefinition {
         ExposedProperty {
             name: "num_inputs".to_string(),
             label: "Number of Inputs".to_string(),
-            description: "Number of video inputs (2-10)".to_string(),
+            description: format!(
+                "Number of video inputs ({}-{})",
+                MIN_NUM_INPUTS, MAX_NUM_INPUTS
+            ),
             property_type: PropertyType::UInt,
             default_value: Some(PropertyValue::UInt(DEFAULT_NUM_INPUTS as u64)),
             mapping: PropertyMapping {
@@ -314,26 +317,24 @@ fn vision_mixer_definition() -> BlockDefinition {
         },
     ];
 
-    // Input labels — single CSV property to avoid bloating the property panel
-    // with one entry per possible input. Format: comma-separated, e.g.
-    // "Cam 1, Cam 2, Game Feed, Replay". Empty entries fall back to "In N".
-    // Legacy per-input "input_{i}_label" properties are still honored on read
-    // for back-compat with existing flows.
-    exposed_properties.push(ExposedProperty {
-        name: "input_labels".to_string(),
-        label: "Input Labels".to_string(),
-        description: "Comma-separated labels for inputs (e.g. \"Cam 1, Cam 2, Game, Replay\"). \
-             Missing or empty entries display as \"In N\"."
-            .to_string(),
-        property_type: PropertyType::String,
-        default_value: Some(PropertyValue::String(String::new())),
-        mapping: PropertyMapping {
-            element_id: "_block".to_string(),
-            property_name: "input_labels".to_string(),
-            transform: None,
-        },
-        live: false,
-    });
+    // Per-input labels. We expose one property per possible input slot
+    // (`MAX_NUM_INPUTS`); the frontend property panel hides entries for slots
+    // beyond the configured `num_inputs` (see `vision_mixer_skip_set`).
+    for i in 0..MAX_NUM_INPUTS {
+        exposed_properties.push(ExposedProperty {
+            name: format!("input_{}_label", i),
+            label: format!("Input {} Label", i + 1),
+            description: format!("Label for input {} shown on multiview", i + 1),
+            property_type: PropertyType::String,
+            default_value: Some(PropertyValue::String(format!("In {}", i + 1))),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: format!("input_{}_label", i),
+                transform: None,
+            },
+            live: false,
+        });
+    }
 
     // Number of PiP tiles
     {

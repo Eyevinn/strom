@@ -808,16 +808,19 @@ impl PropertyInspector {
                                 available_channels,
                             );
                         } else {
-                            // Build skip-set for mixer blocks: skip properties for
-                            // channels/aux/groups beyond the configured count.
-                            let mixer_skip = if definition.id == "builtin.mixer" {
+                            // Build skip-set for blocks whose property panel
+                            // grows with a count property: hide entries for
+                            // slots beyond the configured count.
+                            let skip_set = if definition.id == "builtin.mixer" {
                                 Some(Self::mixer_skip_set(block))
+                            } else if definition.id == "builtin.vision_mixer" {
+                                Some(Self::vision_mixer_skip_set(block))
                             } else {
                                 None
                             };
 
                             for exposed_prop in &definition.exposed_properties {
-                                if let Some(ref skip) = mixer_skip {
+                                if let Some(ref skip) = skip_set {
                                     if skip.contains(exposed_prop.name.as_str()) {
                                         continue;
                                     }
@@ -1308,6 +1311,41 @@ impl PropertyInspector {
     ///
     /// Properties for channels beyond `num_channels`, aux buses beyond
     /// `num_aux_buses`, and groups beyond `num_groups` are excluded.
+    /// Skip properties for inputs / PiPs beyond what the block's current
+    /// `num_inputs` / `num_pips` settings activate, so the property panel
+    /// shows just the slots that are actually in use.
+    fn vision_mixer_skip_set(block: &BlockInstance) -> std::collections::HashSet<String> {
+        use strom_types::vision_mixer::{
+            DEFAULT_NUM_INPUTS, DEFAULT_NUM_PIPS, MAX_NUM_INPUTS, MAX_NUM_PIPS,
+        };
+
+        let get_uint = |key: &str, default: usize| -> usize {
+            block
+                .properties
+                .get(key)
+                .and_then(|v| match v {
+                    PropertyValue::String(s) => s.parse().ok(),
+                    PropertyValue::UInt(n) => Some(*n as usize),
+                    PropertyValue::Int(n) => Some(*n as usize),
+                    _ => None,
+                })
+                .unwrap_or(default)
+        };
+
+        let num_inputs = get_uint("num_inputs", DEFAULT_NUM_INPUTS);
+        let num_pips = get_uint("num_pips", DEFAULT_NUM_PIPS);
+
+        let mut skip = std::collections::HashSet::new();
+        for i in num_inputs..MAX_NUM_INPUTS {
+            skip.insert(format!("input_{}_label", i));
+        }
+        for i in num_pips..MAX_NUM_PIPS {
+            skip.insert(format!("pip_{}_bg_input", i));
+            skip.insert(format!("pip_{}_overlays", i));
+        }
+        skip
+    }
+
     fn mixer_skip_set(block: &BlockInstance) -> std::collections::HashSet<String> {
         use strom_types::mixer::{MAX_AUX_BUSES, MAX_CHANNELS, MAX_GROUPS};
 

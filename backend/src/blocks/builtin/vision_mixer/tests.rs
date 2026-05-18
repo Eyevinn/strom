@@ -52,22 +52,7 @@ fn test_parse_input_labels_defaults() {
 }
 
 #[test]
-fn test_parse_input_labels_csv() {
-    let mut props = HashMap::new();
-    props.insert(
-        "input_labels".to_string(),
-        PropertyValue::String("Camera 1, , Graphics, ".to_string()),
-    );
-    let labels = properties::parse_input_labels(&props, 4);
-    assert_eq!(labels[0], "Camera 1");
-    assert_eq!(labels[1], "In 2"); // empty → default
-    assert_eq!(labels[2], "Graphics");
-    assert_eq!(labels[3], "In 4"); // empty trailing → default
-}
-
-#[test]
-fn test_parse_input_labels_legacy_back_compat() {
-    // Old per-input properties still honored when CSV isn't set.
+fn test_parse_input_labels_custom() {
     let mut props = HashMap::new();
     props.insert(
         "input_0_label".to_string(),
@@ -79,32 +64,9 @@ fn test_parse_input_labels_legacy_back_compat() {
     );
     let labels = properties::parse_input_labels(&props, 4);
     assert_eq!(labels[0], "Camera 1");
-    assert_eq!(labels[1], "In 2");
+    assert_eq!(labels[1], "In 2"); // default
     assert_eq!(labels[2], "Graphics");
-    assert_eq!(labels[3], "In 4");
-}
-
-#[test]
-fn test_parse_input_labels_csv_overrides_legacy() {
-    // When both formats present, CSV wins for indices it covers.
-    let mut props = HashMap::new();
-    props.insert(
-        "input_labels".to_string(),
-        PropertyValue::String("CSV-A, CSV-B".to_string()),
-    );
-    props.insert(
-        "input_0_label".to_string(),
-        PropertyValue::String("Legacy-A".to_string()),
-    );
-    props.insert(
-        "input_2_label".to_string(),
-        PropertyValue::String("Legacy-C".to_string()),
-    );
-    let labels = properties::parse_input_labels(&props, 4);
-    assert_eq!(labels[0], "CSV-A"); // CSV wins
-    assert_eq!(labels[1], "CSV-B"); // CSV wins
-    assert_eq!(labels[2], "Legacy-C"); // no CSV entry → legacy fallback
-    assert_eq!(labels[3], "In 4"); // neither → default
+    assert_eq!(labels[3], "In 4"); // default
 }
 
 #[test]
