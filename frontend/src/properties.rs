@@ -1311,37 +1311,25 @@ impl PropertyInspector {
     ///
     /// Properties for channels beyond `num_channels`, aux buses beyond
     /// `num_aux_buses`, and groups beyond `num_groups` are excluded.
-    /// Skip properties for inputs / PiPs beyond what the block's current
-    /// `num_inputs` / `num_pips` settings activate, so the property panel
-    /// shows just the slots that are actually in use.
+    /// Skip per-input labels for slots beyond the configured `num_inputs`
+    /// so the property panel shows just the inputs in use.
     fn vision_mixer_skip_set(block: &BlockInstance) -> std::collections::HashSet<String> {
-        use strom_types::vision_mixer::{
-            DEFAULT_NUM_INPUTS, DEFAULT_NUM_PIPS, MAX_NUM_INPUTS, MAX_NUM_PIPS,
-        };
+        use strom_types::vision_mixer::{DEFAULT_NUM_INPUTS, MAX_NUM_INPUTS};
 
-        let get_uint = |key: &str, default: usize| -> usize {
-            block
-                .properties
-                .get(key)
-                .and_then(|v| match v {
-                    PropertyValue::String(s) => s.parse().ok(),
-                    PropertyValue::UInt(n) => Some(*n as usize),
-                    PropertyValue::Int(n) => Some(*n as usize),
-                    _ => None,
-                })
-                .unwrap_or(default)
-        };
-
-        let num_inputs = get_uint("num_inputs", DEFAULT_NUM_INPUTS);
-        let num_pips = get_uint("num_pips", DEFAULT_NUM_PIPS);
+        let num_inputs = block
+            .properties
+            .get("num_inputs")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => s.parse().ok(),
+                PropertyValue::UInt(n) => Some(*n as usize),
+                PropertyValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_NUM_INPUTS);
 
         let mut skip = std::collections::HashSet::new();
         for i in num_inputs..MAX_NUM_INPUTS {
             skip.insert(format!("input_{}_label", i));
-        }
-        for i in num_pips..MAX_NUM_PIPS {
-            skip.insert(format!("pip_{}_bg_input", i));
-            skip.insert(format!("pip_{}_overlays", i));
         }
         skip
     }

@@ -105,6 +105,21 @@ impl PipelineManager {
 
                 let parsed = transition_type.parse::<TransitionType>().ok();
                 let is_cut = duration_ms == 0 || matches!(parsed, Some(TransitionType::Cut));
+                // Explicit position animation across heterogeneous Source kinds
+                // (input ↔ PiP) isn't supported yet — Slide/Push/Dip-to-Black
+                // silently degrade to Fade in this branch. Surface that in the
+                // log so operators don't think the requested transition ran.
+                if !is_cut
+                    && !matches!(
+                        parsed,
+                        Some(TransitionType::Fade) | Some(TransitionType::Cut)
+                    )
+                {
+                    info!(
+                        "PiP-aware Take on {}: transition '{}' downgraded to Fade ({}ms) — non-Fade transitions across PiPs not supported yet",
+                        block_instance_id, transition_type, duration_ms
+                    );
+                }
 
                 // Swap Source state PVW ↔ PGM.
                 let new_pgm_pip = old_pvw_pip;
@@ -495,6 +510,15 @@ impl PipelineManager {
             ))
         })?;
 
+        // Validate first — don't mutate any state until we know we can complete.
+        if input >= num_inputs {
+            return Err(PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "preview_input".to_string(),
+                reason: format!("Input {} out of range (max {})", input, num_inputs - 1),
+            });
+        }
+
         let old_pvw_group = state.pvw_group();
         let pgm_group = state.pgm_group();
         // Picking a regular input clears any PiP-on-PVW mode. Also hide *all*
@@ -516,14 +540,6 @@ impl PipelineManager {
                     pad.set_property("alpha", 0.0f64);
                 }
             }
-        }
-
-        if input >= num_inputs {
-            return Err(PipelineError::InvalidProperty {
-                element: block_instance_id.to_string(),
-                property: "preview_input".to_string(),
-                reason: format!("Input {} out of range (max {})", input, num_inputs - 1),
-            });
         }
 
         // Multi-input groups are gone — PVW is always exactly one input (or a
@@ -773,6 +789,35 @@ impl PipelineManager {
         let pgm_group = state.pgm_group();
         let now_active = !was_active;
 
+        // When restoring (FTB-off), fade back exactly the pads the current PGM
+        // source occupies on the dist mixer. For input-mode this is one pad;
+        // for PiP-mode it's the bg pad plus one pad per overlay. Computing
+        // this via `pads_for_source` keeps the deactivate path in sync with
+        // the activation rules without duplicating the per-source logic here.
+        let (cw, ch) = self.dist_canvas_size(block_instance_id);
+        let src_aspect = if ch > 0 {
+            cw as f64 / ch as f64
+        } else {
+            16.0 / 9.0
+        };
+        let active_pad_idxs: std::collections::HashSet<usize> = if now_active {
+            std::collections::HashSet::new()
+        } else {
+            pads_for_source(
+                &state,
+                state.pgm_pip(),
+                &pgm_group,
+                (0, 0, cw, ch),
+                0,
+                strom_types::vision_mixer::DIST_PGM_ZORDER,
+                strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
+                src_aspect,
+            )
+            .into_iter()
+            .map(|t| t.pad_idx)
+            .collect()
+        };
+
         // Use mixer position for stream-time (same as transitions).
         // pipeline.query_position() drifts behind the compositor over time.
         let current_time = mixer
@@ -791,7 +836,7 @@ impl PipelineManager {
                         // FTB on: fade current alpha to 0
                         let current = pad.property::<f64>("alpha");
                         (current, 0.0)
-                    } else if pgm_group.contains(&idx) {
+                    } else if active_pad_idxs.contains(&idx) {
                         (0.0, 1.0)
                     } else if idx >= state.num_inputs {
                         let dsk_idx = idx - state.num_inputs;
@@ -918,6 +963,20 @@ impl PipelineManager {
         state.set_pip_bg_input(pip_idx, bg);
         state.set_pip_overlay_inputs(pip_idx, overlays.clone());
 
+        // `select_vision_mixer_pip_for_preview` and the Cut/Fade Take paths
+        // stash the PiP's bg into `*_group` as a legacy single-source fallback
+        // (so a non-PiP-aware caller still sees a defined "first input"). If we
+        // change the bg while the PiP is currently on a bus, that fallback
+        // would go stale — the next Take swaps `pgm_group ↔ pvw_group`,
+        // carrying the OLD bg into the other bus. Re-sync here.
+        let group_value: Vec<usize> = bg.map(|b| vec![b]).unwrap_or_default();
+        if state.pgm_pip() == Some(pip_idx) {
+            state.set_pgm_group(&group_value);
+        }
+        if state.pvw_pip() == Some(pip_idx) {
+            state.set_pvw_group(&group_value);
+        }
+
         let mv_comp_id = format!("{}:mv_comp", block_instance_id);
         let mv_comp = self
             .elements
@@ -1025,11 +1084,15 @@ impl PipelineManager {
 
         // Hide *all* previous PVW big pads — covers both input-group leftovers
         // and PiP-overlay leftovers when transitioning between source kinds.
-        // apply_pip_layout_to_region below re-activates only the new bg+overlay
-        // pads, but the bg-shown-on-PVW special case from `select_vision_mixer_preview`
-        // and PiP overlay pads from a previous PiP both need explicit clearing.
+        // Clear control bindings first so the alpha=0 actually takes effect
+        // (a stale binding from a previous morph would otherwise override).
         for i in 0..state.num_inputs {
             if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", state.num_inputs + 1 + i)) {
+                for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+                    if let Some(binding) = pad.control_binding(prop) {
+                        pad.remove_control_binding(&binding);
+                    }
+                }
                 pad.set_property("alpha", 0.0f64);
             }
         }
@@ -1113,7 +1176,13 @@ fn pads_for_source(
             overlays.len(),
             source_aspect,
         );
+        // Defensive dedupe: `apply_vision_mixer_pip_config` already filters bg
+        // out of overlays, but the on-disk PiP state could become inconsistent
+        // (e.g. legacy config or future code that bypasses the API). Two
+        // PadTargets with the same `pad_idx` would confuse the transition
+        // planner — keep the bg entry, drop any overlapping overlay.
         let mut out = Vec::new();
+        let mut seen_pad_idxs = std::collections::HashSet::new();
         if let Some(b) = bg {
             out.push(PadTarget {
                 pad_idx: pad_base + b,
@@ -1123,11 +1192,16 @@ fn pads_for_source(
                 h: rh,
                 zorder: bg_zorder,
             });
+            seen_pad_idxs.insert(pad_base + b);
         }
         for (slot, &idx) in overlays.iter().enumerate() {
+            let pad_idx = pad_base + idx;
+            if !seen_pad_idxs.insert(pad_idx) {
+                continue;
+            }
             let (x, y, w, h) = overlay_rects.get(slot).copied().unwrap_or((rx, ry, rw, rh));
             out.push(PadTarget {
-                pad_idx: pad_base + idx,
+                pad_idx,
                 x,
                 y,
                 w,
@@ -1171,6 +1245,13 @@ fn apply_input_group_to_region(
         let Some(pad) = find_pad(compositor, &pad_name) else {
             continue;
         };
+        // Clear any lingering control bindings from a previous morph/fade so
+        // our set_property writes aren't silently overridden by stale values.
+        for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+            if let Some(binding) = pad.control_binding(prop) {
+                pad.remove_control_binding(&binding);
+            }
+        }
         if Some(i) == active {
             pad.set_property("xpos", rx);
             pad.set_property("ypos", ry);

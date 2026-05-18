@@ -365,43 +365,10 @@ fn vision_mixer_definition() -> BlockDefinition {
         });
     }
 
-    // Per-PiP bg/insert source selection (live).
-    for i in 0..MAX_NUM_PIPS {
-        exposed_properties.push(ExposedProperty {
-            name: format!("pip_{}_bg_input", i),
-            label: format!("PiP {} Background", i + 1),
-            description: format!(
-                "Input index used as the background of PiP {}. Leave empty for no background.",
-                i + 1
-            ),
-            property_type: PropertyType::String,
-            default_value: Some(PropertyValue::String(String::new())),
-            mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: format!("pip_{}_bg_input", i),
-                transform: None,
-            },
-            live: true,
-        });
-        exposed_properties.push(ExposedProperty {
-            name: format!("pip_{}_overlays", i),
-            label: format!("PiP {} Overlays", i + 1),
-            description: format!(
-                "Comma-separated input indices overlaid on the bg of PiP {} (auto-tiled, up to {} sources)",
-                i + 1,
-                MAX_PIP_OVERLAYS
-            ),
-            property_type: PropertyType::String,
-            // Sensible default: one overlay (input 1) so a freshly enabled PiP shows something.
-            default_value: Some(PropertyValue::String("1".to_string())),
-            mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: format!("pip_{}_overlays", i),
-                transform: None,
-            },
-            live: true,
-        });
-    }
+    // PiP bg + overlay sources are not exposed as static block properties —
+    // they're configured at runtime through the operator HTML page (which
+    // POSTs `/vision-mixer/pip/{idx}`). A freshly created PiP starts empty;
+    // the operator picks its bg and overlays from the dedicated PiP panel.
 
     BlockDefinition {
         id: "builtin.vision_mixer".to_string(),

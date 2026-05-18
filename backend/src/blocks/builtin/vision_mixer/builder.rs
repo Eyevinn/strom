@@ -305,7 +305,12 @@ fn build_gpu_pipeline(
     elems.push((mv_comp_id.clone(), mv_comp));
 
     // Compute multiview layout
-    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs, p.num_pips);
+    let source_aspect = if p.pgm_h > 0 {
+        p.pgm_w as f64 / p.pgm_h as f64
+    } else {
+        16.0 / 9.0
+    };
+    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs, p.num_pips, source_aspect);
 
     // --- Distribution output chain ---
     // queue_post_dist decouples the compositor from downstream processing.
@@ -699,7 +704,12 @@ fn build_cpu_pipeline(
     elems.push((mixer_id.clone(), dist_comp));
     elems.push((mv_comp_id.clone(), mv_comp));
 
-    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs, p.num_pips);
+    let source_aspect = if p.pgm_h > 0 {
+        p.pgm_w as f64 / p.pgm_h as f64
+    } else {
+        16.0 / 9.0
+    };
+    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs, p.num_pips, source_aspect);
 
     // --- Distribution output chain: mixer → capsfilter_dist → tee_pgm → queue_dist_out ---
     // DSK inputs are composited on the main mixer (same as GPU path).
