@@ -193,20 +193,40 @@ pub fn parse_initial_pvw(properties: &HashMap<String, PropertyValue>, num_inputs
         .min(num_inputs.saturating_sub(1))
 }
 
-/// Parse input labels from block properties, falling back to "In N" defaults.
+/// Parse input labels from block properties.
+///
+/// Resolution order per input index:
+/// 1. The Nth entry of the `input_labels` CSV property (trim of comma split).
+/// 2. The legacy `input_{i}_label` property (for back-compat with flows saved
+///    before the CSV migration).
+/// 3. `"In {N}"` default.
 pub fn parse_input_labels(
     properties: &HashMap<String, PropertyValue>,
     num_inputs: usize,
 ) -> Vec<String> {
+    let csv_parts: Vec<String> = match properties.get("input_labels") {
+        Some(PropertyValue::String(s)) if !s.is_empty() => {
+            s.split(',').map(|p| p.trim().to_string()).collect()
+        }
+        _ => Vec::new(),
+    };
+
     (0..num_inputs)
         .map(|i| {
-            properties
-                .get(&format!("input_{}_label", i))
-                .and_then(|v| match v {
-                    PropertyValue::String(s) if !s.is_empty() => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| format!("In {}", i + 1))
+            // CSV first
+            if let Some(part) = csv_parts.get(i) {
+                if !part.is_empty() {
+                    return part.clone();
+                }
+            }
+            // Legacy per-input property
+            if let Some(PropertyValue::String(s)) = properties.get(&format!("input_{}_label", i)) {
+                if !s.is_empty() {
+                    return s.clone();
+                }
+            }
+            // Default
+            format!("In {}", i + 1)
         })
         .collect()
 }

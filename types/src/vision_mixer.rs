@@ -100,9 +100,6 @@ pub const PGM_BORDER_WIDTH: f64 = 4.0;
 /// Border width in pixels for selected thumbnail indicators on multiview.
 pub const THUMBNAIL_BORDER_WIDTH: f64 = 4.0;
 
-/// Number of thumbnails per row in the multiview grid.
-pub const THUMBNAILS_PER_ROW: usize = 5;
-
 /// Maximum number of DSK (Downstream Keyer) inputs.
 pub const MAX_DSK_INPUTS: usize = 4;
 

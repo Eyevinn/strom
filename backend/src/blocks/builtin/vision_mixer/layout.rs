@@ -1,18 +1,25 @@
-//! Multiview layout calculations for the 2-5-5 broadcast grid.
+//! Multiview layout calculations.
 //!
-//! Layout:
+//! Top half: PVW (left) + PGM (right) big displays. Bottom half: thumbnail grid
+//! with one slot per input + one slot per PiP tile.
+//!
+//! The grid scales to keep thumbnail aspect ratio in a reasonable 4:3..16:9
+//! range as the number of slots grows:
+//!
 //! ```text
-//! +---------------------------+---------------------------+
-//! |         PREVIEW           |          PROGRAM          |
-//! |         (green)           |           (red)           |
-//! +-----+-----+-----+-----+-----+
-//! |  0  |  1  |  2  |  3  |  4  |  Row 1: inputs 0-4
-//! +-----+-----+-----+-----+-----+
-//! |  5  |  6  |  7  |  8  |  9  |  Row 2: inputs 5-9
-//! +-----+-----+-----+-----+-----+
+//! 1-5    slots:  5×1
+//! 6-10   slots:  5×2
+//! 11-12  slots:  6×2
+//! 13-14  slots:  7×2
+//! 15     slots:  5×3
+//! 16-18  slots:  6×3
+//! 19-21  slots:  7×3
+//! 22-25  slots:  5×4 / 6×4 / 7×4
+//! ...
 //! ```
-
-use strom_types::vision_mixer::THUMBNAILS_PER_ROW;
+//!
+//! Per tier we cycle cols 5 → 6 → 7 before bumping rows, so the thumbnail
+//! aspect cycles through familiar broadcast shapes.
 
 /// A rectangle in pixel coordinates.
 #[derive(Debug, Clone, Copy)]
@@ -99,16 +106,49 @@ const GAP_FRACTION: f64 = 0.005;
 /// Height fraction for the top PVW/PGM row.
 const TOP_ROW_HEIGHT_FRACTION: f64 = 0.48;
 
-/// Default height per thumbnail row when ≤ 2 rows fit naturally below the top
-/// PVW/PGM band. Larger input counts shrink rows to fit the available height.
+/// Default height per thumbnail row when the chosen grid fits naturally below
+/// the top PVW/PGM band. Higher slot counts shrink to fit the available height.
 const DEFAULT_THUMB_ROW_HEIGHT_FRACTION: f64 = 0.235;
+
+/// Pick (cols, rows) for `total_slots` thumbnails. Cycles cols 5 → 6 → 7 per
+/// row tier so the thumbnail aspect stays in the broadcast-friendly 4:3..16:9
+/// range as the grid grows.
+fn pick_grid(total_slots: usize) -> (usize, usize) {
+    if total_slots == 0 {
+        return (1, 1);
+    }
+    // Small counts: a single row is fine.
+    if total_slots <= 5 {
+        return (5, 1);
+    }
+    // 2-row tier (the classic broadcast layout).
+    if total_slots <= 10 {
+        return (5, 2);
+    }
+    if total_slots <= 12 {
+        return (6, 2);
+    }
+    if total_slots <= 14 {
+        return (7, 2);
+    }
+    // 3+ row tiers: cycle cols 5 → 6 → 7 per tier.
+    let mut rows = 3usize;
+    loop {
+        for cols in [5usize, 6, 7] {
+            if cols * rows >= total_slots {
+                return (cols, rows);
+            }
+        }
+        rows += 1;
+    }
+}
 
 /// Compute the multiview layout for a given canvas size, input count, and PiP-tile count.
 ///
 /// PiP tiles share the thumbnail grid: they are placed at slot indices
-/// `num_inputs..num_inputs + num_pips`. The grid uses [`THUMBNAILS_PER_ROW`]
-/// columns and as many rows as needed; row height scales down when extra rows
-/// don't fit at the default size.
+/// `num_inputs..num_inputs + num_pips`. Grid dimensions come from [`pick_grid`]
+/// — cols and rows both scale with the total slot count to keep thumbnails
+/// reasonably square.
 pub fn compute_layout(
     canvas_width: u32,
     canvas_height: u32,
@@ -127,22 +167,15 @@ pub fn compute_layout(
     let pvw_rect = Rect::new(gap, gap, half_w, top_h);
     let pgm_rect = Rect::new(gap * 2.0 + half_w, gap, half_w, top_h);
 
-    // Thumbnail rows start below the top row.
+    // Thumbnail grid below the top row.
     let thumb_y_start = gap * 2.0 + top_h;
     let total_slots = num_inputs + num_pips;
-    let needed_rows = total_slots.div_ceil(THUMBNAILS_PER_ROW).max(1);
-    // Available vertical space for thumbnails (one gap above the first row,
-    // one between rows, and one below the last row).
-    let available_h = (ch - thumb_y_start - gap * (needed_rows as f64 + 1.0)).max(0.0);
+    let (cols, rows) = pick_grid(total_slots);
+    let available_h = (ch - thumb_y_start - gap * (rows as f64 + 1.0)).max(0.0);
     let default_thumb_h = (ch * DEFAULT_THUMB_ROW_HEIGHT_FRACTION).round();
-    let max_thumb_h = if needed_rows == 0 {
-        default_thumb_h
-    } else {
-        (available_h / needed_rows as f64).floor()
-    };
+    let max_thumb_h = (available_h / rows as f64).floor();
     let thumb_h = max_thumb_h.min(default_thumb_h).max(1.0);
-    let thumb_w =
-        ((cw - gap * (THUMBNAILS_PER_ROW as f64 + 1.0)) / THUMBNAILS_PER_ROW as f64).round();
+    let thumb_w = ((cw - gap * (cols as f64 + 1.0)) / cols as f64).round();
 
     let mut thumbnail_rects = Vec::with_capacity(num_inputs);
     let mut thumbnail_slot_rects = Vec::with_capacity(num_inputs);
@@ -158,8 +191,8 @@ pub fn compute_layout(
 
     // Same slot geometry for inputs and PiPs — they share the grid.
     let slot_rect = |i: usize| -> (f64, f64) {
-        let row = i / THUMBNAILS_PER_ROW;
-        let col = i % THUMBNAILS_PER_ROW;
+        let row = i / cols;
+        let col = i % cols;
         let x = gap + col as f64 * (thumb_w + gap);
         let y = thumb_y_start + row as f64 * (thumb_h + gap);
         (x, y)
@@ -268,4 +301,48 @@ pub fn pip_overlay_pad_positions(
         count,
         source_aspect,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_grid;
+
+    #[test]
+    fn pick_grid_small_uses_one_row() {
+        assert_eq!(pick_grid(1), (5, 1));
+        assert_eq!(pick_grid(4), (5, 1));
+        assert_eq!(pick_grid(5), (5, 1));
+    }
+
+    #[test]
+    fn pick_grid_two_row_tier() {
+        assert_eq!(pick_grid(6), (5, 2));
+        assert_eq!(pick_grid(10), (5, 2));
+        assert_eq!(pick_grid(11), (6, 2));
+        assert_eq!(pick_grid(12), (6, 2));
+        assert_eq!(pick_grid(13), (7, 2));
+        assert_eq!(pick_grid(14), (7, 2));
+    }
+
+    #[test]
+    fn pick_grid_three_row_tier_cycles_cols() {
+        assert_eq!(pick_grid(15), (5, 3));
+        assert_eq!(pick_grid(16), (6, 3));
+        assert_eq!(pick_grid(18), (6, 3));
+        assert_eq!(pick_grid(19), (7, 3));
+        assert_eq!(pick_grid(21), (7, 3));
+    }
+
+    #[test]
+    fn pick_grid_grows_to_more_rows() {
+        // 20 still fits in the 3-row tier (7×3=21) — no need to bump rows.
+        assert_eq!(pick_grid(20), (7, 3));
+        // 22 exceeds 21 — jumps to the 4-row tier. 5×4=20 too small, so cycle
+        // cols up to 6×4=24.
+        assert_eq!(pick_grid(22), (6, 4));
+        assert_eq!(pick_grid(28), (7, 4));
+        // 29 doesn't fit in 5×5=25 — skips to 6×5=30 in the 5-row tier.
+        assert_eq!(pick_grid(29), (6, 5));
+        assert_eq!(pick_grid(35), (7, 5));
+    }
 }
