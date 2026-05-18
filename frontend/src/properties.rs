@@ -1382,11 +1382,10 @@ impl PropertyInspector {
                     | "num_aux_buses"
                     | "num_groups"
                     | "dsp_backend"
-                    | "solo_mode"
                     | "force_live"
                     | "latency"
                     | "min_upstream_latency"
-                    | "pfl_level"
+                    | "monitor_fader"
             ) {
                 config_idx.push(i);
                 continue;

@@ -848,7 +848,7 @@ impl BlockBuilder for MixerBuilder {
                 let aux_pre = get_bool_prop(
                     properties,
                     &format!("ch{}_aux{}_pre", ch_num, aux + 1),
-                    aux < 2, // Default: aux 1-2 pre-fader (monitor/IEM), rest post-fader (FX)
+                    false, // All aux sends default post-fader (matches definition.rs)
                 );
 
                 let aux_send_id = format!("{}:aux_send_{}_{}", instance_id, ch, aux);

@@ -104,7 +104,7 @@ fn test_parse_num_aux_buses_clamped() {
     let mut props = HashMap::new();
     props.insert(
         "num_aux_buses".to_string(),
-        PropertyValue::String("10".to_string()),
+        PropertyValue::String("999".to_string()),
     );
     assert_eq!(parse_num_aux_buses(&props), MAX_AUX_BUSES);
 }
@@ -316,15 +316,15 @@ fn test_mixer_definition_channel_count() {
 #[test]
 fn test_mixer_definition_aux_group_outputs() {
     let def = mixer_definition();
-    // Should have main, PFL, aux, and group output pads
+    // Should have main, Monitor, aux, and group output pads
     let pads = &def.external_pads;
     assert!(
         pads.outputs.iter().any(|p| p.name == "main_out"),
         "Should have main_out pad"
     );
     assert!(
-        pads.outputs.iter().any(|p| p.name == "pfl_out"),
-        "Should have pfl_out pad"
+        pads.outputs.iter().any(|p| p.name == "monitor_out"),
+        "Should have monitor_out pad"
     );
 }
 
