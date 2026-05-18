@@ -14,6 +14,7 @@ fn main() {
     embed_windows_resources();
 
     let frontend_dir = PathBuf::from("../frontend");
+    let types_dir = PathBuf::from("../types");
     let dist_dir = PathBuf::from("dist");
     let hash_file = PathBuf::from(".frontend-build-hash");
 
@@ -22,6 +23,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../frontend/Cargo.toml");
     println!("cargo:rerun-if-changed=../frontend/index.html");
     println!("cargo:rerun-if-changed=../frontend/Trunk.toml");
+    // Frontend depends on strom-types — rebuild WASM if shared types change.
+    println!("cargo:rerun-if-changed=../types/src");
+    println!("cargo:rerun-if-changed=../types/Cargo.toml");
     // Also rerun if dist directory changes (manual builds)
     println!("cargo:rerun-if-changed=dist");
     // Rerun if static assets change (WHEP player, etc.)
@@ -34,8 +38,8 @@ fn main() {
     // Rerun if Windows icon changes
     println!("cargo:rerun-if-changed=strom.ico");
 
-    // Compute current hash of frontend sources
-    let current_hash = compute_frontend_hash(&frontend_dir);
+    // Compute current hash of frontend sources (including shared types crate)
+    let current_hash = compute_frontend_hash(&frontend_dir, &types_dir);
 
     // Check if rebuild is needed
     let needs_rebuild = !dist_dir.exists()
@@ -138,7 +142,7 @@ fn set_version_info() {
 }
 
 /// Compute a hash of all frontend source files
-fn compute_frontend_hash(frontend_dir: &Path) -> u64 {
+fn compute_frontend_hash(frontend_dir: &Path, types_dir: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
 
     // Hash all .rs files in src/
@@ -151,6 +155,14 @@ fn compute_frontend_hash(frontend_dir: &Path) -> u64 {
     hash_file(&frontend_dir.join("Cargo.toml"), &mut hasher);
     hash_file(&frontend_dir.join("index.html"), &mut hasher);
     hash_file(&frontend_dir.join("Trunk.toml"), &mut hasher);
+
+    // Frontend depends on strom-types — hash its sources so changes there
+    // (e.g. shared constants or schema types) trigger a WASM rebuild.
+    let types_src = types_dir.join("src");
+    if types_src.exists() {
+        hash_directory(&types_src, &mut hasher);
+    }
+    hash_file(&types_dir.join("Cargo.toml"), &mut hasher);
 
     hasher.finish()
 }

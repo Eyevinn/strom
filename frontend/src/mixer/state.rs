@@ -18,6 +18,7 @@ impl MixerEditor {
             active_control: ActiveControl::None,
             main_fader: DEFAULT_FADER,
             main_mute: false,
+            monitor_fader: DEFAULT_FADER,
             main_comp_enabled: false,
             main_comp_threshold: DEFAULT_COMP_THRESHOLD,
             main_comp_ratio: DEFAULT_COMP_RATIO,
@@ -51,6 +52,11 @@ impl MixerEditor {
         }
         if let Some(PropertyValue::Bool(b)) = properties.get("main_mute") {
             self.main_mute = *b;
+        }
+
+        // Monitor bus master fader
+        if let Some(PropertyValue::Float(f)) = properties.get("monitor_fader") {
+            self.monitor_fader = *f as f32;
         }
 
         // Load main bus processing
@@ -182,6 +188,9 @@ impl MixerEditor {
             }
             if let Some(PropertyValue::Bool(b)) = properties.get(&format!("ch{}_pfl", ch_num)) {
                 ch.pfl = *b;
+            }
+            if let Some(PropertyValue::Bool(b)) = properties.get(&format!("ch{}_afl", ch_num)) {
+                ch.afl = *b;
             }
             // Routing to main
             if let Some(PropertyValue::Bool(b)) = properties.get(&format!("ch{}_to_main", ch_num)) {
@@ -342,6 +351,13 @@ impl MixerEditor {
         // Main bus
         set_f!("main_fader".to_string(), self.main_fader, DEFAULT_FADER);
         set_b!("main_mute".to_string(), self.main_mute, false);
+
+        // Monitor bus master fader
+        set_f!(
+            "monitor_fader".to_string(),
+            self.monitor_fader,
+            DEFAULT_FADER
+        );
         set_b!(
             "main_comp_enabled".to_string(),
             self.main_comp_enabled,
@@ -425,6 +441,7 @@ impl MixerEditor {
             set_f!(format!("ch{}_fader", n), ch.fader, DEFAULT_FADER);
             set_b!(format!("ch{}_mute", n), ch.mute, false);
             set_b!(format!("ch{}_pfl", n), ch.pfl, false);
+            set_b!(format!("ch{}_afl", n), ch.afl, false);
             set_b!(format!("ch{}_to_main", n), ch.to_main, true);
             for (sg, &enabled) in ch.to_grp.iter().enumerate().take(self.num_groups) {
                 set_b!(format!("ch{}_to_grp{}", n, sg + 1), enabled, false);
@@ -514,6 +531,7 @@ impl MixerEditor {
         // Main bus
         self.main_fader = DEFAULT_FADER;
         self.main_mute = false;
+        self.monitor_fader = DEFAULT_FADER;
         self.main_comp_enabled = false;
         self.main_comp_threshold = DEFAULT_COMP_THRESHOLD;
         self.main_comp_ratio = DEFAULT_COMP_RATIO;
@@ -545,6 +563,7 @@ impl MixerEditor {
             ch.fader = DEFAULT_FADER;
             ch.mute = false;
             ch.pfl = false;
+            ch.afl = false;
             ch.to_main = true;
             ch.to_grp = [false; MAX_GROUPS];
             ch.aux_sends = [0.0; MAX_AUX_BUSES];

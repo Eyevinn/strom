@@ -36,13 +36,16 @@ pub const DEFAULT_LIMITER_THRESHOLD: f32 = -3.0;
 
 // ── Structural defaults ─────────────────────────────────────────────
 pub const DEFAULT_CHANNELS: usize = 8;
-pub const MAX_CHANNELS: usize = 32;
-pub const MAX_AUX_BUSES: usize = 4;
-pub const MAX_GROUPS: usize = 4;
+pub const MAX_CHANNELS: usize = 128;
+pub const MAX_AUX_BUSES: usize = 32;
+pub const MAX_GROUPS: usize = 32;
 
 // ── Routing defaults ──────────────────────────────────────────────
-/// Default aux send pre/post-fader mode per bus (aux 1-2 pre, 3-4 post)
-pub const DEFAULT_AUX_PRE: [bool; MAX_AUX_BUSES] = [true, true, false, false];
+/// Default aux send pre/post-fader mode per bus.
+/// All aux buses default to post-fader (FX/headphone sends, affected by
+/// the channel fader). Flip individual buses to pre-fader in the UI when
+/// using them for monitor/IEM sends.
+pub const DEFAULT_AUX_PRE: [bool; MAX_AUX_BUSES] = [false; MAX_AUX_BUSES];
 
 /// Minimum compressor knee value in linear scale (corresponds to -24 dB)
 pub const MIN_KNEE_LINEAR: f64 = 0.0631;

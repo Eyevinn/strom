@@ -1,6 +1,6 @@
 //! Utility functions for dB/linear conversions and formatting.
 
-use egui::Color32;
+use egui::{Color32, Painter, Rect, Stroke};
 
 /// Format a linear fader value as dB string.
 pub(super) fn format_db(linear: f32) -> String {
@@ -38,26 +38,83 @@ pub(super) fn db_to_y(db: f32, y_min: f32, y_max: f32) -> f32 {
     y_max - margin - normalized * usable
 }
 
-/// Convert dB to linear level (0.0-1.0).
-pub(super) fn db_to_level(db: f64) -> f32 {
-    if !db.is_finite() {
-        return 0.0;
+/// Meter zone boundaries in dB, matching the standalone VU meter block
+/// and EBU/broadcast convention.
+/// - Green:  -60 dB .. -18 dB (safe operational level)
+/// - Yellow: -18 dB ..  -9 dB (loud but acceptable)
+/// - Orange:  -9 dB ..  -6 dB (getting hot)
+/// - Red:    -6 dB ..  +6 dB (clipping risk)
+pub(super) const METER_ZONES_DB: [(f32, f32, Color32, Color32); 4] = [
+    (
+        -60.0,
+        -18.0,
+        Color32::from_rgb(0, 220, 0),
+        Color32::from_rgb(0, 60, 0),
+    ),
+    (
+        -18.0,
+        -9.0,
+        Color32::from_rgb(255, 220, 0),
+        Color32::from_rgb(60, 60, 0),
+    ),
+    (
+        -9.0,
+        -6.0,
+        Color32::from_rgb(255, 165, 0),
+        Color32::from_rgb(60, 45, 0),
+    ),
+    (
+        -6.0,
+        6.0,
+        Color32::from_rgb(255, 0, 0),
+        Color32::from_rgb(60, 0, 0),
+    ),
+];
+
+/// Draw the dim background sectors of a segmented level meter.
+/// Sectors are positioned in dB using `db_to_y` so they align with the
+/// shared dB scale (e.g. the fader).
+pub(super) fn draw_meter_zones_background(painter: &Painter, rect: Rect) {
+    for (zone_min_db, zone_max_db, _bright, dim) in METER_ZONES_DB {
+        let y_top = db_to_y(zone_max_db, rect.min.y, rect.max.y);
+        let y_bottom = db_to_y(zone_min_db, rect.min.y, rect.max.y);
+        let zone_rect = Rect::from_min_max(
+            egui::pos2(rect.min.x, y_top),
+            egui::pos2(rect.max.x, y_bottom),
+        );
+        painter.rect(
+            zone_rect,
+            0.0,
+            dim,
+            Stroke::NONE,
+            egui::epaint::StrokeKind::Inside,
+        );
     }
-    let min_db = -60.0;
-    let max_db = 6.0;
-    ((db - min_db) / (max_db - min_db)).clamp(0.0, 1.0) as f32
 }
 
-/// Get color for a level value.
-pub(super) fn level_to_color(level: f32) -> Color32 {
-    if level < 0.7 {
-        Color32::from_rgb(0, 200, 0) // Green
-    } else if level < 0.85 {
-        Color32::from_rgb(255, 220, 0) // Yellow
-    } else if level < 0.9 {
-        Color32::from_rgb(255, 165, 0) // Orange
-    } else {
-        Color32::from_rgb(255, 0, 0) // Red
+/// Light up the segmented level meter from the bottom up to `peak_db`.
+/// Each zone keeps its own bright colour, so the visible color band reflects
+/// the actual dB range — not just the highest reached level.
+pub(super) fn draw_meter_zones_lit(painter: &Painter, rect: Rect, peak_db: f32) {
+    let peak_db = if peak_db.is_finite() { peak_db } else { -60.0 };
+    for (zone_min_db, zone_max_db, bright, _dim) in METER_ZONES_DB {
+        if peak_db <= zone_min_db {
+            break;
+        }
+        let lit_top_db = peak_db.min(zone_max_db);
+        let y_top = db_to_y(lit_top_db, rect.min.y, rect.max.y);
+        let y_bottom = db_to_y(zone_min_db, rect.min.y, rect.max.y);
+        let lit_rect = Rect::from_min_max(
+            egui::pos2(rect.min.x, y_top),
+            egui::pos2(rect.max.x, y_bottom),
+        );
+        painter.rect(
+            lit_rect,
+            0.0,
+            bright,
+            Stroke::NONE,
+            egui::epaint::StrokeKind::Inside,
+        );
     }
 }
 

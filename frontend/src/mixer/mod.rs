@@ -50,8 +50,6 @@ const MIN_STRIP_INNER: f32 = 42.0;
 const BUS_FADER_HEIGHT: f32 = 120.0;
 /// Fixed inner width for bus master strips
 const BUS_STRIP_INNER: f32 = 52.0;
-/// Minimum height for the bus master row
-const BUS_ROW_MIN_HEIGHT: f32 = 200.0;
 
 /// A single channel strip in the mixer.
 #[derive(Debug, Clone)]
@@ -68,8 +66,10 @@ struct ChannelStrip {
     fader: f32,
     /// Mute state
     mute: bool,
-    /// PFL (Pre-Fader Listen) state
+    /// PFL (Pre-Fader Listen) state — taps signal before fader/mute
     pfl: bool,
+    /// AFL (After-Fader Listen) state — taps signal after fader/mute/pan
+    afl: bool,
     /// Route to main mix
     to_main: bool,
     /// Route to groups (up to 4)
@@ -142,6 +142,7 @@ impl ChannelStrip {
             fader: DEFAULT_FADER,
             mute: false,
             pfl: false,
+            afl: false,
             to_main: true,
             to_grp: [false; MAX_GROUPS],
             aux_sends: [0.0; MAX_AUX_BUSES],
@@ -234,6 +235,10 @@ pub struct MixerEditor {
     main_fader: f32,
     /// Main mute
     main_mute: bool,
+    /// Monitor bus master level (drives `monitor_master_vol`).
+    /// The monitor bus follows Main when no PFL/AFL is engaged anywhere,
+    /// and switches to the solo mix as soon as any channel toggles PFL or AFL.
+    monitor_fader: f32,
     /// Main bus compressor enabled
     main_comp_enabled: bool,
     /// Main bus compressor threshold (dB)
@@ -287,6 +292,16 @@ pub struct MixerEditor {
 }
 
 impl MixerEditor {
+    /// True if any channel currently has PFL or AFL engaged.
+    /// Drives the monitor bus source-switching gates (`solo_to_mon` /
+    /// `main_to_mon`) — when any solo is active the monitor listens to
+    /// the solo mix, otherwise it follows the main output.
+    pub(super) fn any_solo_active(&self) -> bool {
+        self.channels.iter().any(|c| c.pfl || c.afl)
+    }
+}
+
+impl MixerEditor {
     /// Get the block ID.
     pub fn block_id(&self) -> &str {
         &self.block_id
@@ -318,14 +333,18 @@ impl MixerEditor {
         self.is_reset
     }
 
-    /// Compute the usable inner width of a strip based on number of aux buses.
-    /// The aux knob row is typically the widest element.
+    /// Compute the usable inner width of a strip.
+    ///
+    /// The aux knob row wraps every 4 knobs (see `AUX_PER_ROW` in
+    /// `rendering.rs`), so the strip only needs to be wide enough for one
+    /// row's worth of knobs — capped at 4 — rather than scaling with the
+    /// total aux count.
     fn strip_inner(&self) -> f32 {
         if self.num_aux_buses == 0 {
             return MIN_STRIP_INNER;
         }
-        let knob_row =
-            self.num_aux_buses as f32 * KNOB_SIZE + (self.num_aux_buses as f32 - 1.0) * 2.0;
+        let per_row = self.num_aux_buses.min(4) as f32;
+        let knob_row = per_row * KNOB_SIZE + (per_row - 1.0).max(0.0) * 2.0;
         knob_row.max(MIN_STRIP_INNER)
     }
 }
