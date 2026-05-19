@@ -43,6 +43,9 @@
             max-height: 200px;
             overflow: hidden;
         }
+        body.editing-layout .controls {
+            max-height: 70vh;
+        }
 
         /* Bus section */
         .buses {
@@ -119,16 +122,6 @@
             border-color: #33cc33;
             color: #fff;
             box-shadow: 0 0 8px rgba(0, 255, 0, 0.3);
-        }
-
-        .src-btn.bg-active {
-            border-color: #cc9900;
-            box-shadow: 0 0 6px rgba(204, 153, 0, 0.4);
-        }
-        .src-btn.bg-active::after {
-            content: ' BG';
-            font-size: 8px;
-            color: #cc9900;
         }
 
         /* Transition section */
@@ -264,6 +257,390 @@
         }
         .duration-preset:hover { border-color: #666; color: #ccc; }
         .duration-preset.active { background: #444; color: #fff; border-color: #888; }
+
+        /* Shared color tokens for the PiP/zone editor.
+           Kept local to .pip-* rules so the rest of the UI is untouched. */
+        :root {
+            --pip-text: #d6d0e0;
+            --pip-text-dim: #8a7aa0;
+            --pip-text-muted: #5a4d6a;
+            --pip-accent: #8a5acc;
+            --pip-accent-bright: #d6b8ff;
+            --pip-accent-fill: #5a3a7a;
+            --pip-bg-panel: #1a1320;
+            --pip-bg-elevated: #14101c;
+            --pip-bg-control: #2a1a3a;
+            --pip-border: #3a2350;
+            --pip-border-strong: #5a3a7a;
+            --pip-warn: #ffaa00;
+        }
+
+        /* PiP controls (purple-ish to distinguish from regular inputs) */
+        .pip-btn {
+            flex: 1 1 0;
+            min-width: 36px;
+            height: 36px;
+            padding: 0 4px;
+            background: #2a1a3a;
+            border: 2px solid #5a3a7a;
+            border-radius: 4px;
+            color: #b18ad6;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            letter-spacing: 0.5px;
+        }
+        .pip-btn:focus { outline: none; }
+        .pip-btn:hover { border-color: #8a5acc; color: #d6b8ff; }
+        .pip-btn.pgm-active { background: #cc0000; border-color: #ee0000; color: #fff; }
+        .pip-btn.pvw-active { background: #006600; border-color: #00aa00; color: #fff; }
+
+        /* PiP config panel */
+        .pip-config-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px 16px;
+            background: var(--pip-bg-panel);
+            border-top: 1px solid var(--pip-border);
+            max-height: 22vh;
+            overflow-y: auto;
+            transition: max-height 0.18s ease-out;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--pip-text);
+        }
+        .pip-config-panel.editing {
+            max-height: 70vh;
+        }
+        .pip-config-block {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .pip-edit-btn {
+            margin-left: auto;
+            background: var(--pip-bg-control);
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            color: var(--pip-accent-bright);
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 10px;
+            cursor: pointer;
+        }
+        .pip-edit-btn:hover { border-color: var(--pip-accent); color: #fff; }
+        .pip-edit-btn.active {
+            background: var(--pip-accent-fill);
+            border-color: var(--pip-accent);
+            color: #fff;
+        }
+        .pip-summary {
+            color: var(--pip-text-dim);
+            font-size: 11px;
+            font-weight: 400;
+        }
+        .pip-editor {
+            display: inline-flex;
+            align-items: flex-start;
+            gap: 16px;
+            padding: 12px;
+            background: var(--pip-bg-elevated);
+            border: 1px solid var(--pip-border);
+            border-radius: 4px;
+            align-self: flex-start;
+        }
+        .pip-config-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--pip-text);
+            padding: 4px 8px;
+            border-radius: 4px;
+            transition: background 0.15s, box-shadow 0.15s;
+        }
+        .pip-config-row.on-pgm {
+            background: rgba(204, 0, 0, 0.22);
+            box-shadow: inset 0 0 0 1px rgba(255, 51, 51, 0.6);
+        }
+        .pip-config-row.on-pvw {
+            background: rgba(0, 102, 0, 0.22);
+            box-shadow: inset 0 0 0 1px rgba(51, 204, 51, 0.6);
+        }
+        .pip-config-row .pip-config-label {
+            color: var(--pip-accent-bright);
+            font-weight: 700;
+            min-width: 50px;
+            letter-spacing: 0.3px;
+        }
+        .pip-config-row.on-pgm .pip-config-label { color: #ff8a8a; }
+        .pip-config-row.on-pvw .pip-config-label { color: #8aff8a; }
+        .pip-config-row .pip-row-tag {
+            color: var(--pip-text-dim);
+            font-weight: 400;
+            margin-left: 4px;
+        }
+        /* Zone selector chip on the PiP row (compact, distinct from input chips). */
+        .pip-zone-selector {
+            height: 24px;
+            min-width: 30px;
+            padding: 0 8px;
+            background: transparent;
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            color: var(--pip-accent-bright);
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            user-select: none;
+        }
+        .pip-zone-selector:hover {
+            border-color: var(--pip-accent);
+            background: rgba(138, 90, 204, 0.12);
+        }
+        .pip-zone-selector.active {
+            background: var(--pip-warn);
+            border-color: var(--pip-warn);
+            color: #1a1320;
+        }
+        .pip-zone-selector .zone-count {
+            font-weight: 400;
+            opacity: 0.7;
+        }
+        .pip-zone-selector.active .zone-count { opacity: 1; }
+        .pip-bg-select {
+            height: 24px;
+            background: var(--pip-bg-control);
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            color: var(--pip-text);
+            padding: 0 6px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .pip-overlay-chip {
+            width: 28px;
+            height: 24px;
+            background: var(--pip-bg-control);
+            border: 1px solid var(--pip-border);
+            border-radius: 3px;
+            color: var(--pip-text-dim);
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+        }
+        .pip-overlay-chip:hover {
+            border-color: var(--pip-accent);
+            color: var(--pip-accent-bright);
+        }
+        .pip-overlay-chip.active {
+            background: var(--pip-accent-fill);
+            border-color: var(--pip-accent);
+            color: #fff;
+        }
+        .pip-overlay-chip.disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        /* PiP zone editor — visual canvas per PiP */
+        .pip-canvas-wrap {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+        }
+        .pip-canvas {
+            position: relative;
+            width: 480px;
+            height: 270px;
+            background: var(--pip-bg-panel);
+            border: 1px solid var(--pip-border);
+            border-radius: 3px;
+            overflow: hidden;
+            flex-shrink: 0;
+            user-select: none;
+        }
+        .pip-canvas-bg {
+            position: absolute;
+            inset: 0;
+            background: repeating-linear-gradient(
+                45deg,
+                rgba(138, 90, 204, 0.06),
+                rgba(138, 90, 204, 0.06) 6px,
+                transparent 6px,
+                transparent 14px
+            );
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--pip-text-dim);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            pointer-events: none;
+        }
+        .pip-canvas-zone {
+            position: absolute;
+            background: rgba(138, 90, 204, 0.18);
+            border: 1px solid var(--pip-accent);
+            box-sizing: border-box;
+            cursor: move;
+            color: var(--pip-text);
+            font-size: 10px;
+            font-weight: 600;
+            min-width: 16px;
+            min-height: 16px;
+            display: flex;
+            flex-direction: column;
+        }
+        .pip-canvas-zone.auto {
+            border-style: dashed;
+            background: rgba(138, 90, 204, 0.08);
+        }
+        .pip-canvas-zone.active {
+            border-color: var(--pip-warn);
+            box-shadow: 0 0 0 1px var(--pip-warn) inset, 0 0 8px rgba(255, 170, 0, 0.3);
+        }
+        .pip-canvas-zone:hover {
+            box-shadow: 0 0 0 1px var(--pip-accent-bright) inset;
+        }
+        .zone-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 3px 6px;
+            background: rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+        }
+        .zone-cap {
+            color: var(--pip-warn);
+        }
+        .zone-sources {
+            flex: 1;
+            display: flex;
+            flex-wrap: wrap;
+            align-content: flex-start;
+            gap: 3px;
+            padding: 4px;
+            overflow: hidden;
+        }
+        .zone-source-chip {
+            background: rgba(0, 0, 0, 0.55);
+            border: 1px solid var(--pip-accent-bright);
+            color: #fff;
+            padding: 2px 6px;
+            font-size: 10px;
+            font-weight: 600;
+            border-radius: 2px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .zone-source-chip:hover {
+            background: #cc0000;
+            border-color: #ff3333;
+        }
+        .pip-canvas-zone .zone-remove {
+            position: absolute;
+            top: -1px;
+            right: -1px;
+            width: 16px;
+            height: 16px;
+            background: #cc0000;
+            color: #fff;
+            border: none;
+            border-radius: 0 0 0 3px;
+            font-size: 11px;
+            line-height: 1;
+            font-weight: 700;
+            cursor: pointer;
+            padding: 0;
+            opacity: 0;
+            transition: opacity 0.1s;
+            z-index: 5;
+        }
+        .pip-canvas-zone:hover .zone-remove { opacity: 1; }
+        .pip-canvas-zone .zone-handle {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: var(--pip-accent-bright);
+            border: 1px solid var(--pip-border-strong);
+            z-index: 4;
+        }
+        .pip-canvas-zone .zone-handle.nw { left: -4px; top: -4px; cursor: nwse-resize; }
+        .pip-canvas-zone .zone-handle.ne { right: -4px; top: -4px; cursor: nesw-resize; }
+        .pip-canvas-zone .zone-handle.sw { left: -4px; bottom: -4px; cursor: nesw-resize; }
+        .pip-canvas-zone .zone-handle.se { right: -4px; bottom: -4px; cursor: nwse-resize; }
+        .pip-canvas-toolbar {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 8px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--pip-text);
+            width: 220px;
+            flex-shrink: 0;
+        }
+        .pip-canvas-toolbar > * { max-width: 100%; }
+        .pip-zone-add-btn {
+            background: var(--pip-bg-control);
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            color: var(--pip-accent-bright);
+            font-size: 11px;
+            font-weight: 600;
+            padding: 6px 12px;
+            cursor: pointer;
+        }
+        .pip-zone-add-btn:hover {
+            border-color: var(--pip-accent);
+            color: #fff;
+        }
+        .pip-zone-cap-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--pip-text-dim);
+        }
+        .pip-zone-cap-input {
+            width: 48px;
+            height: 24px;
+            background: var(--pip-bg-control);
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            color: var(--pip-text);
+            padding: 0 6px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .pip-canvas-hint {
+            font-size: 10px;
+            font-weight: 400;
+            color: var(--pip-text-muted);
+            line-height: 1.5;
+            max-width: 220px;
+        }
 
         /* Status bar */
         .status-bar {
@@ -434,6 +811,9 @@
             </div>
         </div>
 
+        <!-- PiP composition panel (populated when num_pips > 0) -->
+        <div class="pip-config-panel" id="pipConfigPanel" style="display:none;"></div>
+
         <!-- Transition controls -->
         <div class="transition-panel">
             <div class="transition-buttons">
@@ -466,7 +846,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">1-9,0 = PVW | G+N = Multi | B+N = BG | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.10-zones | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -483,20 +863,47 @@
         let MULTIVIEW_ENDPOINT = _cfg.multiview_endpoint;
         const INPUT_LABELS = _cfg.input_labels;
         const NUM_DSK_INPUTS = _cfg.num_dsk_inputs || 0;
+        const NUM_PIPS = _cfg.num_pips || 0;
 
         // ---- State ----
-        // Groups: ordered arrays of 0-based input indices (1-4 items each)
-        let currentPgmGroup = _cfg.initial_pgm_group || [_cfg.initial_pgm];
-        let currentPvwGroup = _cfg.initial_pvw_group || [_cfg.initial_pvw];
-        let currentBackground = _cfg.background_input != null ? _cfg.background_input : null;
+        // PGM/PVW source: each bus shows either an input (number) or a PiP (currentPvwPip/currentPgmPip).
+        // currentPgm/currentPvw is the input index, or null when the bus is showing a PiP.
+        let currentPgm = (_cfg.initial_pgm != null) ? _cfg.initial_pgm : null;
+        let currentPvw = (_cfg.initial_pvw != null) ? _cfg.initial_pvw : null;
         let dskEnabled = _cfg.dsk_states || [true, true, true, true];
+        // PiPs: { bg, zones: [{rect, capacity, sources}] } per configured PiP.
+        // A zone with rect=null fills the whole PiP region; sources in a zone
+        // auto-tile within its rect. capacity=null means unlimited.
+        let pipConfigs = (_cfg.pips || []).map(p => ({
+            bg: (p && p.bg != null) ? p.bg : null,
+            zones: (p && Array.isArray(p.zones))
+                ? p.zones.map(z => ({
+                    rect: z && z.rect ? { ...z.rect } : null,
+                    capacity: (z && z.capacity != null) ? z.capacity : null,
+                    sources: (z && Array.isArray(z.sources)) ? z.sources.slice() : []
+                }))
+                : []
+        }));
+        // Active zone target per PiP — input-chip clicks push into this zone.
+        // Defaults to zone 0; user clicks a zone in the canvas to change focus.
+        let activeZoneIdx = pipConfigs.map(() => 0);
+        // Which PiP (if any) currently has its layout editor open. null = none.
+        // Only one editor open at a time keeps the panel height bounded.
+        let editingPipIdx = null;
+
+        function toggleEditPip(pipIdx) {
+            editingPipIdx = (editingPipIdx === pipIdx) ? null : pipIdx;
+            document.body.classList.toggle('editing-layout', editingPipIdx != null);
+            buildPipConfigPanel();
+        }
+        // Which PiP is currently shown on each bus (null = bus is showing an input, not a PiP).
+        let currentPvwPip = (_cfg.pvw_pip != null) ? _cfg.pvw_pip : null;
+        let currentPgmPip = (_cfg.pgm_pip != null) ? _cfg.pgm_pip : null;
         let transitionType = 'fade';
         let transitionDurationMs = 1000;
         let transitioning = false;
         let ftbActive = _cfg.ftb_active || false;
         let overlayAlpha = _cfg.overlay_alpha != null ? _cfg.overlay_alpha : 1.0;
-        let groupMode = false;  // true while G is held down
-        let bgMode = false;     // true while B is held down
         let controlsMinimized = localStorage.getItem('vm-controls-minimized') === 'true';
 
         function toggleMinimize() {
@@ -508,9 +915,9 @@
         // ---- API helpers ----
         const API_BASE = '/api/flows/' + FLOW_ID + '/blocks/' + BLOCK_ID;
 
-        async function apiPost(path, body) {
+        async function apiCall(method, path, body) {
             const resp = await fetch(API_BASE + path, {
-                method: 'POST',
+                method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             });
@@ -520,19 +927,23 @@
             }
             return resp.json();
         }
+        const apiPost = (path, body) => apiCall('POST', path, body);
+        const apiPut = (path, body) => apiCall('PUT', path, body);
 
         // ---- PVW/PGM selection ----
-        function selectPreview(input, multi) {
-            if (currentBackground === input) return;  // background source is exclusive
-            if (!multi && currentPgmGroup.length === 1 && currentPgmGroup[0] === input) return;
-            if (!multi && currentPvwGroup.length === 1 && currentPvwGroup[0] === input) return;
-            apiPost('/preview', { input, multi: !!multi })
+        function selectPreview(input) {
+            if (currentPgm === input && currentPgmPip == null) return;
+            if (currentPvw === input && currentPvwPip == null) return;
+            apiPut('/preview', { source: { input } })
                 .then(r => {
-                    currentPvwGroup = r.preview_inputs || [r.preview_input];
-                    currentPgmGroup = r.program_inputs || [r.program_input];
+                    currentPvw = (r.preview_input != null) ? r.preview_input : null;
+                    currentPgm = (r.program_input != null) ? r.program_input : null;
+                    currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
+                    currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
                     updateButtons();
-                    const label = currentPvwGroup.map(i => i + 1).join('+');
-                    setStatus('PVW: Input ' + label);
+                    setStatus(currentPvw != null
+                        ? 'PVW: Input ' + (currentPvw + 1)
+                        : 'PVW: (no input)');
                 })
                 .catch(e => setStatus('Preview error: ' + e.message));
         }
@@ -546,28 +957,41 @@
                 document.getElementById('autoBtn').classList.add('active');
             }
 
-            // Capture state before sending — swap immediately for responsive UI
-            const fromGroup = [...currentPgmGroup];
-            const toGroup = [...currentPvwGroup];
-            currentPgmGroup = toGroup;
-            currentPvwGroup = fromGroup;
+            // Capture state before sending — swap immediately for responsive UI.
+            // Includes PiP swap so the colored borders / PiP buttons reflect the new state.
+            const fromPgm = currentPgm;
+            const fromPvw = currentPvw;
+            const fromPip = currentPgmPip;
+            const toPip = currentPvwPip;
+            currentPgm = fromPvw;
+            currentPvw = fromPgm;
+            currentPgmPip = toPip;
+            currentPvwPip = fromPip;
             updateButtons();
 
             apiPost('/transition', {
-                from_input: fromGroup[0] || 0,
-                to_input: toGroup[0] || 0,
+                from_input: fromPgm ?? 0,
+                to_input: fromPvw ?? 0,
                 transition_type: type,
                 duration_ms: durationMs
             }).then(r => {
-                setStatus(r.message);
+                // Bus state is reconciled via the VisionMixerStateChanged WS event
+                // broadcast right after the take.
+                const actual = r.actual_transition_type;
+                const note = (actual && actual !== type.toLowerCase())
+                    ? ' (' + r.message + ' — downgraded to ' + actual + ')'
+                    : '';
+                setStatus(r.message + note);
                 setTimeout(() => {
                     transitioning = false;
                     document.getElementById('autoBtn').classList.remove('active');
                 }, durationMs);
             }).catch(e => {
                 // Revert swap on error
-                currentPgmGroup = fromGroup;
-                currentPvwGroup = toGroup;
+                currentPgm = fromPgm;
+                currentPvw = fromPvw;
+                currentPgmPip = fromPip;
+                currentPvwPip = toPip;
                 updateButtons();
                 transitioning = false;
                 document.getElementById('autoBtn').classList.remove('active');
@@ -598,29 +1022,6 @@
             const btn = document.getElementById('ftbBtn');
             btn.classList.toggle('ftb-active', ftbActive);
             btn.textContent = ftbActive ? 'FTB ON' : 'FTB';
-        }
-
-        // ---- Background source ----
-        function setBackground(input) {
-            // Toggle: if already background, clear it
-            const newBg = (currentBackground === input) ? null : input;
-            apiPost('/background', { input: newBg })
-                .then(r => {
-                    currentBackground = r.background_input;
-                    updateButtons();
-                    setStatus(r.message);
-                })
-                .catch(e => setStatus('Background error: ' + e.message));
-        }
-
-        function clearBackground() {
-            apiPost('/background', { input: null })
-                .then(r => {
-                    currentBackground = r.background_input;
-                    updateButtons();
-                    setStatus(r.message);
-                })
-                .catch(e => setStatus('Background error: ' + e.message));
         }
 
         // ---- DSK toggle ----
@@ -675,7 +1076,7 @@
             if (!overlayAlphaTimeout) {
                 overlayAlphaTimeout = setTimeout(() => {
                     overlayAlphaTimeout = null;
-                    apiPost('/overlay-alpha', { alpha: overlayAlpha })
+                    apiPut('/overlay-alpha', { alpha: overlayAlpha })
                         .then(r => setStatus(r.message))
                         .catch(e => setStatus('Overlay alpha error: ' + e.message));
                 }, 50);
@@ -716,12 +1117,23 @@
         // ---- UI update ----
         function updateButtons() {
             document.querySelectorAll('#pgmBus .src-btn').forEach((btn, i) => {
-                btn.classList.toggle('pgm-active', currentPgmGroup.includes(i));
-                btn.classList.toggle('bg-active', currentBackground === i);
+                btn.classList.toggle('pgm-active', currentPgm === i && currentPgmPip == null);
             });
             document.querySelectorAll('#pvwBus .src-btn').forEach((btn, i) => {
-                btn.classList.toggle('pvw-active', currentPvwGroup.includes(i));
-                btn.classList.toggle('bg-active', currentBackground === i);
+                btn.classList.toggle('pvw-active', currentPvwPip == null && currentPvw === i);
+            });
+            document.querySelectorAll('#pgmBus .pip-btn').forEach((btn, i) => {
+                btn.classList.toggle('pgm-active', currentPgmPip === i);
+            });
+            document.querySelectorAll('#pvwBus .pip-btn').forEach((btn, i) => {
+                btn.classList.toggle('pvw-active', currentPvwPip === i);
+            });
+            // Refresh PiP-row PGM/PVW tinting in-place (cheaper than rebuilding
+            // the whole panel and doesn't disrupt an open layout editor).
+            document.querySelectorAll('.pip-config-row[data-pip]').forEach((row) => {
+                const p = parseInt(row.dataset.pip, 10);
+                row.classList.toggle('on-pgm', currentPgmPip === p);
+                row.classList.toggle('on-pvw', currentPvwPip === p);
             });
         }
 
@@ -743,52 +1155,531 @@
 
                 // PGM button (display only)
                 const pgmBtn = document.createElement('button');
-                pgmBtn.className = 'src-btn' + (currentPgmGroup.includes(i) ? ' pgm-active' : '');
+                pgmBtn.className = 'src-btn' + (currentPgm === i ? ' pgm-active' : '');
                 pgmBtn.textContent = btnText;
                 pgmBtn.title = label + (keyHint ? ' (' + keyHint + ')' : '');
                 pgmBus.appendChild(pgmBtn);
 
-                // PVW button (click = single select, shift+click = multi-toggle)
+                // PVW button (single select). Multi-source layouts are built via PiPs.
                 const pvwBtn = document.createElement('button');
-                pvwBtn.className = 'src-btn' + (currentPvwGroup.includes(i) ? ' pvw-active' : '');
+                pvwBtn.className = 'src-btn' + (currentPvw === i ? ' pvw-active' : '');
                 pvwBtn.textContent = btnText;
-                pvwBtn.title = label + (keyHint ? ' (' + keyHint + ', hold G + ' + keyHint + ' multi)' : '');
-                pvwBtn.onclick = () => selectPreview(i, groupMode);
+                pvwBtn.title = label + (keyHint ? ' (' + keyHint + ')' : '');
+                pvwBtn.onclick = () => selectPreview(i);
                 pvwBus.appendChild(pvwBtn);
+            }
+
+            // PiP buttons after input buttons on both buses.
+            // Slot number continues after the input range so keyboard shortcuts
+            // line up: with 8 inputs, PiP1 is slot 9, PiP2 is slot 10 (key '0').
+            for (let p = 0; p < NUM_PIPS; p++) {
+                const slotNum = NUM_INPUTS + p + 1;
+                const labelText = slotNum + ' - PiP' + (p + 1);
+                const keyHint = slotNum <= 10 ? (slotNum === 10 ? '0' : String(slotNum)) : '';
+
+                const pgmPipBtn = document.createElement('button');
+                pgmPipBtn.className = 'pip-btn' + (currentPgmPip === p ? ' pgm-active' : '');
+                pgmPipBtn.textContent = labelText;
+                pgmPipBtn.title = 'PiP ' + (p + 1) + ' on PGM' + (keyHint ? ' (' + keyHint + ')' : '');
+                pgmBus.appendChild(pgmPipBtn);
+
+                const pvwPipBtn = document.createElement('button');
+                pvwPipBtn.className = 'pip-btn' + (currentPvwPip === p ? ' pvw-active' : '');
+                pvwPipBtn.textContent = labelText;
+                pvwPipBtn.title = 'Take PiP ' + (p + 1) + ' to PVW' + (keyHint ? ' (' + keyHint + ')' : '');
+                pvwPipBtn.onclick = () => selectPreviewPip(p);
+                pvwBus.appendChild(pvwPipBtn);
             }
         }
 
-        // ---- Keyboard shortcuts ----
-        // Hold G = group mode (multi-select), release G = normal mode
-        document.addEventListener('keydown', (e) => {
-            if (e.target.tagName === 'INPUT') return;
+        // ---- PiP composition controls ----
+        function selectPreviewPip(pipIdx) {
+            apiPut('/preview', { source: { pip: pipIdx } })
+                .then(r => {
+                    currentPvw = (r.preview_input != null) ? r.preview_input : null;
+                    currentPgm = (r.program_input != null) ? r.program_input : null;
+                    currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
+                    currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
+                    updateButtons();
+                    setStatus('PVW: PiP ' + (pipIdx + 1));
+                })
+                .catch(e => setStatus('Preview error: ' + e.message));
+        }
 
-            if ((e.key === 'g' || e.key === 'G') && !e.repeat) {
-                groupMode = true;
-                e.preventDefault();
-                return;
-            }
-
-            // Hold B = background mode (B + number sets background)
-            if ((e.key === 'b' || e.key === 'B') && !e.repeat) {
-                bgMode = true;
-                e.preventDefault();
-                return;
-            }
-
-            // 1-9, 0 = action depends on mode
-            if (e.key >= '1' && e.key <= '9') {
-                const input = parseInt(e.key) - 1;
-                if (input < NUM_INPUTS) {
-                    if (bgMode) { setBackground(input); }
-                    else { selectPreview(input, groupMode); }
+        function postPipConfig(pipIdx) {
+            const cfg = pipConfigs[pipIdx];
+            return apiPut('/pip/' + pipIdx, {
+                bg: cfg.bg,
+                zones: cfg.zones
+            }).then(r => {
+                pipConfigs[pipIdx] = {
+                    bg: r.bg,
+                    zones: (r.zones || []).map(z => ({
+                        rect: z.rect ? { ...z.rect } : null,
+                        capacity: z.capacity != null ? z.capacity : null,
+                        sources: Array.isArray(z.sources) ? z.sources.slice() : []
+                    }))
+                };
+                // Keep activeZoneIdx within bounds after server-side cleanup.
+                const nz = pipConfigs[pipIdx].zones.length;
+                if (nz === 0) {
+                    activeZoneIdx[pipIdx] = 0;
+                } else if (activeZoneIdx[pipIdx] >= nz) {
+                    activeZoneIdx[pipIdx] = nz - 1;
                 }
-                e.preventDefault();
+                buildPipConfigPanel();
+                setStatus(r.message);
+            }).catch(e => setStatus('PiP config error: ' + e.message));
+        }
+
+        function setPipBg(pipIdx, bg) {
+            const cfg = pipConfigs[pipIdx];
+            cfg.bg = (bg === '' || bg === 'none') ? null : parseInt(bg, 10);
+            // Bg can't simultaneously be a zone source; strip from every zone.
+            if (cfg.bg != null) {
+                cfg.zones.forEach(z => {
+                    z.sources = z.sources.filter(s => s !== cfg.bg);
+                });
+            }
+            postPipConfig(pipIdx);
+        }
+
+        // Toggle an input on the active zone.
+        //  - Already in any zone → remove it.
+        //  - Otherwise → push into active zone (FIFO evicts oldest at capacity).
+        // An input can only appear in one place at a time (single compositor pad).
+        function toggleSourceOnActiveZone(pipIdx, input) {
+            const cfg = pipConfigs[pipIdx];
+            if (cfg.bg === input) return; // bg already occupies this input's pad
+            // If already in any zone, clicking again removes it.
+            let wasPresent = false;
+            cfg.zones.forEach(z => {
+                if (z.sources.includes(input)) {
+                    z.sources = z.sources.filter(s => s !== input);
+                    wasPresent = true;
+                }
+            });
+            if (wasPresent) {
+                postPipConfig(pipIdx);
                 return;
             }
-            if (e.key === '0' && NUM_INPUTS >= 10) {
-                if (bgMode) { setBackground(9); }
-                else { selectPreview(9, groupMode); }
+            // Not present anywhere — push into active zone, evicting oldest if full.
+            if (cfg.zones.length === 0) {
+                cfg.zones.push({ rect: null, capacity: null, sources: [] });
+                activeZoneIdx[pipIdx] = 0;
+            }
+            const zi = Math.min(activeZoneIdx[pipIdx], cfg.zones.length - 1);
+            const zone = cfg.zones[zi];
+            zone.sources.push(input);
+            if (zone.capacity != null && zone.sources.length > zone.capacity) {
+                zone.sources.splice(0, zone.sources.length - zone.capacity);
+            }
+            postPipConfig(pipIdx);
+        }
+
+        function removeSourceFromZone(pipIdx, zoneIdx, input) {
+            const zone = pipConfigs[pipIdx].zones[zoneIdx];
+            if (!zone) return;
+            zone.sources = zone.sources.filter(s => s !== input);
+            postPipConfig(pipIdx);
+        }
+
+        function addZone(pipIdx) {
+            const cfg = pipConfigs[pipIdx];
+            // Default new zone: right-half rect, unlimited capacity.
+            cfg.zones.push({
+                rect: { x: 0.55, y: 0.10, w: 0.42, h: 0.42 },
+                capacity: null,
+                sources: []
+            });
+            activeZoneIdx[pipIdx] = cfg.zones.length - 1;
+            postPipConfig(pipIdx);
+        }
+
+        function removeZone(pipIdx, zoneIdx) {
+            pipConfigs[pipIdx].zones.splice(zoneIdx, 1);
+            if (activeZoneIdx[pipIdx] >= pipConfigs[pipIdx].zones.length) {
+                activeZoneIdx[pipIdx] = Math.max(0, pipConfigs[pipIdx].zones.length - 1);
+            }
+            postPipConfig(pipIdx);
+        }
+
+        function setZoneCapacity(pipIdx, zoneIdx, value) {
+            const zone = pipConfigs[pipIdx].zones[zoneIdx];
+            if (!zone) return;
+            const parsed = parseInt(value, 10);
+            zone.capacity = (Number.isFinite(parsed) && parsed > 0) ? parsed : null;
+            // Apply cap immediately to existing sources (drop oldest).
+            if (zone.capacity != null && zone.sources.length > zone.capacity) {
+                zone.sources.splice(0, zone.sources.length - zone.capacity);
+            }
+            postPipConfig(pipIdx);
+        }
+
+        function buildPipConfigPanel() {
+            const panel = document.getElementById('pipConfigPanel');
+            if (NUM_PIPS === 0) {
+                panel.style.display = 'none';
+                return;
+            }
+            panel.style.display = 'flex';
+            panel.classList.toggle('editing', editingPipIdx != null);
+            panel.innerHTML = '';
+
+            for (let p = 0; p < NUM_PIPS; p++) {
+                const cfg = pipConfigs[p] || { bg: null, zones: [] };
+                const block = document.createElement('div');
+                block.className = 'pip-config-block';
+
+                const row = document.createElement('div');
+                row.className = 'pip-config-row';
+                row.dataset.pip = String(p);
+                // Tint the row red/green when this PiP is currently on PGM/PVW.
+                if (currentPgmPip === p) row.classList.add('on-pgm');
+                else if (currentPvwPip === p) row.classList.add('on-pvw');
+
+                const label = document.createElement('span');
+                label.className = 'pip-config-label';
+                label.textContent = 'PiP ' + (p + 1);
+                row.appendChild(label);
+
+                // Push chips — click toggles input on/off in the active zone.
+                const inputsAlreadyShown = new Set(cfg.zones.flatMap(z => z.sources));
+                for (let i = 0; i < NUM_INPUTS; i++) {
+                    const chip = document.createElement('span');
+                    chip.className = 'pip-overlay-chip';
+                    if (cfg.bg === i) {
+                        chip.classList.add('disabled');
+                        chip.title = 'Used as background';
+                    } else {
+                        chip.title = inputsAlreadyShown.has(i)
+                            ? 'Remove Input ' + (i + 1) + ' from PiP'
+                            : 'Push Input ' + (i + 1) + ' to active zone';
+                        chip.onclick = () => toggleSourceOnActiveZone(p, i);
+                    }
+                    if (inputsAlreadyShown.has(i)) chip.classList.add('active');
+                    chip.textContent = String(i + 1);
+                    row.appendChild(chip);
+                }
+
+                // Zone selector buttons (one per zone) — pick the active push target.
+                // Hidden inside the editor (the canvas already conveys focus).
+                if (editingPipIdx !== p) {
+                    cfg.zones.forEach((z, zi) => {
+                        const sel = document.createElement('button');
+                        sel.className = 'pip-zone-selector' + (activeZoneIdx[p] === zi ? ' active' : '');
+                        sel.title = 'Activate zone Z' + (zi + 1)
+                            + (z.capacity != null ? ' (cap ' + z.capacity + ')' : '');
+                        const lbl = document.createElement('span');
+                        lbl.textContent = 'Z' + (zi + 1);
+                        const cnt = document.createElement('span');
+                        cnt.className = 'zone-count';
+                        cnt.textContent = z.sources.length + (z.capacity != null ? '/' + z.capacity : '');
+                        sel.appendChild(lbl);
+                        sel.appendChild(cnt);
+                        sel.onclick = () => {
+                            activeZoneIdx[p] = zi;
+                            buildPipConfigPanel();
+                        };
+                        row.appendChild(sel);
+                    });
+                }
+
+                const editBtn = document.createElement('button');
+                editBtn.className = 'pip-edit-btn' + (editingPipIdx === p ? ' active' : '');
+                editBtn.textContent = editingPipIdx === p ? 'Close' : 'Edit';
+                editBtn.onclick = () => toggleEditPip(p);
+                row.appendChild(editBtn);
+
+                block.appendChild(row);
+
+                if (editingPipIdx !== p) {
+                    panel.appendChild(block);
+                    continue;
+                }
+
+                // ---- Layout editor (only when this PiP is being edited) ----
+                const editor = document.createElement('div');
+                editor.className = 'pip-editor';
+
+                const canvasWrap = document.createElement('div');
+                canvasWrap.className = 'pip-canvas-wrap';
+                const canvas = document.createElement('div');
+                canvas.className = 'pip-canvas';
+                canvas.dataset.pip = String(p);
+
+                const bgDiv = document.createElement('div');
+                bgDiv.className = 'pip-canvas-bg';
+                bgDiv.textContent = cfg.bg != null
+                    ? ('BG: ' + (INPUT_LABELS[cfg.bg] || ('Input ' + (cfg.bg + 1))))
+                    : '(no background)';
+                canvas.appendChild(bgDiv);
+
+                cfg.zones.forEach((zone, zi) => {
+                    const isAuto = zone.rect == null;
+                    const r = zone.rect || { x: 0, y: 0, w: 1, h: 1 };
+                    const z = document.createElement('div');
+                    z.className = 'pip-canvas-zone' + (isAuto ? ' auto' : '');
+                    if (zi === activeZoneIdx[p]) z.classList.add('active');
+                    z.style.left = (r.x * 100) + '%';
+                    z.style.top = (r.y * 100) + '%';
+                    z.style.width = (r.w * 100) + '%';
+                    z.style.height = (r.h * 100) + '%';
+                    z.style.zIndex = String(10 + zi);
+
+                    // Header: zone label + capacity.
+                    const header = document.createElement('div');
+                    header.className = 'zone-header';
+                    const hLabel = document.createElement('span');
+                    hLabel.textContent = 'Z' + (zi + 1);
+                    const hCap = document.createElement('span');
+                    hCap.className = 'zone-cap';
+                    hCap.textContent = zone.capacity != null ? ('cap ' + zone.capacity) : 'cap ∞';
+                    header.appendChild(hLabel);
+                    header.appendChild(hCap);
+                    z.appendChild(header);
+
+                    // Source chips inside zone — click = remove from zone.
+                    const sourcesRow = document.createElement('div');
+                    sourcesRow.className = 'zone-sources';
+                    zone.sources.forEach(input => {
+                        const sc = document.createElement('span');
+                        sc.className = 'zone-source-chip';
+                        sc.textContent = INPUT_LABELS[input] || ('In ' + (input + 1));
+                        sc.title = 'Remove from zone';
+                        sc.onclick = (ev) => {
+                            ev.stopPropagation();
+                            removeSourceFromZone(p, zi, input);
+                        };
+                        sourcesRow.appendChild(sc);
+                    });
+                    z.appendChild(sourcesRow);
+
+                    ['nw', 'ne', 'sw', 'se'].forEach(corner => {
+                        const h = document.createElement('div');
+                        h.className = 'zone-handle ' + corner;
+                        h.dataset.corner = corner;
+                        z.appendChild(h);
+                    });
+
+                    const rm = document.createElement('button');
+                    rm.className = 'zone-remove';
+                    rm.textContent = '×';
+                    rm.title = 'Remove zone';
+                    rm.onclick = (e) => {
+                        e.stopPropagation();
+                        removeZone(p, zi);
+                    };
+                    z.appendChild(rm);
+
+                    // Click anywhere on zone (except chips/handles/remove) = activate.
+                    z.addEventListener('mousedown', (ev) => {
+                        if (ev.target.closest('.zone-source-chip, .zone-remove')) return;
+                        if (activeZoneIdx[p] !== zi) {
+                            activeZoneIdx[p] = zi;
+                            buildPipConfigPanel();
+                        }
+                    });
+                    // Right-click → toggle auto/manual rect.
+                    z.oncontextmenu = (ev) => {
+                        ev.preventDefault();
+                        zone.rect = isAuto
+                            ? { x: 0.55, y: 0.10, w: 0.42, h: 0.42 }
+                            : null;
+                        postPipConfig(p);
+                    };
+
+                    attachZoneDrag(z, canvas, p, zi);
+                    canvas.appendChild(z);
+                });
+
+                canvasWrap.appendChild(canvas);
+
+                // Toolbar: BG selector, add-zone button, active-zone capacity input.
+                const toolbar = document.createElement('div');
+                toolbar.className = 'pip-canvas-toolbar';
+
+                const bgRow = document.createElement('label');
+                bgRow.className = 'pip-zone-cap-row';
+                bgRow.append('Background');
+                const bgSel = document.createElement('select');
+                bgSel.className = 'pip-bg-select';
+                const noneOpt = document.createElement('option');
+                noneOpt.value = '';
+                noneOpt.textContent = 'None';
+                bgSel.appendChild(noneOpt);
+                for (let i = 0; i < NUM_INPUTS; i++) {
+                    const o = document.createElement('option');
+                    o.value = String(i);
+                    o.textContent = INPUT_LABELS[i] || ('Input ' + (i + 1));
+                    if (cfg.bg === i) o.selected = true;
+                    bgSel.appendChild(o);
+                }
+                bgSel.onchange = () => setPipBg(p, bgSel.value);
+                bgRow.appendChild(bgSel);
+                toolbar.appendChild(bgRow);
+
+                const addBtn = document.createElement('button');
+                addBtn.className = 'pip-zone-add-btn';
+                addBtn.textContent = '+ Zone';
+                addBtn.onclick = () => addZone(p);
+                toolbar.appendChild(addBtn);
+
+                if (cfg.zones.length > 0) {
+                    const zi = Math.min(activeZoneIdx[p], cfg.zones.length - 1);
+                    const zone = cfg.zones[zi];
+                    const capRow = document.createElement('label');
+                    capRow.className = 'pip-zone-cap-row';
+                    capRow.append('Active: Z' + (zi + 1) + ' · cap');
+                    const capInput = document.createElement('input');
+                    capInput.className = 'pip-zone-cap-input';
+                    capInput.type = 'number';
+                    capInput.min = '1';
+                    capInput.placeholder = '∞';
+                    capInput.value = zone.capacity != null ? String(zone.capacity) : '';
+                    capInput.onchange = () => setZoneCapacity(p, zi, capInput.value);
+                    capRow.appendChild(capInput);
+                    toolbar.appendChild(capRow);
+                }
+
+                const hint = document.createElement('div');
+                hint.className = 'pip-canvas-hint';
+                hint.innerHTML = 'Click a zone to activate. Push-chip adds the input to the active zone (oldest evicts at cap). Chip inside a zone = remove. Right-click a zone to toggle auto / manual rect.';
+                toolbar.appendChild(hint);
+                canvasWrap.appendChild(toolbar);
+                editor.appendChild(canvasWrap);
+
+                block.appendChild(editor);
+                panel.appendChild(block);
+            }
+        }
+
+        // Snap anchors for layout rects (edges, halves, quarters).
+        const SNAP_ANCHORS = [0, 0.25, 0.5, 0.75, 1];
+        const SNAP_TOL = 0.022; // ~10px on a 480-px canvas; tight enough to not fight free dragging
+
+        // Snap a single coordinate to nearby anchors. Used when resizing — only
+        // the corner being dragged snaps; the opposite corner stays put.
+        function snapEdge(v) {
+            for (const a of SNAP_ANCHORS) {
+                if (Math.abs(v - a) < SNAP_TOL) return a;
+            }
+            return v;
+        }
+
+        // Snap a moving rect along one axis to whichever of {left edge, right edge,
+        // center} is closest to a snap anchor. Lets a centered rect "dent" into
+        // the canvas center, and lets the right/bottom edge dock against an anchor.
+        function snapMoveAxis(pos, size) {
+            let bestDelta = SNAP_TOL;
+            let bestPos = pos;
+            for (const a of SNAP_ANCHORS) {
+                const d1 = Math.abs(a - pos);
+                if (d1 < bestDelta) { bestDelta = d1; bestPos = a; }
+                const d2 = Math.abs(a - (pos + size));
+                if (d2 < bestDelta) { bestDelta = d2; bestPos = a - size; }
+                const d3 = Math.abs(a - (pos + size / 2));
+                if (d3 < bestDelta) { bestDelta = d3; bestPos = a - size / 2; }
+            }
+            return bestPos;
+        }
+
+        // Drag-and-resize handler for a zone. Promotes auto zones to explicit
+        // on first drag. Sends a single POST on mouseup.
+        function attachZoneDrag(zoneEl, canvas, pipIdx, zoneIdx) {
+            zoneEl.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return;
+                if (e.target.closest('.zone-source-chip, .zone-remove, .zone-cap-input')) return;
+                const handle = e.target.closest('.zone-handle');
+                e.preventDefault();
+                e.stopPropagation();
+                const canvasRect = canvas.getBoundingClientRect();
+                const startX = e.clientX;
+                const startY = e.clientY;
+                const cfg = pipConfigs[pipIdx];
+                const zone = cfg.zones[zoneIdx];
+                if (!zone) return;
+                // Promote auto zone to a manual rect at its current rendered
+                // position so the user doesn't see a jump.
+                const initial = zone.rect ? { ...zone.rect } : { x: 0, y: 0, w: 1, h: 1 };
+                const corner = handle ? handle.dataset.corner : null;
+                let dirty = false;
+
+                const onMove = (ev) => {
+                    const dx = (ev.clientX - startX) / canvasRect.width;
+                    const dy = (ev.clientY - startY) / canvasRect.height;
+                    let next = { ...initial };
+                    if (!corner) {
+                        // Move: snap to whichever of {left, right, center} is closest
+                        // to an anchor — gives a satisfying detent at canvas-center.
+                        next.x = snapMoveAxis(initial.x + dx, initial.w);
+                        next.y = snapMoveAxis(initial.y + dy, initial.h);
+                    } else {
+                        // Resize: only the dragged corner snaps to anchors.
+                        const right = initial.x + initial.w;
+                        const bottom = initial.y + initial.h;
+                        if (corner === 'nw') {
+                            next.x = snapEdge(initial.x + dx);
+                            next.y = snapEdge(initial.y + dy);
+                            next.w = right - next.x;
+                            next.h = bottom - next.y;
+                        } else if (corner === 'ne') {
+                            next.y = snapEdge(initial.y + dy);
+                            next.w = snapEdge(right + dx) - initial.x;
+                            next.h = bottom - next.y;
+                        } else if (corner === 'sw') {
+                            next.x = snapEdge(initial.x + dx);
+                            next.w = right - next.x;
+                            next.h = snapEdge(bottom + dy) - initial.y;
+                        } else if (corner === 'se') {
+                            next.w = snapEdge(right + dx) - initial.x;
+                            next.h = snapEdge(bottom + dy) - initial.y;
+                        }
+                    }
+                    next.w = Math.max(0.05, Math.min(1, next.w));
+                    next.h = Math.max(0.05, Math.min(1, next.h));
+                    next.x = Math.max(0, Math.min(1 - next.w, next.x));
+                    next.y = Math.max(0, Math.min(1 - next.h, next.y));
+                    if (Math.abs(next.x - initial.x) + Math.abs(next.y - initial.y)
+                        + Math.abs(next.w - initial.w) + Math.abs(next.h - initial.h) > 0.0001) {
+                        dirty = true;
+                    }
+                    zone.rect = next;
+                    zoneEl.classList.remove('auto');
+                    zoneEl.style.left = (next.x * 100) + '%';
+                    zoneEl.style.top = (next.y * 100) + '%';
+                    zoneEl.style.width = (next.w * 100) + '%';
+                    zoneEl.style.height = (next.h * 100) + '%';
+                };
+                const onUp = () => {
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                    if (dirty) postPipConfig(pipIdx);
+                };
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+            });
+        }
+
+        // ---- Keyboard shortcuts ----
+        document.addEventListener('keydown', (e) => {
+            const tag = e.target.tagName;
+            if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+            if (e.target.isContentEditable) return;
+            // Let the browser keep its own modifier-key shortcuts (Ctrl+0 reset
+            // zoom, Ctrl+F find, Ctrl+R reload, Cmd+...). Shift is fine — we
+            // already accept "X" and "x" for the same action.
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+            // 1-9, 0 = select PVW. Slots continue past NUM_INPUTS into PiPs,
+            // so with 8 inputs key '9' picks PiP1 and key '0' picks PiP2.
+            if ((e.key >= '1' && e.key <= '9') || e.key === '0') {
+                const slot = e.key === '0' ? 9 : (parseInt(e.key) - 1);
+                if (slot < NUM_INPUTS) {
+                    selectPreview(slot);
+                } else if (slot < NUM_INPUTS + NUM_PIPS) {
+                    selectPreviewPip(slot - NUM_INPUTS);
+                }
                 e.preventDefault();
                 return;
             }
@@ -823,8 +1714,6 @@
         });
 
         document.addEventListener('keyup', (e) => {
-            if (e.key === 'g' || e.key === 'G') groupMode = false;
-            if (e.key === 'b' || e.key === 'B') bgMode = false;
         });
 
         // ---- Connection status helpers ----
@@ -921,9 +1810,8 @@
                 const match = html.match(/<script id="vm-config" type="application\/json">([\s\S]*?)<\/script>/);
                 if (!match) return;
                 const cfg = JSON.parse(match[1]);
-                currentPgmGroup = cfg.initial_pgm_group || [cfg.initial_pgm];
-                currentPvwGroup = cfg.initial_pvw_group || [cfg.initial_pvw];
-                currentBackground = cfg.background_input != null ? cfg.background_input : null;
+                currentPgm = (cfg.initial_pgm != null) ? cfg.initial_pgm : null;
+                currentPvw = (cfg.initial_pvw != null) ? cfg.initial_pvw : null;
                 ftbActive = cfg.ftb_active || false;
                 dskEnabled = cfg.dsk_states || [true, true, true, true];
                 overlayAlpha = cfg.overlay_alpha != null ? cfg.overlay_alpha : 1.0;
@@ -952,8 +1840,10 @@
                     if (event.type === 'VisionMixerStateChanged' && event.data) {
                         const d = event.data;
                         if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
-                            currentPvwGroup = d.preview_inputs || [d.preview_input];
-                            currentPgmGroup = d.program_inputs || [d.program_input];
+                            currentPvw = (d.preview_input != null) ? d.preview_input : null;
+                            currentPgm = (d.program_input != null) ? d.program_input : null;
+                            currentPvwPip = (d.preview_pip != null) ? d.preview_pip : null;
+                            currentPgmPip = (d.program_pip != null) ? d.program_pip : null;
                             updateButtons();
                         }
                     }
@@ -978,13 +1868,6 @@
                             updateOverlayAlphaUi();
                         }
                     }
-                    if (event.type === 'VisionMixerBackgroundChanged' && event.data) {
-                        const d = event.data;
-                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
-                            currentBackground = d.background_input;
-                            updateButtons();
-                        }
-                    }
                 } catch {}
             };
 
@@ -1002,6 +1885,7 @@
             buildBuses();
             updateButtons();
             initDskUi();
+            buildPipConfigPanel();
             updateFtbButton();
             connectMultiview();
             connectWebSocket();

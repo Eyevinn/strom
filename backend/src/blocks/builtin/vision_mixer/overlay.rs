@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
-use strom_types::vision_mixer::{self, TIMEZONE_REFRESH_SECS};
+use strom_types::vision_mixer::{self, Zone, TIMEZONE_REFRESH_SECS};
 use tracing::{debug, warn};
 
 /// Global registry of vision mixer overlay states, keyed by block instance ID.
@@ -49,12 +49,24 @@ pub fn unregister_overlay_state(block_id: &str) {
 ///
 /// Updated atomically from the API thread; read lock-free from the streaming thread.
 pub struct VisionMixerOverlayState {
-    /// Packed PGM source group (up to 4 source indices). See `vision_mixer::pack_source_group`.
-    pgm_group: AtomicU64,
-    /// Packed PVW source group (up to 4 source indices). See `vision_mixer::pack_source_group`.
-    pvw_group: AtomicU64,
-    /// Background source index (u64::MAX = no background).
-    background_input: AtomicU64,
+    /// Current PGM input index, or [`NO_SOURCE`] when no input is on PGM
+    /// (e.g. PGM is a PiP composition — see [`Self::pgm_pip`]).
+    pgm_input: AtomicU64,
+    /// Current PVW input index, or [`NO_SOURCE`] when PVW shows a PiP composition.
+    pvw_input: AtomicU64,
+    /// PiP currently shown on PGM (u64::MAX = PGM is an input, not a PiP).
+    /// Set at build time from `initial_pgm_source`; cleared/changed via runtime API.
+    pgm_pip: AtomicU64,
+    /// PiP currently shown on PVW (u64::MAX = PVW is an input, not a PiP).
+    pvw_pip: AtomicU64,
+    /// Current PiP bg input (u64::MAX = no bg). One entry per configured PiP.
+    pub pip_bg: Vec<AtomicU64>,
+    /// Current zones (sub-regions hosting overlay sources) per configured PiP.
+    /// A zone with `rect: None` fills the entire PiP region; sources inside a
+    /// zone auto-tile within its rect.
+    pub pip_zones: Vec<std::sync::Mutex<Vec<Zone>>>,
+    /// Number of configured PiP tiles (also `pip_bg.len()` / `pip_zones.len()`).
+    pub num_pips: usize,
     /// Number of inputs.
     pub num_inputs: usize,
     /// Whether Fade to Black is active.
@@ -91,7 +103,30 @@ pub struct VisionMixerOverlayState {
     pub pgm_decay: AtomicU8,
 }
 
+/// Initial PiP runtime state passed to [`VisionMixerOverlayState::new`].
+///
+/// `pip_bgs` and `pip_zones` must have length `num_pips`. `pgm_pip` / `pvw_pip`
+/// are `Some(idx)` if the corresponding bus starts in PiP mode.
+#[derive(Default)]
+pub struct PipInitialState {
+    pub num_pips: usize,
+    pub pip_bgs: Vec<Option<usize>>,
+    /// Initial zone list per PiP. Empty inner Vec = no overlays yet.
+    pub pip_zones: Vec<Vec<Zone>>,
+    pub pgm_pip: Option<usize>,
+    pub pvw_pip: Option<usize>,
+}
+
+/// Sentinel used in [`VisionMixerOverlayState::pgm_pip`] / `pvw_pip` for
+/// "this bus is an input, not a PiP".
+pub const NO_PIP: u64 = u64::MAX;
+
+/// Sentinel for "no input source on this bus" in [`VisionMixerOverlayState::pgm_input`]
+/// / `pvw_input` (e.g. when the bus shows a PiP composition instead).
+pub const NO_SOURCE: u64 = u64::MAX;
+
 impl VisionMixerOverlayState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_inputs: usize,
         num_dsk_inputs: usize,
@@ -100,6 +135,7 @@ impl VisionMixerOverlayState {
         labels: Vec<String>,
         layout: OverlayLayout,
         show_vu_meters: bool,
+        pip: PipInitialState,
     ) -> Self {
         let now_sys = SystemTime::now();
         let now_instant = Instant::now();
@@ -109,10 +145,30 @@ impl VisionMixerOverlayState {
             .as_secs();
         let (offset_secs, tz_abbr) = local_tz_info();
 
+        let pip_bg = (0..pip.num_pips)
+            .map(|i| {
+                let v = pip
+                    .pip_bgs
+                    .get(i)
+                    .copied()
+                    .unwrap_or(None)
+                    .map(|x| x as u64)
+                    .unwrap_or(NO_PIP);
+                AtomicU64::new(v)
+            })
+            .collect();
+        let pip_zones = (0..pip.num_pips)
+            .map(|i| std::sync::Mutex::new(pip.pip_zones.get(i).cloned().unwrap_or_default()))
+            .collect();
+
         Self {
-            pgm_group: AtomicU64::new(vision_mixer::pack_single_source(pgm_input)),
-            pvw_group: AtomicU64::new(vision_mixer::pack_single_source(pvw_input)),
-            background_input: AtomicU64::new(vision_mixer::NO_BACKGROUND),
+            pgm_input: AtomicU64::new(pgm_input as u64),
+            pvw_input: AtomicU64::new(pvw_input as u64),
+            pgm_pip: AtomicU64::new(pip.pgm_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
+            pvw_pip: AtomicU64::new(pip.pvw_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
+            pip_bg,
+            pip_zones,
+            num_pips: pip.num_pips,
             num_inputs,
             ftb_active: AtomicBool::new(false),
             overlay_alpha: AtomicU64::new(1.0f64.to_bits()),
@@ -132,6 +188,88 @@ impl VisionMixerOverlayState {
             input_decay: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
             pgm_peak: AtomicU8::new(0),
             pgm_decay: AtomicU8::new(0),
+        }
+    }
+
+    /// Returns the PiP index currently displayed on PGM, or `None` if PGM
+    /// is an input.
+    pub fn pgm_pip(&self) -> Option<usize> {
+        let v = self.pgm_pip.load(Ordering::Relaxed);
+        if v == NO_PIP {
+            None
+        } else {
+            Some(v as usize)
+        }
+    }
+
+    /// Returns the PiP index currently displayed on PVW, or `None` if PVW
+    /// is an input.
+    pub fn pvw_pip(&self) -> Option<usize> {
+        let v = self.pvw_pip.load(Ordering::Relaxed);
+        if v == NO_PIP {
+            None
+        } else {
+            Some(v as usize)
+        }
+    }
+
+    /// Set PGM to be a PiP (or clear it back to input mode with `None`).
+    pub fn set_pgm_pip(&self, pip_idx: Option<usize>) {
+        self.pgm_pip.store(
+            pip_idx.map(|x| x as u64).unwrap_or(NO_PIP),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Set PVW to be a PiP (or clear it back to input mode with `None`).
+    pub fn set_pvw_pip(&self, pip_idx: Option<usize>) {
+        self.pvw_pip.store(
+            pip_idx.map(|x| x as u64).unwrap_or(NO_PIP),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Packed PGM-pip atomic value (for dirty checking).
+    pub fn pgm_pip_packed(&self) -> u64 {
+        self.pgm_pip.load(Ordering::Relaxed)
+    }
+
+    /// Packed PVW-pip atomic value (for dirty checking).
+    pub fn pvw_pip_packed(&self) -> u64 {
+        self.pvw_pip.load(Ordering::Relaxed)
+    }
+
+    /// Get the bg input for a configured PiP (None if PiP doesn't exist or has no bg).
+    pub fn pip_bg_input(&self, pip_idx: usize) -> Option<usize> {
+        let v = self.pip_bg.get(pip_idx)?.load(Ordering::Relaxed);
+        if v == NO_PIP {
+            None
+        } else {
+            Some(v as usize)
+        }
+    }
+
+    /// Set the bg input for a configured PiP.
+    pub fn set_pip_bg_input(&self, pip_idx: usize, input: Option<usize>) {
+        if let Some(slot) = self.pip_bg.get(pip_idx) {
+            slot.store(input.map(|x| x as u64).unwrap_or(NO_PIP), Ordering::Relaxed);
+        }
+    }
+
+    /// Get the zone list for a configured PiP (empty if PiP doesn't exist).
+    pub fn pip_zones(&self, pip_idx: usize) -> Vec<Zone> {
+        self.pip_zones
+            .get(pip_idx)
+            .and_then(|m| m.lock().ok().map(|v| v.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Replace the zone list for a configured PiP.
+    pub fn set_pip_zones(&self, pip_idx: usize, zones: Vec<Zone>) {
+        if let Some(slot) = self.pip_zones.get(pip_idx) {
+            if let Ok(mut v) = slot.lock() {
+                *v = zones;
+            }
         }
     }
 
@@ -163,69 +301,46 @@ impl VisionMixerOverlayState {
             .store(vision_mixer::quantize_db_to_u8(decay_db), Ordering::Relaxed);
     }
 
-    /// Get the PGM source group as a Vec of indices.
-    pub fn pgm_group(&self) -> Vec<usize> {
-        vision_mixer::unpack_source_group(self.pgm_group.load(Ordering::Relaxed))
-    }
-
-    /// Get the PVW source group as a Vec of indices.
-    pub fn pvw_group(&self) -> Vec<usize> {
-        vision_mixer::unpack_source_group(self.pvw_group.load(Ordering::Relaxed))
-    }
-
-    /// Get the packed PGM group value (for atomic comparison).
-    pub fn pgm_group_packed(&self) -> u64 {
-        self.pgm_group.load(Ordering::Relaxed)
-    }
-
-    /// Get the packed PVW group value (for atomic comparison).
-    pub fn pvw_group_packed(&self) -> u64 {
-        self.pvw_group.load(Ordering::Relaxed)
-    }
-
-    /// Get first PGM source index (backward compat).
-    pub fn pgm_first(&self) -> usize {
-        vision_mixer::group_first(self.pgm_group.load(Ordering::Relaxed))
-    }
-
-    /// Get first PVW source index (backward compat).
-    pub fn pvw_first(&self) -> usize {
-        vision_mixer::group_first(self.pvw_group.load(Ordering::Relaxed))
-    }
-
-    /// Set the PGM source group.
-    pub fn set_pgm_group(&self, indices: &[usize]) {
-        self.pgm_group
-            .store(vision_mixer::pack_source_group(indices), Ordering::Relaxed);
-    }
-
-    /// Set the PVW source group.
-    pub fn set_pvw_group(&self, indices: &[usize]) {
-        self.pvw_group
-            .store(vision_mixer::pack_source_group(indices), Ordering::Relaxed);
-    }
-
-    /// Get the background source index, or None if no background.
-    pub fn background_input(&self) -> Option<usize> {
-        let val = self.background_input.load(Ordering::Relaxed);
-        if val == vision_mixer::NO_BACKGROUND {
+    /// Current PGM input, or `None` when PGM is a PiP source.
+    pub fn pgm_input(&self) -> Option<usize> {
+        let v = self.pgm_input.load(Ordering::Relaxed);
+        if v == NO_SOURCE {
             None
         } else {
-            Some(val as usize)
+            Some(v as usize)
         }
     }
 
-    /// Get the raw background atomic value (for dirty checking).
-    pub fn background_input_packed(&self) -> u64 {
-        self.background_input.load(Ordering::Relaxed)
+    /// Current PVW input, or `None` when PVW is a PiP source.
+    pub fn pvw_input(&self) -> Option<usize> {
+        let v = self.pvw_input.load(Ordering::Relaxed);
+        if v == NO_SOURCE {
+            None
+        } else {
+            Some(v as usize)
+        }
     }
 
-    /// Set or clear the background source.
-    pub fn set_background_input(&self, input: Option<usize>) {
-        let val = input
-            .map(|i| i as u64)
-            .unwrap_or(vision_mixer::NO_BACKGROUND);
-        self.background_input.store(val, Ordering::Relaxed);
+    /// Raw atomic value (used for dirty-checking).
+    pub fn pgm_input_packed(&self) -> u64 {
+        self.pgm_input.load(Ordering::Relaxed)
+    }
+
+    /// Raw atomic value (used for dirty-checking).
+    pub fn pvw_input_packed(&self) -> u64 {
+        self.pvw_input.load(Ordering::Relaxed)
+    }
+
+    /// Set PGM input, or clear it with `None` (bus shows a PiP instead).
+    pub fn set_pgm_input(&self, input: Option<usize>) {
+        let v = input.map(|i| i as u64).unwrap_or(NO_SOURCE);
+        self.pgm_input.store(v, Ordering::Relaxed);
+    }
+
+    /// Set PVW input, or clear it with `None` (bus shows a PiP instead).
+    pub fn set_pvw_input(&self, input: Option<usize>) {
+        let v = input.map(|i| i as u64).unwrap_or(NO_SOURCE);
+        self.pvw_input.store(v, Ordering::Relaxed);
     }
 
     /// Get the multiview overlay alpha (0.0–1.0).
@@ -306,9 +421,6 @@ const PGM_G: f64 = 0.0;
 const PGM_B: f64 = 1.0; // want B=0 in output → feed to cairo R channel
 
 // Yellow for background indicator: want output R=1.0, G=0.8, B=0
-const BG_R: f64 = 0.0; // fed to cairo R channel → outputs as B=0
-const BG_G: f64 = 0.8;
-const BG_B: f64 = 1.0; // fed to cairo B channel → outputs as R=1.0
 
 const GRAY: f64 = 0.5;
 
@@ -464,7 +576,6 @@ pub struct OverlayRenderer {
     last_overlay_data: Option<Arc<[u8]>>,
     last_pgm: u64,
     last_pvw: u64,
-    last_bg: u64,
     last_ftb: bool,
     last_clock_secs: u64,
     /// Meter state hash from the last render; used to avoid re-rendering when
@@ -472,6 +583,10 @@ pub struct OverlayRenderer {
     last_meters_hash: u64,
     /// Whether meters were on at the last render.
     last_show_vu: bool,
+    /// Previous PGM-on-PiP index packed (NO_PIP if PGM was an input).
+    last_pgm_pip: u64,
+    /// Previous PVW-on-PiP index packed (NO_PIP if PVW was an input).
+    last_pvw_pip: u64,
 }
 
 // SAFETY: OverlayRenderer is accessed via Mutex from the timer thread and API
@@ -497,11 +612,12 @@ impl OverlayRenderer {
             last_overlay_data: None,
             last_pgm: u64::MAX,
             last_pvw: u64::MAX,
-            last_bg: u64::MAX - 1,
             last_ftb: false,
             last_clock_secs: u64::MAX,
             last_meters_hash: u64::MAX,
             last_show_vu: false,
+            last_pgm_pip: u64::MAX - 2,
+            last_pvw_pip: u64::MAX - 2,
         }
     }
 
@@ -511,10 +627,11 @@ impl OverlayRenderer {
     /// so the multiview compositor has a steady stream of overlay buffers and
     /// does not stall waiting for the overlay pad.
     pub fn render_if_dirty(&mut self) -> bool {
-        let pgm_packed = self.state.pgm_group_packed();
-        let pvw_packed = self.state.pvw_group_packed();
-        let bg_packed = self.state.background_input_packed();
+        let pgm_packed = self.state.pgm_input_packed();
+        let pvw_packed = self.state.pvw_input_packed();
         let ftb = self.state.ftb_active.load(Ordering::Relaxed);
+        let pgm_pip_packed = self.state.pgm_pip_packed();
+        let pvw_pip_packed = self.state.pvw_pip_packed();
         let (h, m, s) = self.state.wall_clock_hms();
         let clock_secs = h as u64 * 3600 + m as u64 * 60 + s as u64;
         let show_vu = self.state.show_vu_meters();
@@ -522,25 +639,25 @@ impl OverlayRenderer {
 
         let dirty = self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
-            || self.last_bg != bg_packed
             || self.last_ftb != ftb
+            || self.last_pgm_pip != pgm_pip_packed
+            || self.last_pvw_pip != pvw_pip_packed
             || self.last_clock_secs != clock_secs
             || self.last_show_vu != show_vu
             || (show_vu && self.last_meters_hash != meters_hash);
 
         if dirty {
-            let pgm_group = vision_mixer::unpack_source_group(pgm_packed);
-            let pvw_group = vision_mixer::unpack_source_group(pvw_packed);
-            let bg = self.state.background_input();
+            let pgm = (pgm_packed != NO_SOURCE).then_some(pgm_packed as usize);
+            let pvw = (pvw_packed != NO_SOURCE).then_some(pvw_packed as usize);
 
             let t0 = std::time::Instant::now();
-            let pushed = self.push_frame(&pgm_group, &pvw_group, bg, ftb, h, m, s);
+            let pushed = self.push_frame(pgm, pvw, ftb, h, m, s);
             let elapsed = t0.elapsed();
             debug!(
                 "Overlay render+push: {:.1}ms (pgm={:?}, pvw={:?}, ftb={}, pushed={})",
                 elapsed.as_secs_f64() * 1000.0,
-                pgm_group,
-                pvw_group,
+                pgm,
+                pvw,
                 ftb,
                 pushed
             );
@@ -548,8 +665,9 @@ impl OverlayRenderer {
             if pushed {
                 self.last_pgm = pgm_packed;
                 self.last_pvw = pvw_packed;
-                self.last_bg = bg_packed;
                 self.last_ftb = ftb;
+                self.last_pgm_pip = pgm_pip_packed;
+                self.last_pvw_pip = pvw_pip_packed;
                 self.last_clock_secs = clock_secs;
                 self.last_show_vu = show_vu;
                 self.last_meters_hash = meters_hash;
@@ -564,9 +682,8 @@ impl OverlayRenderer {
     #[allow(clippy::too_many_arguments)]
     fn push_frame(
         &mut self,
-        pgm_group: &[usize],
-        pvw_group: &[usize],
-        bg: Option<usize>,
+        pgm: Option<usize>,
+        pvw: Option<usize>,
         ftb: bool,
         h: u32,
         m: u32,
@@ -592,7 +709,7 @@ impl OverlayRenderer {
             cr.set_operator(cairo::Operator::Clear);
             let _ = cr.paint();
             cr.set_operator(cairo::Operator::Over);
-            render_overlay(&self.state, &cr, pgm_group, pvw_group, bg, ftb, h, m, s);
+            render_overlay(&self.state, &cr, pgm, pvw, ftb, h, m, s);
         }
 
         let t_cairo = t0.elapsed();
@@ -799,9 +916,8 @@ pub fn start_overlay_timer(
 fn render_overlay(
     state: &VisionMixerOverlayState,
     cr: &cairo::Context,
-    pgm_group: &[usize],
-    pvw_group: &[usize],
-    bg: Option<usize>,
+    pgm: Option<usize>,
+    pvw: Option<usize>,
     ftb: bool,
     h: u32,
     m: u32,
@@ -826,19 +942,37 @@ fn render_overlay(
     // --- Thumbnail borders (drawn around full slot including label area) ---
     for i in 0..layout.num_inputs.min(layout.thumbnail_slot_rects.len()) {
         let r = &layout.thumbnail_slot_rects[i];
-        if pgm_group.contains(&i) {
+        if pgm == Some(i) {
             cr.set_source_rgb(PGM_R, PGM_G, PGM_B);
-            cr.set_line_width(layout.thumb_border_width);
-        } else if pvw_group.contains(&i) {
+        } else if pvw == Some(i) {
             cr.set_source_rgb(PVW_R, PVW_G, PVW_B);
-            cr.set_line_width(layout.thumb_border_width);
-        } else if bg == Some(i) {
-            cr.set_source_rgb(BG_R, BG_G, BG_B);
-            cr.set_line_width(layout.thumb_border_width);
         } else {
             cr.set_source_rgb(GRAY, GRAY, GRAY);
-            cr.set_line_width(layout.thumb_border_width);
         }
+        cr.set_line_width(layout.thumb_border_width);
+        cr.rectangle(r.x, r.y, r.w, r.h);
+        let _ = cr.stroke();
+    }
+
+    // --- PiP tile borders ---
+    // Mirror the thumbnail color scheme: red if this PiP is on PGM, green if on
+    // PVW, gray otherwise. PGM wins over PVW if both somehow apply.
+    let pgm_pip_idx = state.pgm_pip();
+    let pvw_pip_idx = state.pvw_pip();
+    for (i, r) in layout
+        .pip_tile_slot_rects
+        .iter()
+        .take(layout.num_pips)
+        .enumerate()
+    {
+        if pgm_pip_idx == Some(i) {
+            cr.set_source_rgb(PGM_R, PGM_G, PGM_B);
+        } else if pvw_pip_idx == Some(i) {
+            cr.set_source_rgb(PVW_R, PVW_G, PVW_B);
+        } else {
+            cr.set_source_rgb(GRAY, GRAY, GRAY);
+        }
+        cr.set_line_width(layout.thumb_border_width);
         cr.rectangle(r.x, r.y, r.w, r.h);
         let _ = cr.stroke();
     }
@@ -861,45 +995,22 @@ fn render_overlay(
             draw_vu_meter(cr, r, peak, decay, layout.scale);
         }
 
-        // PVW meters: one per source in the group, each drawn in the
-        // bottom-left of its sub-tile. Sub-tiles follow the 1/2/3/4-source
-        // layout from `compute_group_sub_rects`.
-        if !pvw_group.is_empty() {
-            let rects = super::layout::compute_group_sub_rects(&layout.pvw_rect, pvw_group.len());
-            for (tile_rect, &src_idx) in rects.iter().zip(pvw_group.iter()) {
-                if let (Some(peak_slot), Some(decay_slot)) = (
-                    state.input_peak.get(src_idx),
-                    state.input_decay.get(src_idx),
-                ) {
-                    let peak = peak_slot.load(Ordering::Relaxed);
-                    let decay = decay_slot.load(Ordering::Relaxed);
-                    draw_vu_meter(cr, tile_rect, peak, decay, layout.scale);
-                }
+        // PVW meter — draw the PVW source's level across the full PVW rect.
+        if let Some(src_idx) = pvw {
+            if let (Some(peak_slot), Some(decay_slot)) = (
+                state.input_peak.get(src_idx),
+                state.input_decay.get(src_idx),
+            ) {
+                let peak = peak_slot.load(Ordering::Relaxed);
+                let decay = decay_slot.load(Ordering::Relaxed);
+                draw_vu_meter(cr, &layout.pvw_rect, peak, decay, layout.scale);
             }
         }
 
-        // PGM meters:
-        //  - single source: one meter in the full PGM rect, driven by the
-        //    dedicated pgm_audio_in port (master PGM mix from the audio mixer).
-        //  - multi-source group: per-tile meters, each showing the
-        //    corresponding source's own audio input.
-        if pgm_group.len() <= 1 {
-            let pgm_peak = state.pgm_peak.load(Ordering::Relaxed);
-            let pgm_decay = state.pgm_decay.load(Ordering::Relaxed);
-            draw_vu_meter(cr, &layout.pgm_rect, pgm_peak, pgm_decay, layout.scale);
-        } else {
-            let rects = super::layout::compute_group_sub_rects(&layout.pgm_rect, pgm_group.len());
-            for (tile_rect, &src_idx) in rects.iter().zip(pgm_group.iter()) {
-                if let (Some(peak_slot), Some(decay_slot)) = (
-                    state.input_peak.get(src_idx),
-                    state.input_decay.get(src_idx),
-                ) {
-                    let peak = peak_slot.load(Ordering::Relaxed);
-                    let decay = decay_slot.load(Ordering::Relaxed);
-                    draw_vu_meter(cr, tile_rect, peak, decay, layout.scale);
-                }
-            }
-        }
+        // PGM meter — master PGM mix from the audio mixer at the full PGM rect.
+        let pgm_peak = state.pgm_peak.load(Ordering::Relaxed);
+        let pgm_decay = state.pgm_decay.load(Ordering::Relaxed);
+        draw_vu_meter(cr, &layout.pgm_rect, pgm_peak, pgm_decay, layout.scale);
     }
 
     // --- Input labels on thumbnails ---
@@ -909,9 +1020,10 @@ fn render_overlay(
     let sc = layout.scale;
     for i in 0..layout.num_inputs.min(layout.label_positions.len()) {
         let pos = &layout.label_positions[i];
+        let label = state.labels.get(i).map_or("", String::as_str);
         draw_label_centered(
             cr,
-            &state.labels[i],
+            label,
             pos.x,
             pos.y,
             0.0,
@@ -923,24 +1035,26 @@ fn render_overlay(
         );
     }
 
-    // --- BG indicator on background source thumbnail ---
-    if let Some(bg_idx) = bg {
-        if bg_idx < layout.thumbnail_rects.len() {
-            let r = &layout.thumbnail_rects[bg_idx];
-            cr.set_font_size(layout.label_font_size * 0.8);
-            draw_label_centered(
-                cr,
-                "BG",
-                r.x + r.w / 2.0,
-                r.y + layout.label_font_size,
-                BG_R,
-                BG_G,
-                BG_B,
-                0.7,
-                2.0 * sc,
-                1.0 * sc,
-            );
-        }
+    // --- PiP tile labels (e.g. "PiP 1") ---
+    for (i, pos) in layout
+        .pip_label_positions
+        .iter()
+        .take(layout.num_pips)
+        .enumerate()
+    {
+        let label = format!("PiP {}", i + 1);
+        draw_label_centered(
+            cr,
+            &label,
+            pos.x,
+            pos.y,
+            0.0,
+            0.0,
+            0.0,
+            0.6,
+            2.0 * sc,
+            2.0 * sc,
+        );
     }
 
     // --- PVW / PGM header labels ---

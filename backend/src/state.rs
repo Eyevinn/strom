@@ -1482,7 +1482,7 @@ impl AppState {
         to_input: usize,
         transition_type: &str,
         duration_ms: u64,
-    ) -> Result<(), PipelineError> {
+    ) -> Result<String, PipelineError> {
         debug!(
             "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
             transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
@@ -1494,7 +1494,7 @@ impl AppState {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
 
-        let (ftb_cancelled, old_pgm_group, new_pgm_group) = manager.trigger_transition(
+        let (ftb_cancelled, old_pgm, new_pgm, actual_kind) = manager.trigger_transition(
             block_instance_id,
             from_input,
             to_input,
@@ -1516,7 +1516,7 @@ impl AppState {
         }
 
         // Sync final alpha values back to flow definition for persistence
-        // Clear ALL input alphas to 0.0, then set active group inputs to 1.0
+        // Clear ALL input alphas to 0.0, then set the active input to 1.0
         if let Some(block_id) = block_instance_id.split(':').next() {
             let mut flows = self.inner.flows.write().await;
             if let Some(flow) = flows.get_mut(flow_id) {
@@ -1531,15 +1531,15 @@ impl AppState {
                     for key in alpha_keys {
                         block.properties.insert(key, PropertyValue::Float(0.0));
                     }
-                    // Set the active inputs (new PGM group)
-                    for &idx in &new_pgm_group {
+                    // Set the active input (new PGM, if any)
+                    if let Some(idx) = new_pgm {
                         block
                             .properties
                             .insert(format!("input_{}_alpha", idx), PropertyValue::Float(1.0));
                     }
                     trace!(
-                        "Synced transition alpha values: all -> 0.0, inputs {:?} -> 1.0",
-                        new_pgm_group
+                        "Synced transition alpha values: all -> 0.0, input {:?} -> 1.0",
+                        new_pgm
                     );
                 }
             }
@@ -1550,7 +1550,7 @@ impl AppState {
         }
 
         // Check if this is a vision mixer block and update multiview accordingly
-        // After take: new PGM = old PVW group, new PVW = old PGM group (swap)
+        // After take: new PGM = old PVW, new PVW = old PGM (swap)
         if let Some(block_id) = block_instance_id.split(':').next() {
             let flows = self.inner.flows.read().await;
             let is_vision_mixer = flows
@@ -1562,32 +1562,34 @@ impl AppState {
 
             if is_vision_mixer {
                 let num_inputs = self.get_vision_mixer_num_inputs(flow_id, block_id).await;
-                let new_pvw_group = old_pgm_group.clone();
+                let new_pvw = old_pgm;
                 let pipelines = self.inner.pipelines.read().await;
                 if let Some(manager) = pipelines.get(flow_id) {
-                    let _ = manager.update_vision_mixer_after_take(
-                        block_id,
-                        &new_pgm_group,
-                        &new_pvw_group,
-                        num_inputs,
-                    );
+                    let _ = manager
+                        .update_vision_mixer_after_take(block_id, new_pgm, new_pvw, num_inputs);
                 }
                 drop(pipelines);
 
-                // Broadcast vision mixer state change
+                // Broadcast vision mixer state change. Reads authoritative
+                // post-take state from the overlay so PiP-aware takes are
+                // reflected (the local new_pgm/new_pvw are input-centric and
+                // don't carry PiP info).
+                let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                    block_instance_id,
+                );
+                let preview_input = overlay.as_ref().and_then(|s| s.pvw_input());
+                let program_input = overlay.as_ref().and_then(|s| s.pgm_input());
+                let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
+                let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
                 self.inner
                     .events
                     .broadcast(StromEvent::VisionMixerStateChanged {
                         flow_id: *flow_id,
                         block_id: block_id.to_string(),
-                        preview_input: strom_types::vision_mixer::group_first(
-                            strom_types::vision_mixer::pack_source_group(&new_pvw_group),
-                        ),
-                        program_input: strom_types::vision_mixer::group_first(
-                            strom_types::vision_mixer::pack_source_group(&new_pgm_group),
-                        ),
-                        preview_inputs: new_pvw_group,
-                        program_inputs: new_pgm_group.clone(),
+                        preview_input,
+                        program_input,
+                        preview_pip,
+                        program_pip,
                     });
             }
         }
@@ -1604,22 +1606,21 @@ impl AppState {
                 duration_ms,
             });
 
-        Ok(())
+        Ok(actual_kind)
     }
 
     /// Select a preview input on a vision mixer block.
     ///
-    /// If `multi` is false, replaces PVW group with a single source.
-    /// If `multi` is true, toggles the input in/out of the PVW group.
+    /// Replaces the PVW source with `input` (clearing any PiP-on-PVW mode).
     ///
-    /// Returns (pvw_group, pgm_group).
+    /// Returns `(new_pvw, current_pgm)`. Either is `None` when the bus is on
+    /// a PiP source.
     pub async fn select_vision_mixer_preview(
         &self,
         flow_id: &FlowId,
         block_instance_id: &str,
         input: usize,
-        multi: bool,
-    ) -> Result<(Vec<usize>, Vec<usize>), PipelineError> {
+    ) -> Result<(Option<usize>, Option<usize>), PipelineError> {
         let pipelines = self.inner.pipelines.read().await;
 
         let manager = pipelines.get(flow_id).ok_or_else(|| {
@@ -1631,24 +1632,61 @@ impl AppState {
             .get_vision_mixer_num_inputs(flow_id, block_instance_id)
             .await;
 
-        let (pvw_group, pgm_group) =
-            manager.select_vision_mixer_preview(block_instance_id, input, num_inputs, multi)?;
+        let (new_pvw, pgm) =
+            manager.select_vision_mixer_preview(block_instance_id, input, num_inputs)?;
 
         drop(pipelines);
 
-        // Broadcast state change event
+        // Broadcast state change event. Reads authoritative state from the
+        // overlay so PiP visibility is reflected alongside the inputs.
+        let overlay =
+            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
+        let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
+        let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
         self.inner
             .events
             .broadcast(StromEvent::VisionMixerStateChanged {
                 flow_id: *flow_id,
                 block_id: block_instance_id.to_string(),
-                preview_input: pvw_group.first().copied().unwrap_or(0),
-                program_input: pgm_group.first().copied().unwrap_or(0),
-                preview_inputs: pvw_group.clone(),
-                program_inputs: pgm_group.clone(),
+                preview_input: new_pvw,
+                program_input: pgm,
+                preview_pip,
+                program_pip,
             });
 
-        Ok((pvw_group, pgm_group))
+        Ok((new_pvw, pgm))
+    }
+
+    /// Select a PiP composition as the preview source on a vision mixer block.
+    pub async fn select_vision_mixer_pip_for_preview(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        pip_idx: usize,
+    ) -> Result<(), PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+        manager.select_vision_mixer_pip_for_preview(block_instance_id, pip_idx)?;
+        Ok(())
+    }
+
+    /// Update a PiP composition (bg + overlays) on a vision mixer block at runtime.
+    pub async fn apply_vision_mixer_pip_config(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        pip_idx: usize,
+        bg: Option<usize>,
+        zones: Vec<strom_types::vision_mixer::Zone>,
+    ) -> Result<(), PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+        manager.apply_vision_mixer_pip_config(block_instance_id, pip_idx, bg, zones)?;
+        Ok(())
     }
 
     /// Get num_inputs for a vision mixer block from the flow definition.
@@ -1664,31 +1702,6 @@ impl AppState {
             .and_then(|flow| flow.blocks.iter().find(|b| b.id == block_instance_id))
             .map(|block| vm_props::parse_num_inputs(&block.properties))
             .unwrap_or(4)
-    }
-
-    /// Set or clear the background source on a vision mixer block.
-    pub async fn set_vision_mixer_background(
-        &self,
-        flow_id: &FlowId,
-        block_instance_id: &str,
-        input: Option<usize>,
-    ) -> Result<Option<usize>, PipelineError> {
-        let pipelines = self.inner.pipelines.read().await;
-        let manager = pipelines.get(flow_id).ok_or_else(|| {
-            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-        })?;
-        manager.set_vision_mixer_background(block_instance_id, input)?;
-        drop(pipelines);
-
-        self.inner
-            .events
-            .broadcast(StromEvent::VisionMixerBackgroundChanged {
-                flow_id: *flow_id,
-                block_id: block_instance_id.to_string(),
-                background_input: input,
-            });
-
-        Ok(input)
     }
 
     /// Toggle a DSK (Downstream Keyer) layer on a vision mixer block.

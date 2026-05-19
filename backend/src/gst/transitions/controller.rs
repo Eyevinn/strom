@@ -1,96 +1,20 @@
-//! Scene transitions using GStreamer Controller API.
-//!
-//! This module provides animated transitions between compositor inputs using
-//! GStreamer's interpolation control source to animate pad properties over time.
+//! `TransitionController` impl — drives compositor pads through plans produced
+//! by [`super::plan_transition`].
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_controller::prelude::*;
 use gstreamer_controller::{DirectControlBinding, InterpolationControlSource, InterpolationMode};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use strom_types::vision_mixer;
 use tracing::{debug, info};
 
-/// Transition type for scene switching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransitionType {
-    /// Instant cut (no animation).
-    Cut,
-    /// Cross-fade via alpha blending.
-    Fade,
-    /// Slide the new input in from the left (old stays in place).
-    SlideLeft,
-    /// Slide the new input in from the right (old stays in place).
-    SlideRight,
-    /// Slide the new input in from the top (old stays in place).
-    SlideUp,
-    /// Slide the new input in from the bottom (old stays in place).
-    SlideDown,
-    /// Push from the left (both move together).
-    PushLeft,
-    /// Push from the right (both move together).
-    PushRight,
-    /// Push from the top (both move together).
-    PushUp,
-    /// Push from the bottom (both move together).
-    PushDown,
-    /// Dip to black then reveal new source.
-    DipToBlack,
-}
-
-impl std::str::FromStr for TransitionType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "cut" => Ok(Self::Cut),
-            "fade" | "dissolve" | "crossfade" => Ok(Self::Fade),
-            "slide_left" | "slideleft" => Ok(Self::SlideLeft),
-            "slide_right" | "slideright" => Ok(Self::SlideRight),
-            "slide_up" | "slideup" => Ok(Self::SlideUp),
-            "slide_down" | "slidedown" => Ok(Self::SlideDown),
-            "push_left" | "pushleft" => Ok(Self::PushLeft),
-            "push_right" | "pushright" => Ok(Self::PushRight),
-            "push_up" | "pushup" => Ok(Self::PushUp),
-            "push_down" | "pushdown" => Ok(Self::PushDown),
-            "dip_to_black" | "diptoblack" | "dip" => Ok(Self::DipToBlack),
-            _ => Err(format!("Unknown transition type: {}", s)),
-        }
-    }
-}
-
-/// Error type for transition operations.
-#[derive(Debug, thiserror::Error)]
-pub enum TransitionError {
-    #[error("Mixer element not found: {0}")]
-    MixerNotFound(String),
-    #[error("Pad not found: {0}")]
-    PadNotFound(String),
-    #[error("Invalid input index: {0}")]
-    InvalidInput(usize),
-    #[error("Pipeline not running")]
-    PipelineNotRunning,
-    #[error("Failed to query pipeline position")]
-    PositionQueryFailed,
-    #[error("Failed to create control source: {0}")]
-    ControlSourceError(String),
-    #[error("GStreamer error: {0}")]
-    GstError(String),
-}
-
-/// Manages transitions for a compositor element.
-pub struct TransitionController {
-    /// The compositor/mixer element.
-    mixer: gst::Element,
-    /// Canvas width for position calculations.
-    canvas_width: i32,
-    /// Canvas height for position calculations.
-    canvas_height: i32,
-    /// Active control sources for ongoing transitions (pad_name -> control_sources).
-    /// We keep references to prevent them from being dropped during animation.
-    active_transitions: Arc<Mutex<HashMap<String, Vec<InterpolationControlSource>>>>,
-}
+use super::{
+    plan_transition, PadAction, PadTarget, TransitionController, TransitionError, TransitionType,
+    ZHandling,
+};
 
 impl TransitionController {
     /// Create a new transition controller for a mixer element.
@@ -100,7 +24,17 @@ impl TransitionController {
             canvas_width,
             canvas_height,
             active_transitions: Arc::new(Mutex::new(HashMap::new())),
+            next_transition_id: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Build a unique key for `active_transitions`. The descriptive prefix is
+    /// kept for log/debug readability; the monotonic suffix prevents concurrent
+    /// transitions with the same prefix from overwriting each other's
+    /// `control_sources` Vec.
+    fn next_key(&self, prefix: &str) -> String {
+        let id = self.next_transition_id.fetch_add(1, Ordering::Relaxed);
+        format!("{}_{}", prefix, id)
     }
 
     /// Get a sink pad by input index.
@@ -254,7 +188,7 @@ impl TransitionController {
         control_sources.push(cs_to);
 
         // Store control sources to keep them alive during animation
-        let key = format!("fade_{}_{}", from_input, to_input);
+        let key = self.next_key(&format!("fade_{}_{}", from_input, to_input));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -323,7 +257,7 @@ impl TransitionController {
         let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
         control_sources.push(cs);
 
-        let key = format!("slide_{}_{}", from_input, to_input);
+        let key = self.next_key(&format!("slide_{}_{}", from_input, to_input));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -414,7 +348,7 @@ impl TransitionController {
         let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
         control_sources.push(cs);
 
-        let key = format!("push_{}_{}", from_input, to_input);
+        let key = self.next_key(&format!("push_{}_{}", from_input, to_input));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -519,7 +453,7 @@ impl TransitionController {
         })?;
         control_sources.push(cs_to);
 
-        let key = format!("dip_{}_{}", from_input, to_input);
+        let key = self.next_key(&format!("dip_{}_{}", from_input, to_input));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -650,9 +584,11 @@ impl TransitionController {
         Ok(cs)
     }
 
-    /// Remove all control bindings from a pad.
+    /// Remove all control bindings from a pad. Must cover every property the
+    /// transition setup helpers can bind: alpha (fades + step-off), xpos/ypos/
+    /// width/height (position animation), and zorder (morph z lift/step).
     fn clear_control_bindings(&self, pad: &gst::Pad) {
-        for prop in ["alpha", "xpos", "ypos", "width", "height"] {
+        for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
             if let Some(binding) = pad.control_binding(prop) {
                 pad.remove_control_binding(&binding);
                 debug!("Removed {} control binding from pad {}", prop, pad.name());
@@ -660,55 +596,247 @@ impl TransitionController {
         }
     }
 
-    /// Perform a cross-fade transition between two source groups.
+    /// Animate a transition between two pad compositions ("PiP morph" style).
     ///
-    /// Fades out all pads in `from_group` and fades in all pads in `to_group`.
-    /// The to_group pads should already have their positions set before calling this.
-    pub fn transition_groups(
+    /// Targets are `(pad_idx, x, y, w, h, zorder)`. The behaviour per pad:
+    ///   - **Shared (in both old and new)**: position+size animates from old →
+    ///     new linearly with ease-in-out, alpha stays 1, zorder snaps to new.
+    ///     This drives the "PiP zoom" effect — a source that's fullscreen on
+    ///     PGM and an overlay in the new PiP smoothly scales/translates between
+    ///     the two layouts.
+    ///   - **Incoming-only (fresh) pads**: pre-positioned at the new geometry
+    ///     with alpha=1 immediately. They sit behind the shared pad in z-order
+    ///     and are gradually revealed as the shared pad shrinks/moves.
+    ///   - **Outgoing-only (departing) pads**: stay at their current geometry
+    ///     with alpha=1 throughout the animation (the shared pad covers them
+    ///     as it grows). At `end_time` they step to alpha=0 so the final state
+    ///     is consistent with the new composition.
+    pub fn animate_pad_transition(
         &self,
-        from_group: &[usize],
-        to_group: &[usize],
+        outgoing: &[PadTarget],
+        incoming: &[PadTarget],
         duration_ms: u64,
         pipeline: &gst::Pipeline,
     ) -> Result<(), TransitionError> {
-        // Clean up any previous transitions
-        if let Ok(mut transitions) = self.active_transitions.lock() {
-            transitions.clear();
-        }
-
-        // Adjust for pipeline latency so keyframes align with compositor processing
         let current_time = self.query_stream_time(pipeline)?;
         let end_time = current_time + gst::ClockTime::from_mseconds(duration_ms);
 
+        let plan = plan_transition(outgoing, incoming);
         let mut control_sources = Vec::new();
 
-        // Fade out all from_group pads
-        for &idx in from_group {
-            let pad = self.get_sink_pad(idx)?;
+        for (idx, action) in &plan {
+            let pad = self.get_sink_pad(*idx)?;
             self.clear_control_bindings(&pad);
-            let cs = self.setup_alpha_animation(&pad, current_time, end_time, 1.0, 0.0)?;
-            control_sources.push(cs);
+
+            match *action {
+                PadAction::Morph {
+                    from_x,
+                    from_y,
+                    from_w,
+                    from_h,
+                    to_x,
+                    to_y,
+                    to_w,
+                    to_h,
+                    z_handling,
+                } => {
+                    pad.set_property("alpha", 1.0f64);
+                    match z_handling {
+                        ZHandling::SnapToNew(z) => pad.set_property("zorder", z),
+                        ZHandling::LiftAndStep { new_z } => {
+                            // Lift to TRANSITION_FOREGROUND_ZORDER + new_z so multiple
+                            // simultaneously-morphing pads keep their relative target
+                            // ordering throughout the lift. Otherwise both would sit at
+                            // the same flat lifted z and ties would be broken by pad
+                            // index — when they snap back to their real new_z values at
+                            // end_time, the relative order can flip and a pad that was
+                            // visually behind suddenly jumps in front.
+                            let lifted = vision_mixer::TRANSITION_FOREGROUND_ZORDER + new_z;
+                            pad.set_property("zorder", lifted);
+                            control_sources.push(self.setup_zorder_step(
+                                &pad,
+                                current_time,
+                                end_time,
+                                lifted,
+                                new_z,
+                            )?);
+                        }
+                    }
+                    pad.set_property("xpos", from_x);
+                    pad.set_property("ypos", from_y);
+                    pad.set_property("width", from_w);
+                    pad.set_property("height", from_h);
+                    control_sources.push(self.setup_int_animation(
+                        &pad,
+                        "xpos",
+                        current_time,
+                        end_time,
+                        from_x,
+                        to_x,
+                    )?);
+                    control_sources.push(self.setup_int_animation(
+                        &pad,
+                        "ypos",
+                        current_time,
+                        end_time,
+                        from_y,
+                        to_y,
+                    )?);
+                    control_sources.push(self.setup_int_animation(
+                        &pad,
+                        "width",
+                        current_time,
+                        end_time,
+                        from_w,
+                        to_w,
+                    )?);
+                    control_sources.push(self.setup_int_animation(
+                        &pad,
+                        "height",
+                        current_time,
+                        end_time,
+                        from_h,
+                        to_h,
+                    )?);
+                }
+                PadAction::AffirmStatic { x, y, w, h, zorder } => {
+                    pad.set_property("alpha", 1.0f64);
+                    pad.set_property("zorder", zorder);
+                    pad.set_property("xpos", x);
+                    pad.set_property("ypos", y);
+                    pad.set_property("width", w);
+                    pad.set_property("height", h);
+                }
+                PadAction::HoldFullAlpha { x, y, w, h, zorder } => {
+                    pad.set_property("xpos", x);
+                    pad.set_property("ypos", y);
+                    pad.set_property("width", w);
+                    pad.set_property("height", h);
+                    pad.set_property("zorder", zorder);
+                    pad.set_property("alpha", 1.0f64);
+                }
+                PadAction::FadeIn { x, y, w, h, zorder } => {
+                    pad.set_property("xpos", x);
+                    pad.set_property("ypos", y);
+                    pad.set_property("width", w);
+                    pad.set_property("height", h);
+                    pad.set_property("zorder", zorder);
+                    pad.set_property("alpha", 0.0f64);
+                    control_sources.push(self.setup_alpha_animation(
+                        &pad,
+                        current_time,
+                        end_time,
+                        0.0,
+                        1.0,
+                    )?);
+                }
+                PadAction::FadeOut => {
+                    control_sources.push(self.setup_alpha_animation(
+                        &pad,
+                        current_time,
+                        end_time,
+                        1.0,
+                        0.0,
+                    )?);
+                }
+                PadAction::StepOffAtEnd => {
+                    control_sources.push(self.setup_alpha_step_off(
+                        &pad,
+                        current_time,
+                        end_time,
+                    )?);
+                }
+            }
         }
 
-        // Fade in all to_group pads
-        for &idx in to_group {
-            let pad = self.get_sink_pad(idx)?;
-            self.clear_control_bindings(&pad);
-            let cs = self.setup_alpha_animation(&pad, current_time, end_time, 0.0, 1.0)?;
-            control_sources.push(cs);
-        }
-
-        let key = format!("group_{:?}_{:?}", from_group, to_group);
+        let key = self.next_key(&format!("morph_o{}_i{}", outgoing.len(), incoming.len()));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
 
         info!(
-            "Group fade transition started: {:?} -> {:?} ({}ms)",
-            from_group, to_group, duration_ms
+            "Source morph transition started: out={:?}, in={:?} ({}ms, {} actions)",
+            outgoing.iter().map(|t| t.pad_idx).collect::<Vec<_>>(),
+            incoming.iter().map(|t| t.pad_idx).collect::<Vec<_>>(),
+            duration_ms,
+            plan.len()
         );
 
         Ok(())
+    }
+
+    /// Step a `zorder` property from `start_z` (held during the animation) to
+    /// `end_z` at `end_time` using a None-mode control source. The shared pad
+    /// in a morph transition is lifted to a high zorder for the duration so it
+    /// stays on top of any pad it crosses, then snaps back to its proper zorder
+    /// when the morph completes.
+    fn setup_zorder_step(
+        &self,
+        pad: &gst::Pad,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        start_z: u32,
+        end_z: u32,
+    ) -> Result<InterpolationControlSource, TransitionError> {
+        let cs = InterpolationControlSource::new();
+        cs.set_mode(InterpolationMode::None);
+
+        // DirectControlBinding scales the source value by the property paramspec
+        // range, so we have to express absolute zorder values as a 0..1 ratio.
+        let pspec = pad.find_property("zorder").ok_or_else(|| {
+            TransitionError::ControlSourceError("zorder property not found".to_string())
+        })?;
+        let (min, max) = if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecUInt>() {
+            (p.minimum() as f64, p.maximum() as f64)
+        } else {
+            (0.0, u32::MAX as f64)
+        };
+        let range = (max - min).max(1.0);
+
+        if !cs.set(start_time, (start_z as f64 - min) / range) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set zorder start keyframe".to_string(),
+            ));
+        }
+        if !cs.set(end_time, (end_z as f64 - min) / range) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set zorder end keyframe".to_string(),
+            ));
+        }
+        let binding = DirectControlBinding::new(pad, "zorder", &cs);
+        pad.add_control_binding(&binding).map_err(|e| {
+            TransitionError::GstError(format!("Failed to add zorder control binding: {}", e))
+        })?;
+        Ok(cs)
+    }
+
+    /// Hold `alpha=1` from `start_time` until just before `end_time`, then step
+    /// to `alpha=0`. Used for outgoing-only pads in a morph transition: they
+    /// stay visible (covered by the growing shared pad) and snap off at the end
+    /// so the final composition is clean.
+    fn setup_alpha_step_off(
+        &self,
+        pad: &gst::Pad,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+    ) -> Result<InterpolationControlSource, TransitionError> {
+        let cs = InterpolationControlSource::new();
+        cs.set_mode(InterpolationMode::None); // constant-between-keyframes
+        if !cs.set(start_time, 1.0) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set start keyframe".to_string(),
+            ));
+        }
+        if !cs.set(end_time, 0.0) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set end keyframe".to_string(),
+            ));
+        }
+        let binding = DirectControlBinding::new(pad, "alpha", &cs);
+        pad.add_control_binding(&binding).map_err(|e| {
+            TransitionError::GstError(format!("Failed to add control binding: {}", e))
+        })?;
+        Ok(cs)
     }
 
     /// Clean up completed transitions.
@@ -812,7 +940,7 @@ impl TransitionController {
         }
 
         // Store control sources
-        let key = format!("animate_input_{}", input_index);
+        let key = self.next_key(&format!("animate_input_{}", input_index));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -823,47 +951,5 @@ impl TransitionController {
         );
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_transition_type_from_str() {
-        assert_eq!(
-            "fade".parse::<TransitionType>().ok(),
-            Some(TransitionType::Fade)
-        );
-        assert_eq!(
-            "dissolve".parse::<TransitionType>().ok(),
-            Some(TransitionType::Fade)
-        );
-        assert_eq!(
-            "cut".parse::<TransitionType>().ok(),
-            Some(TransitionType::Cut)
-        );
-        assert_eq!(
-            "slide_left".parse::<TransitionType>().ok(),
-            Some(TransitionType::SlideLeft)
-        );
-        assert_eq!(
-            "push_left".parse::<TransitionType>().ok(),
-            Some(TransitionType::PushLeft)
-        );
-        assert_eq!(
-            "push_right".parse::<TransitionType>().ok(),
-            Some(TransitionType::PushRight)
-        );
-        assert_eq!(
-            "dip_to_black".parse::<TransitionType>().ok(),
-            Some(TransitionType::DipToBlack)
-        );
-        assert_eq!(
-            "dip".parse::<TransitionType>().ok(),
-            Some(TransitionType::DipToBlack)
-        );
-        assert!("unknown".parse::<TransitionType>().is_err());
     }
 }

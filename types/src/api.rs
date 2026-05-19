@@ -126,13 +126,21 @@ fn default_transition_duration() -> u64 {
 }
 
 /// Response after triggering a transition.
+///
+/// Reports *what was done*, not the resulting bus state — for the latter,
+/// listen to the `VisionMixerStateChanged` WebSocket event, which is
+/// broadcast immediately after the take completes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct TransitionResponse {
     /// Success message
     pub message: String,
-    /// The type of transition that was triggered
+    /// The transition type requested by the client.
     pub transition_type: String,
+    /// The transition type that was actually executed. Differs from
+    /// `transition_type` when the engine downgraded the request — e.g.
+    /// Slide/Push across heterogeneous PiP/input sources downgrades to "fade".
+    pub actual_transition_type: String,
     /// Duration of the transition in milliseconds
     pub duration_ms: u64,
 }
@@ -1077,12 +1085,38 @@ impl MediaOperationResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct SelectPreviewRequest {
-    /// Index of the input to set as preview (0-based)
-    pub input: usize,
-    /// If true, toggle the input in/out of the current PVW group (shift+click).
-    /// If false (default), replace the PVW group with just this input.
+    /// Source to place on the PVW bus.
+    pub source: crate::vision_mixer::Source,
+}
+
+/// Request to update a PiP composition (background source + zones).
+///
+/// A PiP is a background source plus zero or more zones. Each zone is a
+/// sub-region with its own current sources (FIFO, oldest first) that
+/// auto-tile inside the zone's rect. See [`crate::vision_mixer::Zone`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct UpdatePipConfigRequest {
+    /// Background input index. Omit/null for no bg.
     #[serde(default)]
-    pub multi: bool,
+    pub bg: Option<usize>,
+    /// Zones in z-order (zone 0 lowest, last zone on top). Sources within a
+    /// zone are also in z-order (oldest first).
+    #[serde(default)]
+    pub zones: Vec<crate::vision_mixer::Zone>,
+}
+
+/// Response after updating a PiP composition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct UpdatePipConfigResponse {
+    pub message: String,
+    pub pip_idx: usize,
+    pub bg: Option<usize>,
+    /// Authoritative zone state. Identical to the request except that
+    /// `NormRect`s are clamped to `[0,1]`. Duplicate sources or out-of-range
+    /// indices are rejected with 400 rather than silently sanitized.
+    pub zones: Vec<crate::vision_mixer::Zone>,
 }
 
 /// Response after selecting a preview source.
@@ -1090,43 +1124,54 @@ pub struct SelectPreviewRequest {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct SelectPreviewResponse {
     pub message: String,
-    /// First source in the PVW group (backward compat).
-    pub preview_input: usize,
-    /// First source in the PGM group (backward compat).
-    pub program_input: usize,
-    /// Full ordered PVW source group.
-    pub preview_inputs: Vec<usize>,
-    /// Full ordered PGM source group.
-    pub program_inputs: Vec<usize>,
+    /// Current PVW input. `None` when PVW is a PiP source.
+    #[serde(default)]
+    pub preview_input: Option<usize>,
+    /// Current PGM input. `None` when PGM is a PiP source.
+    #[serde(default)]
+    pub program_input: Option<usize>,
+    /// PiP index currently displayed on PVW, or `None` if PVW is an input.
+    #[serde(default)]
+    pub preview_pip: Option<usize>,
+    /// PiP index currently displayed on PGM, or `None` if PGM is an input.
+    #[serde(default)]
+    pub program_pip: Option<usize>,
 }
 
-/// Current state of a vision mixer block.
+/// One PiP composition's runtime state (background + zones).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct PipState {
+    /// Background input index, or `None` if no bg is set.
+    pub bg: Option<usize>,
+    /// Overlay zones (FIFO order, oldest first inside each zone).
+    pub zones: Vec<crate::vision_mixer::Zone>,
+}
+
+/// Current runtime state of a vision mixer block.
+///
+/// This is the snapshot a client uses to reconcile on (re)connect when WS
+/// events have not yet arrived. Static config (input count, labels, DSK
+/// count) is *not* included — that lives on the block resource itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct VisionMixerState {
-    pub preview_input: usize,
-    pub program_input: usize,
-    pub preview_inputs: Vec<usize>,
-    pub program_inputs: Vec<usize>,
-    pub num_inputs: usize,
-    pub input_labels: Vec<String>,
-}
-
-/// Request to set or clear the background source on a vision mixer block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct SetBackgroundRequest {
-    /// Source index to use as background (0-based), or null to clear.
-    pub input: Option<usize>,
-}
-
-/// Response after setting/clearing the background source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct SetBackgroundResponse {
-    pub message: String,
-    /// Current background source index, or null if none.
-    pub background_input: Option<usize>,
+    /// Current PGM input. `None` when PGM is a PiP source.
+    pub program_input: Option<usize>,
+    /// Current PVW input. `None` when PVW is a PiP source.
+    pub preview_input: Option<usize>,
+    /// PiP index currently displayed on PGM, or `None` if PGM is an input.
+    pub program_pip: Option<usize>,
+    /// PiP index currently displayed on PVW, or `None` if PVW is an input.
+    pub preview_pip: Option<usize>,
+    /// Whether Fade to Black is currently active.
+    pub ftb_active: bool,
+    /// DSK on/off state, one entry per configured DSK input.
+    pub dsk_enabled: Vec<bool>,
+    /// Multiview overlay alpha (0.0–1.0).
+    pub overlay_alpha: f64,
+    /// Per-PiP runtime state (length = configured `num_pips`).
+    pub pips: Vec<PipState>,
 }
 
 /// Request to set the multiview overlay alpha on a vision mixer block.

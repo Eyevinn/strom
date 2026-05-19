@@ -1,7 +1,7 @@
 use super::{PipelineError, PipelineManager};
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 impl PipelineManager {
     /// Get the distribution compositor canvas size from its capsfilter.
@@ -27,11 +27,16 @@ impl PipelineManager {
 
     /// Trigger a transition on a compositor/mixer block.
     ///
-    /// Uses the server's authoritative PGM/PVW groups from overlay state.
-    /// For single-source groups, uses standard single-pad transitions.
-    /// For multi-source groups, cross-fades between group layouts.
+    /// Reads the authoritative PGM/PVW source from overlay state. When either
+    /// bus is a PiP, takes the source-aware path that animates pads across
+    /// dist + multiview compositors; otherwise runs a standard single-pad
+    /// transition on the mv mixer.
     ///
-    /// Returns (was_ftb_cancelled, old_pgm_group, new_pgm_group).
+    /// Returns `(was_ftb_cancelled, old_pgm, new_pgm, actual_kind)`. The two
+    /// middle elements are `None` when the corresponding bus is a PiP source.
+    /// `actual_kind` is the transition that actually ran — differs from
+    /// `transition_type` when the engine downgraded the request (e.g. Slide
+    /// across heterogeneous PiP/input sources downgrades to "fade").
     pub fn trigger_transition(
         &self,
         block_instance_id: &str,
@@ -39,7 +44,7 @@ impl PipelineManager {
         to_input: usize,
         transition_type: &str,
         duration_ms: u64,
-    ) -> Result<(bool, Vec<usize>, Vec<usize>), PipelineError> {
+    ) -> Result<(bool, Option<usize>, Option<usize>, String), PipelineError> {
         use crate::gst::transitions::{TransitionController, TransitionType};
 
         debug!(
@@ -54,21 +59,25 @@ impl PipelineManager {
             .get(&mixer_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
 
-        // Read authoritative PGM/PVW groups from overlay state
+        // Read authoritative PGM/PVW source from overlay state. `None` means
+        // the bus is a PiP — handled by the PiP-aware branch below.
         let overlay_state =
             crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
         let num_video_inputs = overlay_state
             .as_ref()
             .map(|s| s.num_inputs)
             .unwrap_or(usize::MAX);
-        let old_pgm_group = overlay_state
-            .as_ref()
-            .map(|s| s.pgm_group())
-            .unwrap_or_else(|| vec![from_input]);
-        let new_pgm_group = overlay_state
-            .as_ref()
-            .map(|s| s.pvw_group())
-            .unwrap_or_else(|| vec![to_input]);
+        // When overlay state is missing entirely, fall back to the request-
+        // provided indices. When state exists but reports None (PiP on bus),
+        // pass None through so the PiP-aware branch below handles it.
+        let old_pgm: Option<usize> = match overlay_state.as_ref() {
+            Some(s) => s.pgm_input(),
+            None => Some(from_input),
+        };
+        let new_pgm: Option<usize> = match overlay_state.as_ref() {
+            Some(s) => s.pvw_input(),
+            None => Some(to_input),
+        };
 
         // Auto-cancel FTB if active
         let was_ftb = overlay_state
@@ -87,17 +96,205 @@ impl PipelineManager {
 
         let (canvas_width, canvas_height) = self.dist_canvas_size(block_instance_id);
 
+        // --- PiP-aware Take ---
+        // If either bus is currently a PiP (or will become one via swap), use a
+        // Source-aware path. Cut snaps geometry+alpha; Fade cross-fades alphas
+        // across both compositor regions (dist for PGM, mv PVW for PVW).
+        // Slide/Push/Dip-to-Black with PiP downgrade to Fade — explicit position
+        // animation across heterogeneous Source kinds isn't supported yet.
+        if let Some(state) = overlay_state.as_ref() {
+            let old_pgm_pip = state.pgm_pip();
+            let old_pvw_pip = state.pvw_pip();
+            if old_pgm_pip.is_some() || old_pvw_pip.is_some() {
+                let mv_comp_id = format!("{}:mv_comp", block_instance_id);
+                let mv_comp = self
+                    .elements
+                    .get(&mv_comp_id)
+                    .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
+
+                let parsed = transition_type.parse::<TransitionType>().ok();
+                let is_cut = duration_ms == 0 || matches!(parsed, Some(TransitionType::Cut));
+                // Explicit position animation across heterogeneous Source kinds
+                // (input ↔ PiP) isn't supported yet — Slide/Push/Dip-to-Black
+                // silently degrade to Fade in this branch. Surface that in the
+                // log so operators don't think the requested transition ran.
+                if !is_cut
+                    && !matches!(
+                        parsed,
+                        Some(TransitionType::Fade) | Some(TransitionType::Cut)
+                    )
+                {
+                    info!(
+                        "PiP-aware Take on {}: transition '{}' downgraded to Fade ({}ms) — non-Fade transitions across PiPs not supported yet",
+                        block_instance_id, transition_type, duration_ms
+                    );
+                }
+
+                // Swap Source state PVW ↔ PGM.
+                let new_pgm_pip = old_pvw_pip;
+                let new_pvw_pip = old_pgm_pip;
+                let new_pgm_swap = state.pvw_input();
+                let new_pvw_swap = state.pgm_input();
+
+                let dist_region = (0, 0, canvas_width, canvas_height);
+                let r = &state.layout.pvw_rect;
+                let pvw_region = (r.x as i32, r.y as i32, r.w as i32, r.h as i32);
+                // Source aspect = PGM canvas aspect (typically 16:9). Used to
+                // compute aspect-preserving tile cells so overlays fill cleanly.
+                let src_aspect = if canvas_height > 0 {
+                    canvas_width as f64 / canvas_height as f64
+                } else {
+                    16.0 / 9.0
+                };
+
+                let old_dist_targets = pads_for_source(
+                    state,
+                    old_pgm_pip,
+                    old_pgm,
+                    dist_region,
+                    0,
+                    strom_types::vision_mixer::DIST_PGM_ZORDER,
+                    strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
+                    src_aspect,
+                );
+                let new_dist_targets = pads_for_source(
+                    state,
+                    new_pgm_pip,
+                    new_pgm_swap,
+                    dist_region,
+                    0,
+                    strom_types::vision_mixer::DIST_PGM_ZORDER,
+                    strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
+                    src_aspect,
+                );
+                let old_pvw_targets = pads_for_source(
+                    state,
+                    old_pvw_pip,
+                    state.pvw_input(),
+                    pvw_region,
+                    state.num_inputs + 1,
+                    strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
+                    strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
+                    src_aspect,
+                );
+                let new_pvw_targets = pads_for_source(
+                    state,
+                    new_pvw_pip,
+                    new_pvw_swap,
+                    pvw_region,
+                    state.num_inputs + 1,
+                    strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
+                    strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
+                    src_aspect,
+                );
+
+                if is_cut {
+                    // Snap apply: hide everything in the region, then set new active pads.
+                    if let Some(p) = new_pgm_pip {
+                        apply_pip_layout_to_region(
+                            mixer,
+                            0,
+                            state.num_inputs,
+                            dist_region,
+                            state.pip_bg_input(p),
+                            &state.pip_zones(p),
+                            strom_types::vision_mixer::DIST_PGM_ZORDER,
+                            strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
+                            src_aspect,
+                        );
+                    } else {
+                        apply_input_group_to_region(
+                            mixer,
+                            0,
+                            state.num_inputs,
+                            dist_region,
+                            new_pgm_swap,
+                            strom_types::vision_mixer::DIST_PGM_ZORDER,
+                        );
+                    }
+                    if let Some(p) = new_pvw_pip {
+                        apply_pip_layout_to_region(
+                            mv_comp,
+                            state.num_inputs + 1,
+                            state.num_inputs,
+                            pvw_region,
+                            state.pip_bg_input(p),
+                            &state.pip_zones(p),
+                            strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
+                            strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
+                            src_aspect,
+                        );
+                    } else {
+                        apply_input_group_to_region(
+                            mv_comp,
+                            state.num_inputs + 1,
+                            state.num_inputs,
+                            pvw_region,
+                            new_pvw_swap,
+                            strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
+                        );
+                    }
+                } else {
+                    // Morph transition: sources shared between old and new
+                    // animate position+size; fresh sources alpha-fade in; departing
+                    // sources alpha-fade out. Runs in parallel on both dist (PGM)
+                    // and mv PVW big regions.
+                    let dist_controller =
+                        TransitionController::new(mixer.clone(), canvas_width, canvas_height);
+                    dist_controller
+                        .animate_pad_transition(
+                            &old_dist_targets,
+                            &new_dist_targets,
+                            duration_ms,
+                            &self.pipeline,
+                        )
+                        .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
+
+                    let mv_controller = TransitionController::new(
+                        mv_comp.clone(),
+                        state.layout.canvas_width as i32,
+                        state.layout.canvas_height as i32,
+                    );
+                    mv_controller
+                        .animate_pad_transition(
+                            &old_pvw_targets,
+                            &new_pvw_targets,
+                            duration_ms,
+                            &self.pipeline,
+                        )
+                        .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
+                }
+
+                // Persist new state.
+                state.set_pgm_pip(new_pgm_pip);
+                state.set_pvw_pip(new_pvw_pip);
+                state.set_pgm_input(new_pgm_swap);
+                state.set_pvw_input(new_pvw_swap);
+                crate::blocks::builtin::vision_mixer::overlay::trigger_overlay_update(
+                    block_instance_id,
+                );
+
+                info!(
+                    "PiP-aware Take on {} ({}{}ms): PGM pip={:?} input={:?}; PVW pip={:?} input={:?}",
+                    block_instance_id,
+                    if is_cut { "Cut, " } else { "Fade, " },
+                    duration_ms,
+                    new_pgm_pip,
+                    new_pgm_swap,
+                    new_pvw_pip,
+                    new_pvw_swap,
+                );
+                // After the downgrade guard above, the PiP-aware branch only
+                // ever runs a Cut or a Fade.
+                let actual_kind = if is_cut { "cut" } else { "fade" }.to_string();
+                return Ok((was_ftb, old_pgm, new_pgm_swap, actual_kind));
+            }
+        }
+
         // Reset all video pads to a clean state before the transition:
-        // clear control bindings, restore alpha/position/size for current PGM group.
-        // Background pad stays fullscreen at low z-order.
-        let pgm_rects = strom_types::vision_mixer::compute_group_rects(
-            0,
-            0,
-            canvas_width,
-            canvas_height,
-            old_pgm_group.len(),
-        );
-        let bg_input = overlay_state.as_ref().and_then(|s| s.background_input());
+        // clear control bindings, restore alpha/position/size for the current
+        // PGM input. Single-input PGM only (multi-source compositions are PiPs).
+        let active_pgm_input = old_pgm;
 
         for pad in mixer.sink_pads() {
             let name = pad.name();
@@ -109,31 +306,14 @@ impl PipelineManager {
                         }
                     }
                     if idx < num_video_inputs {
-                        if let Some(slot) = old_pgm_group.iter().position(|&x| x == idx) {
-                            // This pad is in the current PGM group — restore its position
-                            let (x, y, w, h) = pgm_rects.get(slot).copied().unwrap_or((
-                                0,
-                                0,
-                                canvas_width,
-                                canvas_height,
-                            ));
-                            pad.set_property("alpha", 1.0f64);
-                            pad.set_property("xpos", x);
-                            pad.set_property("ypos", y);
-                            pad.set_property("width", w);
-                            pad.set_property("height", h);
-                            pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER);
-                        } else if bg_input == Some(idx) {
-                            // Background source: fullscreen, low z-order
+                        if Some(idx) == active_pgm_input {
+                            // The active PGM input fills the canvas.
                             pad.set_property("alpha", 1.0f64);
                             pad.set_property("xpos", 0i32);
                             pad.set_property("ypos", 0i32);
                             pad.set_property("width", canvas_width);
                             pad.set_property("height", canvas_height);
-                            pad.set_property(
-                                "zorder",
-                                strom_types::vision_mixer::DIST_BACKGROUND_ZORDER,
-                            );
+                            pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER);
                         } else {
                             pad.set_property("alpha", 0.0f64);
                             pad.set_property("xpos", 0i32);
@@ -162,73 +342,21 @@ impl PipelineManager {
             }
         })?;
 
-        // Check if this is a single-to-single transition (use existing optimized path)
-        let single_to_single = old_pgm_group.len() == 1 && new_pgm_group.len() == 1;
+        // Single-input transition only. Multi-source compositions are now
+        // expressed as PiPs which are handled by the PiP-aware branch above.
+        let from = old_pgm.unwrap_or(from_input);
+        let to = new_pgm.unwrap_or(to_input);
+        let controller = TransitionController::new(mixer.clone(), canvas_width, canvas_height);
+        controller
+            .transition(from, to, trans_type, duration_ms, &self.pipeline)
+            .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
 
-        if single_to_single {
-            let from = old_pgm_group[0];
-            let to = new_pgm_group[0];
-            let controller = TransitionController::new(mixer.clone(), canvas_width, canvas_height);
-            controller
-                .transition(from, to, trans_type, duration_ms, &self.pipeline)
-                .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
+        let actual_kind = if duration_ms == 0 {
+            TransitionType::Cut.to_string()
         } else {
-            // Group transition: position incoming pads at target sub-rects, then cross-fade
-            let new_rects = strom_types::vision_mixer::compute_group_rects(
-                0,
-                0,
-                canvas_width,
-                canvas_height,
-                new_pgm_group.len(),
-            );
-
-            // Set incoming pad positions (invisible at alpha=0, above background)
-            for (slot, &idx) in new_pgm_group.iter().enumerate() {
-                if let Some(pad) = mixer.static_pad(&format!("sink_{}", idx)) {
-                    let (x, y, w, h) =
-                        new_rects
-                            .get(slot)
-                            .copied()
-                            .unwrap_or((0, 0, canvas_width, canvas_height));
-                    pad.set_property("xpos", x);
-                    pad.set_property("ypos", y);
-                    pad.set_property("width", w);
-                    pad.set_property("height", h);
-                    pad.set_property("alpha", 0.0f64);
-                    pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER);
-                }
-            }
-
-            // For group transitions, always use fade (slides don't make sense)
-            let effective_type = if matches!(trans_type, TransitionType::Cut) {
-                TransitionType::Cut
-            } else {
-                TransitionType::Fade
-            };
-
-            if effective_type == TransitionType::Cut {
-                // Instant: hide old, show new
-                for &idx in &old_pgm_group {
-                    if let Some(pad) = mixer.static_pad(&format!("sink_{}", idx)) {
-                        pad.set_property("alpha", 0.0f64);
-                    }
-                }
-                for &idx in &new_pgm_group {
-                    if let Some(pad) = mixer.static_pad(&format!("sink_{}", idx)) {
-                        pad.set_property("alpha", 1.0f64);
-                    }
-                }
-            } else {
-                // Fade: cross-fade all outgoing/incoming pads
-                let controller =
-                    TransitionController::new(mixer.clone(), canvas_width, canvas_height);
-                controller
-                    .transition_groups(&old_pgm_group, &new_pgm_group, duration_ms, &self.pipeline)
-                    .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
-            }
-        }
-
-        Ok((was_ftb, old_pgm_group, new_pgm_group))
+            trans_type.to_string()
+        };
+        Ok((was_ftb, old_pgm, new_pgm, actual_kind))
     }
 
     /// Animate a single input's position/size on a compositor block.
@@ -374,18 +502,18 @@ impl PipelineManager {
 
     /// Select a preview input on a vision mixer block.
     ///
-    /// If `multi` is false, replaces the PVW group with a single source (standard behavior).
-    /// If `multi` is true, toggles the input in/out of the current PVW group (shift+click).
+    /// Replaces the PVW source with `input` (clearing any PiP-on-PVW mode).
     ///
-    /// Returns (pvw_group, pgm_group).
+    /// Returns (new_pvw, current_pgm). Both are `None` when the corresponding
+    /// bus is a PiP source; `new_pvw` is always `Some(input)` here since this
+    /// path always switches PVW to an input.
     pub fn select_vision_mixer_preview(
         &self,
         block_instance_id: &str,
         input: usize,
         num_inputs: usize,
-        multi: bool,
-    ) -> Result<(Vec<usize>, Vec<usize>), PipelineError> {
-        use crate::blocks::builtin::vision_mixer::{layout, overlay};
+    ) -> Result<(Option<usize>, Option<usize>), PipelineError> {
+        use crate::blocks::builtin::vision_mixer::overlay;
 
         let mv_comp_id = format!("{}:mv_comp", block_instance_id);
         let mv_comp = self
@@ -400,9 +528,7 @@ impl PipelineManager {
             ))
         })?;
 
-        let old_pvw_group = state.pvw_group();
-        let pgm_group = state.pgm_group();
-
+        // Validate first — don't mutate any state until we know we can complete.
         if input >= num_inputs {
             return Err(PipelineError::InvalidProperty {
                 element: block_instance_id.to_string(),
@@ -411,48 +537,43 @@ impl PipelineManager {
             });
         }
 
-        // Background source is exclusive — can't be used in PVW/PGM groups
-        if state.background_input() == Some(input) {
+        let old_pvw = state.pvw_input();
+        let pgm = state.pgm_input();
+        // Picking a regular input clears any PiP-on-PVW mode. Also hide *all*
+        // PVW-big pads — when leaving PiP mode the previous overlay pads aren't
+        // covered by the single-pad hide below, so we sweep the full range.
+        let leaving_pip = state.pvw_pip().is_some();
+        state.set_pvw_pip(None);
+        if leaving_pip {
+            // Clear any lingering control bindings from a previous PiP-aware
+            // fade, then hide every PVW big pad. The new selection below
+            // re-activates only the chosen one.
+            for i in 0..num_inputs {
+                if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + i)) {
+                    for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+                        if let Some(binding) = pad.control_binding(prop) {
+                            pad.remove_control_binding(&binding);
+                        }
+                    }
+                    pad.set_property("alpha", 0.0f64);
+                }
+            }
+        }
+
+        // PVW is always exactly one input (or a PiP — handled by
+        // select_vision_mixer_pip_for_preview).
+        if pgm == Some(input) && state.pgm_pip().is_none() {
             return Err(PipelineError::InvalidProperty {
                 element: block_instance_id.to_string(),
                 property: "preview_input".to_string(),
-                reason: format!("Input {} is the background source", input),
+                reason: format!("Input {} is already the sole program source", input),
             });
         }
+        let new_pvw = Some(input);
 
-        // Compute new PVW group
-        let new_pvw_group = if multi {
-            // Toggle mode: add/remove the input from the PVW group
-            let mut group = old_pvw_group.clone();
-            if let Some(pos) = group.iter().position(|&x| x == input) {
-                // Remove if present (unless it's the last one)
-                if group.len() > 1 {
-                    group.remove(pos);
-                } else {
-                    return Ok((old_pvw_group, pgm_group));
-                }
-            } else if group.len() < strom_types::vision_mixer::MAX_GROUP_SIZE {
-                group.push(input);
-            }
-            group
-        } else {
-            // Single select: replace entire PVW group
-            // Only block if this input IS the entire PGM (single-source PGM).
-            // If PGM is multi-source, previewing one of its members is fine.
-            if pgm_group.len() == 1 && pgm_group[0] == input {
-                return Err(PipelineError::InvalidProperty {
-                    element: block_instance_id.to_string(),
-                    property: "preview_input".to_string(),
-                    reason: format!("Input {} is already the sole program source", input),
-                });
-            }
-            vec![input]
-        };
-
-        // Update multiview PVW candidate pads
-        // First hide all old PVW pads (and old background PVW pad)
-        for &old_idx in &old_pvw_group {
-            if !pgm_group.contains(&old_idx) {
+        // Hide the old PVW pad (unless it's the same input the new PGM uses).
+        if let Some(old_idx) = old_pvw {
+            if pgm != Some(old_idx) {
                 if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + old_idx))
                 {
                     pad.set_property("alpha", 0.0f64);
@@ -460,64 +581,40 @@ impl PipelineManager {
             }
         }
 
-        let bg = state.background_input();
-
-        // If there's a background, show it fullscreen in the PVW area at lower z-order
-        if let Some(bg_idx) = bg {
-            if !new_pvw_group.contains(&bg_idx) {
-                if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + bg_idx)) {
-                    let r = &state.layout.pvw_rect;
-                    pad.set_property("xpos", r.x as i32);
-                    pad.set_property("ypos", r.y as i32);
-                    pad.set_property("width", r.w as i32);
-                    pad.set_property("height", r.h as i32);
-                    pad.set_property("alpha", 1.0f64);
-                    pad.set_property(
-                        "zorder",
-                        strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER - 1,
-                    );
-                }
-            }
+        // Position the new PVW pad at the PVW big rect.
+        if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + input)) {
+            let r = &state.layout.pvw_rect;
+            pad.set_property("xpos", r.x as i32);
+            pad.set_property("ypos", r.y as i32);
+            pad.set_property("width", r.w as i32);
+            pad.set_property("height", r.h as i32);
+            pad.set_property("alpha", 1.0f64);
+            pad.set_property("zorder", strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER);
         }
 
-        // Position new PVW pads in sub-rects of the PVW area (above background)
-        let sub_rects =
-            layout::compute_group_sub_rects(&state.layout.pvw_rect, new_pvw_group.len());
-        for (slot, &idx) in new_pvw_group.iter().enumerate() {
-            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + idx)) {
-                if let Some(r) = sub_rects.get(slot) {
-                    pad.set_property("xpos", r.x as i32);
-                    pad.set_property("ypos", r.y as i32);
-                    pad.set_property("width", r.w as i32);
-                    pad.set_property("height", r.h as i32);
-                    pad.set_property("alpha", 1.0f64);
-                    pad.set_property("zorder", strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER);
-                }
-            }
-        }
-
-        state.set_pvw_group(&new_pvw_group);
+        state.set_pvw_input(new_pvw);
         overlay::trigger_overlay_update(block_instance_id);
 
         info!(
             "Vision mixer {} preview changed: {:?} -> {:?}",
-            block_instance_id, old_pvw_group, new_pvw_group
+            block_instance_id, old_pvw, new_pvw
         );
 
-        Ok((new_pvw_group, pgm_group))
+        Ok((new_pvw, pgm))
     }
 
     /// Update the multiview compositor after a PGM transition on a vision mixer.
     ///
-    /// Swaps PGM and PVW groups: old PVW group becomes new PGM, old PGM group becomes new PVW.
+    /// Swaps PGM and PVW: old PVW becomes new PGM, old PGM becomes new PVW.
+    /// `None` for either side means that bus is showing a PiP.
     pub fn update_vision_mixer_after_take(
         &self,
         block_instance_id: &str,
-        new_pgm_group: &[usize],
-        new_pvw_group: &[usize],
+        new_pgm: Option<usize>,
+        new_pvw: Option<usize>,
         num_inputs: usize,
     ) -> Result<(), PipelineError> {
-        use crate::blocks::builtin::vision_mixer::{layout, overlay};
+        use crate::blocks::builtin::vision_mixer::overlay;
 
         let mv_comp_id = format!("{}:mv_comp", block_instance_id);
         let mv_comp = self
@@ -532,138 +629,60 @@ impl PipelineManager {
             ))
         })?;
 
+        // Skip this entirely when PiP is involved on either bus — the PiP-aware
+        // path in trigger_transition has already configured the right pads
+        // (bg + overlays at proper geometry). Running the legacy single-input
+        // logic here would wipe the PiP composition on PVW big.
+        if state.pgm_pip().is_some() || state.pvw_pip().is_some() {
+            // Still persist the input state so cairo overlay stays consistent.
+            state.set_pgm_input(new_pgm);
+            state.set_pvw_input(new_pvw);
+            overlay::trigger_overlay_update(block_instance_id);
+            return Ok(());
+        }
+
         // PGM big display (sink_N) is fed from tee_pgm — it always shows the dist_comp
         // output automatically, so no pad manipulation needed for PGM.
-        // Only update PVW: hide all old PVW pads, show new PVW group pads.
+        // Only update PVW: hide all old PVW pads, show new PVW pad.
 
-        // Hide all PVW candidate pads first
+        // Hide all PVW candidate pads first. Clear any control bindings too —
+        // a previous fade may have left lingering bindings that would otherwise
+        // override our property writes below.
         for i in 0..num_inputs {
             if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + i)) {
+                for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+                    if let Some(binding) = pad.control_binding(prop) {
+                        pad.remove_control_binding(&binding);
+                    }
+                }
                 pad.set_property("alpha", 0.0f64);
             }
         }
 
-        let bg = state.background_input();
-
-        // If there's a background, show it fullscreen in the PVW area at lower z-order
-        if let Some(bg_idx) = bg {
-            if !new_pvw_group.contains(&bg_idx) {
-                if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + bg_idx)) {
-                    let r = &state.layout.pvw_rect;
-                    pad.set_property("xpos", r.x as i32);
-                    pad.set_property("ypos", r.y as i32);
-                    pad.set_property("width", r.w as i32);
-                    pad.set_property("height", r.h as i32);
-                    pad.set_property("alpha", 1.0f64);
-                    pad.set_property(
-                        "zorder",
-                        strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER - 1,
-                    );
-                }
-            }
-        }
-
-        // Position new PVW group in sub-rects of the PVW area (above background)
-        let sub_rects =
-            layout::compute_group_sub_rects(&state.layout.pvw_rect, new_pvw_group.len());
-        for (slot, &idx) in new_pvw_group.iter().enumerate() {
-            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + idx)) {
-                if let Some(r) = sub_rects.get(slot) {
-                    pad.set_property("xpos", r.x as i32);
-                    pad.set_property("ypos", r.y as i32);
-                    pad.set_property("width", r.w as i32);
-                    pad.set_property("height", r.h as i32);
-                    pad.set_property("alpha", 1.0f64);
-                    pad.set_property("zorder", strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER);
-                }
+        // Position the new PVW pad at the PVW big rect (single input only —
+        // multi-source compositions are PiPs).
+        if let Some(active) = new_pvw {
+            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + active)) {
+                let r = &state.layout.pvw_rect;
+                pad.set_property("xpos", r.x as i32);
+                pad.set_property("ypos", r.y as i32);
+                pad.set_property("width", r.w as i32);
+                pad.set_property("height", r.h as i32);
+                pad.set_property("alpha", 1.0f64);
+                pad.set_property("zorder", strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER);
             }
         }
 
         // Update state
-        state.set_pgm_group(new_pgm_group);
-        state.set_pvw_group(new_pvw_group);
+        state.set_pgm_input(new_pgm);
+        state.set_pvw_input(new_pvw);
 
         overlay::trigger_overlay_update(block_instance_id);
 
         info!(
             "Vision mixer {} take: PGM -> {:?}, PVW -> {:?}",
-            block_instance_id, new_pgm_group, new_pvw_group
+            block_instance_id, new_pgm, new_pvw
         );
-
-        Ok(())
-    }
-
-    /// Set or clear the background source on a vision mixer block.
-    ///
-    /// The background source is placed fullscreen at a low z-order on the distribution
-    /// compositor, behind the PGM group sources. Visible through gaps in split-screen layouts.
-    pub fn set_vision_mixer_background(
-        &self,
-        block_instance_id: &str,
-        input: Option<usize>,
-    ) -> Result<(), PipelineError> {
-        use crate::blocks::builtin::vision_mixer::overlay;
-        use strom_types::vision_mixer;
-
-        let mixer_id = format!("{}:mixer", block_instance_id);
-        let mixer = self
-            .elements
-            .get(&mixer_id)
-            .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
-
-        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
-            PipelineError::ElementNotFound(format!(
-                "Vision mixer overlay state not found for {}",
-                block_instance_id
-            ))
-        })?;
-
-        let (canvas_width, canvas_height) = self.dist_canvas_size(block_instance_id);
-
-        // Clear old background pad (if any)
-        if let Some(old_bg) = state.background_input() {
-            if let Some(pad) = mixer.static_pad(&format!("sink_{}", old_bg)) {
-                pad.set_property("alpha", 0.0f64);
-            }
-        }
-
-        // Set new background pad
-        if let Some(bg_idx) = input {
-            if bg_idx >= state.num_inputs {
-                return Err(PipelineError::InvalidProperty {
-                    element: block_instance_id.to_string(),
-                    property: "background_input".to_string(),
-                    reason: format!(
-                        "Input {} out of range (max {})",
-                        bg_idx,
-                        state.num_inputs - 1
-                    ),
-                });
-            }
-            // Background is exclusive — can't use a source that's in PGM or PVW
-            let pgm_group = state.pgm_group();
-            let pvw_group = state.pvw_group();
-            if pgm_group.contains(&bg_idx) || pvw_group.contains(&bg_idx) {
-                return Err(PipelineError::InvalidProperty {
-                    element: block_instance_id.to_string(),
-                    property: "background_input".to_string(),
-                    reason: format!("Input {} is in use as a PGM/PVW source", bg_idx),
-                });
-            }
-            if let Some(pad) = mixer.static_pad(&format!("sink_{}", bg_idx)) {
-                pad.set_property("xpos", 0i32);
-                pad.set_property("ypos", 0i32);
-                pad.set_property("width", canvas_width);
-                pad.set_property("height", canvas_height);
-                pad.set_property("zorder", vision_mixer::DIST_BACKGROUND_ZORDER);
-                pad.set_property("alpha", 1.0f64);
-            }
-        }
-
-        state.set_background_input(input);
-        overlay::trigger_overlay_update(block_instance_id);
-
-        info!("Vision mixer {} background: {:?}", block_instance_id, input);
 
         Ok(())
     }
@@ -724,8 +743,19 @@ impl PipelineManager {
             .get(&mv_comp_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-        // Overlay pad is the last pad: sink_{2*num_inputs + 1}
-        let pad_name = format!("sink_{}", 2 * num_inputs + 1);
+        // Overlay pad is the last pad on mv_comp. Pad layout:
+        //   sink_0..N-1      : thumbnails
+        //   sink_N           : PGM big (from tee_pgm)
+        //   sink_N+1..2N     : PVW big candidates
+        //   sink_2N+1..2N+P  : PiP-tile candidates (P = num_pips * num_inputs)
+        //   sink_2N+1+P      : cairo overlay  ← this one
+        let num_pips =
+            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id)
+                .as_ref()
+                .map(|s| s.num_pips)
+                .unwrap_or(0);
+        let overlay_idx = 2 * num_inputs + 1 + num_pips * num_inputs;
+        let pad_name = format!("sink_{}", overlay_idx);
         if let Some(pad) = find_pad(mv_comp, &pad_name) {
             pad.set_property("alpha", alpha);
             if let Some(state) =
@@ -775,8 +805,37 @@ impl PipelineManager {
         })?;
 
         let was_active = state.ftb_active.load(std::sync::atomic::Ordering::Relaxed);
-        let pgm_group = state.pgm_group();
+        let pgm = state.pgm_input();
         let now_active = !was_active;
+
+        // When restoring (FTB-off), fade back exactly the pads the current PGM
+        // source occupies on the dist mixer. For input-mode this is one pad;
+        // for PiP-mode it's the bg pad plus one pad per overlay. Computing
+        // this via `pads_for_source` keeps the deactivate path in sync with
+        // the activation rules without duplicating the per-source logic here.
+        let (cw, ch) = self.dist_canvas_size(block_instance_id);
+        let src_aspect = if ch > 0 {
+            cw as f64 / ch as f64
+        } else {
+            16.0 / 9.0
+        };
+        let active_pad_idxs: std::collections::HashSet<usize> = if now_active {
+            std::collections::HashSet::new()
+        } else {
+            pads_for_source(
+                &state,
+                state.pgm_pip(),
+                pgm,
+                (0, 0, cw, ch),
+                0,
+                strom_types::vision_mixer::DIST_PGM_ZORDER,
+                strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
+                src_aspect,
+            )
+            .into_iter()
+            .map(|t| t.pad_idx)
+            .collect()
+        };
 
         // Use mixer position for stream-time (same as transitions).
         // pipeline.query_position() drifts behind the compositor over time.
@@ -792,12 +851,11 @@ impl PipelineManager {
             let name = pad.name();
             if name.starts_with("sink_") {
                 if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
-                    let bg = state.background_input();
                     let (start_alpha, end_alpha) = if now_active {
                         // FTB on: fade current alpha to 0
                         let current = pad.property::<f64>("alpha");
                         (current, 0.0)
-                    } else if pgm_group.contains(&idx) || bg == Some(idx) {
+                    } else if active_pad_idxs.contains(&idx) {
                         (0.0, 1.0)
                     } else if idx >= state.num_inputs {
                         let dsk_idx = idx - state.num_inputs;
@@ -879,6 +937,344 @@ impl PipelineManager {
 
         Ok(now_active)
     }
+
+    /// Update a PiP composition at runtime: new bg + new zone list.
+    ///
+    /// Morphs each affected compositor region (PiP-tile always; PGM/PVW if the
+    /// bus is currently showing this PiP) from its previous pad layout to the
+    /// new one — staying sources animate position+size, fresh sources fade in,
+    /// departing sources fade out.
+    pub fn apply_vision_mixer_pip_config(
+        &self,
+        block_instance_id: &str,
+        pip_idx: usize,
+        bg: Option<usize>,
+        zones: Vec<strom_types::vision_mixer::Zone>,
+    ) -> Result<(), PipelineError> {
+        use crate::blocks::builtin::vision_mixer::overlay;
+        use crate::gst::transitions::TransitionController;
+        use strom_types::vision_mixer;
+
+        const ZONE_MORPH_MS: u64 = 250;
+
+        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
+            PipelineError::ElementNotFound(format!(
+                "Vision mixer overlay state not found for {}",
+                block_instance_id
+            ))
+        })?;
+
+        if pip_idx >= state.num_pips {
+            return Err(PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "pip_idx".to_string(),
+                reason: format!(
+                    "PiP index {} out of range (configured: {})",
+                    pip_idx, state.num_pips
+                ),
+            });
+        }
+
+        // Validate bg + zone sources: indices must be in range, must not
+        // overlap each other, and must not equal bg. Empty zones (no sources)
+        // are allowed — they still hold rect/capacity config. Rects are
+        // clamped to [0,1] (silent — clamping is a layout concern, not
+        // semantic state).
+        if let Some(b) = bg {
+            if b >= state.num_inputs {
+                return Err(PipelineError::InvalidProperty {
+                    element: block_instance_id.to_string(),
+                    property: "bg".to_string(),
+                    reason: format!(
+                        "Background input {} out of range (num_inputs={})",
+                        b, state.num_inputs
+                    ),
+                });
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let zones: Vec<strom_types::vision_mixer::Zone> = zones
+            .into_iter()
+            .map(|z| {
+                for &input in &z.sources {
+                    if input >= state.num_inputs {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!(
+                                "Zone source {} out of range (num_inputs={})",
+                                input, state.num_inputs
+                            ),
+                        });
+                    }
+                    if Some(input) == bg {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!("Zone source {} duplicates bg", input),
+                        });
+                    }
+                    if !seen.insert(input) {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!("Zone source {} appears in more than one zone", input),
+                        });
+                    }
+                }
+                Ok(strom_types::vision_mixer::Zone {
+                    rect: z.rect.map(|r| r.clamped()),
+                    capacity: z.capacity,
+                    sources: z.sources,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+
+        let mv_comp_id = format!("{}:mv_comp", block_instance_id);
+        let mv_comp = self
+            .elements
+            .get(&mv_comp_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
+        let mixer = self.elements.get(&format!("{}:mixer", block_instance_id));
+
+        let (cw, ch) = self.dist_canvas_size(block_instance_id);
+        let src_aspect = if ch > 0 {
+            cw as f64 / ch as f64
+        } else {
+            16.0 / 9.0
+        };
+
+        let on_pgm = state.pgm_pip() == Some(pip_idx);
+        let on_pvw = state.pvw_pip() == Some(pip_idx);
+
+        // ---- 1) Capture OLD pad targets (from current state, before mutation).
+        let pip_tile_rect = state
+            .layout
+            .pip_tile_rects
+            .get(pip_idx)
+            .map(|t| (t.x as i32, t.y as i32, t.w as i32, t.h as i32));
+        let pvw_rect = {
+            let r = &state.layout.pvw_rect;
+            (r.x as i32, r.y as i32, r.w as i32, r.h as i32)
+        };
+        let pip_tile_base = 2 * state.num_inputs + 1 + pip_idx * state.num_inputs;
+
+        let old_tile = pip_tile_rect.map(|reg| {
+            pads_for_source(
+                &state,
+                Some(pip_idx),
+                None,
+                reg,
+                pip_tile_base,
+                vision_mixer::MV_PIP_BG_ZORDER,
+                vision_mixer::MV_PIP_OVERLAY_ZORDER,
+                src_aspect,
+            )
+        });
+        let old_pgm = if on_pgm {
+            Some(pads_for_source(
+                &state,
+                Some(pip_idx),
+                None,
+                (0, 0, cw, ch),
+                0,
+                vision_mixer::DIST_PGM_ZORDER,
+                vision_mixer::DIST_PIP_OVERLAY_ZORDER,
+                src_aspect,
+            ))
+        } else {
+            None
+        };
+        let old_pvw = if on_pvw {
+            Some(pads_for_source(
+                &state,
+                Some(pip_idx),
+                None,
+                pvw_rect,
+                state.num_inputs + 1,
+                vision_mixer::MV_BIG_DISPLAY_ZORDER,
+                vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
+                src_aspect,
+            ))
+        } else {
+            None
+        };
+
+        // ---- 2) Persist new state.
+        state.set_pip_bg_input(pip_idx, bg);
+        state.set_pip_zones(pip_idx, zones.clone());
+        if on_pgm {
+            state.set_pgm_input(bg);
+        }
+        if on_pvw {
+            state.set_pvw_input(bg);
+        }
+
+        // ---- 3) Compute NEW pad targets (after mutation).
+        let new_tile = pip_tile_rect.map(|reg| {
+            pads_for_source(
+                &state,
+                Some(pip_idx),
+                None,
+                reg,
+                pip_tile_base,
+                vision_mixer::MV_PIP_BG_ZORDER,
+                vision_mixer::MV_PIP_OVERLAY_ZORDER,
+                src_aspect,
+            )
+        });
+        let new_pgm = on_pgm.then(|| {
+            pads_for_source(
+                &state,
+                Some(pip_idx),
+                None,
+                (0, 0, cw, ch),
+                0,
+                vision_mixer::DIST_PGM_ZORDER,
+                vision_mixer::DIST_PIP_OVERLAY_ZORDER,
+                src_aspect,
+            )
+        });
+        let new_pvw = on_pvw.then(|| {
+            pads_for_source(
+                &state,
+                Some(pip_idx),
+                None,
+                pvw_rect,
+                state.num_inputs + 1,
+                vision_mixer::MV_BIG_DISPLAY_ZORDER,
+                vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
+                src_aspect,
+            )
+        });
+
+        // ---- 4) Morph each affected region: staying pads animate position+size,
+        // entering pads fade in, departing pads fade out.
+        if let (Some(old_t), Some(new_t)) = (old_tile, new_tile) {
+            let ctrl = TransitionController::new(
+                mv_comp.clone(),
+                state.layout.canvas_width as i32,
+                state.layout.canvas_height as i32,
+            );
+            if let Err(e) =
+                ctrl.animate_pad_transition(&old_t, &new_t, ZONE_MORPH_MS, &self.pipeline)
+            {
+                warn!("PiP tile morph failed: {}", e);
+            }
+        }
+        if let (Some(m), Some(old_p), Some(new_p)) = (mixer, old_pgm, new_pgm) {
+            let ctrl = TransitionController::new(m.clone(), cw, ch);
+            if let Err(e) =
+                ctrl.animate_pad_transition(&old_p, &new_p, ZONE_MORPH_MS, &self.pipeline)
+            {
+                warn!("PGM morph failed: {}", e);
+            }
+        }
+        if let (Some(old_p), Some(new_p)) = (old_pvw, new_pvw) {
+            let ctrl = TransitionController::new(
+                mv_comp.clone(),
+                state.layout.canvas_width as i32,
+                state.layout.canvas_height as i32,
+            );
+            if let Err(e) =
+                ctrl.animate_pad_transition(&old_p, &new_p, ZONE_MORPH_MS, &self.pipeline)
+            {
+                warn!("PVW morph failed: {}", e);
+            }
+        }
+
+        overlay::trigger_overlay_update(block_instance_id);
+
+        info!(
+            "Vision mixer {} PiP {} config updated: bg={:?}, zones={:?}",
+            block_instance_id, pip_idx, bg, zones
+        );
+        Ok(())
+    }
+
+    /// Select a PiP composition as the PVW source.
+    ///
+    /// Hides any input-group PVW pads, then renders the PiP (bg + tiled overlays)
+    /// inside the PVW big rectangle on the multiview compositor.
+    pub fn select_vision_mixer_pip_for_preview(
+        &self,
+        block_instance_id: &str,
+        pip_idx: usize,
+    ) -> Result<(), PipelineError> {
+        use crate::blocks::builtin::vision_mixer::overlay;
+        use strom_types::vision_mixer;
+
+        let state = overlay::get_overlay_state(block_instance_id).ok_or_else(|| {
+            PipelineError::ElementNotFound(format!(
+                "Vision mixer overlay state not found for {}",
+                block_instance_id
+            ))
+        })?;
+
+        if pip_idx >= state.num_pips {
+            return Err(PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "pip_idx".to_string(),
+                reason: format!("PiP index {} out of range", pip_idx),
+            });
+        }
+
+        let mv_comp_id = format!("{}:mv_comp", block_instance_id);
+        let mv_comp = self
+            .elements
+            .get(&mv_comp_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
+
+        // Hide *all* previous PVW big pads — covers both input-group leftovers
+        // and PiP-overlay leftovers when transitioning between source kinds.
+        // Clear control bindings first so the alpha=0 actually takes effect
+        // (a stale binding from a previous morph would otherwise override).
+        for i in 0..state.num_inputs {
+            if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", state.num_inputs + 1 + i)) {
+                for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+                    if let Some(binding) = pad.control_binding(prop) {
+                        pad.remove_control_binding(&binding);
+                    }
+                }
+                pad.set_property("alpha", 0.0f64);
+            }
+        }
+
+        // Mark PVW as PiP. Stash the PiP's bg as the underlying pvw_input so
+        // the non-PiP-aware Take fallback still has a defined source.
+        state.set_pvw_pip(Some(pip_idx));
+        let bg = state.pip_bg_input(pip_idx);
+        let zones = state.pip_zones(pip_idx);
+        state.set_pvw_input(bg);
+
+        // Render PiP layout into the PVW big rectangle.
+        let r = &state.layout.pvw_rect;
+        let (cw, ch) = self.dist_canvas_size(block_instance_id);
+        let src_aspect = if ch > 0 {
+            cw as f64 / ch as f64
+        } else {
+            16.0 / 9.0
+        };
+        apply_pip_layout_to_region(
+            mv_comp,
+            state.num_inputs + 1,
+            state.num_inputs,
+            (r.x as i32, r.y as i32, r.w as i32, r.h as i32),
+            bg,
+            &zones,
+            vision_mixer::MV_BIG_DISPLAY_ZORDER,
+            vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
+            src_aspect,
+        );
+
+        overlay::trigger_overlay_update(block_instance_id);
+
+        info!(
+            "Vision mixer {} PVW set to PiP {}: bg={:?}, zones={:?}",
+            block_instance_id, pip_idx, bg, zones
+        );
+        Ok(())
+    }
 }
 
 /// Find a pad by name on an element, checking both static and request pads.
@@ -890,4 +1286,172 @@ fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pad> {
             .into_iter()
             .find(|p| p.name().as_str() == pad_name)
     })
+}
+
+/// Compute per-pad targets `(pad_idx, x, y, w, h, zorder)` for a Source rendered
+/// into a compositor region. `pad_base` is the index offset of the first input
+/// pad in the region (e.g. 0 for dist_comp, num_inputs+1 for mv_comp PVW big).
+#[allow(clippy::too_many_arguments)]
+fn pads_for_source(
+    state: &crate::blocks::builtin::vision_mixer::overlay::VisionMixerOverlayState,
+    pip: Option<usize>,
+    input: Option<usize>,
+    region: (i32, i32, i32, i32),
+    pad_base: usize,
+    bg_zorder: u32,
+    overlay_zorder: u32,
+    source_aspect: f64,
+) -> Vec<crate::gst::transitions::PadTarget> {
+    use crate::gst::transitions::PadTarget;
+    let (rx, ry, rw, rh) = region;
+    if let Some(p) = pip {
+        let bg = state.pip_bg_input(p);
+        let zones = state.pip_zones(p);
+        let layouts =
+            strom_types::vision_mixer::resolve_zone_pads(rx, ry, rw, rh, &zones, source_aspect);
+        // Defensive dedupe: `apply_vision_mixer_pip_config` already filters bg
+        // out of zone sources, but the on-disk state could become inconsistent
+        // (e.g. legacy config or future code that bypasses the API). Two
+        // PadTargets with the same `pad_idx` would confuse the transition
+        // planner — keep the bg entry, drop any overlapping zone source.
+        let mut out = Vec::new();
+        let mut seen_pad_idxs = std::collections::HashSet::new();
+        if let Some(b) = bg {
+            out.push(PadTarget {
+                pad_idx: pad_base + b,
+                x: rx,
+                y: ry,
+                w: rw,
+                h: rh,
+                zorder: bg_zorder,
+            });
+            seen_pad_idxs.insert(pad_base + b);
+        }
+        for l in &layouts {
+            let pad_idx = pad_base + l.input;
+            if !seen_pad_idxs.insert(pad_idx) {
+                continue;
+            }
+            out.push(PadTarget {
+                pad_idx,
+                x: l.x,
+                y: l.y,
+                w: l.w,
+                h: l.h,
+                zorder: overlay_zorder + l.zorder_offset,
+            });
+        }
+        out
+    } else {
+        // Single-input source (multi-source compositions are PiPs now).
+        input
+            .map(|idx| PadTarget {
+                pad_idx: pad_base + idx,
+                x: rx,
+                y: ry,
+                w: rw,
+                h: rh,
+                zorder: bg_zorder,
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Apply a single-input source layout (fills the region) to a contiguous range
+/// of compositor sink pads. Pads not equal to the active input are hidden.
+fn apply_input_group_to_region(
+    compositor: &gst::Element,
+    pad_base: usize,
+    num_inputs: usize,
+    region: (i32, i32, i32, i32),
+    active: Option<usize>,
+    fg_zorder: u32,
+) {
+    let (rx, ry, rw, rh) = region;
+    for i in 0..num_inputs {
+        let pad_name = format!("sink_{}", pad_base + i);
+        let Some(pad) = find_pad(compositor, &pad_name) else {
+            continue;
+        };
+        // Clear any lingering control bindings from a previous morph/fade so
+        // our set_property writes aren't silently overridden by stale values.
+        for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+            if let Some(binding) = pad.control_binding(prop) {
+                pad.remove_control_binding(&binding);
+            }
+        }
+        if Some(i) == active {
+            pad.set_property("xpos", rx);
+            pad.set_property("ypos", ry);
+            pad.set_property("width", rw);
+            pad.set_property("height", rh);
+            pad.set_property("alpha", 1.0f64);
+            pad.set_property("zorder", fg_zorder);
+        } else {
+            pad.set_property("alpha", 0.0f64);
+        }
+    }
+}
+
+/// Apply a PiP composition (bg fills the region, overlays auto-tile on top) to a
+/// contiguous range of compositor sink pads named `sink_{pad_base..pad_base+num_inputs}`.
+///
+/// Each pad whose input index matches `bg` becomes the background; each pad whose
+/// input is found in `overlays` is positioned at its corresponding tile; all other
+/// pads in the range are hidden (alpha=0).
+#[allow(clippy::too_many_arguments)]
+fn apply_pip_layout_to_region(
+    compositor: &gst::Element,
+    pad_base: usize,
+    num_inputs: usize,
+    region: (i32, i32, i32, i32),
+    bg: Option<usize>,
+    zones: &[strom_types::vision_mixer::Zone],
+    bg_zorder: u32,
+    overlay_zorder: u32,
+    source_aspect: f64,
+) {
+    let (rx, ry, rw, rh) = region;
+    let layouts =
+        strom_types::vision_mixer::resolve_zone_pads(rx, ry, rw, rh, zones, source_aspect);
+    // Fast lookup: input → (x, y, w, h, zorder_offset).
+    let layout_map: std::collections::HashMap<usize, (i32, i32, i32, i32, u32)> = layouts
+        .iter()
+        .map(|l| (l.input, (l.x, l.y, l.w, l.h, l.zorder_offset)))
+        .collect();
+
+    for i in 0..num_inputs {
+        let pad_name = format!("sink_{}", pad_base + i);
+        let Some(pad) = find_pad(compositor, &pad_name) else {
+            continue;
+        };
+        // Clear any lingering control bindings from a previous fade — otherwise
+        // they keep driving the property and our set_property calls below would
+        // be invisible until the next take rebuilds bindings.
+        for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+            if let Some(binding) = pad.control_binding(prop) {
+                pad.remove_control_binding(&binding);
+            }
+        }
+        if Some(i) == bg {
+            pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
+            pad.set_property("xpos", rx);
+            pad.set_property("ypos", ry);
+            pad.set_property("width", rw);
+            pad.set_property("height", rh);
+            pad.set_property("alpha", 1.0f64);
+            pad.set_property("zorder", bg_zorder);
+        } else if let Some(&(ox, oy, ow, oh, off)) = layout_map.get(&i) {
+            pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
+            pad.set_property("xpos", ox);
+            pad.set_property("ypos", oy);
+            pad.set_property("width", ow);
+            pad.set_property("height", oh);
+            pad.set_property("alpha", 1.0f64);
+            pad.set_property("zorder", overlay_zorder + off);
+        } else {
+            pad.set_property("alpha", 0.0f64);
+        }
+    }
 }

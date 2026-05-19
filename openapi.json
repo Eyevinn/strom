@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.4.13-dev4"
+    "version": "0.5.2-dev"
   },
   "paths": {
     "/api/auth/status": {
@@ -817,67 +817,6 @@
         }
       }
     },
-    "/api/flows/{flow_id}/blocks/{block_id}/background": {
-      "post": {
-        "tags": [
-          "flows"
-        ],
-        "summary": "Set or clear the background source on a vision mixer block.",
-        "operationId": "set_background",
-        "parameters": [
-          {
-            "name": "flow_id",
-            "in": "path",
-            "description": "Flow ID (UUID)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "block_id",
-            "in": "path",
-            "description": "Vision mixer block instance ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SetBackgroundRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Background source set/cleared",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SetBackgroundResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/flows/{flow_id}/blocks/{block_id}/dsk": {
       "post": {
         "tags": [
@@ -1099,7 +1038,7 @@
       }
     },
     "/api/flows/{flow_id}/blocks/{block_id}/overlay-alpha": {
-      "post": {
+      "put": {
         "tags": [
           "flows"
         ],
@@ -1148,6 +1087,88 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/pip/{pip_idx}": {
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Update a PiP composition (background + overlay inputs) on a vision mixer block.",
+        "description": "The change is applied live to all places where the PiP is currently visible:\nthe multiview PiP thumbnail tile, plus PGM/PVW if either bus is showing this PiP.",
+        "operationId": "update_pip_config",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pip_idx",
+            "in": "path",
+            "description": "PiP index (0-based)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePipConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "PiP config updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatePipConfigResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow or block not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1457,7 +1478,7 @@
       }
     },
     "/api/flows/{flow_id}/blocks/{block_id}/preview": {
-      "post": {
+      "put": {
         "tags": [
           "flows"
         ],
@@ -1628,6 +1649,58 @@
           },
           "404": {
             "description": "Flow or block not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flows/{flow_id}/blocks/{block_id}/state": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Get the current runtime state of a vision mixer block.",
+        "description": "Reflects the live overlay state — bus inputs, PiP visibility, FTB, DSK,\noverlay alpha, per-PiP composition. Clients use this on (re)connect to\nreconcile state; subsequent changes flow over the `VisionMixerStateChanged`\nWebSocket event.",
+        "operationId": "get_vision_mixer_state",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current vision mixer state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VisionMixerState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Block has no live state (pipeline not running)",
             "content": {
               "application/json": {
                 "schema": {
@@ -6466,6 +6539,34 @@
           }
         }
       },
+      "NormRect": {
+        "type": "object",
+        "description": "Normalized rectangle in container coordinates. Each component is in `0.0..=1.0`.\n`(x, y)` is the top-left corner; `(w, h)` is the size.\n\nUsed to position a PiP overlay slot anywhere inside its parent region without\ncoupling to the output resolution.",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "h": {
+            "type": "number",
+            "format": "float"
+          },
+          "w": {
+            "type": "number",
+            "format": "float"
+          },
+          "x": {
+            "type": "number",
+            "format": "float"
+          },
+          "y": {
+            "type": "number",
+            "format": "float"
+          }
+        }
+      },
       "NtpInfo": {
         "type": "object",
         "description": "NTP clock information (GStreamer GstNtpClock / NetClientClock).\n\nPopulated at read-time from the running NtpClock instance. Values are snapshots\nfrom the clock's internal state at the moment the flow was queried.",
@@ -6668,6 +6769,30 @@
               "$ref": "#/components/schemas/Link"
             },
             "description": "Links between elements"
+          }
+        }
+      },
+      "PipState": {
+        "type": "object",
+        "description": "One PiP composition's runtime state (background + zones).",
+        "required": [
+          "zones"
+        ],
+        "properties": {
+          "bg": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Background input index, or `None` if no bg is set.",
+            "minimum": 0
+          },
+          "zones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Zone"
+            },
+            "description": "Overlay zones (FIFO order, oldest first inside each zone)."
           }
         }
       },
@@ -7258,17 +7383,12 @@
         "type": "object",
         "description": "Request to select a preview source on a vision mixer block.",
         "required": [
-          "input"
+          "source"
         ],
         "properties": {
-          "input": {
-            "type": "integer",
-            "description": "Index of the input to set as preview (0-based)",
-            "minimum": 0
-          },
-          "multi": {
-            "type": "boolean",
-            "description": "If true, toggle the input in/out of the current PVW group (shift+click).\nIf false (default), replace the PVW group with just this input."
+          "source": {
+            "$ref": "#/components/schemas/Source",
+            "description": "Source to place on the PVW bus."
           }
         }
       },
@@ -7276,41 +7396,43 @@
         "type": "object",
         "description": "Response after selecting a preview source.",
         "required": [
-          "message",
-          "preview_input",
-          "program_input",
-          "preview_inputs",
-          "program_inputs"
+          "message"
         ],
         "properties": {
           "message": {
             "type": "string"
           },
           "preview_input": {
-            "type": "integer",
-            "description": "First source in the PVW group (backward compat).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Current PVW input. `None` when PVW is a PiP source.",
             "minimum": 0
           },
-          "preview_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "description": "Full ordered PVW source group."
+          "preview_pip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PiP index currently displayed on PVW, or `None` if PVW is an input.",
+            "minimum": 0
           },
           "program_input": {
-            "type": "integer",
-            "description": "First source in the PGM group (backward compat).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Current PGM input. `None` when PGM is a PiP source.",
             "minimum": 0
           },
-          "program_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "description": "Full ordered PGM source group."
+          "program_pip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PiP index currently displayed on PGM, or `None` if PGM is an input.",
+            "minimum": 0
           }
         }
       },
@@ -7415,40 +7537,6 @@
           "propertyName": "type"
         }
       },
-      "SetBackgroundRequest": {
-        "type": "object",
-        "description": "Request to set or clear the background source on a vision mixer block.",
-        "properties": {
-          "input": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "description": "Source index to use as background (0-based), or null to clear.",
-            "minimum": 0
-          }
-        }
-      },
-      "SetBackgroundResponse": {
-        "type": "object",
-        "description": "Response after setting/clearing the background source.",
-        "required": [
-          "message"
-        ],
-        "properties": {
-          "background_input": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "description": "Current background source index, or null if none.",
-            "minimum": 0
-          },
-          "message": {
-            "type": "string"
-          }
-        }
-      },
       "SetGstLogLevelRequest": {
         "type": "object",
         "description": "Request to change the GStreamer debug level at runtime.",
@@ -7490,6 +7578,39 @@
             "description": "List of file URIs (e.g., \"file:///path/to/video.mp4\")"
           }
         }
+      },
+      "Source": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A regular video input by index.",
+            "required": [
+              "input"
+            ],
+            "properties": {
+              "input": {
+                "type": "integer",
+                "description": "A regular video input by index.",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A configured PiP composition by index.",
+            "required": [
+              "pip"
+            ],
+            "properties": {
+              "pip": {
+                "type": "integer",
+                "description": "A configured PiP composition by index.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "A source that can be assigned to PGM or PVW.\n\nJSON encoding is externally tagged: `{\"input\": 5}` or `{\"pip\": 1}`.\nThe [`FromStr`] / [`fmt::Display`] impls use a separate compact form\n(`\"input:N\"` / `\"pip:N\"`, case-insensitive) for stored block properties."
       },
       "SourceFlowInfo": {
         "type": "object",
@@ -9552,11 +9673,7 @@
                 "description": "Vision mixer PVW/PGM state changed",
                 "required": [
                   "flow_id",
-                  "block_id",
-                  "preview_input",
-                  "program_input",
-                  "preview_inputs",
-                  "program_inputs"
+                  "block_id"
                 ],
                 "properties": {
                   "block_id": {
@@ -9567,30 +9684,36 @@
                     "format": "uuid"
                   },
                   "preview_input": {
-                    "type": "integer",
-                    "description": "First source in PVW group (backward compat).",
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Current PVW input. `None` when PVW is a PiP source.",
                     "minimum": 0
                   },
-                  "preview_inputs": {
-                    "type": "array",
-                    "items": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "description": "Full ordered PVW source group."
+                  "preview_pip": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "PiP index on PVW, or `None` if PVW is an input.",
+                    "minimum": 0
                   },
                   "program_input": {
-                    "type": "integer",
-                    "description": "First source in PGM group (backward compat).",
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Current PGM input. `None` when PGM is a PiP source.",
                     "minimum": 0
                   },
-                  "program_inputs": {
-                    "type": "array",
-                    "items": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "description": "Full ordered PGM source group."
+                  "program_pip": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "PiP index on PGM, or `None` if PGM is an input.",
+                    "minimum": 0
                   }
                 }
               },
@@ -9716,47 +9839,6 @@
                 "type": "string",
                 "enum": [
                   "VisionMixerFtbChanged"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Vision mixer background source changed",
-            "required": [
-              "data",
-              "type"
-            ],
-            "properties": {
-              "data": {
-                "type": "object",
-                "description": "Vision mixer background source changed",
-                "required": [
-                  "flow_id",
-                  "block_id"
-                ],
-                "properties": {
-                  "background_input": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "description": "Background source index, or null if cleared.",
-                    "minimum": 0
-                  },
-                  "block_id": {
-                    "type": "string"
-                  },
-                  "flow_id": {
-                    "type": "string",
-                    "format": "uuid"
-                  }
-                }
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "VisionMixerBackgroundChanged"
                 ]
               }
             }
@@ -10069,13 +10151,18 @@
       },
       "TransitionResponse": {
         "type": "object",
-        "description": "Response after triggering a transition.",
+        "description": "Response after triggering a transition.\n\nReports *what was done*, not the resulting bus state — for the latter,\nlisten to the `VisionMixerStateChanged` WebSocket event, which is\nbroadcast immediately after the take completes.",
         "required": [
           "message",
           "transition_type",
+          "actual_transition_type",
           "duration_ms"
         ],
         "properties": {
+          "actual_transition_type": {
+            "type": "string",
+            "description": "The transition type that was actually executed. Differs from\n`transition_type` when the engine downgraded the request — e.g.\nSlide/Push across heterogeneous PiP/input sources downgrades to \"fade\"."
+          },
           "duration_ms": {
             "type": "integer",
             "format": "int64",
@@ -10088,7 +10175,7 @@
           },
           "transition_type": {
             "type": "string",
-            "description": "The type of transition that was triggered"
+            "description": "The transition type requested by the client."
           }
         }
       },
@@ -10194,6 +10281,59 @@
           }
         }
       },
+      "UpdatePipConfigRequest": {
+        "type": "object",
+        "description": "Request to update a PiP composition (background source + zones).\n\nA PiP is a background source plus zero or more zones. Each zone is a\nsub-region with its own current sources (FIFO, oldest first) that\nauto-tile inside the zone's rect. See [`crate::vision_mixer::Zone`].",
+        "properties": {
+          "bg": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Background input index. Omit/null for no bg.",
+            "minimum": 0
+          },
+          "zones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Zone"
+            },
+            "description": "Zones in z-order (zone 0 lowest, last zone on top). Sources within a\nzone are also in z-order (oldest first)."
+          }
+        }
+      },
+      "UpdatePipConfigResponse": {
+        "type": "object",
+        "description": "Response after updating a PiP composition.",
+        "required": [
+          "message",
+          "pip_idx",
+          "zones"
+        ],
+        "properties": {
+          "bg": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "pip_idx": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "zones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Zone"
+            },
+            "description": "Authoritative zone state. Identical to the request except that\n`NormRect`s are clamped to `[0,1]`. Duplicate sources or out-of-range\nindices are rejected with 400 rather than silently sanitized."
+          }
+        }
+      },
       "UpdatePropertyRequest": {
         "type": "object",
         "description": "Request to update a property on a running pipeline element.",
@@ -10223,47 +10363,68 @@
       },
       "VisionMixerState": {
         "type": "object",
-        "description": "Current state of a vision mixer block.",
+        "description": "Current runtime state of a vision mixer block.\n\nThis is the snapshot a client uses to reconcile on (re)connect when WS\nevents have not yet arrived. Static config (input count, labels, DSK\ncount) is *not* included — that lives on the block resource itself.",
         "required": [
-          "preview_input",
-          "program_input",
-          "preview_inputs",
-          "program_inputs",
-          "num_inputs",
-          "input_labels"
+          "ftb_active",
+          "dsk_enabled",
+          "overlay_alpha",
+          "pips"
         ],
         "properties": {
-          "input_labels": {
+          "dsk_enabled": {
             "type": "array",
             "items": {
-              "type": "string"
-            }
+              "type": "boolean"
+            },
+            "description": "DSK on/off state, one entry per configured DSK input."
           },
-          "num_inputs": {
-            "type": "integer",
-            "minimum": 0
+          "ftb_active": {
+            "type": "boolean",
+            "description": "Whether Fade to Black is currently active."
+          },
+          "overlay_alpha": {
+            "type": "number",
+            "format": "double",
+            "description": "Multiview overlay alpha (0.0–1.0)."
+          },
+          "pips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PipState"
+            },
+            "description": "Per-PiP runtime state (length = configured `num_pips`)."
           },
           "preview_input": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Current PVW input. `None` when PVW is a PiP source.",
             "minimum": 0
           },
-          "preview_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            }
+          "preview_pip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PiP index currently displayed on PVW, or `None` if PVW is an input.",
+            "minimum": 0
           },
           "program_input": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Current PGM input. `None` when PGM is a PiP source.",
             "minimum": 0
           },
-          "program_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            }
+          "program_pip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PiP index currently displayed on PGM, or `None` if PGM is an input.",
+            "minimum": 0
           }
         }
       },
@@ -10406,6 +10567,39 @@
               "$ref": "#/components/schemas/WhepStreamInfo"
             },
             "description": "List of active WHEP streams"
+          }
+        }
+      },
+      "Zone": {
+        "type": "object",
+        "description": "A sub-region of a PiP that hosts one or more overlay sources.\n\nSources inside a zone auto-tile within its `rect` (using\n[`compute_pip_overlay_rects`]) so the zone behaves like a \"mini-PiP\"\nnested inside the parent PiP region. The `capacity` puts a cap on how\nmany sources can occupy the zone; pushing a new source into a full zone\nis expected to evict the oldest (client-side FIFO).",
+        "properties": {
+          "capacity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Max sources allowed in the zone. `None` = unlimited (up to\n[`MAX_PIP_OVERLAYS`]). A capacity of 1 is \"swap mode\": replacing\nthe source animates a cross-fade.",
+            "minimum": 0
+          },
+          "rect": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NormRect",
+                "description": "Where the zone sits within the parent PiP region.\n`None` = fill the entire PiP region."
+              }
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Current sources (FIFO, oldest first). Sources auto-tile within `rect`."
           }
         }
       }

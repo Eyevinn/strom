@@ -823,7 +823,21 @@ impl PropertyInspector {
                                 &mut result,
                             );
                         } else {
+                            // Build skip-set for blocks whose property panel
+                            // grows with a count property: hide entries for
+                            // slots beyond the configured count.
+                            let skip_set = if definition.id == "builtin.vision_mixer" {
+                                Some(Self::vision_mixer_skip_set(block))
+                            } else {
+                                None
+                            };
+
                             for exposed_prop in &definition.exposed_properties {
+                                if let Some(ref skip) = skip_set {
+                                    if skip.contains(exposed_prop.name.as_str()) {
+                                        continue;
+                                    }
+                                }
                                 let changed = Self::show_exposed_property(
                                     ui,
                                     block,
@@ -1304,6 +1318,29 @@ impl PropertyInspector {
         result.local_devices_needed = device_picker_actions.needed;
         result.local_devices_refresh_requested = device_picker_actions.refresh_requested;
         result
+    }
+
+    /// Skip per-input labels for slots beyond the configured `num_inputs`
+    /// so the property panel shows just the inputs in use.
+    fn vision_mixer_skip_set(block: &BlockInstance) -> std::collections::HashSet<String> {
+        use strom_types::vision_mixer::{DEFAULT_NUM_INPUTS, MAX_NUM_INPUTS};
+
+        let num_inputs = block
+            .properties
+            .get("num_inputs")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => s.parse().ok(),
+                PropertyValue::UInt(n) => Some(*n as usize),
+                PropertyValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_NUM_INPUTS);
+
+        let mut skip = std::collections::HashSet::new();
+        for i in num_inputs..MAX_NUM_INPUTS {
+            skip.insert(format!("input_{}_label", i));
+        }
+        skip
     }
 
     /// Show mixer properties grouped into collapsing sections.
