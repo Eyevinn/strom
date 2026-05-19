@@ -54,10 +54,10 @@ pub struct VisionMixerOverlayState {
     pgm_group: AtomicU64,
     /// Current PVW input index, or [`NO_SOURCE`] when PVW shows a PiP composition.
     pvw_group: AtomicU64,
-    /// PiP currently shown on PGM (u64::MAX = PGM is an input group, not a PiP).
+    /// PiP currently shown on PGM (u64::MAX = PGM is an input, not a PiP).
     /// Set at build time from `initial_pgm_source`; cleared/changed via runtime API.
     pgm_pip: AtomicU64,
-    /// PiP currently shown on PVW (u64::MAX = PVW is an input group, not a PiP).
+    /// PiP currently shown on PVW (u64::MAX = PVW is an input, not a PiP).
     pvw_pip: AtomicU64,
     /// Current PiP bg input (u64::MAX = no bg). One entry per configured PiP.
     pub pip_bg: Vec<AtomicU64>,
@@ -115,7 +115,7 @@ pub struct PipInitialState {
 }
 
 /// Sentinel used in [`VisionMixerOverlayState::pgm_pip`] / `pvw_pip` for
-/// "this bus is an input group, not a PiP".
+/// "this bus is an input, not a PiP".
 pub const NO_PIP: u64 = u64::MAX;
 
 /// Sentinel for "no input source on this bus" in [`VisionMixerOverlayState::pgm_group`]
@@ -189,7 +189,7 @@ impl VisionMixerOverlayState {
     }
 
     /// Returns the PiP index currently displayed on PGM, or `None` if PGM
-    /// is an input group.
+    /// is an input.
     pub fn pgm_pip(&self) -> Option<usize> {
         let v = self.pgm_pip.load(Ordering::Relaxed);
         if v == NO_PIP {
@@ -200,7 +200,7 @@ impl VisionMixerOverlayState {
     }
 
     /// Returns the PiP index currently displayed on PVW, or `None` if PVW
-    /// is an input group.
+    /// is an input.
     pub fn pvw_pip(&self) -> Option<usize> {
         let v = self.pvw_pip.load(Ordering::Relaxed);
         if v == NO_PIP {
@@ -210,7 +210,7 @@ impl VisionMixerOverlayState {
         }
     }
 
-    /// Set PGM to be a PiP (or clear it back to input-group mode with `None`).
+    /// Set PGM to be a PiP (or clear it back to input mode with `None`).
     pub fn set_pgm_pip(&self, pip_idx: Option<usize>) {
         self.pgm_pip.store(
             pip_idx.map(|x| x as u64).unwrap_or(NO_PIP),
@@ -218,7 +218,7 @@ impl VisionMixerOverlayState {
         );
     }
 
-    /// Set PVW to be a PiP (or clear it back to input-group mode with `None`).
+    /// Set PVW to be a PiP (or clear it back to input mode with `None`).
     pub fn set_pvw_pip(&self, pip_idx: Option<usize>) {
         self.pvw_pip.store(
             pip_idx.map(|x| x as u64).unwrap_or(NO_PIP),
@@ -298,25 +298,36 @@ impl VisionMixerOverlayState {
             .store(vision_mixer::quantize_db_to_u8(decay_db), Ordering::Relaxed);
     }
 
-    /// Get the PGM source group — a 1-element vec with the current PGM input,
-    /// or empty when PGM has no input (e.g. it's a PiP composition).
-    pub fn pgm_group(&self) -> Vec<usize> {
+    /// Current PGM input, or `None` when PGM is a PiP source.
+    pub fn pgm_input(&self) -> Option<usize> {
         let v = self.pgm_group.load(Ordering::Relaxed);
         if v == NO_SOURCE {
-            Vec::new()
+            None
         } else {
-            vec![v as usize]
+            Some(v as usize)
         }
     }
 
-    /// Get the PVW source group (see [`Self::pgm_group`]).
-    pub fn pvw_group(&self) -> Vec<usize> {
+    /// Current PVW input, or `None` when PVW is a PiP source.
+    pub fn pvw_input(&self) -> Option<usize> {
         let v = self.pvw_group.load(Ordering::Relaxed);
         if v == NO_SOURCE {
-            Vec::new()
+            None
         } else {
-            vec![v as usize]
+            Some(v as usize)
         }
+    }
+
+    /// PGM as a 0-or-1 element vec. Used by the legacy slice-based
+    /// transition helpers in [`crate::gst::pipeline::effects`].
+    pub fn pgm_group(&self) -> Vec<usize> {
+        self.pgm_input().map(|i| vec![i]).unwrap_or_default()
+    }
+
+    /// PVW as a 0-or-1 element vec. Used by the legacy slice-based
+    /// transition helpers in [`crate::gst::pipeline::effects`].
+    pub fn pvw_group(&self) -> Vec<usize> {
+        self.pvw_input().map(|i| vec![i]).unwrap_or_default()
     }
 
     /// Raw atomic value (used for dirty-checking).
@@ -609,9 +620,9 @@ pub struct OverlayRenderer {
     last_meters_hash: u64,
     /// Whether meters were on at the last render.
     last_show_vu: bool,
-    /// Previous PGM-on-PiP index packed (NO_PIP if PGM was an input group).
+    /// Previous PGM-on-PiP index packed (NO_PIP if PGM was an input).
     last_pgm_pip: u64,
-    /// Previous PVW-on-PiP index packed (NO_PIP if PVW was an input group).
+    /// Previous PVW-on-PiP index packed (NO_PIP if PVW was an input).
     last_pvw_pip: u64,
 }
 

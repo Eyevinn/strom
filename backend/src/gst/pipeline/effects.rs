@@ -27,11 +27,17 @@ impl PipelineManager {
 
     /// Trigger a transition on a compositor/mixer block.
     ///
-    /// Uses the server's authoritative PGM/PVW groups from overlay state.
-    /// For single-source groups, uses standard single-pad transitions.
-    /// For multi-source groups, cross-fades between group layouts.
+    /// Reads the authoritative PGM/PVW source from overlay state. When either
+    /// bus is a PiP, takes the source-aware path that animates pads across
+    /// dist + multiview compositors; otherwise runs a standard single-pad
+    /// transition on the mv mixer.
     ///
-    /// Returns (was_ftb_cancelled, old_pgm_group, new_pgm_group).
+    /// Returns `(was_ftb_cancelled, old_pgm, new_pgm, actual_kind)` where the
+    /// two middle elements are 0-or-1 element vecs (legacy slice shape — see
+    /// [`crate::blocks::builtin::vision_mixer::overlay::VisionMixerOverlayState::pgm_group`]).
+    /// `actual_kind` is the transition that actually ran — differs from
+    /// `transition_type` when the engine downgraded the request (e.g. Slide
+    /// across heterogeneous PiP/input sources downgrades to "fade").
     pub fn trigger_transition(
         &self,
         block_instance_id: &str,
@@ -39,7 +45,7 @@ impl PipelineManager {
         to_input: usize,
         transition_type: &str,
         duration_ms: u64,
-    ) -> Result<(bool, Vec<usize>, Vec<usize>), PipelineError> {
+    ) -> Result<(bool, Vec<usize>, Vec<usize>, String), PipelineError> {
         use crate::gst::transitions::{TransitionController, TransitionType};
 
         debug!(
@@ -275,7 +281,10 @@ impl PipelineManager {
                     new_pvw_pip,
                     new_pvw_group_swap,
                 );
-                return Ok((was_ftb, old_pgm_group, new_pgm_group_swap));
+                // After the downgrade guard above, the PiP-aware branch only
+                // ever runs a Cut or a Fade.
+                let actual_kind = if is_cut { "cut" } else { "fade" }.to_string();
+                return Ok((was_ftb, old_pgm_group, new_pgm_group_swap, actual_kind));
             }
         }
 
@@ -339,7 +348,12 @@ impl PipelineManager {
             .transition(from, to, trans_type, duration_ms, &self.pipeline)
             .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
 
-        Ok((was_ftb, old_pgm_group, new_pgm_group))
+        let actual_kind = if duration_ms == 0 {
+            TransitionType::Cut.to_string()
+        } else {
+            trans_type.to_string()
+        };
+        Ok((was_ftb, old_pgm_group, new_pgm_group, actual_kind))
     }
 
     /// Animate a single input's position/size on a compositor block.

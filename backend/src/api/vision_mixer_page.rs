@@ -113,19 +113,20 @@ async fn render_vision_mixer_page(
     let num_dsk_inputs = vm_props::parse_num_dsk_inputs(&vm_block.properties);
     let num_pips = vm_props::parse_num_pips(&vm_block.properties);
 
-    // Get current state from live overlay state or fall back to defaults
+    // Get current state from live overlay state or fall back to defaults.
+    // `None` means the bus is showing a PiP (see `pvw_pip` / `pgm_pip` below).
     let overlay = overlay::get_overlay_state(block_id);
-    let initial_pgm_group = overlay.as_ref().map(|s| s.pgm_group()).unwrap_or_else(|| {
-        vec![vm_props::parse_initial_pgm(
+    let initial_pgm: Option<usize> = overlay.as_ref().map(|s| s.pgm_input()).unwrap_or_else(|| {
+        Some(vm_props::parse_initial_pgm(
             &vm_block.properties,
             num_inputs,
-        )]
+        ))
     });
-    let initial_pvw_group = overlay.as_ref().map(|s| s.pvw_group()).unwrap_or_else(|| {
-        vec![vm_props::parse_initial_pvw(
+    let initial_pvw: Option<usize> = overlay.as_ref().map(|s| s.pvw_input()).unwrap_or_else(|| {
+        Some(vm_props::parse_initial_pvw(
             &vm_block.properties,
             num_inputs,
-        )]
+        ))
     });
     let ftb_active = overlay
         .as_ref()
@@ -166,10 +167,8 @@ async fn render_vision_mixer_page(
         "block_id": block_id,
         "num_inputs": num_inputs,
         "input_labels": labels,
-        "initial_pgm": initial_pgm_group.first().copied().unwrap_or(0),
-        "initial_pvw": initial_pvw_group.first().copied().unwrap_or(1),
-        "initial_pgm_group": initial_pgm_group,
-        "initial_pvw_group": initial_pvw_group,
+        "initial_pgm": initial_pgm,
+        "initial_pvw": initial_pvw,
         "num_dsk_inputs": num_dsk_inputs,
         "ftb_active": ftb_active,
         "dsk_states": dsk_states,

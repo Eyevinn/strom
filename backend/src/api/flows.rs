@@ -1472,7 +1472,7 @@ pub async fn trigger_transition(
         req.transition_type, block_id, flow_id, req.from_input, req.to_input, req.duration_ms
     );
 
-    state
+    let actual_transition_type = state
         .trigger_transition(
             &flow_id,
             &block_id,
@@ -1495,8 +1495,8 @@ pub async fn trigger_transition(
 
     // Read authoritative post-take state so the operator UI can sync (incl. PiP).
     let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id);
-    let program_inputs = overlay.as_ref().map(|s| s.pgm_group()).unwrap_or_default();
-    let preview_inputs = overlay.as_ref().map(|s| s.pvw_group()).unwrap_or_default();
+    let program_input = overlay.as_ref().and_then(|s| s.pgm_input());
+    let preview_input = overlay.as_ref().and_then(|s| s.pvw_input());
     let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
     let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
 
@@ -1506,9 +1506,10 @@ pub async fn trigger_transition(
             req.transition_type, req.from_input, req.to_input
         ),
         transition_type: req.transition_type,
+        actual_transition_type,
         duration_ms: req.duration_ms,
-        program_inputs,
-        preview_inputs,
+        program_input,
+        preview_input,
         program_pip,
         preview_pip,
     }))
@@ -1561,14 +1562,10 @@ pub async fn select_preview(
 
         // Read back authoritative state for response.
         let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id);
-        let pvw_group = overlay.as_ref().map(|s| s.pvw_group()).unwrap_or_default();
-        let pgm_group = overlay.as_ref().map(|s| s.pgm_group()).unwrap_or_default();
         return Ok(Json(strom_types::api::SelectPreviewResponse {
             message: format!("Preview set to PiP {}", pip_idx),
-            preview_input: pvw_group.first().copied().unwrap_or(0),
-            program_input: pgm_group.first().copied().unwrap_or(0),
-            preview_inputs: pvw_group,
-            program_inputs: pgm_group,
+            preview_input: overlay.as_ref().and_then(|s| s.pvw_input()),
+            program_input: overlay.as_ref().and_then(|s| s.pgm_input()),
             preview_pip: Some(pip_idx),
             program_pip: overlay.as_ref().and_then(|s| s.pgm_pip()),
         }));
@@ -1605,10 +1602,8 @@ pub async fn select_preview(
 
     Ok(Json(strom_types::api::SelectPreviewResponse {
         message: format!("Preview set to {:?}", pvw_group),
-        preview_input: pvw_group.first().copied().unwrap_or(0),
-        program_input: pgm_group.first().copied().unwrap_or(0),
-        preview_inputs: pvw_group,
-        program_inputs: pgm_group,
+        preview_input: pvw_group.first().copied(),
+        program_input: pgm_group.first().copied(),
         preview_pip: None,
         program_pip: pgm_pip,
     }))
@@ -1639,6 +1634,21 @@ pub async fn update_pip_config(
     Path((flow_id, block_id, pip_idx)): Path<(FlowId, String, usize)>,
     Json(req): Json<strom_types::api::UpdatePipConfigRequest>,
 ) -> Result<Json<strom_types::api::UpdatePipConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use strom_types::vision_mixer::MAX_PIP_OVERLAYS;
+    if req.overlays.len() > MAX_PIP_OVERLAYS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_details(
+                "Too many PiP overlays",
+                format!(
+                    "Got {} overlays, but MAX_PIP_OVERLAYS is {}",
+                    req.overlays.len(),
+                    MAX_PIP_OVERLAYS
+                ),
+            )),
+        ));
+    }
+
     info!(
         "Updating PiP {} on vision mixer {} in flow {}: bg={:?}, overlays={:?}",
         pip_idx, block_id, flow_id, req.bg, req.overlays

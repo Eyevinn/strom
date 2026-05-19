@@ -131,20 +131,24 @@ fn default_transition_duration() -> u64 {
 pub struct TransitionResponse {
     /// Success message
     pub message: String,
-    /// The type of transition that was triggered
+    /// The transition type requested by the client.
     pub transition_type: String,
+    /// The transition type that was actually executed. Differs from
+    /// `transition_type` when the engine downgraded the request — e.g.
+    /// Slide/Push across heterogeneous PiP/input sources downgrades to "fade".
+    pub actual_transition_type: String,
     /// Duration of the transition in milliseconds
     pub duration_ms: u64,
-    /// PGM input group after the take. Empty when PGM is a PiP source.
+    /// PGM input after the take. `None` when PGM is a PiP source.
     #[serde(default)]
-    pub program_inputs: Vec<usize>,
-    /// PVW input group after the take. Empty when PVW is a PiP source.
+    pub program_input: Option<usize>,
+    /// PVW input after the take. `None` when PVW is a PiP source.
     #[serde(default)]
-    pub preview_inputs: Vec<usize>,
-    /// PiP index on PGM after the take, or None if PGM is an input group.
+    pub preview_input: Option<usize>,
+    /// PiP index on PGM after the take, or `None` if PGM is an input.
     #[serde(default)]
     pub program_pip: Option<usize>,
-    /// PiP index on PVW after the take, or None if PVW is an input group.
+    /// PiP index on PVW after the take, or `None` if PVW is an input.
     #[serde(default)]
     pub preview_pip: Option<usize>,
 }
@@ -1124,32 +1128,18 @@ pub struct UpdatePipConfigResponse {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct SelectPreviewResponse {
     pub message: String,
-    /// First source in the PVW group (backward compat).
-    pub preview_input: usize,
-    /// First source in the PGM group (backward compat).
-    pub program_input: usize,
-    /// Full ordered PVW source group.
-    pub preview_inputs: Vec<usize>,
-    /// Full ordered PGM source group.
-    pub program_inputs: Vec<usize>,
-    /// PiP index currently displayed on PVW, or None if PVW is an input group.
+    /// Current PVW input. `None` when PVW is a PiP source.
+    #[serde(default)]
+    pub preview_input: Option<usize>,
+    /// Current PGM input. `None` when PGM is a PiP source.
+    #[serde(default)]
+    pub program_input: Option<usize>,
+    /// PiP index currently displayed on PVW, or `None` if PVW is an input.
     #[serde(default)]
     pub preview_pip: Option<usize>,
-    /// PiP index currently displayed on PGM, or None.
+    /// PiP index currently displayed on PGM, or `None` if PGM is an input.
     #[serde(default)]
     pub program_pip: Option<usize>,
-}
-
-/// Current state of a vision mixer block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
-pub struct VisionMixerState {
-    pub preview_input: usize,
-    pub program_input: usize,
-    pub preview_inputs: Vec<usize>,
-    pub program_inputs: Vec<usize>,
-    pub num_inputs: usize,
-    pub input_labels: Vec<String>,
 }
 
 /// Request to set the multiview overlay alpha on a vision mixer block.

@@ -7300,56 +7300,42 @@
         "type": "object",
         "description": "Response after selecting a preview source.",
         "required": [
-          "message",
-          "preview_input",
-          "program_input",
-          "preview_inputs",
-          "program_inputs"
+          "message"
         ],
         "properties": {
           "message": {
             "type": "string"
           },
           "preview_input": {
-            "type": "integer",
-            "description": "First source in the PVW group (backward compat).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Current PVW input. `None` when PVW is a PiP source.",
             "minimum": 0
-          },
-          "preview_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "description": "Full ordered PVW source group."
           },
           "preview_pip": {
             "type": [
               "integer",
               "null"
             ],
-            "description": "PiP index currently displayed on PVW, or None if PVW is an input group.",
+            "description": "PiP index currently displayed on PVW, or `None` if PVW is an input.",
             "minimum": 0
           },
           "program_input": {
-            "type": "integer",
-            "description": "First source in the PGM group (backward compat).",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Current PGM input. `None` when PGM is a PiP source.",
             "minimum": 0
-          },
-          "program_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "description": "Full ordered PGM source group."
           },
           "program_pip": {
             "type": [
               "integer",
               "null"
             ],
-            "description": "PiP index currently displayed on PGM, or None.",
+            "description": "PiP index currently displayed on PGM, or `None` if PGM is an input.",
             "minimum": 0
           }
         }
@@ -9558,11 +9544,7 @@
                 "description": "Vision mixer PVW/PGM state changed",
                 "required": [
                   "flow_id",
-                  "block_id",
-                  "preview_input",
-                  "program_input",
-                  "preview_inputs",
-                  "program_inputs"
+                  "block_id"
                 ],
                 "properties": {
                   "block_id": {
@@ -9573,30 +9555,36 @@
                     "format": "uuid"
                   },
                   "preview_input": {
-                    "type": "integer",
-                    "description": "First source in PVW group (backward compat).",
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Current PVW input. `None` when PVW is a PiP source.",
                     "minimum": 0
                   },
-                  "preview_inputs": {
-                    "type": "array",
-                    "items": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "description": "Full ordered PVW source group."
+                  "preview_pip": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "PiP index on PVW, or `None` if PVW is an input.",
+                    "minimum": 0
                   },
                   "program_input": {
-                    "type": "integer",
-                    "description": "First source in PGM group (backward compat).",
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Current PGM input. `None` when PGM is a PiP source.",
                     "minimum": 0
                   },
-                  "program_inputs": {
-                    "type": "array",
-                    "items": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "description": "Full ordered PGM source group."
+                  "program_pip": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "PiP index on PGM, or `None` if PGM is an input.",
+                    "minimum": 0
                   }
                 }
               },
@@ -10038,9 +10026,14 @@
         "required": [
           "message",
           "transition_type",
+          "actual_transition_type",
           "duration_ms"
         ],
         "properties": {
+          "actual_transition_type": {
+            "type": "string",
+            "description": "The transition type that was actually executed. Differs from\n`transition_type` when the engine downgraded the request — e.g.\nSlide/Push across heterogeneous PiP/input sources downgrades to \"fade\"."
+          },
           "duration_ms": {
             "type": "integer",
             "format": "int64",
@@ -10051,41 +10044,41 @@
             "type": "string",
             "description": "Success message"
           },
-          "preview_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "description": "PVW input group after the take. Empty when PVW is a PiP source."
+          "preview_input": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PVW input after the take. `None` when PVW is a PiP source.",
+            "minimum": 0
           },
           "preview_pip": {
             "type": [
               "integer",
               "null"
             ],
-            "description": "PiP index on PVW after the take, or None if PVW is an input group.",
+            "description": "PiP index on PVW after the take, or `None` if PVW is an input.",
             "minimum": 0
           },
-          "program_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "description": "PGM input group after the take. Empty when PGM is a PiP source."
+          "program_input": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "PGM input after the take. `None` when PGM is a PiP source.",
+            "minimum": 0
           },
           "program_pip": {
             "type": [
               "integer",
               "null"
             ],
-            "description": "PiP index on PGM after the take, or None if PGM is an input group.",
+            "description": "PiP index on PGM after the take, or `None` if PGM is an input.",
             "minimum": 0
           },
           "transition_type": {
             "type": "string",
-            "description": "The type of transition that was triggered"
+            "description": "The transition type requested by the client."
           }
         }
       },
@@ -10269,52 +10262,6 @@
           "value": {
             "$ref": "#/components/schemas/PropertyValue",
             "description": "The new value for the property"
-          }
-        }
-      },
-      "VisionMixerState": {
-        "type": "object",
-        "description": "Current state of a vision mixer block.",
-        "required": [
-          "preview_input",
-          "program_input",
-          "preview_inputs",
-          "program_inputs",
-          "num_inputs",
-          "input_labels"
-        ],
-        "properties": {
-          "input_labels": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "num_inputs": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "preview_input": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "preview_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            }
-          },
-          "program_input": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "program_inputs": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            }
           }
         }
       },

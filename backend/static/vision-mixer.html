@@ -561,9 +561,11 @@
         const NUM_PIPS = _cfg.num_pips || 0;
 
         // ---- State ----
-        // Groups: ordered arrays of 0-based input indices (1-4 items each)
-        let currentPgmGroup = _cfg.initial_pgm_group || [_cfg.initial_pgm];
-        let currentPvwGroup = _cfg.initial_pvw_group || [_cfg.initial_pvw];
+        // PGM/PVW source: each bus shows either an input (number) or a PiP (currentPvwPip/currentPgmPip).
+        // Kept as 0-or-1 element arrays internally so UI render code that loops over inputs still works.
+        const _toGroup = (v) => (v != null) ? [v] : [];
+        let currentPgmGroup = _toGroup(_cfg.initial_pgm);
+        let currentPvwGroup = _toGroup(_cfg.initial_pvw);
         let dskEnabled = _cfg.dsk_states || [true, true, true, true];
         // PiPs: array of { bg: int|null, overlays: int[] } per configured PiP.
         let pipConfigs = (_cfg.pips || []).map(p => ({
@@ -609,8 +611,8 @@
             if (currentPvwGroup.length === 1 && currentPvwGroup[0] === input && currentPvwPip == null) return;
             apiPost('/preview', { input })
                 .then(r => {
-                    currentPvwGroup = r.preview_inputs || [r.preview_input];
-                    currentPgmGroup = r.program_inputs || [r.program_input];
+                    currentPvwGroup = _toGroup(r.preview_input);
+                    currentPgmGroup = _toGroup(r.program_input);
                     currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
                     currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
                     updateButtons();
@@ -649,12 +651,16 @@
             }).then(r => {
                 // Reconcile from authoritative server state — covers any clamping
                 // / re-resolution the server did during the take.
-                if (r.program_inputs) currentPgmGroup = r.program_inputs;
-                if (r.preview_inputs) currentPvwGroup = r.preview_inputs;
+                currentPgmGroup = _toGroup(r.program_input);
+                currentPvwGroup = _toGroup(r.preview_input);
                 currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
                 currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
                 updateButtons();
-                setStatus(r.message);
+                const actual = r.actual_transition_type;
+                const note = (actual && actual !== type.toLowerCase())
+                    ? ' (' + r.message + ' — downgraded to ' + actual + ')'
+                    : '';
+                setStatus(r.message + note);
                 setTimeout(() => {
                     transitioning = false;
                     document.getElementById('autoBtn').classList.remove('active');
@@ -862,8 +868,8 @@
         function selectPreviewPip(pipIdx) {
             apiPost('/preview', { input: 0, source: 'pip:' + pipIdx })
                 .then(r => {
-                    currentPvwGroup = r.preview_inputs || [];
-                    currentPgmGroup = r.program_inputs || [];
+                    currentPvwGroup = _toGroup(r.preview_input);
+                    currentPgmGroup = _toGroup(r.program_input);
                     currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
                     currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
                     updateButtons();
@@ -1110,8 +1116,8 @@
                 const match = html.match(/<script id="vm-config" type="application\/json">([\s\S]*?)<\/script>/);
                 if (!match) return;
                 const cfg = JSON.parse(match[1]);
-                currentPgmGroup = cfg.initial_pgm_group || [cfg.initial_pgm];
-                currentPvwGroup = cfg.initial_pvw_group || [cfg.initial_pvw];
+                currentPgmGroup = _toGroup(cfg.initial_pgm);
+                currentPvwGroup = _toGroup(cfg.initial_pvw);
                 ftbActive = cfg.ftb_active || false;
                 dskEnabled = cfg.dsk_states || [true, true, true, true];
                 overlayAlpha = cfg.overlay_alpha != null ? cfg.overlay_alpha : 1.0;
@@ -1140,8 +1146,10 @@
                     if (event.type === 'VisionMixerStateChanged' && event.data) {
                         const d = event.data;
                         if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
-                            currentPvwGroup = d.preview_inputs || [d.preview_input];
-                            currentPgmGroup = d.program_inputs || [d.program_input];
+                            currentPvwGroup = _toGroup(d.preview_input);
+                            currentPgmGroup = _toGroup(d.program_input);
+                            currentPvwPip = (d.preview_pip != null) ? d.preview_pip : null;
+                            currentPgmPip = (d.program_pip != null) ? d.program_pip : null;
                             updateButtons();
                         }
                     }

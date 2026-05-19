@@ -107,14 +107,14 @@ pub const MAX_DSK_INPUTS: usize = 4;
 pub const DEFAULT_DSK_INPUTS: usize = 0;
 
 /// Maximum number of PiP (Picture-in-Picture) tiles rendered virtually in the multiview.
-/// Each PiP consumes one slot in the multiview thumbnail grid alongside the inputs.
+/// Each PiP consumes one tile in the multiview thumbnail grid alongside the inputs.
 pub const MAX_NUM_PIPS: usize = 4;
 
 /// Default number of PiP tiles (0 = no PiP).
 pub const DEFAULT_NUM_PIPS: usize = 0;
 
 /// Maximum number of overlay sources placed on top of the PiP background.
-/// Practically `MAX_NUM_INPUTS - 1` since the bg consumes one input slot.
+/// Capped at `MAX_NUM_INPUTS - 1` because the bg consumes one input.
 /// Auto-tiling supports any 1..=MAX_PIP_OVERLAYS via [`compute_pip_overlay_rects`].
 pub const MAX_PIP_OVERLAYS: usize = MAX_NUM_INPUTS - 1;
 

@@ -15,8 +15,8 @@ use strom_types::api::{
     SetLogLevelRequest, SourceFlowInfo, SrtCallerStats, SrtConnectionStats, SrtMode, SrtRole,
     SrtStats, SrtStatsResponse, SystemClockInfo, SystemInfo, TransitionResponse, TransportStats,
     TriggerTransitionRequest, UpdateFlowPropertiesRequest, UpdatePadPropertyRequest,
-    UpdatePipConfigRequest, UpdatePipConfigResponse, UpdatePropertyRequest, VisionMixerState,
-    WebRtcConnectionStats, WebRtcStats, WebRtcStatsResponse,
+    UpdatePipConfigRequest, UpdatePipConfigResponse, UpdatePropertyRequest, WebRtcConnectionStats,
+    WebRtcStats, WebRtcStatsResponse,
 };
 use strom_types::auth::{LoginRequest, LoginResponse};
 use strom_types::block::{
@@ -231,7 +231,6 @@ use utoipa::OpenApi;
             SelectPreviewResponse,
             UpdatePipConfigRequest,
             UpdatePipConfigResponse,
-            VisionMixerState,
             strom_types::api::MultiviewEndpointResponse,
             OverlayAlphaRequest,
             OverlayAlphaResponse,

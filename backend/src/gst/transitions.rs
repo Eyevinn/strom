@@ -61,6 +61,24 @@ impl std::str::FromStr for TransitionType {
     }
 }
 
+impl std::fmt::Display for TransitionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Cut => "cut",
+            Self::Fade => "fade",
+            Self::SlideLeft => "slide_left",
+            Self::SlideRight => "slide_right",
+            Self::SlideUp => "slide_up",
+            Self::SlideDown => "slide_down",
+            Self::PushLeft => "push_left",
+            Self::PushRight => "push_right",
+            Self::PushUp => "push_up",
+            Self::PushDown => "push_down",
+            Self::DipToBlack => "dip_to_black",
+        })
+    }
+}
+
 /// Error type for transition operations.
 #[derive(Debug, thiserror::Error)]
 pub enum TransitionError {

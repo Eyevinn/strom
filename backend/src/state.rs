@@ -1482,7 +1482,7 @@ impl AppState {
         to_input: usize,
         transition_type: &str,
         duration_ms: u64,
-    ) -> Result<(), PipelineError> {
+    ) -> Result<String, PipelineError> {
         debug!(
             "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
             transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
@@ -1494,13 +1494,14 @@ impl AppState {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
 
-        let (ftb_cancelled, old_pgm_group, new_pgm_group) = manager.trigger_transition(
-            block_instance_id,
-            from_input,
-            to_input,
-            transition_type,
-            duration_ms,
-        )?;
+        let (ftb_cancelled, old_pgm_group, new_pgm_group, actual_kind) = manager
+            .trigger_transition(
+                block_instance_id,
+                from_input,
+                to_input,
+                transition_type,
+                duration_ms,
+            )?;
 
         drop(pipelines);
 
@@ -1574,16 +1575,26 @@ impl AppState {
                 }
                 drop(pipelines);
 
-                // Broadcast vision mixer state change
+                // Broadcast vision mixer state change. Reads authoritative
+                // post-take state from the overlay so PiP-aware takes are
+                // reflected (the *_group locals from the swap path are
+                // input-centric and don't carry PiP info).
+                let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(
+                    block_instance_id,
+                );
+                let preview_input = overlay.as_ref().and_then(|s| s.pvw_input());
+                let program_input = overlay.as_ref().and_then(|s| s.pgm_input());
+                let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
+                let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
                 self.inner
                     .events
                     .broadcast(StromEvent::VisionMixerStateChanged {
                         flow_id: *flow_id,
                         block_id: block_id.to_string(),
-                        preview_input: new_pvw_group.first().copied().unwrap_or(0),
-                        program_input: new_pgm_group.first().copied().unwrap_or(0),
-                        preview_inputs: new_pvw_group,
-                        program_inputs: new_pgm_group.clone(),
+                        preview_input,
+                        program_input,
+                        preview_pip,
+                        program_pip,
                     });
             }
         }
@@ -1600,7 +1611,7 @@ impl AppState {
                 duration_ms,
             });
 
-        Ok(())
+        Ok(actual_kind)
     }
 
     /// Select a preview input on a vision mixer block.
@@ -1631,16 +1642,21 @@ impl AppState {
 
         drop(pipelines);
 
-        // Broadcast state change event
+        // Broadcast state change event. Reads authoritative state from the
+        // overlay so PiP visibility is reflected alongside the inputs.
+        let overlay =
+            crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
+        let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
+        let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
         self.inner
             .events
             .broadcast(StromEvent::VisionMixerStateChanged {
                 flow_id: *flow_id,
                 block_id: block_instance_id.to_string(),
-                preview_input: pvw_group.first().copied().unwrap_or(0),
-                program_input: pgm_group.first().copied().unwrap_or(0),
-                preview_inputs: pvw_group.clone(),
-                program_inputs: pgm_group.clone(),
+                preview_input: pvw_group.first().copied(),
+                program_input: pgm_group.first().copied(),
+                preview_pip,
+                program_pip,
             });
 
         Ok((pvw_group, pgm_group))

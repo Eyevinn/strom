@@ -331,14 +331,14 @@ pub enum StromEvent {
         #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
         flow_id: FlowId,
         block_id: String,
-        /// First source in PVW group (backward compat).
-        preview_input: usize,
-        /// First source in PGM group (backward compat).
-        program_input: usize,
-        /// Full ordered PVW source group.
-        preview_inputs: Vec<usize>,
-        /// Full ordered PGM source group.
-        program_inputs: Vec<usize>,
+        /// Current PVW input. `None` when PVW is a PiP source.
+        preview_input: Option<usize>,
+        /// Current PGM input. `None` when PGM is a PiP source.
+        program_input: Option<usize>,
+        /// PiP index on PVW, or `None` if PVW is an input.
+        preview_pip: Option<usize>,
+        /// PiP index on PGM, or `None` if PGM is an input.
+        program_pip: Option<usize>,
     },
     /// Vision mixer DSK layer toggled
     VisionMixerDskChanged {
@@ -744,13 +744,22 @@ impl StromEvent {
             StromEvent::VisionMixerStateChanged {
                 flow_id,
                 block_id,
-                preview_inputs,
-                program_inputs,
-                ..
+                preview_input,
+                program_input,
+                preview_pip,
+                program_pip,
             } => {
+                let pvw = preview_pip
+                    .map(|p| format!("pip:{}", p))
+                    .or_else(|| preview_input.map(|i| format!("input:{}", i)))
+                    .unwrap_or_else(|| "<none>".to_string());
+                let pgm = program_pip
+                    .map(|p| format!("pip:{}", p))
+                    .or_else(|| program_input.map(|i| format!("input:{}", i)))
+                    .unwrap_or_else(|| "<none>".to_string());
                 format!(
-                    "Vision mixer {} in flow {}: PVW={:?}, PGM={:?}",
-                    block_id, flow_id, preview_inputs, program_inputs
+                    "Vision mixer {} in flow {}: PVW={}, PGM={}",
+                    block_id, flow_id, pvw, pgm
                 )
             }
             StromEvent::VisionMixerDskChanged {
