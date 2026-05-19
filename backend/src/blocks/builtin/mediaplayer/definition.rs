@@ -29,6 +29,7 @@ pub fn media_player_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "sync".to_string(),
@@ -43,6 +44,7 @@ pub fn media_player_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "loop_playlist".to_string(),
@@ -57,6 +59,7 @@ pub fn media_player_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "position_update_interval".to_string(),
@@ -71,6 +74,7 @@ pub fn media_player_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

@@ -25,8 +25,6 @@ use crate::meter::{MeterData, MeterDataStore};
 
 use util::*;
 
-use strom_types::mixer::MIN_KNEE_LINEAR;
-
 // ── Layout constants ─────────────────────────────────────────────────
 /// Gap between strips
 const STRIP_GAP: f32 = 2.0;

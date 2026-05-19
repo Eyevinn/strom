@@ -152,6 +152,48 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Update one or more exposed properties on a block instance live.
+    ///
+    /// Values are expressed in block-level (user-facing) units (e.g. a bool for
+    /// `ch{N}_pfl`, dB for `fader_db`). The backend resolves each to the underlying
+    /// element via the block's PropertyMapping and applies the declared transform.
+    pub async fn update_block_property(
+        &self,
+        flow_id: &FlowId,
+        block_id: &str,
+        property_name: &str,
+        value: strom_types::PropertyValue,
+        ramp_ms: Option<u32>,
+    ) -> ApiResult<()> {
+        use std::collections::HashMap;
+        use strom_types::api::UpdateBlockPropertiesRequest;
+
+        let url = format!(
+            "{}/flows/{}/blocks/{}/properties",
+            self.base_url, flow_id, block_id
+        );
+        let mut properties = HashMap::new();
+        properties.insert(property_name.to_string(), value);
+
+        let request = UpdateBlockPropertiesRequest {
+            properties,
+            ramp_ms,
+        };
+
+        let response = self
+            .with_auth(self.client.patch(&url).json(&request))
+            .send()
+            .await
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http(status, text));
+        }
+        Ok(())
+    }
+
     /// Get the debug graph URL for a flow.
     /// Returns the full URL that can be opened in a new tab.
     pub fn get_debug_graph_url(&self, id: FlowId) -> String {

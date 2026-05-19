@@ -192,6 +192,7 @@ fn videoformat_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "framerate".to_string(),
@@ -207,6 +208,7 @@ fn videoformat_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "format".to_string(),
@@ -222,6 +224,7 @@ fn videoformat_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

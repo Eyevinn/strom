@@ -210,6 +210,44 @@ pub struct PadPropertiesResponse {
     pub properties: HashMap<String, PropertyValue>,
 }
 
+/// Request to update one or more exposed properties on a block instance live.
+///
+/// Values are expressed in the block-level (user-facing) units defined by the block
+/// — e.g. `ch1_pfl: true` (Bool), `fader_db: -3.0` (dB). The backend resolves each
+/// property to its underlying GStreamer element via the block's PropertyMapping and
+/// applies the declared transform (`bool_to_volume`, `db_to_linear`, …) before
+/// writing.
+///
+/// Only properties marked `live: true` in the block definition can be patched via
+/// this endpoint. Non-live properties must go through the regular flow update.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "validation", derive(garde::Validate))]
+pub struct UpdateBlockPropertiesRequest {
+    /// Map of exposed property name → new value (in block-level units).
+    #[cfg_attr(feature = "validation", garde(skip))]
+    pub properties: HashMap<String, PropertyValue>,
+    /// Optional ramp duration in ms (honored for volume-element writes — produces
+    /// anti-click fades for bool/dB toggles that map to a `volume` property).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "validation", garde(range(max = 60000)))]
+    pub ramp_ms: Option<u32>,
+}
+
+/// Response containing current block-level exposed property values and any rejections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct BlockPropertiesResponse {
+    /// The block instance ID
+    pub block_id: String,
+    /// Current values (in block-level units, inverse-transformed from the live elements)
+    pub properties: HashMap<String, PropertyValue>,
+    /// Names of properties that could not be applied, mapped to a short reason.
+    /// Empty on full success. Only populated on PATCH.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub rejected: HashMap<String, String>,
+}
+
 // ============================================================================
 // Latency API Types
 // ============================================================================

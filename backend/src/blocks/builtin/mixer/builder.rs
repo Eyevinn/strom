@@ -206,7 +206,9 @@ impl BlockBuilder for MixerBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("main volume: {}", e)))?;
 
-        // Set main fader from properties, respecting mute state
+        // Fader and mute are independent properties on the GstVolume element —
+        // the native `mute` property handles anti-click via the volume_ramps
+        // manager so we don't need the legacy "volume = 0 if mute" trick.
         let main_fader = properties
             .get("main_fader")
             .and_then(|v| match v {
@@ -215,8 +217,8 @@ impl BlockBuilder for MixerBuilder {
             })
             .unwrap_or(1.0);
         let main_mute = get_bool_prop(properties, "main_mute", false);
-        let effective_main_volume = if main_mute { 0.0 } else { main_fader };
-        main_volume.set_property("volume", effective_main_volume);
+        main_volume.set_property("volume", main_fader);
+        main_volume.set_property("mute", main_mute);
         elements.push((main_volume_id.clone(), main_volume));
 
         // Main level meter (for main mix metering)
@@ -413,12 +415,12 @@ impl BlockBuilder for MixerBuilder {
 
             let aux_fader = get_float_prop(properties, &format!("aux{}_fader", aux + 1), 1.0);
             let aux_mute = get_bool_prop(properties, &format!("aux{}_mute", aux + 1), false);
-            let aux_volume_val = if aux_mute { 0.0 } else { aux_fader };
 
             let aux_volume_id = format!("{}:aux{}_volume", instance_id, aux);
             let aux_volume = gst::ElementFactory::make("volume")
                 .name(&aux_volume_id)
-                .property("volume", aux_volume_val)
+                .property("volume", aux_fader)
+                .property("mute", aux_mute)
                 .build()
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("aux{}_volume: {}", aux, e))
@@ -477,12 +479,12 @@ impl BlockBuilder for MixerBuilder {
 
             let sg_fader = get_float_prop(properties, &format!("group{}_fader", sg + 1), 1.0);
             let sg_mute = get_bool_prop(properties, &format!("group{}_mute", sg + 1), false);
-            let sg_volume_val = if sg_mute { 0.0 } else { sg_fader };
 
             let sg_volume_id = format!("{}:group{}_volume", instance_id, sg);
             let sg_volume = gst::ElementFactory::make("volume")
                 .name(&sg_volume_id)
-                .property("volume", sg_volume_val)
+                .property("volume", sg_fader)
+                .property("mute", sg_mute)
                 .build()
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("group{}_volume: {}", sg, e))
@@ -741,12 +743,12 @@ impl BlockBuilder for MixerBuilder {
                 })?;
             elements.push((pan_id.clone(), panorama));
 
-            // volume (channel fader + mute)
+            // Channel volume + mute as independent properties on GstVolume.
             let volume_id = format!("{}:volume_{}", instance_id, ch);
-            let effective_volume = if mute { 0.0 } else { fader };
             let volume = gst::ElementFactory::make("volume")
                 .name(&volume_id)
-                .property("volume", effective_volume)
+                .property("volume", fader)
+                .property("mute", mute)
                 .build()
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("volume ch{}: {}", ch_num, e))

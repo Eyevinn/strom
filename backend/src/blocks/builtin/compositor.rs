@@ -899,6 +899,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Number of inputs
         ExposedProperty {
@@ -913,6 +914,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Output resolution
         ExposedProperty {
@@ -929,6 +931,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Background
         ExposedProperty {
@@ -958,6 +961,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Latency
         ExposedProperty {
@@ -972,6 +976,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Min upstream latency
         ExposedProperty {
@@ -986,6 +991,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Force live mode
         ExposedProperty {
@@ -1000,6 +1006,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Use queues
         ExposedProperty {
@@ -1014,6 +1021,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // GL output (GPU only)
         ExposedProperty {
@@ -1028,6 +1036,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
     ];
 
@@ -1049,6 +1058,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
 
         // YPos
@@ -1064,6 +1074,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
 
         // Width
@@ -1079,6 +1090,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
 
         // Height
@@ -1094,6 +1106,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
 
         // Alpha
@@ -1109,6 +1122,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
 
         // Z-Order
@@ -1124,6 +1138,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
 
         // Sizing Policy (GPU only)
@@ -1153,6 +1168,7 @@ fn compositor_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
     }
 

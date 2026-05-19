@@ -44,6 +44,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Number of inputs
         ExposedProperty {
@@ -61,6 +62,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // PGM output resolution
         ExposedProperty {
@@ -77,6 +79,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Multiview output resolution
         ExposedProperty {
@@ -95,6 +98,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // PGM output framerate
         ExposedProperty {
@@ -113,6 +117,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Multiview output framerate
         ExposedProperty {
@@ -131,6 +136,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Latency
         ExposedProperty {
@@ -147,6 +153,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Min upstream latency
         ExposedProperty {
@@ -163,6 +170,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Initial PGM input
         ExposedProperty {
@@ -177,6 +185,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Initial PVW input
         ExposedProperty {
@@ -191,6 +200,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Initial PGM source — overrides initial_pgm_input when non-empty.
         // Format: "input:N" or "pip:N".
@@ -208,6 +218,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Initial PVW source — overrides initial_pvw_input when non-empty.
         ExposedProperty {
@@ -224,6 +235,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Output pixel format
         ExposedProperty {
@@ -248,6 +260,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // GL download (GPU path only)
         ExposedProperty {
@@ -262,6 +275,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Show VU meters in multiview overlay
         ExposedProperty {
@@ -277,6 +291,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Number of DSK inputs
         ExposedProperty {
@@ -314,6 +329,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
     ];
 
@@ -333,6 +349,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
     }
 
@@ -362,6 +379,7 @@ fn vision_mixer_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
     }
 

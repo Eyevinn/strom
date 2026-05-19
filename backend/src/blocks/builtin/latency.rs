@@ -171,6 +171,7 @@ fn latency_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "print_latency".to_string(),
@@ -184,6 +185,7 @@ fn latency_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

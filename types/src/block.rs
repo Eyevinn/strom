@@ -148,6 +148,26 @@ pub struct ExposedProperty {
     /// Live properties show a LIVE badge in the UI and send updates directly to running elements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub live: bool,
+
+    /// Whether live writes to this property should also be persisted to the
+    /// block instance's properties map (so they survive pipeline restart).
+    ///
+    /// `None` (default) means persist. Set explicitly to `Some(false)` for
+    /// transient properties — e.g. solo states like `chN_pfl`/`chN_afl` —
+    /// that should reset on restart and not dirty the flow on every toggle.
+    ///
+    /// `Option` is used here (rather than a bare `bool` with a serde default)
+    /// to keep existing struct-literal call sites compiling — they get the
+    /// default behaviour without an added field. Read via `persist()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persist: Option<bool>,
+}
+
+impl ExposedProperty {
+    /// Effective persist flag (defaults to `true` when unset).
+    pub fn persist(&self) -> bool {
+        self.persist.unwrap_or(true)
+    }
 }
 
 /// Maps an exposed property to one or more internal element properties

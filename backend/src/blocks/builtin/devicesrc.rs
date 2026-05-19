@@ -498,6 +498,7 @@ fn local_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "video_device".to_string(),
@@ -513,6 +514,7 @@ fn local_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "audio_device".to_string(),
@@ -528,6 +530,7 @@ fn local_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "video_resolution".to_string(),
@@ -543,6 +546,7 @@ fn local_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "video_framerate".to_string(),
@@ -558,6 +562,7 @@ fn local_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "audio_rate".to_string(),
@@ -606,6 +611,7 @@ fn local_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "audio_channels".to_string(),
@@ -650,6 +656,7 @@ fn local_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "wasapi_exclusive_mode".to_string(),
@@ -663,6 +670,7 @@ fn local_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

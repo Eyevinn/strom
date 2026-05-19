@@ -118,14 +118,6 @@ pub(super) fn draw_meter_zones_lit(painter: &Painter, rect: Rect, peak_db: f32) 
     }
 }
 
-/// Convert dB to linear scale (f64).
-pub(super) fn db_to_linear_f64(db: f64) -> f64 {
-    if !db.is_finite() {
-        return 0.0;
-    }
-    10.0_f64.powf(db / 20.0)
-}
-
 /// Convert dB to linear scale (f32).
 pub(super) fn db_to_linear_f32(db: f32) -> f32 {
     if !db.is_finite() || db <= -60.0 {

@@ -1660,9 +1660,9 @@ impl StromApp {
                             let api = self.api.clone();
                             spawn_task(async move {
                                 if let Err(e) = api
-                                    .update_element_property(
+                                    .update_block_property(
                                         &update.flow_id,
-                                        &update.element_id,
+                                        &update.block_id,
                                         &update.property_name,
                                         update.value,
                                         None,

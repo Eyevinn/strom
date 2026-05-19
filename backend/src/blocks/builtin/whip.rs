@@ -1299,6 +1299,7 @@ fn whip_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "whip_endpoint".to_string(),
@@ -1313,6 +1314,7 @@ fn whip_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "auth_token".to_string(),
@@ -1326,6 +1328,7 @@ fn whip_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "opus_complexity".to_string(),
@@ -1339,6 +1342,7 @@ fn whip_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "opus_bitrate".to_string(),
@@ -1352,6 +1356,7 @@ fn whip_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {
@@ -1409,6 +1414,7 @@ fn whip_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "endpoint_id".to_string(),
@@ -1422,6 +1428,7 @@ fn whip_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "decode".to_string(),
@@ -1435,6 +1442,7 @@ fn whip_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "max_video_bitrate".to_string(),
@@ -1450,6 +1458,7 @@ fn whip_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "max_sessions".to_string(),
@@ -1463,6 +1472,7 @@ fn whip_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         // Note: external_pads here are the static defaults for audio_video mode with max_sessions=1.

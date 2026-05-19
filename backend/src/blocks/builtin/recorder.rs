@@ -875,6 +875,7 @@ fn recorder_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -888,6 +889,7 @@ fn recorder_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "container".to_string(),
@@ -908,6 +910,7 @@ fn recorder_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "output_dir".to_string(),
@@ -921,6 +924,7 @@ fn recorder_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "filename_prefix".to_string(),
@@ -934,6 +938,7 @@ fn recorder_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "max_size_time_secs".to_string(),
@@ -947,6 +952,7 @@ fn recorder_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "max_size_mb".to_string(),
@@ -960,6 +966,7 @@ fn recorder_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "max_duration_mins".to_string(),
@@ -973,6 +980,7 @@ fn recorder_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

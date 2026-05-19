@@ -591,6 +591,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "device_number".to_string(),
@@ -605,6 +606,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "mode".to_string(),
@@ -620,6 +622,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "connection".to_string(),
@@ -664,6 +667,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "video_format".to_string(),
@@ -679,6 +683,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "drop_no_signal_frames".to_string(),
@@ -692,6 +697,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "synchronized_capture".to_string(),
@@ -705,6 +711,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "audio_connection".to_string(),
@@ -745,6 +752,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "audio_channels".to_string(),
@@ -777,6 +785,7 @@ fn decklink_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         // Static fallback — matches the default `audio_video` mode. The actual
@@ -846,6 +855,7 @@ fn decklink_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "device_number".to_string(),
@@ -860,6 +870,7 @@ fn decklink_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "mode".to_string(),
@@ -875,6 +886,7 @@ fn decklink_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "video_format".to_string(),
@@ -890,6 +902,7 @@ fn decklink_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         // Static fallback — matches the default `audio_video` mode. Actual pads

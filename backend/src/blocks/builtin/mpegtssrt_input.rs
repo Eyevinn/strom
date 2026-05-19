@@ -620,6 +620,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -633,6 +634,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },            ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
@@ -647,6 +649,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "latency".to_string(),
@@ -660,6 +663,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
@@ -673,6 +677,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
@@ -686,6 +691,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "keep_listening".to_string(),
@@ -699,6 +705,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "decode".to_string(),
@@ -712,6 +719,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },            ExposedProperty {
                 name: "tsdemux_latency".to_string(),
                 label: "TS Demux Latency (ms)".to_string(),
@@ -724,6 +732,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "ignore_pcr".to_string(),
@@ -737,6 +746,7 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

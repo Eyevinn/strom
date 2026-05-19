@@ -764,6 +764,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -777,6 +778,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "srt_uri".to_string(),
@@ -790,6 +792,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "latency".to_string(),
@@ -803,6 +806,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
@@ -816,6 +820,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
@@ -829,6 +834,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "sync".to_string(),
@@ -842,6 +848,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "mtu".to_string(),
@@ -855,6 +862,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

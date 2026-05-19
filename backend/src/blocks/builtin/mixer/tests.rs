@@ -328,6 +328,86 @@ fn test_mixer_definition_aux_group_outputs() {
     );
 }
 
+#[test]
+fn test_mixer_pfl_afl_are_transient() {
+    // Solo state must not persist across pipeline restarts — see the
+    // persist:false guard in state.rs::strip_transient_properties.
+    let def = mixer_definition();
+    for ch in 1..=4usize {
+        for kind in ["pfl", "afl"] {
+            let name = format!("ch{}_{}", ch, kind);
+            let prop = def
+                .exposed_properties
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("missing {}", name));
+            assert!(prop.live, "{} should be live", name);
+            assert_eq!(
+                prop.persist,
+                Some(false),
+                "{} must be marked persist: Some(false)",
+                name
+            );
+        }
+    }
+}
+
+#[test]
+fn test_mixer_mute_maps_to_gstvolume_mute_property() {
+    // Mute is implemented via GstVolume's native `mute` property, not the
+    // legacy "volume = 0 if muted" trick. The mapping must point at the
+    // corresponding volume element with property_name == "mute" so the new
+    // block-properties endpoint can write through.
+    let def = mixer_definition();
+    let cases: &[(&str, &str)] = &[
+        ("main_mute", "main_volume"),
+        ("ch1_mute", "volume_0"),
+        ("ch3_mute", "volume_2"),
+        ("group1_mute", "group0_volume"),
+        ("aux1_mute", "aux0_volume"),
+    ];
+    for (name, expected_element) in cases {
+        let prop = def
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == *name)
+            .unwrap_or_else(|| panic!("missing {}", name));
+        assert_eq!(
+            prop.mapping.element_id, *expected_element,
+            "{} should map to {}",
+            name, expected_element
+        );
+        assert_eq!(
+            prop.mapping.property_name, "mute",
+            "{} should target GstVolume.mute",
+            name
+        );
+        assert!(
+            prop.mapping.transform.is_none(),
+            "{} needs no transform",
+            name
+        );
+        assert!(prop.live, "{} must be live", name);
+    }
+}
+
+#[test]
+fn test_mixer_config_properties_not_live() {
+    // Construction-time block parameters cannot be live-applied: they decide
+    // how the builder wires up the pipeline. The block-property endpoint
+    // depends on this flag to give a meaningful error message instead of
+    // silently failing in the `_block` branch.
+    let def = mixer_definition();
+    for name in ["num_channels", "dsp_backend", "num_aux_buses", "num_groups"] {
+        let prop = def
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("missing {}", name));
+        assert!(!prop.live, "{} must NOT be marked live: true", name);
+    }
+}
+
 // ---- GStreamer element tests (conditional on plugin availability) ----
 
 #[test]

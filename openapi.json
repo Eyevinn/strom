@@ -1548,6 +1548,118 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/properties": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Get current block-level exposed property values from a running pipeline.",
+        "description": "Returns each live exposed property's current value in block-level (user-facing)\nunits — e.g. a `ch1_pfl` bool, a `fader_db` float in dB — by reading the\nunderlying GStreamer element and applying the declared inverse transform.\nNon-live properties and those bound to the `_block` virtual element are\nomitted.",
+        "operationId": "get_block_properties",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Block properties retrieved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockPropertiesResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow not running or block not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Update one or more exposed properties on a block instance live.",
+        "description": "Properties are expressed in block-level (user-facing) units — e.g.\n`{\"ch1_pfl\": true, \"fader_db\": -3.0}`. The backend resolves each name to its\nunderlying GStreamer element via the block definition's PropertyMapping,\napplies the declared transform (`bool_to_volume`, `db_to_linear`, …), and\nwrites through the standard live-property path (so `ramp_ms` produces the\nusual anti-click fade where applicable).\n\nOnly properties marked `live: true` are accepted. Unknown, non-live, or\ntype-mismatched entries are returned in the `rejected` map without aborting\nthe rest of the batch.",
+        "operationId": "update_block_properties",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBlockPropertiesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Block properties applied (see `rejected` for partial failures)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockPropertiesResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Flow not running or block not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/blocks/{block_id}/recorder/split": {
       "post": {
         "tags": [
@@ -4617,6 +4729,40 @@
           }
         }
       },
+      "BlockPropertiesResponse": {
+        "type": "object",
+        "description": "Response containing current block-level exposed property values and any rejections.",
+        "required": [
+          "block_id",
+          "properties"
+        ],
+        "properties": {
+          "block_id": {
+            "type": "string",
+            "description": "The block instance ID"
+          },
+          "properties": {
+            "type": "object",
+            "description": "Current values (in block-level units, inverse-transformed from the live elements)",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PropertyValue"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "rejected": {
+            "type": "object",
+            "description": "Names of properties that could not be applied, mapped to a short reason.\nEmpty on full success. Only populated on PATCH.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "BlockResponse": {
         "type": "object",
         "description": "Response containing a block definition",
@@ -5451,6 +5597,13 @@
           "name": {
             "type": "string",
             "description": "Name of the exposed property (used as key)"
+          },
+          "persist": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether live writes to this property should also be persisted to the\nblock instance's properties map (so they survive pipeline restart).\n\n`None` (default) means persist. Set explicitly to `Some(false)` for\ntransient properties — e.g. solo states like `chN_pfl`/`chN_afl` —\nthat should reset on restart and not dirty the flow on every toggle.\n\n`Option` is used here (rather than a bare `bool` with a serde default)\nto keep existing struct-literal call sites compiling — they get the\ndefault behaviour without an added field. Read via `persist()`."
           },
           "property_type": {
             "$ref": "#/components/schemas/PropertyType",
@@ -10248,6 +10401,34 @@
           "transition_type": {
             "type": "string",
             "description": "Type of transition: \"cut\", \"fade\", \"slide_left\", \"slide_right\", \"slide_up\", \"slide_down\""
+          }
+        }
+      },
+      "UpdateBlockPropertiesRequest": {
+        "type": "object",
+        "description": "Request to update one or more exposed properties on a block instance live.\n\nValues are expressed in the block-level (user-facing) units defined by the block\n— e.g. `ch1_pfl: true` (Bool), `fader_db: -3.0` (dB). The backend resolves each\nproperty to its underlying GStreamer element via the block's PropertyMapping and\napplies the declared transform (`bool_to_volume`, `db_to_linear`, …) before\nwriting.\n\nOnly properties marked `live: true` in the block definition can be patched via\nthis endpoint. Non-live properties must go through the regular flow update.",
+        "required": [
+          "properties"
+        ],
+        "properties": {
+          "properties": {
+            "type": "object",
+            "description": "Map of exposed property name → new value (in block-level units).",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PropertyValue"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "ramp_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional ramp duration in ms (honored for volume-element writes — produces\nanti-click fades for bool/dB toggles that map to a `volume` property).",
+            "minimum": 0
           }
         }
       },

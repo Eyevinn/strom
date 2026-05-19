@@ -213,6 +213,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
                 transform: None,
             },
             live: true,
+            persist: None,
         }],
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {

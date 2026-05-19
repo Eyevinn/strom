@@ -346,12 +346,51 @@ impl AppState {
         ))
     }
 
+    /// Strip block properties marked `persist: false` from a flow.
+    ///
+    /// Transient state (currently `chN_pfl` / `chN_afl` on the audio mixer)
+    /// should never reach the in-memory flow definition or disk — otherwise an
+    /// explicit flow save would re-engage solo on the next restart, and the
+    /// runtime-only intent of `persist: false` would silently leak.
+    ///
+    /// Called at two boundaries:
+    ///   * `load_from_storage` — cleans up legacy flow JSON that may carry
+    ///     transient values from before this guard existed.
+    ///   * `upsert_flow` — filters everything coming in from the flow PATCH /
+    ///     PUT handlers and the create-flow path.
+    ///
+    /// Live PATCHes via `update_block_properties` already skip `persist: false`
+    /// at write time, so no additional filtering is needed on that path.
+    async fn strip_transient_properties(&self, flow: &mut Flow) {
+        for block in &mut flow.blocks {
+            let Some(def) = self
+                .inner
+                .block_registry
+                .get_by_id(&block.block_definition_id)
+                .await
+            else {
+                continue;
+            };
+            for prop in &def.exposed_properties {
+                if !prop.persist() {
+                    block.properties.remove(&prop.name);
+                }
+            }
+        }
+    }
+
     /// Load flows from storage into memory.
     pub async fn load_from_storage(&self) -> anyhow::Result<()> {
         info!("Loading flows from storage...");
         match self.inner.storage.load_all().await {
             Ok(mut flows) => {
                 let count = flows.len();
+
+                // Strip transient (persist: false) properties from any legacy
+                // flow JSON that stored them before this guard existed.
+                for flow in flows.values_mut() {
+                    self.strip_transient_properties(flow).await;
+                }
 
                 // Reset all flow states to None on server restart since pipelines aren't running
                 // This prevents showing stale "Playing" states from before the server stopped
@@ -573,11 +612,17 @@ impl AppState {
     }
 
     /// Add or update a flow and persist to storage.
-    pub async fn upsert_flow(&self, flow: Flow) -> anyhow::Result<()> {
+    pub async fn upsert_flow(&self, mut flow: Flow) -> anyhow::Result<()> {
         let is_new = {
             let flows = self.inner.flows.read().await;
             !flows.contains_key(&flow.id)
         };
+
+        // Filter out transient (persist: false) block properties before this
+        // flow definition reaches either the in-memory map or disk. Without
+        // this, an explicit save from the frontend would re-engage transient
+        // state (e.g. PFL/AFL solo) on the next restart.
+        self.strip_transient_properties(&mut flow).await;
 
         // Update in-memory state
         {
@@ -1471,6 +1516,204 @@ impl AppState {
         });
 
         Ok(())
+    }
+
+    /// Apply a batch of exposed block-level properties to the running pipeline live.
+    ///
+    /// Each requested property is looked up in the block's `ExposedProperty` list, its
+    /// declared `transform` (e.g. `bool_to_volume`) is applied, and the result is
+    /// written to the resolved underlying element via [`Self::update_element_property`]
+    /// — so all the existing anti-click / ramp behaviour is inherited.
+    ///
+    /// Returns `(current_values, rejected)`:
+    /// - `current_values`: block-level (inverse-transformed) values after the writes.
+    /// - `rejected`: per-property reason strings for entries that could not be applied
+    ///   (unknown name, non-live, transform mismatch). The overall call still succeeds —
+    ///   only flow/block-not-found is a hard `Err`.
+    pub async fn update_block_properties(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        properties: HashMap<String, PropertyValue>,
+        ramp_ms: Option<u32>,
+    ) -> Result<(HashMap<String, PropertyValue>, HashMap<String, String>), PipelineError> {
+        // Resolve block instance → definition_id → BlockDefinition.
+        let definition_id = {
+            let flows = self.inner.flows.read().await;
+            let flow = flows.get(flow_id).ok_or_else(|| {
+                PipelineError::InvalidFlow(format!("Flow not found: {}", flow_id))
+            })?;
+            flow.blocks
+                .iter()
+                .find(|b| b.id == block_instance_id)
+                .map(|b| b.block_definition_id.clone())
+                .ok_or_else(|| {
+                    PipelineError::InvalidFlow(format!(
+                        "Block instance not found in flow: {}",
+                        block_instance_id
+                    ))
+                })?
+        };
+        let definition = self
+            .inner
+            .block_registry
+            .get_by_id(&definition_id)
+            .await
+            .ok_or_else(|| {
+                PipelineError::InvalidFlow(format!("Block definition not found: {}", definition_id))
+            })?;
+
+        let mut rejected: HashMap<String, String> = HashMap::new();
+        let mut to_persist: Vec<(String, PropertyValue)> = Vec::new();
+
+        for (name, value) in properties {
+            let Some(exposed) = definition
+                .exposed_properties
+                .iter()
+                .find(|p| p.name == name)
+            else {
+                rejected.insert(name, "unknown exposed property".to_string());
+                continue;
+            };
+
+            if !exposed.live {
+                rejected.insert(
+                    name,
+                    "property is not live (requires flow restart)".to_string(),
+                );
+                continue;
+            }
+
+            // The `_block` element_id marker is a virtual element for properties that
+            // get baked into the block at build time — they have no underlying element
+            // to write to live.
+            if exposed.mapping.element_id == "_block" {
+                rejected.insert(name, "property has no underlying live element".to_string());
+                continue;
+            }
+
+            let transform = crate::blocks::transforms::lookup(exposed.mapping.transform.as_deref());
+            let Some(transformed) = (transform.forward)(value.clone()) else {
+                rejected.insert(name, "value type does not match transform".to_string());
+                continue;
+            };
+
+            // Element IDs in block definitions are relative to the instance — prepend.
+            let full_element_id = format!("{}:{}", block_instance_id, exposed.mapping.element_id);
+
+            if let Err(e) = self
+                .update_element_property(
+                    flow_id,
+                    &full_element_id,
+                    &exposed.mapping.property_name,
+                    transformed,
+                    ramp_ms,
+                )
+                .await
+            {
+                rejected.insert(name, format!("pipeline write failed: {}", e));
+                continue;
+            }
+
+            if exposed.persist() {
+                to_persist.push((name, value));
+            }
+        }
+
+        // Sync persisted values back to the block instance so they survive a
+        // pipeline restart. Done after the pipeline writes so we don't store
+        // values that failed to apply.
+        if !to_persist.is_empty() {
+            {
+                let mut flows = self.inner.flows.write().await;
+                if let Some(flow) = flows.get_mut(flow_id) {
+                    if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_instance_id)
+                    {
+                        for (name, value) in to_persist {
+                            block.properties.insert(name, value);
+                        }
+                    }
+                }
+            }
+            self.mark_flow_dirty(*flow_id).await;
+        }
+
+        let current = self
+            .get_block_properties_inner(flow_id, block_instance_id, &definition)
+            .await?;
+        Ok((current, rejected))
+    }
+
+    /// Read the current block-level (user-facing) values of all live exposed properties
+    /// from the running pipeline. Non-live properties and those without a transform
+    /// match are silently skipped.
+    pub async fn get_block_properties(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+    ) -> Result<HashMap<String, PropertyValue>, PipelineError> {
+        let definition_id = {
+            let flows = self.inner.flows.read().await;
+            let flow = flows.get(flow_id).ok_or_else(|| {
+                PipelineError::InvalidFlow(format!("Flow not found: {}", flow_id))
+            })?;
+            flow.blocks
+                .iter()
+                .find(|b| b.id == block_instance_id)
+                .map(|b| b.block_definition_id.clone())
+                .ok_or_else(|| {
+                    PipelineError::InvalidFlow(format!(
+                        "Block instance not found in flow: {}",
+                        block_instance_id
+                    ))
+                })?
+        };
+        let definition = self
+            .inner
+            .block_registry
+            .get_by_id(&definition_id)
+            .await
+            .ok_or_else(|| {
+                PipelineError::InvalidFlow(format!("Block definition not found: {}", definition_id))
+            })?;
+        self.get_block_properties_inner(flow_id, block_instance_id, &definition)
+            .await
+    }
+
+    async fn get_block_properties_inner(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        definition: &strom_types::BlockDefinition,
+    ) -> Result<HashMap<String, PropertyValue>, PipelineError> {
+        let mut out = HashMap::new();
+        for exposed in &definition.exposed_properties {
+            if !exposed.live || exposed.mapping.element_id == "_block" {
+                continue;
+            }
+            let full_element_id = format!("{}:{}", block_instance_id, exposed.mapping.element_id);
+            let raw = match self
+                .get_element_property(flow_id, &full_element_id, &exposed.mapping.property_name)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    trace!(
+                        "Skipping {} (could not read {}.{}): {}",
+                        exposed.name,
+                        full_element_id,
+                        exposed.mapping.property_name,
+                        e
+                    );
+                    continue;
+                }
+            };
+            let transform = crate::blocks::transforms::lookup(exposed.mapping.transform.as_deref());
+            if let Some(v) = (transform.inverse)(raw) {
+                out.insert(exposed.name.clone(), v);
+            }
+        }
+        Ok(out)
     }
 
     /// Trigger a transition on a compositor/mixer block.

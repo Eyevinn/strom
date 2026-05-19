@@ -722,6 +722,7 @@ fn ndi_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "url_address".to_string(),
@@ -735,6 +736,7 @@ fn ndi_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "mode".to_string(),
@@ -750,6 +752,7 @@ fn ndi_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "bandwidth".to_string(),
@@ -765,6 +768,7 @@ fn ndi_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "timeout_ms".to_string(),
@@ -778,6 +782,7 @@ fn ndi_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "connect_timeout_ms".to_string(),
@@ -793,6 +798,7 @@ fn ndi_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {
@@ -848,6 +854,7 @@ fn ndi_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "mode".to_string(),
@@ -863,6 +870,7 @@ fn ndi_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {
