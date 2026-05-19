@@ -846,7 +846,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.9-zones | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.10-zones | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1670,6 +1670,10 @@
             const tag = e.target.tagName;
             if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
             if (e.target.isContentEditable) return;
+            // Let the browser keep its own modifier-key shortcuts (Ctrl+0 reset
+            // zoom, Ctrl+F find, Ctrl+R reload, Cmd+...). Shift is fine — we
+            // already accept "X" and "x" for the same action.
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
 
             // 1-9, 0 = select PVW. Slots continue past NUM_INPUTS into PiPs,
             // so with 8 inputs key '9' picks PiP1 and key '0' picks PiP2.
