@@ -8,6 +8,7 @@ use gstreamer::prelude::*;
 use gstreamer_controller::prelude::*;
 use gstreamer_controller::{DirectControlBinding, InterpolationControlSource, InterpolationMode};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use strom_types::vision_mixer;
 use tracing::{debug, info};
@@ -87,9 +88,13 @@ pub struct TransitionController {
     canvas_width: i32,
     /// Canvas height for position calculations.
     canvas_height: i32,
-    /// Active control sources for ongoing transitions (pad_name -> control_sources).
+    /// Active control sources for ongoing transitions (unique key -> control_sources).
     /// We keep references to prevent them from being dropped during animation.
+    /// Keys are generated from `next_transition_id` so concurrent transitions never
+    /// overwrite each other's bookkeeping — see `next_key`.
     active_transitions: Arc<Mutex<HashMap<String, Vec<InterpolationControlSource>>>>,
+    /// Monotonic counter feeding unique suffixes into `active_transitions` keys.
+    next_transition_id: Arc<AtomicU64>,
 }
 
 /// A pad's target geometry + zorder in a composition. Used by [`plan_transition`]
@@ -325,7 +330,17 @@ impl TransitionController {
             canvas_width,
             canvas_height,
             active_transitions: Arc::new(Mutex::new(HashMap::new())),
+            next_transition_id: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Build a unique key for `active_transitions`. The descriptive prefix is
+    /// kept for log/debug readability; the monotonic suffix prevents concurrent
+    /// transitions with the same prefix from overwriting each other's
+    /// `control_sources` Vec.
+    fn next_key(&self, prefix: &str) -> String {
+        let id = self.next_transition_id.fetch_add(1, Ordering::Relaxed);
+        format!("{}_{}", prefix, id)
     }
 
     /// Get a sink pad by input index.
@@ -479,7 +494,7 @@ impl TransitionController {
         control_sources.push(cs_to);
 
         // Store control sources to keep them alive during animation
-        let key = format!("fade_{}_{}", from_input, to_input);
+        let key = self.next_key(&format!("fade_{}_{}", from_input, to_input));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -548,7 +563,7 @@ impl TransitionController {
         let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
         control_sources.push(cs);
 
-        let key = format!("slide_{}_{}", from_input, to_input);
+        let key = self.next_key(&format!("slide_{}_{}", from_input, to_input));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -639,7 +654,7 @@ impl TransitionController {
         let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
         control_sources.push(cs);
 
-        let key = format!("push_{}_{}", from_input, to_input);
+        let key = self.next_key(&format!("push_{}_{}", from_input, to_input));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -744,7 +759,7 @@ impl TransitionController {
         })?;
         control_sources.push(cs_to);
 
-        let key = format!("dip_{}_{}", from_input, to_input);
+        let key = self.next_key(&format!("dip_{}_{}", from_input, to_input));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -1032,7 +1047,7 @@ impl TransitionController {
             }
         }
 
-        let key = format!("morph_o{}_i{}", outgoing.len(), incoming.len());
+        let key = self.next_key(&format!("morph_o{}_i{}", outgoing.len(), incoming.len()));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }
@@ -1223,7 +1238,7 @@ impl TransitionController {
         }
 
         // Store control sources
-        let key = format!("animate_input_{}", input_index);
+        let key = self.next_key(&format!("animate_input_{}", input_index));
         if let Ok(mut transitions) = self.active_transitions.lock() {
             transitions.insert(key, control_sources);
         }

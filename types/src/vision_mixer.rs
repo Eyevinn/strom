@@ -74,7 +74,7 @@ pub const DEFAULT_NUM_INPUTS: usize = 4;
 /// ceiling. The multiview thumbnail grid scales rows dynamically so any value
 /// in `[MIN_NUM_INPUTS, MAX_NUM_INPUTS]` produces a usable layout (smaller
 /// thumbnails for larger N).
-pub const MAX_NUM_INPUTS: usize = 64;
+pub const MAX_NUM_INPUTS: usize = 16;
 
 /// Minimum number of video inputs.
 pub const MIN_NUM_INPUTS: usize = 2;
@@ -256,13 +256,13 @@ pub fn compute_pip_overlay_rects(
     let (cell_w, cell_h) = if source_aspect > 0.0 {
         let cell_h_from_w = (max_cell_w as f64 / source_aspect).floor() as i32;
         if cell_h_from_w <= max_cell_h {
-            (max_cell_w, cell_h_from_w.max(1))
+            (max_cell_w.max(1), cell_h_from_w.max(1))
         } else {
             let cell_w_from_h = (max_cell_h as f64 * source_aspect).floor() as i32;
-            (cell_w_from_h.max(1), max_cell_h)
+            (cell_w_from_h.max(1), max_cell_h.max(1))
         }
     } else {
-        (max_cell_w, max_cell_h)
+        (max_cell_w.max(1), max_cell_h.max(1))
     };
 
     let total_w = cell_w * cols as i32;

@@ -1057,9 +1057,10 @@ fn render_overlay(
     let sc = layout.scale;
     for i in 0..layout.num_inputs.min(layout.label_positions.len()) {
         let pos = &layout.label_positions[i];
+        let label = state.labels.get(i).map_or("", String::as_str);
         draw_label_centered(
             cr,
-            &state.labels[i],
+            label,
             pos.x,
             pos.y,
             0.0,
