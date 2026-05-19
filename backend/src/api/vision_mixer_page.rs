@@ -111,20 +111,22 @@ async fn render_vision_mixer_page(
     let num_inputs = vm_props::parse_num_inputs(&vm_block.properties);
     let labels = vm_props::parse_input_labels(&vm_block.properties, num_inputs);
     let num_dsk_inputs = vm_props::parse_num_dsk_inputs(&vm_block.properties);
+    let num_pips = vm_props::parse_num_pips(&vm_block.properties);
 
-    // Get current state from live overlay state or fall back to defaults
+    // Get current state from live overlay state or fall back to defaults.
+    // `None` means the bus is showing a PiP (see `pvw_pip` / `pgm_pip` below).
     let overlay = overlay::get_overlay_state(block_id);
-    let initial_pgm_group = overlay.as_ref().map(|s| s.pgm_group()).unwrap_or_else(|| {
-        vec![vm_props::parse_initial_pgm(
+    let initial_pgm: Option<usize> = overlay.as_ref().map(|s| s.pgm_input()).unwrap_or_else(|| {
+        Some(vm_props::parse_initial_pgm(
             &vm_block.properties,
             num_inputs,
-        )]
+        ))
     });
-    let initial_pvw_group = overlay.as_ref().map(|s| s.pvw_group()).unwrap_or_else(|| {
-        vec![vm_props::parse_initial_pvw(
+    let initial_pvw: Option<usize> = overlay.as_ref().map(|s| s.pvw_input()).unwrap_or_else(|| {
+        Some(vm_props::parse_initial_pvw(
             &vm_block.properties,
             num_inputs,
-        )]
+        ))
     });
     let ftb_active = overlay
         .as_ref()
@@ -139,8 +141,29 @@ async fn render_vision_mixer_page(
                 .collect()
         })
         .unwrap_or_else(|| vec![true; num_dsk_inputs]);
-    let background_input: Option<usize> = overlay.as_ref().and_then(|s| s.background_input());
     let overlay_alpha = overlay.as_ref().map(|s| s.overlay_alpha()).unwrap_or(1.0);
+
+    // Per-PiP runtime state (bg + zones). Fallback when the pipeline isn't
+    // built yet: bg comes from the block property; zones are runtime-only and
+    // therefore empty until the operator configures them.
+    let pips: Vec<serde_json::Value> = (0..num_pips)
+        .map(|i| {
+            let (bg, zones) = if let Some(s) = overlay.as_ref() {
+                (s.pip_bg_input(i), s.pip_zones(i))
+            } else {
+                (
+                    vm_props::parse_pip_bg(&vm_block.properties, i, num_inputs),
+                    Vec::<strom_types::vision_mixer::Zone>::new(),
+                )
+            };
+            serde_json::json!({
+                "bg": bg,
+                "zones": zones,
+            })
+        })
+        .collect();
+    let pvw_pip: Option<usize> = overlay.as_ref().and_then(|s| s.pvw_pip());
+    let pgm_pip: Option<usize> = overlay.as_ref().and_then(|s| s.pgm_pip());
 
     // Build a single JSON config object (safe injection via <script type="application/json">)
     let config = serde_json::json!({
@@ -148,15 +171,16 @@ async fn render_vision_mixer_page(
         "block_id": block_id,
         "num_inputs": num_inputs,
         "input_labels": labels,
-        "initial_pgm": initial_pgm_group.first().copied().unwrap_or(0),
-        "initial_pvw": initial_pvw_group.first().copied().unwrap_or(1),
-        "initial_pgm_group": initial_pgm_group,
-        "initial_pvw_group": initial_pvw_group,
+        "initial_pgm": initial_pgm,
+        "initial_pvw": initial_pvw,
         "num_dsk_inputs": num_dsk_inputs,
         "ftb_active": ftb_active,
         "dsk_states": dsk_states,
-        "background_input": background_input,
         "overlay_alpha": overlay_alpha,
+        "num_pips": num_pips,
+        "pips": pips,
+        "pvw_pip": pvw_pip,
+        "pgm_pip": pgm_pip,
     });
 
     let html = VISION_MIXER_HTML.replace("{{VM_CONFIG_JSON}}", &config.to_string());
