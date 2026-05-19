@@ -33,7 +33,12 @@ impl TestPipe {
         let pipeline = gst::Pipeline::new();
         let src = gst::ElementFactory::make("audiotestsrc")
             .property("is-live", true)
-            .property("samplesperbuffer", 480_i32) // 10ms @ 48k → frequent sync_values
+            // 1ms buffers so the controlled `volume` property is re-synced
+            // ~1000 times per second. Larger buffer sizes make mid-fade
+            // sampling flaky (the volume property only refreshes per buffer,
+            // so an 8 ms sample window can fall entirely inside a 10 ms
+            // buffer and miss the ramp).
+            .property("samplesperbuffer", 48_i32)
             .build()
             .expect("audiotestsrc");
         let volume = gst::ElementFactory::make("volume").build().expect("volume");
