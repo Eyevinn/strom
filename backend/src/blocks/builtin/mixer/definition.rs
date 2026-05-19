@@ -462,7 +462,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 property_name: "volume".to_string(),
                 transform: Some("bool_to_volume".to_string()),
             },
-            live: false,
+            live: true,
         });
 
         // AFL (After-Fader Listen)
@@ -477,7 +477,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 property_name: "volume".to_string(),
                 transform: Some("bool_to_volume".to_string()),
             },
-            live: false,
+            live: true,
         });
 
         // Routing to main

@@ -5,6 +5,7 @@ pub mod builtin;
 pub mod registry;
 pub mod sdp;
 pub mod storage;
+pub mod transforms;
 
 pub use builder::{
     BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, BusMessageConnectFn,

@@ -309,6 +309,41 @@ impl MixerEditor {
 
         let channel = &self.channels[index];
 
+        // PFL/AFL are exposed as block-level bool properties (live: true). The
+        // backend resolves the underlying volume element and applies the
+        // `bool_to_volume` transform — frontend stays free of internal element
+        // names.
+        let block_prop: Option<(String, PropertyValue)> = match property {
+            "pfl" => Some((
+                format!("ch{}_pfl", index + 1),
+                PropertyValue::Bool(channel.pfl),
+            )),
+            "afl" => Some((
+                format!("ch{}_afl", index + 1),
+                PropertyValue::Bool(channel.afl),
+            )),
+            _ => None,
+        };
+
+        if let Some((prop_name, value)) = block_prop {
+            let ramp_ms = Some(self.fade_ms);
+            let api = self.api.clone();
+            let flow_id = self.flow_id;
+            let block_id = self.block_id.clone();
+            let ctx = ctx.clone();
+
+            crate::app::spawn_task(async move {
+                if let Err(e) = api
+                    .update_block_property(&flow_id, &block_id, &prop_name, value, ramp_ms)
+                    .await
+                {
+                    tracing::warn!("Mixer block-property update failed: {}", e);
+                }
+                ctx.request_repaint();
+            });
+            return;
+        }
+
         // Map channel property to GStreamer element and property
         // The element_id format is "block_id:element_name"
         let (element_suffix, gst_prop, value) = match property {
@@ -362,16 +397,6 @@ impl MixerEditor {
                 format!("eq_{}", index),
                 "enabled",
                 PropertyValue::Bool(channel.eq_enabled),
-            ),
-            "pfl" => (
-                format!("pfl_volume_{}", index),
-                "volume",
-                PropertyValue::Float(if channel.pfl { 1.0 } else { 0.0 }),
-            ),
-            "afl" => (
-                format!("afl_volume_{}", index),
-                "volume",
-                PropertyValue::Float(if channel.afl { 1.0 } else { 0.0 }),
             ),
             _ => return,
         };

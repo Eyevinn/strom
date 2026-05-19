@@ -12,12 +12,12 @@ use serde::Deserialize;
 use std::process::{Command, Stdio};
 use strom_types::{
     api::{
-        AnimateInputRequest, AvailableOutput, AvailableSourcesResponse, DynamicPadsResponse,
-        ElementPropertiesResponse, ErrorResponse, FlowDebugInfo, FlowListResponse, FlowResponse,
-        FlowStatsResponse, LatencyResponse, PadPropertiesResponse, SourceFlowInfo,
-        SrtStatsResponse, TransitionResponse, TriggerTransitionRequest,
-        UpdateFlowPropertiesRequest, UpdatePadPropertyRequest, UpdatePropertyRequest,
-        WebRtcStatsResponse,
+        AnimateInputRequest, AvailableOutput, AvailableSourcesResponse, BlockPropertiesResponse,
+        DynamicPadsResponse, ElementPropertiesResponse, ErrorResponse, FlowDebugInfo,
+        FlowListResponse, FlowResponse, FlowStatsResponse, LatencyResponse, PadPropertiesResponse,
+        SourceFlowInfo, SrtStatsResponse, TransitionResponse, TriggerTransitionRequest,
+        UpdateBlockPropertiesRequest, UpdateFlowPropertiesRequest, UpdatePadPropertyRequest,
+        UpdatePropertyRequest, WebRtcStatsResponse,
     },
     Flow, FlowId,
 };
@@ -1125,6 +1125,99 @@ pub async fn update_pad_property(
         element_id,
         pad_name,
         properties,
+    }))
+}
+
+/// Get current block-level exposed property values from a running pipeline.
+///
+/// Returns each live exposed property's current value in block-level (user-facing)
+/// units — e.g. a `ch1_pfl` bool, a `fader_db` float in dB — by reading the
+/// underlying GStreamer element and applying the declared inverse transform.
+/// Non-live properties and those bound to the `_block` virtual element are
+/// omitted.
+#[utoipa::path(
+    get,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/properties",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Block instance ID")
+    ),
+    responses(
+        (status = 200, description = "Block properties retrieved", body = BlockPropertiesResponse),
+        (status = 404, description = "Flow not running or block not found", body = ErrorResponse),
+    )
+)]
+pub async fn get_block_properties(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+) -> Result<Json<BlockPropertiesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let properties = state
+        .get_block_properties(&flow_id, &block_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::with_details(
+                    "Failed to get block properties",
+                    e.to_string(),
+                )),
+            )
+        })?;
+    Ok(Json(BlockPropertiesResponse {
+        block_id,
+        properties,
+        rejected: Default::default(),
+    }))
+}
+
+/// Update one or more exposed properties on a block instance live.
+///
+/// Properties are expressed in block-level (user-facing) units — e.g.
+/// `{"ch1_pfl": true, "fader_db": -3.0}`. The backend resolves each name to its
+/// underlying GStreamer element via the block definition's PropertyMapping,
+/// applies the declared transform (`bool_to_volume`, `db_to_linear`, …), and
+/// writes through the standard live-property path (so `ramp_ms` produces the
+/// usual anti-click fade where applicable).
+///
+/// Only properties marked `live: true` are accepted. Unknown, non-live, or
+/// type-mismatched entries are returned in the `rejected` map without aborting
+/// the rest of the batch.
+#[utoipa::path(
+    patch,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/properties",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Block instance ID")
+    ),
+    request_body = UpdateBlockPropertiesRequest,
+    responses(
+        (status = 200, description = "Block properties applied (see `rejected` for partial failures)", body = BlockPropertiesResponse),
+        (status = 404, description = "Flow not running or block not found", body = ErrorResponse),
+    )
+)]
+pub async fn update_block_properties(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+    ValidatedJson(req): ValidatedJson<UpdateBlockPropertiesRequest>,
+) -> Result<Json<BlockPropertiesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (properties, rejected) = state
+        .update_block_properties(&flow_id, &block_id, req.properties, req.ramp_ms)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::with_details(
+                    "Failed to update block properties",
+                    e.to_string(),
+                )),
+            )
+        })?;
+    Ok(Json(BlockPropertiesResponse {
+        block_id,
+        properties,
+        rejected,
     }))
 }
 

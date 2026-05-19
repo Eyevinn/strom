@@ -159,6 +159,10 @@ pub async fn create_app_with_config(
             patch(api::flows::update_pad_property),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/properties",
+            get(api::flows::get_block_properties).patch(api::flows::update_block_properties),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/loudness/reset",
             post(api::flows::reset_loudness),
         )
