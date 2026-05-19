@@ -143,19 +143,31 @@ async fn render_vision_mixer_page(
         .unwrap_or_else(|| vec![true; num_dsk_inputs]);
     let overlay_alpha = overlay.as_ref().map(|s| s.overlay_alpha()).unwrap_or(1.0);
 
-    // Per-PiP runtime state (bg + overlays) — fall back to block properties if pipeline isn't built yet.
+    // Per-PiP runtime state (bg + zones). Fallback for not-yet-built pipelines:
+    // hoist legacy `pip_X_overlays` property into a single uncapped zone with
+    // no rect (= matches old auto-tile-on-bg behavior).
     let pips: Vec<serde_json::Value> = (0..num_pips)
         .map(|i| {
-            let (bg, overlays) = if let Some(s) = overlay.as_ref() {
-                (s.pip_bg_input(i), s.pip_overlay_inputs(i))
+            let (bg, zones) = if let Some(s) = overlay.as_ref() {
+                (s.pip_bg_input(i), s.pip_zones(i))
             } else {
                 let bg = vm_props::parse_pip_bg(&vm_block.properties, i, num_inputs);
-                (
-                    bg,
-                    vm_props::parse_pip_overlays(&vm_block.properties, i, num_inputs, bg),
-                )
+                let sources = vm_props::parse_pip_overlays(&vm_block.properties, i, num_inputs, bg);
+                let zones = if sources.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![strom_types::vision_mixer::Zone {
+                        rect: None,
+                        capacity: None,
+                        sources,
+                    }]
+                };
+                (bg, zones)
             };
-            serde_json::json!({ "bg": bg, "overlays": overlays })
+            serde_json::json!({
+                "bg": bg,
+                "zones": zones,
+            })
         })
         .collect();
     let pvw_pip: Option<usize> = overlay.as_ref().and_then(|s| s.pvw_pip());

@@ -1679,13 +1679,13 @@ impl AppState {
         block_instance_id: &str,
         pip_idx: usize,
         bg: Option<usize>,
-        overlays: Vec<usize>,
+        zones: Vec<strom_types::vision_mixer::Zone>,
     ) -> Result<(), PipelineError> {
         let pipelines = self.inner.pipelines.read().await;
         let manager = pipelines.get(flow_id).ok_or_else(|| {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
-        manager.apply_vision_mixer_pip_config(block_instance_id, pip_idx, bg, overlays)?;
+        manager.apply_vision_mixer_pip_config(block_instance_id, pip_idx, bg, zones)?;
         Ok(())
     }
 

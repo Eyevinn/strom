@@ -1101,16 +1101,21 @@ pub struct SelectPreviewRequest {
     pub source: Option<String>,
 }
 
-/// Request to update a PiP composition (background source + overlay sources).
+/// Request to update a PiP composition (background source + zones).
+///
+/// A PiP is a background source plus zero or more zones. Each zone is a
+/// sub-region with its own current sources (FIFO, oldest first) that
+/// auto-tile inside the zone's rect. See [`crate::vision_mixer::Zone`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct UpdatePipConfigRequest {
     /// Background input index. Omit/null for no bg.
     #[serde(default)]
     pub bg: Option<usize>,
-    /// Overlay input indices, auto-tiled in order on top of the bg.
+    /// Zones in z-order (zone 0 lowest, last zone on top). Sources within a
+    /// zone are also in z-order (oldest first).
     #[serde(default)]
-    pub overlays: Vec<usize>,
+    pub zones: Vec<crate::vision_mixer::Zone>,
 }
 
 /// Response after updating a PiP composition.
@@ -1120,7 +1125,8 @@ pub struct UpdatePipConfigResponse {
     pub message: String,
     pub pip_idx: usize,
     pub bg: Option<usize>,
-    pub overlays: Vec<usize>,
+    /// Authoritative zone state after server-side clamping/dedup.
+    pub zones: Vec<crate::vision_mixer::Zone>,
 }
 
 /// Response after selecting a preview source.

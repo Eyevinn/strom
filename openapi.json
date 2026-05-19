@@ -6487,6 +6487,34 @@
           }
         }
       },
+      "NormRect": {
+        "type": "object",
+        "description": "Normalized rectangle in container coordinates. Each component is in `0.0..=1.0`.\n`(x, y)` is the top-left corner; `(w, h)` is the size.\n\nUsed to position a PiP overlay slot anywhere inside its parent region without\ncoupling to the output resolution.",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "h": {
+            "type": "number",
+            "format": "float"
+          },
+          "w": {
+            "type": "number",
+            "format": "float"
+          },
+          "x": {
+            "type": "number",
+            "format": "float"
+          },
+          "y": {
+            "type": "number",
+            "format": "float"
+          }
+        }
+      },
       "NtpInfo": {
         "type": "object",
         "description": "NTP clock information (GStreamer GstNtpClock / NetClientClock).\n\nPopulated at read-time from the running NtpClock instance. Values are snapshots\nfrom the clock's internal state at the moment the flow was queried.",
@@ -10186,7 +10214,7 @@
       },
       "UpdatePipConfigRequest": {
         "type": "object",
-        "description": "Request to update a PiP composition (background source + overlay sources).",
+        "description": "Request to update a PiP composition (background source + zones).\n\nA PiP is a background source plus zero or more zones. Each zone is a\nsub-region with its own current sources (FIFO, oldest first) that\nauto-tile inside the zone's rect. See [`crate::vision_mixer::Zone`].",
         "properties": {
           "bg": {
             "type": [
@@ -10196,13 +10224,12 @@
             "description": "Background input index. Omit/null for no bg.",
             "minimum": 0
           },
-          "overlays": {
+          "zones": {
             "type": "array",
             "items": {
-              "type": "integer",
-              "minimum": 0
+              "$ref": "#/components/schemas/Zone"
             },
-            "description": "Overlay input indices, auto-tiled in order on top of the bg."
+            "description": "Zones in z-order (zone 0 lowest, last zone on top). Sources within a\nzone are also in z-order (oldest first)."
           }
         }
       },
@@ -10212,7 +10239,7 @@
         "required": [
           "message",
           "pip_idx",
-          "overlays"
+          "zones"
         ],
         "properties": {
           "bg": {
@@ -10225,16 +10252,16 @@
           "message": {
             "type": "string"
           },
-          "overlays": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            }
-          },
           "pip_idx": {
             "type": "integer",
             "minimum": 0
+          },
+          "zones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Zone"
+            },
+            "description": "Authoritative zone state after server-side clamping/dedup."
           }
         }
       },
@@ -10404,6 +10431,39 @@
               "$ref": "#/components/schemas/WhepStreamInfo"
             },
             "description": "List of active WHEP streams"
+          }
+        }
+      },
+      "Zone": {
+        "type": "object",
+        "description": "A sub-region of a PiP that hosts one or more overlay sources.\n\nSources inside a zone auto-tile within its `rect` (using\n[`compute_pip_overlay_rects`]) so the zone behaves like a \"mini-PiP\"\nnested inside the parent PiP region. The `capacity` puts a cap on how\nmany sources can occupy the zone; pushing a new source into a full zone\nis expected to evict the oldest (client-side FIFO).",
+        "properties": {
+          "capacity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Max sources allowed in the zone. `None` = unlimited (up to\n[`MAX_PIP_OVERLAYS`]). A capacity of 1 is \"swap mode\": replacing\nthe source animates a cross-fade.",
+            "minimum": 0
+          },
+          "rect": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NormRect",
+                "description": "Where the zone sits within the parent PiP region.\n`None` = fill the entire PiP region (legacy single-zone PiP)."
+              }
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Current sources (FIFO, oldest first). Sources auto-tile within `rect`."
           }
         }
       }

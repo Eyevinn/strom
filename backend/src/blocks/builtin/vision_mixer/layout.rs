@@ -336,28 +336,6 @@ pub fn pip_bg_pad_position(layout: &OverlayLayout, pip_idx: usize) -> (i32, i32,
         .unwrap_or((0, 0, 1, 1))
 }
 
-/// Compute auto-tiled overlay sub-rectangles inside a PiP tile, preserving
-/// `source_aspect` so the rendered source fills each cell without transparent
-/// letterbox bands. See [`strom_types::vision_mixer::compute_pip_overlay_rects`].
-pub fn pip_overlay_pad_positions(
-    layout: &OverlayLayout,
-    pip_idx: usize,
-    count: usize,
-    source_aspect: f64,
-) -> Vec<(i32, i32, i32, i32)> {
-    let Some(tile) = layout.pip_tile_rects.get(pip_idx) else {
-        return Vec::new();
-    };
-    strom_types::vision_mixer::compute_pip_overlay_rects(
-        tile.x as i32,
-        tile.y as i32,
-        tile.w as i32,
-        tile.h as i32,
-        count,
-        source_aspect,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{fit_to_aspect, pick_grid};

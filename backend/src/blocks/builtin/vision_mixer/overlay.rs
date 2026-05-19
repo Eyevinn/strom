@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime};
-use strom_types::vision_mixer::{self, TIMEZONE_REFRESH_SECS};
+use strom_types::vision_mixer::{self, Zone, TIMEZONE_REFRESH_SECS};
 use tracing::{debug, warn};
 
 /// Global registry of vision mixer overlay states, keyed by block instance ID.
@@ -61,9 +61,11 @@ pub struct VisionMixerOverlayState {
     pvw_pip: AtomicU64,
     /// Current PiP bg input (u64::MAX = no bg). One entry per configured PiP.
     pub pip_bg: Vec<AtomicU64>,
-    /// Current PiP overlays (input indices). One Mutex<Vec> per configured PiP.
-    pub pip_overlays: Vec<std::sync::Mutex<Vec<usize>>>,
-    /// Number of configured PiP tiles (also `pip_bg.len()` / `pip_overlays.len()`).
+    /// Current zones (sub-regions hosting overlay sources) per configured PiP.
+    /// A zone with `rect: None` fills the entire PiP region; sources inside a
+    /// zone auto-tile within its rect.
+    pub pip_zones: Vec<std::sync::Mutex<Vec<Zone>>>,
+    /// Number of configured PiP tiles (also `pip_bg.len()` / `pip_zones.len()`).
     pub num_pips: usize,
     /// Number of inputs.
     pub num_inputs: usize,
@@ -103,13 +105,14 @@ pub struct VisionMixerOverlayState {
 
 /// Initial PiP runtime state passed to [`VisionMixerOverlayState::new`].
 ///
-/// `pip_bgs` and `pip_overlays` must have length `num_pips`. `pgm_pip` / `pvw_pip`
+/// `pip_bgs` and `pip_zones` must have length `num_pips`. `pgm_pip` / `pvw_pip`
 /// are `Some(idx)` if the corresponding bus starts in PiP mode.
 #[derive(Default)]
 pub struct PipInitialState {
     pub num_pips: usize,
     pub pip_bgs: Vec<Option<usize>>,
-    pub pip_overlays: Vec<Vec<usize>>,
+    /// Initial zone list per PiP. Empty inner Vec = no overlays yet.
+    pub pip_zones: Vec<Vec<Zone>>,
     pub pgm_pip: Option<usize>,
     pub pvw_pip: Option<usize>,
 }
@@ -154,8 +157,8 @@ impl VisionMixerOverlayState {
                 AtomicU64::new(v)
             })
             .collect();
-        let pip_overlays = (0..pip.num_pips)
-            .map(|i| std::sync::Mutex::new(pip.pip_overlays.get(i).cloned().unwrap_or_default()))
+        let pip_zones = (0..pip.num_pips)
+            .map(|i| std::sync::Mutex::new(pip.pip_zones.get(i).cloned().unwrap_or_default()))
             .collect();
 
         Self {
@@ -164,7 +167,7 @@ impl VisionMixerOverlayState {
             pgm_pip: AtomicU64::new(pip.pgm_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
             pvw_pip: AtomicU64::new(pip.pvw_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
             pip_bg,
-            pip_overlays,
+            pip_zones,
             num_pips: pip.num_pips,
             num_inputs,
             ftb_active: AtomicBool::new(false),
@@ -253,19 +256,19 @@ impl VisionMixerOverlayState {
         }
     }
 
-    /// Get the overlay input list for a configured PiP (empty if PiP doesn't exist).
-    pub fn pip_overlay_inputs(&self, pip_idx: usize) -> Vec<usize> {
-        self.pip_overlays
+    /// Get the zone list for a configured PiP (empty if PiP doesn't exist).
+    pub fn pip_zones(&self, pip_idx: usize) -> Vec<Zone> {
+        self.pip_zones
             .get(pip_idx)
             .and_then(|m| m.lock().ok().map(|v| v.clone()))
             .unwrap_or_default()
     }
 
-    /// Replace the overlay input list for a configured PiP.
-    pub fn set_pip_overlay_inputs(&self, pip_idx: usize, overlays: Vec<usize>) {
-        if let Some(slot) = self.pip_overlays.get(pip_idx) {
+    /// Replace the zone list for a configured PiP.
+    pub fn set_pip_zones(&self, pip_idx: usize, zones: Vec<Zone>) {
+        if let Some(slot) = self.pip_zones.get(pip_idx) {
             if let Ok(mut v) = slot.lock() {
-                *v = overlays;
+                *v = zones;
             }
         }
     }

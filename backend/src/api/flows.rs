@@ -1635,14 +1635,16 @@ pub async fn update_pip_config(
     Json(req): Json<strom_types::api::UpdatePipConfigRequest>,
 ) -> Result<Json<strom_types::api::UpdatePipConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
     use strom_types::vision_mixer::MAX_PIP_OVERLAYS;
-    if req.overlays.len() > MAX_PIP_OVERLAYS {
+    let total_sources: usize = req.zones.iter().map(|z| z.sources.len()).sum();
+    if total_sources > MAX_PIP_OVERLAYS {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::with_details(
-                "Too many PiP overlays",
+                "Too many PiP overlay sources",
                 format!(
-                    "Got {} overlays, but MAX_PIP_OVERLAYS is {}",
-                    req.overlays.len(),
+                    "Got {} total sources across {} zones, but MAX_PIP_OVERLAYS is {}",
+                    total_sources,
+                    req.zones.len(),
                     MAX_PIP_OVERLAYS
                 ),
             )),
@@ -1650,11 +1652,11 @@ pub async fn update_pip_config(
     }
 
     info!(
-        "Updating PiP {} on vision mixer {} in flow {}: bg={:?}, overlays={:?}",
-        pip_idx, block_id, flow_id, req.bg, req.overlays
+        "Updating PiP {} on vision mixer {} in flow {}: bg={:?}, zones={:?}",
+        pip_idx, block_id, flow_id, req.bg, req.zones
     );
     state
-        .apply_vision_mixer_pip_config(&flow_id, &block_id, pip_idx, req.bg, req.overlays.clone())
+        .apply_vision_mixer_pip_config(&flow_id, &block_id, pip_idx, req.bg, req.zones.clone())
         .await
         .map_err(|e| {
             error!("Failed to update PiP config: {}", e);
@@ -1667,20 +1669,20 @@ pub async fn update_pip_config(
             )
         })?;
 
-    // Read back authoritative state.
-    let (bg, overlays) = if let Some(s) =
+    // Read back authoritative state (server-side dedup may have dropped sources).
+    let (bg, zones) = if let Some(s) =
         crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
     {
-        (s.pip_bg_input(pip_idx), s.pip_overlay_inputs(pip_idx))
+        (s.pip_bg_input(pip_idx), s.pip_zones(pip_idx))
     } else {
-        (req.bg, req.overlays)
+        (req.bg, req.zones)
     };
 
     Ok(Json(strom_types::api::UpdatePipConfigResponse {
         message: format!("PiP {} updated", pip_idx),
         pip_idx,
         bg,
-        overlays,
+        zones,
     }))
 }
 

@@ -161,7 +161,8 @@ fn test_pip_overlay_rects_tile_within_bg() {
     let (bx, by, bw, bh) = layout::pip_bg_pad_position(&l, 0);
 
     // Two overlays → side-by-side aspect-preserving cells within the PiP tile.
-    let rects = layout::pip_overlay_pad_positions(&l, 0, 2, ASPECT_16_9);
+    let rects =
+        strom_types::vision_mixer::compute_pip_overlay_rects(bx, by, bw, bh, 2, ASPECT_16_9);
     assert_eq!(rects.len(), 2);
     for (rx, ry, rw, rh) in &rects {
         assert!(*rx >= bx && *ry >= by);

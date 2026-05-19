@@ -231,6 +231,8 @@ use utoipa::OpenApi;
             SelectPreviewResponse,
             UpdatePipConfigRequest,
             UpdatePipConfigResponse,
+            strom_types::vision_mixer::NormRect,
+            strom_types::vision_mixer::Zone,
             strom_types::api::MultiviewEndpointResponse,
             OverlayAlphaRequest,
             OverlayAlphaResponse,

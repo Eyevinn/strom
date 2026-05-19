@@ -1,7 +1,11 @@
 //! Vision mixer constants and defaults.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
+
+#[cfg(feature = "openapi")]
+use utoipa::ToSchema;
 
 /// A source that can be assigned to PGM or PVW.
 ///
@@ -220,6 +224,210 @@ pub const TRANSITION_KEYFRAMES: usize = 10;
 
 // --- Source layout helpers ---
 
+/// Normalized rectangle in container coordinates. Each component is in `0.0..=1.0`.
+/// `(x, y)` is the top-left corner; `(w, h)` is the size.
+///
+/// Used to position a PiP overlay slot anywhere inside its parent region without
+/// coupling to the output resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct NormRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl NormRect {
+    /// Returns true if the rect lies entirely inside `0..=1` and has positive size.
+    pub fn is_valid(&self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.w.is_finite()
+            && self.h.is_finite()
+            && self.x >= 0.0
+            && self.y >= 0.0
+            && self.w > 0.0
+            && self.h > 0.0
+            && self.x + self.w <= 1.0 + 1e-6
+            && self.y + self.h <= 1.0 + 1e-6
+    }
+
+    /// Clamp components into `0..=1` and ensure `x + w <= 1`, `y + h <= 1`.
+    pub fn clamped(&self) -> Self {
+        let x = self.x.clamp(0.0, 1.0);
+        let y = self.y.clamp(0.0, 1.0);
+        let w = self.w.clamp(0.0, 1.0 - x);
+        let h = self.h.clamp(0.0, 1.0 - y);
+        Self { x, y, w, h }
+    }
+
+    /// Project the normalized rect into a container region given in pixels.
+    /// Result is `(x, y, w, h)` with components clamped to `>= 0` and `w, h >= 1`.
+    pub fn to_pixels(
+        &self,
+        container_x: i32,
+        container_y: i32,
+        container_w: i32,
+        container_h: i32,
+    ) -> (i32, i32, i32, i32) {
+        let cw = container_w.max(0) as f32;
+        let ch = container_h.max(0) as f32;
+        let x = container_x + (self.x * cw).round() as i32;
+        let y = container_y + (self.y * ch).round() as i32;
+        let w = ((self.w * cw).round() as i32).max(1);
+        let h = ((self.h * ch).round() as i32).max(1);
+        (x, y, w, h)
+    }
+}
+
+/// Resolve final pixel rects for all overlay slots within `(cx, cy, cw, ch)`.
+///
+/// Slots with `Some(rect)` use that rect (clamped + projected onto the container).
+/// Slots with `None` fall back to the auto-tile position from
+/// [`compute_pip_overlay_rects`] — including the case where every slot is `None`,
+/// which yields exactly the legacy auto-tile layout.
+pub fn resolve_pip_overlay_rects(
+    container_x: i32,
+    container_y: i32,
+    container_w: i32,
+    container_h: i32,
+    slots: &[Option<NormRect>],
+    source_aspect: f64,
+) -> Vec<(i32, i32, i32, i32)> {
+    if slots.is_empty() {
+        return Vec::new();
+    }
+    let auto = compute_pip_overlay_rects(
+        container_x,
+        container_y,
+        container_w,
+        container_h,
+        slots.len(),
+        source_aspect,
+    );
+    slots
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| match slot {
+            Some(r) => r
+                .clamped()
+                .to_pixels(container_x, container_y, container_w, container_h),
+            None => auto
+                .get(i)
+                .copied()
+                .unwrap_or((container_x, container_y, 1, 1)),
+        })
+        .collect()
+}
+
+/// A sub-region of a PiP that hosts one or more overlay sources.
+///
+/// Sources inside a zone auto-tile within its `rect` (using
+/// [`compute_pip_overlay_rects`]) so the zone behaves like a "mini-PiP"
+/// nested inside the parent PiP region. The `capacity` puts a cap on how
+/// many sources can occupy the zone; pushing a new source into a full zone
+/// is expected to evict the oldest (client-side FIFO).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct Zone {
+    /// Where the zone sits within the parent PiP region.
+    /// `None` = fill the entire PiP region (legacy single-zone PiP).
+    #[serde(default)]
+    pub rect: Option<NormRect>,
+    /// Max sources allowed in the zone. `None` = unlimited (up to
+    /// [`MAX_PIP_OVERLAYS`]). A capacity of 1 is "swap mode": replacing
+    /// the source animates a cross-fade.
+    #[serde(default)]
+    pub capacity: Option<usize>,
+    /// Current sources (FIFO, oldest first). Sources auto-tile within `rect`.
+    #[serde(default)]
+    pub sources: Vec<usize>,
+}
+
+impl Zone {
+    /// Returns `true` when the zone would not contribute any visible pads.
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+
+    /// Effective source slice respecting `capacity` (truncate from the front,
+    /// keeping the newest entries).
+    pub fn effective_sources(&self) -> &[usize] {
+        match self.capacity {
+            Some(cap) if cap < self.sources.len() => {
+                let start = self.sources.len() - cap;
+                &self.sources[start..]
+            }
+            _ => &self.sources[..],
+        }
+    }
+}
+
+/// Per-pad layout produced by [`resolve_zone_pads`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ZonePadLayout {
+    pub input: usize,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// 0-based offset relative to the zone's `overlay_zorder`. Sources
+    /// later in the zone's FIFO render on top of earlier ones.
+    pub zorder_offset: u32,
+}
+
+/// Compute pixel-space pad layouts for every source across every zone.
+///
+/// Each zone's `rect` is projected onto `(container_x, container_y,
+/// container_w, container_h)` (or defaults to the full container when
+/// `rect` is `None`). Sources inside the zone auto-tile within the projected
+/// rect using [`compute_pip_overlay_rects`].
+///
+/// Duplicate sources across zones are filtered: only the first occurrence
+/// keeps its pad layout. Sources that exceed a zone's `capacity` are
+/// dropped (oldest first), matching [`Zone::effective_sources`].
+pub fn resolve_zone_pads(
+    container_x: i32,
+    container_y: i32,
+    container_w: i32,
+    container_h: i32,
+    zones: &[Zone],
+    source_aspect: f64,
+) -> Vec<ZonePadLayout> {
+    let mut out: Vec<ZonePadLayout> = Vec::new();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    for zone in zones {
+        let sources = zone.effective_sources();
+        if sources.is_empty() {
+            continue;
+        }
+        let (zx, zy, zw, zh) = match zone.rect {
+            Some(r) => r
+                .clamped()
+                .to_pixels(container_x, container_y, container_w, container_h),
+            None => (container_x, container_y, container_w, container_h),
+        };
+        let cells = compute_pip_overlay_rects(zx, zy, zw, zh, sources.len(), source_aspect);
+        for (i, &input) in sources.iter().enumerate() {
+            if !seen.insert(input) {
+                continue;
+            }
+            let (x, y, w, h) = cells.get(i).copied().unwrap_or((zx, zy, 1, 1));
+            out.push(ZonePadLayout {
+                input,
+                x,
+                y,
+                w,
+                h,
+                zorder_offset: out.len() as u32,
+            });
+        }
+    }
+    out
+}
+
 /// Compute sub-rectangles for PiP overlays within a container, preserving the
 /// source aspect ratio.
 ///
@@ -374,5 +582,223 @@ mod tests {
         assert!("input".parse::<Source>().is_err());
         assert!("input:".parse::<Source>().is_err());
         assert!("pip:abc".parse::<Source>().is_err());
+    }
+
+    #[test]
+    fn test_normrect_is_valid() {
+        assert!(NormRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0
+        }
+        .is_valid());
+        assert!(NormRect {
+            x: 0.5,
+            y: 0.5,
+            w: 0.5,
+            h: 0.5
+        }
+        .is_valid());
+        assert!(!NormRect {
+            x: -0.1,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5
+        }
+        .is_valid());
+        assert!(!NormRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.5
+        }
+        .is_valid());
+        assert!(!NormRect {
+            x: 0.6,
+            y: 0.0,
+            w: 0.5,
+            h: 0.5
+        }
+        .is_valid()); // x+w > 1
+    }
+
+    #[test]
+    fn test_normrect_clamped() {
+        let r = NormRect {
+            x: -0.2,
+            y: 1.5,
+            w: 2.0,
+            h: 0.3,
+        }
+        .clamped();
+        assert_eq!(r.x, 0.0);
+        assert_eq!(r.y, 1.0);
+        assert_eq!(r.w, 1.0);
+        assert_eq!(r.h, 0.0);
+    }
+
+    #[test]
+    fn test_normrect_to_pixels_basic() {
+        let r = NormRect {
+            x: 0.5,
+            y: 0.25,
+            w: 0.5,
+            h: 0.5,
+        };
+        assert_eq!(r.to_pixels(0, 0, 1920, 1080), (960, 270, 960, 540));
+    }
+
+    #[test]
+    fn test_resolve_pip_overlay_rects_all_explicit() {
+        let slots = vec![
+            Some(NormRect {
+                x: 0.55,
+                y: 0.10,
+                w: 0.40,
+                h: 0.30,
+            }),
+            Some(NormRect {
+                x: 0.05,
+                y: 0.60,
+                w: 0.40,
+                h: 0.30,
+            }),
+        ];
+        let rects = resolve_pip_overlay_rects(0, 0, 1000, 1000, &slots, 16.0 / 9.0);
+        assert_eq!(rects[0], (550, 100, 400, 300));
+        assert_eq!(rects[1], (50, 600, 400, 300));
+    }
+
+    #[test]
+    fn test_resolve_pip_overlay_rects_all_none_matches_auto() {
+        // All-None should produce the same layout as compute_pip_overlay_rects.
+        let auto = compute_pip_overlay_rects(0, 0, 1920, 1080, 2, 16.0 / 9.0);
+        let slots = vec![None, None];
+        let resolved = resolve_pip_overlay_rects(0, 0, 1920, 1080, &slots, 16.0 / 9.0);
+        assert_eq!(resolved, auto);
+    }
+
+    #[test]
+    fn test_zone_effective_sources_uncapped() {
+        let z = Zone {
+            rect: None,
+            capacity: None,
+            sources: vec![1, 2, 3],
+        };
+        assert_eq!(z.effective_sources(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_zone_effective_sources_capped_keeps_newest() {
+        let z = Zone {
+            rect: None,
+            capacity: Some(2),
+            sources: vec![1, 2, 3, 4],
+        };
+        assert_eq!(z.effective_sources(), &[3, 4]);
+    }
+
+    #[test]
+    fn test_resolve_zone_pads_single_zone_full_region() {
+        // One zone with no rect, three sources → auto-tile across full container.
+        let z = Zone {
+            rect: None,
+            capacity: None,
+            sources: vec![0, 1, 2],
+        };
+        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0);
+        assert_eq!(layouts.len(), 3);
+        // First source covers ~upper-left cell of the 2x2 auto-tile.
+        assert_eq!(layouts[0].input, 0);
+        assert!(layouts[0].w > 0 && layouts[0].h > 0);
+        // Z-order increments by 1 per pad.
+        assert_eq!(layouts[0].zorder_offset, 0);
+        assert_eq!(layouts[1].zorder_offset, 1);
+        assert_eq!(layouts[2].zorder_offset, 2);
+    }
+
+    #[test]
+    fn test_resolve_zone_pads_two_zones() {
+        // Zone A: right half, one source. Zone B: bottom strip, three sources.
+        let a = Zone {
+            rect: Some(NormRect {
+                x: 0.5,
+                y: 0.0,
+                w: 0.5,
+                h: 1.0,
+            }),
+            capacity: Some(1),
+            sources: vec![5],
+        };
+        let b = Zone {
+            rect: Some(NormRect {
+                x: 0.0,
+                y: 0.75,
+                w: 0.5,
+                h: 0.25,
+            }),
+            capacity: Some(3),
+            sources: vec![1, 2, 3],
+        };
+        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[a, b], 16.0 / 9.0);
+        assert_eq!(layouts.len(), 4);
+        assert_eq!(layouts[0].input, 5);
+        // Zone A: x starts at half the container width (960).
+        assert!(layouts[0].x >= 960);
+        // Zone B sources live in the bottom strip.
+        for l in &layouts[1..] {
+            assert!(l.y >= (1080.0 * 0.75) as i32 - 1);
+        }
+    }
+
+    #[test]
+    fn test_resolve_zone_pads_dedupes_across_zones() {
+        let a = Zone {
+            rect: None,
+            capacity: None,
+            sources: vec![1, 2],
+        };
+        let b = Zone {
+            rect: None,
+            capacity: None,
+            sources: vec![2, 3],
+        };
+        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[a, b], 16.0 / 9.0);
+        // Source 2 should appear once (from zone A); zone B drops it.
+        let inputs: Vec<usize> = layouts.iter().map(|l| l.input).collect();
+        assert_eq!(inputs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_resolve_zone_pads_drops_oldest_when_overcap() {
+        // Capacity 2 but 4 sources — should keep only the last 2.
+        let z = Zone {
+            rect: None,
+            capacity: Some(2),
+            sources: vec![1, 2, 3, 4],
+        };
+        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0);
+        let inputs: Vec<usize> = layouts.iter().map(|l| l.input).collect();
+        assert_eq!(inputs, vec![3, 4]);
+    }
+
+    #[test]
+    fn test_resolve_pip_overlay_rects_mixed() {
+        // Slot 0 explicit, slot 1 auto. Slot 1 falls back to the auto-tile cell
+        // that would have been computed for 2-slot auto-tile.
+        let auto = compute_pip_overlay_rects(0, 0, 1920, 1080, 2, 16.0 / 9.0);
+        let slots = vec![
+            Some(NormRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.5,
+                h: 0.5,
+            }),
+            None,
+        ];
+        let resolved = resolve_pip_overlay_rects(0, 0, 1920, 1080, &slots, 16.0 / 9.0);
+        assert_eq!(resolved[0], (0, 0, 960, 540));
+        assert_eq!(resolved[1], auto[1]);
     }
 }
