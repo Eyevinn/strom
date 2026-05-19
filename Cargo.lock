@@ -2991,9 +2991,9 @@ dependencies = [
 
 [[package]]
 name = "gstreamer-controller"
-version = "0.25.0"
+version = "0.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3250c6f71c62a8f51401f99ce779f1f1a32bc84086d0f3bc677b8e4fd49cbb06"
+checksum = "2d8c72be029c50abb50fed29e83105364b5cbcdb48c4fbf608826cd69d31458d"
 dependencies = [
  "glib",
  "gstreamer",
