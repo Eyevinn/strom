@@ -114,4 +114,37 @@ mod tests {
             Some(PropertyValue::Int(42))
         ));
     }
+
+    #[test]
+    fn unknown_transform_falls_back_to_identity() {
+        // Tolerating unknown transform names keeps older block definitions
+        // (perhaps loaded from disk, perhaps user-defined) working when the
+        // backend doesn't recognise their transform name.
+        let t = lookup(Some("definitely_not_a_real_transform"));
+        assert!(matches!(
+            (t.forward)(PropertyValue::Float(1.5)),
+            Some(PropertyValue::Float(f)) if (f - 1.5).abs() < 1e-9
+        ));
+        assert!(matches!(
+            (t.inverse)(PropertyValue::Bool(true)),
+            Some(PropertyValue::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn bool_to_volume_rejects_non_bool_forward() {
+        // The forward direction expects Bool; sending Float should yield None
+        // so state.rs reports a clear "value type does not match transform"
+        // error to the API caller.
+        let t = lookup(Some("bool_to_volume"));
+        assert!((t.forward)(PropertyValue::Float(0.5)).is_none());
+        assert!((t.forward)(PropertyValue::Int(1)).is_none());
+    }
+
+    #[test]
+    fn db_to_linear_rejects_non_numeric_forward() {
+        let t = lookup(Some("db_to_linear"));
+        assert!((t.forward)(PropertyValue::Bool(true)).is_none());
+        assert!((t.forward)(PropertyValue::String("0".to_string())).is_none());
+    }
 }
