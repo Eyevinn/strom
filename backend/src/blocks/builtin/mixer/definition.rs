@@ -10,7 +10,8 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 pub(super) fn mixer_definition() -> BlockDefinition {
     // Generate channel properties
     let mut exposed_properties = vec![
-        // Global: number of channels (1..=MAX_CHANNELS, clamped on parse)
+        // Global: number of channels — construction-time only, defines how the
+        // block is built. Changing it requires a flow restart.
         ExposedProperty {
             name: "num_channels".to_string(),
             label: "Channels".to_string(),
@@ -22,10 +23,11 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 property_name: "num_channels".to_string(),
                 transform: None,
             },
-            live: true,
+            live: false,
             persist: None,
         },
-        // DSP Backend selection
+        // DSP Backend selection — construction-time only; switches which set of
+        // LV2/Rust DSP elements the builder instantiates.
         ExposedProperty {
             name: "dsp_backend".to_string(),
             label: "DSP Backend".to_string(),
@@ -49,7 +51,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 property_name: "dsp_backend".to_string(),
                 transform: None,
             },
-            live: true,
+            live: false,
             persist: None,
         },
         // Main fader
@@ -67,7 +69,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             live: true,
             persist: None,
         },
-        // Number of aux buses (0..=MAX_AUX_BUSES, clamped on parse)
+        // Number of aux buses — construction-time only.
         ExposedProperty {
             name: "num_aux_buses".to_string(),
             label: "Aux Buses".to_string(),
@@ -79,10 +81,10 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 property_name: "num_aux_buses".to_string(),
                 transform: None,
             },
-            live: true,
+            live: false,
             persist: None,
         },
-        // Number of groups (0..=MAX_GROUPS, clamped on parse)
+        // Number of groups — construction-time only.
         ExposedProperty {
             name: "num_groups".to_string(),
             label: "Groups".to_string(),
@@ -94,7 +96,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                 property_name: "num_groups".to_string(),
                 transform: None,
             },
-            live: true,
+            live: false,
             persist: None,
         },
         // Monitor master level — drives the Monitor bus output. The Monitor
