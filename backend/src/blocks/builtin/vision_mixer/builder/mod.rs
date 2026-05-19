@@ -306,10 +306,10 @@ pub(super) fn setup_overlay_renderer(
         pvw_pip: p.pvw_source.as_pip(),
     };
 
-    // pgm_group/pvw_group must match what the compositor actually renders.
-    // For a single Input source it's that input; for a PiP source the legacy
-    // group reflects the PiP's bg input so transitions and overlay rendering
-    // stay consistent (Take from PiP-PGM falls back to bg-as-single-input).
+    // pgm_input/pvw_input must match what the compositor actually renders.
+    // For a single Input source it's that input; for a PiP source we initialize
+    // from the PiP's bg input so transitions and overlay rendering stay consistent
+    // (Take from PiP-PGM falls back to bg-as-single-input).
     let initial_pgm_input = p
         .pgm_source
         .as_pip()

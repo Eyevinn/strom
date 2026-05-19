@@ -1516,7 +1516,7 @@ impl AppState {
         }
 
         // Sync final alpha values back to flow definition for persistence
-        // Clear ALL input alphas to 0.0, then set active group inputs to 1.0
+        // Clear ALL input alphas to 0.0, then set the active input to 1.0
         if let Some(block_id) = block_instance_id.split(':').next() {
             let mut flows = self.inner.flows.write().await;
             if let Some(flow) = flows.get_mut(flow_id) {
@@ -1550,7 +1550,7 @@ impl AppState {
         }
 
         // Check if this is a vision mixer block and update multiview accordingly
-        // After take: new PGM = old PVW group, new PVW = old PGM group (swap)
+        // After take: new PGM = old PVW, new PVW = old PGM (swap)
         if let Some(block_id) = block_instance_id.split(':').next() {
             let flows = self.inner.flows.read().await;
             let is_vision_mixer = flows

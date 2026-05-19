@@ -145,7 +145,7 @@ pub const MV_THUMBNAIL_ZORDER: u32 = 1;
 /// Z-order for PGM/PVW big display pads on the multiview compositor.
 pub const MV_BIG_DISPLAY_ZORDER: u32 = 10;
 
-/// Z-order for PGM group sources on the distribution compositor.
+/// Z-order for the PGM source on the distribution compositor.
 pub const DIST_PGM_ZORDER: u32 = 1;
 
 /// Base z-order for DSK pads on the distribution compositor (+ dsk index).
@@ -286,7 +286,7 @@ impl NormRect {
 /// Slots with `Some(rect)` use that rect (clamped + projected onto the container).
 /// Slots with `None` fall back to the auto-tile position from
 /// [`compute_pip_overlay_rects`] — including the case where every slot is `None`,
-/// which yields exactly the legacy auto-tile layout.
+/// which yields the default auto-tile layout.
 pub fn resolve_pip_overlay_rects(
     container_x: i32,
     container_y: i32,
@@ -332,7 +332,7 @@ pub fn resolve_pip_overlay_rects(
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct Zone {
     /// Where the zone sits within the parent PiP region.
-    /// `None` = fill the entire PiP region (legacy single-zone PiP).
+    /// `None` = fill the entire PiP region.
     #[serde(default)]
     pub rect: Option<NormRect>,
     /// Max sources allowed in the zone. `None` = unlimited (up to
@@ -433,8 +433,8 @@ pub fn resolve_zone_pads(
 ///
 /// Layout strategy:
 ///   - Cells are arranged in a `cols × rows` grid where
-///     `cols = ceil(sqrt(N))`, `rows = ceil(N / cols)`. For 1..=4 the shape
-///     matches the existing groups layout (1, 2-side, 2-top+1-bot, 2×2).
+///     `cols = ceil(sqrt(N))`, `rows = ceil(N / cols)`. For 1..=4 the cells
+///     lay out as 1, 2-side, 2-top+1-bot, 2×2.
 ///   - Each cell's size is constrained to `source_aspect`, so the rendered
 ///     source fills the cell exactly — no transparent letterbox bands that
 ///     would otherwise let the bg peek through when the pads are stacked.
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn test_pip_overlay_rects_falls_back_to_uniform_when_aspect_invalid() {
-        // source_aspect <= 0 → uniform cells filling the container (legacy).
+        // source_aspect <= 0 → uniform cells filling the container (no aspect preservation).
         let rects = compute_pip_overlay_rects(0, 0, 600, 400, 2, 0.0);
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[0], (0, 0, 300, 400));

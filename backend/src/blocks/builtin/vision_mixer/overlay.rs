@@ -51,9 +51,9 @@ pub fn unregister_overlay_state(block_id: &str) {
 pub struct VisionMixerOverlayState {
     /// Current PGM input index, or [`NO_SOURCE`] when no input is on PGM
     /// (e.g. PGM is a PiP composition — see [`Self::pgm_pip`]).
-    pgm_group: AtomicU64,
+    pgm_input: AtomicU64,
     /// Current PVW input index, or [`NO_SOURCE`] when PVW shows a PiP composition.
-    pvw_group: AtomicU64,
+    pvw_input: AtomicU64,
     /// PiP currently shown on PGM (u64::MAX = PGM is an input, not a PiP).
     /// Set at build time from `initial_pgm_source`; cleared/changed via runtime API.
     pgm_pip: AtomicU64,
@@ -121,8 +121,8 @@ pub struct PipInitialState {
 /// "this bus is an input, not a PiP".
 pub const NO_PIP: u64 = u64::MAX;
 
-/// Sentinel for "no input source on this bus" in [`VisionMixerOverlayState::pgm_group`]
-/// / `pvw_group` (e.g. when the bus shows a PiP composition instead).
+/// Sentinel for "no input source on this bus" in [`VisionMixerOverlayState::pgm_input`]
+/// / `pvw_input` (e.g. when the bus shows a PiP composition instead).
 pub const NO_SOURCE: u64 = u64::MAX;
 
 impl VisionMixerOverlayState {
@@ -162,8 +162,8 @@ impl VisionMixerOverlayState {
             .collect();
 
         Self {
-            pgm_group: AtomicU64::new(pgm_input as u64),
-            pvw_group: AtomicU64::new(pvw_input as u64),
+            pgm_input: AtomicU64::new(pgm_input as u64),
+            pvw_input: AtomicU64::new(pvw_input as u64),
             pgm_pip: AtomicU64::new(pip.pgm_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
             pvw_pip: AtomicU64::new(pip.pvw_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
             pip_bg,
@@ -303,7 +303,7 @@ impl VisionMixerOverlayState {
 
     /// Current PGM input, or `None` when PGM is a PiP source.
     pub fn pgm_input(&self) -> Option<usize> {
-        let v = self.pgm_group.load(Ordering::Relaxed);
+        let v = self.pgm_input.load(Ordering::Relaxed);
         if v == NO_SOURCE {
             None
         } else {
@@ -313,7 +313,7 @@ impl VisionMixerOverlayState {
 
     /// Current PVW input, or `None` when PVW is a PiP source.
     pub fn pvw_input(&self) -> Option<usize> {
-        let v = self.pvw_group.load(Ordering::Relaxed);
+        let v = self.pvw_input.load(Ordering::Relaxed);
         if v == NO_SOURCE {
             None
         } else {
@@ -322,25 +322,25 @@ impl VisionMixerOverlayState {
     }
 
     /// Raw atomic value (used for dirty-checking).
-    pub fn pgm_group_packed(&self) -> u64 {
-        self.pgm_group.load(Ordering::Relaxed)
+    pub fn pgm_input_packed(&self) -> u64 {
+        self.pgm_input.load(Ordering::Relaxed)
     }
 
     /// Raw atomic value (used for dirty-checking).
-    pub fn pvw_group_packed(&self) -> u64 {
-        self.pvw_group.load(Ordering::Relaxed)
+    pub fn pvw_input_packed(&self) -> u64 {
+        self.pvw_input.load(Ordering::Relaxed)
     }
 
     /// Set PGM input, or clear it with `None` (bus shows a PiP instead).
     pub fn set_pgm_input(&self, input: Option<usize>) {
         let v = input.map(|i| i as u64).unwrap_or(NO_SOURCE);
-        self.pgm_group.store(v, Ordering::Relaxed);
+        self.pgm_input.store(v, Ordering::Relaxed);
     }
 
     /// Set PVW input, or clear it with `None` (bus shows a PiP instead).
     pub fn set_pvw_input(&self, input: Option<usize>) {
         let v = input.map(|i| i as u64).unwrap_or(NO_SOURCE);
-        self.pvw_group.store(v, Ordering::Relaxed);
+        self.pvw_input.store(v, Ordering::Relaxed);
     }
 
     /// Get the multiview overlay alpha (0.0–1.0).
@@ -627,8 +627,8 @@ impl OverlayRenderer {
     /// so the multiview compositor has a steady stream of overlay buffers and
     /// does not stall waiting for the overlay pad.
     pub fn render_if_dirty(&mut self) -> bool {
-        let pgm_packed = self.state.pgm_group_packed();
-        let pvw_packed = self.state.pvw_group_packed();
+        let pgm_packed = self.state.pgm_input_packed();
+        let pvw_packed = self.state.pvw_input_packed();
         let ftb = self.state.ftb_active.load(Ordering::Relaxed);
         let pgm_pip_packed = self.state.pgm_pip_packed();
         let pvw_pip_packed = self.state.pvw_pip_packed();
@@ -647,27 +647,17 @@ impl OverlayRenderer {
             || (show_vu && self.last_meters_hash != meters_hash);
 
         if dirty {
-            // pgm/pvw_packed is the raw AtomicU64 (single input idx or NO_SOURCE);
-            // expand to a Vec for the renderer (cairo loop iterates the group).
-            let pgm_group = if pgm_packed == NO_SOURCE {
-                Vec::new()
-            } else {
-                vec![pgm_packed as usize]
-            };
-            let pvw_group = if pvw_packed == NO_SOURCE {
-                Vec::new()
-            } else {
-                vec![pvw_packed as usize]
-            };
+            let pgm = (pgm_packed != NO_SOURCE).then_some(pgm_packed as usize);
+            let pvw = (pvw_packed != NO_SOURCE).then_some(pvw_packed as usize);
 
             let t0 = std::time::Instant::now();
-            let pushed = self.push_frame(&pgm_group, &pvw_group, ftb, h, m, s);
+            let pushed = self.push_frame(pgm, pvw, ftb, h, m, s);
             let elapsed = t0.elapsed();
             debug!(
                 "Overlay render+push: {:.1}ms (pgm={:?}, pvw={:?}, ftb={}, pushed={})",
                 elapsed.as_secs_f64() * 1000.0,
-                pgm_group,
-                pvw_group,
+                pgm,
+                pvw,
                 ftb,
                 pushed
             );
@@ -692,8 +682,8 @@ impl OverlayRenderer {
     #[allow(clippy::too_many_arguments)]
     fn push_frame(
         &mut self,
-        pgm_group: &[usize],
-        pvw_group: &[usize],
+        pgm: Option<usize>,
+        pvw: Option<usize>,
         ftb: bool,
         h: u32,
         m: u32,
@@ -719,7 +709,7 @@ impl OverlayRenderer {
             cr.set_operator(cairo::Operator::Clear);
             let _ = cr.paint();
             cr.set_operator(cairo::Operator::Over);
-            render_overlay(&self.state, &cr, pgm_group, pvw_group, ftb, h, m, s);
+            render_overlay(&self.state, &cr, pgm, pvw, ftb, h, m, s);
         }
 
         let t_cairo = t0.elapsed();
@@ -926,8 +916,8 @@ pub fn start_overlay_timer(
 fn render_overlay(
     state: &VisionMixerOverlayState,
     cr: &cairo::Context,
-    pgm_group: &[usize],
-    pvw_group: &[usize],
+    pgm: Option<usize>,
+    pvw: Option<usize>,
     ftb: bool,
     h: u32,
     m: u32,
@@ -952,9 +942,9 @@ fn render_overlay(
     // --- Thumbnail borders (drawn around full slot including label area) ---
     for i in 0..layout.num_inputs.min(layout.thumbnail_slot_rects.len()) {
         let r = &layout.thumbnail_slot_rects[i];
-        if pgm_group.contains(&i) {
+        if pgm == Some(i) {
             cr.set_source_rgb(PGM_R, PGM_G, PGM_B);
-        } else if pvw_group.contains(&i) {
+        } else if pvw == Some(i) {
             cr.set_source_rgb(PVW_R, PVW_G, PVW_B);
         } else {
             cr.set_source_rgb(GRAY, GRAY, GRAY);
@@ -1005,9 +995,8 @@ fn render_overlay(
             draw_vu_meter(cr, r, peak, decay, layout.scale);
         }
 
-        // PVW meter — one source max (groups removed). Draw the input's level
-        // across the full PVW rect.
-        if let Some(&src_idx) = pvw_group.first() {
+        // PVW meter — draw the PVW source's level across the full PVW rect.
+        if let Some(src_idx) = pvw {
             if let (Some(peak_slot), Some(decay_slot)) = (
                 state.input_peak.get(src_idx),
                 state.input_decay.get(src_idx),
