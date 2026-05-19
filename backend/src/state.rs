@@ -346,12 +346,51 @@ impl AppState {
         ))
     }
 
+    /// Strip block properties marked `persist: false` from a flow.
+    ///
+    /// Transient state (currently `chN_pfl` / `chN_afl` on the audio mixer)
+    /// should never reach the in-memory flow definition or disk — otherwise an
+    /// explicit flow save would re-engage solo on the next restart, and the
+    /// runtime-only intent of `persist: false` would silently leak.
+    ///
+    /// Called at two boundaries:
+    ///   * `load_from_storage` — cleans up legacy flow JSON that may carry
+    ///     transient values from before this guard existed.
+    ///   * `upsert_flow` — filters everything coming in from the flow PATCH /
+    ///     PUT handlers and the create-flow path.
+    ///
+    /// Live PATCHes via `update_block_properties` already skip `persist: false`
+    /// at write time, so no additional filtering is needed on that path.
+    async fn strip_transient_properties(&self, flow: &mut Flow) {
+        for block in &mut flow.blocks {
+            let Some(def) = self
+                .inner
+                .block_registry
+                .get_by_id(&block.block_definition_id)
+                .await
+            else {
+                continue;
+            };
+            for prop in &def.exposed_properties {
+                if !prop.persist() {
+                    block.properties.remove(&prop.name);
+                }
+            }
+        }
+    }
+
     /// Load flows from storage into memory.
     pub async fn load_from_storage(&self) -> anyhow::Result<()> {
         info!("Loading flows from storage...");
         match self.inner.storage.load_all().await {
             Ok(mut flows) => {
                 let count = flows.len();
+
+                // Strip transient (persist: false) properties from any legacy
+                // flow JSON that stored them before this guard existed.
+                for flow in flows.values_mut() {
+                    self.strip_transient_properties(flow).await;
+                }
 
                 // Reset all flow states to None on server restart since pipelines aren't running
                 // This prevents showing stale "Playing" states from before the server stopped
@@ -573,11 +612,17 @@ impl AppState {
     }
 
     /// Add or update a flow and persist to storage.
-    pub async fn upsert_flow(&self, flow: Flow) -> anyhow::Result<()> {
+    pub async fn upsert_flow(&self, mut flow: Flow) -> anyhow::Result<()> {
         let is_new = {
             let flows = self.inner.flows.read().await;
             !flows.contains_key(&flow.id)
         };
+
+        // Filter out transient (persist: false) block properties before this
+        // flow definition reaches either the in-memory map or disk. Without
+        // this, an explicit save from the frontend would re-engage transient
+        // state (e.g. PFL/AFL solo) on the next restart.
+        self.strip_transient_properties(&mut flow).await;
 
         // Update in-memory state
         {
