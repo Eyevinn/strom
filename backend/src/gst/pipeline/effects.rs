@@ -32,9 +32,8 @@ impl PipelineManager {
     /// dist + multiview compositors; otherwise runs a standard single-pad
     /// transition on the mv mixer.
     ///
-    /// Returns `(was_ftb_cancelled, old_pgm, new_pgm, actual_kind)` where the
-    /// two middle elements are 0-or-1 element vecs (legacy slice shape — see
-    /// [`crate::blocks::builtin::vision_mixer::overlay::VisionMixerOverlayState::pgm_group`]).
+    /// Returns `(was_ftb_cancelled, old_pgm, new_pgm, actual_kind)`. The two
+    /// middle elements are `None` when the corresponding bus is a PiP source.
     /// `actual_kind` is the transition that actually ran — differs from
     /// `transition_type` when the engine downgraded the request (e.g. Slide
     /// across heterogeneous PiP/input sources downgrades to "fade").
@@ -45,7 +44,7 @@ impl PipelineManager {
         to_input: usize,
         transition_type: &str,
         duration_ms: u64,
-    ) -> Result<(bool, Vec<usize>, Vec<usize>, String), PipelineError> {
+    ) -> Result<(bool, Option<usize>, Option<usize>, String), PipelineError> {
         use crate::gst::transitions::{TransitionController, TransitionType};
 
         debug!(
@@ -60,21 +59,25 @@ impl PipelineManager {
             .get(&mixer_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
 
-        // Read authoritative PGM/PVW groups from overlay state
+        // Read authoritative PGM/PVW source from overlay state. `None` means
+        // the bus is a PiP — handled by the PiP-aware branch below.
         let overlay_state =
             crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_instance_id);
         let num_video_inputs = overlay_state
             .as_ref()
             .map(|s| s.num_inputs)
             .unwrap_or(usize::MAX);
-        let old_pgm_group = overlay_state
-            .as_ref()
-            .map(|s| s.pgm_group())
-            .unwrap_or_else(|| vec![from_input]);
-        let new_pgm_group = overlay_state
-            .as_ref()
-            .map(|s| s.pvw_group())
-            .unwrap_or_else(|| vec![to_input]);
+        // When overlay state is missing entirely, fall back to the request-
+        // provided indices. When state exists but reports None (PiP on bus),
+        // pass None through so the PiP-aware branch below handles it.
+        let old_pgm: Option<usize> = match overlay_state.as_ref() {
+            Some(s) => s.pgm_input(),
+            None => Some(from_input),
+        };
+        let new_pgm: Option<usize> = match overlay_state.as_ref() {
+            Some(s) => s.pvw_input(),
+            None => Some(to_input),
+        };
 
         // Auto-cancel FTB if active
         let was_ftb = overlay_state
@@ -130,8 +133,8 @@ impl PipelineManager {
                 // Swap Source state PVW ↔ PGM.
                 let new_pgm_pip = old_pvw_pip;
                 let new_pvw_pip = old_pgm_pip;
-                let new_pgm_group_swap = state.pvw_group();
-                let new_pvw_group_swap = state.pgm_group();
+                let new_pgm_swap = state.pvw_input();
+                let new_pvw_swap = state.pgm_input();
 
                 let dist_region = (0, 0, canvas_width, canvas_height);
                 let r = &state.layout.pvw_rect;
@@ -147,7 +150,7 @@ impl PipelineManager {
                 let old_dist_targets = pads_for_source(
                     state,
                     old_pgm_pip,
-                    &old_pgm_group,
+                    old_pgm,
                     dist_region,
                     0,
                     strom_types::vision_mixer::DIST_PGM_ZORDER,
@@ -157,7 +160,7 @@ impl PipelineManager {
                 let new_dist_targets = pads_for_source(
                     state,
                     new_pgm_pip,
-                    &new_pgm_group_swap,
+                    new_pgm_swap,
                     dist_region,
                     0,
                     strom_types::vision_mixer::DIST_PGM_ZORDER,
@@ -167,7 +170,7 @@ impl PipelineManager {
                 let old_pvw_targets = pads_for_source(
                     state,
                     old_pvw_pip,
-                    &state.pvw_group(),
+                    state.pvw_input(),
                     pvw_region,
                     state.num_inputs + 1,
                     strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
@@ -177,7 +180,7 @@ impl PipelineManager {
                 let new_pvw_targets = pads_for_source(
                     state,
                     new_pvw_pip,
-                    &new_pvw_group_swap,
+                    new_pvw_swap,
                     pvw_region,
                     state.num_inputs + 1,
                     strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
@@ -205,7 +208,7 @@ impl PipelineManager {
                             0,
                             state.num_inputs,
                             dist_region,
-                            &new_pgm_group_swap,
+                            new_pgm_swap,
                             strom_types::vision_mixer::DIST_PGM_ZORDER,
                         );
                     }
@@ -227,7 +230,7 @@ impl PipelineManager {
                             state.num_inputs + 1,
                             state.num_inputs,
                             pvw_region,
-                            &new_pvw_group_swap,
+                            new_pvw_swap,
                             strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
                         );
                     }
@@ -265,33 +268,33 @@ impl PipelineManager {
                 // Persist new state.
                 state.set_pgm_pip(new_pgm_pip);
                 state.set_pvw_pip(new_pvw_pip);
-                state.set_pgm_group(&new_pgm_group_swap);
-                state.set_pvw_group(&new_pvw_group_swap);
+                state.set_pgm_input(new_pgm_swap);
+                state.set_pvw_input(new_pvw_swap);
                 crate::blocks::builtin::vision_mixer::overlay::trigger_overlay_update(
                     block_instance_id,
                 );
 
                 info!(
-                    "PiP-aware Take on {} ({}{}ms): PGM pip={:?} group={:?}; PVW pip={:?} group={:?}",
+                    "PiP-aware Take on {} ({}{}ms): PGM pip={:?} input={:?}; PVW pip={:?} input={:?}",
                     block_instance_id,
                     if is_cut { "Cut, " } else { "Fade, " },
                     duration_ms,
                     new_pgm_pip,
-                    new_pgm_group_swap,
+                    new_pgm_swap,
                     new_pvw_pip,
-                    new_pvw_group_swap,
+                    new_pvw_swap,
                 );
                 // After the downgrade guard above, the PiP-aware branch only
                 // ever runs a Cut or a Fade.
                 let actual_kind = if is_cut { "cut" } else { "fade" }.to_string();
-                return Ok((was_ftb, old_pgm_group, new_pgm_group_swap, actual_kind));
+                return Ok((was_ftb, old_pgm, new_pgm_swap, actual_kind));
             }
         }
 
         // Reset all video pads to a clean state before the transition:
         // clear control bindings, restore alpha/position/size for the current
         // PGM input. Single-input PGM only (multi-source compositions are PiPs).
-        let active_pgm_input = old_pgm_group.first().copied();
+        let active_pgm_input = old_pgm;
 
         for pad in mixer.sink_pads() {
             let name = pad.name();
@@ -341,8 +344,8 @@ impl PipelineManager {
 
         // Single-input transition only. Multi-source compositions are now
         // expressed as PiPs which are handled by the PiP-aware branch above.
-        let from = old_pgm_group.first().copied().unwrap_or(from_input);
-        let to = new_pgm_group.first().copied().unwrap_or(to_input);
+        let from = old_pgm.unwrap_or(from_input);
+        let to = new_pgm.unwrap_or(to_input);
         let controller = TransitionController::new(mixer.clone(), canvas_width, canvas_height);
         controller
             .transition(from, to, trans_type, duration_ms, &self.pipeline)
@@ -353,7 +356,7 @@ impl PipelineManager {
         } else {
             trans_type.to_string()
         };
-        Ok((was_ftb, old_pgm_group, new_pgm_group, actual_kind))
+        Ok((was_ftb, old_pgm, new_pgm, actual_kind))
     }
 
     /// Animate a single input's position/size on a compositor block.
@@ -499,16 +502,17 @@ impl PipelineManager {
 
     /// Select a preview input on a vision mixer block.
     ///
-    /// If `multi` is false, replaces the PVW group with a single source (standard behavior).
-    /// If `multi` is true, toggles the input in/out of the current PVW group (shift+click).
+    /// Replaces the PVW source with `input` (clearing any PiP-on-PVW mode).
     ///
-    /// Returns (pvw_group, pgm_group).
+    /// Returns (new_pvw, current_pgm). Both are `None` when the corresponding
+    /// bus is a PiP source; `new_pvw` is always `Some(input)` here since this
+    /// path always switches PVW to an input.
     pub fn select_vision_mixer_preview(
         &self,
         block_instance_id: &str,
         input: usize,
         num_inputs: usize,
-    ) -> Result<(Vec<usize>, Vec<usize>), PipelineError> {
+    ) -> Result<(Option<usize>, Option<usize>), PipelineError> {
         use crate::blocks::builtin::vision_mixer::overlay;
 
         let mv_comp_id = format!("{}:mv_comp", block_instance_id);
@@ -533,17 +537,17 @@ impl PipelineManager {
             });
         }
 
-        let old_pvw_group = state.pvw_group();
-        let pgm_group = state.pgm_group();
+        let old_pvw = state.pvw_input();
+        let pgm = state.pgm_input();
         // Picking a regular input clears any PiP-on-PVW mode. Also hide *all*
         // PVW-big pads — when leaving PiP mode the previous overlay pads aren't
-        // in old_pvw_group, so the per-old-group hide pass would miss them.
+        // covered by the single-pad hide below, so we sweep the full range.
         let leaving_pip = state.pvw_pip().is_some();
         state.set_pvw_pip(None);
         if leaving_pip {
             // Clear any lingering control bindings from a previous PiP-aware
             // fade, then hide every PVW big pad. The new selection below
-            // re-activates only the chosen ones.
+            // re-activates only the chosen one.
             for i in 0..num_inputs {
                 if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + i)) {
                     for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
@@ -556,20 +560,20 @@ impl PipelineManager {
             }
         }
 
-        // Multi-input groups are gone — PVW is always exactly one input (or a
-        // PiP, but the PiP path is handled by select_vision_mixer_pip_for_preview).
-        if pgm_group.len() == 1 && pgm_group[0] == input && state.pgm_pip().is_none() {
+        // PVW is always exactly one input (or a PiP — handled by
+        // select_vision_mixer_pip_for_preview).
+        if pgm == Some(input) && state.pgm_pip().is_none() {
             return Err(PipelineError::InvalidProperty {
                 element: block_instance_id.to_string(),
                 property: "preview_input".to_string(),
                 reason: format!("Input {} is already the sole program source", input),
             });
         }
-        let new_pvw_group = vec![input];
+        let new_pvw = Some(input);
 
-        // Hide all old PVW big pads (the new selection re-activates only its own).
-        for &old_idx in &old_pvw_group {
-            if !pgm_group.contains(&old_idx) {
+        // Hide the old PVW pad (unless it's the same input the new PGM uses).
+        if let Some(old_idx) = old_pvw {
+            if pgm != Some(old_idx) {
                 if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + old_idx))
                 {
                     pad.set_property("alpha", 0.0f64);
@@ -588,25 +592,26 @@ impl PipelineManager {
             pad.set_property("zorder", strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER);
         }
 
-        state.set_pvw_group(&new_pvw_group);
+        state.set_pvw_input(new_pvw);
         overlay::trigger_overlay_update(block_instance_id);
 
         info!(
             "Vision mixer {} preview changed: {:?} -> {:?}",
-            block_instance_id, old_pvw_group, new_pvw_group
+            block_instance_id, old_pvw, new_pvw
         );
 
-        Ok((new_pvw_group, pgm_group))
+        Ok((new_pvw, pgm))
     }
 
     /// Update the multiview compositor after a PGM transition on a vision mixer.
     ///
-    /// Swaps PGM and PVW groups: old PVW group becomes new PGM, old PGM group becomes new PVW.
+    /// Swaps PGM and PVW: old PVW becomes new PGM, old PGM becomes new PVW.
+    /// `None` for either side means that bus is showing a PiP.
     pub fn update_vision_mixer_after_take(
         &self,
         block_instance_id: &str,
-        new_pgm_group: &[usize],
-        new_pvw_group: &[usize],
+        new_pgm: Option<usize>,
+        new_pvw: Option<usize>,
         num_inputs: usize,
     ) -> Result<(), PipelineError> {
         use crate::blocks::builtin::vision_mixer::overlay;
@@ -629,16 +634,16 @@ impl PipelineManager {
         // (bg + overlays at proper geometry). Running the legacy single-input
         // logic here would wipe the PiP composition on PVW big.
         if state.pgm_pip().is_some() || state.pvw_pip().is_some() {
-            // Still persist the group state so cairo overlay stays consistent.
-            state.set_pgm_group(new_pgm_group);
-            state.set_pvw_group(new_pvw_group);
+            // Still persist the input state so cairo overlay stays consistent.
+            state.set_pgm_input(new_pgm);
+            state.set_pvw_input(new_pvw);
             overlay::trigger_overlay_update(block_instance_id);
             return Ok(());
         }
 
         // PGM big display (sink_N) is fed from tee_pgm — it always shows the dist_comp
         // output automatically, so no pad manipulation needed for PGM.
-        // Only update PVW: hide all old PVW pads, show new PVW group pads.
+        // Only update PVW: hide all old PVW pads, show new PVW pad.
 
         // Hide all PVW candidate pads first. Clear any control bindings too —
         // a previous fade may have left lingering bindings that would otherwise
@@ -656,7 +661,7 @@ impl PipelineManager {
 
         // Position the new PVW pad at the PVW big rect (single input only —
         // multi-source compositions are PiPs).
-        if let Some(active) = new_pvw_group.first().copied() {
+        if let Some(active) = new_pvw {
             if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + active)) {
                 let r = &state.layout.pvw_rect;
                 pad.set_property("xpos", r.x as i32);
@@ -669,14 +674,14 @@ impl PipelineManager {
         }
 
         // Update state
-        state.set_pgm_group(new_pgm_group);
-        state.set_pvw_group(new_pvw_group);
+        state.set_pgm_input(new_pgm);
+        state.set_pvw_input(new_pvw);
 
         overlay::trigger_overlay_update(block_instance_id);
 
         info!(
             "Vision mixer {} take: PGM -> {:?}, PVW -> {:?}",
-            block_instance_id, new_pgm_group, new_pvw_group
+            block_instance_id, new_pgm, new_pvw
         );
 
         Ok(())
@@ -800,7 +805,7 @@ impl PipelineManager {
         })?;
 
         let was_active = state.ftb_active.load(std::sync::atomic::Ordering::Relaxed);
-        let pgm_group = state.pgm_group();
+        let pgm = state.pgm_input();
         let now_active = !was_active;
 
         // When restoring (FTB-off), fade back exactly the pads the current PGM
@@ -820,7 +825,7 @@ impl PipelineManager {
             pads_for_source(
                 &state,
                 state.pgm_pip(),
-                &pgm_group,
+                pgm,
                 (0, 0, cw, ch),
                 0,
                 strom_types::vision_mixer::DIST_PGM_ZORDER,
@@ -978,17 +983,15 @@ impl PipelineManager {
         state.set_pip_overlay_inputs(pip_idx, overlays.clone());
 
         // `select_vision_mixer_pip_for_preview` and the Cut/Fade Take paths
-        // stash the PiP's bg into `*_group` as a legacy single-source fallback
-        // (so a non-PiP-aware caller still sees a defined "first input"). If we
-        // change the bg while the PiP is currently on a bus, that fallback
-        // would go stale — the next Take swaps `pgm_group ↔ pvw_group`,
-        // carrying the OLD bg into the other bus. Re-sync here.
-        let group_value: Vec<usize> = bg.map(|b| vec![b]).unwrap_or_default();
+        // stash the PiP's bg into the bus's input slot as a fallback for
+        // non-PiP-aware callers. If we change the bg while the PiP is on a
+        // bus, that fallback goes stale — the next Take swaps PVW ↔ PGM and
+        // would carry the OLD bg to the other bus. Re-sync here.
         if state.pgm_pip() == Some(pip_idx) {
-            state.set_pgm_group(&group_value);
+            state.set_pgm_input(bg);
         }
         if state.pvw_pip() == Some(pip_idx) {
-            state.set_pvw_group(&group_value);
+            state.set_pvw_input(bg);
         }
 
         let mv_comp_id = format!("{}:mv_comp", block_instance_id);
@@ -1111,16 +1114,12 @@ impl PipelineManager {
             }
         }
 
-        // Mark PVW as PiP. Keep the underlying pvw_group as [bg] so legacy
-        // single-source PGM-take fallback still has a defined "first input".
+        // Mark PVW as PiP. Stash the PiP's bg as the underlying pvw_input so
+        // the non-PiP-aware Take fallback still has a defined source.
         state.set_pvw_pip(Some(pip_idx));
         let bg = state.pip_bg_input(pip_idx);
         let overlays = state.pip_overlay_inputs(pip_idx);
-        if let Some(b) = bg {
-            state.set_pvw_group(&[b]);
-        } else {
-            state.set_pvw_group(&[]);
-        }
+        state.set_pvw_input(bg);
 
         // Render PiP layout into the PVW big rectangle.
         let r = &state.layout.pvw_rect;
@@ -1170,7 +1169,7 @@ fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pad> {
 fn pads_for_source(
     state: &crate::blocks::builtin::vision_mixer::overlay::VisionMixerOverlayState,
     pip: Option<usize>,
-    group: &[usize],
+    input: Option<usize>,
     region: (i32, i32, i32, i32),
     pad_base: usize,
     bg_zorder: u32,
@@ -1225,11 +1224,9 @@ fn pads_for_source(
         }
         out
     } else {
-        // Single-input source — only first element of `group` is meaningful
-        // (multi-input groups removed; multi-source compositions are PiPs now).
-        group
-            .first()
-            .map(|&idx| PadTarget {
+        // Single-input source (multi-source compositions are PiPs now).
+        input
+            .map(|idx| PadTarget {
                 pad_idx: pad_base + idx,
                 x: rx,
                 y: ry,
@@ -1249,11 +1246,10 @@ fn apply_input_group_to_region(
     pad_base: usize,
     num_inputs: usize,
     region: (i32, i32, i32, i32),
-    group: &[usize],
+    active: Option<usize>,
     fg_zorder: u32,
 ) {
     let (rx, ry, rw, rh) = region;
-    let active = group.first().copied();
     for i in 0..num_inputs {
         let pad_name = format!("sink_{}", pad_base + i);
         let Some(pad) = find_pad(compositor, &pad_name) else {

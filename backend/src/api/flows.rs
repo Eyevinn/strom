@@ -1582,7 +1582,7 @@ pub async fn select_preview(
         input, block_id, flow_id
     );
 
-    let (pvw_group, pgm_group) = state
+    let (new_pvw, pgm) = state
         .select_vision_mixer_preview(&flow_id, &block_id, input)
         .await
         .map_err(|e| {
@@ -1601,9 +1601,9 @@ pub async fn select_preview(
         .and_then(|s| s.pgm_pip());
 
     Ok(Json(strom_types::api::SelectPreviewResponse {
-        message: format!("Preview set to {:?}", pvw_group),
-        preview_input: pvw_group.first().copied(),
-        program_input: pgm_group.first().copied(),
+        message: format!("Preview set to input {}", input),
+        preview_input: new_pvw,
+        program_input: pgm,
         preview_pip: None,
         program_pip: pgm_pip,
     }))

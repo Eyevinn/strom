@@ -318,18 +318,6 @@ impl VisionMixerOverlayState {
         }
     }
 
-    /// PGM as a 0-or-1 element vec. Used by the legacy slice-based
-    /// transition helpers in [`crate::gst::pipeline::effects`].
-    pub fn pgm_group(&self) -> Vec<usize> {
-        self.pgm_input().map(|i| vec![i]).unwrap_or_default()
-    }
-
-    /// PVW as a 0-or-1 element vec. Used by the legacy slice-based
-    /// transition helpers in [`crate::gst::pipeline::effects`].
-    pub fn pvw_group(&self) -> Vec<usize> {
-        self.pvw_input().map(|i| vec![i]).unwrap_or_default()
-    }
-
     /// Raw atomic value (used for dirty-checking).
     pub fn pgm_group_packed(&self) -> u64 {
         self.pgm_group.load(Ordering::Relaxed)
@@ -340,43 +328,15 @@ impl VisionMixerOverlayState {
         self.pvw_group.load(Ordering::Relaxed)
     }
 
-    /// Get PGM input index (returns 0 when no input is on PGM — fallback).
-    pub fn pgm_first(&self) -> usize {
-        let v = self.pgm_group.load(Ordering::Relaxed);
-        if v == NO_SOURCE {
-            0
-        } else {
-            v as usize
-        }
-    }
-
-    /// Get PVW input index (returns 0 when no input is on PVW — fallback).
-    pub fn pvw_first(&self) -> usize {
-        let v = self.pvw_group.load(Ordering::Relaxed);
-        if v == NO_SOURCE {
-            0
-        } else {
-            v as usize
-        }
-    }
-
-    /// Set PGM input. Empty slice or omitted first element clears to NO_SOURCE.
-    pub fn set_pgm_group(&self, indices: &[usize]) {
-        let v = indices
-            .first()
-            .copied()
-            .map(|i| i as u64)
-            .unwrap_or(NO_SOURCE);
+    /// Set PGM input, or clear it with `None` (bus shows a PiP instead).
+    pub fn set_pgm_input(&self, input: Option<usize>) {
+        let v = input.map(|i| i as u64).unwrap_or(NO_SOURCE);
         self.pgm_group.store(v, Ordering::Relaxed);
     }
 
-    /// Set PVW input.
-    pub fn set_pvw_group(&self, indices: &[usize]) {
-        let v = indices
-            .first()
-            .copied()
-            .map(|i| i as u64)
-            .unwrap_or(NO_SOURCE);
+    /// Set PVW input, or clear it with `None` (bus shows a PiP instead).
+    pub fn set_pvw_input(&self, input: Option<usize>) {
+        let v = input.map(|i| i as u64).unwrap_or(NO_SOURCE);
         self.pvw_group.store(v, Ordering::Relaxed);
     }
 
