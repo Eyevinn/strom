@@ -1493,13 +1493,6 @@ pub async fn trigger_transition(
             )
         })?;
 
-    // Read authoritative post-take state so the operator UI can sync (incl. PiP).
-    let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id);
-    let program_input = overlay.as_ref().and_then(|s| s.pgm_input());
-    let preview_input = overlay.as_ref().and_then(|s| s.pvw_input());
-    let program_pip = overlay.as_ref().and_then(|s| s.pgm_pip());
-    let preview_pip = overlay.as_ref().and_then(|s| s.pvw_pip());
-
     Ok(Json(TransitionResponse {
         message: format!(
             "Transition {} started: input {} -> {}",
@@ -1508,16 +1501,12 @@ pub async fn trigger_transition(
         transition_type: req.transition_type,
         actual_transition_type,
         duration_ms: req.duration_ms,
-        program_input,
-        preview_input,
-        program_pip,
-        preview_pip,
     }))
 }
 
 /// Select a preview source on a vision mixer block.
 #[utoipa::path(
-    post,
+    put,
     path = "/api/flows/{flow_id}/blocks/{block_id}/preview",
     tag = "flows",
     params(
@@ -1538,10 +1527,7 @@ pub async fn select_preview(
 ) -> Result<Json<strom_types::api::SelectPreviewResponse>, (StatusCode, Json<ErrorResponse>)> {
     use strom_types::vision_mixer::Source;
 
-    // Parse `source` if provided; falls back to legacy `input` field.
-    let parsed_source: Option<Source> = req.source.as_deref().and_then(|s| s.parse().ok());
-
-    if let Some(Source::Pip(pip_idx)) = parsed_source {
+    if let Source::Pip(pip_idx) = req.source {
         info!(
             "Selecting preview to PiP {} on vision mixer {} in flow {}",
             pip_idx, block_id, flow_id
@@ -1571,10 +1557,8 @@ pub async fn select_preview(
         }));
     }
 
-    // Legacy path: input index (either from `input` field or parsed Source::Input).
-    let input = match parsed_source {
-        Some(Source::Input(i)) => i,
-        _ => req.input,
+    let Source::Input(input) = req.source else {
+        unreachable!("Source::Pip handled above");
     };
 
     info!(
@@ -1614,8 +1598,8 @@ pub async fn select_preview(
 /// The change is applied live to all places where the PiP is currently visible:
 /// the multiview PiP thumbnail tile, plus PGM/PVW if either bus is showing this PiP.
 #[utoipa::path(
-    post,
-    path = "/api/flows/{flow_id}/blocks/{block_id}/vision-mixer/pip/{pip_idx}",
+    put,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/pip/{pip_idx}",
     tag = "flows",
     params(
         ("flow_id" = String, Path, description = "Flow ID (UUID)"),
@@ -1669,7 +1653,9 @@ pub async fn update_pip_config(
             )
         })?;
 
-    // Read back authoritative state (server-side dedup may have dropped sources).
+    // Read back authoritative state. Validation runs in
+    // `apply_vision_mixer_pip_config`, so the only mutation vs. the request
+    // is rect clamping (NormRect → [0,1]).
     let (bg, zones) = if let Some(s) =
         crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
     {
@@ -1686,9 +1672,73 @@ pub async fn update_pip_config(
     }))
 }
 
+/// Get the current runtime state of a vision mixer block.
+///
+/// Reflects the live overlay state — bus inputs, PiP visibility, FTB, DSK,
+/// overlay alpha, per-PiP composition. Clients use this on (re)connect to
+/// reconcile state; subsequent changes flow over the `VisionMixerStateChanged`
+/// WebSocket event.
+#[utoipa::path(
+    get,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/state",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block instance ID")
+    ),
+    responses(
+        (status = 200, description = "Current vision mixer state", body = strom_types::api::VisionMixerState),
+        (status = 404, description = "Block has no live state (pipeline not running)", body = ErrorResponse),
+    )
+)]
+pub async fn get_vision_mixer_state(
+    State(_state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+) -> Result<Json<strom_types::api::VisionMixerState>, (StatusCode, Json<ErrorResponse>)> {
+    let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::with_details(
+                    "Vision mixer state not available",
+                    format!(
+                        "No live overlay state for block {} in flow {} (pipeline not running)",
+                        block_id, flow_id
+                    ),
+                )),
+            )
+        })?;
+
+    let pips: Vec<strom_types::api::PipState> = (0..overlay.num_pips)
+        .map(|i| strom_types::api::PipState {
+            bg: overlay.pip_bg_input(i),
+            zones: overlay.pip_zones(i),
+        })
+        .collect();
+
+    let dsk_enabled: Vec<bool> = overlay
+        .dsk_enabled
+        .iter()
+        .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+        .collect();
+
+    Ok(Json(strom_types::api::VisionMixerState {
+        program_input: overlay.pgm_input(),
+        preview_input: overlay.pvw_input(),
+        program_pip: overlay.pgm_pip(),
+        preview_pip: overlay.pvw_pip(),
+        ftb_active: overlay
+            .ftb_active
+            .load(std::sync::atomic::Ordering::Relaxed),
+        dsk_enabled,
+        overlay_alpha: overlay.overlay_alpha(),
+        pips,
+    }))
+}
+
 /// Set the multiview overlay alpha on a vision mixer block.
 #[utoipa::path(
-    post,
+    put,
     path = "/api/flows/{flow_id}/blocks/{block_id}/overlay-alpha",
     tag = "flows",
     params(

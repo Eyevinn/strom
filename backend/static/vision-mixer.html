@@ -915,9 +915,9 @@
         // ---- API helpers ----
         const API_BASE = '/api/flows/' + FLOW_ID + '/blocks/' + BLOCK_ID;
 
-        async function apiPost(path, body) {
+        async function apiCall(method, path, body) {
             const resp = await fetch(API_BASE + path, {
-                method: 'POST',
+                method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             });
@@ -927,12 +927,14 @@
             }
             return resp.json();
         }
+        const apiPost = (path, body) => apiCall('POST', path, body);
+        const apiPut = (path, body) => apiCall('PUT', path, body);
 
         // ---- PVW/PGM selection ----
         function selectPreview(input) {
             if (currentPgm === input && currentPgmPip == null) return;
             if (currentPvw === input && currentPvwPip == null) return;
-            apiPost('/preview', { input })
+            apiPut('/preview', { source: { input } })
                 .then(r => {
                     currentPvw = (r.preview_input != null) ? r.preview_input : null;
                     currentPgm = (r.program_input != null) ? r.program_input : null;
@@ -973,13 +975,8 @@
                 transition_type: type,
                 duration_ms: durationMs
             }).then(r => {
-                // Reconcile from authoritative server state — covers any clamping
-                // / re-resolution the server did during the take.
-                currentPgm = (r.program_input != null) ? r.program_input : null;
-                currentPvw = (r.preview_input != null) ? r.preview_input : null;
-                currentPgmPip = (r.program_pip != null) ? r.program_pip : null;
-                currentPvwPip = (r.preview_pip != null) ? r.preview_pip : null;
-                updateButtons();
+                // Bus state is reconciled via the VisionMixerStateChanged WS event
+                // broadcast right after the take.
                 const actual = r.actual_transition_type;
                 const note = (actual && actual !== type.toLowerCase())
                     ? ' (' + r.message + ' — downgraded to ' + actual + ')'
@@ -1079,7 +1076,7 @@
             if (!overlayAlphaTimeout) {
                 overlayAlphaTimeout = setTimeout(() => {
                     overlayAlphaTimeout = null;
-                    apiPost('/overlay-alpha', { alpha: overlayAlpha })
+                    apiPut('/overlay-alpha', { alpha: overlayAlpha })
                         .then(r => setStatus(r.message))
                         .catch(e => setStatus('Overlay alpha error: ' + e.message));
                 }, 50);
@@ -1197,7 +1194,7 @@
 
         // ---- PiP composition controls ----
         function selectPreviewPip(pipIdx) {
-            apiPost('/preview', { input: 0, source: 'pip:' + pipIdx })
+            apiPut('/preview', { source: { pip: pipIdx } })
                 .then(r => {
                     currentPvw = (r.preview_input != null) ? r.preview_input : null;
                     currentPgm = (r.program_input != null) ? r.program_input : null;
@@ -1211,7 +1208,7 @@
 
         function postPipConfig(pipIdx) {
             const cfg = pipConfigs[pipIdx];
-            return apiPost('/vision-mixer/pip/' + pipIdx, {
+            return apiPut('/pip/' + pipIdx, {
                 bg: cfg.bg,
                 zones: cfg.zones
             }).then(r => {

@@ -367,7 +367,7 @@ fn vision_mixer_definition() -> BlockDefinition {
 
     // PiP bg + overlay sources are not exposed as static block properties —
     // they're configured at runtime through the operator HTML page (which
-    // POSTs `/vision-mixer/pip/{idx}`). A freshly created PiP starts empty;
+    // POSTs `/pip/{idx}`). A freshly created PiP starts empty;
     // the operator picks its bg and overlays from the dedicated PiP panel.
 
     BlockDefinition {

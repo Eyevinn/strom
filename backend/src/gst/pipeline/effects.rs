@@ -975,27 +975,60 @@ impl PipelineManager {
             });
         }
 
-        // Clamp bg, then clean zones: clamp sources to valid range, dedupe
-        // across zones, filter out the bg input. Empty zones (no surviving
-        // sources) are kept — they still hold rect/capacity config.
-        let bg = bg.filter(|i| *i < state.num_inputs);
+        // Validate bg + zone sources: indices must be in range, must not
+        // overlap each other, and must not equal bg. Empty zones (no sources)
+        // are allowed — they still hold rect/capacity config. Rects are
+        // clamped to [0,1] (silent — clamping is a layout concern, not
+        // semantic state).
+        if let Some(b) = bg {
+            if b >= state.num_inputs {
+                return Err(PipelineError::InvalidProperty {
+                    element: block_instance_id.to_string(),
+                    property: "bg".to_string(),
+                    reason: format!(
+                        "Background input {} out of range (num_inputs={})",
+                        b, state.num_inputs
+                    ),
+                });
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         let zones: Vec<strom_types::vision_mixer::Zone> = zones
             .into_iter()
             .map(|z| {
-                let mut sanitized: Vec<usize> = Vec::with_capacity(z.sources.len());
-                for input in z.sources {
-                    if input < state.num_inputs && Some(input) != bg && seen.insert(input) {
-                        sanitized.push(input);
+                for &input in &z.sources {
+                    if input >= state.num_inputs {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!(
+                                "Zone source {} out of range (num_inputs={})",
+                                input, state.num_inputs
+                            ),
+                        });
+                    }
+                    if Some(input) == bg {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!("Zone source {} duplicates bg", input),
+                        });
+                    }
+                    if !seen.insert(input) {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!("Zone source {} appears in more than one zone", input),
+                        });
                     }
                 }
-                strom_types::vision_mixer::Zone {
+                Ok(strom_types::vision_mixer::Zone {
                     rect: z.rect.map(|r| r.clamped()),
                     capacity: z.capacity,
-                    sources: sanitized,
-                }
+                    sources: z.sources,
+                })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         let mv_comp_id = format!("{}:mv_comp", block_instance_id);
         let mv_comp = self

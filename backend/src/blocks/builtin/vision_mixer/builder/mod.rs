@@ -139,7 +139,7 @@ impl BlockBuilder for VisionMixerBuilder {
             .map(|i| properties::parse_pip_bg(props, i, num_inputs))
             .collect();
         // Zones are runtime-only — the operator configures them via the
-        // /vision-mixer/pip endpoint after the pipeline is built.
+        // /pip endpoint after the pipeline is built.
         let pip_zones: Vec<Vec<strom_types::vision_mixer::Zone>> =
             (0..num_pips).map(|_| Vec::new()).collect();
 

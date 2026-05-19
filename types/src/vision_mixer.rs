@@ -9,8 +9,12 @@ use utoipa::ToSchema;
 
 /// A source that can be assigned to PGM or PVW.
 ///
-/// Encoded as `"input:N"` or `"pip:N"` in string properties (case-insensitive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// JSON encoding is externally tagged: `{"input": 5}` or `{"pip": 1}`.
+/// The [`FromStr`] / [`fmt::Display`] impls use a separate compact form
+/// (`"input:N"` / `"pip:N"`, case-insensitive) for stored block properties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[serde(rename_all = "lowercase")]
 pub enum Source {
     /// A regular video input by index.
     Input(usize),
