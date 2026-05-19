@@ -300,140 +300,71 @@ impl MixerEditor {
         let channel = &self.channels[index];
         let ch1 = index + 1;
 
-        // Block-level properties (backend resolves element + applies transform).
-        let block_prop: Option<(String, PropertyValue)> = match property {
-            "pfl" => Some((format!("ch{}_pfl", ch1), PropertyValue::Bool(channel.pfl))),
-            "afl" => Some((format!("ch{}_afl", ch1), PropertyValue::Bool(channel.afl))),
-            "gain" => Some((
+        // All channel properties now flow through the block-properties endpoint
+        // — fader (Float) and mute (Bool) write to separate GstVolume properties
+        // (volume / mute) so they no longer share a single value with the
+        // "volume=0 if muted" trick.
+        let (prop_name, value) = match property {
+            "pfl" => (format!("ch{}_pfl", ch1), PropertyValue::Bool(channel.pfl)),
+            "afl" => (format!("ch{}_afl", ch1), PropertyValue::Bool(channel.afl)),
+            "gain" => (
                 format!("ch{}_gain", ch1),
                 PropertyValue::Float(channel.gain as f64),
-            )),
-            "pan" => Some((
+            ),
+            "pan" => (
                 format!("ch{}_pan", ch1),
                 PropertyValue::Float(channel.pan as f64),
-            )),
-            "gate_enabled" => Some((
+            ),
+            "fader" => (
+                format!("ch{}_fader", ch1),
+                PropertyValue::Float(channel.fader as f64),
+            ),
+            "mute" => (format!("ch{}_mute", ch1), PropertyValue::Bool(channel.mute)),
+            "gate_enabled" => (
                 format!("ch{}_gate_enabled", ch1),
                 PropertyValue::Bool(channel.gate_enabled),
-            )),
-            "comp_enabled" => Some((
+            ),
+            "comp_enabled" => (
                 format!("ch{}_comp_enabled", ch1),
                 PropertyValue::Bool(channel.comp_enabled),
-            )),
-            "eq_enabled" => Some((
+            ),
+            "eq_enabled" => (
                 format!("ch{}_eq_enabled", ch1),
                 PropertyValue::Bool(channel.eq_enabled),
-            )),
-            _ => None,
-        };
-
-        if let Some((prop_name, value)) = block_prop {
-            self.spawn_block_prop_update(ctx, prop_name, value);
-            return;
-        }
-
-        // Fader/mute share the volume element; mute is implemented by writing
-        // volume=0 and restoring on unmute. Stays on the element path.
-        let (element_suffix, gst_prop, value) = match property {
-            "fader" | "mute" => {
-                let effective_volume = if channel.mute {
-                    0.0
-                } else {
-                    channel.fader as f64
-                };
-                (
-                    format!("volume_{}", index),
-                    "volume",
-                    PropertyValue::Float(effective_volume),
-                )
-            }
+            ),
             _ => return,
         };
 
-        let ramp_ms = Some(self.fade_ms);
-        let api = self.api.clone();
-        let flow_id = self.flow_id;
-        let element_id = format!("{}:{}", self.block_id, element_suffix);
-        let gst_prop = gst_prop.to_string();
-        let ctx = ctx.clone();
-
-        crate::app::spawn_task(async move {
-            if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, &gst_prop, value, ramp_ms)
-                .await
-            {
-                tracing::warn!("Mixer API update failed: {}", e);
-            }
-            ctx.request_repaint();
-        });
+        self.spawn_block_prop_update(ctx, prop_name, value);
     }
 
-    /// Update main fader via API.
+    /// Update main fader via the block-properties endpoint.
     pub(super) fn update_main_fader(&mut self, ctx: &Context) {
         if !self.live_updates || !self.pipeline_running {
             return;
         }
-
-        // Throttle updates
         if self.last_update.elapsed().as_millis() < 50 {
             return;
         }
         self.last_update = instant::Instant::now();
 
-        // Apply mute: if muted, send 0, otherwise send fader value
-        let effective_volume = if self.main_mute {
-            0.0
-        } else {
-            self.main_fader as f64
-        };
-
-        let ramp_ms = Some(self.fade_ms);
-        let api = self.api.clone();
-        let flow_id = self.flow_id;
-        let element_id = format!("{}:main_volume", self.block_id);
-        let value = PropertyValue::Float(effective_volume);
-        let ctx = ctx.clone();
-
-        crate::app::spawn_task(async move {
-            if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
-                .await
-            {
-                tracing::warn!("Mixer API update failed: {}", e);
-            }
-            ctx.request_repaint();
-        });
+        self.spawn_block_prop_update(
+            ctx,
+            "main_fader".to_string(),
+            PropertyValue::Float(self.main_fader as f64),
+        );
     }
 
-    /// Update main mute via API.
+    /// Update main mute via the block-properties endpoint (Bool to GstVolume.mute).
     pub(super) fn update_main_mute(&mut self, ctx: &Context) {
         if !self.live_updates || !self.pipeline_running {
             return;
         }
-
-        // Mute is implemented by setting volume to 0
-        let effective_volume = if self.main_mute {
-            0.0
-        } else {
-            self.main_fader as f64
-        };
-
-        let ramp_ms = Some(self.fade_ms);
-        let api = self.api.clone();
-        let flow_id = self.flow_id;
-        let element_id = format!("{}:main_volume", self.block_id);
-        let value = PropertyValue::Float(effective_volume);
-        let ctx = ctx.clone();
-
-        crate::app::spawn_task(async move {
-            if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
-                .await
-            {
-                tracing::warn!("Mixer API update failed: {}", e);
-            }
-            ctx.request_repaint();
-        });
+        self.spawn_block_prop_update(
+            ctx,
+            "main_mute".to_string(),
+            PropertyValue::Bool(self.main_mute),
+        );
     }
 
     /// Push the monitor bus master fader through the block-properties endpoint.
@@ -581,127 +512,51 @@ impl MixerEditor {
         }
         self.last_update = instant::Instant::now();
 
-        let mute = self.groups[sg_idx].mute;
-        let effective_volume = if mute {
-            0.0
-        } else {
-            self.groups[sg_idx].fader as f64
-        };
-
-        let ramp_ms = Some(self.fade_ms);
-        let api = self.api.clone();
-        let flow_id = self.flow_id;
-        let element_id = format!("{}:group{}_volume", self.block_id, sg_idx);
-        let value = PropertyValue::Float(effective_volume);
-        let ctx = ctx.clone();
-
-        crate::app::spawn_task(async move {
-            if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
-                .await
-            {
-                tracing::warn!("Mixer API update failed: {}", e);
-            }
-            ctx.request_repaint();
-        });
+        self.spawn_block_prop_update(
+            ctx,
+            format!("group{}_fader", sg_idx + 1),
+            PropertyValue::Float(self.groups[sg_idx].fader as f64),
+        );
     }
 
-    /// Update group mute via API.
+    /// Update group mute via the block-properties endpoint (Bool to GstVolume.mute).
     pub(super) fn update_group_mute(&mut self, ctx: &Context, sg_idx: usize) {
         if !self.live_updates || !self.pipeline_running {
             return;
         }
-
-        let mute = self.groups[sg_idx].mute;
-        let effective_volume = if mute {
-            0.0
-        } else {
-            self.groups[sg_idx].fader as f64
-        };
-
-        let ramp_ms = Some(self.fade_ms);
-        let api = self.api.clone();
-        let flow_id = self.flow_id;
-        let element_id = format!("{}:group{}_volume", self.block_id, sg_idx);
-        let value = PropertyValue::Float(effective_volume);
-        let ctx = ctx.clone();
-
-        crate::app::spawn_task(async move {
-            if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
-                .await
-            {
-                tracing::warn!("Mixer API update failed: {}", e);
-            }
-            ctx.request_repaint();
-        });
+        self.spawn_block_prop_update(
+            ctx,
+            format!("group{}_mute", sg_idx + 1),
+            PropertyValue::Bool(self.groups[sg_idx].mute),
+        );
     }
 
-    /// Update aux master fader via API.
+    /// Update aux master fader via the block-properties endpoint.
     pub(super) fn update_aux_master_fader(&mut self, ctx: &Context, aux_idx: usize) {
         if !self.live_updates || !self.pipeline_running {
             return;
         }
-
-        // Throttle updates
         if self.last_update.elapsed().as_millis() < 50 {
             return;
         }
         self.last_update = instant::Instant::now();
 
-        let mute = self.aux_masters[aux_idx].mute;
-        let effective_volume = if mute {
-            0.0
-        } else {
-            self.aux_masters[aux_idx].fader as f64
-        };
-
-        let ramp_ms = Some(self.fade_ms);
-        let api = self.api.clone();
-        let flow_id = self.flow_id;
-        let element_id = format!("{}:aux{}_volume", self.block_id, aux_idx);
-        let value = PropertyValue::Float(effective_volume);
-        let ctx = ctx.clone();
-
-        crate::app::spawn_task(async move {
-            if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
-                .await
-            {
-                tracing::warn!("Mixer API update failed: {}", e);
-            }
-            ctx.request_repaint();
-        });
+        self.spawn_block_prop_update(
+            ctx,
+            format!("aux{}_fader", aux_idx + 1),
+            PropertyValue::Float(self.aux_masters[aux_idx].fader as f64),
+        );
     }
 
-    /// Update aux master mute via API.
+    /// Update aux master mute via the block-properties endpoint (Bool to GstVolume.mute).
     pub(super) fn update_aux_master_mute(&mut self, ctx: &Context, aux_idx: usize) {
         if !self.live_updates || !self.pipeline_running {
             return;
         }
-
-        let mute = self.aux_masters[aux_idx].mute;
-        let effective_volume = if mute {
-            0.0
-        } else {
-            self.aux_masters[aux_idx].fader as f64
-        };
-
-        let ramp_ms = Some(self.fade_ms);
-        let api = self.api.clone();
-        let flow_id = self.flow_id;
-        let element_id = format!("{}:aux{}_volume", self.block_id, aux_idx);
-        let value = PropertyValue::Float(effective_volume);
-        let ctx = ctx.clone();
-
-        crate::app::spawn_task(async move {
-            if let Err(e) = api
-                .update_element_property(&flow_id, &element_id, "volume", value, ramp_ms)
-                .await
-            {
-                tracing::warn!("Mixer API update failed: {}", e);
-            }
-            ctx.request_repaint();
-        });
+        self.spawn_block_prop_update(
+            ctx,
+            format!("aux{}_mute", aux_idx + 1),
+            PropertyValue::Bool(self.aux_masters[aux_idx].mute),
+        );
     }
 }

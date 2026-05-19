@@ -69,6 +69,22 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             live: true,
             persist: None,
         },
+        // Main mute — independent Bool on the same GstVolume element. Built-in
+        // anti-click on the `mute` property handles the on/off fade.
+        ExposedProperty {
+            name: "main_mute".to_string(),
+            label: "Main Mute".to_string(),
+            description: "Mute main output".to_string(),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(false)),
+            mapping: PropertyMapping {
+                element_id: "main_volume".to_string(),
+                property_name: "mute".to_string(),
+                transform: None,
+            },
+            live: true,
+            persist: None,
+        },
         // Number of aux buses — construction-time only.
         ExposedProperty {
             name: "num_aux_buses".to_string(),
@@ -366,11 +382,11 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             property_type: PropertyType::Bool,
             default_value: Some(PropertyValue::Bool(false)),
             mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: format!("aux{}_mute", aux),
+                element_id: format!("aux{}_volume", aux - 1),
+                property_name: "mute".to_string(),
                 transform: None,
             },
-            live: false,
+            live: true,
             persist: None,
         });
     }
@@ -398,11 +414,11 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             property_type: PropertyType::Bool,
             default_value: Some(PropertyValue::Bool(false)),
             mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: format!("group{}_mute", sg),
+                element_id: format!("group{}_volume", sg - 1),
+                property_name: "mute".to_string(),
                 transform: None,
             },
-            live: false,
+            live: true,
             persist: None,
         });
     }
@@ -478,11 +494,11 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             property_type: PropertyType::Bool,
             default_value: Some(PropertyValue::Bool(false)),
             mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: format!("ch{}_mute", ch),
+                element_id: format!("volume_{}", ch - 1),
+                property_name: "mute".to_string(),
                 transform: None,
             },
-            live: false,
+            live: true,
             persist: None,
         });
 
