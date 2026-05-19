@@ -138,28 +138,10 @@ impl BlockBuilder for VisionMixerBuilder {
         let pip_bg_inputs: Vec<Option<usize>> = (0..num_pips)
             .map(|i| properties::parse_pip_bg(props, i, num_inputs))
             .collect();
-        // Legacy block properties expose `pip_X_overlays` as a flat input list
-        // with auto-tile semantics. We hoist that into a single zone per PiP so
-        // existing saved flows keep their overlays without explicit zone config.
-        let pip_zones: Vec<Vec<strom_types::vision_mixer::Zone>> = (0..num_pips)
-            .map(|i| {
-                let sources = properties::parse_pip_overlays(
-                    props,
-                    i,
-                    num_inputs,
-                    pip_bg_inputs.get(i).copied().flatten(),
-                );
-                if sources.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![strom_types::vision_mixer::Zone {
-                        rect: None,
-                        capacity: None,
-                        sources,
-                    }]
-                }
-            })
-            .collect();
+        // Zones are runtime-only — the operator configures them via the
+        // /vision-mixer/pip endpoint after the pipeline is built.
+        let pip_zones: Vec<Vec<strom_types::vision_mixer::Zone>> =
+            (0..num_pips).map(|_| Vec::new()).collect();
 
         let output_format = properties::parse_output_format(props);
         let gl_download =

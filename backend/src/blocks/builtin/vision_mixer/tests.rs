@@ -191,37 +191,6 @@ fn test_parse_num_pips_clamped() {
 }
 
 #[test]
-fn test_parse_pip_overlays_basic() {
-    let mut props = HashMap::new();
-    props.insert(
-        "pip_0_overlays".to_string(),
-        PropertyValue::String(" 1, 2 , 3 ".to_string()),
-    );
-    assert_eq!(
-        properties::parse_pip_overlays(&props, 0, 4, None),
-        vec![1, 2, 3]
-    );
-}
-
-#[test]
-fn test_parse_pip_overlays_clamped_deduped_truncated() {
-    let mut props = HashMap::new();
-    // 99 → clamped to 3 (num_inputs=4); duplicate 1 dropped; length capped at MAX_PIP_OVERLAYS=4.
-    props.insert(
-        "pip_0_overlays".to_string(),
-        PropertyValue::String("1,99,2,1,3,0,9".to_string()),
-    );
-    let v = properties::parse_pip_overlays(&props, 0, 4, None);
-    assert_eq!(v, vec![1, 3, 2, 0]);
-}
-
-#[test]
-fn test_parse_pip_overlays_empty() {
-    let props = HashMap::new();
-    assert!(properties::parse_pip_overlays(&props, 0, 4, None).is_empty());
-}
-
-#[test]
 fn test_parse_initial_pgm_pvw() {
     let mut props = HashMap::new();
     props.insert("initial_pgm_input".to_string(), PropertyValue::UInt(3));

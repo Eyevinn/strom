@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use strom_types::vision_mixer::{
     Source, DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, DEFAULT_NUM_PIPS, DEFAULT_SHOW_VU_METERS,
-    MAX_DSK_INPUTS, MAX_NUM_INPUTS, MAX_NUM_PIPS, MAX_PIP_OVERLAYS, MIN_NUM_INPUTS,
+    MAX_DSK_INPUTS, MAX_NUM_INPUTS, MAX_NUM_PIPS, MIN_NUM_INPUTS,
 };
 use strom_types::PropertyValue;
 
@@ -60,50 +60,6 @@ pub fn parse_pip_bg(
         return None;
     }
     Some(raw.min(num_inputs - 1))
-}
-
-/// Parse the overlay input list for PiP `pip_idx`.
-///
-/// Format: comma-separated input indices, e.g. `"1,2,3"`. Whitespace is ignored.
-/// Each index is clamped to a valid input. Indices are deduplicated (preserving
-/// first-occurrence order), bg is filtered out (a bg input can't also be an
-/// overlay), and the list is truncated to [`MAX_PIP_OVERLAYS`].
-pub fn parse_pip_overlays(
-    properties: &HashMap<String, PropertyValue>,
-    pip_idx: usize,
-    num_inputs: usize,
-    bg: Option<usize>,
-) -> Vec<usize> {
-    let raw = match properties.get(&format!("pip_{}_overlays", pip_idx)) {
-        Some(PropertyValue::String(s)) => s.clone(),
-        _ => return Vec::new(),
-    };
-    if num_inputs == 0 {
-        return Vec::new();
-    }
-    let max_idx = num_inputs - 1;
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for tok in raw.split(',') {
-        let t = tok.trim();
-        if t.is_empty() {
-            continue;
-        }
-        let Ok(idx) = t.parse::<usize>() else {
-            continue;
-        };
-        let clamped = idx.min(max_idx);
-        if Some(clamped) == bg {
-            continue;
-        }
-        if seen.insert(clamped) {
-            out.push(clamped);
-            if out.len() >= MAX_PIP_OVERLAYS {
-                break;
-            }
-        }
-    }
-    out
 }
 
 /// Parse the number of inputs from block properties, clamped to valid range.
