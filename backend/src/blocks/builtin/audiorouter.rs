@@ -777,6 +777,7 @@ fn audiorouter_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
         // Number of outputs
         ExposedProperty {
@@ -791,6 +792,7 @@ fn audiorouter_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         },
     ];
 
@@ -808,6 +810,7 @@ fn audiorouter_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
     }
 
@@ -825,6 +828,7 @@ fn audiorouter_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         });
     }
 
@@ -841,6 +845,7 @@ fn audiorouter_definition() -> BlockDefinition {
             transform: None,
         },
         live: false,
+        persist: None,
     });
 
     BlockDefinition {

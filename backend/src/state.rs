@@ -1519,6 +1519,7 @@ impl AppState {
             })?;
 
         let mut rejected: HashMap<String, String> = HashMap::new();
+        let mut to_persist: Vec<(String, PropertyValue)> = Vec::new();
 
         for (name, value) in properties {
             let Some(exposed) = definition
@@ -1547,7 +1548,7 @@ impl AppState {
             }
 
             let transform = crate::blocks::transforms::lookup(exposed.mapping.transform.as_deref());
-            let Some(transformed) = (transform.forward)(value) else {
+            let Some(transformed) = (transform.forward)(value.clone()) else {
                 rejected.insert(name, "value type does not match transform".to_string());
                 continue;
             };
@@ -1566,7 +1567,30 @@ impl AppState {
                 .await
             {
                 rejected.insert(name, format!("pipeline write failed: {}", e));
+                continue;
             }
+
+            if exposed.persist() {
+                to_persist.push((name, value));
+            }
+        }
+
+        // Sync persisted values back to the block instance so they survive a
+        // pipeline restart. Done after the pipeline writes so we don't store
+        // values that failed to apply.
+        if !to_persist.is_empty() {
+            {
+                let mut flows = self.inner.flows.write().await;
+                if let Some(flow) = flows.get_mut(flow_id) {
+                    if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_instance_id)
+                    {
+                        for (name, value) in to_persist {
+                            block.properties.insert(name, value);
+                        }
+                    }
+                }
+            }
+            self.mark_flow_dirty(*flow_id).await;
         }
 
         let current = self

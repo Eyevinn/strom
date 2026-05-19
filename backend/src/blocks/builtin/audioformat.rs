@@ -188,6 +188,7 @@ fn audioformat_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "channels".to_string(),
@@ -217,6 +218,7 @@ fn audioformat_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "format".to_string(),
@@ -246,6 +248,7 @@ fn audioformat_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

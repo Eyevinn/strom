@@ -2157,6 +2157,7 @@ fn whep_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "whep_endpoint".to_string(),
@@ -2171,6 +2172,7 @@ fn whep_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "auth_token".to_string(),
@@ -2184,6 +2186,7 @@ fn whep_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "mixer_latency_ms".to_string(),
@@ -2197,6 +2200,7 @@ fn whep_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "jitterbuffer_latency_ms".to_string(),
@@ -2210,6 +2214,7 @@ fn whep_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {
@@ -2252,6 +2257,7 @@ fn whep_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -2265,6 +2271,7 @@ fn whep_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "endpoint_id".to_string(),
@@ -2278,6 +2285,7 @@ fn whep_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "ts_offset_ms".to_string(),
@@ -2291,6 +2299,7 @@ fn whep_output_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         // Note: external_pads here are the static defaults (1 video + 1 audio).

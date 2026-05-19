@@ -764,6 +764,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "num_audio_tracks".to_string(),
@@ -777,6 +778,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },            ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
@@ -791,6 +793,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "latency".to_string(),
@@ -804,6 +807,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "wait_for_connection".to_string(),
@@ -817,6 +821,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "auto_reconnect".to_string(),
@@ -830,6 +835,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "keep_listening".to_string(),
@@ -843,6 +849,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "decode".to_string(),
@@ -856,6 +863,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "bucket_timeout".to_string(),
@@ -869,6 +877,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "hol_timeout".to_string(),
@@ -882,6 +891,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "normalize_segment".to_string(),
@@ -914,6 +924,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

@@ -393,6 +393,7 @@ fn audioanalyzer_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "waveform_columns".to_string(),
@@ -421,6 +422,7 @@ fn audioanalyzer_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "vector_pairs".to_string(),
@@ -449,6 +451,7 @@ fn audioanalyzer_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

@@ -205,6 +205,7 @@ fn meter_definition() -> BlockDefinition {
                 transform: None,
             },
             live: false,
+            persist: None,
         }],
         external_pads: ExternalPads {
             inputs: vec![ExternalPad {

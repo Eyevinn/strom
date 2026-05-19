@@ -812,6 +812,7 @@ fn videoenc_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "profile".to_string(),
@@ -829,6 +830,7 @@ fn videoenc_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "encoder_preference".to_string(),
@@ -848,6 +850,7 @@ fn videoenc_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "bitrate".to_string(),
@@ -861,6 +864,7 @@ fn videoenc_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "quality_preset".to_string(),
@@ -882,6 +886,7 @@ fn videoenc_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "tune".to_string(),
@@ -904,6 +909,7 @@ fn videoenc_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "rate_control".to_string(),
@@ -923,6 +929,7 @@ fn videoenc_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
             ExposedProperty {
                 name: "keyframe_interval".to_string(),
@@ -936,6 +943,7 @@ fn videoenc_definition() -> BlockDefinition {
                     transform: None,
                 },
                 live: false,
+                persist: None,
             },
         ],
         external_pads: ExternalPads {

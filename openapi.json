@@ -5525,6 +5525,13 @@
             "type": "string",
             "description": "Name of the exposed property (used as key)"
           },
+          "persist": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether live writes to this property should also be persisted to the\nblock instance's properties map (so they survive pipeline restart).\n\n`None` (default) means persist. Set explicitly to `Some(false)` for\ntransient properties — e.g. solo states like `chN_pfl`/`chN_afl` —\nthat should reset on restart and not dirty the flow on every toggle.\n\n`Option` is used here (rather than a bare `bool` with a serde default)\nto keep existing struct-literal call sites compiling — they get the\ndefault behaviour without an added field. Read via `persist()`."
+          },
           "property_type": {
             "$ref": "#/components/schemas/PropertyType",
             "description": "Type of property"

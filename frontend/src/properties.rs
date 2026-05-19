@@ -8,11 +8,18 @@ use strom_types::{
     BlockDefinition, BlockInstance, Element, FlowId, PropertyValue,
 };
 
-/// A live property update to send to a running pipeline element.
+/// A live update for one block-level exposed property.
+///
+/// Always sent through `PATCH /flows/{id}/blocks/{block_id}/properties` so the
+/// backend applies the property's declared transform (`bool_to_volume`,
+/// `db_to_linear`, …) before writing to the underlying GStreamer element.
+/// Values here are therefore in user-facing units (Bool, dB, Hz, …) — never
+/// the post-transform element value.
 pub struct LivePropertyUpdate {
     pub flow_id: FlowId,
-    /// Full element ID: "{block_id}:{element_suffix}"
-    pub element_id: String,
+    /// Block instance ID.
+    pub block_id: String,
+    /// Exposed property name (e.g. `ch1_pfl`, `fader_db`).
     pub property_name: String,
     pub value: PropertyValue,
 }
@@ -52,7 +59,7 @@ pub fn drain_live_updates(
 
     // Process incoming updates
     for update in incoming {
-        let key = (update.element_id.clone(), update.property_name.clone());
+        let key = (update.block_id.clone(), update.property_name.clone());
         touched_keys.insert(key.clone());
 
         let entry = debounce_map
@@ -839,14 +846,11 @@ impl PropertyInspector {
                                     &mut device_picker_actions,
                                 );
 
-                                // For live properties, send updates directly to the pipeline
+                                // For live properties, route the block-level value
+                                // through the block-properties endpoint so the backend
+                                // applies the declared transform.
                                 if changed && exposed_prop.live {
                                     if let Some(fid) = flow_id {
-                                        let element_id = format!(
-                                            "{}:{}",
-                                            block.id, exposed_prop.mapping.element_id
-                                        );
-                                        // Use the current value (or default) for the update
                                         let value = block
                                             .properties
                                             .get(&exposed_prop.name)
@@ -856,11 +860,8 @@ impl PropertyInspector {
                                             result.live_property_updates.push(
                                                 LivePropertyUpdate {
                                                     flow_id: fid,
-                                                    element_id,
-                                                    property_name: exposed_prop
-                                                        .mapping
-                                                        .property_name
-                                                        .clone(),
+                                                    block_id: block.id.clone(),
+                                                    property_name: exposed_prop.name.clone(),
                                                     value,
                                                 },
                                             );
@@ -1821,7 +1822,6 @@ impl PropertyInspector {
 
             if changed && exposed_prop.live {
                 if let Some(fid) = flow_id {
-                    let element_id = format!("{}:{}", block.id, exposed_prop.mapping.element_id);
                     let value = block
                         .properties
                         .get(&exposed_prop.name)
@@ -1830,8 +1830,8 @@ impl PropertyInspector {
                     if let Some(value) = value {
                         result.live_property_updates.push(LivePropertyUpdate {
                             flow_id: fid,
-                            element_id,
-                            property_name: exposed_prop.mapping.property_name.clone(),
+                            block_id: block.id.clone(),
+                            property_name: exposed_prop.name.clone(),
                             value,
                         });
                     }
