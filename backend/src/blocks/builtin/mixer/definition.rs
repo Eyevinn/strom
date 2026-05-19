@@ -92,41 +92,18 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: false,
         },
-        // PFL master level
+        // Monitor master level — drives the Monitor bus output. The Monitor
+        // bus follows Main when no channel has PFL or AFL active, and
+        // switches to the solo mix as soon as any PFL/AFL is engaged.
         ExposedProperty {
-            name: "pfl_level".to_string(),
-            label: "PFL Level".to_string(),
-            description: "PFL/AFL bus master level (0.0 to 2.0)".to_string(),
+            name: "monitor_fader".to_string(),
+            label: "Monitor Fader".to_string(),
+            description: "Monitor bus master level (0.0 to 2.0)".to_string(),
             property_type: PropertyType::Float,
             default_value: Some(PropertyValue::Float(1.0)),
             mapping: PropertyMapping {
-                element_id: "pfl_master_vol".to_string(),
+                element_id: "monitor_master_vol".to_string(),
                 property_name: "volume".to_string(),
-                transform: None,
-            },
-            live: false,
-        },
-        // Solo mode (PFL or AFL)
-        ExposedProperty {
-            name: "solo_mode".to_string(),
-            label: "Solo Mode".to_string(),
-            description: "Solo listen mode: PFL (pre-fader) or AFL (after-fader)".to_string(),
-            property_type: PropertyType::Enum {
-                values: vec![
-                    EnumValue {
-                        value: "pfl".to_string(),
-                        label: Some("PFL".to_string()),
-                    },
-                    EnumValue {
-                        value: "afl".to_string(),
-                        label: Some("AFL".to_string()),
-                    },
-                ],
-            },
-            default_value: Some(PropertyValue::String("pfl".to_string())),
-            mapping: PropertyMapping {
-                element_id: "_block".to_string(),
-                property_name: "solo_mode".to_string(),
                 transform: None,
             },
             live: false,
@@ -488,6 +465,21 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             live: false,
         });
 
+        // AFL (After-Fader Listen)
+        exposed_properties.push(ExposedProperty {
+            name: format!("ch{}_afl", ch),
+            label: format!("Ch {} AFL", ch),
+            description: format!("Enable AFL (After-Fader Listen) on channel {}", ch),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(false)),
+            mapping: PropertyMapping {
+                element_id: format!("afl_volume_{}", ch - 1),
+                property_name: "volume".to_string(),
+                transform: Some("bool_to_volume".to_string()),
+            },
+            live: false,
+        });
+
         // Routing to main
         exposed_properties.push(ExposedProperty {
             name: format!("ch{}_to_main", ch),
@@ -543,7 +535,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                     ch, aux
                 ),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(aux <= 2)), // aux 1-2 pre, 3-4 post
+                default_value: Some(PropertyValue::Bool(false)), // all aux sends default post-fader
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: format!("ch{}_aux{}_pre", ch, aux),
@@ -850,10 +842,10 @@ pub(super) fn mixer_definition() -> BlockDefinition {
                     internal_pad_name: "src_%u".to_string(),
                 },
                 ExternalPad {
-                    name: "pfl_out".to_string(),
-                    label: Some("PFL".to_string()),
+                    name: "monitor_out".to_string(),
+                    label: Some("Monitor".to_string()),
                     media_type: MediaType::Audio,
-                    internal_element_id: "pfl_out_tee".to_string(),
+                    internal_element_id: "monitor_out_tee".to_string(),
                     internal_pad_name: "src_%u".to_string(),
                 },
             ],

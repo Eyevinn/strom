@@ -1,11 +1,13 @@
 //! Stereo Mixer block - a digital mixing console for audio.
 //!
 //! This block provides a mixer similar to digital consoles like Behringer X32:
-//! - Configurable number of input channels (1-32)
+//! - Configurable number of input channels (1-128)
 //! - Per-channel: input gain, gate, compressor, 4-band parametric EQ, pan, fader, mute
-//! - Aux sends (0-4 configurable aux buses, switchable pre/post fader)
-//! - Groups (0-4 configurable, with output pads)
-//! - PFL (Pre-Fader Listen) bus with master level
+//! - Aux sends (0-32 configurable aux buses, switchable pre/post fader)
+//! - Groups (0-32 configurable, with output pads)
+//! - Independent per-channel PFL (pre-fader) and AFL (post-fader) sends
+//! - Monitor bus that follows Main when no PFL/AFL is engaged and switches
+//!   to the solo mix as soon as any channel toggles PFL or AFL
 //! - Main stereo bus with compressor, EQ, limiter, and master fader
 //! - Per-channel and bus metering
 //!
@@ -15,12 +17,21 @@
 //!           pre_fader_tee → audiopanorama_N → volume_N → post_fader_tee →
 //!           level_N → [group or main audiomixer]
 //!
-//! (pre_fader_tee | post_fader_tee) → solo_volume_N → solo_queue_N → pfl_mixer
-//!   (source depends on solo_mode: pfl=pre-fader, afl=post-fader)
+//! pre_fader_tee  → pfl_volume_N → pfl_queue_N ─┐
+//!                                              ├→ solo_mixer
+//! post_fader_tee → afl_volume_N → afl_queue_N ─┘
+//!
 //! (pre_fader_tee | post_fader_tee) → aux_send_N_M → aux_queue_N_M → aux_M_mixer
 //! ```
 //!
 //! Main bus: audiomixer → main_comp → main_eq → main_limiter → main_volume → main_level → main_out_tee
+//!
+//! Monitor bus: the solo_mixer and a tap from main_out_tee both feed a
+//! monitor_mixer through two volume-gate elements (solo_to_mon and
+//! main_to_mon). The frontend toggles those gates whenever any ch{N}_pfl or
+//! ch{N}_afl property changes — no PFL/AFL active → main_to_mon=1,
+//! solo_to_mon=0; any solo active → reversed. monitor_mixer feeds
+//! monitor_master_vol → monitor_level → monitor_out_tee → monitor_out pad.
 //!
 //! All output buses terminate in a tee with allow-not-linked=true, so unconnected
 //! output pads don't cause NOT_LINKED flow errors. Audiomixer elements use
