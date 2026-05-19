@@ -220,6 +220,14 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             "Main bus compressor makeup gain in dB (0 to 24)",
             Some("db_to_linear"),
         ),
+        (
+            "main_comp_knee",
+            "Main Comp Knee",
+            "kn",
+            DEFAULT_COMP_KNEE as f64,
+            "Main bus compressor knee in dB (-24 to 0)",
+            Some("db_to_linear"),
+        ),
     ] {
         exposed_properties.push(ExposedProperty {
             name: prop_suffix.to_string(),
