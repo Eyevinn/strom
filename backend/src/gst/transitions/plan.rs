@@ -67,12 +67,20 @@ pub fn plan_transition(outgoing: &[PadTarget], incoming: &[PadTarget]) -> Vec<(u
         if let Some(o) = outgoing_map.get(&t.pad_idx) {
             let morphing = o.x != t.x || o.y != t.y || o.w != t.w || o.h != t.h;
             if morphing {
-                let new_has_overlays_above_me = incoming.iter().any(|i_t| {
+                // SnapToNew is only correct when the higher-z incoming pad is
+                // *visible at t=0* — i.e. its rect is NOT covered by this pad's
+                // morph_start. If it is covered, the planner gives it
+                // HoldFullAlpha at full alpha and we need to lift this pad
+                // above it during the morph; otherwise the new pad pops in on
+                // top instead of being revealed as we shrink/move.
+                let morph_start = (o.x, o.y, o.w, o.h);
+                let new_has_visible_overlay_above_me = incoming.iter().any(|i_t| {
                     i_t.pad_idx != t.pad_idx
                         && !outgoing_map.contains_key(&i_t.pad_idx)
                         && i_t.zorder > t.zorder
+                        && !rect_contains(morph_start, (i_t.x, i_t.y, i_t.w, i_t.h))
                 });
-                let z_handling = if new_has_overlays_above_me {
+                let z_handling = if new_has_visible_overlay_above_me {
                     ZHandling::SnapToNew(t.zorder)
                 } else {
                     ZHandling::LiftAndStep { new_z: t.zorder }
@@ -392,6 +400,64 @@ mod tests {
         assert!(matches!(action_of(&plan, 1), PadAction::Morph { .. }));
         // pad 0 fullscreen — not covered by morph_end (600×400) → FadeOut
         assert!(matches!(action_of(&plan, 0), PadAction::FadeOut));
+    }
+
+    #[test]
+    fn morph_lifts_when_higher_z_incoming_is_inside_morph_start() {
+        // Regression: a PiP zone with one fullscreen source gets a second
+        // source added → source A shrinks to left-half, source B appears at
+        // right-half. The zone FIFO gives B a higher zorder_offset (z=3) than
+        // A (z=2). B's rect (right-half) is fully contained in A's morph_start
+        // (fullscreen) — B is meant to be hidden behind A until A shrinks to
+        // reveal it. The planner must therefore LIFT A above B during the
+        // morph, even though B's final zorder is higher.
+        const Z_A: u32 = 2;
+        const Z_B: u32 = 3;
+        let a_fullscreen = pad(0, 0, 0, 1920, 1080, Z_A);
+        let a_left = pad(0, 0, 0, 960, 1080, Z_A);
+        let b_right = pad(1, 960, 0, 960, 1080, Z_B);
+        let old = vec![a_fullscreen];
+        let new = vec![a_left, b_right];
+        let plan = plan_transition(&old, &new);
+        // A must be lifted, not snap to new — otherwise B (higher z) pops on
+        // top of A at t=0 instead of being revealed as A shrinks.
+        match action_of(&plan, 0) {
+            PadAction::Morph { z_handling, .. } => assert_eq!(
+                z_handling,
+                ZHandling::LiftAndStep { new_z: Z_A },
+                "higher-z incoming pad is inside morph_start → must lift, \
+                 not snap (otherwise the new source pops on top)",
+            ),
+            other => panic!("expected Morph, got {:?}", other),
+        }
+        // B is covered by A's morph_start → HoldFullAlpha (hidden until reveal).
+        assert!(matches!(
+            action_of(&plan, 1),
+            PadAction::HoldFullAlpha { .. }
+        ));
+    }
+
+    #[test]
+    fn morph_snaps_when_higher_z_incoming_is_outside_morph_start() {
+        // Counter-case to the above: when the higher-z incoming pad is NOT
+        // covered by morph_start, it's meant to be visible from t=0 — the
+        // morphing pad must NOT lift above it, or the new overlay would be
+        // hidden during the morph. Mirrors `pip_to_pip_overlay_becomes_bg_slides_under`
+        // but isolates the geometry decision.
+        let pad_a_old = pad(0, 0, 0, 480, 270, OVL_Z);
+        let pad_a_new = fullscreen(0, PGM_Z);
+        let pad_b_new = pad(1, 1000, 600, 480, 270, OVL_Z); // outside cell-a
+        let old = vec![pad_a_old];
+        let new = vec![pad_a_new, pad_b_new];
+        let plan = plan_transition(&old, &new);
+        match action_of(&plan, 0) {
+            PadAction::Morph { z_handling, .. } => assert_eq!(
+                z_handling,
+                ZHandling::SnapToNew(PGM_Z),
+                "higher-z incoming pad is visible at t=0 → must snap below it",
+            ),
+            other => panic!("expected Morph, got {:?}", other),
+        }
     }
 
     #[test]
