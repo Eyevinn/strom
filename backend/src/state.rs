@@ -392,6 +392,18 @@ impl AppState {
                     self.strip_transient_properties(flow).await;
                 }
 
+                // Migrate legacy `mode` on WHEP Output blocks to explicit track
+                // counts so the property panel and the computed pads agree.
+                for flow in flows.values_mut() {
+                    for block in &mut flow.blocks {
+                        if block.block_definition_id == "builtin.whep_output" {
+                            crate::blocks::builtin::whep::migrate_legacy_mode(
+                                &mut block.properties,
+                            );
+                        }
+                    }
+                }
+
                 // Reset all flow states to None on server restart since pipelines aren't running
                 // This prevents showing stale "Playing" states from before the server stopped
                 for flow in flows.values_mut() {
