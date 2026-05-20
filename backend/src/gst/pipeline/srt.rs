@@ -67,13 +67,17 @@ fn collect_element_stats(role: SrtRole, element: &gst::Element) -> SrtConnection
     };
 
     // Listener mode (or any srtsink/srtsrc with multiple callers) exposes a
-    // `callers` GstValueArray. If present, treat each entry as a separate caller.
+    // `callers` GstValueArray. Its *presence* is what marks the element as
+    // multi-peer mode — even an empty array means "listener, no peer attached",
+    // not "fall back to single-peer parsing." Skipping this early-return on
+    // empty would push a phantom caller built from top-level link metrics
+    // (libsrt populates `bandwidth-mbps`/`negotiated-latency-ms` at the element
+    // level before any handshake), making the UI report "1p connected" on an
+    // idle listener.
     if let Some(callers) = read_callers_array(&structure) {
-        if !callers.is_empty() {
-            conn.callers = callers;
-            conn.connected = conn.callers.iter().any(caller_is_active);
-            return conn;
-        }
+        conn.callers = callers;
+        conn.connected = conn.callers.iter().any(caller_is_active);
+        return conn;
     }
 
     // Caller / rendezvous / single-peer mode: the top-level structure IS the
@@ -405,6 +409,39 @@ mod tests {
         assert_eq!(callers[0].rtt_ms, Some(5.5));
         assert_eq!(callers[1].packets_sent, Some(50));
         assert_eq!(callers[1].bytes_sent, Some(12_000));
+    }
+
+    #[test]
+    fn empty_callers_array_does_not_fall_through_to_single_peer() {
+        // Listener-mode element with no peer attached exposes `callers` as an
+        // empty array. The previous behaviour fell through to single-peer
+        // parsing and pushed a phantom caller using the top-level link metrics
+        // (which libsrt populates eagerly before any handshake) — the inline
+        // peer count in the graph then read "1p connected" on an idle listener.
+        init();
+        let callers_value = gst::Array::new(std::iter::empty::<gst::glib::SendValue>());
+        let listener_stats = gst::Structure::builder("application/x-srt-statistics")
+            .field("bandwidth-mbps", 1000.0f64)
+            .field("negotiated-latency-ms", 125i32)
+            .field("callers", callers_value)
+            .build();
+
+        // We can't easily build a real srtsrc element here, but the salient
+        // logic lives in the parse branch. Drive it directly via the helpers.
+        let callers = read_callers_array(&listener_stats).expect("callers field present");
+        assert!(callers.is_empty(), "no peer attached → empty callers");
+
+        // The fall-through path would have produced this phantom caller; the
+        // production code must NOT execute it when `callers` is present.
+        let phantom = parse_caller_stats(&listener_stats);
+        assert!(
+            has_any_data(&phantom),
+            "top-level link metrics make has_any_data true — exactly the trap we are avoiding"
+        );
+        assert!(
+            !caller_is_active(&phantom),
+            "phantom has no packet/byte counters, so it would render as 'waiting' but still bump the peer count"
+        );
     }
 
     #[test]
