@@ -207,6 +207,15 @@ fn prepare_flow(flow: &mut Flow) {
         }
     }
 
+    // Migrate legacy `mode` enum on WHEP Output blocks to explicit track counts.
+    // Old flows had `mode: "audio"|"video"|"audio_video"`; the property panel now
+    // exposes `num_audio_tracks` / `num_video_tracks` instead.
+    for block in &mut flow.blocks {
+        if block.block_definition_id == "builtin.whep_output" {
+            crate::blocks::builtin::whep::migrate_legacy_mode(&mut block.properties);
+        }
+    }
+
     // Compute external pads for all block instances based on their properties
     for block in &mut flow.blocks {
         if let Some(builder) = crate::blocks::builtin::get_builder(&block.block_definition_id) {
