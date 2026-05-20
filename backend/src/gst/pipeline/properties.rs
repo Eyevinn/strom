@@ -31,34 +31,41 @@ impl PipelineManager {
         );
 
         // Audio volume element: route through the ramp manager to avoid
-        // zipper noise (volume) and click artifacts (mute). The match
-        // guards have side effects (they install a control source / schedule
-        // the mute toggle) and short-circuit when ramp setup succeeds; on
-        // failure (e.g. pipeline not yet running) we fall through to the
-        // direct `set_property` path below.
+        // zipper noise (volume) and click artifacts (mute). The short-circuit
+        // installs a control source / schedules the mute toggle and returns;
+        // on failure (e.g. pipeline not yet running) we fall through to the
+        // direct `set_property` path below. Volume accepts any numeric
+        // PropertyValue (Float/Int/UInt) since clients sometimes send an
+        // integer 0/1 — the underlying property is `gdouble`.
         if VolumeRampManager::is_volume_element(element) {
-            match (prop_name, prop_value) {
-                ("volume", PropertyValue::Float(v))
+            if prop_name == "volume" {
+                let target: Option<f64> = match prop_value {
+                    PropertyValue::Float(v) => Some(*v),
+                    PropertyValue::Int(v) => Some(*v as f64),
+                    PropertyValue::UInt(v) => Some(*v as f64),
+                    _ => None,
+                };
+                if let Some(target) = target {
                     if self.volume_ramps.apply_volume_ramp(
                         element,
                         element_id,
-                        *v,
+                        target,
                         ramp_ms.unwrap_or(DEFAULT_VOLUME_RAMP_MS),
-                    ) =>
-                {
-                    return Ok(());
+                    ) {
+                        return Ok(());
+                    }
                 }
-                ("mute", PropertyValue::Bool(v))
+            } else if prop_name == "mute" {
+                if let PropertyValue::Bool(v) = prop_value {
                     if self.volume_ramps.apply_mute(
                         element,
                         element_id,
                         *v,
                         ramp_ms.unwrap_or(MUTE_ANTICLICK_RAMP_MS),
-                    ) =>
-                {
-                    return Ok(());
+                    ) {
+                        return Ok(());
+                    }
                 }
-                _ => {}
             }
         }
 
@@ -122,6 +129,12 @@ impl PipelineManager {
                     } else if type_name == "gint64" {
                         // Property expects i64
                         element.set_property(prop_name, *v);
+                    } else if type_name == "gdouble" {
+                        // Property expects f64 — coerce (e.g. volume sent as int)
+                        element.set_property(prop_name, *v as f64);
+                    } else if type_name == "gfloat" {
+                        // Property expects f32 — coerce
+                        element.set_property(prop_name, *v as f32);
                     } else {
                         // Try i64, might work
                         element.set_property(prop_name, *v);
@@ -149,6 +162,12 @@ impl PipelineManager {
                     } else if type_name == "guint64" {
                         // Property expects u64
                         element.set_property(prop_name, *v);
+                    } else if type_name == "gdouble" {
+                        // Property expects f64 — coerce
+                        element.set_property(prop_name, *v as f64);
+                    } else if type_name == "gfloat" {
+                        // Property expects f32 — coerce
+                        element.set_property(prop_name, *v as f32);
                     } else {
                         // Try u64, might work
                         element.set_property(prop_name, *v);
