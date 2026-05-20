@@ -385,56 +385,6 @@ impl MixerEditor {
         );
     }
 
-    /// Drive the monitor source-switching gates based on whether any channel
-    /// currently has PFL or AFL engaged.
-    ///
-    /// `solo_to_mon` opens when any solo is active, `main_to_mon` closes.
-    /// When all solo is released, the gates flip back so the monitor follows
-    /// the main output. Both gates ramp via the standard `fade_ms` to avoid
-    /// clicks on transition.
-    pub(super) fn update_monitor_gates(&mut self, ctx: &Context) {
-        if !self.live_updates || !self.pipeline_running {
-            return;
-        }
-        let solo_active = self.any_solo_active();
-        let solo_vol = if solo_active { 1.0_f64 } else { 0.0 };
-        let main_vol = if solo_active { 0.0_f64 } else { 1.0 };
-        let ramp_ms = Some(self.fade_ms);
-        let api = self.api.clone();
-        let flow_id = self.flow_id;
-        let solo_id = format!("{}:solo_to_mon", self.block_id);
-        let main_id = format!("{}:main_to_mon", self.block_id);
-        let ctx = ctx.clone();
-
-        crate::app::spawn_task(async move {
-            if let Err(e) = api
-                .update_element_property(
-                    &flow_id,
-                    &solo_id,
-                    "volume",
-                    PropertyValue::Float(solo_vol),
-                    ramp_ms,
-                )
-                .await
-            {
-                tracing::warn!("Monitor gate (solo) update failed: {}", e);
-            }
-            if let Err(e) = api
-                .update_element_property(
-                    &flow_id,
-                    &main_id,
-                    "volume",
-                    PropertyValue::Float(main_vol),
-                    ramp_ms,
-                )
-                .await
-            {
-                tracing::warn!("Monitor gate (main) update failed: {}", e);
-            }
-            ctx.request_repaint();
-        });
-    }
-
     /// Update aux send level via the block-properties endpoint.
     pub(super) fn update_aux_send(&mut self, ctx: &Context, ch_idx: usize, aux_idx: usize) {
         if !self.live_updates || !self.pipeline_running {

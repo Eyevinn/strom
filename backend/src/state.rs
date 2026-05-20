@@ -1525,6 +1525,12 @@ impl AppState {
     /// written to the resolved underlying element via [`Self::update_element_property`]
     /// — so all the existing anti-click / ramp behaviour is inherited.
     ///
+    /// Block-specific derived state: for the audio mixer, any chN_pfl or chN_afl
+    /// write in the batch triggers a post-step that recomputes "any solo active"
+    /// and writes the two monitor-source gates (`solo_to_mon` / `main_to_mon`) with
+    /// the same `ramp_ms`. Those gates are pure derived state — clients must never
+    /// touch them directly.
+    ///
     /// Returns `(current_values, rejected)`:
     /// - `current_values`: block-level (inverse-transformed) values after the writes.
     /// - `rejected`: per-property reason strings for entries that could not be applied
@@ -1565,6 +1571,10 @@ impl AppState {
 
         let mut rejected: HashMap<String, String> = HashMap::new();
         let mut to_persist: Vec<(String, PropertyValue)> = Vec::new();
+        // Captures successfully applied chN_pfl / chN_afl bools from this batch
+        // so the mixer monitor-gate post-step can compute "any solo active"
+        // without having to read mid-ramp element values back.
+        let mut mixer_solo_overrides: HashMap<String, bool> = HashMap::new();
 
         for (name, value) in properties {
             let Some(exposed) = definition
@@ -1615,9 +1625,33 @@ impl AppState {
                 continue;
             }
 
+            if definition.id == crate::blocks::builtin::mixer::MIXER_BLOCK_ID
+                && crate::blocks::builtin::mixer::parse_solo_property_name(&name).is_some()
+            {
+                if let PropertyValue::Bool(b) = &value {
+                    mixer_solo_overrides.insert(name.clone(), *b);
+                }
+            }
+
             if exposed.persist() {
                 to_persist.push((name, value));
             }
+        }
+
+        // Mixer: PFL/AFL bools are the only public API for solo. The two
+        // monitor-source gates (solo_to_mon / main_to_mon) are pure derived
+        // state — any chN_pfl or chN_afl true → solo bus to monitor; otherwise
+        // main bus to monitor. We apply this exactly once per batch so the two
+        // gates are atomic relative to the bool writes that triggered them.
+        if !mixer_solo_overrides.is_empty() {
+            self.refresh_mixer_monitor_gates(
+                flow_id,
+                block_instance_id,
+                &definition,
+                &mixer_solo_overrides,
+                ramp_ms,
+            )
+            .await;
         }
 
         // Sync persisted values back to the block instance so they survive a
@@ -1678,6 +1712,99 @@ impl AppState {
             })?;
         self.get_block_properties_inner(flow_id, block_instance_id, &definition)
             .await
+    }
+
+    /// Mixer-specific derived state: refresh the monitor-source gates after a
+    /// batch that contained one or more chN_pfl / chN_afl writes.
+    ///
+    /// "Any solo active" is computed across all of the block's PFL/AFL bools:
+    /// values that were in this batch are taken from `solo_overrides` (the
+    /// authoritative post-batch intent), and the rest are read back from the
+    /// corresponding `pfl_volume_N` / `afl_volume_N` elements and run through
+    /// the inverse `bool_to_volume` transform. Then `solo_to_mon` is opened
+    /// (or closed) and `main_to_mon` is set to the inverse, both ramped with
+    /// the caller's `ramp_ms` so the gate change stays in sync with the
+    /// per-channel PFL/AFL ramp that just kicked off.
+    ///
+    /// Gate-write failures are logged but never bubble up — a transient
+    /// element-not-found shouldn't fail the user's solo toggle.
+    async fn refresh_mixer_monitor_gates(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        definition: &strom_types::BlockDefinition,
+        solo_overrides: &HashMap<String, bool>,
+        ramp_ms: Option<u32>,
+    ) {
+        let mut any_solo = false;
+        for exposed in &definition.exposed_properties {
+            if crate::blocks::builtin::mixer::parse_solo_property_name(&exposed.name).is_none() {
+                continue;
+            }
+            let on = if let Some(b) = solo_overrides.get(&exposed.name) {
+                *b
+            } else {
+                let full_element_id =
+                    format!("{}:{}", block_instance_id, exposed.mapping.element_id);
+                match self
+                    .get_element_property(flow_id, &full_element_id, &exposed.mapping.property_name)
+                    .await
+                {
+                    Ok(v) => {
+                        let t =
+                            crate::blocks::transforms::lookup(exposed.mapping.transform.as_deref());
+                        matches!((t.inverse)(v), Some(PropertyValue::Bool(true)))
+                    }
+                    Err(_) => false,
+                }
+            };
+            if on {
+                any_solo = true;
+                break;
+            }
+        }
+
+        let (solo_vol, main_vol) = if any_solo { (1.0, 0.0) } else { (0.0, 1.0) };
+        let solo_id = format!(
+            "{}:{}",
+            block_instance_id,
+            crate::blocks::builtin::mixer::SOLO_TO_MON_ELEMENT
+        );
+        let main_id = format!(
+            "{}:{}",
+            block_instance_id,
+            crate::blocks::builtin::mixer::MAIN_TO_MON_ELEMENT
+        );
+        if let Err(e) = self
+            .update_element_property(
+                flow_id,
+                &solo_id,
+                "volume",
+                PropertyValue::Float(solo_vol),
+                ramp_ms,
+            )
+            .await
+        {
+            warn!(
+                "Mixer {} solo_to_mon gate update failed (any_solo={}): {}",
+                block_instance_id, any_solo, e
+            );
+        }
+        if let Err(e) = self
+            .update_element_property(
+                flow_id,
+                &main_id,
+                "volume",
+                PropertyValue::Float(main_vol),
+                ramp_ms,
+            )
+            .await
+        {
+            warn!(
+                "Mixer {} main_to_mon gate update failed (any_solo={}): {}",
+                block_instance_id, any_solo, e
+            );
+        }
     }
 
     async fn get_block_properties_inner(

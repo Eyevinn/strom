@@ -353,6 +353,17 @@ fn test_mixer_pfl_afl_are_transient() {
 }
 
 #[test]
+fn test_parse_solo_property_name_matches_pfl_and_afl() {
+    use super::parse_solo_property_name;
+    assert_eq!(parse_solo_property_name("ch1_pfl"), Some(1));
+    assert_eq!(parse_solo_property_name("ch12_afl"), Some(12));
+    assert_eq!(parse_solo_property_name("ch1_mute"), None);
+    assert_eq!(parse_solo_property_name("main_fader"), None);
+    assert_eq!(parse_solo_property_name("ch_pfl"), None);
+    assert_eq!(parse_solo_property_name("chA_pfl"), None);
+}
+
+#[test]
 fn test_mixer_mute_maps_to_gstvolume_mute_property() {
     // Mute is implemented via GstVolume's native `mute` property, not the
     // legacy "volume = 0 if muted" trick. The mapping must point at the

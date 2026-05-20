@@ -630,8 +630,6 @@ impl MixerEditor {
 
                         if let Some(prop) = solo_changed {
                             self.update_channel_property(ctx, index, prop);
-                            // Switch the monitor source whenever any PFL/AFL toggles.
-                            self.update_monitor_gates(ctx);
                         }
                     }
 
@@ -1012,12 +1010,12 @@ impl MixerEditor {
                         }
                         for i in changed_indices {
                             // Push both volumes to 0 so the backend sees the
-                            // release on each per-channel solo send.
+                            // release on each per-channel solo send. The
+                            // backend flips the monitor gates back to Main as
+                            // a side effect once any_solo goes false.
                             self.update_channel_property(ctx, i, "pfl");
                             self.update_channel_property(ctx, i, "afl");
                         }
-                        // Flip the monitor gates back to follow Main.
-                        self.update_monitor_gates(ctx);
                     }
                 });
             });
