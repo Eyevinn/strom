@@ -1008,13 +1008,14 @@ impl MixerEditor {
                                 changed_indices.push(i);
                             }
                         }
-                        for i in changed_indices {
-                            // Push both volumes to 0 so the backend sees the
-                            // release on each per-channel solo send. The
-                            // backend flips the monitor gates back to Main as
-                            // a side effect once any_solo goes false.
-                            self.update_channel_property(ctx, i, "pfl");
-                            self.update_channel_property(ctx, i, "afl");
+                        // Send every chN_pfl=false / chN_afl=false in a single
+                        // batched PATCH. Per-property calls go through a 50 ms
+                        // throttle that would silently drop all but the first
+                        // release in a tight loop; one call sidesteps that and
+                        // also lets the backend flip the monitor gates back to
+                        // Main exactly once (single any_solo recomputation).
+                        if !changed_indices.is_empty() {
+                            self.update_solo_clear_batch(ctx, &changed_indices);
                         }
                     }
                 });

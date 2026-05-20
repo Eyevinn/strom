@@ -385,6 +385,39 @@ impl MixerEditor {
         );
     }
 
+    /// Release every PFL/AFL on the given channels in a single batched PATCH.
+    ///
+    /// The Clear-all button needs to send 2N writes at once, and the per-property
+    /// throttle in [`Self::update_channel_property`] would otherwise drop all
+    /// but the first. Routing through the batched endpoint also collapses N
+    /// monitor-gate refreshes on the backend into one — gates ramp back to Main
+    /// exactly once.
+    pub(super) fn update_solo_clear_batch(&mut self, ctx: &Context, channels: &[usize]) {
+        if !self.live_updates || !self.pipeline_running {
+            return;
+        }
+        let mut properties = HashMap::new();
+        for &i in channels {
+            let ch1 = i + 1;
+            properties.insert(format!("ch{}_pfl", ch1), PropertyValue::Bool(false));
+            properties.insert(format!("ch{}_afl", ch1), PropertyValue::Bool(false));
+        }
+        let ramp_ms = Some(self.fade_ms);
+        let api = self.api.clone();
+        let flow_id = self.flow_id;
+        let block_id = self.block_id.clone();
+        let ctx = ctx.clone();
+        crate::app::spawn_task(async move {
+            if let Err(e) = api
+                .update_block_properties(&flow_id, &block_id, properties, ramp_ms)
+                .await
+            {
+                tracing::warn!("Mixer solo-clear batch failed: {}", e);
+            }
+            ctx.request_repaint();
+        });
+    }
+
     /// Update aux send level via the block-properties endpoint.
     pub(super) fn update_aux_send(&mut self, ctx: &Context, ch_idx: usize, aux_idx: usize) {
         if !self.live_updates || !self.pipeline_running {

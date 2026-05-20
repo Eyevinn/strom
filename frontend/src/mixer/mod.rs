@@ -291,9 +291,10 @@ pub struct MixerEditor {
 
 impl MixerEditor {
     /// True if any channel currently has PFL or AFL engaged.
-    /// Drives the monitor bus source-switching gates (`solo_to_mon` /
-    /// `main_to_mon`) — when any solo is active the monitor listens to
-    /// the solo mix, otherwise it follows the main output.
+    /// Used only to render the MAIN/SOLO indicator on the monitor strip — the
+    /// backend owns the actual monitor source switching as a side effect of
+    /// any chN_pfl / chN_afl write. The frontend never touches the internal
+    /// monitor gates directly; PFL/AFL bools are the entire solo API.
     pub(super) fn any_solo_active(&self) -> bool {
         self.channels.iter().any(|c| c.pfl || c.afl)
     }
