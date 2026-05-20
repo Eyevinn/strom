@@ -28,9 +28,10 @@
 //!
 //! Monitor bus: the solo_mixer and a tap from main_out_tee both feed a
 //! monitor_mixer through two volume-gate elements (solo_to_mon and
-//! main_to_mon). The frontend toggles those gates whenever any ch{N}_pfl or
-//! ch{N}_afl property changes — no PFL/AFL active → main_to_mon=1,
-//! solo_to_mon=0; any solo active → reversed. monitor_mixer feeds
+//! main_to_mon). The state layer flips those gates as a side effect of any
+//! `chN_pfl`/`chN_afl` write — no PFL/AFL active → main_to_mon=1,
+//! solo_to_mon=0; any solo active → reversed. Clients only write the bools;
+//! the gates are not part of the public API. monitor_mixer feeds
 //! monitor_master_vol → monitor_level → monitor_out_tee → monitor_out pad.
 //!
 //! All output buses terminate in a tee with allow-not-linked=true, so unconnected
@@ -60,6 +61,26 @@ const EQ_BAND_TYPE_BELL: i32 = 7;
 pub use builder::MixerBuilder;
 pub use definition::get_blocks;
 pub use properties::translate_property_for_element;
+
+/// Block definition ID for the audio mixer. Used by state-layer hooks that
+/// need to recognize mixer instances (e.g. the PFL/AFL → monitor-gate derivation).
+pub const MIXER_BLOCK_ID: &str = "builtin.mixer";
+
+/// Element IDs (relative to the block instance) for the two monitor-source gates.
+/// These are pure derived state driven by PFL/AFL — external clients never
+/// write them directly.
+pub const SOLO_TO_MON_ELEMENT: &str = "solo_to_mon";
+pub const MAIN_TO_MON_ELEMENT: &str = "main_to_mon";
+
+/// Return the 1-indexed channel number if `name` matches a `chN_pfl` / `chN_afl`
+/// exposed property, otherwise `None`. Used to detect solo-affecting writes in
+/// the block-properties batch path.
+pub fn parse_solo_property_name(name: &str) -> Option<usize> {
+    let stripped = name
+        .strip_suffix("_pfl")
+        .or_else(|| name.strip_suffix("_afl"))?;
+    stripped.strip_prefix("ch")?.parse::<usize>().ok()
+}
 
 // Crate-internal re-imports (accessible via super::* in tests)
 #[cfg(test)]

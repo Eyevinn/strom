@@ -270,12 +270,12 @@ impl BlockBuilder for MixerBuilder {
         // Create solo bus (sums PFL pre-fader + AFL post-fader sends from every
         // channel) and the Monitor bus that listens to either Main or solo.
         //
-        // Routing rule (driven by frontend gate updates, never by pad probes):
+        // Routing rule (driven by the state layer as a side effect of any
+        // ch{N}_pfl/ch{N}_afl write, not by clients):
         //   - no PFL/AFL active anywhere → main_to_mon=1, solo_to_mon=0
         //   - any PFL/AFL active        → main_to_mon=0, solo_to_mon=1
-        // The frontend computes "any solo active" whenever a ch{N}_pfl /
-        // ch{N}_afl toggles and ramps both gate volumes via the standard
-        // volume-element ramp.
+        // PFL/AFL bools are `persist: false`, so the build-time defaults below
+        // are always the no-solo case — no need to inspect properties here.
         // ========================================================================
         let solo_mixer_id = format!("{}:solo_mixer", instance_id);
         let solo_mixer = make_audiomixer(

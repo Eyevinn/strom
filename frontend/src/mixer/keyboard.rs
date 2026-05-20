@@ -56,7 +56,6 @@ impl MixerEditor {
             if let Some(ch) = selected_ch {
                 self.channels[ch].pfl = !self.channels[ch].pfl;
                 self.update_channel_property(ctx, ch, "pfl");
-                self.update_monitor_gates(ctx);
             }
         }
 
@@ -65,7 +64,6 @@ impl MixerEditor {
             if let Some(ch) = selected_ch {
                 self.channels[ch].afl = !self.channels[ch].afl;
                 self.update_channel_property(ctx, ch, "afl");
-                self.update_monitor_gates(ctx);
             }
         }
 

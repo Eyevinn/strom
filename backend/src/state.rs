@@ -84,6 +84,15 @@ struct AppStateInner {
     gst_debug_filter: parking_lot::Mutex<String>,
     /// The GStreamer debug filter the server started with
     default_gst_debug_filter: parking_lot::Mutex<String>,
+    /// Authoritative solo intent for each mixer block instance: the set of
+    /// `chN_pfl` / `chN_afl` exposed property names that the user has currently
+    /// engaged. Updated as a side effect of every `update_block_properties`
+    /// call that touches PFL/AFL bools, and consulted by the monitor-gate
+    /// refresh — never derived from element values (which would race with the
+    /// per-channel volume ramp). PFL/AFL bools are `persist: false`, so the
+    /// per-flow entry is cleared on `stop_flow`; a fresh start sees an empty
+    /// set, which matches the build-time element defaults (gates closed).
+    mixer_solo_state: RwLock<HashMap<FlowId, HashMap<String, HashSet<String>>>>,
 }
 
 impl AppState {
@@ -126,6 +135,7 @@ impl AppState {
                 default_log_filter: parking_lot::Mutex::new("info".to_string()),
                 gst_debug_filter: parking_lot::Mutex::new(String::new()),
                 default_gst_debug_filter: parking_lot::Mutex::new(String::new()),
+                mixer_solo_state: RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -1267,6 +1277,13 @@ impl AppState {
     pub async fn stop_flow(&self, id: &FlowId) -> Result<PipelineState, PipelineError> {
         info!("Stopping flow: {}", id);
 
+        // Drop any cached mixer solo intent — PFL/AFL bools are `persist: false`
+        // and the rebuilt pipeline will start with the no-solo defaults.
+        {
+            let mut state = self.inner.mixer_solo_state.write().await;
+            state.remove(id);
+        }
+
         // Get and remove the pipeline
         let manager = {
             let mut pipelines = self.inner.pipelines.write().await;
@@ -1537,6 +1554,12 @@ impl AppState {
     /// written to the resolved underlying element via [`Self::update_element_property`]
     /// — so all the existing anti-click / ramp behaviour is inherited.
     ///
+    /// Block-specific derived state: for the audio mixer, any chN_pfl or chN_afl
+    /// write in the batch triggers a post-step that recomputes "any solo active"
+    /// and writes the two monitor-source gates (`solo_to_mon` / `main_to_mon`) with
+    /// the same `ramp_ms`. Those gates are pure derived state — clients must never
+    /// touch them directly.
+    ///
     /// Returns `(current_values, rejected)`:
     /// - `current_values`: block-level (inverse-transformed) values after the writes.
     /// - `rejected`: per-property reason strings for entries that could not be applied
@@ -1577,6 +1600,10 @@ impl AppState {
 
         let mut rejected: HashMap<String, String> = HashMap::new();
         let mut to_persist: Vec<(String, PropertyValue)> = Vec::new();
+        // True iff this batch successfully applied at least one chN_pfl /
+        // chN_afl write. We update the per-block solo-intent cache below as
+        // those writes succeed, then run the monitor-gate refresh once.
+        let mut mixer_solo_changed = false;
 
         for (name, value) in properties {
             let Some(exposed) = definition
@@ -1627,9 +1654,30 @@ impl AppState {
                 continue;
             }
 
+            if definition.id == crate::blocks::builtin::mixer::MIXER_BLOCK_ID
+                && crate::blocks::builtin::mixer::parse_solo_property_name(&name).is_some()
+            {
+                if let PropertyValue::Bool(b) = &value {
+                    self.set_mixer_solo_intent(flow_id, block_instance_id, &name, *b)
+                        .await;
+                    mixer_solo_changed = true;
+                }
+            }
+
             if exposed.persist() {
                 to_persist.push((name, value));
             }
+        }
+
+        // Mixer: PFL/AFL bools are the only public API for solo. The two
+        // monitor-source gates (solo_to_mon / main_to_mon) are pure derived
+        // state — any chN_pfl or chN_afl currently engaged → solo bus to
+        // monitor; otherwise main bus to monitor. We apply this exactly once
+        // per batch so the two gates are atomic relative to the bool writes
+        // that triggered them.
+        if mixer_solo_changed {
+            self.refresh_mixer_monitor_gates(flow_id, block_instance_id, ramp_ms)
+                .await;
         }
 
         // Sync persisted values back to the block instance so they survive a
@@ -1690,6 +1738,110 @@ impl AppState {
             })?;
         self.get_block_properties_inner(flow_id, block_instance_id, &definition)
             .await
+    }
+
+    /// Record a single chN_pfl / chN_afl write in the per-block solo-intent
+    /// cache. `true` adds the property name to the set, `false` removes it.
+    /// The empty-set case is the no-solo state and matches the build-time
+    /// gate defaults, so we clean up empty inner / outer maps.
+    async fn set_mixer_solo_intent(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        property_name: &str,
+        value: bool,
+    ) {
+        let mut state = self.inner.mixer_solo_state.write().await;
+        let by_block = state.entry(*flow_id).or_default();
+        let set = by_block.entry(block_instance_id.to_string()).or_default();
+        if value {
+            set.insert(property_name.to_string());
+        } else {
+            set.remove(property_name);
+        }
+        if set.is_empty() {
+            by_block.remove(block_instance_id);
+        }
+        if by_block.is_empty() {
+            state.remove(flow_id);
+        }
+    }
+
+    /// True iff at least one chN_pfl / chN_afl is currently engaged on the
+    /// given mixer block instance. Reads only the in-memory intent cache —
+    /// never touches the running pipeline, so it is immune to mid-ramp races.
+    async fn mixer_any_solo_active(&self, flow_id: &FlowId, block_instance_id: &str) -> bool {
+        let state = self.inner.mixer_solo_state.read().await;
+        state
+            .get(flow_id)
+            .and_then(|by_block| by_block.get(block_instance_id))
+            .map(|set| !set.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Mixer-specific derived state: refresh the monitor-source gates after a
+    /// batch that contained one or more chN_pfl / chN_afl writes.
+    ///
+    /// "Any solo active" is computed purely from the in-memory solo-intent
+    /// cache (see [`Self::set_mixer_solo_intent`]) — the running element
+    /// values are not consulted, so a long volume ramp on one channel cannot
+    /// race with a release on another. Both gates are written with the
+    /// caller's `ramp_ms` so they stay in sync with the per-channel PFL/AFL
+    /// ramp that just kicked off.
+    ///
+    /// Gate-write failures are logged but never bubble up — a transient
+    /// element-not-found shouldn't fail the user's solo toggle. Note that a
+    /// partial failure (one gate written, the other not) leaves both buses
+    /// audible on the monitor until the next solo write retries — an
+    /// acceptable degraded mode but worth knowing about when debugging.
+    async fn refresh_mixer_monitor_gates(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        ramp_ms: Option<u32>,
+    ) {
+        let any_solo = self.mixer_any_solo_active(flow_id, block_instance_id).await;
+        let (solo_vol, main_vol) = if any_solo { (1.0, 0.0) } else { (0.0, 1.0) };
+        let solo_id = format!(
+            "{}:{}",
+            block_instance_id,
+            crate::blocks::builtin::mixer::SOLO_TO_MON_ELEMENT
+        );
+        let main_id = format!(
+            "{}:{}",
+            block_instance_id,
+            crate::blocks::builtin::mixer::MAIN_TO_MON_ELEMENT
+        );
+        if let Err(e) = self
+            .update_element_property(
+                flow_id,
+                &solo_id,
+                "volume",
+                PropertyValue::Float(solo_vol),
+                ramp_ms,
+            )
+            .await
+        {
+            warn!(
+                "Mixer {} solo_to_mon gate update failed (any_solo={}): {}",
+                block_instance_id, any_solo, e
+            );
+        }
+        if let Err(e) = self
+            .update_element_property(
+                flow_id,
+                &main_id,
+                "volume",
+                PropertyValue::Float(main_vol),
+                ramp_ms,
+            )
+            .await
+        {
+            warn!(
+                "Mixer {} main_to_mon gate update failed (any_solo={}): {}",
+                block_instance_id, any_solo, e
+            );
+        }
     }
 
     async fn get_block_properties_inner(
@@ -2459,5 +2611,125 @@ fn parse_gst_level(s: &str) -> Result<gstreamer::DebugLevel, String> {
             "Invalid GStreamer debug level '{}': expected 0-7 or 9",
             n
         )),
+    }
+}
+
+#[cfg(test)]
+mod mixer_solo_intent_tests {
+    use super::*;
+    use crate::storage::JsonFileStorage;
+    use std::sync::Once;
+    use tempfile::NamedTempFile;
+
+    static GST_INIT: Once = Once::new();
+
+    fn new_state() -> AppState {
+        // AppState construction touches GStreamer registries; init once.
+        GST_INIT.call_once(|| {
+            gstreamer::init().expect("gstreamer init failed in test");
+        });
+        let storage_file = NamedTempFile::new().unwrap();
+        let blocks_file = NamedTempFile::new().unwrap();
+        let storage = JsonFileStorage::new(storage_file.path());
+        AppState::new(
+            storage,
+            blocks_file.path(),
+            std::env::temp_dir(),
+            vec![],
+            "all".to_string(),
+            vec![],
+        )
+    }
+
+    #[tokio::test]
+    async fn solo_intent_starts_empty_and_records_writes() {
+        let state = new_state();
+        let flow = FlowId::new_v4();
+        assert!(!state.mixer_any_solo_active(&flow, "mix1").await);
+
+        state
+            .set_mixer_solo_intent(&flow, "mix1", "ch1_pfl", true)
+            .await;
+        assert!(state.mixer_any_solo_active(&flow, "mix1").await);
+
+        state
+            .set_mixer_solo_intent(&flow, "mix1", "ch1_pfl", false)
+            .await;
+        assert!(!state.mixer_any_solo_active(&flow, "mix1").await);
+    }
+
+    #[tokio::test]
+    async fn solo_intent_tracks_multiple_channels_independently() {
+        let state = new_state();
+        let flow = FlowId::new_v4();
+        // Two channels engaged on the same block.
+        state
+            .set_mixer_solo_intent(&flow, "mix1", "ch1_pfl", true)
+            .await;
+        state
+            .set_mixer_solo_intent(&flow, "mix1", "ch2_afl", true)
+            .await;
+        assert!(state.mixer_any_solo_active(&flow, "mix1").await);
+
+        // Releasing only one channel must not flip the gate.
+        state
+            .set_mixer_solo_intent(&flow, "mix1", "ch1_pfl", false)
+            .await;
+        assert!(
+            state.mixer_any_solo_active(&flow, "mix1").await,
+            "monitor should stay on solo while ch2_afl is still engaged"
+        );
+
+        // Releasing the last engaged channel returns to no-solo.
+        state
+            .set_mixer_solo_intent(&flow, "mix1", "ch2_afl", false)
+            .await;
+        assert!(!state.mixer_any_solo_active(&flow, "mix1").await);
+    }
+
+    #[tokio::test]
+    async fn solo_intent_is_scoped_per_block_and_per_flow() {
+        let state = new_state();
+        let flow_a = FlowId::new_v4();
+        let flow_b = FlowId::new_v4();
+        state
+            .set_mixer_solo_intent(&flow_a, "mixA", "ch1_pfl", true)
+            .await;
+        assert!(state.mixer_any_solo_active(&flow_a, "mixA").await);
+        assert!(!state.mixer_any_solo_active(&flow_a, "mixB").await);
+        assert!(!state.mixer_any_solo_active(&flow_b, "mixA").await);
+    }
+
+    #[tokio::test]
+    async fn solo_intent_is_cleared_on_stop_flow() {
+        let state = new_state();
+        let flow = FlowId::new_v4();
+        state
+            .set_mixer_solo_intent(&flow, "mix1", "ch1_pfl", true)
+            .await;
+        assert!(state.mixer_any_solo_active(&flow, "mix1").await);
+
+        // stop_flow on an unknown flow is a no-op for the pipeline map but
+        // still drops the solo intent — matches the `persist: false`
+        // semantics of the underlying PFL/AFL bools.
+        let _ = state.stop_flow(&flow).await;
+        assert!(
+            !state.mixer_any_solo_active(&flow, "mix1").await,
+            "stop_flow must purge cached solo intent so a restart starts clean"
+        );
+    }
+
+    #[tokio::test]
+    async fn solo_intent_set_false_is_idempotent_when_empty() {
+        // Writing false to a channel that was never engaged should leave
+        // the cache empty (no spurious entry).
+        let state = new_state();
+        let flow = FlowId::new_v4();
+        state
+            .set_mixer_solo_intent(&flow, "mix1", "ch1_pfl", false)
+            .await;
+        assert!(!state.mixer_any_solo_active(&flow, "mix1").await);
+        let map = state.inner.mixer_solo_state.read().await;
+        assert!(map.is_empty(), "no flow entry should be created for false");
     }
 }

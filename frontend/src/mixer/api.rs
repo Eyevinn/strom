@@ -385,51 +385,34 @@ impl MixerEditor {
         );
     }
 
-    /// Drive the monitor source-switching gates based on whether any channel
-    /// currently has PFL or AFL engaged.
+    /// Release every PFL/AFL on the given channels in a single batched PATCH.
     ///
-    /// `solo_to_mon` opens when any solo is active, `main_to_mon` closes.
-    /// When all solo is released, the gates flip back so the monitor follows
-    /// the main output. Both gates ramp via the standard `fade_ms` to avoid
-    /// clicks on transition.
-    pub(super) fn update_monitor_gates(&mut self, ctx: &Context) {
+    /// The Clear-all button needs to send 2N writes at once, and the per-property
+    /// throttle in [`Self::update_channel_property`] would otherwise drop all
+    /// but the first. Routing through the batched endpoint also collapses N
+    /// monitor-gate refreshes on the backend into one — gates ramp back to Main
+    /// exactly once.
+    pub(super) fn update_solo_clear_batch(&mut self, ctx: &Context, channels: &[usize]) {
         if !self.live_updates || !self.pipeline_running {
             return;
         }
-        let solo_active = self.any_solo_active();
-        let solo_vol = if solo_active { 1.0_f64 } else { 0.0 };
-        let main_vol = if solo_active { 0.0_f64 } else { 1.0 };
+        let mut properties = HashMap::new();
+        for &i in channels {
+            let ch1 = i + 1;
+            properties.insert(format!("ch{}_pfl", ch1), PropertyValue::Bool(false));
+            properties.insert(format!("ch{}_afl", ch1), PropertyValue::Bool(false));
+        }
         let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
         let flow_id = self.flow_id;
-        let solo_id = format!("{}:solo_to_mon", self.block_id);
-        let main_id = format!("{}:main_to_mon", self.block_id);
+        let block_id = self.block_id.clone();
         let ctx = ctx.clone();
-
         crate::app::spawn_task(async move {
             if let Err(e) = api
-                .update_element_property(
-                    &flow_id,
-                    &solo_id,
-                    "volume",
-                    PropertyValue::Float(solo_vol),
-                    ramp_ms,
-                )
+                .update_block_properties(&flow_id, &block_id, properties, ramp_ms)
                 .await
             {
-                tracing::warn!("Monitor gate (solo) update failed: {}", e);
-            }
-            if let Err(e) = api
-                .update_element_property(
-                    &flow_id,
-                    &main_id,
-                    "volume",
-                    PropertyValue::Float(main_vol),
-                    ramp_ms,
-                )
-                .await
-            {
-                tracing::warn!("Monitor gate (main) update failed: {}", e);
+                tracing::warn!("Mixer solo-clear batch failed: {}", e);
             }
             ctx.request_repaint();
         });

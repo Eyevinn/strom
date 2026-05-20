@@ -166,14 +166,29 @@ impl ApiClient {
         ramp_ms: Option<u32>,
     ) -> ApiResult<()> {
         use std::collections::HashMap;
+        let mut properties = HashMap::new();
+        properties.insert(property_name.to_string(), value);
+        self.update_block_properties(flow_id, block_id, properties, ramp_ms)
+            .await
+    }
+
+    /// Batched variant of [`Self::update_block_property`]. All writes in `properties`
+    /// arrive at the backend in a single PATCH and are applied atomically relative to
+    /// any block-level derived state (e.g. the mixer monitor-gate refresh fires once
+    /// per batch, not once per property).
+    pub async fn update_block_properties(
+        &self,
+        flow_id: &FlowId,
+        block_id: &str,
+        properties: std::collections::HashMap<String, strom_types::PropertyValue>,
+        ramp_ms: Option<u32>,
+    ) -> ApiResult<()> {
         use strom_types::api::UpdateBlockPropertiesRequest;
 
         let url = format!(
             "{}/flows/{}/blocks/{}/properties",
             self.base_url, flow_id, block_id
         );
-        let mut properties = HashMap::new();
-        properties.insert(property_name.to_string(), value);
 
         let request = UpdateBlockPropertiesRequest {
             properties,
