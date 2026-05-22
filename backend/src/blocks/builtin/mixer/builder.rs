@@ -462,6 +462,45 @@ impl BlockBuilder for MixerBuilder {
                 ElementPadRef::pad(&aux_level_id, "src"),
                 ElementPadRef::pad(&aux_out_tee_id, "sink"),
             ));
+
+            // AFL tap on the aux master. Taps from `aux_out_tee` (post-master,
+            // post-mute, post-meter) so the operator hears exactly what is
+            // leaving the aux send. Like channel PFL/AFL, the gate volume is
+            // either 0 or 1 — `bool_to_volume` transforms the public Bool
+            // property to the underlying volume value.
+            let aux_afl_enabled = get_bool_prop(properties, &format!("aux{}_afl", aux + 1), false);
+            let aux_afl_volume_id = format!("{}:aux{}_afl_volume", instance_id, aux);
+            let aux_afl_volume = gst::ElementFactory::make("volume")
+                .name(&aux_afl_volume_id)
+                .property("volume", if aux_afl_enabled { 1.0 } else { 0.0 })
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("aux{}_afl_volume: {}", aux, e))
+                })?;
+            elements.push((aux_afl_volume_id.clone(), aux_afl_volume));
+
+            let aux_afl_queue_id = format!("{}:aux{}_afl_queue", instance_id, aux);
+            let aux_afl_queue = gst::ElementFactory::make("queue")
+                .name(&aux_afl_queue_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("aux{}_afl_queue: {}", aux, e))
+                })?;
+            elements.push((aux_afl_queue_id.clone(), aux_afl_queue));
+
+            // aux_out_tee → aux_afl_volume → aux_afl_queue → solo_mixer
+            internal_links.push((
+                ElementPadRef::element(&aux_out_tee_id),
+                ElementPadRef::pad(&aux_afl_volume_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&aux_afl_volume_id, "src"),
+                ElementPadRef::pad(&aux_afl_queue_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&aux_afl_queue_id, "src"),
+                ElementPadRef::element(&solo_mixer_id),
+            ));
         }
 
         // ========================================================================
@@ -546,6 +585,44 @@ impl BlockBuilder for MixerBuilder {
             internal_links.push((
                 ElementPadRef::pad(&sg_to_main_queue_id, "src"),
                 ElementPadRef::element(&mixer_id), // Request pad from main audiomixer
+            ));
+
+            // AFL tap on the group master. Taps from `group_out_tee`
+            // (post-master, post-mute, post-meter) so the operator hears the
+            // summed group exactly as it leaves the bus. Gate volume is 0/1
+            // via `bool_to_volume`.
+            let sg_afl_enabled = get_bool_prop(properties, &format!("group{}_afl", sg + 1), false);
+            let sg_afl_volume_id = format!("{}:group{}_afl_volume", instance_id, sg);
+            let sg_afl_volume = gst::ElementFactory::make("volume")
+                .name(&sg_afl_volume_id)
+                .property("volume", if sg_afl_enabled { 1.0 } else { 0.0 })
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("group{}_afl_volume: {}", sg, e))
+                })?;
+            elements.push((sg_afl_volume_id.clone(), sg_afl_volume));
+
+            let sg_afl_queue_id = format!("{}:group{}_afl_queue", instance_id, sg);
+            let sg_afl_queue = gst::ElementFactory::make("queue")
+                .name(&sg_afl_queue_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("group{}_afl_queue: {}", sg, e))
+                })?;
+            elements.push((sg_afl_queue_id.clone(), sg_afl_queue));
+
+            // group_out_tee → group_afl_volume → group_afl_queue → solo_mixer
+            internal_links.push((
+                ElementPadRef::element(&sg_out_tee_id),
+                ElementPadRef::pad(&sg_afl_volume_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&sg_afl_volume_id, "src"),
+                ElementPadRef::pad(&sg_afl_queue_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&sg_afl_queue_id, "src"),
+                ElementPadRef::element(&solo_mixer_id),
             ));
         }
 

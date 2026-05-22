@@ -144,6 +144,10 @@ impl MixerEditor {
                 {
                     sg.mute = *b;
                 }
+                if let Some(PropertyValue::Bool(b)) = properties.get(&format!("group{}_afl", i + 1))
+                {
+                    sg.afl = *b;
+                }
                 sg
             })
             .collect();
@@ -160,6 +164,9 @@ impl MixerEditor {
                 if let Some(PropertyValue::Bool(b)) = properties.get(&format!("aux{}_mute", i + 1))
                 {
                     aux.mute = *b;
+                }
+                if let Some(PropertyValue::Bool(b)) = properties.get(&format!("aux{}_afl", i + 1)) {
+                    aux.afl = *b;
                 }
                 aux
             })
@@ -417,6 +424,7 @@ impl MixerEditor {
             let n = aux.index + 1;
             set_f!(format!("aux{}_fader", n), aux.fader, DEFAULT_FADER);
             set_b!(format!("aux{}_mute", n), aux.mute, false);
+            set_b!(format!("aux{}_afl", n), aux.afl, false);
         }
 
         // Groups
@@ -424,6 +432,7 @@ impl MixerEditor {
             let n = sg.index + 1;
             set_f!(format!("group{}_fader", n), sg.fader, DEFAULT_FADER);
             set_b!(format!("group{}_mute", n), sg.mute, false);
+            set_b!(format!("group{}_afl", n), sg.afl, false);
         }
 
         // Per-channel
@@ -548,12 +557,14 @@ impl MixerEditor {
         for aux in &mut self.aux_masters {
             aux.fader = DEFAULT_FADER;
             aux.mute = false;
+            aux.afl = false;
         }
 
         // Groups
         for sg in &mut self.groups {
             sg.fader = DEFAULT_FADER;
             sg.mute = false;
+            sg.afl = false;
         }
 
         // Channels

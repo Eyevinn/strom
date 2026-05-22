@@ -333,34 +333,58 @@ fn test_mixer_pfl_afl_are_transient() {
     // Solo state must not persist across pipeline restarts — see the
     // persist:false guard in state.rs::strip_transient_properties.
     let def = mixer_definition();
+
+    let mut names: Vec<String> = Vec::new();
     for ch in 1..=4usize {
         for kind in ["pfl", "afl"] {
-            let name = format!("ch{}_{}", ch, kind);
-            let prop = def
-                .exposed_properties
-                .iter()
-                .find(|p| p.name == name)
-                .unwrap_or_else(|| panic!("missing {}", name));
-            assert!(prop.live, "{} should be live", name);
-            assert_eq!(
-                prop.persist,
-                Some(false),
-                "{} must be marked persist: Some(false)",
-                name
-            );
+            names.push(format!("ch{}_{}", ch, kind));
         }
+    }
+    // Aux/group AFL are also pure solo state and follow the same rule.
+    for aux in 1..=4usize {
+        names.push(format!("aux{}_afl", aux));
+    }
+    for sg in 1..=4usize {
+        names.push(format!("group{}_afl", sg));
+    }
+
+    for name in names {
+        let prop = def
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("missing {}", name));
+        assert!(prop.live, "{} should be live", name);
+        assert_eq!(
+            prop.persist,
+            Some(false),
+            "{} must be marked persist: Some(false)",
+            name
+        );
     }
 }
 
 #[test]
-fn test_parse_solo_property_name_matches_pfl_and_afl() {
-    use super::parse_solo_property_name;
-    assert_eq!(parse_solo_property_name("ch1_pfl"), Some(1));
-    assert_eq!(parse_solo_property_name("ch12_afl"), Some(12));
-    assert_eq!(parse_solo_property_name("ch1_mute"), None);
-    assert_eq!(parse_solo_property_name("main_fader"), None);
-    assert_eq!(parse_solo_property_name("ch_pfl"), None);
-    assert_eq!(parse_solo_property_name("chA_pfl"), None);
+fn test_is_solo_property_name_matches_pfl_and_afl() {
+    use super::is_solo_property_name;
+    // Channel PFL/AFL
+    assert!(is_solo_property_name("ch1_pfl"));
+    assert!(is_solo_property_name("ch12_afl"));
+    // Aux/group AFL
+    assert!(is_solo_property_name("aux1_afl"));
+    assert!(is_solo_property_name("aux32_afl"));
+    assert!(is_solo_property_name("group1_afl"));
+    assert!(is_solo_property_name("group16_afl"));
+    // Non-solo names must be rejected
+    assert!(!is_solo_property_name("ch1_mute"));
+    assert!(!is_solo_property_name("main_fader"));
+    assert!(!is_solo_property_name("ch_pfl"));
+    assert!(!is_solo_property_name("chA_pfl"));
+    assert!(!is_solo_property_name("aux1_mute"));
+    assert!(!is_solo_property_name("group1_mute"));
+    // PFL only exists for channels today
+    assert!(!is_solo_property_name("aux1_pfl"));
+    assert!(!is_solo_property_name("group1_pfl"));
 }
 
 #[test]
