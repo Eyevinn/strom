@@ -32,6 +32,9 @@ Compressor (LSP Compressor Stereo)
 EQ (LSP Parametric EQ x8 Stereo, 4 bands used)
   │
   ▼
+Level meter (pre-fader, 100ms interval)
+  │
+  ▼
 pre_fader_tee ──────────┬──► Pre-fader aux sends (aux 1-2 default)
   │                      └──► PFL/AFL tap (configurable)
   ▼
@@ -44,17 +47,17 @@ Volume (fader + mute combined)
 post_fader_tee ─────────────► Post-fader aux sends (aux 3-4 default)
   │
   ▼
-Level meter (post-fader, 100ms interval)
-  │
-  ▼
 routing_tee ────────────┬──► Main mixer (via to_main_vol → queue)
                         ├──► Group 1 mixer (via to_grp1_vol → queue)
                         └──► Group 2 mixer (via to_grp2_vol → queue)
 ```
 
 Key points:
-- **Meter position**: Post-fader, post-mute. Shows what is actually being
-  sent to the buses.
+- **Meter position**: Pre-fader (after EQ/dynamics, before pan/fader/mute).
+  The channel meter shows the signal hitting the fader regardless of fader
+  position or mute — convention is *inputs are metered pre-fader, outputs
+  (buses) are metered post-master*. Use PFL/AFL when you want to hear or
+  read the post-fader signal.
 - **Mute**: Implemented by setting the volume element to 0.0 (not a
   separate element).
 - **Routing**: Each destination (main, groups) has its own volume element

@@ -9,13 +9,14 @@
 //! - Monitor bus that follows Main when no PFL/AFL is engaged and switches
 //!   to the solo mix as soon as any channel toggles PFL or AFL
 //! - Main stereo bus with compressor, EQ, limiter, and master fader
-//! - Per-channel and bus metering
+//! - Per-channel and bus metering. Convention: channel (input) meters are
+//!   tapped pre-fader; bus (output) meters are tapped post-master.
 //!
 //! Pipeline structure per channel:
 //! ```text
 //! input_N → audioconvert → capsfilter(F32LE) → gain → hpf → gate → compressor → EQ →
-//!           pre_fader_tee → audiopanorama_N → volume_N → post_fader_tee →
-//!           level_N → [group or main audiomixer]
+//!           level_N → pre_fader_tee → audiopanorama_N → volume_N → post_fader_tee →
+//!           routing_tee_N → [group or main audiomixer]
 //!
 //! pre_fader_tee  → pfl_volume_N → pfl_queue_N ─┐
 //!                                              ├→ solo_mixer
@@ -23,6 +24,10 @@
 //!
 //! (pre_fader_tee | post_fader_tee) → aux_send_N_M → aux_queue_N_M → aux_M_mixer
 //! ```
+//! `level_N` sits pre-fader so the channel meter shows the signal hitting the
+//! fader regardless of fader position or mute. Bus meters (`main_level`,
+//! `monitor_level`, `auxN_level`, `groupN_level`) sit on the bus output,
+//! post-master.
 //!
 //! Main bus: audiomixer → main_comp → main_eq → main_limiter → main_volume → main_level → main_out_tee
 //!

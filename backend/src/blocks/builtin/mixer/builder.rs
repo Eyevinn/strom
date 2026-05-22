@@ -768,7 +768,9 @@ impl BlockBuilder for MixerBuilder {
                 })?;
             elements.push((post_fader_tee_id.clone(), post_fader_tee));
 
-            // level (metering)
+            // level (pre-fader metering — taps post-EQ/dynamics, pre-fader/pan/mute
+            // so the meter reflects the input signal regardless of fader position).
+            // Built here, but linked in-path between `eq` and `pre_fader_tee` below.
             let level_id = format!("{}:level_{}", instance_id, ch);
             let level = gst::ElementFactory::make("level")
                 .name(&level_id)
@@ -781,7 +783,7 @@ impl BlockBuilder for MixerBuilder {
             elements.push((level_id.clone(), level));
 
             // ----------------------------------------------------------------
-            // Routing tee (after level, for multi-destination routing)
+            // Routing tee (after post_fader_tee, for multi-destination routing)
             // ----------------------------------------------------------------
             let routing_tee_id = format!("{}:routing_tee_{}", instance_id, ch);
             let routing_tee = gst::ElementFactory::make("tee")
@@ -908,7 +910,9 @@ impl BlockBuilder for MixerBuilder {
             // ----------------------------------------------------------------
             // Main chain links
             // ----------------------------------------------------------------
-            // Chain: convert → caps → gain → hpf → gate → comp → eq → pre_fader_tee
+            // Chain: convert → caps → gain → hpf → gate → comp → eq → level → pre_fader_tee
+            // The channel `level` element sits pre-fader (after EQ/dynamics, before
+            // pan/fader/mute) so the meter reflects the signal hitting the fader.
             internal_links.push((
                 ElementPadRef::pad(&convert_id, "src"),
                 ElementPadRef::pad(&caps_id, "sink"),
@@ -935,10 +939,14 @@ impl BlockBuilder for MixerBuilder {
             ));
             internal_links.push((
                 ElementPadRef::pad(&eq_id, "src"),
+                ElementPadRef::pad(&level_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&level_id, "src"),
                 ElementPadRef::pad(&pre_fader_tee_id, "sink"),
             ));
 
-            // pre_fader_tee → pan → volume → post_fader_tee → level → routing_tee
+            // pre_fader_tee → pan → volume → post_fader_tee → routing_tee
             internal_links.push((
                 ElementPadRef::element(&pre_fader_tee_id), // Request pad from tee
                 ElementPadRef::pad(&pan_id, "sink"),
@@ -953,10 +961,6 @@ impl BlockBuilder for MixerBuilder {
             ));
             internal_links.push((
                 ElementPadRef::element(&post_fader_tee_id), // Request pad from tee
-                ElementPadRef::pad(&level_id, "sink"),
-            ));
-            internal_links.push((
-                ElementPadRef::pad(&level_id, "src"),
                 ElementPadRef::pad(&routing_tee_id, "sink"),
             ));
 
