@@ -202,6 +202,9 @@ pub const VU_METER_MAX_DB: f64 = 0.0;
 /// dBFS threshold above which the VU bar turns yellow.
 pub const VU_METER_YELLOW_DB: f64 = -18.0;
 
+/// dBFS threshold above which the VU bar turns orange.
+pub const VU_METER_ORANGE_DB: f64 = -9.0;
+
 /// dBFS threshold above which the VU bar turns red.
 pub const VU_METER_RED_DB: f64 = -6.0;
 

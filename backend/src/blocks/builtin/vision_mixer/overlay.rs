@@ -424,12 +424,74 @@ const PGM_B: f64 = 1.0; // want B=0 in output → feed to cairo R channel
 
 const GRAY: f64 = 0.5;
 
+/// Vertical VU meter sectors matching the audio mixer live UI and the
+/// standalone meter block. Boundaries follow [`vision_mixer::VU_METER_*_DB`]
+/// (EBU/broadcast convention).
+///
+/// Each tuple is `(top_fraction, bright_bgr, dim_bgr)` where the fractions are
+/// the upper edge of the sector in 0.0..=1.0 meter space (the lower edge is
+/// the previous sector's top, or 0.0 for the first sector). Colors are stored
+/// in cairo channel order (B, G, R) because the overlay surface is BGRA in
+/// memory but emitted as RGBA — see the comment on the PVW/PGM color constants.
+struct MeterSector {
+    /// Upper edge of this sector in 0.0..=1.0 meter space.
+    top_frac: f64,
+    /// Bright color drawn over the lit portion. cairo (B, G, R).
+    bright: (f64, f64, f64),
+    /// Dim color drawn as the always-visible background. cairo (B, G, R).
+    dim: (f64, f64, f64),
+}
+
+/// Convert a dB value to a 0.0..=1.0 fraction along the meter, matching
+/// [`vision_mixer::u8_to_meter_fraction`].
+fn db_to_meter_fraction(db: f64) -> f64 {
+    let span = vision_mixer::VU_METER_MAX_DB - vision_mixer::VU_METER_MIN_DB;
+    ((db - vision_mixer::VU_METER_MIN_DB) / span).clamp(0.0, 1.0)
+}
+
+fn meter_sectors() -> [MeterSector; 4] {
+    // Bright/dim colors mirror frontend `METER_ZONES_DB` (mixer/util.rs):
+    //   green  (0, 220, 0)   / dim (0,  60, 0)
+    //   yellow (255, 220, 0) / dim (60, 60, 0)
+    //   orange (255, 165, 0) / dim (60, 45, 0)
+    //   red    (255, 0,   0) / dim (60, 0,  0)
+    // Each (B, G, R) below is the cairo argument order; output channels are
+    // R↔B swapped on emit, so cairo B=0, G=g, R=r yields output (R=r, G=g, B=0).
+    const B220: f64 = 220.0 / 255.0;
+    const B165: f64 = 165.0 / 255.0;
+    const D60: f64 = 60.0 / 255.0;
+    const D45: f64 = 45.0 / 255.0;
+    [
+        MeterSector {
+            top_frac: db_to_meter_fraction(vision_mixer::VU_METER_YELLOW_DB),
+            bright: (0.0, B220, 0.0),
+            dim: (0.0, D60, 0.0),
+        },
+        MeterSector {
+            top_frac: db_to_meter_fraction(vision_mixer::VU_METER_ORANGE_DB),
+            bright: (0.0, B220, 1.0),
+            dim: (0.0, D60, D60),
+        },
+        MeterSector {
+            top_frac: db_to_meter_fraction(vision_mixer::VU_METER_RED_DB),
+            bright: (0.0, B165, 1.0),
+            dim: (0.0, D45, D60),
+        },
+        MeterSector {
+            top_frac: 1.0,
+            bright: (0.0, 0.0, 1.0),
+            dim: (0.0, 0.0, D60),
+        },
+    ]
+}
+
 /// Draw a vertical VU meter in the bottom-left of `container`.
 ///
-/// The bar fills from the bottom up; the fill height is proportional to the
-/// quantized peak value. A thin white line marks the decay (slower-moving
-/// peak indicator). Bar color goes green → yellow → red following the
-/// VU_METER_*_DB thresholds.
+/// The meter is divided into four sectors (green/yellow/orange/red) matching
+/// the audio mixer live UI and the standalone meter block. Each sector shows
+/// a dim background when unlit; the portion below the current peak is filled
+/// with the sector's bright color. A thin white tick marks the decay (slower-
+/// moving peak indicator).
 fn draw_vu_meter(
     cr: &cairo::Context,
     container: &super::layout::Rect,
@@ -445,28 +507,37 @@ fn draw_vu_meter(
     let x = container.x + margin;
     let y = container.y + container.h - margin - bar_h;
 
-    // Dark translucent background rectangle.
+    // Dark translucent backdrop so the sectors stay legible over bright video.
     cr.set_source_rgba(0.0, 0.0, 0.0, 0.6);
     cr.rectangle(x, y, bar_w, bar_h);
     let _ = cr.fill();
 
-    if peak > 0 {
-        let fill_frac = vision_mixer::u8_to_meter_fraction(peak);
-        let fill_h = bar_h * fill_frac;
-        // Color by peak level. The R/B channels are swapped here because the
-        // overlay surface is BGRA in memory but emitted as RGBA (see comment
-        // on the PVW/PGM color constants).
-        let peak_db = db_from_u8(peak);
-        let (cr_r, cr_g, cr_b) = if peak_db >= vision_mixer::VU_METER_RED_DB {
-            (0.0, 0.0, 1.0) // red output
-        } else if peak_db >= vision_mixer::VU_METER_YELLOW_DB {
-            (0.0, 0.9, 1.0) // yellow output
-        } else {
-            (0.0, 0.9, 0.0) // green output
-        };
-        cr.set_source_rgba(cr_r, cr_g, cr_b, 0.9);
-        cr.rectangle(x, y + bar_h - fill_h, bar_w, fill_h);
+    let sectors = meter_sectors();
+    let peak_frac = vision_mixer::u8_to_meter_fraction(peak);
+
+    let mut bottom_frac = 0.0;
+    for sector in &sectors {
+        let top_frac = sector.top_frac;
+        // Dim sector background.
+        let bg_y = y + bar_h * (1.0 - top_frac);
+        let bg_h = bar_h * (top_frac - bottom_frac);
+        let (b, g, r) = sector.dim;
+        cr.set_source_rgba(b, g, r, 0.7);
+        cr.rectangle(x, bg_y, bar_w, bg_h);
         let _ = cr.fill();
+
+        // Bright lit portion clipped to the current peak.
+        if peak_frac > bottom_frac {
+            let lit_top = peak_frac.min(top_frac);
+            let lit_y = y + bar_h * (1.0 - lit_top);
+            let lit_h = bar_h * (lit_top - bottom_frac);
+            let (b, g, r) = sector.bright;
+            cr.set_source_rgba(b, g, r, 0.95);
+            cr.rectangle(x, lit_y, bar_w, lit_h);
+            let _ = cr.fill();
+        }
+
+        bottom_frac = top_frac;
     }
 
     // Decay tick — a short horizontal line at the decay position, lagging
@@ -485,13 +556,6 @@ fn draw_vu_meter(
     cr.set_line_width((0.75 * scale).max(0.5));
     cr.rectangle(x, y, bar_w, bar_h);
     let _ = cr.stroke();
-}
-
-/// Inverse of quantize_db_to_u8: approximate dBFS for color-band selection.
-fn db_from_u8(v: u8) -> f64 {
-    let frac = vision_mixer::u8_to_meter_fraction(v);
-    vision_mixer::VU_METER_MIN_DB
-        + frac * (vision_mixer::VU_METER_MAX_DB - vision_mixer::VU_METER_MIN_DB)
 }
 
 /// Compute a cheap hash of all per-input + PGM meter values so the dirty check
