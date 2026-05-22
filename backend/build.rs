@@ -259,9 +259,13 @@ fn build_frontend(frontend_dir: &Path) {
         return;
     }
 
+    // Use a separate CARGO_TARGET_DIR for the inner WASM build so it doesn't
+    // contend for the same target/release/.cargo-lock the outer cargo holds.
+    // Without this the inner cargo blocks indefinitely on the lock → deadlock.
     let status = Command::new("trunk")
         .arg("build")
         .arg("--release")
+        .env("CARGO_TARGET_DIR", "../target/frontend-wasm")
         .current_dir(frontend_dir)
         .status()
         .expect("Failed to execute trunk build. Make sure trunk is installed: cargo install trunk");
