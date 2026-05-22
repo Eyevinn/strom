@@ -270,7 +270,7 @@ flowchart LR
     MONFADER["Monitor fader"]
     MONM(["Monitor<br/>METER"]):::metr
 
-    CHIN --> CHPROC --> CHFADER --> CHM --> MAIN
+    CHIN --> CHPROC --> CHM --> CHFADER --> MAIN
     CHFADER --> GRP --> GRPM
     CHFADER --> AUX --> AUXM
     MAIN --> MAINM
