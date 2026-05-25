@@ -61,7 +61,6 @@ gst-plugin-webrtchttp.workspace = true
 gst-plugin-inter.workspace = true
 gst-plugin-rtp.workspace = true
 gst-plugins-lsp = { git = "https://github.com/srperens/lsp-plugins-rs", tag = "v1.3.1", package = "gst-plugins-lsp" }
-agua-gst = { git = "https://github.com/srperens/agua", tag = "v0.2.4", package = "agua-gst" }
 gst-plugin-efp = { git = "https://github.com/Eyevinn/efp", tag = "v0.3.0", package = "gst-plugin-efp", optional = true }
 
 # Encoding
