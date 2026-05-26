@@ -95,6 +95,18 @@ struct AppStateInner {
     mixer_solo_state: RwLock<HashMap<FlowId, HashMap<String, HashSet<String>>>>,
 }
 
+/// Pick the ramp_ms that should apply to a single property in a batched
+/// `update_block_properties` call. A per-name entry in `overrides` wins over
+/// the batch-level `global` default; absent both, returns `None` so the
+/// pipeline layer falls back to its own per-route default.
+fn resolve_ramp_ms(
+    name: &str,
+    overrides: Option<&HashMap<String, u32>>,
+    global: Option<u32>,
+) -> Option<u32> {
+    overrides.and_then(|m| m.get(name).copied()).or(global)
+}
+
 impl AppState {
     /// Create new application state with the given storage backend.
     pub fn new(
@@ -1571,6 +1583,7 @@ impl AppState {
         block_instance_id: &str,
         properties: HashMap<String, PropertyValue>,
         ramp_ms: Option<u32>,
+        ramp_ms_overrides: Option<HashMap<String, u32>>,
     ) -> Result<(HashMap<String, PropertyValue>, HashMap<String, String>), PipelineError> {
         // Resolve block instance → definition_id → BlockDefinition.
         let definition_id = {
@@ -1640,13 +1653,15 @@ impl AppState {
             // Element IDs in block definitions are relative to the instance — prepend.
             let full_element_id = format!("{}:{}", block_instance_id, exposed.mapping.element_id);
 
+            let effective_ramp_ms = resolve_ramp_ms(&name, ramp_ms_overrides.as_ref(), ramp_ms);
+
             if let Err(e) = self
                 .update_element_property(
                     flow_id,
                     &full_element_id,
                     &exposed.mapping.property_name,
                     transformed,
-                    ramp_ms,
+                    effective_ramp_ms,
                 )
                 .await
             {
@@ -2731,5 +2746,51 @@ mod mixer_solo_intent_tests {
         assert!(!state.mixer_any_solo_active(&flow, "mix1").await);
         let map = state.inner.mixer_solo_state.read().await;
         assert!(map.is_empty(), "no flow entry should be created for false");
+    }
+}
+
+#[cfg(test)]
+mod ramp_ms_resolution_tests {
+    use super::resolve_ramp_ms;
+    use std::collections::HashMap;
+
+    #[test]
+    fn override_wins_over_global() {
+        let mut overrides = HashMap::new();
+        overrides.insert("ch1_fader_db".to_string(), 500);
+        assert_eq!(
+            resolve_ramp_ms("ch1_fader_db", Some(&overrides), Some(50)),
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_global_when_no_override_for_name() {
+        let mut overrides = HashMap::new();
+        overrides.insert("ch2_fader_db".to_string(), 500);
+        assert_eq!(
+            resolve_ramp_ms("ch1_fader_db", Some(&overrides), Some(50)),
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_global_when_overrides_absent() {
+        assert_eq!(resolve_ramp_ms("ch1_fader_db", None, Some(50)), Some(50));
+    }
+
+    #[test]
+    fn returns_none_when_neither_set() {
+        assert_eq!(resolve_ramp_ms("ch1_fader_db", None, None), None);
+    }
+
+    #[test]
+    fn override_used_even_when_global_is_none() {
+        let mut overrides = HashMap::new();
+        overrides.insert("ch1_fader_db".to_string(), 500);
+        assert_eq!(
+            resolve_ramp_ms("ch1_fader_db", Some(&overrides), None),
+            Some(500)
+        );
     }
 }

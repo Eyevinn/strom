@@ -1187,7 +1187,10 @@ pub async fn get_block_properties(
 /// underlying GStreamer element via the block definition's PropertyMapping,
 /// applies the declared transform (`bool_to_volume`, `db_to_linear`, …), and
 /// writes through the standard live-property path (so `ramp_ms` produces the
-/// usual anti-click fade where applicable).
+/// usual anti-click fade where applicable). `ramp_ms_overrides` lets the
+/// caller pin a different ramp duration for individual properties in the same
+/// batch — useful for crossfades where one fader rises while another falls at
+/// the same rate but other properties move instantly.
 ///
 /// Only properties marked `live: true` are accepted. Unknown, non-live, or
 /// type-mismatched entries are returned in the `rejected` map without aborting
@@ -1212,7 +1215,13 @@ pub async fn update_block_properties(
     ValidatedJson(req): ValidatedJson<UpdateBlockPropertiesRequest>,
 ) -> Result<Json<BlockPropertiesResponse>, (StatusCode, Json<ErrorResponse>)> {
     let (properties, rejected) = state
-        .update_block_properties(&flow_id, &block_id, req.properties, req.ramp_ms)
+        .update_block_properties(
+            &flow_id,
+            &block_id,
+            req.properties,
+            req.ramp_ms,
+            req.ramp_ms_overrides,
+        )
         .await
         .map_err(|e| {
             (

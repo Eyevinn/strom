@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.5.2-dev"
+    "version": "0.6.1-dev"
   },
   "paths": {
     "/api/auth/status": {
@@ -1604,7 +1604,7 @@
           "flows"
         ],
         "summary": "Update one or more exposed properties on a block instance live.",
-        "description": "Properties are expressed in block-level (user-facing) units — e.g.\n`{\"ch1_pfl\": true, \"fader_db\": -3.0}`. The backend resolves each name to its\nunderlying GStreamer element via the block definition's PropertyMapping,\napplies the declared transform (`bool_to_volume`, `db_to_linear`, …), and\nwrites through the standard live-property path (so `ramp_ms` produces the\nusual anti-click fade where applicable).\n\nOnly properties marked `live: true` are accepted. Unknown, non-live, or\ntype-mismatched entries are returned in the `rejected` map without aborting\nthe rest of the batch.",
+        "description": "Properties are expressed in block-level (user-facing) units — e.g.\n`{\"ch1_pfl\": true, \"fader_db\": -3.0}`. The backend resolves each name to its\nunderlying GStreamer element via the block definition's PropertyMapping,\napplies the declared transform (`bool_to_volume`, `db_to_linear`, …), and\nwrites through the standard live-property path (so `ramp_ms` produces the\nusual anti-click fade where applicable). `ramp_ms_overrides` lets the\ncaller pin a different ramp duration for individual properties in the same\nbatch — useful for crossfades where one fader rises while another falls at\nthe same rate but other properties move instantly.\n\nOnly properties marked `live: true` are accepted. Unknown, non-live, or\ntype-mismatched entries are returned in the `rejected` map without aborting\nthe rest of the batch.",
         "operationId": "update_block_properties",
         "parameters": [
           {
@@ -10427,8 +10427,23 @@
               "null"
             ],
             "format": "int32",
-            "description": "Optional ramp duration in ms (honored for volume-element writes — produces\nanti-click fades for bool/dB toggles that map to a `volume` property).",
+            "description": "Optional default ramp duration in ms applied to every property in this\nbatch (honored for volume-element writes — produces anti-click fades for\nbool/dB toggles that map to a `volume` property). Acts as the fallback\nwhen no per-property override is set in `ramp_ms_overrides`.",
             "minimum": 0
+          },
+          "ramp_ms_overrides": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Optional per-property ramp duration overrides, keyed by exposed\nproperty name. When a property in `properties` has an entry here, that\nduration is used instead of the batch-level `ramp_ms`. Entries for\nnames not present in `properties` are silently ignored. Only effective\nfor properties whose underlying write goes through the ramp path\n(currently audio `volume`-element `volume` and `mute`); for other\nproperties the override is accepted but has no effect, matching the\nbehavior of the batch-level `ramp_ms`. Enables crossfades where\nindividual faders ramp at different rates within a single PATCH.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       },
