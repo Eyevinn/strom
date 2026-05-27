@@ -117,6 +117,8 @@ struct GroupStrip {
     fader: f32,
     /// Mute state
     mute: bool,
+    /// AFL (After-Fader Listen) state — taps the bus output post-master, post-mute
+    afl: bool,
 }
 
 /// Aux bus master state.
@@ -128,6 +130,8 @@ struct AuxMaster {
     fader: f32,
     /// Mute state
     mute: bool,
+    /// AFL (After-Fader Listen) state — taps the bus output post-master, post-mute
+    afl: bool,
 }
 
 impl ChannelStrip {
@@ -170,6 +174,7 @@ impl GroupStrip {
             index,
             fader: DEFAULT_FADER,
             mute: false,
+            afl: false,
         }
     }
 }
@@ -180,6 +185,7 @@ impl AuxMaster {
             index,
             fader: DEFAULT_FADER,
             mute: false,
+            afl: false,
         }
     }
 }
@@ -290,13 +296,16 @@ pub struct MixerEditor {
 }
 
 impl MixerEditor {
-    /// True if any channel currently has PFL or AFL engaged.
-    /// Used only to render the MAIN/SOLO indicator on the monitor strip — the
-    /// backend owns the actual monitor source switching as a side effect of
-    /// any chN_pfl / chN_afl write. The frontend never touches the internal
-    /// monitor gates directly; PFL/AFL bools are the entire solo API.
+    /// True if any channel, aux master, or group currently has PFL or AFL
+    /// engaged. Used only to render the MAIN/SOLO indicator on the monitor
+    /// strip — the backend owns the actual monitor source switching as a
+    /// side effect of any chN_pfl / chN_afl / auxN_afl / groupN_afl write.
+    /// The frontend never touches the internal monitor gates directly;
+    /// PFL/AFL bools are the entire solo API.
     pub(super) fn any_solo_active(&self) -> bool {
         self.channels.iter().any(|c| c.pfl || c.afl)
+            || self.aux_masters.iter().any(|a| a.afl)
+            || self.groups.iter().any(|g| g.afl)
     }
 }
 

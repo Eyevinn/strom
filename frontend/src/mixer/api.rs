@@ -385,14 +385,21 @@ impl MixerEditor {
         );
     }
 
-    /// Release every PFL/AFL on the given channels in a single batched PATCH.
+    /// Release every PFL/AFL on the given channels, aux masters, and groups
+    /// in a single batched PATCH.
     ///
-    /// The Clear-all button needs to send 2N writes at once, and the per-property
-    /// throttle in [`Self::update_channel_property`] would otherwise drop all
-    /// but the first. Routing through the batched endpoint also collapses N
-    /// monitor-gate refreshes on the backend into one — gates ramp back to Main
-    /// exactly once.
-    pub(super) fn update_solo_clear_batch(&mut self, ctx: &Context, channels: &[usize]) {
+    /// The Clear-all button needs to send many writes at once, and the
+    /// per-property throttle in [`Self::update_channel_property`] would
+    /// otherwise drop all but the first. Routing through the batched endpoint
+    /// also collapses N monitor-gate refreshes on the backend into one —
+    /// gates ramp back to Main exactly once.
+    pub(super) fn update_solo_clear_batch(
+        &mut self,
+        ctx: &Context,
+        channels: &[usize],
+        aux_masters: &[usize],
+        groups: &[usize],
+    ) {
         if !self.live_updates || !self.pipeline_running {
             return;
         }
@@ -401,6 +408,12 @@ impl MixerEditor {
             let ch1 = i + 1;
             properties.insert(format!("ch{}_pfl", ch1), PropertyValue::Bool(false));
             properties.insert(format!("ch{}_afl", ch1), PropertyValue::Bool(false));
+        }
+        for &i in aux_masters {
+            properties.insert(format!("aux{}_afl", i + 1), PropertyValue::Bool(false));
+        }
+        for &i in groups {
+            properties.insert(format!("group{}_afl", i + 1), PropertyValue::Bool(false));
         }
         let ramp_ms = Some(self.fade_ms);
         let api = self.api.clone();
@@ -514,6 +527,21 @@ impl MixerEditor {
         );
     }
 
+    /// Update group AFL via the block-properties endpoint. The backend's
+    /// `bool_to_volume` transform writes 0/1 to the group's AFL volume gate,
+    /// and the same write side-effects the monitor-source gates so the bus
+    /// appears on the Monitor output.
+    pub(super) fn update_group_afl(&mut self, ctx: &Context, sg_idx: usize) {
+        if !self.live_updates || !self.pipeline_running {
+            return;
+        }
+        self.spawn_block_prop_update(
+            ctx,
+            format!("group{}_afl", sg_idx + 1),
+            PropertyValue::Bool(self.groups[sg_idx].afl),
+        );
+    }
+
     /// Update aux master fader via the block-properties endpoint.
     pub(super) fn update_aux_master_fader(&mut self, ctx: &Context, aux_idx: usize) {
         if !self.live_updates || !self.pipeline_running {
@@ -540,6 +568,21 @@ impl MixerEditor {
             ctx,
             format!("aux{}_mute", aux_idx + 1),
             PropertyValue::Bool(self.aux_masters[aux_idx].mute),
+        );
+    }
+
+    /// Update aux master AFL via the block-properties endpoint. The backend's
+    /// `bool_to_volume` transform writes 0/1 to the aux's AFL volume gate,
+    /// and the same write side-effects the monitor-source gates so the bus
+    /// appears on the Monitor output.
+    pub(super) fn update_aux_master_afl(&mut self, ctx: &Context, aux_idx: usize) {
+        if !self.live_updates || !self.pipeline_running {
+            return;
+        }
+        self.spawn_block_prop_update(
+            ctx,
+            format!("aux{}_afl", aux_idx + 1),
+            PropertyValue::Bool(self.aux_masters[aux_idx].afl),
         );
     }
 }

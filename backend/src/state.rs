@@ -1566,10 +1566,11 @@ impl AppState {
     /// written to the resolved underlying element via [`Self::update_element_property`]
     /// — so all the existing anti-click / ramp behaviour is inherited.
     ///
-    /// Block-specific derived state: for the audio mixer, any chN_pfl or chN_afl
-    /// write in the batch triggers a post-step that recomputes "any solo active"
-    /// and writes the two monitor-source gates (`solo_to_mon` / `main_to_mon`) with
-    /// the same `ramp_ms`. Those gates are pure derived state — clients must never
+    /// Block-specific derived state: for the audio mixer, any chN_pfl /
+    /// chN_afl / auxN_afl / groupN_afl write in the batch triggers a
+    /// post-step that recomputes "any solo active" and writes the two
+    /// monitor-source gates (`solo_to_mon` / `main_to_mon`) with the same
+    /// `ramp_ms`. Those gates are pure derived state — clients must never
     /// touch them directly.
     ///
     /// Returns `(current_values, rejected)`:
@@ -1613,9 +1614,10 @@ impl AppState {
 
         let mut rejected: HashMap<String, String> = HashMap::new();
         let mut to_persist: Vec<(String, PropertyValue)> = Vec::new();
-        // True iff this batch successfully applied at least one chN_pfl /
-        // chN_afl write. We update the per-block solo-intent cache below as
-        // those writes succeed, then run the monitor-gate refresh once.
+        // True iff this batch successfully applied at least one solo write
+        // (channel chN_pfl / chN_afl, aux auxN_afl, or group groupN_afl).
+        // We update the per-block solo-intent cache below as those writes
+        // succeed, then run the monitor-gate refresh once.
         let mut mixer_solo_changed = false;
 
         for (name, value) in properties {
@@ -1670,7 +1672,7 @@ impl AppState {
             }
 
             if definition.id == crate::blocks::builtin::mixer::MIXER_BLOCK_ID
-                && crate::blocks::builtin::mixer::parse_solo_property_name(&name).is_some()
+                && crate::blocks::builtin::mixer::is_solo_property_name(&name)
             {
                 if let PropertyValue::Bool(b) = &value {
                     self.set_mixer_solo_intent(flow_id, block_instance_id, &name, *b)
@@ -1686,10 +1688,10 @@ impl AppState {
 
         // Mixer: PFL/AFL bools are the only public API for solo. The two
         // monitor-source gates (solo_to_mon / main_to_mon) are pure derived
-        // state — any chN_pfl or chN_afl currently engaged → solo bus to
-        // monitor; otherwise main bus to monitor. We apply this exactly once
-        // per batch so the two gates are atomic relative to the bool writes
-        // that triggered them.
+        // state — any chN_pfl / chN_afl / auxN_afl / groupN_afl currently
+        // engaged → solo bus to monitor; otherwise main bus to monitor. We
+        // apply this exactly once per batch so the two gates are atomic
+        // relative to the bool writes that triggered them.
         if mixer_solo_changed {
             self.refresh_mixer_monitor_gates(flow_id, block_instance_id, ramp_ms)
                 .await;
@@ -1755,10 +1757,11 @@ impl AppState {
             .await
     }
 
-    /// Record a single chN_pfl / chN_afl write in the per-block solo-intent
-    /// cache. `true` adds the property name to the set, `false` removes it.
-    /// The empty-set case is the no-solo state and matches the build-time
-    /// gate defaults, so we clean up empty inner / outer maps.
+    /// Record a single solo-affecting write (chN_pfl / chN_afl / auxN_afl /
+    /// groupN_afl) in the per-block solo-intent cache. `true` adds the
+    /// property name to the set, `false` removes it. The empty-set case is
+    /// the no-solo state and matches the build-time gate defaults, so we
+    /// clean up empty inner / outer maps.
     async fn set_mixer_solo_intent(
         &self,
         flow_id: &FlowId,
@@ -1782,9 +1785,10 @@ impl AppState {
         }
     }
 
-    /// True iff at least one chN_pfl / chN_afl is currently engaged on the
-    /// given mixer block instance. Reads only the in-memory intent cache —
-    /// never touches the running pipeline, so it is immune to mid-ramp races.
+    /// True iff at least one channel / aux / group PFL or AFL is currently
+    /// engaged on the given mixer block instance. Reads only the in-memory
+    /// intent cache — never touches the running pipeline, so it is immune
+    /// to mid-ramp races.
     async fn mixer_any_solo_active(&self, flow_id: &FlowId, block_instance_id: &str) -> bool {
         let state = self.inner.mixer_solo_state.read().await;
         state
@@ -1795,14 +1799,15 @@ impl AppState {
     }
 
     /// Mixer-specific derived state: refresh the monitor-source gates after a
-    /// batch that contained one or more chN_pfl / chN_afl writes.
+    /// batch that contained one or more chN_pfl / chN_afl / auxN_afl /
+    /// groupN_afl writes.
     ///
     /// "Any solo active" is computed purely from the in-memory solo-intent
     /// cache (see [`Self::set_mixer_solo_intent`]) — the running element
     /// values are not consulted, so a long volume ramp on one channel cannot
     /// race with a release on another. Both gates are written with the
-    /// caller's `ramp_ms` so they stay in sync with the per-channel PFL/AFL
-    /// ramp that just kicked off.
+    /// caller's `ramp_ms` so they stay in sync with the PFL/AFL ramps that
+    /// just kicked off.
     ///
     /// Gate-write failures are logged but never bubble up — a transient
     /// element-not-found shouldn't fail the user's solo toggle. Note that a

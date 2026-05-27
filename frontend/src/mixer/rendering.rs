@@ -1000,22 +1000,44 @@ impl MixerEditor {
                         .add_enabled(solo_active, clear_button)
                         .on_hover_text("Clear all active PFL and AFL");
                     if clear_resp.clicked() {
-                        let mut changed_indices: Vec<usize> = Vec::new();
+                        let mut changed_channels: Vec<usize> = Vec::new();
+                        let mut changed_aux: Vec<usize> = Vec::new();
+                        let mut changed_groups: Vec<usize> = Vec::new();
                         for (i, ch) in self.channels.iter_mut().enumerate() {
                             if ch.pfl || ch.afl {
                                 ch.pfl = false;
                                 ch.afl = false;
-                                changed_indices.push(i);
+                                changed_channels.push(i);
                             }
                         }
-                        // Send every chN_pfl=false / chN_afl=false in a single
-                        // batched PATCH. Per-property calls go through a 50 ms
-                        // throttle that would silently drop all but the first
-                        // release in a tight loop; one call sidesteps that and
-                        // also lets the backend flip the monitor gates back to
-                        // Main exactly once (single any_solo recomputation).
-                        if !changed_indices.is_empty() {
-                            self.update_solo_clear_batch(ctx, &changed_indices);
+                        for (i, aux) in self.aux_masters.iter_mut().enumerate() {
+                            if aux.afl {
+                                aux.afl = false;
+                                changed_aux.push(i);
+                            }
+                        }
+                        for (i, sg) in self.groups.iter_mut().enumerate() {
+                            if sg.afl {
+                                sg.afl = false;
+                                changed_groups.push(i);
+                            }
+                        }
+                        // Send every solo=false in a single batched PATCH.
+                        // Per-property calls go through a 50 ms throttle that
+                        // would silently drop all but the first release in a
+                        // tight loop; one call sidesteps that and also lets
+                        // the backend flip the monitor gates back to Main
+                        // exactly once (single any_solo recomputation).
+                        if !changed_channels.is_empty()
+                            || !changed_aux.is_empty()
+                            || !changed_groups.is_empty()
+                        {
+                            self.update_solo_clear_batch(
+                                ctx,
+                                &changed_channels,
+                                &changed_aux,
+                                &changed_groups,
+                            );
                         }
                     }
                 });
@@ -1106,6 +1128,34 @@ impl MixerEditor {
                         {
                             self.groups[sg_idx].mute = !self.groups[sg_idx].mute;
                             self.update_group_mute(ctx, sg_idx);
+                        }
+
+                        // AFL — after-fader listen on the group bus.
+                        // Labelled "AFL" rather than "Solo" so the PFL/AFL
+                        // distinction stays visible if PFL is added later.
+                        let afl = self.groups[sg_idx].afl;
+                        let afl_fill = if afl {
+                            Color32::from_rgb(160, 200, 80)
+                        } else {
+                            Color32::from_rgb(48, 48, 52)
+                        };
+                        let afl_text = if afl {
+                            Color32::BLACK
+                        } else {
+                            Color32::from_gray(100)
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("AFL").small().color(afl_text),
+                                )
+                                .fill(afl_fill)
+                                .min_size(Vec2::new(BUS_STRIP_INNER - 4.0, BTN_H)),
+                            )
+                            .clicked()
+                        {
+                            self.groups[sg_idx].afl = !self.groups[sg_idx].afl;
+                            self.update_group_afl(ctx, sg_idx);
                         }
                     });
                 });
@@ -1206,6 +1256,34 @@ impl MixerEditor {
                         {
                             self.aux_masters[aux_idx].mute = !self.aux_masters[aux_idx].mute;
                             self.update_aux_master_mute(ctx, aux_idx);
+                        }
+
+                        // AFL — after-fader listen on the aux bus.
+                        // Labelled "AFL" rather than "Solo" so the PFL/AFL
+                        // distinction stays visible if PFL is added later.
+                        let afl = self.aux_masters[aux_idx].afl;
+                        let afl_fill = if afl {
+                            Color32::from_rgb(160, 200, 80)
+                        } else {
+                            Color32::from_rgb(48, 48, 52)
+                        };
+                        let afl_text = if afl {
+                            Color32::BLACK
+                        } else {
+                            Color32::from_gray(100)
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("AFL").small().color(afl_text),
+                                )
+                                .fill(afl_fill)
+                                .min_size(Vec2::new(BUS_STRIP_INNER - 4.0, BTN_H)),
+                            )
+                            .clicked()
+                        {
+                            self.aux_masters[aux_idx].afl = !self.aux_masters[aux_idx].afl;
+                            self.update_aux_master_afl(ctx, aux_idx);
                         }
                     });
                 });

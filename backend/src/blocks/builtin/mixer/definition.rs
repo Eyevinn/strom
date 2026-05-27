@@ -389,6 +389,24 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             live: true,
             persist: None,
         });
+
+        // AFL on the aux master — taps post-master, post-mute and sums into
+        // the solo bus alongside per-channel PFL/AFL. Transient: never
+        // persisted across restarts.
+        exposed_properties.push(ExposedProperty {
+            name: format!("aux{}_afl", aux),
+            label: format!("Aux {} AFL", aux),
+            description: format!("Enable AFL (After-Fader Listen) on aux bus {}", aux),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(false)),
+            mapping: PropertyMapping {
+                element_id: format!("aux{}_afl_volume", aux - 1),
+                property_name: "volume".to_string(),
+                transform: Some("bool_to_volume".to_string()),
+            },
+            live: true,
+            persist: Some(false),
+        });
     }
 
     // Add group properties
@@ -420,6 +438,24 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             },
             live: true,
             persist: None,
+        });
+
+        // AFL on the group master — taps post-master, post-mute and sums
+        // into the solo bus alongside per-channel PFL/AFL. Transient: never
+        // persisted across restarts.
+        exposed_properties.push(ExposedProperty {
+            name: format!("group{}_afl", sg),
+            label: format!("Group {} AFL", sg),
+            description: format!("Enable AFL (After-Fader Listen) on group {}", sg),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(false)),
+            mapping: PropertyMapping {
+                element_id: format!("group{}_afl_volume", sg - 1),
+                property_name: "volume".to_string(),
+                transform: Some("bool_to_volume".to_string()),
+            },
+            live: true,
+            persist: Some(false),
         });
     }
 
