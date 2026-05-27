@@ -227,11 +227,25 @@ pub struct UpdateBlockPropertiesRequest {
     /// Map of exposed property name → new value (in block-level units).
     #[cfg_attr(feature = "validation", garde(skip))]
     pub properties: HashMap<String, PropertyValue>,
-    /// Optional ramp duration in ms (honored for volume-element writes — produces
-    /// anti-click fades for bool/dB toggles that map to a `volume` property).
+    /// Optional default ramp duration in ms applied to every property in this
+    /// batch (honored for volume-element writes — produces anti-click fades for
+    /// bool/dB toggles that map to a `volume` property). Acts as the fallback
+    /// when no per-property override is set in `ramp_ms_overrides`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "validation", garde(range(max = 60000)))]
     pub ramp_ms: Option<u32>,
+    /// Optional per-property ramp duration overrides, keyed by exposed
+    /// property name. When a property in `properties` has an entry here, that
+    /// duration is used instead of the batch-level `ramp_ms`. Entries for
+    /// names not present in `properties` are silently ignored. Only effective
+    /// for properties whose underlying write goes through the ramp path
+    /// (currently audio `volume`-element `volume` and `mute`); for other
+    /// properties the override is accepted but has no effect, matching the
+    /// behavior of the batch-level `ramp_ms`. Enables crossfades where
+    /// individual faders ramp at different rates within a single PATCH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "validation", garde(skip))]
+    pub ramp_ms_overrides: Option<HashMap<String, u32>>,
 }
 
 /// Response containing current block-level exposed property values and any rejections.

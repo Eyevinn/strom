@@ -193,6 +193,7 @@ impl ApiClient {
         let request = UpdateBlockPropertiesRequest {
             properties,
             ramp_ms,
+            ramp_ms_overrides: None,
         };
 
         let response = self
