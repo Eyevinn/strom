@@ -1844,21 +1844,54 @@ impl AppState {
         }
     }
 
+    /// Read the current block-level values of all live exposed properties from
+    /// the running pipeline.
+    ///
+    /// A block definition is generated for the block type's MAX sizing (e.g. the
+    /// mixer's 128 channels / 32 aux / 32 groups), so a smaller instance has no
+    /// backing element for the vast majority of its exposed properties. We take
+    /// the pipelines lock once and resolve which elements the instance actually
+    /// built, then skip every property whose element is absent before touching
+    /// GStreamer — instead of re-acquiring the lock and walking the
+    /// element-not-found path thousands of times per call. The output is
+    /// identical to reading each property individually (a property is only
+    /// readable when its element exists), this just avoids the per-property
+    /// lock churn and error-path allocations. Generic: any block that builds
+    /// elements conditionally (mixer, audiorouter, …) benefits.
     async fn get_block_properties_inner(
         &self,
         flow_id: &FlowId,
         block_instance_id: &str,
         definition: &strom_types::BlockDefinition,
     ) -> Result<HashMap<String, PropertyValue>, PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+        let Some(manager) = pipelines.get(flow_id) else {
+            // Pipeline not running: every read would fail and be skipped, so the
+            // historical behaviour here is an empty map rather than an error.
+            return Ok(HashMap::new());
+        };
+
+        // Element IDs that exist for this instance, with the "{instance}:" prefix
+        // stripped so the definition's bare `element_id` can be tested without
+        // allocating a full id per property.
+        let prefix_len = block_instance_id.len() + 1;
+        let existing: std::collections::HashSet<&str> = manager
+            .find_block_elements(block_instance_id)
+            .into_iter()
+            .map(|(id, _)| &id[prefix_len..])
+            .collect();
+
         let mut out = HashMap::new();
         for exposed in &definition.exposed_properties {
             if !exposed.live || exposed.mapping.element_id == "_block" {
                 continue;
             }
+            if !existing.contains(exposed.mapping.element_id.as_str()) {
+                continue;
+            }
             let full_element_id = format!("{}:{}", block_instance_id, exposed.mapping.element_id);
-            let raw = match self
-                .get_element_property(flow_id, &full_element_id, &exposed.mapping.property_name)
-                .await
+            let raw = match manager
+                .get_element_property(&full_element_id, &exposed.mapping.property_name)
             {
                 Ok(v) => v,
                 Err(e) => {
