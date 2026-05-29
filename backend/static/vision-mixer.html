@@ -109,6 +109,21 @@
         .src-btn:focus {
             outline: none;
         }
+        /* Indicator variant used by the PGM bus — display only, no click.
+           Removes the pointer cursor + hover affordance so it doesn't look
+           interactive. The active (red) tally still shows what's on air. */
+        .src-btn.indicator,
+        .pip-btn.indicator {
+            cursor: default;
+        }
+        .src-btn.indicator:hover {
+            border-color: #444;
+            color: #999;
+        }
+        .pip-btn.indicator:hover {
+            border-color: #555;
+            color: #999;
+        }
 
         .src-btn.pgm-active {
             background: #cc0000;
@@ -122,6 +137,22 @@
             border-color: #33cc33;
             color: #fff;
             box-shadow: 0 0 8px rgba(0, 255, 0, 0.3);
+        }
+
+        /* "Via PiP" tally: an input is visible on this bus indirectly because
+           the PiP currently on the bus uses it as bg or as a zone source.
+           Dimmer hue than the direct active tally so the eye still ranks
+           "direct > via-pip" at a glance. Matches the multiview thumbnail
+           rings in overlay.rs (PGM_VIA_PIP / PVW_VIA_PIP). */
+        .src-btn.pgm-via-pip {
+            background: #4a0000;
+            border-color: #8c0000;
+            color: #f0bbbb;
+        }
+        .src-btn.pvw-via-pip {
+            background: #002a00;
+            border-color: #008c00;
+            color: #bbf0bb;
         }
 
         /* Transition section */
@@ -919,7 +950,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.13-snap-glow | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.15-via-pip-tally | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1209,12 +1240,37 @@
         }
 
         // ---- UI update ----
+        // Inputs that participate in a PiP composition (bg + every zone source).
+        // Mirrors `collect_pip_inputs` in overlay.rs so the bus buttons and the
+        // multiview status rings agree on what "visible via this PiP" means.
+        function collectPipInputs(pipCfg) {
+            const set = new Set();
+            if (!pipCfg) return set;
+            if (pipCfg.bg != null) set.add(pipCfg.bg);
+            for (const zone of pipCfg.zones) {
+                for (const src of zone.sources) set.add(src);
+            }
+            return set;
+        }
+
         function updateButtons() {
+            // Inputs reachable through the PiP currently on each bus. Used to
+            // shade the input buttons with a dimmer tally — dark red on PGM,
+            // dark green on PVW — matching the multiview thumbnail rings.
+            const pgmViaPip = currentPgmPip != null
+                ? collectPipInputs(pipConfigs[currentPgmPip])
+                : new Set();
+            const pvwViaPip = currentPvwPip != null
+                ? collectPipInputs(pipConfigs[currentPvwPip])
+                : new Set();
+
             document.querySelectorAll('#pgmBus .src-btn').forEach((btn, i) => {
                 btn.classList.toggle('pgm-active', currentPgm === i && currentPgmPip == null);
+                btn.classList.toggle('pgm-via-pip', pgmViaPip.has(i));
             });
             document.querySelectorAll('#pvwBus .src-btn').forEach((btn, i) => {
                 btn.classList.toggle('pvw-active', currentPvwPip == null && currentPvw === i);
+                btn.classList.toggle('pvw-via-pip', pvwViaPip.has(i));
             });
             document.querySelectorAll('#pgmBus .pip-btn').forEach((btn, i) => {
                 btn.classList.toggle('pgm-active', currentPgmPip === i);
@@ -1247,11 +1303,14 @@
                 const btnText = String(i + 1);
                 const keyHint = i < 9 ? (i + 1) : (i === 9 ? '0' : '');
 
-                // PGM button (display only)
-                const pgmBtn = document.createElement('button');
-                pgmBtn.className = 'src-btn' + (currentPgm === i ? ' pgm-active' : '');
+                // PGM indicator (display only — PGM changes via Take/Cut/Auto,
+                // never via direct click). A <div> with the indicator modifier
+                // strips the button affordance: no pointer cursor, no hover
+                // state, no tab focus, no keyboard activation.
+                const pgmBtn = document.createElement('div');
+                pgmBtn.className = 'src-btn indicator' + (currentPgm === i ? ' pgm-active' : '');
                 pgmBtn.textContent = btnText;
-                pgmBtn.title = label + (keyHint ? ' (' + keyHint + ')' : '');
+                pgmBtn.title = label + ' — on PGM';
                 pgmBus.appendChild(pgmBtn);
 
                 // PVW button (single select). Multi-source layouts are built via PiPs.
@@ -1271,10 +1330,11 @@
                 const labelText = slotNum + ' - PiP' + (p + 1);
                 const keyHint = slotNum <= 10 ? (slotNum === 10 ? '0' : String(slotNum)) : '';
 
-                const pgmPipBtn = document.createElement('button');
-                pgmPipBtn.className = 'pip-btn' + (currentPgmPip === p ? ' pgm-active' : '');
+                // PGM PiP indicator (display only — see PGM input indicator above).
+                const pgmPipBtn = document.createElement('div');
+                pgmPipBtn.className = 'pip-btn indicator' + (currentPgmPip === p ? ' pgm-active' : '');
                 pgmPipBtn.textContent = labelText;
-                pgmPipBtn.title = 'PiP ' + (p + 1) + ' on PGM' + (keyHint ? ' (' + keyHint + ')' : '');
+                pgmPipBtn.title = 'PiP ' + (p + 1) + ' on PGM';
                 pgmBus.appendChild(pgmPipBtn);
 
                 const pvwPipBtn = document.createElement('button');
@@ -1322,6 +1382,9 @@
                     activeZoneIdx[pipIdx] = nz - 1;
                 }
                 buildPipConfigPanel();
+                // The via-pip tally on the input buttons depends on this PiP's
+                // bg + zone sources, so refresh the buses too.
+                updateButtons();
                 setStatus(r.message);
             }).catch(e => setStatus('PiP config error: ' + e.message));
         }
