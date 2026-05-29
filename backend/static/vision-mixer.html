@@ -634,6 +634,79 @@
             font-size: 11px;
             font-weight: 600;
         }
+        /* Pixel-precise rect editor for the active zone. Two rows of two
+           inputs — X/Y above, W/H below — sized to fit the 220px toolbar. */
+        .pip-zone-px-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--pip-text-dim);
+        }
+        .pip-zone-px-label {
+            font-size: 11px;
+            font-weight: 600;
+            width: 10px;
+            text-align: center;
+        }
+        .pip-zone-px-input {
+            width: 64px;
+            height: 24px;
+            background: var(--pip-bg-control);
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            color: var(--pip-text);
+            padding: 0 6px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .pip-zone-px-input:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        /* Snap + grid toggle checkboxes for the layout editor. */
+        .pip-zone-toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: var(--pip-text-dim);
+            font-size: 11px;
+        }
+        .pip-zone-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .pip-zone-toggle input[type="checkbox"] {
+            cursor: pointer;
+            margin: 0;
+        }
+        /* Grid overlay drawn on top of the canvas BG and under the zone rects.
+           Quarter lines stay subtle (white) so layouts dominate visually;
+           rule-of-thirds lines pop slightly (gold) to read at a glance. */
+        .pip-canvas-grid {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            z-index: 1;
+        }
+        .pip-grid-line {
+            position: absolute;
+        }
+        .pip-grid-line.v { top: 0; bottom: 0; width: 1px; }
+        .pip-grid-line.h { left: 0; right: 0; height: 1px; }
+        .pip-grid-line.quarter { background: rgba(255, 255, 255, 0.14); }
+        .pip-grid-line.third { background: rgba(255, 200, 80, 0.45); }
+        /* Lit-up while a drag/resize/px-input lands on this line. Bumped to a
+           2px solid bright cyan with a faint glow so it pops above both the
+           subtle quarter and the gold third base colors. */
+        .pip-grid-line.active-snap {
+            background: rgba(120, 230, 255, 0.95);
+            box-shadow: 0 0 6px rgba(120, 230, 255, 0.7);
+        }
+        .pip-grid-line.active-snap.v { width: 2px; margin-left: -0.5px; }
+        .pip-grid-line.active-snap.h { height: 2px; margin-top: -0.5px; }
         .pip-canvas-hint {
             font-size: 10px;
             font-weight: 400;
@@ -846,7 +919,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.10-zones | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.13-snap-glow | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -864,6 +937,12 @@
         const INPUT_LABELS = _cfg.input_labels;
         const NUM_DSK_INPUTS = _cfg.num_dsk_inputs || 0;
         const NUM_PIPS = _cfg.num_pips || 0;
+        // PGM canvas size in pixels. Zone rects are stored normalized (0..1) so
+        // they project cleanly into the multiview tile, big-PVW rect, and the
+        // PGM/PVW outputs alike. The pixel input fields display values in PGM
+        // coordinates because that's the broadcast canvas operators think in.
+        const PGM_W = (_cfg.pgm_w && _cfg.pgm_w > 0) ? _cfg.pgm_w : 1920;
+        const PGM_H = (_cfg.pgm_h && _cfg.pgm_h > 0) ? _cfg.pgm_h : 1080;
 
         // ---- State ----
         // PGM/PVW source: each bus shows either an input (number) or a PiP (currentPvwPip/currentPgmPip).
@@ -905,6 +984,21 @@
         let ftbActive = _cfg.ftb_active || false;
         let overlayAlpha = _cfg.overlay_alpha != null ? _cfg.overlay_alpha : 1.0;
         let controlsMinimized = localStorage.getItem('vm-controls-minimized') === 'true';
+        // Snap & grid toggles for the zone layout editor. Snap defaults ON
+        // (preserves the original drag behavior); grid defaults OFF so the
+        // editor stays visually clean unless the operator wants the guides.
+        let snapEnabled = localStorage.getItem('vm-zone-snap') !== 'false';
+        let gridVisible = localStorage.getItem('vm-zone-grid') === 'true';
+        function toggleSnap() {
+            snapEnabled = !snapEnabled;
+            localStorage.setItem('vm-zone-snap', snapEnabled);
+            buildPipConfigPanel();
+        }
+        function toggleGrid() {
+            gridVisible = !gridVisible;
+            localStorage.setItem('vm-zone-grid', gridVisible);
+            buildPipConfigPanel();
+        }
 
         function toggleMinimize() {
             controlsMinimized = !controlsMinimized;
@@ -1316,6 +1410,47 @@
             postPipConfig(pipIdx);
         }
 
+        // Update one component of an explicit (non-auto) zone rect from a pixel
+        // value entered into the X/Y/W/H toolbar inputs. Pixel values are in PGM
+        // canvas coordinates (PGM_W × PGM_H); we divide by the same dimension
+        // the backend uses on the way back (NormRect::to_pixels), so a round-trip
+        // through px → norm → px lands on the same integer pixel.
+        //
+        // Position fields (x, y) preserve the current size; size fields (w, h)
+        // preserve the current position. Out-of-range entries are clamped to
+        // keep the rect inside [0,1].
+        function setZoneRectPx(pipIdx, zoneIdx, field, pixelValue) {
+            const zone = pipConfigs[pipIdx].zones[zoneIdx];
+            if (!zone || !zone.rect) return;
+            const parsed = parseFloat(pixelValue);
+            if (!Number.isFinite(parsed)) return;
+            const dim = (field === 'x' || field === 'w') ? PGM_W : PGM_H;
+            // Snap the input value to a nearby anchor when snap is on. The
+            // Detect variant also returns which anchor was hit so we can
+            // flash the matching grid line during the network roundtrip
+            // (postPipConfig rebuilds the panel on response and wipes the
+            // highlight naturally).
+            const res = snapEdgeDetect(parsed / dim);
+            const norm = res.value;
+            const next = { ...zone.rect };
+            if (field === 'x') {
+                next.x = Math.max(0, Math.min(1 - next.w, norm));
+            } else if (field === 'y') {
+                next.y = Math.max(0, Math.min(1 - next.h, norm));
+            } else if (field === 'w') {
+                next.w = Math.max(1 / PGM_W, Math.min(1 - next.x, norm));
+            } else if (field === 'h') {
+                next.h = Math.max(1 / PGM_H, Math.min(1 - next.y, norm));
+            }
+            zone.rect = next;
+            if (res.anchor != null) {
+                const canvas = document.querySelector('.pip-canvas[data-pip="' + pipIdx + '"]');
+                const axis = (field === 'x' || field === 'w') ? 'x' : 'y';
+                showSnapHighlight(canvas, axis, res.anchor);
+            }
+            postPipConfig(pipIdx);
+        }
+
         function buildPipConfigPanel() {
             const panel = document.getElementById('pipConfigPanel');
             if (NUM_PIPS === 0) {
@@ -1414,6 +1549,31 @@
                     ? ('BG: ' + (INPUT_LABELS[cfg.bg] || ('Input ' + (cfg.bg + 1))))
                     : '(no background)';
                 canvas.appendChild(bgDiv);
+
+                // Optional grid overlay: vertical + horizontal lines at every
+                // snap anchor. Thirds get a brighter (gold) line so the rule-
+                // of-thirds intersections read at a glance; quarters stay
+                // subtle. Sits above the BG fill and below the zones.
+                if (gridVisible) {
+                    const grid = document.createElement('div');
+                    grid.className = 'pip-canvas-grid';
+                    SNAP_ANCHORS.forEach(a => {
+                        if (a === 0 || a === 1) return; // edges are the canvas border
+                        const isThird = SNAP_THIRDS.some(t => Math.abs(t - a) < 1e-6);
+                        const cls = 'pip-grid-line ' + (isThird ? 'third' : 'quarter');
+                        const vl = document.createElement('div');
+                        vl.className = cls + ' v';
+                        vl.style.left = (a * 100) + '%';
+                        vl.dataset.anchor = String(a);
+                        grid.appendChild(vl);
+                        const hl = document.createElement('div');
+                        hl.className = cls + ' h';
+                        hl.style.top = (a * 100) + '%';
+                        hl.dataset.anchor = String(a);
+                        grid.appendChild(hl);
+                    });
+                    canvas.appendChild(grid);
+                }
 
                 cfg.zones.forEach((zone, zi) => {
                     const isAuto = zone.rect == null;
@@ -1525,6 +1685,33 @@
                 addBtn.onclick = () => addZone(p);
                 toolbar.appendChild(addBtn);
 
+                // Snap + grid toggles. Affect drag, px-input, and the optional
+                // overlay rendered above. State persists across reloads via
+                // localStorage (see snapEnabled / gridVisible).
+                const toggleRow = document.createElement('div');
+                toggleRow.className = 'pip-zone-toggle-row';
+                const snapLabel = document.createElement('label');
+                snapLabel.className = 'pip-zone-toggle';
+                const snapCb = document.createElement('input');
+                snapCb.type = 'checkbox';
+                snapCb.checked = snapEnabled;
+                snapCb.onchange = () => toggleSnap();
+                snapLabel.appendChild(snapCb);
+                snapLabel.append(' Snap');
+                snapLabel.title = 'Snap drag and pixel input to quarters and rule-of-thirds';
+                toggleRow.appendChild(snapLabel);
+                const gridLabel = document.createElement('label');
+                gridLabel.className = 'pip-zone-toggle';
+                const gridCb = document.createElement('input');
+                gridCb.type = 'checkbox';
+                gridCb.checked = gridVisible;
+                gridCb.onchange = () => toggleGrid();
+                gridLabel.appendChild(gridCb);
+                gridLabel.append(' Grid');
+                gridLabel.title = 'Show quarter (white) and rule-of-thirds (gold) guide lines';
+                toggleRow.appendChild(gridLabel);
+                toolbar.appendChild(toggleRow);
+
                 if (cfg.zones.length > 0) {
                     const zi = Math.min(activeZoneIdx[p], cfg.zones.length - 1);
                     const zone = cfg.zones[zi];
@@ -1540,11 +1727,70 @@
                     capInput.onchange = () => setZoneCapacity(p, zi, capInput.value);
                     capRow.appendChild(capInput);
                     toolbar.appendChild(capRow);
+
+                    // Pixel-precise rect editor for the active zone. Values are
+                    // in PGM canvas coordinates and round-trip through the same
+                    // formula the backend uses (NormRect::to_pixels). Disabled
+                    // for auto zones — right-click the zone to promote it to a
+                    // manual rect first.
+                    const isAuto = zone.rect == null;
+                    const pxRect = isAuto
+                        ? { x: 0, y: 0, w: PGM_W, h: PGM_H }
+                        : {
+                            x: Math.round(zone.rect.x * PGM_W),
+                            y: Math.round(zone.rect.y * PGM_H),
+                            w: Math.round(zone.rect.w * PGM_W),
+                            h: Math.round(zone.rect.h * PGM_H),
+                        };
+
+                    const mkPxInput = (field, max) => {
+                        const inp = document.createElement('input');
+                        inp.className = 'pip-zone-px-input';
+                        inp.type = 'number';
+                        inp.min = (field === 'w' || field === 'h') ? '1' : '0';
+                        inp.max = String(max);
+                        inp.step = '1';
+                        inp.value = String(pxRect[field]);
+                        inp.disabled = isAuto;
+                        inp.title = isAuto
+                            ? 'Auto-tile mode — right-click the zone to set a manual rect'
+                            : (field.toUpperCase() + ' in PGM pixels (' + PGM_W + '×' + PGM_H + ')');
+                        inp.onchange = () => setZoneRectPx(p, zi, field, inp.value);
+                        return inp;
+                    };
+
+                    const pxRow1 = document.createElement('div');
+                    pxRow1.className = 'pip-zone-px-row';
+                    const xLabel = document.createElement('span');
+                    xLabel.className = 'pip-zone-px-label';
+                    xLabel.textContent = 'X';
+                    pxRow1.appendChild(xLabel);
+                    pxRow1.appendChild(mkPxInput('x', PGM_W));
+                    const yLabel = document.createElement('span');
+                    yLabel.className = 'pip-zone-px-label';
+                    yLabel.textContent = 'Y';
+                    pxRow1.appendChild(yLabel);
+                    pxRow1.appendChild(mkPxInput('y', PGM_H));
+                    toolbar.appendChild(pxRow1);
+
+                    const pxRow2 = document.createElement('div');
+                    pxRow2.className = 'pip-zone-px-row';
+                    const wLabel = document.createElement('span');
+                    wLabel.className = 'pip-zone-px-label';
+                    wLabel.textContent = 'W';
+                    pxRow2.appendChild(wLabel);
+                    pxRow2.appendChild(mkPxInput('w', PGM_W));
+                    const hLabel = document.createElement('span');
+                    hLabel.className = 'pip-zone-px-label';
+                    hLabel.textContent = 'H';
+                    pxRow2.appendChild(hLabel);
+                    pxRow2.appendChild(mkPxInput('h', PGM_H));
+                    toolbar.appendChild(pxRow2);
                 }
 
                 const hint = document.createElement('div');
                 hint.className = 'pip-canvas-hint';
-                hint.innerHTML = 'Click a zone to activate. Push-chip adds the input to the active zone (oldest evicts at cap). Chip inside a zone = remove. Right-click a zone to toggle auto / manual rect.';
+                hint.innerHTML = 'Click a zone to activate. Push-chip adds the input to the active zone (oldest evicts at cap). Chip inside a zone = remove. Right-click a zone to toggle auto / manual rect. X/Y/W/H inputs are in PGM pixels.';
                 toolbar.appendChild(hint);
                 canvasWrap.appendChild(toolbar);
                 editor.appendChild(canvasWrap);
@@ -1554,34 +1800,70 @@
             }
         }
 
-        // Snap anchors for layout rects (edges, halves, quarters).
-        const SNAP_ANCHORS = [0, 0.25, 0.5, 0.75, 1];
+        // Snap anchors for layout rects: edges, quarters, and rule-of-thirds.
+        // Thirds (1/3, 2/3) are broadcast composition guides — placing a PiP
+        // overlay on a third often reads better than dead-center. Quarters
+        // are kept for symmetric splits (left/right half, exact center).
+        const SNAP_QUARTERS = [0.25, 0.5, 0.75];
+        const SNAP_THIRDS = [1 / 3, 2 / 3];
+        const SNAP_ANCHORS = [0, ...SNAP_QUARTERS, ...SNAP_THIRDS, 1].sort((a, b) => a - b);
         const SNAP_TOL = 0.022; // ~10px on a 480-px canvas; tight enough to not fight free dragging
 
-        // Snap a single coordinate to nearby anchors. Used when resizing — only
-        // the corner being dragged snaps; the opposite corner stays put.
-        function snapEdge(v) {
+        // Snap a single coordinate to a nearby anchor. Returns the snapped
+        // value plus the matched anchor (null when no snap happens or when
+        // snapping is disabled). Caller passes `anchor` to showSnapHighlight
+        // so the user sees which guide line locked the value in.
+        function snapEdgeDetect(v) {
+            if (!snapEnabled) return { value: v, anchor: null };
             for (const a of SNAP_ANCHORS) {
-                if (Math.abs(v - a) < SNAP_TOL) return a;
+                if (Math.abs(v - a) < SNAP_TOL) return { value: a, anchor: a };
             }
-            return v;
+            return { value: v, anchor: null };
         }
 
-        // Snap a moving rect along one axis to whichever of {left edge, right edge,
-        // center} is closest to a snap anchor. Lets a centered rect "dent" into
-        // the canvas center, and lets the right/bottom edge dock against an anchor.
-        function snapMoveAxis(pos, size) {
+        // Snap a moving rect along one axis to whichever of {left edge, right
+        // edge, center} is closest to a snap anchor. Returns the snapped
+        // position plus the matched anchor so the caller can light it up.
+        function snapMoveAxisDetect(pos, size) {
+            if (!snapEnabled) return { value: pos, anchor: null };
             let bestDelta = SNAP_TOL;
             let bestPos = pos;
+            let bestAnchor = null;
             for (const a of SNAP_ANCHORS) {
                 const d1 = Math.abs(a - pos);
-                if (d1 < bestDelta) { bestDelta = d1; bestPos = a; }
+                if (d1 < bestDelta) { bestDelta = d1; bestPos = a; bestAnchor = a; }
                 const d2 = Math.abs(a - (pos + size));
-                if (d2 < bestDelta) { bestDelta = d2; bestPos = a - size; }
+                if (d2 < bestDelta) { bestDelta = d2; bestPos = a - size; bestAnchor = a; }
                 const d3 = Math.abs(a - (pos + size / 2));
-                if (d3 < bestDelta) { bestDelta = d3; bestPos = a - size / 2; }
+                if (d3 < bestDelta) { bestDelta = d3; bestPos = a - size / 2; bestAnchor = a; }
             }
-            return bestPos;
+            return { value: bestPos, anchor: bestAnchor };
+        }
+
+        // Thin wrappers preserved for any call sites that only need the value.
+        function snapEdge(v) { return snapEdgeDetect(v).value; }
+        function snapMoveAxis(pos, size) { return snapMoveAxisDetect(pos, size).value; }
+
+        // Highlight the grid line for a given (axis, anchor). axis is 'x' for
+        // a vertical line, 'y' for a horizontal one. Looks up the DOM element
+        // by data-anchor; silently no-ops when grid lines aren't rendered
+        // (gridVisible off) — the snap still happens, just without the cue.
+        function showSnapHighlight(canvas, axis, anchor) {
+            if (!canvas || anchor == null) return;
+            const cls = axis === 'x' ? '.pip-grid-line.v' : '.pip-grid-line.h';
+            const lines = canvas.querySelectorAll(cls);
+            for (const el of lines) {
+                if (Math.abs(parseFloat(el.dataset.anchor) - anchor) < 1e-6) {
+                    el.classList.add('active-snap');
+                    return;
+                }
+            }
+        }
+
+        function clearSnapHighlights(canvas) {
+            if (!canvas) return;
+            canvas.querySelectorAll('.pip-grid-line.active-snap')
+                .forEach(el => el.classList.remove('active-snap'));
         }
 
         // Drag-and-resize handler for a zone. Promotes auto zones to explicit
@@ -1609,31 +1891,58 @@
                     const dx = (ev.clientX - startX) / canvasRect.width;
                     const dy = (ev.clientY - startY) / canvasRect.height;
                     let next = { ...initial };
+                    // Track which anchor (if any) each axis snapped to so we
+                    // can light up the matching grid line. Move snaps once
+                    // per axis; resize snaps the dragged edges (which may be
+                    // left or right, top or bottom depending on the corner).
+                    let snapX = null;
+                    let snapY = null;
                     if (!corner) {
                         // Move: snap to whichever of {left, right, center} is closest
                         // to an anchor — gives a satisfying detent at canvas-center.
-                        next.x = snapMoveAxis(initial.x + dx, initial.w);
-                        next.y = snapMoveAxis(initial.y + dy, initial.h);
+                        const sx = snapMoveAxisDetect(initial.x + dx, initial.w);
+                        const sy = snapMoveAxisDetect(initial.y + dy, initial.h);
+                        next.x = sx.value;
+                        next.y = sy.value;
+                        snapX = sx.anchor;
+                        snapY = sy.anchor;
                     } else {
-                        // Resize: only the dragged corner snaps to anchors.
+                        // Resize: only the dragged corner snaps. The anchor each
+                        // dragged edge lands on is what we light up.
                         const right = initial.x + initial.w;
                         const bottom = initial.y + initial.h;
                         if (corner === 'nw') {
-                            next.x = snapEdge(initial.x + dx);
-                            next.y = snapEdge(initial.y + dy);
+                            const sx = snapEdgeDetect(initial.x + dx);
+                            const sy = snapEdgeDetect(initial.y + dy);
+                            next.x = sx.value;
+                            next.y = sy.value;
                             next.w = right - next.x;
                             next.h = bottom - next.y;
+                            snapX = sx.anchor;
+                            snapY = sy.anchor;
                         } else if (corner === 'ne') {
-                            next.y = snapEdge(initial.y + dy);
-                            next.w = snapEdge(right + dx) - initial.x;
+                            const sy = snapEdgeDetect(initial.y + dy);
+                            const sr = snapEdgeDetect(right + dx);
+                            next.y = sy.value;
+                            next.w = sr.value - initial.x;
                             next.h = bottom - next.y;
+                            snapX = sr.anchor;
+                            snapY = sy.anchor;
                         } else if (corner === 'sw') {
-                            next.x = snapEdge(initial.x + dx);
+                            const sx = snapEdgeDetect(initial.x + dx);
+                            const sb = snapEdgeDetect(bottom + dy);
+                            next.x = sx.value;
                             next.w = right - next.x;
-                            next.h = snapEdge(bottom + dy) - initial.y;
+                            next.h = sb.value - initial.y;
+                            snapX = sx.anchor;
+                            snapY = sb.anchor;
                         } else if (corner === 'se') {
-                            next.w = snapEdge(right + dx) - initial.x;
-                            next.h = snapEdge(bottom + dy) - initial.y;
+                            const sr = snapEdgeDetect(right + dx);
+                            const sb = snapEdgeDetect(bottom + dy);
+                            next.w = sr.value - initial.x;
+                            next.h = sb.value - initial.y;
+                            snapX = sr.anchor;
+                            snapY = sb.anchor;
                         }
                     }
                     next.w = Math.max(0.05, Math.min(1, next.w));
@@ -1650,10 +1959,16 @@
                     zoneEl.style.top = (next.y * 100) + '%';
                     zoneEl.style.width = (next.w * 100) + '%';
                     zoneEl.style.height = (next.h * 100) + '%';
+                    // Update snap-line highlights. Clears any stale highlight
+                    // first so a line doesn't stay lit after the snap is lost.
+                    clearSnapHighlights(canvas);
+                    showSnapHighlight(canvas, 'x', snapX);
+                    showSnapHighlight(canvas, 'y', snapY);
                 };
                 const onUp = () => {
                     document.removeEventListener('mousemove', onMove);
                     document.removeEventListener('mouseup', onUp);
+                    clearSnapHighlights(canvas);
                     if (dirty) postPipConfig(pipIdx);
                 };
                 document.addEventListener('mousemove', onMove);

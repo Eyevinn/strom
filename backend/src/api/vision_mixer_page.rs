@@ -112,6 +112,11 @@ async fn render_vision_mixer_page(
     let labels = vm_props::parse_input_labels(&vm_block.properties, num_inputs);
     let num_dsk_inputs = vm_props::parse_num_dsk_inputs(&vm_block.properties);
     let num_pips = vm_props::parse_num_pips(&vm_block.properties);
+    let (pgm_w, pgm_h) = vm_props::parse_resolution(
+        &vm_block.properties,
+        "pgm_resolution",
+        strom_types::vision_mixer::DEFAULT_PGM_RESOLUTION,
+    );
 
     // Get current state from live overlay state or fall back to defaults.
     // `None` means the bus is showing a PiP (see `pvw_pip` / `pgm_pip` below).
@@ -181,6 +186,8 @@ async fn render_vision_mixer_page(
         "pips": pips,
         "pvw_pip": pvw_pip,
         "pgm_pip": pgm_pip,
+        "pgm_w": pgm_w,
+        "pgm_h": pgm_h,
     });
 
     let html = VISION_MIXER_HTML.replace("{{VM_CONFIG_JSON}}", &config.to_string());
