@@ -125,6 +125,25 @@
             color: #999;
         }
 
+        /* "Via PiP" tally: an input is visible on this bus indirectly because
+           the PiP currently on the bus uses it as bg or as a zone source.
+           Dimmer hue than the direct active tally so the eye still ranks
+           "direct > via-pip" at a glance. Matches the multiview thumbnail
+           rings in overlay.rs (PGM_VIA_PIP / PVW_VIA_PIP).
+           Declared BEFORE the direct .pgm-active / .pvw-active blocks so the
+           direct tally wins on equal specificity — JS keeps them mutually
+           exclusive today, but the source order is the safety net. */
+        .src-btn.pgm-via-pip {
+            background: #4a0000;
+            border-color: #8c0000;
+            color: #f0bbbb;
+        }
+        .src-btn.pvw-via-pip {
+            background: #002a00;
+            border-color: #008c00;
+            color: #bbf0bb;
+        }
+
         .src-btn.pgm-active {
             background: #cc0000;
             border-color: #ff3333;
@@ -137,22 +156,6 @@
             border-color: #33cc33;
             color: #fff;
             box-shadow: 0 0 8px rgba(0, 255, 0, 0.3);
-        }
-
-        /* "Via PiP" tally: an input is visible on this bus indirectly because
-           the PiP currently on the bus uses it as bg or as a zone source.
-           Dimmer hue than the direct active tally so the eye still ranks
-           "direct > via-pip" at a glance. Matches the multiview thumbnail
-           rings in overlay.rs (PGM_VIA_PIP / PVW_VIA_PIP). */
-        .src-btn.pgm-via-pip {
-            background: #4a0000;
-            border-color: #8c0000;
-            color: #f0bbbb;
-        }
-        .src-btn.pvw-via-pip {
-            background: #002a00;
-            border-color: #008c00;
-            color: #bbf0bb;
         }
 
         /* Transition section */
@@ -950,7 +953,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.15-via-pip-tally | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.16-bus-cleanup | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1310,7 +1313,7 @@
                 const pgmBtn = document.createElement('div');
                 pgmBtn.className = 'src-btn indicator' + (currentPgm === i ? ' pgm-active' : '');
                 pgmBtn.textContent = btnText;
-                pgmBtn.title = label + ' — on PGM';
+                pgmBtn.title = label;
                 pgmBus.appendChild(pgmBtn);
 
                 // PVW button (single select). Multi-source layouts are built via PiPs.
@@ -1334,7 +1337,7 @@
                 const pgmPipBtn = document.createElement('div');
                 pgmPipBtn.className = 'pip-btn indicator' + (currentPgmPip === p ? ' pgm-active' : '');
                 pgmPipBtn.textContent = labelText;
-                pgmPipBtn.title = 'PiP ' + (p + 1) + ' on PGM';
+                pgmPipBtn.title = 'PiP ' + (p + 1);
                 pgmBus.appendChild(pgmPipBtn);
 
                 const pvwPipBtn = document.createElement('button');
