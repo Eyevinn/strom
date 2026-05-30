@@ -24,7 +24,6 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [BLOCKS_IMPLEMENTATION.md](BLOCKS_IMPLEMENTATION.md) — block system architecture and how to add a block.
 - [MIXER_BLOCK.md](MIXER_BLOCK.md) — Audio Mixer block reference.
 - [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) — Video Encoder block reference.
-- [WHEP_OUTPUT_BLOCK.md](WHEP_OUTPUT_BLOCK.md) — WHEP Output block reference.
 - [MCP.md](MCP.md) — Model Context Protocol server (AI assistant integration).
 - [INTEGRATION.md](INTEGRATION.md) — MCP / OpenAPI integration overview.
 

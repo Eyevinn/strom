@@ -52,7 +52,7 @@ Current built-in blocks in `backend/src/blocks/builtin/`:
 | Audio Analyzer | `audioanalyzer.rs` | Real-time waveform and vectorscope visualization |
 | Recorder | `recorder.rs` | Write audio/video streams to file with splitmuxsink |
 
-See [MIXER_BLOCK.md](MIXER_BLOCK.md), [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) and [WHEP_OUTPUT_BLOCK.md](WHEP_OUTPUT_BLOCK.md) for detailed documentation.
+See [MIXER_BLOCK.md](MIXER_BLOCK.md) and [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) for detailed documentation.
 
 ## Adding a New Block
 

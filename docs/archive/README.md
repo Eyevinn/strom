@@ -24,3 +24,4 @@ the parent [`docs/`](../) folder.
 | [OPENAPI_AUDIT_2026-03-16.md](OPENAPI_AUDIT_2026-03-16.md) | OpenAPI contract coverage audit | Completed — all findings shipped; contract is now snapshot-tested in CI. |
 | [MIXER_BLOCK_PLAN.md](MIXER_BLOCK_PLAN.md) | Original Audio Mixer design spec | Built — see [../MIXER_BLOCK.md](../MIXER_BLOCK.md) for the living reference. |
 | [video-thumbnail-block.md](video-thumbnail-block.md) | Original thumbnail block design spec | Built — `builtin.thumbnail` shipped in v0.4.0. |
+| [WHEP_OUTPUT_BLOCK.md](WHEP_OUTPUT_BLOCK.md) | Original WHEP Output block design/implementation writeup | Outdated — the block evolved (multi-track since v0.5.0); kept for background. |

@@ -1,5 +1,11 @@
 # WHEP Output Block - Design & Implementation
 
+> **Archived — outdated.** This is the original WHEP Output design/implementation writeup.
+> The block has evolved since (e.g. multi-audio/multi-video track counts replaced the old
+> `mode` in v0.5.0), so details here no longer match the current implementation. Kept for
+> historical/background reference; for current behaviour consult the code under
+> `backend/src/blocks/builtin/` and the in-app block properties.
+
 ## Overview
 
 The WHEP Output block (`builtin.whep_output`) serves audio and/or video streams via WebRTC using the WHEP (WebRTC-HTTP Egress Protocol) standard. It includes a built-in proxy system that provides stable external URLs and integrated web player pages for easy stream playback.
