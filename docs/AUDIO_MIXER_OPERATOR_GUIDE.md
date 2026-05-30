@@ -1,5 +1,8 @@
 # Audio Mixer — Operator Guide
 
+> **Code is the source of truth.** This guide describes intended behaviour and may have
+> drifted from the current implementation. When in doubt, read the code and check the in-app UI.
+
 A reference to the internal routing, signal flow and tap points of the
 strom **Audio Mixer** block. Written for audio engineers and mixer
 operators — no software internals, just signal flow.

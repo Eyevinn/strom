@@ -1,5 +1,9 @@
 # AES67 Discovery - Design & Implementation
 
+> **Archived — code is the source of truth.** This describes the original design and intent.
+> The code has very likely drifted since; treat this as a high-level pointer, not an accurate
+> spec — read the code for the current implementation.
+
 ## Overview
 
 AES67 deliberately **does not mandate** a discovery mechanism. Different vendors use different approaches, which creates interoperability challenges. This document outlines the discovery protocols used in the AES67 ecosystem and documents Strom's implementation.

@@ -63,15 +63,16 @@ DSK, fade-to-black, PiP, and multiview. See [VISION_MIXER_OPERATOR_GUIDE.md](VIS
 ### What's the difference between the Compositor and the Vision Mixer?
 The Compositor is Strom's first-generation video compositor (WIP, known limitations). The
 **Vision Mixer** is the more developed switcher and the recommended path — it's what Open
-Live uses. See [COMPOSITOR_EDITOR.md](COMPOSITOR_EDITOR.md) and
-[VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md).
+Live uses. See [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) (the old
+compositor's writeup is in [archive/COMPOSITOR_EDITOR.md](archive/COMPOSITOR_EDITOR.md)).
 
 ### Can I render web pages / HTML graphics as a video source?
 Yes, via CEF in the `strom-full` image. See [HTML_RENDER.md](HTML_RENDER.md).
 
 ### Which video encoders are supported?
 H.264/H.265/AV1/VP9 with automatic hardware acceleration (NVENC, QSV, VA-API, AMF, software
-fallback). See [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md).
+fallback). The Video Encoder block picks the best available encoder; its properties in the
+in-app inspector are the authoritative list.
 
 ### How do I integrate with an AI assistant (Claude, etc.)?
 Strom speaks the Model Context Protocol over HTTP (`/api/mcp`) and stdio. See [MCP.md](MCP.md).

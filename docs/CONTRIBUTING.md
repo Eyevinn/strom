@@ -2,6 +2,17 @@
 
 Thank you for your interest in contributing to Strom! This document provides guidelines and instructions for contributing to the project.
 
+## How this project is built
+
+Strom is written by **Claude Code**. The codebase is authored by AI — humans are not meant to hand-write the code. People set direction, review, and steer; the AI writes the implementation. This is by design, and it shapes how to contribute:
+
+- **Contribute AI-written changes.** Open a pull request whose changes were written by an AI coding agent (Claude Code or similar). Our Claude Code will review it, just as it would any change. Describe *what* you want and *why*; let the agent produce the diff.
+- **Or just propose the idea.** Open a [GitHub Discussion](https://github.com/Eyevinn/strom/discussions) or file a feature request in [Issues](https://github.com/Eyevinn/strom/issues). Our Claude Code may pick it up and implement it — you don't have to write code at all.
+
+Because the code is AI-authored and evolves quickly, **the code is the source of truth**, not the documentation. Docs in this repo are for navigation and high-level understanding (what Strom is, what it can do, how to set it up, how things fit together). Documents that describe internal design or implementation live in [`archive/`](archive/) with a disclaimer — assume they have drifted, and read the code for current behaviour.
+
+The setup below is still useful for running and testing Strom locally, and for steering an agent against a working build.
+
 ## Development Setup
 
 ### Prerequisites

@@ -1,5 +1,10 @@
 # Block Feature Implementation Guide
 
+> **Archived — code is the source of truth.** This describes the original design and intent
+> of the block system. The code has very likely drifted since; treat this as a high-level
+> pointer to what was once intended, not as an accurate spec — read the code for the current
+> implementation.
+
 This document describes the block system architecture and how to add new built-in blocks.
 
 ## Overview

@@ -1,5 +1,8 @@
 # HTML Rendering with CEF (Chromium Embedded Framework)
 
+> **Code is the source of truth.** This guide describes intended behaviour and may have
+> drifted from the current implementation. When in doubt, read the code and check the in-app UI.
+
 Strom supports rendering HTML content as video sources using the `cefsrc` GStreamer element from [gstcefsrc](https://github.com/AioCef/gstcefsrc). This enables:
 
 - Dynamic HTML/CSS/JavaScript overlays

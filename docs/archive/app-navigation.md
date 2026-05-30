@@ -1,5 +1,9 @@
 # Application Navigation & Pages
 
+> **Archived — code is the source of truth.** This describes the original design and intent
+> of the frontend page structure. The code has very likely drifted since; treat this as a
+> high-level pointer, not an accurate spec — read the code for the current implementation.
+
 ## Current Implementation
 
 The frontend now has a multi-page structure with top-level navigation:

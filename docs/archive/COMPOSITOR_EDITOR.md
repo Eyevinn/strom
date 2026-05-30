@@ -1,11 +1,11 @@
 # Compositor Layout Editor - Implementation Summary
 
-> **Legacy / first-generation compositor.** The `builtin.compositor` block and this layout
-> editor are Strom's first-generation video compositor. It is WIP-ish and has known bugs
-> (notably around mixing Live View settings with transitions). For production switching and
-> composition — and the path Open Live uses — prefer the **Vision Mixer**:
-> see [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md). This document is kept
-> for users of the existing compositor block.
+> **Archived — legacy, and code is the source of truth.** The `builtin.compositor` block and
+> this layout editor are Strom's first-generation video compositor (WIP-ish, with known bugs).
+> For production switching and composition — and the path Open Live uses — prefer the
+> **Vision Mixer**: see [VISION_MIXER_OPERATOR_GUIDE.md](../VISION_MIXER_OPERATOR_GUIDE.md).
+> This is the original implementation writeup and has very likely drifted from the code; treat
+> it as background, not spec.
 
 ## Overview
 A visual, interactive layout editor for the `builtin.compositor` block that allows drag-and-drop repositioning and resizing of input video sources in real-time while the pipeline is running.

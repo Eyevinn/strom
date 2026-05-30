@@ -7,11 +7,12 @@ for transparency and residual value:
   primary target, the Docker Linux image), but the root-cause analysis and workaround
   may still help anyone hitting the same issue on a non-standard setup.
 - **Completed audits** — point-in-time reports whose findings have all shipped.
-- **Design specs for features that are now built** — superseded by the living
-  reference docs for the shipped feature.
+- **Original design / implementation writeups** — documents that describe how a feature
+  was once designed or built. **The code is the source of truth**; these have very likely
+  drifted from it. They are kept as high-level pointers to original intent, not as specs.
 
 Nothing here describes current behaviour you need to follow. For up-to-date docs, see
-the parent [`docs/`](../) folder.
+the parent [`docs/`](../) folder; for how a feature actually works, read the code.
 
 ## Contents
 
@@ -22,6 +23,12 @@ the parent [`docs/`](../) folder.
 | [PAD_TEMPLATE_CRASH_FIX.md](PAD_TEMPLATE_CRASH_FIX.md) | SIGSEGV in pad-template access during multi-threaded construction | Solved — fix shipped. |
 | [WHIP_ICE_DISCONNECT_INVESTIGATION.md](WHIP_ICE_DISCONNECT_INVESTIGATION.md) | WHIP/WHEP ICE disconnect investigation | Resolved — isolated pipeline per session + `drop-on-latency=true`. |
 | [OPENAPI_AUDIT_2026-03-16.md](OPENAPI_AUDIT_2026-03-16.md) | OpenAPI contract coverage audit | Completed — all findings shipped; contract is now snapshot-tested in CI. |
-| [MIXER_BLOCK_PLAN.md](MIXER_BLOCK_PLAN.md) | Original Audio Mixer design spec | Built — see [../MIXER_BLOCK.md](../MIXER_BLOCK.md) for the living reference. |
+| [BLOCKS_IMPLEMENTATION.md](BLOCKS_IMPLEMENTATION.md) | Block system architecture & how-to-add-a-block writeup | Design/impl — likely drifted; read the code. |
+| [MIXER_BLOCK.md](MIXER_BLOCK.md) | Audio Mixer block design/implementation reference | Design/impl — likely drifted. See [../AUDIO_MIXER_OPERATOR_GUIDE.md](../AUDIO_MIXER_OPERATOR_GUIDE.md) for usage. |
+| [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) | Video Encoder block design/implementation reference | Design/impl — likely drifted; read the code. |
+| [COMPOSITOR_EDITOR.md](COMPOSITOR_EDITOR.md) | First-generation compositor layout editor writeup | Legacy + design/impl — prefer the [Vision Mixer](../VISION_MIXER_OPERATOR_GUIDE.md). |
+| [aes67-discovery.md](aes67-discovery.md) | AES67/SAP discovery design | Design/impl — likely drifted; read the code. |
+| [app-navigation.md](app-navigation.md) | Frontend page/navigation architecture | Design/impl — likely drifted; read the code. |
+| [MIXER_BLOCK_PLAN.md](MIXER_BLOCK_PLAN.md) | Original Audio Mixer planning spec | Built — predates [MIXER_BLOCK.md](MIXER_BLOCK.md). |
 | [video-thumbnail-block.md](video-thumbnail-block.md) | Original thumbnail block design spec | Built — `builtin.thumbnail` shipped in v0.4.0. |
 | [WHEP_OUTPUT_BLOCK.md](WHEP_OUTPUT_BLOCK.md) | Original WHEP Output block design/implementation writeup | Outdated — the block evolved (multi-track since v0.5.0); kept for background. |

@@ -6,7 +6,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 ## Getting started & deployment
 
 - [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) — guided setup for running a local Strom instance (Docker, GPU, ICE, auth). Good first stop for operators.
-- [DOCKER.md](DOCKER.md) — full Docker / Docker Compose deployment reference.
+- [DOCKER.md](DOCKER.md) — generic Docker deployment reference.
 - [docker-gpu-setup.md](docker-gpu-setup.md) — NVIDIA GPU acceleration (NVENC/NVDEC, CUDA-GL interop, container toolkit).
 - [AUTHENTICATION.md](AUTHENTICATION.md) — session login and API keys.
 - [POSTGRESQL.md](POSTGRESQL.md) — PostgreSQL storage backend for production.
@@ -17,15 +17,16 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [AUDIO_MIXER_OPERATOR_GUIDE.md](AUDIO_MIXER_OPERATOR_GUIDE.md) — audio mixing console signal flow and operation.
 - [HTML_RENDER.md](HTML_RENDER.md) — render web pages as video sources (CEF / `strom-full`).
 - [STREAM_SYNCHRONIZATION.md](STREAM_SYNCHRONIZATION.md) — aligning multiple inputs with PTP/NTP clocks.
-- [COMPOSITOR_EDITOR.md](COMPOSITOR_EDITOR.md) — first-generation compositor layout editor (legacy; prefer the Vision Mixer).
 
-## Blocks & API reference
+The full set of built-in blocks and their properties is best browsed in the app's element
+palette and inspector — the code is the source of truth. Older block design writeups live in
+[archive/](archive/).
 
-- [BLOCKS_IMPLEMENTATION.md](BLOCKS_IMPLEMENTATION.md) — block system architecture and how to add a block.
-- [MIXER_BLOCK.md](MIXER_BLOCK.md) — Audio Mixer block reference.
-- [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) — Video Encoder block reference.
+## API & integration
+
 - [MCP.md](MCP.md) — Model Context Protocol server (AI assistant integration).
 - [INTEGRATION.md](INTEGRATION.md) — MCP / OpenAPI integration overview.
+- Interactive OpenAPI docs are served at `/swagger-ui` on a running instance.
 
 ## Host setup scripts
 
@@ -47,10 +48,6 @@ Ready-to-run scripts for preparing a host, under [`scripts/setup/`](../scripts/s
 
 - [CHANGELOG.md](CHANGELOG.md) — release history.
 - [FEATURE_SUGGESTIONS.md](FEATURE_SUGGESTIONS.md) — unordered idea list (not a roadmap).
-- [design/](design/) — architecture/design notes (AES67 discovery, app navigation).
-- [archive/](archive/) — solved-problem postmortems and built design specs, kept for reference.
-
-## Design notes
-
-- [design/aes67-discovery.md](design/aes67-discovery.md) — AES67/SAP discovery design.
-- [design/app-navigation.md](design/app-navigation.md) — frontend page architecture.
+- [archive/](archive/) — historical material kept for reference: solved-problem postmortems,
+  completed audits, and original design/implementation writeups that have likely drifted from
+  the code (block design, compositor editor, AES67 discovery, app navigation, …).

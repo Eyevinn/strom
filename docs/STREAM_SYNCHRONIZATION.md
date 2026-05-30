@@ -1,5 +1,8 @@
 # Stream Synchronization
 
+> **Code is the source of truth.** This guide describes intended behaviour and may have
+> drifted from the current implementation. When in doubt, read the code and check the in-app UI.
+
 How to align multiple input streams on a shared timeline so that buffers with
 the same source-wallclock PTS line up at the mixer/compositor input, regardless
 of independent network paths, jitter, or receiver latency.

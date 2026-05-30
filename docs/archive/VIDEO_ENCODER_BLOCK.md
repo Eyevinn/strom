@@ -1,5 +1,9 @@
 # Video Encoder Block - Design & Implementation
 
+> **Archived — code is the source of truth.** This describes the original design and intent
+> of the video encoder block. The code has very likely drifted since; treat this as a
+> high-level pointer, not an accurate spec — read the code for the current implementation.
+
 ## Overview
 
 The Video Encoder block (`builtin.videoenc`) provides automatic hardware-accelerated video encoding with intelligent encoder selection and graceful software fallback. It supports H.264, H.265, AV1, and VP9 codecs across all major hardware acceleration platforms.

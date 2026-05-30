@@ -38,7 +38,7 @@ Run this service in the cloud with a single click.
 - **MCP Integration** - Control pipelines with AI assistants (Claude, etc.)
 - **Native or Web** - Run as a desktop app or a web service
 
-A full breakdown of built-in blocks and capabilities lives in [docs/BLOCKS_IMPLEMENTATION.md](docs/BLOCKS_IMPLEMENTATION.md).
+Browse the full set of built-in blocks and their properties in the app's element palette and inspector.
 
 ## Quick Start
 
@@ -123,6 +123,15 @@ Copy `.strom.toml.example` to `.strom.toml` for all options. Key topics have ded
 - `WS /api/ws` and `GET /api/events` for real-time state and pipeline events.
 - gst-launch import/export via `POST /api/gst-launch/parse` and `/export`.
 - Model Context Protocol at `/api/mcp` (HTTP) or the `strom-mcp-server` binary (stdio) — see [docs/MCP.md](docs/MCP.md).
+
+## Built by AI
+
+Strom is written by **Claude Code**. The codebase is authored by AI, not hand-written by humans — that's intentional, and it's also why the code (not the docs) is the source of truth for how things work.
+
+Contributions are welcome in the same spirit:
+
+- Open a PR with **AI-written** changes — our Claude Code will review it.
+- Or open a [GitHub Discussion](https://github.com/Eyevinn/strom/discussions) or file a feature request in [Issues](https://github.com/Eyevinn/strom/issues), and our Claude Code may pick it up and implement it.
 
 ## Contributing
 
