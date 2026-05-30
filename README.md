@@ -128,10 +128,7 @@ Copy `.strom.toml.example` to `.strom.toml` for all options. Key topics have ded
 
 Strom is written by **Claude Code**. The codebase is authored by AI, not hand-written by humans — that's intentional, and it's also why the code (not the docs) is the source of truth for how things work.
 
-Contributions are welcome in the same spirit:
-
-- Open a PR with **AI-written** changes — our Claude Code will review it.
-- Or open a [GitHub Discussion](https://github.com/Eyevinn/strom/discussions) or file a feature request in [Issues](https://github.com/Eyevinn/strom/issues), and our Claude Code may pick it up and implement it.
+We welcome feature requests, ideas, and pull requests — ideally AI-written, in the same spirit. Open a [GitHub Discussion](https://github.com/Eyevinn/strom/discussions), file a [feature request](https://github.com/Eyevinn/strom/issues), or send a PR.
 
 ## Contributing
 

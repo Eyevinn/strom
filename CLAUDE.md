@@ -43,7 +43,7 @@
 - Operator/usage guides (how to *use* a feature) may stay top-level, but carry the disclaimer: "Code is the source of truth — this may have drifted; read the code for the current implementation." Do not cite file paths in disclaimers (paths drift too) — just say "read the code".
 - Doc filenames in `docs/` use `UPPER_SNAKE_CASE` (e.g. `DOCKER_GPU_SETUP.md`). Leave `README.md` and `.github/ISSUE_TEMPLATE/*` lowercase (GitHub convention).
 - There is no committed roadmap. Ideas go in `docs/FEATURE_SUGGESTIONS.md` (an unordered "not a roadmap" list) or as GitHub Issues/Discussions.
-- Strom is authored by Claude Code (AI), not hand-written by humans. Contributions are AI-written PRs (reviewed by our Claude Code) or feature requests/discussions our Claude Code may implement.
+- Strom is authored by Claude Code (AI), not hand-written by humans. We welcome feature requests, ideas, and (ideally AI-written) PRs.
 
 ## Shared Types (`strom-types`)
 - Before defining a new struct, enum, constant, or default value — always check if it already exists in `strom-types`. All new API-visible or shared types must be placed in `strom-types`, never directly in the backend. If you find a duplicate, move it to `strom-types`.
