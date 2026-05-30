@@ -1,6 +1,8 @@
 # Setting Up a Local Strom Instance for Open Live
 
-This section walks through deploying a local [Strom](https://github.com/Eyevinn/strom) instance that Open Live can connect to. Strom is the GStreamer flow engine that handles the actual media pipelines — Open Live drives it over its REST and WebSocket APIs.
+This section walks through deploying a local [Strom](https://github.com/Eyevinn/strom) instance that Open Live can connect to.
+
+[Open Live](https://github.com/Eyevinn/open-live) is an open-source live production platform, with [Open Live Studio](https://github.com/Eyevinn/open-live-studio) as its web-based production interface. Strom is a standalone GStreamer flow engine that handles the actual media pipelines — it is not tied to Open Live, but Open Live uses it as a backend, driving it over its REST and WebSocket APIs. This guide covers running your own Strom instance for Open Live to connect to.
 
 Linux + Docker is the primary supported target — that combination is what we run in production and test against. Native Linux binaries, macOS, and Windows builds exist, but the instructions below assume the Docker path.
 
