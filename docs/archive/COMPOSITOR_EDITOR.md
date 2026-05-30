@@ -209,7 +209,7 @@ Due to WASM async limitations, the editor uses local storage as a message bus:
 - [ ] Layout presets (picture-in-picture, split-screen, etc.)
 - [ ] Copy/paste layout between compositors
 - [ ] Export/import layout as JSON
-- [ ] Streaming thumbnails via WebSocket (see `docs/archive/video-thumbnail-block.md`)
+- [ ] Streaming thumbnails via WebSocket (see `docs/archive/VIDEO_THUMBNAIL_BLOCK.md`)
 
 ## Files
 

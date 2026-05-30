@@ -27,8 +27,8 @@ the parent [`docs/`](../) folder; for how a feature actually works, read the cod
 | [MIXER_BLOCK.md](MIXER_BLOCK.md) | Audio Mixer block design/implementation reference | Design/impl — likely drifted. See [../AUDIO_MIXER_OPERATOR_GUIDE.md](../AUDIO_MIXER_OPERATOR_GUIDE.md) for usage. |
 | [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) | Video Encoder block design/implementation reference | Design/impl — likely drifted; read the code. |
 | [COMPOSITOR_EDITOR.md](COMPOSITOR_EDITOR.md) | First-generation compositor layout editor writeup | Legacy + design/impl — prefer the [Vision Mixer](../VISION_MIXER_OPERATOR_GUIDE.md). |
-| [aes67-discovery.md](aes67-discovery.md) | AES67/SAP discovery design | Design/impl — likely drifted; read the code. |
-| [app-navigation.md](app-navigation.md) | Frontend page/navigation architecture | Design/impl — likely drifted; read the code. |
+| [AES67_DISCOVERY.md](AES67_DISCOVERY.md) | AES67/SAP discovery design | Design/impl — likely drifted; read the code. |
+| [APP_NAVIGATION.md](APP_NAVIGATION.md) | Frontend page/navigation architecture | Design/impl — likely drifted; read the code. |
 | [MIXER_BLOCK_PLAN.md](MIXER_BLOCK_PLAN.md) | Original Audio Mixer planning spec | Built — predates [MIXER_BLOCK.md](MIXER_BLOCK.md). |
-| [video-thumbnail-block.md](video-thumbnail-block.md) | Original thumbnail block design spec | Built — `builtin.thumbnail` shipped in v0.4.0. |
+| [VIDEO_THUMBNAIL_BLOCK.md](VIDEO_THUMBNAIL_BLOCK.md) | Original thumbnail block design spec | Built — `builtin.thumbnail` shipped in v0.4.0. |
 | [WHEP_OUTPUT_BLOCK.md](WHEP_OUTPUT_BLOCK.md) | Original WHEP Output block design/implementation writeup | Outdated — the block evolved (multi-track since v0.5.0); kept for background. |

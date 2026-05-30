@@ -1,6 +1,6 @@
 # Stereo Mixer Block - Implementation Plan
 
-> **Archived — built.** This is a historical design document from the planning phase. The mixer has since been implemented as a multi-file module at `backend/src/blocks/builtin/mixer/`. See [../MIXER_BLOCK.md](../MIXER_BLOCK.md) for current documentation.
+> **Archived — built.** This is a historical design document from the planning phase; the mixer has long since been implemented. The code is the source of truth. For usage, see the [Audio Mixer operator guide](../AUDIO_MIXER_OPERATOR_GUIDE.md); the older block writeup is at [MIXER_BLOCK.md](MIXER_BLOCK.md).
 
 ## Overview
 

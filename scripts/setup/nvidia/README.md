@@ -293,7 +293,7 @@ gst-inspect-1.0 glupload
 - [GStreamer GL Documentation](https://gstreamer.freedesktop.org/documentation/gl/)
 - [CUDA-OpenGL Interop Guide](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__OPENGL.html)
 - [Strom Docker Guide](../../docs/DOCKER.md)
-- [Strom Docker GPU Setup](../../docs/docker-gpu-setup.md)
+- [Strom Docker GPU Setup](../../docs/DOCKER_GPU_SETUP.md)
 
 ## References
 

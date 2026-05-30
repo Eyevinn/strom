@@ -61,7 +61,7 @@ Use `eyevinntechnology/strom-full:latest` for the image with HTML rendering (CEF
 ### Other ways to install
 
 - **Pre-built binaries** (Linux, macOS, Windows MSI) — see [GitHub Releases](https://github.com/Eyevinn/strom/releases).
-- **Docker / Docker Compose** (production, GPU, reverse proxy) — see [docs/DOCKER.md](docs/DOCKER.md) and [docs/docker-gpu-setup.md](docs/docker-gpu-setup.md).
+- **Docker / Docker Compose** (production, GPU, reverse proxy) — see [docs/DOCKER.md](docs/DOCKER.md) and [docs/DOCKER_GPU_SETUP.md](docs/DOCKER_GPU_SETUP.md).
 - **Build from source** — see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 - **Deploy for Open Live** — see [docs/OPEN_LIVE_SETUP.md](docs/OPEN_LIVE_SETUP.md).
 
@@ -78,7 +78,7 @@ For interactive API docs, visit `http://localhost:8080/swagger-ui`.
 - **[Documentation index](docs/README.md)** — everything, organized by topic.
 - **[FAQ](docs/FAQ.md)** — short answers to common questions.
 
-Quick links: [Open Live setup](docs/OPEN_LIVE_SETUP.md) · [Docker](docs/DOCKER.md) · [GPU setup](docs/docker-gpu-setup.md) · [Authentication](docs/AUTHENTICATION.md) · [Vision Mixer](docs/VISION_MIXER_OPERATOR_GUIDE.md) · [Audio Mixer](docs/AUDIO_MIXER_OPERATOR_GUIDE.md) · [MCP](docs/MCP.md) · [Development](docs/DEVELOPMENT.md) · [Changelog](docs/CHANGELOG.md)
+Quick links: [Open Live setup](docs/OPEN_LIVE_SETUP.md) · [Docker](docs/DOCKER.md) · [GPU setup](docs/DOCKER_GPU_SETUP.md) · [Authentication](docs/AUTHENTICATION.md) · [Vision Mixer](docs/VISION_MIXER_OPERATOR_GUIDE.md) · [Audio Mixer](docs/AUDIO_MIXER_OPERATOR_GUIDE.md) · [MCP](docs/MCP.md) · [Development](docs/DEVELOPMENT.md) · [Changelog](docs/CHANGELOG.md)
 
 ## Architecture
 

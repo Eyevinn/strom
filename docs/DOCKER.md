@@ -31,7 +31,7 @@ Open `http://localhost:8080`. The `/data` volume persists flows, blocks, and oth
 configuration across restarts.
 
 For GPU acceleration add `--gpus all` and `-e NVIDIA_DRIVER_CAPABILITIES=all` — see
-[docker-gpu-setup.md](docker-gpu-setup.md). For WHEP/WHIP, AES67, NDI, or SRT, prefer
+[DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md). For WHEP/WHIP, AES67, NDI, or SRT, prefer
 `--network host` so these protocols don't have to fight Docker NAT.
 
 ## Configuration
@@ -156,11 +156,11 @@ curl http://localhost:8080/health
 docker exec strom gst-inspect-1.0 --version
 ```
 
-For GPU issues see [docker-gpu-setup.md](docker-gpu-setup.md); for segfaults see
+For GPU issues see [DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md); for segfaults see
 [DEBUGGING_SEGFAULTS_WSL2.md](DEBUGGING_SEGFAULTS_WSL2.md).
 
 ## See also
 
 - [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) — guided deployment with a compose example
-- [docker-gpu-setup.md](docker-gpu-setup.md) — NVIDIA GPU acceleration
+- [DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md) — NVIDIA GPU acceleration
 - [AUTHENTICATION.md](AUTHENTICATION.md) · [POSTGRESQL.md](POSTGRESQL.md) · [MCP.md](MCP.md)

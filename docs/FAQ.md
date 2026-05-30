@@ -31,7 +31,7 @@ for a guided, opinionated setup.
 ### Do I need a GPU?
 No, but it's **highly preferred** for production. Without one, video encoding falls back to
 software (x264 etc.), which works for small flows but doesn't scale. See
-[docker-gpu-setup.md](docker-gpu-setup.md).
+[DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md).
 
 ### Is there help for setting up my host (GPU, capture cards, NDI, clock sync)?
 Yes — ready-to-run host setup scripts live in

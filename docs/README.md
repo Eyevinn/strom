@@ -7,7 +7,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 
 - [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) — guided setup for running a local Strom instance (Docker, GPU, ICE, auth). Good first stop for operators.
 - [DOCKER.md](DOCKER.md) — generic Docker deployment reference.
-- [docker-gpu-setup.md](docker-gpu-setup.md) — NVIDIA GPU acceleration (NVENC/NVDEC, CUDA-GL interop, container toolkit).
+- [DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md) — NVIDIA GPU acceleration (NVENC/NVDEC, CUDA-GL interop, container toolkit).
 - [AUTHENTICATION.md](AUTHENTICATION.md) — session login and API keys.
 - [POSTGRESQL.md](POSTGRESQL.md) — PostgreSQL storage backend for production.
 
