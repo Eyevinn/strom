@@ -36,6 +36,15 @@
 - Each sub-module should have a single clear responsibility (e.g. construction, lifecycle, linking, properties)
 - Check for large files with: `find backend/src frontend/src -name "*.rs" | xargs wc -l | sort -rn | head -20`
 
+## Documentation
+- **The code is the source of truth.** Do not write or maintain docs that describe how the code works, its design, or its implementation — that documentation always drifts.
+- Repo docs (`docs/`) are for navigation only: what Strom is, what it can do, how to set it up, how to contribute, and how things fit together at a high level. Keep them there.
+- Do not create code-describing / design / implementation docs at top level. Anything that explains internals belongs in `docs/archive/` with a disclaimer (or should not exist).
+- Operator/usage guides (how to *use* a feature) may stay top-level, but carry the disclaimer: "Code is the source of truth — this may have drifted; read the code for the current implementation." Do not cite file paths in disclaimers (paths drift too) — just say "read the code".
+- Doc filenames in `docs/` use `UPPER_SNAKE_CASE` (e.g. `DOCKER_GPU_SETUP.md`). Leave `README.md` and `.github/ISSUE_TEMPLATE/*` lowercase (GitHub convention).
+- There is no committed roadmap. Ideas go in `docs/FEATURE_SUGGESTIONS.md` (an unordered "not a roadmap" list) or as GitHub Issues/Discussions.
+- Strom is authored by Claude Code (AI), not hand-written by humans. Contributions are AI-written PRs (reviewed by our Claude Code) or feature requests/discussions our Claude Code may implement.
+
 ## Shared Types (`strom-types`)
 - Before defining a new struct, enum, constant, or default value — always check if it already exists in `strom-types`. All new API-visible or shared types must be placed in `strom-types`, never directly in the backend. If you find a duplicate, move it to `strom-types`.
 - `strom-types` must not depend on the backend, GStreamer crates, or other internal crates — only pure utility crates such as `serde` and `uuid`.
