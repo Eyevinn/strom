@@ -28,6 +28,15 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [MCP.md](MCP.md) — Model Context Protocol server (AI assistant integration).
 - [INTEGRATION.md](INTEGRATION.md) — MCP / OpenAPI integration overview.
 
+## Host setup scripts
+
+Ready-to-run scripts for preparing a host, under [`scripts/setup/`](../scripts/setup)
+(also bundled in the Docker images at `/app/scripts/setup/`):
+[nvidia](../scripts/setup/nvidia/README.md) ·
+[decklink](../scripts/setup/decklink/README.md) ·
+[ndi](../scripts/setup/ndi/README.md) ·
+[ntp](../scripts/setup/ntp/README.md).
+
 ## Contributing & building
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) — build, run, and develop locally.
@@ -35,11 +44,10 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [CROSS_COMPILE_ARM64.md](CROSS_COMPILE_ARM64.md) — cross-compiling for ARM64 (Raspberry Pi etc.).
 - [DEBUGGING_SEGFAULTS_WSL2.md](DEBUGGING_SEGFAULTS_WSL2.md) — debugging segfaults (especially on WSL2).
 
-## Planning & history
+## History & ideas
 
-- [FEATURE_ROADMAP.md](FEATURE_ROADMAP.md) — prioritized roadmap.
-- [FEATURE_SUGGESTIONS.md](FEATURE_SUGGESTIONS.md) — feature wishlist beyond the roadmap.
 - [CHANGELOG.md](CHANGELOG.md) — release history.
+- [FEATURE_SUGGESTIONS.md](FEATURE_SUGGESTIONS.md) — unordered idea list (not a roadmap).
 - [design/](design/) — architecture/design notes (AES67 discovery, app navigation).
 - [archive/](archive/) — solved-problem postmortems and built design specs, kept for reference.
 

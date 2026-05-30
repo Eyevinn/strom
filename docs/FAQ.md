@@ -33,6 +33,16 @@ No, but it's **highly preferred** for production. Without one, video encoding fa
 software (x264 etc.), which works for small flows but doesn't scale. See
 [docker-gpu-setup.md](docker-gpu-setup.md).
 
+### Is there help for setting up my host (GPU, capture cards, NDI, clock sync)?
+Yes — ready-to-run host setup scripts live in
+[`scripts/setup/`](../scripts/setup), each with its own README:
+[`nvidia/`](../scripts/setup/nvidia/README.md) (driver + container toolkit),
+[`decklink/`](../scripts/setup/decklink/README.md) (Blackmagic SDI/HDMI),
+[`ndi/`](../scripts/setup/ndi/README.md) (NewTek NDI SDK + plugin), and
+[`ntp/`](../scripts/setup/ntp/README.md) (chrony for clock sync). They are also bundled
+inside the Docker images at `/app/scripts/setup/`, so you don't have to clone the repo —
+see [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) for how to extract them.
+
 ### How do I turn on authentication?
 Strom is unauthenticated by default. Set a session login and an API key before exposing it
 to any untrusted network. See [AUTHENTICATION.md](AUTHENTICATION.md).
