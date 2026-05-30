@@ -2,7 +2,9 @@
 
 # Strom - GStreamer Flow Engine
 
-**Strom** ("Ström" - Swedish for "stream") is a visual, web-based interface for creating and managing GStreamer media pipelines. Design complex media flows without writing code.
+**Strom** is a GStreamer media pipeline engine with a visual, web-based GUI. At its core it builds, runs, and manages real-time media pipelines; the node-based editor lets you design and control complex media flows without writing code.
+
+> **Used by [Open Live](https://github.com/Eyevinn/open-live):** Strom is a standalone GStreamer flow engine, but [Open Live](https://github.com/Eyevinn/open-live) — an open-source live production platform with [Open Live Studio](https://github.com/Eyevinn/open-live-studio) as its web-based production interface — uses Strom as a media backend, driving it over its REST and WebSocket APIs. See [docs/OPEN_LIVE_SETUP.md](docs/OPEN_LIVE_SETUP.md) for running your own Strom instance for Open Live.
 
 ---
 <div align="center">
@@ -434,3 +436,7 @@ See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)
 ## License
 
 MIT OR Apache-2.0
+
+---
+
+> The name **Strom** comes from "Ström" — Swedish for "stream".
