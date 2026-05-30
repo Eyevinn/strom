@@ -1,5 +1,8 @@
 # Video Thumbnail Block Design
 
+> **Archived — built.** The `builtin.thumbnail` block shipped in v0.4.0. This is the
+> original design spec, kept for reference; it may differ from the shipped implementation.
+
 ## Overview
 
 Add a reusable video thumbnail/preview block that can be inserted anywhere in a flow to capture and stream video frames to the frontend. This follows the existing `builtin.meter` pattern for audio level monitoring.

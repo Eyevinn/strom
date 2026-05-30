@@ -51,10 +51,11 @@ Provide in-browser preview of pipeline output:
 
 - ✅ **WebRTC-based preview**: WHEP Output block serves streams with built-in browser player pages
 - ✅ **Audio monitoring**: Audio Meter block with RMS and peak level monitoring per channel
-- **Thumbnail generation**: Auto-generate thumbnails from video sources
-- **Multi-view**: Monitor multiple pipelines simultaneously in grid layout
+- ✅ **Thumbnail generation**: `builtin.thumbnail` block / thumbnail tap captures frames from video sources (v0.4.0)
+- ✅ **Multi-view (within a mix)**: Vision Mixer multiview output shows all its sources in one frame
+- **Cross-flow multi-view**: Monitor multiple independent pipelines simultaneously in a grid layout
 
-**Remaining work**: Thumbnail generation and multi-view dashboard.
+**Remaining work**: A cross-flow multi-view dashboard (the Vision Mixer multiview is per-mix, not server-wide).
 
 ---
 
@@ -297,9 +298,8 @@ These features can be implemented quickly while providing significant value:
    - Support .env files and variable substitution
    - Estimated effort: 3-4 hours
 
-4. **Thumbnail Generation**: Screenshot capability for video pipelines
-   - Add endpoint to capture current frame
-   - Estimated effort: 2-3 hours
+4. ~~**Thumbnail Generation**: Screenshot capability for video pipelines~~ ✅ Done
+   - `builtin.thumbnail` block + frame-capture endpoint shipped in v0.4.0
 
 5. **Pipeline Validation**: Pre-flight checks before starting
    - Validate element compatibility and required properties
@@ -365,5 +365,5 @@ Interested in implementing any of these features? See [CONTRIBUTING.md](CONTRIBU
 
 ---
 
-*Last updated: 2026-03-02*
+*Last updated: 2026-05-30*
 *Status: Community feedback welcome*

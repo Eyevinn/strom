@@ -1,5 +1,8 @@
 # OpenAPI/utoipa Audit – Strom
 
+> **Archived — completed.** A point-in-time audit; all findings shipped and the contract
+> is now snapshot-tested in CI. Kept as a record of the initiative.
+
 **Date:** 2026-03-16
 **Purpose:** Map how strict the API contract is today and what is required for external consumers (e.g. Open Live) to build on it.
 

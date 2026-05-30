@@ -18,7 +18,7 @@ ARG TARGETARCH
 # CEF 144 (Chrome runtime). The MemoryInfra SIGILL that could otherwise crash
 # libcef in long-running processes is handled at runtime by LD_PRELOADing
 # libmallinfo_shim.so (see docker/strom-full/entrypoint.sh and
-# docs/CEF_SIGILL_CRASH.md). The shim interposes glibc's legacy int-based
+# docs/archive/CEF_SIGILL_CRASH.md). The shim interposes glibc's legacy int-based
 # mallinfo(), whose fields overflow when the CEF process arena > 2 GiB and
 # trigger a Chromium CHECK() on a failed checked_cast<size_t>.
 ARG CEF_VERSION=144.0.21+g4f5b28c+chromium-144.0.7559.248
@@ -72,7 +72,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /build
 
 # Copy and compile the mallinfo LD_PRELOAD shim (fixes CEF MemoryInfra SIGILL
-# when arena > 2 GiB; see mallinfo_shim.c and docs/CEF_SIGILL_CRASH.md).
+# when arena > 2 GiB; see mallinfo_shim.c and docs/archive/CEF_SIGILL_CRASH.md).
 COPY mallinfo_shim.c /build/mallinfo_shim.c
 RUN gcc -shared -fPIC -O2 -o /build/libmallinfo_shim.so /build/mallinfo_shim.c
 

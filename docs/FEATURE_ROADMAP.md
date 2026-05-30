@@ -45,11 +45,10 @@ Real-time adjustments for running pipelines with immediate visual feedback.
 
 Enable complex broadcast workflows by routing outputs between flows dynamically.
 
-**Current status:** ✅ Compositor block with 11 layout templates (multiview, PIP, side-by-side, grids, etc.) and visual editor. ✅ Inter Input/Output blocks for cross-flow routing. ✅ Audio Router block with multi-input channel routing matrix. ✅ Audio Mixer block with 32 channels, aux sends, and groups.
+**Current status:** ✅ Vision Mixer block with broadcast-style PVW/PGM switching, CUT/AUTO transitions, DSK overlays, fade-to-black, PiP, and multiview output. ✅ Compositor block with layout templates and visual editor (first-generation; superseded by Vision Mixer). ✅ Inter Input/Output blocks for cross-flow routing. ✅ Audio Router block with multi-input channel routing matrix. ✅ Audio Mixer block with up to 32 channels, aux sends, groups, PFL/AFL, and a monitor bus.
 
 **Remaining features:**
-- Tally/program/preview bus concept for live switching
-- Global audio/video buses
+- Global audio/video buses across flows
 
 **Use cases:**
 - Live production switching
@@ -136,13 +135,11 @@ Enable unattended operation and broadcast automation.
 
 Multi-viewer style monitoring for all running pipelines.
 
-**Current status:** ✅ Audio Meter block with RMS and peak level monitoring per channel. ✅ WHEP Output block with built-in browser player pages for live preview. ✅ Links page for quick access to WHEP player pages and stream URLs.
+**Current status:** ✅ Vision Mixer multiview output with per-input labels and VU meters. ✅ Audio Meter block with RMS and peak level monitoring per channel. ✅ WHEP Output block with built-in browser player pages for live preview. ✅ Links page for quick access to WHEP player pages and stream URLs.
 
 **Remaining features:**
-- Thumbnail grid of all active pipelines
-- Customizable multiviewer layout builder
+- Thumbnail grid of all active pipelines (cross-flow, not just within a Vision Mixer)
 - Full-screen preview on click
-- Source labeling and status indicators
 
 **Why it matters:** Standard requirement for broadcast control rooms.
 
@@ -210,12 +207,12 @@ Team workflows and enterprise access control.
 
 Essential for live production workflows.
 
-**Features:**
-- One-click recording of any flow output
+**Current status:** ✅ Recorder block (`builtin.recorder`, shipped v0.3.25) — writes any audio/video stream to file with configurable segmentation, a recording duration counter, and auto-stop.
+
+**Remaining features:**
 - Timeline-based clip marking during recording
 - Instant replay capability with variable speed
-- Automatic file segmentation
-- Integration with storage backends (local, S3, NFS)
+- Integration with remote storage backends (S3, NFS)
 
 **Use cases:**
 - Sports instant replay
@@ -252,14 +249,16 @@ Low effort improvements with noticeable impact.
 
 ### Phase 2: Professional Tools
 - [x] Live Parameter Tweaking (basic - properties editable on running pipelines)
-- [x] Compositor with layout templates
+- [x] Compositor with layout templates (first-generation)
+- [x] Vision Mixer with PVW/PGM switching, transitions, DSK, FTB, PiP, multiview
 - [x] Inter Input/Output blocks for cross-flow routing
-- [x] Audio Mixer (32 channels, aux sends, groups, PFL)
+- [x] Audio Mixer (up to 32 channels, aux sends, groups, PFL/AFL, monitor bus)
 - [x] Audio Router (multi-input channel routing matrix)
 - [x] WHEP Output with built-in player pages
+- [x] Recorder block (segmentation, auto-stop)
 - [ ] Multi-Flow Routing Matrix (visual patchbay)
 - [ ] Scheduled Operations
-- [ ] Source Preview Grid
+- [ ] Cross-flow Source Preview Grid
 
 ### Phase 3: Intelligence & Safety
 - [ ] Flow Version Control
@@ -271,7 +270,7 @@ Low effort improvements with noticeable impact.
 - [ ] Kubernetes Operator
 - [ ] Block Marketplace
 - [ ] Multi-User Collaboration
-- [ ] Recording System
+- [x] Recording System (Recorder block; replay/clip-marking still open)
 
 ---
 
@@ -316,4 +315,4 @@ Strom's unique position: **Professional broadcast capabilities with open-source 
 
 ---
 
-*Last updated: 2026-03-02*
+*Last updated: 2026-05-30*

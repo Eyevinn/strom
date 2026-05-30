@@ -1,5 +1,8 @@
 # Fix for Pad Template Access Crashes
 
+> **Archived — solved.** The fix is shipped. Kept as a root-cause reference for the
+> SIGSEGV in factory-level pad-template access during multi-threaded construction.
+
 ## Problem
 Recurring SIGSEGV crashes in `__strcmp_avx2()` during GStreamer element linking.
 

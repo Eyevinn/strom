@@ -1,9 +1,14 @@
 # Compositor Layout Editor - Implementation Summary
 
-> **WIP Notice**: Scene transitions and Live View mode are work in progress. There are known bugs around mixing UI live view settings and transitions - these features may not work correctly together in all cases.
+> **Legacy / first-generation compositor.** The `builtin.compositor` block and this layout
+> editor are Strom's first-generation video compositor. It is WIP-ish and has known bugs
+> (notably around mixing Live View settings with transitions). For production switching and
+> composition — and the path Open Live uses — prefer the **Vision Mixer**:
+> see [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md). This document is kept
+> for users of the existing compositor block.
 
 ## Overview
-A visual, interactive layout editor for the `glcompositor` block that allows drag-and-drop repositioning and resizing of input video sources in real-time while the pipeline is running.
+A visual, interactive layout editor for the `builtin.compositor` block that allows drag-and-drop repositioning and resizing of input video sources in real-time while the pipeline is running.
 
 ## What's Implemented
 
@@ -111,7 +116,7 @@ POST /api/flows/{flow_id}/compositor/{block_id}/animate
 ## Usage
 
 ### Opening the Editor
-1. Create a flow with a `builtin.glcompositor` block
+1. Create a flow with a `builtin.compositor` block
 2. Start the flow
 3. Double-click on the compositor block to open the layout editor
 
@@ -178,7 +183,7 @@ Due to WASM async limitations, the editor uses local storage as a message bus:
 ## Testing
 
 ### Manual Test Plan
-1. Create flow with videotestsrc -> glcompositor -> autovideosink
+1. Create flow with videotestsrc -> compositor -> autovideosink
 2. Add 2-4 inputs to compositor
 3. Start flow
 4. Open compositor editor
@@ -204,7 +209,7 @@ Due to WASM async limitations, the editor uses local storage as a message bus:
 - [ ] Layout presets (picture-in-picture, split-screen, etc.)
 - [ ] Copy/paste layout between compositors
 - [ ] Export/import layout as JSON
-- [ ] Streaming thumbnails via WebSocket (see `docs/design/video-thumbnail-block.md`)
+- [ ] Streaming thumbnails via WebSocket (see `docs/archive/video-thumbnail-block.md`)
 
 ## Files
 

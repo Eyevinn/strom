@@ -113,7 +113,7 @@ impl ElementDiscovery {
             // - HLS elements (hlssink*, hlsdemux*): NULL pointer in pad template access
             // - glvideomixer: NULL pointer when requesting pads
             //
-            // See docs/MPEGTSMUX_DEADLOCK_FIX.md and docs/PAD_TEMPLATE_CRASH_FIX.md
+            // See docs/archive/MPEGTSMUX_DEADLOCK_FIX.md and docs/archive/PAD_TEMPLATE_CRASH_FIX.md
         ]
     }
 
