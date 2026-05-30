@@ -1,5 +1,8 @@
 # GStreamer mpegtsmux Deadlock Fix
 
+> **Archived — solved.** The fix is shipped. Kept as a root-cause reference for the
+> `mpegtsmux` aggregator deadlock during pipeline construction.
+
 ## Problem
 Starting flows with `mpegtsmux` elements caused the application to hang indefinitely during pipeline creation. The lockup occurred when trying to link elements to mpegtsmux by explicitly requesting sink pads.
 

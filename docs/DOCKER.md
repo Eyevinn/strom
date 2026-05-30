@@ -1,327 +1,166 @@
 # Docker Deployment Guide
 
-This guide covers deploying Strom using Docker and Docker Compose, including both the backend server and MCP server.
+This is the generic Docker reference for Strom. For a guided, opinionated deployment
+(Docker run, GPU, ICE servers, authentication, verification) see
+[OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) — it is the recommended starting point and ships a
+working `docker-compose.yml` example.
 
-## Quick Start
+## Images
 
-### Using Docker Compose (Recommended)
-
-The easiest way to run Strom with both backend and MCP server:
+Pre-built multi-architecture images (amd64/arm64) are published on Docker Hub:
 
 ```bash
-# Build and start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
+docker pull eyevinntechnology/strom:latest        # base image
+docker pull eyevinntechnology/strom-full:latest   # + CEF/Chromium for HTML rendering
 ```
 
-This starts:
-- **strom**: Web server on port 8080
-- **strom-mcp**: MCP server for AI integration
+Pin a specific version with a tag, e.g. `eyevinntechnology/strom:0.6.0`.
 
-### Using Docker Only
-
-If you prefer to run services individually:
+## Quick start
 
 ```bash
-# Build the image
-docker build -t strom:latest .
-
-# Run backend only
 docker run -d \
-  -p 8080:8080 \
-  -v $(pwd)/data:/data \
-  -e RUST_LOG=info \
   --name strom \
-  strom:latest
-
-# Run MCP server (requires backend running)
-docker run -d \
-  --link strom \
-  -e STROM_API_URL=http://strom:8080 \
-  -e RUST_LOG=info \
-  --name strom-mcp \
-  strom:latest \
-  strom-mcp-server
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v "$(pwd)/data:/data" \
+  eyevinntechnology/strom:latest
 ```
 
-## Architecture
+Open `http://localhost:8080`. The `/data` volume persists flows, blocks, and other
+configuration across restarts.
 
-```
-┌─────────────────────────────────────────┐
-│        Docker Compose Network           │
-│                                          │
-│  ┌────────────────┐  ┌───────────────┐ │
-│  │ strom  │  │  strom-mcp    │ │
-│  │   Port: 8080   │◄─┤  (stdio MCP)  │ │
-│  │                │  │               │ │
-│  │  - Web UI      │  │  - AI Tools   │ │
-│  │  - REST API    │  │  - JSON-RPC   │ │
-│  │  - GStreamer   │  └───────────────┘ │
-│  └────────────────┘                     │
-│         │                                │
-│         │ Volume Mount                   │
-│         ▼                                │
-│    ./data/ (flows.json, blocks.json)     │
-└─────────────────────────────────────────┘
-```
+For GPU acceleration add `--gpus all` and `-e NVIDIA_DRIVER_CAPABILITIES=all` — see
+[DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md). For WHEP/WHIP, AES67, NDI, or SRT, prefer
+`--network host` so these protocols don't have to fight Docker NAT.
 
 ## Configuration
 
-### Environment Variables
+Strom is configured via environment variables (see [DEVELOPMENT.md](DEVELOPMENT.md) for the
+full list and the CLI equivalents):
 
-#### Backend (strom)
-- `RUST_LOG` - Logging level (default: `info`)
-- `STROM_PORT` - HTTP server port (default: `8080`)
-- `STROM_DATA_DIR` - Data directory for storage files (default: `/data`)
-- `STROM_FLOWS_PATH` - Override flows file path (optional)
-- `STROM_BLOCKS_PATH` - Override blocks file path (optional)
-- `STROM_DATABASE_URL` - Database URL for PostgreSQL storage (optional, e.g., `postgresql://user:pass@localhost/strom`)
-- `STROM_ADMIN_USER` - Admin username for authentication (optional)
-- `STROM_ADMIN_PASSWORD_HASH` - Admin password hash for authentication (optional)
-- `STROM_API_KEY` - API key for bearer token authentication (optional)
+| Variable | Purpose |
+|----------|---------|
+| `STROM_PORT` | HTTP server port (default `8080`) |
+| `STROM_DATA_DIR` | Data directory (default `/data` in the image) |
+| `STROM_DATABASE_URL` | PostgreSQL connection string (optional) — see [POSTGRESQL.md](POSTGRESQL.md) |
+| `STROM_ADMIN_USER` / `STROM_ADMIN_PASSWORD_HASH` / `STROM_API_KEY` | Authentication — see [AUTHENTICATION.md](AUTHENTICATION.md) |
+| `STROM_SERVER_ICE_SERVERS` | STUN/TURN servers for WebRTC |
+| `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
+| `RUST_LOG` | Logging level (default `info`) |
 
-#### MCP Server (strom-mcp)
-- `RUST_LOG` - Logging level (default: `info`)
-- `STROM_API_URL` - Backend URL (default: `http://strom:8080`)
+Volumes: mount `./data:/data` for persistent storage. The `/data` volume is the only state
+Strom keeps by default.
 
-### Volumes
+## Docker Compose
 
-- `./data:/data` - Persistent storage for flow configurations
+No `docker-compose.yml` is committed to the repository — compose files are deployment-specific
+and gitignored. Use the worked example in [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) §5 as a
+starting point and adapt it (GPU, auth, TLS, network mode, DeckLink mounts) to your host.
 
-### Ports
+## MCP server in Docker
 
-- `8080` - Backend HTTP server (web UI and REST API)
+The image bundles the standalone MCP server binary at `/app/strom-mcp-server` (stdio
+transport). The backend also serves MCP over HTTP at `/api/mcp` directly, so for most setups
+you do **not** need to run the separate binary — point your MCP client at
+`http://<host>:8080/api/mcp`. See [MCP.md](MCP.md).
 
-## Using the MCP Server with Claude Desktop
-
-To connect Claude Desktop to the dockerized MCP server:
-
-1. **Expose the MCP server via named pipe or socket** (advanced setup required)
-2. **Or use the standalone MCP server** outside Docker:
+To run the stdio MCP server against a running backend (e.g. for Claude Desktop), it's usually
+simplest to run it on the host, pointing at the container's HTTP port:
 
 ```bash
-# Run MCP server locally, pointing to dockerized backend
 STROM_API_URL=http://localhost:8080 ./target/release/strom-mcp-server
 ```
 
-Configure Claude Desktop:
 ```json
 {
   "mcpServers": {
     "strom": {
       "command": "/path/to/strom-mcp-server",
-      "env": {
-        "STROM_API_URL": "http://localhost:8080"
-      }
+      "env": { "STROM_API_URL": "http://localhost:8080" }
     }
   }
 }
 ```
 
-## Multi-Stage Build
+## Building the image yourself
 
-The Dockerfile uses a multi-stage build with Zig cross-compilation support:
+The [`Dockerfile`](../Dockerfile) uses a multi-stage build on Ubuntu 25.10 (Questing), which
+provides GStreamer 1.26 with the nvcodec fix:
 
-1. **Frontend Builder**: Builds WASM frontend on native platform
-2. **Backend Builder**: Builds backend with optional Zig cross-compilation for ARM64
-3. **Runtime**: Ubuntu 25.04 (Plucky) with GStreamer 1.26.0
-
-### Build Stages
-
-```dockerfile
-# Stage 1: Frontend builder
-FROM --platform=$BUILDPLATFORM ubuntu:plucky AS frontend-builder
-# Builds WASM frontend (platform-independent output)
-
-# Stage 2: Backend builder
-FROM --platform=$BUILDPLATFORM ubuntu:plucky AS backend-builder
-# Installs Rust and optionally Zig for cross-compilation
-# Supports native builds and ARM64 cross-compilation
-
-# Stage 3: Runtime
-FROM ubuntu:plucky AS runtime
-# Minimal Ubuntu with GStreamer 1.26.0 runtime
-COPY --from=builder binaries
-```
-
-This approach:
-- Uses Ubuntu 25.04 for GStreamer 1.26.0 support
-- Enables ARM64 cross-compilation via Zig (targets glibc 2.36)
-- Platform-independent WASM frontend build
-- Multi-architecture support (amd64/arm64)
-
-## Health Checks
-
-The backend includes a health check:
-
-```yaml
-healthcheck:
-  test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-  interval: 30s
-  timeout: 10s
-  retries: 3
-```
-
-Check service health:
-```bash
-docker-compose ps
-```
-
-## Logs
-
-View logs for all services:
-```bash
-docker-compose logs -f
-```
-
-View logs for specific service:
-```bash
-docker-compose logs -f strom
-docker-compose logs -f strom-mcp
-```
-
-## Troubleshooting
-
-### Backend won't start
-
-Check GStreamer dependencies:
-```bash
-docker-compose exec strom gst-inspect-1.0 --version
-```
-
-### MCP server can't connect to backend
-
-Verify networking:
-```bash
-docker-compose exec strom-mcp curl http://strom:8080/health
-```
-
-### Rebuilding after code changes
+1. **Frontend builder** — builds the WASM frontend (platform-independent output).
+2. **Backend builder** — builds the backend and the MCP server, optionally cross-compiling
+   for ARM64 via Zig (targets an older glibc for broad compatibility — see
+   [CROSS_COMPILE_ARM64.md](CROSS_COMPILE_ARM64.md)).
+3. **Runtime** — minimal Ubuntu with the GStreamer runtime plugins and the GL/EGL libraries
+   required for CUDA-GL interop.
 
 ```bash
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
+docker build -t strom:local .
+docker run -p 8080:8080 -v "$(pwd)/data:/data" strom:local
 ```
 
-## Production Deployment
+CI builds and publishes the multi-arch images on release; building locally is only needed for
+development or custom images.
 
-### Reverse Proxy
+## Production notes
 
-Use nginx or Caddy in front of the backend:
+### Reverse proxy
+
+Terminate TLS and route to the backend with nginx, Caddy, or Traefik:
 
 ```nginx
 server {
-    listen 80;
+    listen 443 ssl;
     server_name strom.example.com;
 
     location / {
-        proxy_pass http://localhost:8080;
+        proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        # WebSocket upgrade for /api/ws
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 ```
 
-### Docker Compose for Production
+Alternatively, terminate TLS in Strom itself with `STROM_TLS_CERT` / `STROM_TLS_KEY`.
+
+### Logging and restart
 
 ```yaml
-services:
-  strom:
-    image: strom:latest
-    restart: always
-    environment:
-      - RUST_LOG=warn  # Less verbose
-    volumes:
-      - /var/strom/data:/data  # Persistent location
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 2G
+restart: unless-stopped
+logging:
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
 ```
 
 ### Backup
 
-Backup data files:
+The entire state lives under `/data`:
+
 ```bash
-docker cp strom:/data/flows.json ./backup/
-docker cp strom:/data/blocks.json ./backup/
-# Or backup entire data directory
 docker cp strom:/data ./backup/
 ```
 
-## Development
+## Troubleshooting
 
-Mount source code for development:
-```yaml
-volumes:
-  - .:/app
-  - /app/target  # Separate target directory
-```
-
-Hot reload not supported - rebuild after changes:
 ```bash
-docker-compose build strom
-docker-compose restart strom
+# Health endpoint (no auth required)
+curl http://localhost:8080/health
+
+# Confirm GStreamer is present in the container
+docker exec strom gst-inspect-1.0 --version
 ```
 
-## Security
+For GPU issues see [DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md); for segfaults see
+[DEBUGGING_SEGFAULTS_WSL2.md](DEBUGGING_SEGFAULTS_WSL2.md).
 
-### Best Practices
+## See also
 
-1. **Run as non-root user** (add to Dockerfile):
-   ```dockerfile
-   RUN useradd -m strom
-   USER strom
-   ```
-
-2. **Read-only filesystem**:
-   ```yaml
-   read_only: true
-   tmpfs:
-     - /tmp
-   ```
-
-3. **Resource limits**:
-   ```yaml
-   deploy:
-     resources:
-       limits:
-         cpus: '2'
-         memory: 2G
-   ```
-
-4. **Network isolation**: Use custom networks, not default bridge
-
-## Monitoring
-
-Add Prometheus metrics:
-```yaml
-services:
-  prometheus:
-    image: prom/prometheus
-    ports:
-      - "9090:9090"
-```
-
-Add Grafana dashboards:
-```yaml
-services:
-  grafana:
-    image: grafana/grafana
-    ports:
-      - "3000:3000"
-```
-
-## Additional Resources
-
-- [Official Docker Documentation](https://docs.docker.com/)
-- [Docker Compose Reference](https://docs.docker.com/compose/)
-- [Multi-stage Builds](https://docs.docker.com/build/building/multi-stage/)
-- [cargo-chef](https://github.com/LukeMathWalker/cargo-chef)
+- [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) — guided deployment with a compose example
+- [DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md) — NVIDIA GPU acceleration
+- [AUTHENTICATION.md](AUTHENTICATION.md) · [POSTGRESQL.md](POSTGRESQL.md) · [MCP.md](MCP.md)

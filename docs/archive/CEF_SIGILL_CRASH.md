@@ -1,5 +1,9 @@
 # CEF SIGILL Crash (MemoryInfra / PartitionAlloc)
 
+> **Archived — solved.** Fixed in our `strom-full` Docker image via the `mallinfo`
+> LD_PRELOAD shim (see `docker/gstcefsrc/Dockerfile` and `docker/strom-full/entrypoint.sh`).
+> Kept as a reference for anyone running gstcefsrc in a container who hits the same crash.
+
 ## Summary
 
 gstcefsrc running in Docker with NVIDIA GPU crashes intermittently with

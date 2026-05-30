@@ -1,5 +1,8 @@
 # Vision Mixer — Operator Guide
 
+> **Code is the source of truth.** This guide describes intended behaviour and may have
+> drifted from the current implementation. When in doubt, read the code and check the in-app UI.
+
 A reference to the production switcher block in strom: the PVW/PGM
 workflow, transitions, Picture-in-Picture, downstream keying, and the
 multiview monitor. Written for vision/video engineers — no software

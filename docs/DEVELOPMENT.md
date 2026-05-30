@@ -11,10 +11,15 @@ Make sure you have the following installed:
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
 
-2. **GStreamer development libraries**
+2. **GStreamer development libraries and runtime plugins**
    ```bash
-   # Ubuntu/Debian
-   sudo apt-get install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libcairo2-dev
+   # Ubuntu/Debian (full set, matches what the binaries are built against)
+   sudo apt-get install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+     libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base \
+     gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+     gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+     gstreamer1.0-tools libnice-dev gstreamer1.0-nice \
+     libcairo2-dev graphviz
 
    # Fedora
    sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel
@@ -32,6 +37,27 @@ Make sure you have the following installed:
    ```bash
    cargo install trunk
    ```
+
+### Optional Cargo Features
+
+| Feature | Description | Extra dependencies |
+|---------|-------------|--------------------|
+| `nvidia` | NVIDIA GPU monitoring (default) | None |
+| `efp` | EFP/SRT input and output blocks | `cmake`, `libclang-dev` (Linux) / `cmake` (macOS, via Homebrew) |
+
+```bash
+# Build with EFP support (Linux)
+sudo apt install cmake libclang-dev
+cargo run --release --features efp
+
+# Build with EFP support (macOS)
+brew install cmake
+cargo run --release --features efp
+```
+
+Pre-built Linux and macOS binaries, plus the Docker images, ship with the `efp`
+feature enabled. Windows binaries currently ship without EFP because
+`gst-plugin-efp` has not been validated on that platform yet.
 
 ## Project Structure
 

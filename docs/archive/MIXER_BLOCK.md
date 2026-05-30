@@ -1,5 +1,10 @@
 # Audio Mixer Block
 
+> **Archived — code is the source of truth.** This describes the original design and intent
+> of the audio mixer block. The code has very likely drifted since; treat this as a high-level
+> pointer, not an accurate spec — read the code for the current implementation. The
+> [Audio Mixer operator guide](../AUDIO_MIXER_OPERATOR_GUIDE.md) is the maintained usage reference.
+
 Stereo audio mixer with per-channel processing, aux sends, subgroups,
 and main bus mastering. Modeled after professional digital consoles
 (Behringer X32, Yamaha TF series).

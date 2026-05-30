@@ -14,35 +14,34 @@ Verify GPU access on the host:
 nvidia-smi
 ```
 
-## Install NVIDIA Container Toolkit
+## Host Setup (driver + container toolkit)
 
-The NVIDIA Container Toolkit enables GPU access inside Docker containers.
+The repository ships host setup scripts under
+[`scripts/setup/nvidia/`](../scripts/setup/nvidia/README.md) — use them rather than
+running the steps by hand. They are also bundled inside the Docker images at
+`/app/scripts/setup/` (see [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) for how to extract
+them without cloning the repo).
 
 ```bash
-# Install prerequisites
-sudo apt-get update && sudo apt-get install -y curl gnupg2
+# 1. Install the recommended NVIDIA driver (requires reboot)
+#    Do NOT use the nvidia-headless variant — it lacks the OpenGL/EGL bits for CUDA-GL interop.
+sudo ./scripts/setup/nvidia/install-nvidia-driver.sh
 
-# Add GPG key and repository
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
-  sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+# 2. After reboot, verify the driver
+nvidia-smi
 
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+# 3. Install the NVIDIA Container Toolkit so Docker can see the GPU
+sudo ./scripts/setup/nvidia/install-nvidia-container-toolkit.sh
 
-# Install
-sudo apt-get update
-sudo apt-get install -y nvidia-container-toolkit
-
-# Configure Docker
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
+# 4. Sanity check
+docker run --rm --gpus all ubuntu nvidia-smi
 ```
 
-Or use the setup script:
-```bash
-./scripts/setup/nvidia/install-nvidia-container-toolkit.sh
-```
+The toolkit script adds the NVIDIA repo, installs `nvidia-container-toolkit`, configures
+the Docker runtime, pins the cgroup driver to `cgroupfs`, and installs a udev rule that
+keeps containers from losing GPU access on `systemctl daemon-reload`. See
+[`scripts/setup/nvidia/README.md`](../scripts/setup/nvidia/README.md) for the full
+walkthrough, headless EGL notes, and WSL2 caveats.
 
 ## Basic Usage
 
@@ -101,13 +100,13 @@ Strom automatically detects GPU capabilities at startup and selects the optimal 
 **GPU interop works:**
 ```
 INFO  CUDA-GL interop works - using GPU-accelerated video conversion
-INFO  ✓ NVML initialized successfully - found 1 GPU(s)
+INFO  NVML initialized successfully - found 1 GPU(s)
 ```
 
 **GPU interop not available (falls back gracefully):**
 ```
 WARN  CUDA-GL interop failed: ... - using software video conversion
-INFO  ✓ NVML initialized successfully - found 1 GPU(s)
+INFO  NVML initialized successfully - found 1 GPU(s)
 ```
 
 Even when CUDA-GL interop fails, hardware encoding (NVENC) is still used - only color conversion falls back to CPU.

@@ -1,5 +1,10 @@
 # Block Feature Implementation Guide
 
+> **Archived — code is the source of truth.** This describes the original design and intent
+> of the block system. The code has very likely drifted since; treat this as a high-level
+> pointer to what was once intended, not as an accurate spec — read the code for the current
+> implementation.
+
 This document describes the block system architecture and how to add new built-in blocks.
 
 ## Overview
@@ -52,7 +57,7 @@ Current built-in blocks in `backend/src/blocks/builtin/`:
 | Audio Analyzer | `audioanalyzer.rs` | Real-time waveform and vectorscope visualization |
 | Recorder | `recorder.rs` | Write audio/video streams to file with splitmuxsink |
 
-See [MIXER_BLOCK.md](MIXER_BLOCK.md), [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) and [WHEP_OUTPUT_BLOCK.md](WHEP_OUTPUT_BLOCK.md) for detailed documentation.
+See [MIXER_BLOCK.md](MIXER_BLOCK.md) and [VIDEO_ENCODER_BLOCK.md](VIDEO_ENCODER_BLOCK.md) for detailed documentation.
 
 ## Adding a New Block
 

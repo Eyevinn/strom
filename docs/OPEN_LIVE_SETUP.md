@@ -108,7 +108,7 @@ INFO  CUDA-GL interop works - using GPU-accelerated video conversion
 INFO  NVML initialized successfully - found 1 GPU(s)
 ```
 
-For a deeper dive (headless EGL, troubleshooting, WSL2 caveats), see `./strom-setup/nvidia/README.md` (also [on GitHub](https://github.com/Eyevinn/strom/blob/main/scripts/setup/nvidia/README.md)) and the [Strom Docker GPU guide](https://github.com/Eyevinn/strom/blob/main/docs/docker-gpu-setup.md).
+For a deeper dive (headless EGL, troubleshooting, WSL2 caveats), see `./strom-setup/nvidia/README.md` (also [on GitHub](https://github.com/Eyevinn/strom/blob/main/scripts/setup/nvidia/README.md)) and the [Strom Docker GPU guide](https://github.com/Eyevinn/strom/blob/main/docs/DOCKER_GPU_SETUP.md).
 
 ---
 
