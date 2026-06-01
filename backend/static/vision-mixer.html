@@ -953,7 +953,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.16-bus-cleanup | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.17-bus-cleanup | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1251,7 +1251,13 @@
             if (!pipCfg) return set;
             if (pipCfg.bg != null) set.add(pipCfg.bg);
             for (const zone of pipCfg.zones) {
-                for (const src of zone.sources) set.add(src);
+                // Mirror Rust `Zone::effective_sources`: cap to `capacity`,
+                // keeping the newest entries, so the bus tally and the
+                // multiview ring agree even if sources outgrow capacity.
+                const srcs = (zone.capacity != null && zone.capacity < zone.sources.length)
+                    ? zone.sources.slice(zone.sources.length - zone.capacity)
+                    : zone.sources;
+                for (const src of srcs) set.add(src);
             }
             return set;
         }
@@ -1905,10 +1911,6 @@
             }
             return { value: bestPos, anchor: bestAnchor };
         }
-
-        // Thin wrappers preserved for any call sites that only need the value.
-        function snapEdge(v) { return snapEdgeDetect(v).value; }
-        function snapMoveAxis(pos, size) { return snapMoveAxisDetect(pos, size).value; }
 
         // Highlight the grid line for a given (axis, anchor). axis is 'x' for
         // a vertical line, 'y' for a horizontal one. Looks up the DOM element
