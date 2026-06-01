@@ -11,13 +11,14 @@ use tracing::debug;
 /// Link a decoded raw-video source pad into the block's video output `identity`
 /// through a `deinterlace` element.
 ///
-/// The element starts in `mode=auto` and a one-shot CAPS-event probe upgrades it
-/// to `mode=interlaced` (force) when the negotiated `interlace-mode` is
-/// `interleaved` or `mixed`. Forcing is required because H.264 `mixed` streams
-/// report mixed caps without flagging individual buffers as interlaced, so
-/// `mode=auto` would silently pass everything through (relabelling to
-/// progressive) and leave visible combing. Genuinely progressive sources keep
-/// `mode=auto`, i.e. passthrough, so they are untouched.
+/// A one-shot CAPS-event probe pins the deinterlace mode from the negotiated
+/// `interlace-mode`: `interleaved`/`mixed` -> `mode=interlaced` (force),
+/// everything else -> `mode=disabled` (explicit passthrough). Forcing is
+/// required because H.264 `mixed` streams report mixed caps without flagging
+/// individual buffers as interlaced, so `mode=auto` would silently pass
+/// everything through (relabelling to progressive) and leave visible combing.
+/// Progressive sources use `disabled` rather than `auto` so a source marked
+/// progressive is never deinterlaced, even if a stray buffer is flagged.
 ///
 /// The probe reads the element from the pad itself, so its closure captures no
 /// GStreamer references — no circular-ref leak (see CLAUDE.md). EVENT probes
@@ -75,18 +76,15 @@ pub(crate) fn link_raw_video_through_deinterlace(
             interlace_mode.as_deref(),
             Some("interleaved") | Some("mixed")
         );
+        // Force deinterlacing for interlaced/mixed; explicit passthrough
+        // otherwise (never deinterlace a source marked progressive).
+        let mode = if interlaced { "interlaced" } else { "disabled" };
         if let Some(element) = pad.parent().and_then(|p| p.downcast::<gst::Element>().ok()) {
-            if interlaced {
-                element.set_property_from_str("mode", "interlaced");
-            }
+            element.set_property_from_str("mode", mode);
             debug!(
                 "{}: deinterlace mode={} (source interlace-mode={:?})",
                 element.name(),
-                if interlaced {
-                    "interlaced (forced)"
-                } else {
-                    "auto (passthrough)"
-                },
+                mode,
                 interlace_mode
             );
         }
