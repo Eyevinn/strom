@@ -7,6 +7,7 @@ pub mod audiogain;
 pub mod audiorouter;
 pub mod compositor;
 pub mod decklink;
+pub(crate) mod decode_chain;
 pub mod devicesrc;
 #[cfg(feature = "efp")]
 pub mod efpsrt;
