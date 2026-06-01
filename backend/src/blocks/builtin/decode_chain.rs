@@ -40,6 +40,9 @@ pub(crate) fn link_raw_video_through_deinterlace(
     let deinterlace = gst::ElementFactory::make("deinterlace")
         .name(&name)
         .property_from_str("mode", "auto")
+        // High-quality motion-adaptive method; the default `linear` softens
+        // detail and leaves residual artifacts on broadcast content.
+        .property_from_str("method", "yadif")
         .build()
         .map_err(|e| format!("deinterlace: {}", e))?;
 
