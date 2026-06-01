@@ -449,7 +449,9 @@ const PGM_VIA_PIP_B: f64 = 0.55;
 
 // Yellow for background indicator: want output R=1.0, G=0.8, B=0
 
-const GRAY: f64 = 0.5;
+// Default (inactive) border for thumbnail and PiP tiles. Darker than mid-gray
+// so the colored PGM/PVW/via-PiP status borders read as clearly brighter.
+const GRAY: f64 = 0.2;
 
 /// Vertical VU meter sectors matching the audio mixer live UI and the
 /// standalone meter block. Boundaries follow [`vision_mixer::VU_METER_*_DB`]
