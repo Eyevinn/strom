@@ -5,7 +5,7 @@
 //!
 //! Pipeline structure (decode=true, default):
 //! ```text
-//! srtsrc -> decodebin -> videoconvert -> video_output (identity) -> [external video_out]
+//! srtsrc -> decodebin -> deinterlace -> video_output (identity) -> [external video_out]
 //!                     -> audioconvert -> audioresample -> audio_output_0 (identity) -> [external audio_out_0]
 //! ```
 //!
@@ -471,8 +471,12 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
     }
 }
 
-/// Dynamically insert videoconvert between a decoded video pad and an identity element.
-/// decodebin pad -> videoconvert -> identity
+/// decodebin (raw) pad -> deinterlace -> identity
+///
+/// The GL-based vision mixer rejects interlaced frames at `glupload`, so
+/// interlaced broadcast feeds (e.g. 1080i50) are deinterlaced here. See
+/// [`super::decode_chain::link_raw_video_through_deinterlace`] for how the
+/// deinterlace mode is chosen from the negotiated caps.
 fn link_decoded_video(
     element: &gst::Element,
     src_pad: &gst::Pad,
@@ -484,43 +488,16 @@ fn link_decoded_video(
         .and_then(|p| p.downcast::<gst::Bin>().ok())
         .ok_or("parent is not a Bin")?;
 
-    let convert_name = format!("{}:videoconvert_{}", instance_id, src_pad.name());
-    let videoconvert = gst::ElementFactory::make("videoconvert")
-        .name(&convert_name)
-        .build()
-        .map_err(|e| format!("videoconvert: {}", e))?;
-
-    // Add to bin, link internal chain, sync state, then connect source pad LAST
-    // to avoid data flowing before the chain is fully connected.
-    bin.add(&videoconvert)
-        .map_err(|e| format!("add videoconvert: {}", e))?;
-
-    let convert_sink = videoconvert
-        .static_pad("sink")
-        .ok_or("videoconvert has no sink pad")?;
-    let convert_src = videoconvert
-        .static_pad("src")
-        .ok_or("videoconvert has no src pad")?;
-    let identity_sink = identity
-        .static_pad("sink")
-        .ok_or("identity has no sink pad")?;
-
-    // Link downstream first: videoconvert -> identity
-    convert_src
-        .link(&identity_sink)
-        .map_err(|e| format!("link videoconvert -> identity: {:?}", e))?;
-
-    videoconvert
-        .sync_state_with_parent()
-        .map_err(|e| format!("sync videoconvert: {}", e))?;
-
-    // Link source pad last to start data flow only when chain is ready
-    src_pad
-        .link(&convert_sink)
-        .map_err(|e| format!("link pad -> videoconvert: {:?}", e))?;
+    super::decode_chain::link_raw_video_through_deinterlace(
+        &bin,
+        src_pad,
+        identity,
+        instance_id,
+        &src_pad.name(),
+    )?;
 
     debug!(
-        "MPEGTSSRT Input {}: Inserted videoconvert for pad {}",
+        "MPEGTSSRT Input {}: Inserted deinterlace for pad {}",
         instance_id,
         src_pad.name()
     );

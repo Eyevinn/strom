@@ -473,7 +473,7 @@ impl BlockBuilder for EfpSrtInputBuilder {
 }
 
 /// Dynamically insert h264parse + video decoder between an efpdemux video pad and identity.
-/// efpdemux pad -> h264parse -> nvh264dec/avdec_h264 -> identity
+/// efpdemux pad -> h264parse -> nvh264dec/avdec_h264 -> deinterlace -> identity
 fn link_decoded_video(
     element: &gst::Element,
     src_pad: &gst::Pad,
@@ -507,17 +507,10 @@ fn link_decoded_video(
     bin.add_many([&parser, &decoder])
         .map_err(|e| format!("add video decode chain: {}", e))?;
 
-    // Link downstream: h264parse -> decoder -> identity
+    // Link downstream: h264parse -> decoder
     parser
         .link(&decoder)
         .map_err(|e| format!("link h264parse -> decoder: {}", e))?;
-    let decoder_src = decoder.static_pad("src").ok_or("decoder has no src pad")?;
-    let identity_sink = identity
-        .static_pad("sink")
-        .ok_or("identity has no sink pad")?;
-    decoder_src
-        .link(&identity_sink)
-        .map_err(|e| format!("link decoder -> identity: {:?}", e))?;
 
     parser
         .sync_state_with_parent()
@@ -525,6 +518,18 @@ fn link_decoded_video(
     decoder
         .sync_state_with_parent()
         .map_err(|e| format!("sync decoder: {}", e))?;
+
+    // decoder -> deinterlace -> identity. Interlaced broadcast feeds (e.g.
+    // 1080i50) must be deinterlaced before the GL vision mixer; the helper's
+    // caps probe forces deinterlacing only when the source is interlaced/mixed.
+    let decoder_src = decoder.static_pad("src").ok_or("decoder has no src pad")?;
+    super::decode_chain::link_raw_video_through_deinterlace(
+        &bin,
+        &decoder_src,
+        identity,
+        instance_id,
+        &src_pad.name(),
+    )?;
 
     // Link source pad last
     let parser_sink = parser
