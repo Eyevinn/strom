@@ -420,9 +420,38 @@ const PGM_R: f64 = 0.0; // want R=1.0 in output → feed to cairo B channel
 const PGM_G: f64 = 0.0;
 const PGM_B: f64 = 1.0; // want B=0 in output → feed to cairo R channel
 
+// Colors for "visible indirectly via a PiP that's on this bus".
+//
+// Active palette: dark green / dark red — kept in the same hue family as the
+// direct PVW/PGM colours so the relation is obvious at a glance.
+//
+// Alternative palettes tried (kept here as a reference for easy swap-in):
+//
+// Amber + deep orange (PVW leans yellow, PGM leans red):
+//   PVW_VIA_PIP: output R=1.0, G=0.75, B=0.0 → (_R=0.0, _G=0.75, _B=1.0)
+//   PGM_VIA_PIP: output R=1.0, G=0.35, B=0.0 → (_R=0.0, _G=0.35, _B=1.0)
+//
+// Sky blue + vivid blue (both clearly outside red/green hue space):
+//   PVW_VIA_PIP: output R=0.4, G=0.7, B=1.0  → (_R=1.0, _G=0.7,  _B=0.4)
+//   PGM_VIA_PIP: output R=0.0, G=0.2, B=1.0  → (_R=1.0, _G=0.2,  _B=0.0)
+
+// Dark green for "visible in PVW indirectly via a PiP that's on PVW".
+// Output target: R=0, G=0.55, B=0.
+const PVW_VIA_PIP_R: f64 = 0.0;
+const PVW_VIA_PIP_G: f64 = 0.55;
+const PVW_VIA_PIP_B: f64 = 0.0;
+
+// Dark red for "visible in PGM indirectly via a PiP that's on PGM".
+// Output target: R=0.55, G=0, B=0.
+const PGM_VIA_PIP_R: f64 = 0.0;
+const PGM_VIA_PIP_G: f64 = 0.0;
+const PGM_VIA_PIP_B: f64 = 0.55;
+
 // Yellow for background indicator: want output R=1.0, G=0.8, B=0
 
-const GRAY: f64 = 0.5;
+// Default (inactive) border for thumbnail and PiP tiles. Darker than mid-gray
+// so the colored PGM/PVW/via-PiP status borders read as clearly brighter.
+const GRAY: f64 = 0.2;
 
 /// Vertical VU meter sectors matching the audio mixer live UI and the
 /// standalone meter block. Boundaries follow [`vision_mixer::VU_METER_*_DB`]
@@ -581,6 +610,29 @@ fn hash_meters(state: &VisionMixerOverlayState) -> u64 {
     h
 }
 
+/// Cheap rolling hash over PiP composition state (per-PiP bg input + zone
+/// source lists). Used in the overlay dirty-check so zone or bg edits trigger
+/// a re-render even when no PGM/PVW bus index changes — the via-PiP thumbnail
+/// rings depend on these.
+fn hash_pip_compose(state: &VisionMixerOverlayState) -> u64 {
+    let mut h: u64 = 0xDEADBEEFCAFEBABE;
+    for slot in &state.pip_bg {
+        h = h.rotate_left(7).wrapping_add(slot.load(Ordering::Relaxed));
+    }
+    for zones_lock in &state.pip_zones {
+        if let Ok(zones) = zones_lock.lock() {
+            for zone in zones.iter() {
+                for &src in zone.effective_sources() {
+                    h = h.rotate_left(5).wrapping_add(src as u64 + 1);
+                }
+                // Zone separator so [1,2][3] hashes differently from [1][2,3].
+                h = h.rotate_left(11).wrapping_add(0xA55A);
+            }
+        }
+    }
+    h
+}
+
 /// Helper to get text extents, returning (width, height) with a fallback.
 fn text_size(cr: &cairo::Context, text: &str) -> (f64, f64) {
     match cr.text_extents(text) {
@@ -651,6 +703,10 @@ pub struct OverlayRenderer {
     last_pgm_pip: u64,
     /// Previous PVW-on-PiP index packed (NO_PIP if PVW was an input).
     last_pvw_pip: u64,
+    /// Hash of PiP composition (per-PiP bg + zone sources). Captures changes
+    /// that affect which thumbnails get a via-PiP status ring but no other
+    /// tracked atomic changed.
+    last_pip_compose_hash: u64,
 }
 
 // SAFETY: OverlayRenderer is accessed via Mutex from the timer thread and API
@@ -682,6 +738,7 @@ impl OverlayRenderer {
             last_show_vu: false,
             last_pgm_pip: u64::MAX - 2,
             last_pvw_pip: u64::MAX - 2,
+            last_pip_compose_hash: u64::MAX - 3,
         }
     }
 
@@ -700,6 +757,7 @@ impl OverlayRenderer {
         let clock_secs = h as u64 * 3600 + m as u64 * 60 + s as u64;
         let show_vu = self.state.show_vu_meters();
         let meters_hash = if show_vu { hash_meters(&self.state) } else { 0 };
+        let pip_compose_hash = hash_pip_compose(&self.state);
 
         let dirty = self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
@@ -708,7 +766,8 @@ impl OverlayRenderer {
             || self.last_pvw_pip != pvw_pip_packed
             || self.last_clock_secs != clock_secs
             || self.last_show_vu != show_vu
-            || (show_vu && self.last_meters_hash != meters_hash);
+            || (show_vu && self.last_meters_hash != meters_hash)
+            || self.last_pip_compose_hash != pip_compose_hash;
 
         if dirty {
             let pgm = (pgm_packed != NO_SOURCE).then_some(pgm_packed as usize);
@@ -735,6 +794,7 @@ impl OverlayRenderer {
                 self.last_clock_secs = clock_secs;
                 self.last_show_vu = show_vu;
                 self.last_meters_hash = meters_hash;
+                self.last_pip_compose_hash = pip_compose_hash;
             }
             pushed
         } else {
@@ -975,6 +1035,59 @@ pub fn start_overlay_timer(
         });
 }
 
+/// Collect the input indices that contribute to a PiP composition (background
+/// plus all zone sources). Used to determine which thumbnails should be
+/// highlighted as "visible indirectly via this PiP".
+fn collect_pip_inputs(state: &VisionMixerOverlayState, pip_idx: Option<usize>) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some(idx) = pip_idx else {
+        return out;
+    };
+    if let Some(bg) = state.pip_bg_input(idx) {
+        out.push(bg);
+    }
+    for zone in state.pip_zones(idx) {
+        for &src in zone.effective_sources() {
+            if !out.contains(&src) {
+                out.push(src);
+            }
+        }
+    }
+    out
+}
+
+/// Draw concentric border rings around `rect`. Colors are ordered weakest → strongest;
+/// the first colour becomes the outermost ring, the last colour the innermost.
+/// Each ring uses `line_width` and sits flush against the next so total border
+/// width grows linearly with `colors.len()`.
+///
+/// Centralising the stroke logic here keeps it cheap to switch later to a
+/// different presentation (dashed alternation, sectioned borders, etc.).
+fn draw_status_border(
+    cr: &cairo::Context,
+    rect: &super::layout::Rect,
+    line_width: f64,
+    colors: &[(f64, f64, f64)],
+) {
+    if colors.is_empty() {
+        return;
+    }
+    cr.set_line_width(line_width);
+    for (k, &(r, g, b)) in colors.iter().enumerate() {
+        let inset = k as f64 * line_width;
+        let x = rect.x + inset;
+        let y = rect.y + inset;
+        let w = rect.w - 2.0 * inset;
+        let h = rect.h - 2.0 * inset;
+        if w <= 0.0 || h <= 0.0 {
+            break;
+        }
+        cr.set_source_rgb(r, g, b);
+        cr.rectangle(x, y, w, h);
+        let _ = cr.stroke();
+    }
+}
+
 /// Render overlay content to a cairo context (called only when state changes).
 #[allow(clippy::too_many_arguments)]
 fn render_overlay(
@@ -1003,26 +1116,45 @@ fn render_overlay(
     cr.rectangle(r.x, r.y, r.w, r.h);
     let _ = cr.stroke();
 
+    // PiPs currently on PGM/PVW determine which thumbnails get a via-PiP
+    // status ring. Collect their participating input indices once.
+    let pgm_pip_idx = state.pgm_pip();
+    let pvw_pip_idx = state.pvw_pip();
+    let via_pgm_pip = collect_pip_inputs(state, pgm_pip_idx);
+    let via_pvw_pip = collect_pip_inputs(state, pvw_pip_idx);
+
     // --- Thumbnail borders (drawn around full slot including label area) ---
+    // Status rings in weak→strong order: indirect-PVW (dark green), indirect-PGM
+    // (dark red), direct-PVW (green), direct-PGM (red). PGM ends up innermost.
+    let mut colors: Vec<(f64, f64, f64)> = Vec::with_capacity(4);
     for i in 0..layout.num_inputs.min(layout.thumbnail_slot_rects.len()) {
-        let r = &layout.thumbnail_slot_rects[i];
-        if pgm == Some(i) {
-            cr.set_source_rgb(PGM_R, PGM_G, PGM_B);
-        } else if pvw == Some(i) {
-            cr.set_source_rgb(PVW_R, PVW_G, PVW_B);
-        } else {
-            cr.set_source_rgb(GRAY, GRAY, GRAY);
+        colors.clear();
+        if via_pvw_pip.contains(&i) {
+            colors.push((PVW_VIA_PIP_R, PVW_VIA_PIP_G, PVW_VIA_PIP_B));
         }
-        cr.set_line_width(layout.thumb_border_width);
-        cr.rectangle(r.x, r.y, r.w, r.h);
-        let _ = cr.stroke();
+        if via_pgm_pip.contains(&i) {
+            colors.push((PGM_VIA_PIP_R, PGM_VIA_PIP_G, PGM_VIA_PIP_B));
+        }
+        if pvw == Some(i) {
+            colors.push((PVW_R, PVW_G, PVW_B));
+        }
+        if pgm == Some(i) {
+            colors.push((PGM_R, PGM_G, PGM_B));
+        }
+        if colors.is_empty() {
+            colors.push((GRAY, GRAY, GRAY));
+        }
+        draw_status_border(
+            cr,
+            &layout.thumbnail_slot_rects[i],
+            layout.thumb_border_width,
+            &colors,
+        );
     }
 
     // --- PiP tile borders ---
     // Mirror the thumbnail color scheme: red if this PiP is on PGM, green if on
     // PVW, gray otherwise. PGM wins over PVW if both somehow apply.
-    let pgm_pip_idx = state.pgm_pip();
-    let pvw_pip_idx = state.pvw_pip();
     for (i, r) in layout
         .pip_tile_slot_rects
         .iter()
