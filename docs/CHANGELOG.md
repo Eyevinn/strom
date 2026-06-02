@@ -478,7 +478,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.15] - 2026-01-28
+## [0.3.15] - 2026-01-29
 
 ### Added
 - Audio Latency measurement block using GStreamer audiolatency element (#299)
@@ -539,7 +539,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.12] - 2026-01-17
+## [0.3.12] - 2026-01-20
 
 ### Added
 - QoS DSCP marking for AES67 output (#249)
@@ -555,7 +555,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.11] - 2026-01-16
+## [0.3.11] - 2026-01-19
 
 ### Added
 - Windows MSI installer with bundled GStreamer and Graphviz (#230)
@@ -615,7 +615,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.7] - 2026-01-06
+## [0.3.7] - 2026-01-02
 
 ### Changed
 - Use native ARM64 runners for Docker builds (#205)
@@ -623,7 +623,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.6] - 2025-12-30
+## [0.3.6] - 2026-01-02
 
 ### Added
 - NDI video and audio input/output blocks with mode enum and dynamic pads (#139)
@@ -641,7 +641,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.5] - 2025-12-18
+## [0.3.5] - 2025-12-29
 
 ### Added
 - mDNS/RAVENNA discovery support for AES67 streams (#182)
@@ -651,7 +651,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.4] - 2025-12-15
+## [0.3.4] - 2025-12-19
 
 ### Added
 - Auto-reload frontend when backend is rebuilt (#174)
@@ -664,7 +664,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.2] - 2025-12-10
+## [0.3.2] - 2025-12-18
 
 ### Added
 - Signal handling for graceful shutdown (#167)
@@ -676,7 +676,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.3.0] - 2025-12-06
+## [0.3.0] - 2025-12-17
 
 ### Added
 - V4L2 encoder support for Raspberry Pi hardware encoding (#115)
@@ -915,7 +915,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ---
 
-## [0.1.0] - 2025-01-13
+## [0.1.0] - 2025-11-14
 
 ### Added - Backend
 - Complete Cargo workspace structure (types, backend, frontend)
