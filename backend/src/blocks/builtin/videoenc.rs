@@ -532,10 +532,41 @@ fn set_encoder_properties(
     } else if encoder_name.starts_with("vtenc") {
         // Apple VideoToolbox (macOS): bitrate property is in kbps
         encoder.set_property_from_str("bitrate", &bitrate_str);
-        // VideoToolbox: realtime mode for low-latency streaming
+        // VideoToolbox: realtime mode disables frame buffering / lookahead.
+        // That is a *latency* property, orthogonal to compression quality.
+        // Strom is a live mixer/streamer (WebRTC/SRT), so drive it from the
+        // low-latency tune (the same signal x264/x265 use), not the quality
+        // preset — otherwise picking medium/slow would silently add encoder
+        // latency in a live context.
         if encoder.has_property("realtime") {
-            let realtime = matches!(quality_preset, "ultrafast" | "fast");
+            let realtime = tune == "zerolatency";
             encoder.set_property_from_str("realtime", if realtime { "true" } else { "false" });
+        }
+        // VideoToolbox rate control: respect the requested mode. Newer vtenc
+        // exposes a rate-control enum (abr/cbr); CBR gives predictable
+        // bandwidth over constrained SRT/WebRTC links. CQP has no VT
+        // equivalent, so fall back to ABR.
+        if encoder.has_property("rate-control") {
+            let rc = match rate_control {
+                RateControl::CBR => "cbr",
+                RateControl::VBR | RateControl::CQP => "abr",
+            };
+            encoder.set_property_from_str("rate-control", rc);
+        }
+        // VideoToolbox: cap the wall-clock gap between keyframes in addition
+        // to the frame-based max-keyframe-interval set below. WebRTC clients
+        // need a keyframe to start decoding when they join, so an unbounded
+        // wall-clock gap hurts join latency if the source runs slower than
+        // expected. keyframe_interval is in frames; the block's convention
+        // (see property docs) is "60 frames = 2 s at 30 fps", so derive the
+        // ns cap at the same nominal 30 fps. Above 30 fps the frame cap fires
+        // first (tighter); below it this duration holds the line.
+        if keyframe_interval > 0 && encoder.has_property("max-keyframe-interval-duration") {
+            let duration_ns = u64::from(keyframe_interval) * 1_000_000_000 / 30;
+            encoder.set_property_from_str(
+                "max-keyframe-interval-duration",
+                &duration_ns.to_string(),
+            );
         }
         // VideoToolbox defaults to allow-frame-reordering=true, which emits
         // B-frames. B-frames cause non-monotonic PTS in decode order —
