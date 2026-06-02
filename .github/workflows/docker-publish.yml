@@ -67,7 +67,10 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-amd64
           platforms: linux/amd64
           cache-from: type=gha,scope=docker-amd64
-          cache-to: type=gha,mode=max,scope=docker-amd64
+          # mode=min: cache only the final image layers. mode=max also exported
+          # the builder's multi-GB target/ each build (~6 min), which COPY . .
+          # busts anyway and sccache now covers — net loss. See PR discussion.
+          cache-to: type=gha,mode=min,scope=docker-amd64
           provenance: false
           sbom: false
           # sccache S3 credentials, consumed by the Dockerfile builder stages.
@@ -118,7 +121,8 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-arm64
           platforms: linux/arm64
           cache-from: type=gha,scope=docker-arm64
-          cache-to: type=gha,mode=max,scope=docker-arm64
+          # mode=min: see the AMD64 job above.
+          cache-to: type=gha,mode=min,scope=docker-arm64
           provenance: false
           sbom: false
           # sccache S3 credentials, consumed by the Dockerfile builder stages.
