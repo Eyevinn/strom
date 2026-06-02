@@ -11,6 +11,30 @@ use std::sync::{Arc, Mutex};
 use strom_types::{BlockDefinition, Element, Flow, PipelineState};
 use tracing::{debug, error, info, warn};
 
+/// Whether `element` is a sink (its factory klass advertises "Sink").
+fn is_sink_element(element: &gst::Element) -> bool {
+    element
+        .factory()
+        .and_then(|f| f.metadata("klass").map(|k| k.contains("Sink")))
+        .unwrap_or(false)
+}
+
+/// Install a probe on `pad` that drops upstream QoS events.
+///
+/// Used on qos-enabled sink pads to stop the per-buffer upstream QoS event
+/// storm from propagating (and leaking) into the rest of the pipeline. See the
+/// call site in `add_element` for the rationale.
+fn drop_upstream_qos_events(pad: &gst::Pad) {
+    pad.add_probe(gst::PadProbeType::EVENT_UPSTREAM, |_pad, info| {
+        if let Some(gst::PadProbeData::Event(ref event)) = info.data {
+            if event.type_() == gst::EventType::Qos {
+                return gst::PadProbeReturn::Drop;
+            }
+        }
+        gst::PadProbeReturn::Pass
+    });
+}
+
 impl PipelineManager {
     /// Create a new pipeline from a flow definition.
     #[allow(clippy::too_many_arguments)]
@@ -297,10 +321,26 @@ impl PipelineManager {
                 ))
             })?;
 
-        // Enable QoS by default if the element supports it (for buffer drop monitoring)
+        // Enable QoS by default if the element supports it. QoS drop statistics
+        // are surfaced as StromEvent::QoSStats; they come from QoS *bus messages*
+        // (posted by sinks on dropped buffers), not from the upstream QoS *events*.
         if element.has_property("qos") {
             element.set_property("qos", true);
             debug!("Enabled QoS on element {}", element_def.id);
+
+            // A qos-enabled sink emits one upstream QoS event per buffer. These
+            // events are not freed by every element in the WebRTC/RTP receive
+            // chains and accumulate — a per-buffer GstEvent leak that slowly eats
+            // memory (~580 leaked QoS events/s measured under load). They serve no
+            // purpose propagating upstream in our pipelines (a live source cannot
+            // be throttled by a local QoS event), and dropping them does not
+            // affect QoSStats (bus-message based). Kill them at the source: drop
+            // the upstream QoS events on the sink's own sink pad.
+            if is_sink_element(&element) {
+                if let Some(sink_pad) = element.static_pad("sink") {
+                    drop_upstream_qos_events(&sink_pad);
+                }
+            }
         }
 
         // Default is-live=true for test sources (unless explicitly set by user)
