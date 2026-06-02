@@ -22,6 +22,13 @@ Installs the recommended NVIDIA driver using `ubuntu-drivers`. This script:
 - Installs the recommended driver version
 - Prompts for reboot to load the new driver
 
+For automation, set `REBOOT` to skip the prompt: `REBOOT=no` installs the driver
+without rebooting (reboot later yourself), `REBOOT=yes` reboots immediately.
+
+```bash
+REBOOT=no ./install-nvidia-driver.sh
+```
+
 **Important:** Do NOT install the `nvidia-headless` driver variant - it lacks the OpenGL/EGL capabilities required for CUDA-GL interop.
 
 ### 2. Install NVIDIA Container Toolkit
