@@ -12,7 +12,18 @@ env:
   RUST_BACKTRACE: 1
   TRUNK_VERSION: "0.21.14"
   CARGO_INCREMENTAL: 0
-  SCCACHE_GHA_ENABLED: "true"
+  # sccache -> self-hosted MinIO (S3-compatible) cache in OSC.
+  # Replaces the GitHub Actions cache backend, which shares a hard 10 GB/repo
+  # ceiling with the docker buildkit blobs. The same backend is reused by the
+  # release workflow and the Dockerfile builder, where rust-cache cannot reach.
+  # Requires repo secrets SCCACHE_S3_ACCESS_KEY_ID / SCCACHE_S3_SECRET_ACCESS_KEY
+  # (a service account scoped to the strom bucket, no admin).
+  SCCACHE_BUCKET: strom
+  SCCACHE_ENDPOINT: https://eyevinnlab-rustcache.minio-minio.auto.prod.osaas.io
+  SCCACHE_REGION: us-east-1
+  SCCACHE_S3_USE_SSL: "true"
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
 
 jobs:
   # Fast checks on Linux: fmt + clippy + test
@@ -219,19 +230,15 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
-      - name: Install GStreamer
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libunwind-dev \
-            libcairo2-dev \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            libgstreamer-plugins-bad1.0-dev \
-            libssl-dev \
-            pkg-config \
-            cmake \
-            libclang-dev
+      # Cached apt install (mirrors the Check job) — avoids re-downloading the
+      # GStreamer dev stack (~1 min) on every build. cache-apt-pkgs-action keys
+      # the cache by package list + version + runner arch, so x86_64 and arm64
+      # get separate entries automatically.
+      - name: Install GStreamer (cached)
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libunwind-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libssl-dev pkg-config cmake libclang-dev
+          version: 1.5
 
       - name: Download frontend dist
         uses: actions/download-artifact@v4
@@ -331,19 +338,15 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
-      - name: Install GStreamer
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libunwind-dev \
-            libcairo2-dev \
-            libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev \
-            libgstreamer-plugins-bad1.0-dev \
-            libssl-dev \
-            pkg-config \
-            cmake \
-            libclang-dev
+      # Cached apt install (mirrors the Check job) — avoids re-downloading the
+      # GStreamer dev stack (~1 min) on every build. cache-apt-pkgs-action keys
+      # the cache by package list + version + runner arch, so x86_64 and arm64
+      # get separate entries automatically.
+      - name: Install GStreamer (cached)
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: libunwind-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libssl-dev pkg-config cmake libclang-dev
+          version: 1.5
 
       - name: Download frontend dist
         uses: actions/download-artifact@v4
