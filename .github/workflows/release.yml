@@ -11,6 +11,16 @@ env:
   TRUNK_VERSION: "0.21.14"
   CARGO_INCREMENTAL: 0
   CARGO_BUILD_JOBS: 2
+  # sccache -> self-hosted MinIO (S3) cache in OSC. Tag builds run weeks apart,
+  # so the rust-cache target/ is usually evicted (10 GB GHA ceiling) and every
+  # release recompiles cold. A persistent remote compiler cache cuts that.
+  # Requires repo secrets SCCACHE_S3_ACCESS_KEY_ID / SCCACHE_S3_SECRET_ACCESS_KEY.
+  SCCACHE_BUCKET: strom
+  SCCACHE_ENDPOINT: https://eyevinnlab-rustcache.minio-minio.auto.prod.osaas.io
+  SCCACHE_REGION: us-east-1
+  SCCACHE_S3_USE_SSL: "true"
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
 
 jobs:
   build-frontend:
@@ -42,10 +52,15 @@ jobs:
           shared-key: frontend-wasm
           cache-on-failure: true
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Build frontend
         run: |
           cd frontend
           trunk build --release
+        env:
+          RUSTC_WRAPPER: sccache
 
       - name: Upload frontend dist
         uses: actions/upload-artifact@v4
@@ -100,6 +115,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       # Linux: Install Zig and cargo-zigbuild for glibc 2.31 compatibility
       - name: Determine Zig/cargo-zigbuild arch (Linux)
@@ -238,6 +256,7 @@ jobs:
         if: startsWith(matrix.platform, 'linux')
         env:
           RUSTFLAGS: "-L /usr/lib/${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu' || 'x86_64-linux-gnu' }}"
+          RUSTC_WRAPPER: sccache
         run: |
           set -e
           FEATURES="${{ matrix.features }}"
@@ -252,6 +271,8 @@ jobs:
       - name: Build backend (non-Linux)
         if: ${{ !startsWith(matrix.platform, 'linux') }}
         shell: bash
+        env:
+          RUSTC_WRAPPER: sccache
         run: |
           set -e
           FEATURES="${{ matrix.features }}"
