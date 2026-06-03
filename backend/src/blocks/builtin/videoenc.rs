@@ -563,10 +563,8 @@ fn set_encoder_properties(
         // first (tighter); below it this duration holds the line.
         if keyframe_interval > 0 && encoder.has_property("max-keyframe-interval-duration") {
             let duration_ns = u64::from(keyframe_interval) * 1_000_000_000 / 30;
-            encoder.set_property_from_str(
-                "max-keyframe-interval-duration",
-                &duration_ns.to_string(),
-            );
+            encoder
+                .set_property_from_str("max-keyframe-interval-duration", &duration_ns.to_string());
         }
         // VideoToolbox defaults to allow-frame-reordering=true, which emits
         // B-frames. B-frames cause non-monotonic PTS in decode order —
