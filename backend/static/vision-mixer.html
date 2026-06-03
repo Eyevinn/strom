@@ -382,13 +382,66 @@
         }
         .pip-editor {
             display: inline-flex;
-            align-items: flex-start;
-            gap: 16px;
+            flex-direction: column;
+            gap: 10px;
             padding: 12px;
             background: var(--pip-bg-elevated);
             border: 1px solid var(--pip-border);
             border-radius: 4px;
             align-self: flex-start;
+        }
+        /* Two equal columns — Zones and Crop/Zoom — each: header row with
+           its tools, the canvas, then compact control rows beneath. */
+        .pip-editor-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 20px;
+        }
+        .pip-editor-col {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .pip-editor-head {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--pip-text);
+            min-height: 26px;
+        }
+        .pip-editor-title {
+            color: var(--pip-accent-bright);
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+        .pip-editor-ctrl {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--pip-text-dim);
+        }
+        .pip-editor-ctrl-label {
+            color: var(--pip-text);
+            font-weight: 700;
+        }
+        /* Narrower px inputs so X/Y/W/H (+cap) fit on a single control row. */
+        .pip-editor-ctrl .pip-zone-px-input {
+            width: 52px;
+        }
+        .pip-editor-ctrl .pip-zone-cap-input {
+            width: 40px;
+        }
+        /* One shared one-line legend for the whole editor. */
+        .pip-editor-footer {
+            font-size: 10px;
+            color: var(--pip-text-muted);
+            max-width: 860px;
         }
         .pip-config-row {
             display: flex;
@@ -495,11 +548,6 @@
         }
 
         /* PiP zone editor — visual canvas per PiP */
-        .pip-canvas-wrap {
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-        }
         .pip-canvas {
             position: relative;
             width: 480px;
@@ -638,16 +686,6 @@
             width: 320px;
             flex-shrink: 0;
         }
-        .pip-crop-head {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .pip-crop-head .pip-crop-title {
-            color: var(--pip-accent-bright);
-            font-weight: 700;
-            letter-spacing: 0.3px;
-        }
         .pip-crop-select {
             background: var(--pip-bg-control);
             border: 1px solid var(--pip-border-strong);
@@ -741,18 +779,6 @@
             color: var(--pip-accent-bright);
             border-color: var(--pip-accent);
         }
-        .pip-canvas-toolbar {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 8px;
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--pip-text);
-            width: 220px;
-            flex-shrink: 0;
-        }
-        .pip-canvas-toolbar > * { max-width: 100%; }
         .pip-zone-add-btn {
             background: var(--pip-bg-control);
             border: 1px solid var(--pip-border-strong);
@@ -786,12 +812,6 @@
         }
         /* Pixel-precise rect editor for the active zone. Two rows of two
            inputs — X/Y above, W/H below — sized to fit the 220px toolbar. */
-        .pip-zone-px-row {
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            color: var(--pip-text-dim);
-        }
         .pip-zone-px-label {
             font-size: 11px;
             font-weight: 600;
@@ -814,13 +834,6 @@
             cursor: not-allowed;
         }
         /* Snap + grid toggle checkboxes for the layout editor. */
-        .pip-zone-toggle-row {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            color: var(--pip-text-dim);
-            font-size: 11px;
-        }
         .pip-zone-toggle {
             display: inline-flex;
             align-items: center;
@@ -857,13 +870,6 @@
         }
         .pip-grid-line.active-snap.v { width: 2px; margin-left: -0.5px; }
         .pip-grid-line.active-snap.h { height: 2px; margin-top: -0.5px; }
-        .pip-canvas-hint {
-            font-size: 10px;
-            font-weight: 400;
-            color: var(--pip-text-muted);
-            line-height: 1.5;
-            max-width: 220px;
-        }
 
         /* Status bar */
         .status-bar {
@@ -1069,7 +1075,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.18-source-crop | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.19-editor-layout | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1892,9 +1898,9 @@
             }
 
             const head = document.createElement('div');
-            head.className = 'pip-crop-head';
+            head.className = 'pip-editor-head';
             const title = document.createElement('span');
-            title.className = 'pip-crop-title';
+            title.className = 'pip-editor-title';
             title.textContent = 'Crop / Zoom';
             head.appendChild(title);
             const sel = document.createElement('select');
@@ -2037,20 +2043,17 @@
                 l.textContent = text;
                 return l;
             };
-            const cropPxRow1 = document.createElement('div');
-            cropPxRow1.className = 'pip-zone-px-row';
-            cropPxRow1.appendChild(mkPxLabel('X'));
-            cropPxRow1.appendChild(mkCropPxInput('x', srcW));
-            cropPxRow1.appendChild(mkPxLabel('Y'));
-            cropPxRow1.appendChild(mkCropPxInput('y', srcH));
-            wrap.appendChild(cropPxRow1);
-            const cropPxRow2 = document.createElement('div');
-            cropPxRow2.className = 'pip-zone-px-row';
-            cropPxRow2.appendChild(mkPxLabel('W'));
-            cropPxRow2.appendChild(mkCropPxInput('w', srcW));
-            cropPxRow2.appendChild(mkPxLabel('H'));
-            cropPxRow2.appendChild(mkCropPxInput('h', srcH));
-            wrap.appendChild(cropPxRow2);
+            const cropCtrl = document.createElement('div');
+            cropCtrl.className = 'pip-editor-ctrl';
+            cropCtrl.appendChild(mkPxLabel('X'));
+            cropCtrl.appendChild(mkCropPxInput('x', srcW));
+            cropCtrl.appendChild(mkPxLabel('Y'));
+            cropCtrl.appendChild(mkCropPxInput('y', srcH));
+            cropCtrl.appendChild(mkPxLabel('W'));
+            cropCtrl.appendChild(mkCropPxInput('w', srcW));
+            cropCtrl.appendChild(mkPxLabel('H'));
+            cropCtrl.appendChild(mkCropPxInput('h', srcH));
+            wrap.appendChild(cropCtrl);
 
             const actions = document.createElement('div');
             actions.className = 'pip-crop-actions';
@@ -2079,11 +2082,6 @@
             resetBtn.onclick = () => resetCrop(p, input);
             actions.appendChild(resetBtn);
             wrap.appendChild(actions);
-
-            const hint = document.createElement('div');
-            hint.className = 'pip-canvas-hint';
-            hint.textContent = 'The frame is the visible part of the source — it scales to fill the box. Drag to pan, corners or the slider to zoom. X/Y/W/H are in source pixels. Snap/Grid toggles are shared with the zone editor.';
-            wrap.appendChild(hint);
 
             attachCropDrag(frame, srcCanvas, p, input, ratio, {
                 get: () => win,
@@ -2296,11 +2294,74 @@
                 }
 
                 // ---- Layout editor (only when this PiP is being edited) ----
+                // Two equal columns — Zones and Crop/Zoom — each with a
+                // header row holding its tools, the canvas, and compact
+                // control rows beneath. One shared one-line legend at the
+                // bottom replaces the old per-column hint paragraphs.
                 const editor = document.createElement('div');
                 editor.className = 'pip-editor';
+                const editorRow = document.createElement('div');
+                editorRow.className = 'pip-editor-row';
 
-                const canvasWrap = document.createElement('div');
-                canvasWrap.className = 'pip-canvas-wrap';
+                const zoneCol = document.createElement('div');
+                zoneCol.className = 'pip-editor-col';
+
+                // Zones header: title, BG selector, add-zone, snap/grid.
+                const zoneHead = document.createElement('div');
+                zoneHead.className = 'pip-editor-head';
+                const zoneTitle = document.createElement('span');
+                zoneTitle.className = 'pip-editor-title';
+                zoneTitle.textContent = 'Zones';
+                zoneHead.appendChild(zoneTitle);
+                const bgRow = document.createElement('label');
+                bgRow.className = 'pip-zone-cap-row';
+                bgRow.append('BG');
+                bgRow.title = 'Background input (fills the PiP behind the zones)';
+                const bgSel = document.createElement('select');
+                bgSel.className = 'pip-bg-select';
+                const noneOpt = document.createElement('option');
+                noneOpt.value = '';
+                noneOpt.textContent = 'None';
+                bgSel.appendChild(noneOpt);
+                for (let i = 0; i < NUM_INPUTS; i++) {
+                    const o = document.createElement('option');
+                    o.value = String(i);
+                    o.textContent = INPUT_LABELS[i] || ('Input ' + (i + 1));
+                    if (cfg.bg === i) o.selected = true;
+                    bgSel.appendChild(o);
+                }
+                bgSel.onchange = () => setPipBg(p, bgSel.value);
+                bgRow.appendChild(bgSel);
+                zoneHead.appendChild(bgRow);
+                const addBtn = document.createElement('button');
+                addBtn.className = 'pip-zone-add-btn';
+                addBtn.textContent = '+ Zone';
+                addBtn.onclick = () => addZone(p);
+                zoneHead.appendChild(addBtn);
+                // Snap + grid toggles — shared by the zone canvas and the
+                // crop canvas. State persists across reloads via localStorage.
+                const snapLabel = document.createElement('label');
+                snapLabel.className = 'pip-zone-toggle';
+                const snapCb = document.createElement('input');
+                snapCb.type = 'checkbox';
+                snapCb.checked = snapEnabled;
+                snapCb.onchange = () => toggleSnap();
+                snapLabel.appendChild(snapCb);
+                snapLabel.append(' Snap');
+                snapLabel.title = 'Snap drag and pixel input to quarters and rule-of-thirds';
+                zoneHead.appendChild(snapLabel);
+                const gridLabel = document.createElement('label');
+                gridLabel.className = 'pip-zone-toggle';
+                const gridCb = document.createElement('input');
+                gridCb.type = 'checkbox';
+                gridCb.checked = gridVisible;
+                gridCb.onchange = () => toggleGrid();
+                gridLabel.appendChild(gridCb);
+                gridLabel.append(' Grid');
+                gridLabel.title = 'Show quarter (white) and rule-of-thirds (gold) guide lines';
+                zoneHead.appendChild(gridLabel);
+                zoneCol.appendChild(zoneHead);
+
                 const canvas = document.createElement('div');
                 canvas.className = 'pip-canvas';
                 canvas.dataset.pip = String(p);
@@ -2396,86 +2457,23 @@
                     canvas.appendChild(z);
                 });
 
-                canvasWrap.appendChild(canvas);
+                zoneCol.appendChild(canvas);
 
-                // Toolbar: BG selector, add-zone button, active-zone capacity input.
-                const toolbar = document.createElement('div');
-                toolbar.className = 'pip-canvas-toolbar';
-
-                const bgRow = document.createElement('label');
-                bgRow.className = 'pip-zone-cap-row';
-                bgRow.append('Background');
-                const bgSel = document.createElement('select');
-                bgSel.className = 'pip-bg-select';
-                const noneOpt = document.createElement('option');
-                noneOpt.value = '';
-                noneOpt.textContent = 'None';
-                bgSel.appendChild(noneOpt);
-                for (let i = 0; i < NUM_INPUTS; i++) {
-                    const o = document.createElement('option');
-                    o.value = String(i);
-                    o.textContent = INPUT_LABELS[i] || ('Input ' + (i + 1));
-                    if (cfg.bg === i) o.selected = true;
-                    bgSel.appendChild(o);
-                }
-                bgSel.onchange = () => setPipBg(p, bgSel.value);
-                bgRow.appendChild(bgSel);
-                toolbar.appendChild(bgRow);
-
-                const addBtn = document.createElement('button');
-                addBtn.className = 'pip-zone-add-btn';
-                addBtn.textContent = '+ Zone';
-                addBtn.onclick = () => addZone(p);
-                toolbar.appendChild(addBtn);
-
-                // Snap + grid toggles. Affect drag, px-input, and the optional
-                // overlay rendered above. State persists across reloads via
-                // localStorage (see snapEnabled / gridVisible).
-                const toggleRow = document.createElement('div');
-                toggleRow.className = 'pip-zone-toggle-row';
-                const snapLabel = document.createElement('label');
-                snapLabel.className = 'pip-zone-toggle';
-                const snapCb = document.createElement('input');
-                snapCb.type = 'checkbox';
-                snapCb.checked = snapEnabled;
-                snapCb.onchange = () => toggleSnap();
-                snapLabel.appendChild(snapCb);
-                snapLabel.append(' Snap');
-                snapLabel.title = 'Snap drag and pixel input to quarters and rule-of-thirds';
-                toggleRow.appendChild(snapLabel);
-                const gridLabel = document.createElement('label');
-                gridLabel.className = 'pip-zone-toggle';
-                const gridCb = document.createElement('input');
-                gridCb.type = 'checkbox';
-                gridCb.checked = gridVisible;
-                gridCb.onchange = () => toggleGrid();
-                gridLabel.appendChild(gridCb);
-                gridLabel.append(' Grid');
-                gridLabel.title = 'Show quarter (white) and rule-of-thirds (gold) guide lines';
-                toggleRow.appendChild(gridLabel);
-                toolbar.appendChild(toggleRow);
-
+                // Active-zone control row: pixel-precise rect (PGM canvas
+                // coordinates, same round-trip formula as the backend's
+                // NormRect::to_pixels) + capacity. Disabled for auto zones —
+                // right-click the zone to promote it to a manual rect first.
                 if (cfg.zones.length > 0) {
                     const zi = Math.min(activeZoneIdx[p], cfg.zones.length - 1);
                     const zone = cfg.zones[zi];
-                    const capRow = document.createElement('label');
-                    capRow.className = 'pip-zone-cap-row';
-                    capRow.append('Active: Z' + (zi + 1) + ' · cap');
-                    const capInput = document.createElement('input');
-                    capInput.className = 'pip-zone-cap-input';
-                    capInput.type = 'number';
-                    capInput.min = '1';
-                    capInput.placeholder = '∞';
-                    capInput.value = zone.capacity != null ? String(zone.capacity) : '';
-                    capInput.onchange = () => setZoneCapacity(p, zi, capInput.value);
-                    capRow.appendChild(capInput);
-                    toolbar.appendChild(capRow);
+                    const zoneCtrl = document.createElement('div');
+                    zoneCtrl.className = 'pip-editor-ctrl';
+                    const zLbl = document.createElement('span');
+                    zLbl.className = 'pip-editor-ctrl-label';
+                    zLbl.textContent = 'Z' + (zi + 1);
+                    zLbl.title = 'Active zone — click a zone in the canvas to switch';
+                    zoneCtrl.appendChild(zLbl);
 
-                    // Pixel-precise rect editor for the active zone. Values are
-                    // in PGM canvas coordinates and round-trip through the same
-                    // formula the backend uses (NormRect::to_pixels). Disabled
-                    // for auto zones — right-click the zone to promote it to a
-                    // manual rect first.
                     const isAuto = zone.rect == null;
                     const pxRect = isAuto
                         ? { x: 0, y: 0, w: PGM_W, h: PGM_H }
@@ -2485,7 +2483,6 @@
                             w: Math.round(zone.rect.w * PGM_W),
                             h: Math.round(zone.rect.h * PGM_H),
                         };
-
                     const mkPxInput = (field, max) => {
                         const inp = document.createElement('input');
                         inp.className = 'pip-zone-px-input';
@@ -2501,43 +2498,42 @@
                         inp.onchange = () => setZoneRectPx(p, zi, field, inp.value);
                         return inp;
                     };
+                    const mkLbl = (text) => {
+                        const l = document.createElement('span');
+                        l.className = 'pip-zone-px-label';
+                        l.textContent = text;
+                        return l;
+                    };
+                    zoneCtrl.appendChild(mkLbl('X'));
+                    zoneCtrl.appendChild(mkPxInput('x', PGM_W));
+                    zoneCtrl.appendChild(mkLbl('Y'));
+                    zoneCtrl.appendChild(mkPxInput('y', PGM_H));
+                    zoneCtrl.appendChild(mkLbl('W'));
+                    zoneCtrl.appendChild(mkPxInput('w', PGM_W));
+                    zoneCtrl.appendChild(mkLbl('H'));
+                    zoneCtrl.appendChild(mkPxInput('h', PGM_H));
 
-                    const pxRow1 = document.createElement('div');
-                    pxRow1.className = 'pip-zone-px-row';
-                    const xLabel = document.createElement('span');
-                    xLabel.className = 'pip-zone-px-label';
-                    xLabel.textContent = 'X';
-                    pxRow1.appendChild(xLabel);
-                    pxRow1.appendChild(mkPxInput('x', PGM_W));
-                    const yLabel = document.createElement('span');
-                    yLabel.className = 'pip-zone-px-label';
-                    yLabel.textContent = 'Y';
-                    pxRow1.appendChild(yLabel);
-                    pxRow1.appendChild(mkPxInput('y', PGM_H));
-                    toolbar.appendChild(pxRow1);
-
-                    const pxRow2 = document.createElement('div');
-                    pxRow2.className = 'pip-zone-px-row';
-                    const wLabel = document.createElement('span');
-                    wLabel.className = 'pip-zone-px-label';
-                    wLabel.textContent = 'W';
-                    pxRow2.appendChild(wLabel);
-                    pxRow2.appendChild(mkPxInput('w', PGM_W));
-                    const hLabel = document.createElement('span');
-                    hLabel.className = 'pip-zone-px-label';
-                    hLabel.textContent = 'H';
-                    pxRow2.appendChild(hLabel);
-                    pxRow2.appendChild(mkPxInput('h', PGM_H));
-                    toolbar.appendChild(pxRow2);
+                    zoneCtrl.append('cap');
+                    const capInput = document.createElement('input');
+                    capInput.className = 'pip-zone-cap-input';
+                    capInput.type = 'number';
+                    capInput.min = '1';
+                    capInput.placeholder = '∞';
+                    capInput.title = 'Max sources in the zone (oldest evicts when full)';
+                    capInput.value = zone.capacity != null ? String(zone.capacity) : '';
+                    capInput.onchange = () => setZoneCapacity(p, zi, capInput.value);
+                    zoneCtrl.appendChild(capInput);
+                    zoneCol.appendChild(zoneCtrl);
                 }
 
-                const hint = document.createElement('div');
-                hint.className = 'pip-canvas-hint';
-                hint.innerHTML = 'Click a zone to activate. Push-chip adds the input to the active zone (oldest evicts at cap). Chip inside a zone = remove. Right-click a zone to toggle auto / manual rect. X/Y/W/H inputs are in PGM pixels.';
-                toolbar.appendChild(hint);
-                canvasWrap.appendChild(toolbar);
-                editor.appendChild(canvasWrap);
-                editor.appendChild(buildCropSection(p, cfg));
+                editorRow.appendChild(zoneCol);
+                editorRow.appendChild(buildCropSection(p, cfg));
+                editor.appendChild(editorRow);
+
+                const footer = document.createElement('div');
+                footer.className = 'pip-editor-footer';
+                footer.textContent = 'Drag to move · corners resize · right-click zone toggles auto/manual rect · chips push/remove sources · zone px = PGM canvas, crop px = source';
+                editor.appendChild(footer);
 
                 block.appendChild(editor);
                 panel.appendChild(block);
