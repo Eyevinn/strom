@@ -39,17 +39,24 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Package list must stay identical to build-linux-x86_64 so both jobs
+      # share one apt cache entry (the action keys by package list + arch).
       - name: Cache apt packages
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good cmake libclang-dev
+          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good pkg-config cmake libclang-dev
           version: 1.5
 
+      # save-if main: PR runs restore the main-branch cache (GHA cache scoping
+      # falls back to the base branch) but don't save their own per-branch
+      # copy — that copy doubled every rust-cache entry against the 10 GB
+      # repo ceiling. Changed workspace crates rebuild on PRs but hit sccache.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-x86_64
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -102,11 +109,13 @@ jobs:
         run: |
           wget -qO- https://github.com/trunk-rs/trunk/releases/download/v${{ env.TRUNK_VERSION }}/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf- -C ~/.cargo/bin
 
+      # save-if main: see check-linux.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: wasm
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -185,11 +194,13 @@ jobs:
       # first and wins the save race, so its debug/clippy target dir (host
       # target) gets cached instead of the zigbuild release artifacts — and
       # this job then rebuilds the entire dependency tree on every run.
+      # save-if main: see check-linux.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-x86_64-release
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache Zig tarball
         uses: actions/cache@v4
@@ -234,14 +245,14 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
-      # Cached apt install (mirrors the Check job) — avoids re-downloading the
-      # GStreamer dev stack (~1 min) on every build. cache-apt-pkgs-action keys
-      # the cache by package list + version + runner arch, so x86_64 and arm64
-      # get separate entries automatically.
+      # Cached apt install — avoids re-downloading the GStreamer dev stack
+      # (~1 min) on every build. The package list must stay identical to
+      # check-linux so both x86_64 jobs share one apt cache entry; arm64 gets
+      # its own entry automatically (the action keys by list + runner arch).
       - name: Install GStreamer (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: libunwind-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libssl-dev pkg-config cmake libclang-dev
+          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good pkg-config cmake libclang-dev
           version: 1.5
 
       - name: Download frontend dist
@@ -295,11 +306,13 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      # save-if main: see check-linux.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-arm64
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache Zig tarball
         uses: actions/cache@v4
@@ -342,14 +355,14 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
-      # Cached apt install (mirrors the Check job) — avoids re-downloading the
-      # GStreamer dev stack (~1 min) on every build. cache-apt-pkgs-action keys
-      # the cache by package list + version + runner arch, so x86_64 and arm64
-      # get separate entries automatically.
+      # Cached apt install — avoids re-downloading the GStreamer dev stack
+      # (~1 min) on every build. The package list must stay identical to
+      # check-linux so both x86_64 jobs share one apt cache entry; arm64 gets
+      # its own entry automatically (the action keys by list + runner arch).
       - name: Install GStreamer (cached)
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          packages: libunwind-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libssl-dev pkg-config cmake libclang-dev
+          packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good pkg-config cmake libclang-dev
           version: 1.5
 
       - name: Download frontend dist
@@ -432,12 +445,10 @@ jobs:
           name: frontend-dist
           path: backend/dist
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: windows
-          cache-on-failure: true
-
+      # No rust-cache here: this job is workflow_dispatch-only, so a saved
+      # target/ (~1-2 GB against the 10 GB repo ceiling) is almost always
+      # stale or evicted by the next manual run. sccache via MinIO covers
+      # recompiles instead.
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
@@ -512,12 +523,7 @@ jobs:
           name: frontend-dist
           path: backend/dist
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: macos
-          cache-on-failure: true
-
+      # No rust-cache here: workflow_dispatch-only, see the Windows job.
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
