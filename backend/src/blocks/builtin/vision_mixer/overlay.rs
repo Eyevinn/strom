@@ -1217,9 +1217,18 @@ pub fn start_overlay_timer(
             debug!("Overlay timer started for {}", block_id);
             // Wait for pipeline to reach PLAYING before pushing first frame.
             // The appsrc needs caps negotiation to complete first.
+            // Identity check, not just presence: a fast flow restart can
+            // re-register a NEW renderer under the same block id before this
+            // thread observes the unregistration — presence alone would keep
+            // the old thread (and its strong AppSrc ref) alive forever.
+            let still_mine = |r: &Arc<Mutex<OverlayRenderer>>| {
+                get_overlay_renderer(&block_id)
+                    .map(|cur| Arc::ptr_eq(&cur, r))
+                    .unwrap_or(false)
+            };
             let ready = loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                if get_overlay_renderer(&block_id).is_none() {
+                if !still_mine(&renderer) {
                     break false;
                 }
                 if let Ok(r) = renderer.lock() {
@@ -1250,7 +1259,7 @@ pub fn start_overlay_timer(
                     // spinning a catch-up burst.
                     next_tick = now;
                 }
-                if get_overlay_renderer(&block_id).is_none() {
+                if !still_mine(&renderer) {
                     debug!("Overlay timer stopping for {}", block_id);
                     break;
                 }

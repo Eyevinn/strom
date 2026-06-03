@@ -150,7 +150,8 @@ pub(super) fn build_pad_properties(
     }
 
     // --- PGM graphics overlay pad (zone borders): sink_{N + DSK} ---
-    {
+    // Only present when PiPs are configured (see the pipeline builders).
+    if p.num_pips > 0 {
         let pad_name = format!("sink_{}", p.num_inputs + p.num_dsk_inputs);
         let props = dist_pads.entry(pad_name).or_default();
         props.insert("xpos".to_string(), PropertyValue::Int(0));

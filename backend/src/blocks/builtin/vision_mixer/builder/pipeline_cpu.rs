@@ -239,39 +239,72 @@ pub(super) fn build_cpu_pipeline(
     // --- PGM graphics overlay (zone borders): appsrc → videoconvert → dist mixer ---
     // Mixer-state-driven decorations drawn by the mixer itself (borders track
     // live pad geometry). Sits below the DSK stack on the dist compositor.
-    let appsrc_pgm_ov_id = p.id("appsrc_pgm_overlay");
-    let pgm_ov_caps_str = format!(
-        "video/x-raw,format=RGBA,width={},height={},pixel-aspect-ratio=1/1,framerate={}/{},interlace-mode=progressive,multiview-mode=mono",
-        p.pgm_w, p.pgm_h, p.pgm_framerate.0, p.pgm_framerate.1
-    );
-    let pgm_ov_caps: gst::Caps = pgm_ov_caps_str
-        .parse()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("pgm overlay caps: {}", e)))?;
-    let appsrc_pgm_ov = gst_app::AppSrc::builder()
-        .name(&appsrc_pgm_ov_id)
-        .format(gst::Format::Time)
-        .is_live(false)
-        .automatic_eos(false)
-        .do_timestamp(true)
-        .max_buffers(2)
-        .leaky_type(gst_app::AppLeakyType::Upstream)
-        .build();
-    let q_pgm_ov_id = p.id("queue_pgm_overlay");
-    let vc_pgm_ov_id = p.id("videoconvert_pgm_overlay");
-    elems.push((appsrc_pgm_ov_id.clone(), appsrc_pgm_ov.clone().upcast()));
-    elems.push((q_pgm_ov_id.clone(), elements::make_queue(&q_pgm_ov_id)?));
-    elems.push((
-        vc_pgm_ov_id.clone(),
-        elements::make_element(vc_factory, &vc_pgm_ov_id)?,
-    ));
-    links.push((
-        ElementPadRef::pad(&appsrc_pgm_ov_id, "src"),
-        ElementPadRef::pad(&q_pgm_ov_id, "sink"),
-    ));
-    links.push((
-        ElementPadRef::pad(&q_pgm_ov_id, "src"),
-        ElementPadRef::pad(&vc_pgm_ov_id, "sink"),
-    ));
+    // Only built when PiPs are configured — zones (and thus borders) cannot
+    // exist without them, and skipping it saves a pad + a render thread.
+    let pgm_ov_last_id = if p.output_format.is_some() {
+        p.id("capsfilter_pgm_overlay")
+    } else {
+        p.id("videoconvert_pgm_overlay")
+    };
+    let pgm_overlay = if p.num_pips > 0 {
+        let appsrc_pgm_ov_id = p.id("appsrc_pgm_overlay");
+        let pgm_ov_caps_str = format!(
+            "video/x-raw,format=RGBA,width={},height={},pixel-aspect-ratio=1/1,framerate={}/{},interlace-mode=progressive,multiview-mode=mono",
+            p.pgm_w, p.pgm_h, p.pgm_framerate.0, p.pgm_framerate.1
+        );
+        let pgm_ov_caps: gst::Caps = pgm_ov_caps_str
+            .parse()
+            .map_err(|e| BlockBuildError::ElementCreation(format!("pgm overlay caps: {}", e)))?;
+        let appsrc_pgm_ov = gst_app::AppSrc::builder()
+            .name(&appsrc_pgm_ov_id)
+            .format(gst::Format::Time)
+            .is_live(false)
+            .automatic_eos(false)
+            .do_timestamp(true)
+            .max_buffers(2)
+            .leaky_type(gst_app::AppLeakyType::Upstream)
+            .build();
+        let q_pgm_ov_id = p.id("queue_pgm_overlay");
+        let vc_pgm_ov_id = p.id("videoconvert_pgm_overlay");
+        elems.push((appsrc_pgm_ov_id.clone(), appsrc_pgm_ov.clone().upcast()));
+        elems.push((q_pgm_ov_id.clone(), elements::make_queue(&q_pgm_ov_id)?));
+        elems.push((
+            vc_pgm_ov_id.clone(),
+            elements::make_element(vc_factory, &vc_pgm_ov_id)?,
+        ));
+        links.push((
+            ElementPadRef::pad(&appsrc_pgm_ov_id, "src"),
+            ElementPadRef::pad(&q_pgm_ov_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&q_pgm_ov_id, "src"),
+            ElementPadRef::pad(&vc_pgm_ov_id, "sink"),
+        ));
+        // When the compositor output format is forced, match it before the
+        // mixer pad — same pattern as the DSK and multiview overlay chains.
+        if let Some(ref fmt) = p.output_format {
+            let cf_pgm_ov = gst::ElementFactory::make("capsfilter")
+                .name(&pgm_ov_last_id)
+                .property(
+                    "caps",
+                    gst::Caps::builder("video/x-raw")
+                        .field("format", fmt.as_str())
+                        .build(),
+                )
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("capsfilter_pgm_overlay: {}", e))
+                })?;
+            elems.push((pgm_ov_last_id.clone(), cf_pgm_ov));
+            links.push((
+                ElementPadRef::pad(&vc_pgm_ov_id, "src"),
+                ElementPadRef::pad(&pgm_ov_last_id, "sink"),
+            ));
+        }
+        Some((appsrc_pgm_ov, pgm_ov_caps))
+    } else {
+        None
+    };
     // Link to the dist mixer is added after the DSK links (pad ordering).
 
     // --- Per-input elements ---
@@ -400,13 +433,15 @@ pub(super) fn build_cpu_pipeline(
 
     // PGM graphics overlay pad — after the DSK links so it lands at
     // sink_{num_inputs + num_dsk_inputs}.
-    links.push((
-        ElementPadRef::pad(&vc_pgm_ov_id, "src"),
-        ElementPadRef::pad(
-            &mixer_id,
-            format!("sink_{}", p.num_inputs + p.num_dsk_inputs),
-        ),
-    ));
+    if pgm_overlay.is_some() {
+        links.push((
+            ElementPadRef::pad(&pgm_ov_last_id, "src"),
+            ElementPadRef::pad(
+                &mixer_id,
+                format!("sink_{}", p.num_inputs + p.num_dsk_inputs),
+            ),
+        ));
+    }
 
     // Multiview compositor thumbnails: tee_i.src_1 → queue → mv_comp
     for i in 0..p.num_inputs {
@@ -503,17 +538,19 @@ pub(super) fn build_cpu_pipeline(
     );
 
     // --- PGM graphics overlay renderer (zone borders) ---
-    super::super::pgm_overlay::setup_pgm_overlay_renderer(
-        p.instance_id,
-        &appsrc_pgm_ov,
-        &pgm_ov_caps,
-        std::sync::Arc::clone(&overlay_state),
-        dist_weak_pgm,
-        p.pgm_w as i32,
-        p.pgm_h as i32,
-        p.pgm_framerate,
-        ctx,
-    );
+    if let Some((appsrc_pgm_ov, pgm_ov_caps)) = &pgm_overlay {
+        super::super::pgm_overlay::setup_pgm_overlay_renderer(
+            p.instance_id,
+            appsrc_pgm_ov,
+            pgm_ov_caps,
+            std::sync::Arc::clone(&overlay_state),
+            dist_weak_pgm,
+            p.pgm_w as i32,
+            p.pgm_h as i32,
+            p.pgm_framerate,
+            ctx,
+        );
+    }
 
     // --- Reactive explicit geometry ---
     // Input pads run sizing-policy=none; aspect-correct rects are re-applied

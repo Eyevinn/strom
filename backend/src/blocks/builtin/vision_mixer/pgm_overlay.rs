@@ -351,9 +351,18 @@ pub fn start_pgm_overlay_timer(
         .spawn(move || {
             debug!("PGM overlay timer started for {}", block_id);
             // Wait for the pipeline to reach PLAYING before the first push.
+            // Identity check, not just presence: a fast flow restart can
+            // re-register a NEW renderer under the same block id before this
+            // thread observes the unregistration — presence alone would keep
+            // the old thread (and its strong AppSrc ref) alive forever.
+            let still_mine = |r: &Arc<Mutex<PgmOverlayRenderer>>| {
+                get_pgm_overlay_renderer(&block_id)
+                    .map(|cur| Arc::ptr_eq(&cur, r))
+                    .unwrap_or(false)
+            };
             let ready = loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                if get_pgm_overlay_renderer(&block_id).is_none() {
+                if !still_mine(&renderer) {
                     break false;
                 }
                 if let Ok(r) = renderer.lock() {
@@ -378,7 +387,7 @@ pub fn start_pgm_overlay_timer(
                 } else if now - next_tick > frame_interval {
                     next_tick = now;
                 }
-                if get_pgm_overlay_renderer(&block_id).is_none() {
+                if !still_mine(&renderer) {
                     debug!("PGM overlay timer stopping for {}", block_id);
                     break;
                 }
