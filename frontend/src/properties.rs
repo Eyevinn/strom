@@ -2659,6 +2659,13 @@ impl PropertyInspector {
         };
         let mut changed = false;
 
+        // Prefix each entry with the exposing API — on Windows the same
+        // physical device can appear once per API (WASAPI / DirectSound /
+        // Media Foundation / ASIO) and which one you pick matters; same
+        // story on Linux (PulseAudio / PipeWire / ALSA / V4L2).
+        let device_label =
+            |d: &strom_types::discovery::DeviceResponse| format!("[{}] {}", d.api_label(), d.name);
+
         ui.horizontal(|ui| {
             let selected_display = if s.is_empty() {
                 format!("OS default ({})", kind_label)
@@ -2666,7 +2673,7 @@ impl PropertyInspector {
                 devices
                     .iter()
                     .find(|d| d.id == *s)
-                    .map(|d| d.name.clone())
+                    .map(device_label)
                     .unwrap_or_else(|| format!("{} (not found — refresh)", s))
             };
 
@@ -2691,7 +2698,7 @@ impl PropertyInspector {
                         }
                     }
                     for d in devices {
-                        if ui.selectable_label(*s == d.id, &d.name).clicked() {
+                        if ui.selectable_label(*s == d.id, device_label(d)).clicked() {
                             *s = d.id.clone();
                             changed = true;
                         }

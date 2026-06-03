@@ -111,6 +111,53 @@ pub struct DeviceResponse {
     pub last_seen_secs_ago: u64,
 }
 
+impl DeviceResponse {
+    /// Human-readable name of the OS media API exposing this device
+    /// (e.g. "WASAPI", "PulseAudio", "V4L2").
+    ///
+    /// On platforms with several competing media APIs (Windows: WASAPI /
+    /// DirectSound / Media Foundation / ASIO; Linux: PulseAudio / PipeWire /
+    /// ALSA / V4L2) the same physical device can show up once per API, and
+    /// which one you pick matters — surfacing the API lets users tell the
+    /// entries apart.
+    ///
+    /// Reads the GStreamer `device.api` property when present, otherwise
+    /// falls back to the provider name with its `deviceprovider`/`provider`
+    /// suffix stripped. Known API tokens are mapped to their conventional
+    /// spelling; unknown tokens are returned as-is.
+    pub fn api_label(&self) -> String {
+        let raw = self
+            .properties
+            .get("device.api")
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let p = self.provider.as_str();
+                p.strip_suffix("deviceprovider")
+                    .or_else(|| p.strip_suffix("provider"))
+                    .unwrap_or(p)
+            });
+        match raw.to_ascii_lowercase().as_str() {
+            "alsa" => "ALSA".to_string(),
+            "asio" => "ASIO".to_string(),
+            "avf" | "avfoundation" => "AVFoundation".to_string(),
+            "decklink" => "DeckLink".to_string(),
+            "dshow" | "directshow" => "DirectShow".to_string(),
+            "directsound" | "dsound" => "DirectSound".to_string(),
+            "jack" => "JACK".to_string(),
+            "mediafoundation" | "mf" => "Media Foundation".to_string(),
+            "ndi" => "NDI".to_string(),
+            "osxaudio" | "coreaudio" => "CoreAudio".to_string(),
+            "pipewire" => "PipeWire".to_string(),
+            "pulse" | "pulseaudio" => "PulseAudio".to_string(),
+            "v4l2" => "V4L2".to_string(),
+            "wasapi" => "WASAPI".to_string(),
+            "wasapi2" => "WASAPI2".to_string(),
+            _ => raw.to_string(),
+        }
+    }
+}
+
 /// Device discovery status response.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
@@ -144,4 +191,67 @@ pub struct NdiDiscoveryStatus {
     pub available: bool,
     /// Number of discovered NDI sources.
     pub source_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(provider: &str, api: Option<&str>) -> DeviceResponse {
+        let mut properties = HashMap::new();
+        if let Some(api) = api {
+            properties.insert("device.api".to_string(), api.to_string());
+        }
+        DeviceResponse {
+            id: "dev-test".to_string(),
+            name: "Test Device".to_string(),
+            device_class: "Audio/Source".to_string(),
+            category: DeviceCategory::AudioSource,
+            provider: provider.to_string(),
+            properties,
+            first_seen_secs_ago: 0,
+            last_seen_secs_ago: 0,
+        }
+    }
+
+    #[test]
+    fn api_label_from_device_api_property() {
+        assert_eq!(
+            device("wasapiprovider", Some("wasapi")).api_label(),
+            "WASAPI"
+        );
+        assert_eq!(
+            device("pulseprovider", Some("pulse")).api_label(),
+            "PulseAudio"
+        );
+        assert_eq!(device("v4l2provider", Some("v4l2")).api_label(), "V4L2");
+        assert_eq!(
+            device("mfprovider", Some("mediafoundation")).api_label(),
+            "Media Foundation"
+        );
+    }
+
+    #[test]
+    fn api_label_falls_back_to_provider_suffix_stripping() {
+        assert_eq!(
+            device("pulsedeviceprovider", None).api_label(),
+            "PulseAudio"
+        );
+        assert_eq!(device("v4l2deviceprovider", None).api_label(), "V4L2");
+        assert_eq!(device("asioprovider", None).api_label(), "ASIO");
+    }
+
+    #[test]
+    fn api_label_passes_unknown_tokens_through() {
+        assert_eq!(device("unknown", None).api_label(), "unknown");
+        assert_eq!(
+            device("someprovider", Some("someapi")).api_label(),
+            "someapi"
+        );
+    }
+
+    #[test]
+    fn api_label_ignores_empty_device_api() {
+        assert_eq!(device("alsadeviceprovider", Some("")).api_label(), "ALSA");
+    }
 }
