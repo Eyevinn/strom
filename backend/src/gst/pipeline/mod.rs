@@ -2,7 +2,7 @@
 
 mod bus;
 mod construction;
-mod effects;
+pub(crate) mod effects;
 mod lifecycle;
 mod linking;
 mod properties;

@@ -2140,13 +2140,29 @@ impl AppState {
         pip_idx: usize,
         bg: Option<usize>,
         zones: Vec<strom_types::vision_mixer::Zone>,
+        transforms: strom_types::vision_mixer::PipTransforms,
     ) -> Result<(), PipelineError> {
         let pipelines = self.inner.pipelines.read().await;
         let manager = pipelines.get(flow_id).ok_or_else(|| {
             PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
         })?;
-        manager.apply_vision_mixer_pip_config(block_instance_id, pip_idx, bg, zones)?;
+        manager.apply_vision_mixer_pip_config(block_instance_id, pip_idx, bg, zones, transforms)?;
         Ok(())
+    }
+
+    /// Read the negotiated input resolutions for a vision mixer block.
+    /// Returns all-`None` when the pipeline isn't running.
+    pub async fn vision_mixer_input_resolutions(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        num_inputs: usize,
+    ) -> Vec<Option<strom_types::vision_mixer::InputResolution>> {
+        let pipelines = self.inner.pipelines.read().await;
+        pipelines
+            .get(flow_id)
+            .map(|m| m.vision_mixer_input_resolutions(block_instance_id, num_inputs))
+            .unwrap_or_else(|| vec![None; num_inputs])
     }
 
     /// Get num_inputs for a vision mixer block from the flow definition.

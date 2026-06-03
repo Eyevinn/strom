@@ -26,6 +26,11 @@ pub(super) fn build_cpu_pipeline(
 
     let mixer_id = p.id("mixer");
     let mv_comp_id = p.id("mv_comp");
+    // Weak handles for the caps probes registered below — the probes must
+    // not hold strong element references (pads own their probes; a strong
+    // ref would create a cycle that leaks the pipeline on restart).
+    let dist_weak = dist_comp.downgrade();
+    let mv_weak = mv_comp.downgrade();
     elems.push((mixer_id.clone(), dist_comp));
     elems.push((mv_comp_id.clone(), mv_comp));
 
@@ -294,10 +299,31 @@ pub(super) fn build_cpu_pipeline(
         elems.push((q_thumb_id.clone(), elements::make_queue(&q_thumb_id)?));
         elems.push((q_pvw_id.clone(), elements::make_queue(&q_pvw_id)?));
 
-        // One queue per PiP tile per input — feeds the virtual PiP thumbnail pads on mv_comp.
+        // The CPU `compositor` has no crop pad properties, so every croppable
+        // branch (dist, PVW, PiP — not thumbnails, which never crop) gets a
+        // videocrop element directly upstream of its compositor sink pad.
+        // Zero crop = passthrough. `set_pad_crop` finds it via pad.peer().
+        let crop_dist_id = p.id(&format!("videocrop_dist_{}", i));
+        let crop_pvw_id = p.id(&format!("videocrop_pvw_{}", i));
+        elems.push((
+            crop_dist_id.clone(),
+            elements::make_element("videocrop", &crop_dist_id)?,
+        ));
+        elems.push((
+            crop_pvw_id.clone(),
+            elements::make_element("videocrop", &crop_pvw_id)?,
+        ));
+
+        // One queue (+ videocrop) per PiP tile per input — feeds the virtual
+        // PiP thumbnail pads on mv_comp.
         for pip_idx in 0..p.num_pips {
             let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
             elems.push((q_pip_id.clone(), elements::make_queue(&q_pip_id)?));
+            let crop_pip_id = p.id(&format!("videocrop_pip_{}_{}", pip_idx, i));
+            elems.push((
+                crop_pip_id.clone(),
+                elements::make_element("videocrop", &crop_pip_id)?,
+            ));
         }
     }
 
@@ -306,12 +332,17 @@ pub(super) fn build_cpu_pipeline(
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         let q_dist_id = p.id(&format!("queue_to_dist_{}", i));
+        let crop_dist_id = p.id(&format!("videocrop_dist_{}", i));
         links.push((
             ElementPadRef::pad(&tee_id, "src_0"),
             ElementPadRef::pad(&q_dist_id, "sink"),
         ));
         links.push((
             ElementPadRef::pad(&q_dist_id, "src"),
+            ElementPadRef::pad(&crop_dist_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&crop_dist_id, "src"),
             ElementPadRef::pad(&mixer_id, format!("sink_{}", i)),
         ));
     }
@@ -341,16 +372,21 @@ pub(super) fn build_cpu_pipeline(
         ));
     }
 
-    // Multiview PVW big candidates: tee_i.src_2 → queue → mv_comp.sink_{N+1+i}
+    // Multiview PVW big candidates: tee_i.src_2 → queue → videocrop → mv_comp.sink_{N+1+i}
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         let q_pvw_id = p.id(&format!("queue_to_mv_pvw_{}", i));
+        let crop_pvw_id = p.id(&format!("videocrop_pvw_{}", i));
         links.push((
             ElementPadRef::pad(&tee_id, "src_2"),
             ElementPadRef::pad(&q_pvw_id, "sink"),
         ));
         links.push((
             ElementPadRef::pad(&q_pvw_id, "src"),
+            ElementPadRef::pad(&crop_pvw_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&crop_pvw_id, "src"),
             ElementPadRef::pad(&mv_comp_id, format!("sink_{}", p.num_inputs + 1 + i)),
         ));
     }
@@ -362,6 +398,7 @@ pub(super) fn build_cpu_pipeline(
         for i in 0..p.num_inputs {
             let tee_id = p.id(&format!("tee_{}", i));
             let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
+            let crop_pip_id = p.id(&format!("videocrop_pip_{}_{}", pip_idx, i));
             let tee_src = format!("src_{}", 3 + pip_idx);
             let sink_idx = 2 * p.num_inputs + 1 + pip_idx * p.num_inputs + i;
             links.push((
@@ -370,6 +407,10 @@ pub(super) fn build_cpu_pipeline(
             ));
             links.push((
                 ElementPadRef::pad(&q_pip_id, "src"),
+                ElementPadRef::pad(&crop_pip_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&crop_pip_id, "src"),
                 ElementPadRef::pad(&mv_comp_id, format!("sink_{}", sink_idx)),
             ));
         }
@@ -403,6 +444,24 @@ pub(super) fn build_cpu_pipeline(
     audio_meter::append_audio_meter_chains(p, &mut elems, &mut links)?;
 
     let overlay_state = setup_overlay_renderer(p, &appsrc_overlay, &overlay_caps, &mv_layout, ctx);
+
+    // --- Reactive explicit geometry ---
+    // Input pads run sizing-policy=none; aspect-correct rects are re-applied
+    // whenever an input's caps arrive or change. Probes attach at element
+    // setup time (after linking, when the request pads exist).
+    {
+        let block_id = p.instance_id.to_string();
+        let num_inputs = p.num_inputs;
+        let num_pips = p.num_pips;
+        ctx.register_element_setup(Box::new(move |_flow_id, _events| {
+            let (Some(mixer), Some(mv_comp)) = (dist_weak.upgrade(), mv_weak.upgrade()) else {
+                return;
+            };
+            super::super::geometry::install_caps_probes(
+                &block_id, &mixer, &mv_comp, num_inputs, num_pips,
+            );
+        }));
+    }
     let bus_message_handler = Some(audio_meter::build_meter_bus_handler(
         p.instance_id,
         overlay_state,

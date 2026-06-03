@@ -1747,11 +1747,18 @@ pub async fn update_pip_config(
     }
 
     info!(
-        "Updating PiP {} on vision mixer {} in flow {}: bg={:?}, zones={:?}",
-        pip_idx, block_id, flow_id, req.bg, req.zones
+        "Updating PiP {} on vision mixer {} in flow {}: bg={:?}, zones={:?}, transforms={:?}",
+        pip_idx, block_id, flow_id, req.bg, req.zones, req.transforms
     );
     state
-        .apply_vision_mixer_pip_config(&flow_id, &block_id, pip_idx, req.bg, req.zones.clone())
+        .apply_vision_mixer_pip_config(
+            &flow_id,
+            &block_id,
+            pip_idx,
+            req.bg,
+            req.zones.clone(),
+            req.transforms.clone(),
+        )
         .await
         .map_err(|e| {
             error!("Failed to update PiP config: {}", e);
@@ -1766,13 +1773,18 @@ pub async fn update_pip_config(
 
     // Read back authoritative state. Validation runs in
     // `apply_vision_mixer_pip_config`, so the only mutation vs. the request
-    // is rect clamping (NormRect → [0,1]).
-    let (bg, zones) = if let Some(s) =
+    // is rect/crop clamping (NormRect → [0,1], SourceCrop clamped + zero
+    // entries dropped).
+    let (bg, zones, transforms) = if let Some(s) =
         crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
     {
-        (s.pip_bg_input(pip_idx), s.pip_zones(pip_idx))
+        (
+            s.pip_bg_input(pip_idx),
+            s.pip_zones(pip_idx),
+            s.pip_transforms(pip_idx),
+        )
     } else {
-        (req.bg, req.zones)
+        (req.bg, req.zones, req.transforms)
     };
 
     Ok(Json(strom_types::api::UpdatePipConfigResponse {
@@ -1780,6 +1792,7 @@ pub async fn update_pip_config(
         pip_idx,
         bg,
         zones,
+        transforms,
     }))
 }
 
@@ -1803,7 +1816,7 @@ pub async fn update_pip_config(
     )
 )]
 pub async fn get_vision_mixer_state(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path((flow_id, block_id)): Path<(FlowId, String)>,
 ) -> Result<Json<strom_types::api::VisionMixerState>, (StatusCode, Json<ErrorResponse>)> {
     let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
@@ -1824,6 +1837,7 @@ pub async fn get_vision_mixer_state(
         .map(|i| strom_types::api::PipState {
             bg: overlay.pip_bg_input(i),
             zones: overlay.pip_zones(i),
+            transforms: overlay.pip_transforms(i),
         })
         .collect();
 
@@ -1832,6 +1846,10 @@ pub async fn get_vision_mixer_state(
         .iter()
         .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
         .collect();
+
+    let input_resolutions = state
+        .vision_mixer_input_resolutions(&flow_id, &block_id, overlay.num_inputs)
+        .await;
 
     Ok(Json(strom_types::api::VisionMixerState {
         program_input: overlay.pgm_input(),
@@ -1844,6 +1862,7 @@ pub async fn get_vision_mixer_state(
         dsk_enabled,
         overlay_alpha: overlay.overlay_alpha(),
         pips,
+        input_resolutions,
     }))
 }
 

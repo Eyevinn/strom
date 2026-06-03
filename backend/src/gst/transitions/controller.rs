@@ -242,14 +242,26 @@ impl TransitionController {
 
         // Animate to_pad sliding in (from_pad stays still)
         if dx != 0 {
-            let cs = self
-                .setup_int_animation(&to_pad, "xpos", start_time, end_time, to_start_x, target_x)?;
+            let cs = self.setup_int_animation(
+                to_pad.upcast_ref(),
+                "xpos",
+                start_time,
+                end_time,
+                to_start_x,
+                target_x,
+            )?;
             control_sources.push(cs);
         }
 
         if dy != 0 {
-            let cs = self
-                .setup_int_animation(&to_pad, "ypos", start_time, end_time, to_start_y, target_y)?;
+            let cs = self.setup_int_animation(
+                to_pad.upcast_ref(),
+                "ypos",
+                start_time,
+                end_time,
+                to_start_y,
+                target_y,
+            )?;
             control_sources.push(cs);
         }
 
@@ -314,7 +326,7 @@ impl TransitionController {
         // Animate from_pad position (exits)
         if dx != 0 {
             let cs = self.setup_int_animation(
-                &from_pad,
+                from_pad.upcast_ref(),
                 "xpos",
                 start_time,
                 end_time,
@@ -323,14 +335,20 @@ impl TransitionController {
             )?;
             control_sources.push(cs);
 
-            let cs = self
-                .setup_int_animation(&to_pad, "xpos", start_time, end_time, to_start_x, to_end_x)?;
+            let cs = self.setup_int_animation(
+                to_pad.upcast_ref(),
+                "xpos",
+                start_time,
+                end_time,
+                to_start_x,
+                to_end_x,
+            )?;
             control_sources.push(cs);
         }
 
         if dy != 0 {
             let cs = self.setup_int_animation(
-                &from_pad,
+                from_pad.upcast_ref(),
                 "ypos",
                 start_time,
                 end_time,
@@ -339,8 +357,14 @@ impl TransitionController {
             )?;
             control_sources.push(cs);
 
-            let cs = self
-                .setup_int_animation(&to_pad, "ypos", start_time, end_time, to_start_y, to_end_y)?;
+            let cs = self.setup_int_animation(
+                to_pad.upcast_ref(),
+                "ypos",
+                start_time,
+                end_time,
+                to_start_y,
+                to_end_y,
+            )?;
             control_sources.push(cs);
         }
 
@@ -523,10 +547,12 @@ impl TransitionController {
         Ok(cs)
     }
 
-    /// Set up integer property animation on a pad (for xpos, ypos) with ease-in-out.
+    /// Set up integer property animation with ease-in-out on any controllable
+    /// GstObject — compositor sink pads (xpos/ypos/width/height, GL crop-*)
+    /// or the CPU backend's upstream videocrop element (left/right/top/bottom).
     fn setup_int_animation(
         &self,
-        pad: &gst::Pad,
+        pad: &gst::Object,
         property: &str,
         start_time: gst::ClockTime,
         end_time: gst::ClockTime,
@@ -586,9 +612,22 @@ impl TransitionController {
 
     /// Remove all control bindings from a pad. Must cover every property the
     /// transition setup helpers can bind: alpha (fades + step-off), xpos/ypos/
-    /// width/height (position animation), and zorder (morph z lift/step).
+    /// width/height (position animation), zorder (morph z lift/step), and the
+    /// GL mixer crop properties (crop morph — absent on the CPU backend, where
+    /// `control_binding` simply returns `None`).
     fn clear_control_bindings(&self, pad: &gst::Pad) {
-        for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+        for prop in [
+            "alpha",
+            "xpos",
+            "ypos",
+            "width",
+            "height",
+            "zorder",
+            "crop-left",
+            "crop-right",
+            "crop-top",
+            "crop-bottom",
+        ] {
             if let Some(binding) = pad.control_binding(prop) {
                 pad.remove_control_binding(&binding);
                 debug!("Removed {} control binding from pad {}", prop, pad.name());
@@ -667,7 +706,7 @@ impl TransitionController {
                     pad.set_property("width", from_w);
                     pad.set_property("height", from_h);
                     control_sources.push(self.setup_int_animation(
-                        &pad,
+                        pad.upcast_ref(),
                         "xpos",
                         current_time,
                         end_time,
@@ -675,7 +714,7 @@ impl TransitionController {
                         to_x,
                     )?);
                     control_sources.push(self.setup_int_animation(
-                        &pad,
+                        pad.upcast_ref(),
                         "ypos",
                         current_time,
                         end_time,
@@ -683,7 +722,7 @@ impl TransitionController {
                         to_y,
                     )?);
                     control_sources.push(self.setup_int_animation(
-                        &pad,
+                        pad.upcast_ref(),
                         "width",
                         current_time,
                         end_time,
@@ -691,7 +730,7 @@ impl TransitionController {
                         to_w,
                     )?);
                     control_sources.push(self.setup_int_animation(
-                        &pad,
+                        pad.upcast_ref(),
                         "height",
                         current_time,
                         end_time,
@@ -762,6 +801,77 @@ impl TransitionController {
             plan.len()
         );
 
+        Ok(())
+    }
+
+    /// Animate the GL mixer crop properties on a sink pad from their current
+    /// values to the pixel values for `target` (normalized crop × the pad's
+    /// negotiated source caps), with the same easing as the geometry morph.
+    /// Both backends animate: GL crop pad properties, or the CPU backend's
+    /// upstream videocrop element — its `left/right/top/bottom` are
+    /// controllable and it syncs controller values per buffer (each step
+    /// renegotiates caps toward the compositor; a short burst during the
+    /// morph window that videoaggregator's live caps handling absorbs).
+    pub fn animate_pad_crop(
+        &self,
+        pad_idx: usize,
+        target: &vision_mixer::SourceCrop,
+        duration_ms: u64,
+        pipeline: &gst::Pipeline,
+    ) -> Result<(), TransitionError> {
+        use crate::gst::crop::{upstream_videocrop, CROP_PAD_PROPS, VIDEOCROP_PROPS};
+        let pad = self.get_sink_pad(pad_idx)?;
+        // Pick the crop carrier: GL pad properties, or the upstream videocrop.
+        let (carrier, props): (gst::Object, [&str; 4]) = if pad.find_property("crop-left").is_some()
+        {
+            (pad.clone().upcast(), CROP_PAD_PROPS)
+        } else if let Some(vc) = upstream_videocrop(&pad) {
+            (vc.upcast(), VIDEOCROP_PROPS)
+        } else {
+            // Neither — nothing to crop on this branch (e.g. thumbnails).
+            return Ok(());
+        };
+        let Some((src_w, src_h)) = crate::gst::crop::source_dims_for_pad(&pad) else {
+            debug!(
+                "Pad {} has no negotiated caps yet — crop animation skipped",
+                pad.name()
+            );
+            return Ok(());
+        };
+        let (l, r, t, b) = target.to_pixels(src_w, src_h);
+        let current_time = self.query_stream_time(pipeline)?;
+        let end_time = current_time + gst::ClockTime::from_mseconds(duration_ms);
+
+        let mut control_sources = Vec::new();
+        for (prop, to) in props.into_iter().zip([l, r, t, b]) {
+            // Clear a stale binding first so reads + writes hit the real value.
+            if let Some(binding) = carrier.control_binding(prop) {
+                carrier.remove_control_binding(&binding);
+            }
+            let from = carrier.property::<i32>(prop);
+            if from == to {
+                carrier.set_property(prop, to);
+                continue;
+            }
+            control_sources.push(self.setup_int_animation(
+                &carrier,
+                prop,
+                current_time,
+                end_time,
+                from,
+                to,
+            )?);
+        }
+        if !control_sources.is_empty() {
+            let key = self.next_key(&format!("crop_p{}", pad_idx));
+            if let Ok(mut transitions) = self.active_transitions.lock() {
+                transitions.insert(key, control_sources);
+            }
+            debug!(
+                "Crop animation started on pad {}: -> ({}, {}, {}, {}) over {}ms",
+                pad_idx, l, r, t, b, duration_ms
+            );
+        }
         Ok(())
     }
 
@@ -880,7 +990,7 @@ impl TransitionController {
             let current = pad.property::<i32>("xpos");
             if current != target {
                 let cs = self.setup_int_animation(
-                    &pad,
+                    pad.upcast_ref(),
                     "xpos",
                     current_time,
                     end_time,
@@ -896,7 +1006,7 @@ impl TransitionController {
             let current = pad.property::<i32>("ypos");
             if current != target {
                 let cs = self.setup_int_animation(
-                    &pad,
+                    pad.upcast_ref(),
                     "ypos",
                     current_time,
                     end_time,
@@ -912,7 +1022,7 @@ impl TransitionController {
             let current = pad.property::<i32>("width");
             if current != target {
                 let cs = self.setup_int_animation(
-                    &pad,
+                    pad.upcast_ref(),
                     "width",
                     current_time,
                     end_time,
@@ -928,7 +1038,7 @@ impl TransitionController {
             let current = pad.property::<i32>("height");
             if current != target {
                 let cs = self.setup_int_animation(
-                    &pad,
+                    pad.upcast_ref(),
                     "height",
                     current_time,
                     end_time,

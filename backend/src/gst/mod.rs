@@ -2,6 +2,7 @@
 
 mod block_expansion;
 pub mod buffer_age_probe;
+pub(crate) mod crop;
 pub mod discovery;
 pub mod pipeline;
 pub mod pipeline_monitor;

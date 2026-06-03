@@ -65,6 +65,15 @@ pub struct VisionMixerOverlayState {
     /// A zone with `rect: None` fills the entire PiP region; sources inside a
     /// zone auto-tile within its rect.
     pub pip_zones: Vec<std::sync::Mutex<Vec<Zone>>>,
+    /// Per-source crop transforms per configured PiP, keyed by input index.
+    /// Like zones these are runtime-only (configured via the /pip endpoint).
+    pub pip_transforms: Vec<std::sync::Mutex<strom_types::vision_mixer::PipTransforms>>,
+    /// Last known UNCROPPED source dimensions per input, packed as
+    /// `(width << 32) | height` (0 = unknown). Used by the geometry caps
+    /// probe to skip refreshes whose source dims are unchanged — on the CPU
+    /// backend every animated videocrop step renegotiates caps, and an
+    /// unguarded refresh would clear control bindings mid-animation.
+    input_dims: Vec<AtomicU64>,
     /// Number of configured PiP tiles (also `pip_bg.len()` / `pip_zones.len()`).
     pub num_pips: usize,
     /// Number of inputs.
@@ -160,6 +169,9 @@ impl VisionMixerOverlayState {
         let pip_zones = (0..pip.num_pips)
             .map(|i| std::sync::Mutex::new(pip.pip_zones.get(i).cloned().unwrap_or_default()))
             .collect();
+        let pip_transforms = (0..pip.num_pips)
+            .map(|_| std::sync::Mutex::new(strom_types::vision_mixer::PipTransforms::new()))
+            .collect();
 
         Self {
             pgm_input: AtomicU64::new(pgm_input as u64),
@@ -168,6 +180,7 @@ impl VisionMixerOverlayState {
             pvw_pip: AtomicU64::new(pip.pvw_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
             pip_bg,
             pip_zones,
+            pip_transforms,
             num_pips: pip.num_pips,
             num_inputs,
             ftb_active: AtomicBool::new(false),
@@ -184,6 +197,7 @@ impl VisionMixerOverlayState {
             tz_abbr_packed: AtomicU64::new(pack_tz_abbr(&tz_abbr)),
             tz_next_refresh: AtomicU64::new(TIMEZONE_REFRESH_SECS),
             show_vu_meters: AtomicBool::new(show_vu_meters),
+            input_dims: (0..num_inputs).map(|_| AtomicU64::new(0)).collect(),
             input_peak: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
             input_decay: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
             pgm_peak: AtomicU8::new(0),
@@ -271,6 +285,45 @@ impl VisionMixerOverlayState {
                 *v = zones;
             }
         }
+    }
+
+    /// Get the per-source crop transforms for a configured PiP (empty if the
+    /// PiP doesn't exist or has no transforms).
+    pub fn pip_transforms(&self, pip_idx: usize) -> strom_types::vision_mixer::PipTransforms {
+        self.pip_transforms
+            .get(pip_idx)
+            .and_then(|m| m.lock().ok().map(|v| v.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Replace the per-source crop transforms for a configured PiP.
+    pub fn set_pip_transforms(
+        &self,
+        pip_idx: usize,
+        transforms: strom_types::vision_mixer::PipTransforms,
+    ) {
+        if let Some(slot) = self.pip_transforms.get(pip_idx) {
+            if let Ok(mut v) = slot.lock() {
+                *v = transforms;
+            }
+        }
+    }
+
+    /// Store the latest known uncropped source dimensions and report whether
+    /// any input actually changed. `dims` entries are `Option<(w, h)>` per
+    /// input; `None` (caps not negotiated) is treated as "no news" rather
+    /// than a change, so a not-yet-connected input doesn't suppress or force
+    /// refreshes.
+    pub fn update_input_dims(&self, dims: &[Option<(i32, i32)>]) -> bool {
+        let mut changed = false;
+        for (slot, d) in self.input_dims.iter().zip(dims) {
+            let Some((w, h)) = d else { continue };
+            let packed = ((*w as u64) << 32) | (*h as u64 & 0xFFFF_FFFF);
+            if slot.swap(packed, Ordering::Relaxed) != packed {
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Whether VU meters should be rendered.

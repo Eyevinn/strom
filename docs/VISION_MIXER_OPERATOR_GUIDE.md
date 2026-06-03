@@ -182,7 +182,8 @@ just like a regular input.
 | **Background** | One input that fills the whole PiP region. Optional — a PiP can be overlay-only. |
 | **Zone** | A rectangular sub-region inside the PiP that hosts one or more overlay sources. Each zone has its own position, size and capacity. |
 | **Zone capacity** | Max number of overlay sources allowed in the zone. When full, pushing a new source **evicts the oldest** (FIFO). Capacity `1` is "swap mode" — replacing the source cross-fades. |
-| **Auto-tile** | When a zone holds multiple sources without explicit per-source rectangles, they auto-tile in a grid (1, 2 side-by-side, 2+1, 2×2, 3×2, etc.) that preserves 16:9 aspect inside the zone. |
+| **Auto-tile** | When a zone holds multiple sources, they auto-tile in a grid (1, 2 side-by-side, 2+1, 2×2, 3×2, etc.). Each source is fitted with its **own** aspect ratio — a 2.39:1 source letterboxes inside its cell instead of being stretched. |
+| **Source crop ("punch-in")** | Each source in a PiP can carry a crop window: the visible part of the source that scales to fill its box. Think virtual PTZ — zoom into a person's face from a wide shot. See §4.4. |
 
 ### 4.2 Limits
 
@@ -194,24 +195,82 @@ just like a regular input.
 
 ### 4.3 How the operator configures a PiP
 
-A PiP is configured at runtime from the **operator control page**
-(served by the backend; the page handler at
-`backend/src/api/vision_mixer_page.rs` builds the HTML UI). On that
-page:
+A PiP is configured at runtime from the **operator control page** served
+by the backend. Press **Edit** on a PiP row to open the layout editor —
+two side-by-side panels:
 
-- Pick the PiP's **background** input from a dropdown.
+**Zones panel** (left)
+
+- Pick the PiP's **background** input from the dropdown in the header.
 - Add **zones** with the "+ Zone" button. Drag a zone to move it,
-  drag its corner to resize it.
-- For each zone, set a **capacity** (or leave it `∞`).
-- Push **inputs** into the active zone. The zone fills up, auto-tiles,
-  and starts evicting once it hits capacity.
+  drag its corners to resize it. Right-click toggles between auto-tile
+  and a manual rectangle.
+- **Snap** locks drags and typed values to quarters and rule-of-thirds
+  anchors; **Grid** draws the guide lines (thirds in gold). Both
+  toggles are shared with the crop panel.
+- The control row under the canvas shows the active zone's exact
+  **X/Y/W/H in PGM pixels** plus its **capacity** (blank = `∞`).
+- Push **inputs** into the active zone with the numbered chips. The
+  zone fills up, auto-tiles, and starts evicting once it hits capacity.
+
+**Crop / Zoom panel** (right) — see §4.4.
 
 A PiP starts **empty** when the mixer block is first built — there are
 no static "PiP defaults" baked into the flow. Settings the operator
 makes on the page apply live and are reflected in the multiview tile
 for that PiP.
 
-### 4.4 PiPs on the multiview
+### 4.4 Crop & zoom (punch-in)
+
+Every source inside a PiP can carry a **crop window** — the part of the
+source picture that is visible. The window scales to fill the source's
+box (its zone, or its auto-tile cell), and everything outside the window
+is hidden. This is how you build the classic interview layout: three
+portrait boxes side by side, each one punched in on a person's face
+from a wide landscape camera.
+
+```
+   Source (wide shot)                       Zone box (portrait)
+  ┌───────────────────────────┐
+  │            ┌─────┐        │             ┌─────┐
+  │            │ ╭─╮ │ ◄──────┼── crop      │ ╭─╮ │
+  │   desk     │ │☺│ │        │   window    │ │☺│ │  ← fills the box
+  │            │ ╰─╯ │        │             │ ╰─╯ │
+  │            └─────┘        │             │     │
+  └───────────────────────────┘             └─────┘
+```
+
+**Operating the crop editor**
+
+| Control | What it does |
+|---|---|
+| **Source selector** | Pick which of the PiP's sources to crop. Shows each source's real resolution; `✂` marks sources that already carry a crop. Defaults to the active zone's source when the zone holds exactly one. |
+| **Crop frame** | The frame on the source canvas *is* the visible window. **Drag to pan**, drag the **corners to zoom**. Snap/grid (shared with the zones panel) lock to quarters and thirds of the source frame — putting a face on a third reads well. |
+| **Zoom slider** | 1× = the largest window that matches the box; higher values punch in further (up to 20× via the frame). |
+| **X/Y/W/H** | The crop window in **source pixels** (each source uses its own resolution). |
+| **Lock box aspect** *(default on)* | Keeps the crop window at the destination box's aspect so the crop fills the box exactly, edge to edge. Unlock it to frame freely — the result letterboxes inside the box instead. |
+| **Reset** | Removes the crop for the selected source. **This is the only way a crop goes away** — see retention below. |
+
+**Behavior to rely on**
+
+- **Live and animated.** Crop changes morph smoothly (same easing as
+  zone moves), and crops ride along in takes: punching a cropped PiP
+  source to a full-frame input (or back) animates the punch-in/out.
+  Works on both the GPU and CPU compositor backends.
+- **Crops are remembered.** A source that leaves the PiP keeps its
+  crop settings and gets them back when it returns — so a capacity-1
+  swap zone can ping-pong between two punched-in cameras and each one
+  comes back framed the way you left it. If it returns to a
+  differently-shaped box, the aspect lock re-fits the window
+  automatically. Use **Reset** to actually clear a crop.
+- **Per PiP, per source.** The same input can be framed differently in
+  different PiPs. A crop never affects the source's own multiview
+  thumbnail or its appearance as a plain fullscreen source.
+- **A zone with a single cropped source fills its rectangle exactly** —
+  this is what makes portrait/cinema boxes possible. Multi-source zones
+  keep their auto-tile cells.
+
+### 4.5 PiPs on the multiview
 
 Each configured PiP occupies one tile in the multiview thumbnail grid,
 next to the input thumbnails. The tile shows the live PiP composition
@@ -327,7 +386,7 @@ action.
 | **Set transition duration** | Set the length of fade/slide takes. | 0 – 60 000 ms (default 300) |
 | **Fade-to-Black** | Toggle FTB on PGM (first press fades to black, second press fades back). | Duration in ms (0 = instant). |
 | **DSK on/off** | Toggle one DSK channel on or off. | DSK number (1 – 4) + `enabled: true/false` |
-| **Configure PiP** | Set a PiP's background and zones (positions, capacities, source lists). Live, no restart. | `pip_idx`, `bg`, `zones[]` |
+| **Configure PiP** | Set a PiP's background, zones (positions, capacities, source lists) and per-source crop transforms. Live, no restart — staying sources morph, crops animate. | `pip_idx`, `bg`, `zones[]`, `transforms{}` |
 | **Set multiview overlay alpha** | Fade the multiview overlay (borders, labels, clock, VU meters). | `alpha`: 0.0 – 1.0 |
 | **Get state** | Snapshot of current PVW/PGM/DSK/FTB/PiP state. Useful when reconnecting to the mixer mid-show. | — |
 
@@ -411,5 +470,7 @@ is live and takes effect immediately.
 | **DSK (Downstream Keyer)** | Alpha-keyed graphics overlay on the PGM output, sitting above the entire PGM composition. |
 | **PiP (Picture-in-Picture)** | A reusable multi-source composition (background + overlay zones) that can be taken to PVW/PGM like any input. |
 | **Zone** | A rectangular sub-region inside a PiP that hosts overlay sources. Has its own position, size, and capacity (FIFO eviction when full). |
+| **Crop / punch-in** | A per-source window inside a PiP: the visible part of the source, scaled to fill its box. Virtual PTZ. Remembered when the source leaves the PiP; cleared only with **Reset**. |
+| **Aspect lock** | Crop-editor toggle (default on) that keeps the crop window at the destination box's aspect so the crop fills the box edge to edge. |
 | **Multiview** | The operator monitor output showing PVW, PGM, all input thumbnails, all PiP thumbnails, clock, labels and VU meters. |
 | **Source** | A bus assignment, either `input:N` (a regular input) or `pip:N` (a PiP composition). |
