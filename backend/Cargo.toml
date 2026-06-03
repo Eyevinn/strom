@@ -144,7 +144,7 @@ winresource = "0.1"
 tempfile = "3.27"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-serial_test = "3.3"
+serial_test = "3.5"
 
 [[bin]]
 name = "gen-icons"
