@@ -17,6 +17,10 @@
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            /* Render native widget chrome (number-input spinners, scrollbars)
+               in dark theme — otherwise Chrome paints the spin buttons on a
+               white box inside our purple inputs. */
+            color-scheme: dark;
         }
 
         /* Multiview player */
@@ -1075,7 +1079,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.19-editor-layout | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.20-dark-spinners | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
