@@ -57,12 +57,27 @@ pub fn install_caps_probes(
         pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
             if let Some(gst::PadProbeData::Event(ev)) = &info.data {
                 if ev.type_() == gst::EventType::Caps {
-                    // Pipeline teardown in progress → nothing to refresh.
-                    let (Some(mixer), Some(mv_comp)) = (mixer_weak.upgrade(), mv_weak.upgrade())
-                    else {
-                        return gst::PadProbeReturn::Ok;
-                    };
-                    refresh_geometry(&block_id, &mixer, &mv_comp);
+                    // Defer the refresh to the glib main loop instead of
+                    // running it inline: sticky caps are stored on the pad
+                    // only AFTER the probes return, and sibling branches
+                    // negotiate concurrently on their own streaming threads —
+                    // an inline refresh races both, and two probes of the
+                    // same input firing simultaneously can each miss the
+                    // other's caps, leaving that input's thumbnail stretched
+                    // forever. Serialized on the main context, the last
+                    // refresh always sees every negotiated pad.
+                    let block_id = block_id.clone();
+                    let mixer_weak = mixer_weak.clone();
+                    let mv_weak = mv_weak.clone();
+                    gst::glib::idle_add_once(move || {
+                        // Pipeline teardown in progress → nothing to refresh.
+                        let (Some(mixer), Some(mv_comp)) =
+                            (mixer_weak.upgrade(), mv_weak.upgrade())
+                        else {
+                            return;
+                        };
+                        refresh_geometry(&block_id, &mixer, &mv_comp);
+                    });
                 }
             }
             gst::PadProbeReturn::Ok
@@ -93,10 +108,10 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
     };
     let n = state.num_inputs;
 
-    // Per-input source aspects from the dist mixer pads' negotiated caps.
-    // The probe fires while the caps event is still propagating, so the
-    // firing pad itself may not report current_caps yet — its sibling pads
-    // (same tee) usually do, and the next pad's caps event re-fires anyway.
+    // Per-input source aspects from the dist mixer pads' negotiated caps
+    // (refreshes run deferred on the main loop, so the triggering caps event
+    // has been stored as a sticky event by the time we read it). The mv
+    // thumbnail pad serves as fallback — same tee, same dimensions.
     let mut aspects = SourceAspects::new();
     for i in 0..n {
         let dims = pad_caps_dims(mixer, &format!("sink_{}", i))
