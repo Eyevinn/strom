@@ -1364,6 +1364,8 @@ impl PipelineManager {
     /// its dist compositor sink pads. `None` for inputs without negotiated
     /// caps yet (not connected / not prerolled). Inputs can have arbitrary
     /// resolutions and aspect ratios — nothing scales them before the mixer.
+    /// Always the UNCROPPED source dimensions: on the CPU backend the pad's
+    /// own caps are post-videocrop, so this walks upstream past it.
     pub fn vision_mixer_input_resolutions(
         &self,
         block_instance_id: &str,
@@ -1376,13 +1378,7 @@ impl PipelineManager {
         (0..num_inputs)
             .map(|i| {
                 let pad = find_pad(mixer, &format!("sink_{}", i))?;
-                let caps = pad.current_caps()?;
-                let s = caps.structure(0)?;
-                let w = s.get::<i32>("width").ok()?;
-                let h = s.get::<i32>("height").ok()?;
-                if w <= 0 || h <= 0 {
-                    return None;
-                }
+                let (w, h) = crate::gst::crop::source_dims_for_pad(&pad)?;
                 Some(strom_types::vision_mixer::InputResolution {
                     width: w as u32,
                     height: h as u32,
@@ -1504,59 +1500,7 @@ pub(crate) fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pa
     })
 }
 
-use crate::gst::transitions::CROP_PAD_PROPS;
-
-/// Snap-apply a normalized source crop to a compositor sink pad.
-///
-/// Clears any crop control bindings first (a stale binding from a previous
-/// crop animation would silently override the writes). On the CPU backend a
-/// non-zero crop logs a warning and is ignored. Pixel values come from the
-/// pad's negotiated caps; without caps a non-zero crop is skipped — zones and
-/// transforms are runtime-only, so a crop always arrives while the pipeline
-/// is live, and any input that is actually flowing has negotiated caps.
-///
-/// Pads run `sizing-policy=none` permanently (explicit geometry): the layout
-/// code aspect-fits every rect itself, so the cropped window renders into
-/// exactly (width, height) with no policy flipping between modes.
-fn set_pad_crop(pad: &gst::Pad, crop: &strom_types::vision_mixer::SourceCrop) {
-    if pad.find_property("crop-left").is_none() {
-        if !crop.is_zero() {
-            warn!(
-                "Compositor pad {} has no crop properties (CPU backend) — source crop ignored",
-                pad.name()
-            );
-        }
-        return;
-    }
-    for prop in CROP_PAD_PROPS {
-        if let Some(binding) = pad.control_binding(prop) {
-            pad.remove_control_binding(&binding);
-        }
-    }
-    if crop.is_zero() {
-        for prop in CROP_PAD_PROPS {
-            pad.set_property(prop, 0i32);
-        }
-        return;
-    }
-    let caps = pad.current_caps();
-    let px = caps.as_ref().and_then(|c| c.structure(0)).and_then(|s| {
-        let w = s.get::<i32>("width").ok()?;
-        let h = s.get::<i32>("height").ok()?;
-        Some(crop.to_pixels(w, h))
-    });
-    let Some((l, r, t, b)) = px else {
-        debug!(
-            "Pad {} has no negotiated caps yet — source crop skipped",
-            pad.name()
-        );
-        return;
-    };
-    pad.set_property("crop-left", l);
-    pad.set_property("crop-right", r);
-    pad.set_property("crop-top", t);
-    pad.set_property("crop-bottom", b);
-}
+use crate::gst::crop::set_pad_crop;
 
 /// Apply per-source crop to a region after a zone morph: pads present in both
 /// old and new layouts animate crop alongside the geometry morph; pads about

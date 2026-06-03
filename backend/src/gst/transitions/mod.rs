@@ -120,11 +120,6 @@ pub struct TransitionController {
     next_transition_id: Arc<AtomicU64>,
 }
 
-/// GL mixer crop pad properties. Only `glvideomixerelement` pads have these —
-/// the CPU `compositor` backend has no crop support (verified against both
-/// GStreamer 1.24 and current upstream docs).
-pub(crate) const CROP_PAD_PROPS: [&str; 4] = ["crop-left", "crop-right", "crop-top", "crop-bottom"];
-
 /// A pad's target geometry + zorder in a composition. Used by [`plan_transition`]
 /// and [`TransitionController::animate_pad_transition`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

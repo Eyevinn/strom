@@ -89,14 +89,11 @@ pub fn install_caps_probes(
     );
 }
 
-/// Read `(width, height)` from a pad's negotiated caps.
+/// Read the UNCROPPED source `(width, height)` feeding a sink pad. On the
+/// CPU backend the pad's own caps are post-videocrop; this walks past it.
 fn pad_caps_dims(element: &gst::Element, pad_name: &str) -> Option<(i32, i32)> {
     let pad = find_pad(element, pad_name)?;
-    let caps = pad.current_caps()?;
-    let s = caps.structure(0)?;
-    let w = s.get::<i32>("width").ok()?;
-    let h = s.get::<i32>("height").ok()?;
-    (w > 0 && h > 0).then_some((w, h))
+    crate::gst::crop::source_dims_for_pad(&pad)
 }
 
 /// Re-apply aspect-correct geometry (and crop pixel values) for every input
@@ -108,16 +105,30 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
     };
     let n = state.num_inputs;
 
-    // Per-input source aspects from the dist mixer pads' negotiated caps
-    // (refreshes run deferred on the main loop, so the triggering caps event
-    // has been stored as a sticky event by the time we read it). The mv
-    // thumbnail pad serves as fallback — same tee, same dimensions.
+    // Per-input UNCROPPED source dims from the dist mixer pads' negotiated
+    // caps (refreshes run deferred on the main loop, so the triggering caps
+    // event has been stored as a sticky event by the time we read it). The
+    // mv thumbnail pad serves as fallback — same tee, same dimensions.
+    let dims: Vec<Option<(i32, i32)>> = (0..n)
+        .map(|i| {
+            pad_caps_dims(mixer, &format!("sink_{}", i))
+                .or_else(|| pad_caps_dims(mv_comp, &format!("sink_{}", i)))
+        })
+        .collect();
+
+    // Skip when no source actually changed dimensions. On the CPU backend
+    // every animated videocrop step renegotiates the compositor sink caps —
+    // refreshing on each of those events would clear control bindings and
+    // kill the very animation producing them. Source dims are read upstream
+    // of videocrop, so crop-induced caps events never count as changes.
+    if !state.update_input_dims(&dims) {
+        return;
+    }
+
     let mut aspects = SourceAspects::new();
-    for i in 0..n {
-        let dims = pad_caps_dims(mixer, &format!("sink_{}", i))
-            .or_else(|| pad_caps_dims(mv_comp, &format!("sink_{}", i)));
-        if let Some((w, h)) = dims {
-            aspects.insert(i, w as f64 / h as f64);
+    for (i, d) in dims.iter().enumerate() {
+        if let Some((w, h)) = d {
+            aspects.insert(i, *w as f64 / *h as f64);
         }
     }
 

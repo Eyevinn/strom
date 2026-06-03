@@ -68,6 +68,12 @@ pub struct VisionMixerOverlayState {
     /// Per-source crop transforms per configured PiP, keyed by input index.
     /// Like zones these are runtime-only (configured via the /pip endpoint).
     pub pip_transforms: Vec<std::sync::Mutex<strom_types::vision_mixer::PipTransforms>>,
+    /// Last known UNCROPPED source dimensions per input, packed as
+    /// `(width << 32) | height` (0 = unknown). Used by the geometry caps
+    /// probe to skip refreshes whose source dims are unchanged — on the CPU
+    /// backend every animated videocrop step renegotiates caps, and an
+    /// unguarded refresh would clear control bindings mid-animation.
+    input_dims: Vec<AtomicU64>,
     /// Number of configured PiP tiles (also `pip_bg.len()` / `pip_zones.len()`).
     pub num_pips: usize,
     /// Number of inputs.
@@ -191,6 +197,7 @@ impl VisionMixerOverlayState {
             tz_abbr_packed: AtomicU64::new(pack_tz_abbr(&tz_abbr)),
             tz_next_refresh: AtomicU64::new(TIMEZONE_REFRESH_SECS),
             show_vu_meters: AtomicBool::new(show_vu_meters),
+            input_dims: (0..num_inputs).map(|_| AtomicU64::new(0)).collect(),
             input_peak: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
             input_decay: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
             pgm_peak: AtomicU8::new(0),
@@ -300,6 +307,23 @@ impl VisionMixerOverlayState {
                 *v = transforms;
             }
         }
+    }
+
+    /// Store the latest known uncropped source dimensions and report whether
+    /// any input actually changed. `dims` entries are `Option<(w, h)>` per
+    /// input; `None` (caps not negotiated) is treated as "no news" rather
+    /// than a change, so a not-yet-connected input doesn't suppress or force
+    /// refreshes.
+    pub fn update_input_dims(&self, dims: &[Option<(i32, i32)>]) -> bool {
+        let mut changed = false;
+        for (slot, d) in self.input_dims.iter().zip(dims) {
+            let Some((w, h)) = d else { continue };
+            let packed = ((*w as u64) << 32) | (*h as u64 & 0xFFFF_FFFF);
+            if slot.swap(packed, Ordering::Relaxed) != packed {
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Whether VU meters should be rendered.

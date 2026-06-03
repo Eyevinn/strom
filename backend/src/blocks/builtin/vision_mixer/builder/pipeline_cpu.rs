@@ -299,10 +299,31 @@ pub(super) fn build_cpu_pipeline(
         elems.push((q_thumb_id.clone(), elements::make_queue(&q_thumb_id)?));
         elems.push((q_pvw_id.clone(), elements::make_queue(&q_pvw_id)?));
 
-        // One queue per PiP tile per input — feeds the virtual PiP thumbnail pads on mv_comp.
+        // The CPU `compositor` has no crop pad properties, so every croppable
+        // branch (dist, PVW, PiP — not thumbnails, which never crop) gets a
+        // videocrop element directly upstream of its compositor sink pad.
+        // Zero crop = passthrough. `set_pad_crop` finds it via pad.peer().
+        let crop_dist_id = p.id(&format!("videocrop_dist_{}", i));
+        let crop_pvw_id = p.id(&format!("videocrop_pvw_{}", i));
+        elems.push((
+            crop_dist_id.clone(),
+            elements::make_element("videocrop", &crop_dist_id)?,
+        ));
+        elems.push((
+            crop_pvw_id.clone(),
+            elements::make_element("videocrop", &crop_pvw_id)?,
+        ));
+
+        // One queue (+ videocrop) per PiP tile per input — feeds the virtual
+        // PiP thumbnail pads on mv_comp.
         for pip_idx in 0..p.num_pips {
             let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
             elems.push((q_pip_id.clone(), elements::make_queue(&q_pip_id)?));
+            let crop_pip_id = p.id(&format!("videocrop_pip_{}_{}", pip_idx, i));
+            elems.push((
+                crop_pip_id.clone(),
+                elements::make_element("videocrop", &crop_pip_id)?,
+            ));
         }
     }
 
@@ -311,12 +332,17 @@ pub(super) fn build_cpu_pipeline(
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         let q_dist_id = p.id(&format!("queue_to_dist_{}", i));
+        let crop_dist_id = p.id(&format!("videocrop_dist_{}", i));
         links.push((
             ElementPadRef::pad(&tee_id, "src_0"),
             ElementPadRef::pad(&q_dist_id, "sink"),
         ));
         links.push((
             ElementPadRef::pad(&q_dist_id, "src"),
+            ElementPadRef::pad(&crop_dist_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&crop_dist_id, "src"),
             ElementPadRef::pad(&mixer_id, format!("sink_{}", i)),
         ));
     }
@@ -346,16 +372,21 @@ pub(super) fn build_cpu_pipeline(
         ));
     }
 
-    // Multiview PVW big candidates: tee_i.src_2 → queue → mv_comp.sink_{N+1+i}
+    // Multiview PVW big candidates: tee_i.src_2 → queue → videocrop → mv_comp.sink_{N+1+i}
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
         let q_pvw_id = p.id(&format!("queue_to_mv_pvw_{}", i));
+        let crop_pvw_id = p.id(&format!("videocrop_pvw_{}", i));
         links.push((
             ElementPadRef::pad(&tee_id, "src_2"),
             ElementPadRef::pad(&q_pvw_id, "sink"),
         ));
         links.push((
             ElementPadRef::pad(&q_pvw_id, "src"),
+            ElementPadRef::pad(&crop_pvw_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&crop_pvw_id, "src"),
             ElementPadRef::pad(&mv_comp_id, format!("sink_{}", p.num_inputs + 1 + i)),
         ));
     }
@@ -367,6 +398,7 @@ pub(super) fn build_cpu_pipeline(
         for i in 0..p.num_inputs {
             let tee_id = p.id(&format!("tee_{}", i));
             let q_pip_id = p.id(&format!("queue_to_mv_pip_{}_{}", pip_idx, i));
+            let crop_pip_id = p.id(&format!("videocrop_pip_{}_{}", pip_idx, i));
             let tee_src = format!("src_{}", 3 + pip_idx);
             let sink_idx = 2 * p.num_inputs + 1 + pip_idx * p.num_inputs + i;
             links.push((
@@ -375,6 +407,10 @@ pub(super) fn build_cpu_pipeline(
             ));
             links.push((
                 ElementPadRef::pad(&q_pip_id, "src"),
+                ElementPadRef::pad(&crop_pip_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&crop_pip_id, "src"),
                 ElementPadRef::pad(&mv_comp_id, format!("sink_{}", sink_idx)),
             ));
         }
