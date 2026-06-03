@@ -421,6 +421,59 @@ pub struct InputResolution {
     pub height: u32,
 }
 
+/// Per-input source aspect ratios (width / height of the negotiated caps),
+/// keyed by input index. Inputs with unknown caps are simply absent.
+pub type SourceAspects = std::collections::BTreeMap<usize, f64>;
+
+/// Largest rect with `content_aspect` centered inside the given box — the
+/// explicit-geometry replacement for the compositor's `keep-aspect-ratio`
+/// sizing policy (which cannot be used together with pad crop: it fits by
+/// the *uncropped* input DAR, and flipping the policy enum mid-transition
+/// snaps visibly). All pads run `sizing-policy=none`; layout code computes
+/// the letterbox/fill rect itself with this helper.
+///
+/// `content_aspect <= 0` (unknown caps — nothing is flowing yet) returns the
+/// box unchanged; the caps probe re-applies geometry once caps arrive.
+pub fn aspect_fit_rect(
+    box_x: i32,
+    box_y: i32,
+    box_w: i32,
+    box_h: i32,
+    content_aspect: f64,
+) -> (i32, i32, i32, i32) {
+    if content_aspect <= 0.0 || !content_aspect.is_finite() || box_w <= 0 || box_h <= 0 {
+        return (box_x, box_y, box_w.max(1), box_h.max(1));
+    }
+    let box_aspect = box_w as f64 / box_h as f64;
+    if content_aspect > box_aspect {
+        // Wider than the box → full width, reduced height (letterbox).
+        let h = ((box_w as f64 / content_aspect).round() as i32).clamp(1, box_h);
+        (box_x, box_y + (box_h - h) / 2, box_w, h)
+    } else {
+        // Taller than the box → full height, reduced width (pillarbox).
+        let w = ((box_h as f64 * content_aspect).round() as i32).clamp(1, box_w);
+        (box_x + (box_w - w) / 2, box_y, w, box_h)
+    }
+}
+
+/// Aspect ratio of what a source actually shows after cropping: the crop
+/// window scales the raw source aspect by the window's normalized w/h ratio.
+/// Unknown source aspect (`<= 0`) stays unknown.
+pub fn effective_source_aspect(src_aspect: f64, crop: Option<&SourceCrop>) -> f64 {
+    if src_aspect <= 0.0 || !src_aspect.is_finite() {
+        return 0.0;
+    }
+    match crop {
+        Some(c) if !c.is_zero() => {
+            let c = c.clamped();
+            let win_w = (1.0 - c.left - c.right).max(MIN_CROP_VISIBLE) as f64;
+            let win_h = (1.0 - c.top - c.bottom).max(MIN_CROP_VISIBLE) as f64;
+            src_aspect * win_w / win_h
+        }
+        _ => src_aspect,
+    }
+}
+
 /// Per-source crop transforms within a PiP, keyed by input index.
 ///
 /// The crop applies to the input wherever it renders inside that PiP (bg or
@@ -488,26 +541,32 @@ pub struct ZonePadLayout {
 ///
 /// Each zone's `rect` is projected onto `(container_x, container_y,
 /// container_w, container_h)` (or defaults to the full container when
-/// `rect` is `None`). Sources inside the zone auto-tile within the projected
-/// rect using [`compute_pip_overlay_rects`].
+/// `rect` is `None`). A zone holding a single source uses its full projected
+/// rect as the cell; multiple sources auto-tile into a slot grid via
+/// [`compute_pip_overlay_rects`] (sized with `fallback_aspect`, the canvas
+/// aspect). Each source is then aspect-fitted inside its cell using its
+/// *effective* aspect — the negotiated source aspect from `src_aspects`
+/// adjusted by any crop window in `transforms` — so a crop locked to the box
+/// aspect fills it exactly, an unlocked crop letterboxes correctly, and an
+/// uncropped odd-aspect source letterboxes inside its cell. Sources with
+/// unknown caps fall back to `fallback_aspect`.
 ///
-/// A zone holding a *single source with a crop transform* fills its projected
-/// rect exactly instead of auto-tiling: the operator crops the source to the
-/// box ("punch-in" framing), so the aspect-preserving cell math must not
-/// shrink the box back to the source aspect. The UI locks the crop aspect to
-/// the box aspect so the cropped frame fills it without letterboxing.
+/// This is explicit geometry: pads run `sizing-policy=none`, so these rects
+/// are exactly what renders (see [`aspect_fit_rect`] for why).
 ///
 /// Duplicate sources across zones are filtered: only the first occurrence
 /// keeps its pad layout. Sources that exceed a zone's `capacity` are
 /// dropped (oldest first), matching [`Zone::effective_sources`].
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_zone_pads(
     container_x: i32,
     container_y: i32,
     container_w: i32,
     container_h: i32,
     zones: &[Zone],
-    source_aspect: f64,
+    fallback_aspect: f64,
     transforms: &PipTransforms,
+    src_aspects: &SourceAspects,
 ) -> Vec<ZonePadLayout> {
     let mut out: Vec<ZonePadLayout> = Vec::new();
     let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -523,21 +582,21 @@ pub fn resolve_zone_pads(
                 .to_pixels(container_x, container_y, container_w, container_h),
             None => (container_x, container_y, container_w, container_h),
         };
-        let single_cropped = sources.len() == 1
-            && transforms
-                .get(&sources[0])
-                .map(|c| !c.is_zero())
-                .unwrap_or(false);
-        let cells = if single_cropped {
+        let cells = if sources.len() == 1 {
             vec![(zx, zy, zw, zh)]
         } else {
-            compute_pip_overlay_rects(zx, zy, zw, zh, sources.len(), source_aspect)
+            compute_pip_overlay_rects(zx, zy, zw, zh, sources.len(), fallback_aspect)
         };
         for (i, &input) in sources.iter().enumerate() {
             if !seen.insert(input) {
                 continue;
             }
-            let (x, y, w, h) = cells.get(i).copied().unwrap_or((zx, zy, 1, 1));
+            let (cx, cy, cw, ch) = cells.get(i).copied().unwrap_or((zx, zy, 1, 1));
+            let aspect = effective_source_aspect(
+                src_aspects.get(&input).copied().unwrap_or(fallback_aspect),
+                transforms.get(&input),
+            );
+            let (x, y, w, h) = aspect_fit_rect(cx, cy, cw, ch, aspect);
             out.push(ZonePadLayout {
                 input,
                 x,
@@ -830,7 +889,16 @@ mod tests {
             capacity: None,
             sources: vec![0, 1, 2],
         };
-        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0, &PipTransforms::new());
+        let layouts = resolve_zone_pads(
+            0,
+            0,
+            1920,
+            1080,
+            &[z],
+            16.0 / 9.0,
+            &PipTransforms::new(),
+            &SourceAspects::new(),
+        );
         assert_eq!(layouts.len(), 3);
         // First source covers ~upper-left cell of the 2x2 auto-tile.
         assert_eq!(layouts[0].input, 0);
@@ -864,8 +932,16 @@ mod tests {
             capacity: Some(3),
             sources: vec![1, 2, 3],
         };
-        let layouts =
-            resolve_zone_pads(0, 0, 1920, 1080, &[a, b], 16.0 / 9.0, &PipTransforms::new());
+        let layouts = resolve_zone_pads(
+            0,
+            0,
+            1920,
+            1080,
+            &[a, b],
+            16.0 / 9.0,
+            &PipTransforms::new(),
+            &SourceAspects::new(),
+        );
         assert_eq!(layouts.len(), 4);
         assert_eq!(layouts[0].input, 5);
         // Zone A: x starts at half the container width (960).
@@ -888,8 +964,16 @@ mod tests {
             capacity: None,
             sources: vec![2, 3],
         };
-        let layouts =
-            resolve_zone_pads(0, 0, 1920, 1080, &[a, b], 16.0 / 9.0, &PipTransforms::new());
+        let layouts = resolve_zone_pads(
+            0,
+            0,
+            1920,
+            1080,
+            &[a, b],
+            16.0 / 9.0,
+            &PipTransforms::new(),
+            &SourceAspects::new(),
+        );
         // Source 2 should appear once (from zone A); zone B drops it.
         let inputs: Vec<usize> = layouts.iter().map(|l| l.input).collect();
         assert_eq!(inputs, vec![1, 2, 3]);
@@ -903,32 +987,45 @@ mod tests {
             capacity: Some(2),
             sources: vec![1, 2, 3, 4],
         };
-        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0, &PipTransforms::new());
+        let layouts = resolve_zone_pads(
+            0,
+            0,
+            1920,
+            1080,
+            &[z],
+            16.0 / 9.0,
+            &PipTransforms::new(),
+            &SourceAspects::new(),
+        );
         let inputs: Vec<usize> = layouts.iter().map(|l| l.input).collect();
         assert_eq!(inputs, vec![3, 4]);
     }
 
     #[test]
     fn test_resolve_zone_pads_single_cropped_source_fills_rect() {
-        // A single source WITH a crop transform fills the zone rect exactly
-        // (punch-in framing), bypassing the aspect-preserving cell math.
+        // A single 16:9 source whose crop window matches the box aspect
+        // (the UI's aspect lock) fills the zone rect exactly — punch-in.
         let z = Zone {
             rect: Some(NormRect {
                 x: 0.0,
                 y: 0.0,
-                w: 0.25, // portrait box: 480×1080 — far from 16:9
+                w: 0.25, // portrait box: 480×1080, aspect 4:9
                 h: 1.0,
             }),
             capacity: None,
             sources: vec![2],
         };
+        let mut aspects = SourceAspects::new();
+        aspects.insert(2, 16.0 / 9.0);
+        // Window ratio for box aspect (4/9) on a 16:9 source: 0.25 of the
+        // width, full height → effective aspect = 16/9 × 0.25 = 4/9 = box.
         let mut transforms = PipTransforms::new();
         transforms.insert(
             2,
             SourceCrop {
-                left: 0.3,
+                left: 0.375,
                 top: 0.0,
-                right: 0.3,
+                right: 0.375,
                 bottom: 0.0,
             },
         );
@@ -940,6 +1037,7 @@ mod tests {
             std::slice::from_ref(&z),
             16.0 / 9.0,
             &transforms,
+            &aspects,
         );
         assert_eq!(layouts.len(), 1);
         assert_eq!(
@@ -947,10 +1045,67 @@ mod tests {
             (0, 0, 480, 1080)
         );
 
-        // Without a transform the same zone falls back to the 16:9 cell.
-        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0, &PipTransforms::new());
+        // Without a transform the same source letterboxes inside the rect.
+        let layouts = resolve_zone_pads(
+            0,
+            0,
+            1920,
+            1080,
+            std::slice::from_ref(&z),
+            16.0 / 9.0,
+            &PipTransforms::new(),
+            &aspects,
+        );
         assert_eq!(layouts.len(), 1);
-        assert!(layouts[0].h < 1080, "expected aspect-constrained cell");
+        assert!(
+            layouts[0].h < 1080,
+            "expected aspect-fitted (letterboxed) rect"
+        );
+        assert_eq!(layouts[0].w, 480, "16:9 in a portrait box keeps full width");
+    }
+
+    #[test]
+    fn test_aspect_fit_rect_letterbox_and_pillarbox() {
+        // 2.39:1 scope content in a 16:9 box → full width, reduced height.
+        let (x, y, w, h) = aspect_fit_rect(0, 0, 1920, 1080, 2.39);
+        assert_eq!((x, w), (0, 1920));
+        assert_eq!(h, (1920.0 / 2.39_f64).round() as i32);
+        assert_eq!(y, (1080 - h) / 2);
+
+        // 16:9 content in a portrait box → full height of the fitted width.
+        let (x, y, w, h) = aspect_fit_rect(100, 0, 480, 1080, 16.0 / 9.0);
+        assert_eq!(w, 480);
+        assert_eq!(h, 270);
+        assert_eq!(x, 100);
+        assert_eq!(y, (1080 - 270) / 2);
+
+        // Matching aspect → exact box. Unknown aspect → box unchanged.
+        assert_eq!(
+            aspect_fit_rect(5, 7, 1600, 900, 16.0 / 9.0),
+            (5, 7, 1600, 900)
+        );
+        assert_eq!(aspect_fit_rect(5, 7, 1600, 900, 0.0), (5, 7, 1600, 900));
+    }
+
+    #[test]
+    fn test_effective_source_aspect() {
+        // No crop → raw aspect; unknown stays unknown.
+        assert_eq!(effective_source_aspect(2.39, None), 2.39);
+        assert_eq!(effective_source_aspect(0.0, None), 0.0);
+        // Horizontal-only crop narrows the effective aspect.
+        let c = SourceCrop {
+            left: 0.25,
+            top: 0.0,
+            right: 0.25,
+            bottom: 0.0,
+        };
+        let a = effective_source_aspect(16.0 / 9.0, Some(&c));
+        assert!((a - (16.0 / 9.0) * 0.5).abs() < 1e-6);
+        // Zero crop entry behaves like no crop.
+        assert_eq!(
+            effective_source_aspect(1.5, Some(&SourceCrop::default())),
+            1.5
+        );
     }
 
     #[test]

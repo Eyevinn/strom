@@ -13,7 +13,7 @@ use tracing::{debug, info};
 
 use super::{
     plan_transition, PadAction, PadTarget, TransitionController, TransitionError, TransitionType,
-    ZHandling, CROP_PAD_PROPS,
+    ZHandling,
 };
 
 impl TransitionController {
@@ -807,31 +807,9 @@ impl TransitionController {
             return Ok(());
         };
         let (l, r, t, b) = target.to_pixels(src_w, src_h);
-        // Sizing-policy follows the crop (see `set_pad_crop` for why):
-        // `keep-aspect-ratio` fits by the *uncropped* DAR and would letterbox
-        // + distort cropped content; `none` fills (width, height) exactly.
-        // When animating *to* zero crop the UVs stay cropped during the
-        // punch-out, so `none` must persist until the animation completes —
-        // flip back afterwards (only if the crop actually reached zero; a
-        // newer animation may have taken over in the meantime).
-        if !target.is_zero() {
-            pad.set_property_from_str("sizing-policy", "none");
-        } else if CROP_PAD_PROPS.iter().all(|p| pad.property::<i32>(p) == 0) {
-            pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
-        } else {
-            let pad_weak = pad.downgrade();
-            gst::glib::timeout_add_once(
-                std::time::Duration::from_millis(duration_ms + 100),
-                move || {
-                    let Some(pad) = pad_weak.upgrade() else {
-                        return;
-                    };
-                    if CROP_PAD_PROPS.iter().all(|p| pad.property::<i32>(p) == 0) {
-                        pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
-                    }
-                },
-            );
-        }
+        // No sizing-policy handling: pads run `sizing-policy=none` permanently
+        // (explicit geometry — the layout code aspect-fits every rect itself),
+        // so the crop window always renders into exactly (width, height).
         let current_time = self.query_stream_time(pipeline)?;
         let end_time = current_time + gst::ClockTime::from_mseconds(duration_ms);
 

@@ -26,6 +26,11 @@ pub(super) fn build_gpu_pipeline(
 
     let mixer_id = p.id("mixer");
     let mv_comp_id = p.id("mv_comp");
+    // Weak handles for the caps probes registered below — the probes must
+    // not hold strong element references (pads own their probes; a strong
+    // ref would create a cycle that leaks the pipeline on restart).
+    let dist_weak = dist_comp.downgrade();
+    let mv_weak = mv_comp.downgrade();
     elems.push((mixer_id.clone(), dist_comp));
     elems.push((mv_comp_id.clone(), mv_comp));
 
@@ -390,6 +395,24 @@ pub(super) fn build_gpu_pipeline(
 
     // --- Set up overlay appsrc renderer ---
     let overlay_state = setup_overlay_renderer(p, &appsrc_overlay, &overlay_caps, &mv_layout, ctx);
+
+    // --- Reactive explicit geometry ---
+    // Input pads run sizing-policy=none; aspect-correct rects are re-applied
+    // whenever an input's caps arrive or change. Probes attach at element
+    // setup time (after linking, when the request pads exist).
+    {
+        let block_id = p.instance_id.to_string();
+        let num_inputs = p.num_inputs;
+        let num_pips = p.num_pips;
+        ctx.register_element_setup(Box::new(move |_flow_id, _events| {
+            let (Some(mixer), Some(mv_comp)) = (dist_weak.upgrade(), mv_weak.upgrade()) else {
+                return;
+            };
+            super::super::geometry::install_caps_probes(
+                &block_id, &mixer, &mv_comp, num_inputs, num_pips,
+            );
+        }));
+    }
 
     // --- Bus handler that pipes `level` messages into the overlay state ---
     let bus_message_handler = Some(audio_meter::build_meter_bus_handler(

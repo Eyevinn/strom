@@ -139,13 +139,15 @@ impl PipelineManager {
                 let dist_region = (0, 0, canvas_width, canvas_height);
                 let r = &state.layout.pvw_rect;
                 let pvw_region = (r.x as i32, r.y as i32, r.w as i32, r.h as i32);
-                // Source aspect = PGM canvas aspect (typically 16:9). Used to
-                // compute aspect-preserving tile cells so overlays fill cleanly.
+                // Fallback aspect = PGM canvas aspect (typically 16:9), used
+                // for tile-grid cells and for inputs whose caps are unknown.
                 let src_aspect = if canvas_height > 0 {
                     canvas_width as f64 / canvas_height as f64
                 } else {
                     16.0 / 9.0
                 };
+                let src_aspects =
+                    self.vision_mixer_source_aspects(block_instance_id, state.num_inputs);
 
                 let old_dist_targets = pads_for_source(
                     state,
@@ -156,6 +158,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::DIST_PGM_ZORDER,
                     strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                     src_aspect,
+                    &src_aspects,
                 );
                 let new_dist_targets = pads_for_source(
                     state,
@@ -166,6 +169,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::DIST_PGM_ZORDER,
                     strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                     src_aspect,
+                    &src_aspects,
                 );
                 let old_pvw_targets = pads_for_source(
                     state,
@@ -176,6 +180,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
                     strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                     src_aspect,
+                    &src_aspects,
                 );
                 let new_pvw_targets = pads_for_source(
                     state,
@@ -186,6 +191,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
                     strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                     src_aspect,
+                    &src_aspects,
                 );
 
                 if is_cut {
@@ -202,6 +208,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::DIST_PGM_ZORDER,
                             strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                             src_aspect,
+                            &src_aspects,
                         );
                     } else {
                         apply_input_group_to_region(
@@ -211,6 +218,8 @@ impl PipelineManager {
                             dist_region,
                             new_pgm_swap,
                             strom_types::vision_mixer::DIST_PGM_ZORDER,
+                            src_aspect,
+                            &src_aspects,
                         );
                     }
                     if let Some(p) = new_pvw_pip {
@@ -225,6 +234,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
                             strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                             src_aspect,
+                            &src_aspects,
                         );
                     } else {
                         apply_input_group_to_region(
@@ -234,6 +244,8 @@ impl PipelineManager {
                             pvw_region,
                             new_pvw_swap,
                             strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
+                            src_aspect,
+                            &src_aspects,
                         );
                     }
                 } else {
@@ -333,6 +345,19 @@ impl PipelineManager {
         // clear control bindings, restore alpha/position/size for the current
         // PGM input. Single-input PGM only (multi-source compositions are PiPs).
         let active_pgm_input = old_pgm;
+        let classic_aspects = self.vision_mixer_source_aspects(
+            block_instance_id,
+            if num_video_inputs == usize::MAX {
+                0
+            } else {
+                num_video_inputs
+            },
+        );
+        let canvas_aspect = if canvas_height > 0 {
+            canvas_width as f64 / canvas_height as f64
+        } else {
+            16.0 / 9.0
+        };
 
         for pad in mixer.sink_pads() {
             let name = pad.name();
@@ -347,20 +372,25 @@ impl PipelineManager {
                         // Classic takes are input↔input — wipe any crop left
                         // behind by an earlier PiP render on these pads.
                         set_pad_crop(&pad, &Default::default());
+                        // Explicit geometry: aspect-fit the source into the
+                        // canvas (pads run sizing-policy=none).
+                        let aspect = classic_aspects.get(&idx).copied().unwrap_or(canvas_aspect);
+                        let (x, y, w, h) = strom_types::vision_mixer::aspect_fit_rect(
+                            0,
+                            0,
+                            canvas_width,
+                            canvas_height,
+                            aspect,
+                        );
+                        pad.set_property("xpos", x);
+                        pad.set_property("ypos", y);
+                        pad.set_property("width", w);
+                        pad.set_property("height", h);
                         if Some(idx) == active_pgm_input {
-                            // The active PGM input fills the canvas.
                             pad.set_property("alpha", 1.0f64);
-                            pad.set_property("xpos", 0i32);
-                            pad.set_property("ypos", 0i32);
-                            pad.set_property("width", canvas_width);
-                            pad.set_property("height", canvas_height);
                             pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER);
                         } else {
                             pad.set_property("alpha", 0.0f64);
-                            pad.set_property("xpos", 0i32);
-                            pad.set_property("ypos", 0i32);
-                            pad.set_property("width", canvas_width);
-                            pad.set_property("height", canvas_height);
                         }
                     } else if let Some(state) = overlay_state.as_ref() {
                         let dsk_idx = idx - num_video_inputs;
@@ -622,15 +652,23 @@ impl PipelineManager {
             }
         }
 
-        // Position the new PVW pad at the PVW big rect.
+        // Position the new PVW pad aspect-fitted into the PVW big rect.
         if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + input)) {
             // Plain-input PVW never crops — wipe any crop from a PiP render.
             set_pad_crop(&pad, &Default::default());
             let r = &state.layout.pvw_rect;
-            pad.set_property("xpos", r.x as i32);
-            pad.set_property("ypos", r.y as i32);
-            pad.set_property("width", r.w as i32);
-            pad.set_property("height", r.h as i32);
+            let aspect = self
+                .vision_mixer_source_aspects(block_instance_id, num_inputs)
+                .get(&input)
+                .copied()
+                .unwrap_or(0.0);
+            let (x, y, w, h) = strom_types::vision_mixer::aspect_fit_rect(
+                r.x as i32, r.y as i32, r.w as i32, r.h as i32, aspect,
+            );
+            pad.set_property("xpos", x);
+            pad.set_property("ypos", y);
+            pad.set_property("width", w);
+            pad.set_property("height", h);
             pad.set_property("alpha", 1.0f64);
             pad.set_property("zorder", strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER);
         }
@@ -702,17 +740,25 @@ impl PipelineManager {
             }
         }
 
-        // Position the new PVW pad at the PVW big rect (single input only —
-        // multi-source compositions are PiPs).
+        // Position the new PVW pad aspect-fitted into the PVW big rect
+        // (single input only — multi-source compositions are PiPs).
         if let Some(active) = new_pvw {
             if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + active)) {
                 // Plain-input PVW never crops — wipe any crop from a PiP render.
                 set_pad_crop(&pad, &Default::default());
                 let r = &state.layout.pvw_rect;
-                pad.set_property("xpos", r.x as i32);
-                pad.set_property("ypos", r.y as i32);
-                pad.set_property("width", r.w as i32);
-                pad.set_property("height", r.h as i32);
+                let aspect = self
+                    .vision_mixer_source_aspects(block_instance_id, num_inputs)
+                    .get(&active)
+                    .copied()
+                    .unwrap_or(0.0);
+                let (x, y, w, h) = strom_types::vision_mixer::aspect_fit_rect(
+                    r.x as i32, r.y as i32, r.w as i32, r.h as i32, aspect,
+                );
+                pad.set_property("xpos", x);
+                pad.set_property("ypos", y);
+                pad.set_property("width", w);
+                pad.set_property("height", h);
                 pad.set_property("alpha", 1.0f64);
                 pad.set_property("zorder", strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER);
             }
@@ -876,6 +922,7 @@ impl PipelineManager {
                 strom_types::vision_mixer::DIST_PGM_ZORDER,
                 strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                 src_aspect,
+                &self.vision_mixer_source_aspects(block_instance_id, state.num_inputs),
             )
             .into_iter()
             .map(|t| t.pad_idx)
@@ -1122,6 +1169,7 @@ impl PipelineManager {
         } else {
             16.0 / 9.0
         };
+        let src_aspects = self.vision_mixer_source_aspects(block_instance_id, state.num_inputs);
 
         let on_pgm = state.pgm_pip() == Some(pip_idx);
         let on_pvw = state.pvw_pip() == Some(pip_idx);
@@ -1148,6 +1196,7 @@ impl PipelineManager {
                 vision_mixer::MV_PIP_BG_ZORDER,
                 vision_mixer::MV_PIP_OVERLAY_ZORDER,
                 src_aspect,
+                &src_aspects,
             )
         });
         let old_pgm = if on_pgm {
@@ -1160,6 +1209,7 @@ impl PipelineManager {
                 vision_mixer::DIST_PGM_ZORDER,
                 vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                 src_aspect,
+                &src_aspects,
             ))
         } else {
             None
@@ -1174,6 +1224,7 @@ impl PipelineManager {
                 vision_mixer::MV_BIG_DISPLAY_ZORDER,
                 vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                 src_aspect,
+                &src_aspects,
             ))
         } else {
             None
@@ -1201,6 +1252,7 @@ impl PipelineManager {
                 vision_mixer::MV_PIP_BG_ZORDER,
                 vision_mixer::MV_PIP_OVERLAY_ZORDER,
                 src_aspect,
+                &src_aspects,
             )
         });
         let new_pgm = on_pgm.then(|| {
@@ -1213,6 +1265,7 @@ impl PipelineManager {
                 vision_mixer::DIST_PGM_ZORDER,
                 vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                 src_aspect,
+                &src_aspects,
             )
         });
         let new_pvw = on_pvw.then(|| {
@@ -1225,6 +1278,7 @@ impl PipelineManager {
                 vision_mixer::MV_BIG_DISPLAY_ZORDER,
                 vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                 src_aspect,
+                &src_aspects,
             )
         });
 
@@ -1337,6 +1391,21 @@ impl PipelineManager {
             .collect()
     }
 
+    /// Build the per-input source-aspect map for explicit geometry from the
+    /// negotiated input resolutions. Inputs without caps are absent (layout
+    /// code falls back to the canvas aspect until the caps probe fires).
+    pub fn vision_mixer_source_aspects(
+        &self,
+        block_instance_id: &str,
+        num_inputs: usize,
+    ) -> strom_types::vision_mixer::SourceAspects {
+        self.vision_mixer_input_resolutions(block_instance_id, num_inputs)
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.map(|r| (i, r.width as f64 / r.height as f64)))
+            .collect()
+    }
+
     /// Select a PiP composition as the PVW source.
     ///
     /// Hides any input-group PVW pads, then renders the PiP (bg + tiled overlays)
@@ -1411,6 +1480,7 @@ impl PipelineManager {
             vision_mixer::MV_BIG_DISPLAY_ZORDER,
             vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
             src_aspect,
+            &self.vision_mixer_source_aspects(block_instance_id, state.num_inputs),
         );
 
         overlay::trigger_overlay_update(block_instance_id);
@@ -1425,7 +1495,7 @@ impl PipelineManager {
 
 /// Find a pad by name on an element, checking both static and request pads.
 /// `static_pad()` doesn't find request pads on aggregator elements like glvideomixer.
-fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pad> {
+pub(crate) fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pad> {
     element.static_pad(pad_name).or_else(|| {
         element
             .pads()
@@ -1445,11 +1515,9 @@ use crate::gst::transitions::CROP_PAD_PROPS;
 /// transforms are runtime-only, so a crop always arrives while the pipeline
 /// is live, and any input that is actually flowing has negotiated caps.
 ///
-/// The sizing-policy follows the crop: glvideomixer's `keep-aspect-ratio`
-/// fits using the *uncropped* input DAR (verified in upstream
-/// `_mixer_pad_get_output_size`), which letterboxes AND distorts cropped
-/// content. `none` renders the cropped window into exactly (width, height) —
-/// geometrically correct because the UI locks the crop aspect to the box.
+/// Pads run `sizing-policy=none` permanently (explicit geometry): the layout
+/// code aspect-fits every rect itself, so the cropped window renders into
+/// exactly (width, height) with no policy flipping between modes.
 fn set_pad_crop(pad: &gst::Pad, crop: &strom_types::vision_mixer::SourceCrop) {
     if pad.find_property("crop-left").is_none() {
         if !crop.is_zero() {
@@ -1469,7 +1537,6 @@ fn set_pad_crop(pad: &gst::Pad, crop: &strom_types::vision_mixer::SourceCrop) {
         for prop in CROP_PAD_PROPS {
             pad.set_property(prop, 0i32);
         }
-        pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
         return;
     }
     let caps = pad.current_caps();
@@ -1489,7 +1556,6 @@ fn set_pad_crop(pad: &gst::Pad, crop: &strom_types::vision_mixer::SourceCrop) {
     pad.set_property("crop-right", r);
     pad.set_property("crop-top", t);
     pad.set_property("crop-bottom", b);
-    pad.set_property_from_str("sizing-policy", "none");
 }
 
 /// Apply per-source crop to a region after a zone morph: pads present in both
@@ -1530,6 +1596,10 @@ fn apply_pip_crop_after_morph(
 /// Compute per-pad targets `(pad_idx, x, y, w, h, zorder)` for a Source rendered
 /// into a compositor region. `pad_base` is the index offset of the first input
 /// pad in the region (e.g. 0 for dist_comp, num_inputs+1 for mv_comp PVW big).
+///
+/// Geometry is explicit (pads run `sizing-policy=none`): every rect is
+/// aspect-fitted with the source's effective aspect (crop-adjusted), so an
+/// odd-aspect source letterboxes correctly and a locked crop fills its box.
 #[allow(clippy::too_many_arguments)]
 fn pads_for_source(
     state: &crate::blocks::builtin::vision_mixer::overlay::VisionMixerOverlayState,
@@ -1539,9 +1609,11 @@ fn pads_for_source(
     pad_base: usize,
     bg_zorder: u32,
     overlay_zorder: u32,
-    source_aspect: f64,
+    fallback_aspect: f64,
+    src_aspects: &strom_types::vision_mixer::SourceAspects,
 ) -> Vec<crate::gst::transitions::PadTarget> {
     use crate::gst::transitions::PadTarget;
+    use strom_types::vision_mixer::{aspect_fit_rect, effective_source_aspect};
     let (rx, ry, rw, rh) = region;
     if let Some(p) = pip {
         let bg = state.pip_bg_input(p);
@@ -1553,8 +1625,9 @@ fn pads_for_source(
             rw,
             rh,
             &zones,
-            source_aspect,
+            fallback_aspect,
             &transforms,
+            src_aspects,
         );
         // Defensive dedupe: `apply_vision_mixer_pip_config` already filters bg
         // out of zone sources, but the on-disk state could become inconsistent
@@ -1564,12 +1637,17 @@ fn pads_for_source(
         let mut out = Vec::new();
         let mut seen_pad_idxs = std::collections::HashSet::new();
         if let Some(b) = bg {
+            let aspect = effective_source_aspect(
+                src_aspects.get(&b).copied().unwrap_or(fallback_aspect),
+                transforms.get(&b),
+            );
+            let (x, y, w, h) = aspect_fit_rect(rx, ry, rw, rh, aspect);
             out.push(PadTarget {
                 pad_idx: pad_base + b,
-                x: rx,
-                y: ry,
-                w: rw,
-                h: rh,
+                x,
+                y,
+                w,
+                h,
                 zorder: bg_zorder,
             });
             seen_pad_idxs.insert(pad_base + b);
@@ -1591,29 +1669,38 @@ fn pads_for_source(
         out
     } else {
         // Single-input source (multi-source compositions are PiPs now).
+        // Plain inputs never crop — fit with the raw source aspect.
         input
-            .map(|idx| PadTarget {
-                pad_idx: pad_base + idx,
-                x: rx,
-                y: ry,
-                w: rw,
-                h: rh,
-                zorder: bg_zorder,
+            .map(|idx| {
+                let aspect = src_aspects.get(&idx).copied().unwrap_or(fallback_aspect);
+                let (x, y, w, h) = aspect_fit_rect(rx, ry, rw, rh, aspect);
+                PadTarget {
+                    pad_idx: pad_base + idx,
+                    x,
+                    y,
+                    w,
+                    h,
+                    zorder: bg_zorder,
+                }
             })
             .into_iter()
             .collect()
     }
 }
 
-/// Apply a single-input source layout (fills the region) to a contiguous range
-/// of compositor sink pads. Pads not equal to the active input are hidden.
-fn apply_input_group_to_region(
+/// Apply a single-input source layout (aspect-fitted into the region) to a
+/// contiguous range of compositor sink pads. Pads not equal to the active
+/// input are hidden.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_input_group_to_region(
     compositor: &gst::Element,
     pad_base: usize,
     num_inputs: usize,
     region: (i32, i32, i32, i32),
     active: Option<usize>,
     fg_zorder: u32,
+    fallback_aspect: f64,
+    src_aspects: &strom_types::vision_mixer::SourceAspects,
 ) {
     let (rx, ry, rw, rh) = region;
     for i in 0..num_inputs {
@@ -1631,10 +1718,12 @@ fn apply_input_group_to_region(
             }
         }
         if Some(i) == active {
-            pad.set_property("xpos", rx);
-            pad.set_property("ypos", ry);
-            pad.set_property("width", rw);
-            pad.set_property("height", rh);
+            let aspect = src_aspects.get(&i).copied().unwrap_or(fallback_aspect);
+            let (x, y, w, h) = strom_types::vision_mixer::aspect_fit_rect(rx, ry, rw, rh, aspect);
+            pad.set_property("xpos", x);
+            pad.set_property("ypos", y);
+            pad.set_property("width", w);
+            pad.set_property("height", h);
             pad.set_property("alpha", 1.0f64);
             pad.set_property("zorder", fg_zorder);
         } else {
@@ -1650,7 +1739,7 @@ fn apply_input_group_to_region(
 /// input is found in `overlays` is positioned at its corresponding tile; all other
 /// pads in the range are hidden (alpha=0).
 #[allow(clippy::too_many_arguments)]
-fn apply_pip_layout_to_region(
+pub(crate) fn apply_pip_layout_to_region(
     compositor: &gst::Element,
     pad_base: usize,
     num_inputs: usize,
@@ -1660,8 +1749,10 @@ fn apply_pip_layout_to_region(
     transforms: &strom_types::vision_mixer::PipTransforms,
     bg_zorder: u32,
     overlay_zorder: u32,
-    source_aspect: f64,
+    fallback_aspect: f64,
+    src_aspects: &strom_types::vision_mixer::SourceAspects,
 ) {
+    use strom_types::vision_mixer::{aspect_fit_rect, effective_source_aspect};
     let (rx, ry, rw, rh) = region;
     let layouts = strom_types::vision_mixer::resolve_zone_pads(
         rx,
@@ -1669,8 +1760,9 @@ fn apply_pip_layout_to_region(
         rw,
         rh,
         zones,
-        source_aspect,
+        fallback_aspect,
         transforms,
+        src_aspects,
     );
     // Fast lookup: input → (x, y, w, h, zorder_offset).
     let layout_map: std::collections::HashMap<usize, (i32, i32, i32, i32, u32)> = layouts
@@ -1692,15 +1784,18 @@ fn apply_pip_layout_to_region(
             }
         }
         if Some(i) == bg {
-            pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
-            pad.set_property("xpos", rx);
-            pad.set_property("ypos", ry);
-            pad.set_property("width", rw);
-            pad.set_property("height", rh);
+            let aspect = effective_source_aspect(
+                src_aspects.get(&i).copied().unwrap_or(fallback_aspect),
+                transforms.get(&i),
+            );
+            let (x, y, w, h) = aspect_fit_rect(rx, ry, rw, rh, aspect);
+            pad.set_property("xpos", x);
+            pad.set_property("ypos", y);
+            pad.set_property("width", w);
+            pad.set_property("height", h);
             pad.set_property("alpha", 1.0f64);
             pad.set_property("zorder", bg_zorder);
         } else if let Some(&(ox, oy, ow, oh, off)) = layout_map.get(&i) {
-            pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
             pad.set_property("xpos", ox);
             pad.set_property("ypos", oy);
             pad.set_property("width", ow);
