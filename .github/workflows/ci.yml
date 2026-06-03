@@ -27,7 +27,6 @@ env:
 
 jobs:
   # Fast checks on Linux: fmt + clippy + test
-  # Shares cache with build-linux-x86_64
   check-linux:
     name: Check (Linux)
     runs-on: ubuntu-24.04
@@ -181,10 +180,15 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      # Must NOT share a key with check-linux: rust-cache saves only once per
+      # key and skips saving on a full-match restore. check-linux finishes
+      # first and wins the save race, so its debug/clippy target dir (host
+      # target) gets cached instead of the zigbuild release artifacts — and
+      # this job then rebuilds the entire dependency tree on every run.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: linux-x86_64
+          shared-key: linux-x86_64-release
           cache-on-failure: true
 
       - name: Cache Zig tarball
