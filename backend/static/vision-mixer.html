@@ -1069,7 +1069,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.17-bus-cleanup | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.18-source-crop | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1079,10 +1079,6 @@
     <script src="/static/whep.js"></script>
     <script>
         // ---- Configuration (parsed from safe JSON block) ----
-        // UI revision — bump after edits so the browser-loaded version can be
-        // verified (static files are embedded at compile time).
-        const VM_UI_REV = 6;
-        console.log('vision-mixer.html UI rev', VM_UI_REV);
         const _cfg = JSON.parse(document.getElementById('vm-config').textContent);
         const FLOW_ID = _cfg.flow_id;
         const BLOCK_ID = _cfg.block_id;
