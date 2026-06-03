@@ -1160,7 +1160,16 @@ impl eframe::App for StromApp {
                     tracing::info!("Network interfaces loaded: {} interfaces", interfaces.len());
                     self.network_interfaces = interfaces;
                 }
-                AppMessage::LocalDevicesLoaded { category, devices } => {
+                AppMessage::LocalDevicesLoaded {
+                    category,
+                    mut devices,
+                } => {
+                    // Sort by exposing API, then name, so the picker groups
+                    // entries per API (WASAPI/ASIO/PulseAudio/...) and stays
+                    // stable across refreshes.
+                    devices.sort_by_cached_key(|d| {
+                        (d.api_label().to_lowercase(), d.name.to_lowercase())
+                    });
                     match category {
                         strom_types::discovery::DeviceCategory::VideoSource => {
                             tracing::info!("Video devices loaded: {} device(s)", devices.len());
