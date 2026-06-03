@@ -1158,7 +1158,10 @@ pub struct UpdatePipConfigRequest {
     pub zones: Vec<crate::vision_mixer::Zone>,
     /// Per-source crop ("zoom"/"punch-in"), keyed by input index. Applies to
     /// the source wherever it renders inside this PiP (bg or zone). Missing
-    /// key = no crop. See [`crate::vision_mixer::SourceCrop`].
+    /// key = no crop. Entries for sources currently *outside* the PiP are
+    /// retained and re-apply when the source returns (swap-zone workflow);
+    /// removing a crop is explicit — omit/delete its entry while the source
+    /// is present. See [`crate::vision_mixer::SourceCrop`].
     #[serde(default)]
     #[cfg_attr(
         feature = "openapi",

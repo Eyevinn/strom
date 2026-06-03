@@ -1127,17 +1127,14 @@ impl PipelineManager {
         // Validate transforms: input indices must be in range. Crop fractions
         // are clamped (like rects, clamping is a layout concern) and entries
         // that end up as no-crop are dropped to keep the state minimal.
-        // Transforms for inputs no longer part of the PiP (bg or any zone)
-        // are pruned — keeps the authoritative state (and the UI's crop
-        // source list) in sync with the composition.
-        let used_inputs: std::collections::HashSet<usize> = bg
-            .into_iter()
-            .chain(
-                zones
-                    .iter()
-                    .flat_map(|z| z.effective_sources().iter().copied()),
-            )
-            .collect();
+        //
+        // Transforms for inputs NOT currently in the PiP are kept: they are
+        // inert (layout only applies crop to sources that render) and come
+        // back to life when the source returns — the swap-zone workflow
+        // (capacity 1, pushing between two sources) expects each source's
+        // punch-in framing to survive the round trip. Removing a crop is an
+        // explicit act (delete the entry / Reset in the UI), not a side
+        // effect of leaving the composition.
         let transforms: strom_types::vision_mixer::PipTransforms = transforms
             .into_iter()
             .map(|(input, crop)| {
@@ -1153,7 +1150,7 @@ impl PipelineManager {
                 }
                 Ok((input, crop.clamped()))
             })
-            .filter(|r| !matches!(r, Ok((i, c)) if c.is_zero() || !used_inputs.contains(i)))
+            .filter(|r| !matches!(r, Ok((_, c)) if c.is_zero()))
             .collect::<Result<_, _>>()?;
 
         let mv_comp_id = format!("{}:mv_comp", block_instance_id);

@@ -479,6 +479,10 @@ pub fn effective_source_aspect(src_aspect: f64, crop: Option<&SourceCrop>) -> f6
 /// The crop applies to the input wherever it renders inside that PiP (bg or
 /// any zone), and follows it across zone FIFO reshuffles. A missing key means
 /// no crop. The same input can carry different crops in different PiPs.
+///
+/// Entries persist when their source leaves the PiP: they are inert while
+/// the source is absent and re-apply when it returns, so swap-zone workflows
+/// (capacity 1, pushing between sources) keep each source's punch-in framing.
 pub type PipTransforms = std::collections::BTreeMap<usize, SourceCrop>;
 
 /// A sub-region of a PiP that hosts one or more overlay sources.

@@ -10547,7 +10547,7 @@
           },
           "transforms": {
             "type": "object",
-            "description": "Per-source crop (\"zoom\"/\"punch-in\"), keyed by input index. Applies to\nthe source wherever it renders inside this PiP (bg or zone). Missing\nkey = no crop. See [`crate::vision_mixer::SourceCrop`].",
+            "description": "Per-source crop (\"zoom\"/\"punch-in\"), keyed by input index. Applies to\nthe source wherever it renders inside this PiP (bg or zone). Missing\nkey = no crop. Entries for sources currently *outside* the PiP are\nretained and re-apply when the source returns (swap-zone workflow);\nremoving a crop is explicit — omit/delete its entry while the source\nis present. See [`crate::vision_mixer::SourceCrop`].",
             "additionalProperties": {
               "$ref": "#/components/schemas/SourceCrop"
             },
