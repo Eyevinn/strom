@@ -746,6 +746,7 @@ fn border_pad_set(state: &VisionMixerOverlayState) -> Vec<(usize, f64, usize, us
 fn hash_border_geometry(
     state: &VisionMixerOverlayState,
     mv_comp: &gst::glib::WeakRef<gst::Element>,
+    lead: gst::ClockTime,
 ) -> u64 {
     let pads = border_pad_set(state);
     if pads.is_empty() {
@@ -754,9 +755,7 @@ fn hash_border_geometry(
     let Some(mv) = mv_comp.upgrade() else {
         return 0;
     };
-    let eval_t = mv
-        .query_position::<gst::ClockTime>()
-        .map(|pos| pos + gst::ClockTime::from_mseconds(super::pgm_overlay::BORDER_LEAD_MS));
+    let eval_t = mv.query_position::<gst::ClockTime>().map(|pos| pos + lead);
     let mut h: u64 = 0xB04DE4 ^ 0x9E3779B97F4A7C15;
     let mut mix = |v: u64| {
         h = h.rotate_left(13) ^ v.wrapping_mul(0x100000001B3);
@@ -794,6 +793,7 @@ fn draw_zone_borders(
     state: &VisionMixerOverlayState,
     cr: &cairo::Context,
     mv_comp: &gst::glib::WeakRef<gst::Element>,
+    lead: gst::ClockTime,
 ) {
     let pads = border_pad_set(state);
     if pads.is_empty() {
@@ -804,9 +804,7 @@ fn draw_zone_borders(
     };
     // Evaluate animated geometry at composite time, not sampling time —
     // otherwise borders trail their boxes during morphs/takes.
-    let eval_t = mv
-        .query_position::<gst::ClockTime>()
-        .map(|pos| pos + gst::ClockTime::from_mseconds(super::pgm_overlay::BORDER_LEAD_MS));
+    let eval_t = mv.query_position::<gst::ClockTime>().map(|pos| pos + lead);
     for (idx, scale, zi, p) in pads {
         let zones = state.pip_zones(p);
         let Some(border) = zones.get(zi).and_then(|z| z.border.as_ref()) else {
@@ -918,6 +916,9 @@ pub struct OverlayRenderer {
     /// tick when any zone has a border, so borders track morphs frame by
     /// frame on the multiview too.
     last_border_hash: u64,
+    /// Border geometry look-ahead, one output frame period (see
+    /// `pgm_overlay::border_lead`).
+    border_lead: gst::ClockTime,
 }
 
 // SAFETY: OverlayRenderer is accessed via Mutex from the timer thread and API
@@ -933,6 +934,7 @@ impl OverlayRenderer {
         mv_comp: gst::glib::WeakRef<gst::Element>,
         width: i32,
         height: i32,
+        mv_framerate: (i32, i32),
     ) -> Self {
         Self {
             appsrc,
@@ -941,6 +943,7 @@ impl OverlayRenderer {
             mv_comp,
             width,
             height,
+            border_lead: super::pgm_overlay::border_lead(mv_framerate),
             surface: None,
             last_overlay_data: None,
             last_pgm: u64::MAX,
@@ -972,7 +975,7 @@ impl OverlayRenderer {
         let show_vu = self.state.show_vu_meters();
         let meters_hash = if show_vu { hash_meters(&self.state) } else { 0 };
         let pip_compose_hash = hash_pip_compose(&self.state);
-        let border_hash = hash_border_geometry(&self.state, &self.mv_comp);
+        let border_hash = hash_border_geometry(&self.state, &self.mv_comp, self.border_lead);
 
         let dirty = self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
@@ -1050,7 +1053,18 @@ impl OverlayRenderer {
             cr.set_operator(cairo::Operator::Clear);
             let _ = cr.paint();
             cr.set_operator(cairo::Operator::Over);
-            render_overlay(&self.state, &cr, &self.mv_comp, pgm, pvw, ftb, h, m, s);
+            render_overlay(
+                &self.state,
+                &cr,
+                &self.mv_comp,
+                self.border_lead,
+                pgm,
+                pvw,
+                ftb,
+                h,
+                m,
+                s,
+            );
         }
 
         let t_cairo = t0.elapsed();
@@ -1311,6 +1325,7 @@ fn render_overlay(
     state: &VisionMixerOverlayState,
     cr: &cairo::Context,
     mv_comp: &gst::glib::WeakRef<gst::Element>,
+    border_lead: gst::ClockTime,
     pgm: Option<usize>,
     pvw: Option<usize>,
     ftb: bool,
@@ -1323,7 +1338,7 @@ fn render_overlay(
     // Zone borders on the PiP tiles and the PVW big display, drawn first so
     // PVW/PGM rings and labels stay on top. (The PGM big display shows the
     // dist output, which already carries its borders.)
-    draw_zone_borders(state, cr, mv_comp);
+    draw_zone_borders(state, cr, mv_comp, border_lead);
 
     // --- PVW large border ---
     cr.set_source_rgb(PVW_R, PVW_G, PVW_B);
