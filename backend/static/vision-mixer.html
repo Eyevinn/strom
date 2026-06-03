@@ -1882,8 +1882,11 @@
             const wrap = document.createElement('div');
             wrap.className = 'pip-crop-wrap';
 
-            // Candidate targets: bg + every zone source. The backend prunes
-            // transforms for inputs that leave the PiP, so no stale entries.
+            // Candidate targets: bg + every zone source. The backend RETAINS
+            // transforms for sources that leave the PiP (they re-apply on
+            // return — swap-zone workflow), but only present sources are
+            // listed here: a retained crop is edited or Reset by bringing
+            // its source back first.
             const targets = [];
             if (cfg.bg != null) targets.push(cfg.bg);
             cfg.zones.forEach(z => effectiveZoneSources(z).forEach(s => {

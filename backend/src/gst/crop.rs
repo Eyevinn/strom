@@ -54,11 +54,13 @@ pub(crate) fn source_dims_for_pad(pad: &gst::Pad) -> Option<(i32, i32)> {
 ///
 /// GL: writes the pad's `crop-*` properties (clearing stale crop control
 /// bindings first — a leftover binding from a crop animation would silently
-/// override the writes). CPU: writes the upstream `videocrop`'s properties,
-/// with values rounded down to even so subsampled formats (4:2:0) stay
-/// aligned. Without negotiated caps a non-zero crop is skipped — transforms
-/// are runtime-only, so a crop always arrives while the pipeline is live,
-/// and any input that is actually flowing has negotiated caps.
+/// override the writes). CPU: writes the upstream `videocrop`'s properties.
+/// Values are NOT rounded to even: videocrop accepts arbitrary offsets (its
+/// copy path handles subsampled chroma itself), and crop animations
+/// interpolate through odd values per buffer anyway. Without negotiated caps
+/// a non-zero crop is skipped — transforms are runtime-only, so a crop
+/// always arrives while the pipeline is live, and any input that is actually
+/// flowing has negotiated caps.
 pub(crate) fn set_pad_crop(pad: &gst::Pad, crop: &strom_types::vision_mixer::SourceCrop) {
     if pad.find_property("crop-left").is_some() {
         // --- GL backend: crop pad properties. ---

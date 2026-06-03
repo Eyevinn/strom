@@ -1746,8 +1746,10 @@ pub(crate) fn apply_pip_layout_to_region(
         } else {
             pad.set_property("alpha", 0.0f64);
         }
-        // Crop applies to the source wherever it renders in this PiP; hidden
-        // pads reset to no crop so later non-PiP reveals start clean.
+        // Crop applies to the source wherever it renders in this PiP —
+        // including hidden pads, whose retained transform stays staged so the
+        // source returns pre-framed. Non-PiP reveal paths wipe crop
+        // themselves (apply_input_group_to_region, the classic-take reset).
         let crop = transforms.get(&i).copied().unwrap_or_default();
         set_pad_crop(&pad, &crop);
     }
