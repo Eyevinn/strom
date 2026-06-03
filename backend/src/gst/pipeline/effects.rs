@@ -198,6 +198,7 @@ impl PipelineManager {
                             dist_region,
                             state.pip_bg_input(p),
                             &state.pip_zones(p),
+                            &state.pip_transforms(p),
                             strom_types::vision_mixer::DIST_PGM_ZORDER,
                             strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                             src_aspect,
@@ -220,6 +221,7 @@ impl PipelineManager {
                             pvw_region,
                             state.pip_bg_input(p),
                             &state.pip_zones(p),
+                            &state.pip_transforms(p),
                             strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
                             strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                             src_aspect,
@@ -263,6 +265,42 @@ impl PipelineManager {
                             &self.pipeline,
                         )
                         .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
+
+                    // Apply per-source crop for the incoming compositions:
+                    // pads shared between old and new (e.g. a source that is
+                    // fullscreen on PGM and cropped in the incoming PiP)
+                    // animate their crop in sync with the geometry morph;
+                    // fresh pads snap; fading-out pads keep their crop until
+                    // hidden. An input-mode side uses an empty transform map,
+                    // so shared pads animate their punch-out back to no crop.
+                    let new_pgm_transforms = new_pgm_pip
+                        .map(|p| state.pip_transforms(p))
+                        .unwrap_or_default();
+                    apply_pip_crop_after_morph(
+                        mixer,
+                        &dist_controller,
+                        &self.pipeline,
+                        &new_pgm_transforms,
+                        state.num_inputs,
+                        0,
+                        &old_dist_targets,
+                        &new_dist_targets,
+                        duration_ms,
+                    );
+                    let new_pvw_transforms = new_pvw_pip
+                        .map(|p| state.pip_transforms(p))
+                        .unwrap_or_default();
+                    apply_pip_crop_after_morph(
+                        mv_comp,
+                        &mv_controller,
+                        &self.pipeline,
+                        &new_pvw_transforms,
+                        state.num_inputs,
+                        state.num_inputs + 1,
+                        &old_pvw_targets,
+                        &new_pvw_targets,
+                        duration_ms,
+                    );
                 }
 
                 // Persist new state.
@@ -306,6 +344,9 @@ impl PipelineManager {
                         }
                     }
                     if idx < num_video_inputs {
+                        // Classic takes are input↔input — wipe any crop left
+                        // behind by an earlier PiP render on these pads.
+                        set_pad_crop(&pad, &Default::default());
                         if Some(idx) == active_pgm_input {
                             // The active PGM input fills the canvas.
                             pad.set_property("alpha", 1.0f64);
@@ -583,6 +624,8 @@ impl PipelineManager {
 
         // Position the new PVW pad at the PVW big rect.
         if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + input)) {
+            // Plain-input PVW never crops — wipe any crop from a PiP render.
+            set_pad_crop(&pad, &Default::default());
             let r = &state.layout.pvw_rect;
             pad.set_property("xpos", r.x as i32);
             pad.set_property("ypos", r.y as i32);
@@ -663,6 +706,8 @@ impl PipelineManager {
         // multi-source compositions are PiPs).
         if let Some(active) = new_pvw {
             if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + active)) {
+                // Plain-input PVW never crops — wipe any crop from a PiP render.
+                set_pad_crop(&pad, &Default::default());
                 let r = &state.layout.pvw_rect;
                 pad.set_property("xpos", r.x as i32);
                 pad.set_property("ypos", r.y as i32);
@@ -938,18 +983,20 @@ impl PipelineManager {
         Ok(now_active)
     }
 
-    /// Update a PiP composition at runtime: new bg + new zone list.
+    /// Update a PiP composition at runtime: new bg + new zone list + new
+    /// per-source crop transforms.
     ///
     /// Morphs each affected compositor region (PiP-tile always; PGM/PVW if the
     /// bus is currently showing this PiP) from its previous pad layout to the
-    /// new one — staying sources animate position+size, fresh sources fade in,
-    /// departing sources fade out.
+    /// new one — staying sources animate position+size (and crop, on the GL
+    /// backend), fresh sources fade in, departing sources fade out.
     pub fn apply_vision_mixer_pip_config(
         &self,
         block_instance_id: &str,
         pip_idx: usize,
         bg: Option<usize>,
         zones: Vec<strom_types::vision_mixer::Zone>,
+        transforms: strom_types::vision_mixer::PipTransforms,
     ) -> Result<(), PipelineError> {
         use crate::blocks::builtin::vision_mixer::overlay;
         use crate::gst::transitions::TransitionController;
@@ -1030,6 +1077,38 @@ impl PipelineManager {
             })
             .collect::<Result<_, _>>()?;
 
+        // Validate transforms: input indices must be in range. Crop fractions
+        // are clamped (like rects, clamping is a layout concern) and entries
+        // that end up as no-crop are dropped to keep the state minimal.
+        // Transforms for inputs no longer part of the PiP (bg or any zone)
+        // are pruned — keeps the authoritative state (and the UI's crop
+        // source list) in sync with the composition.
+        let used_inputs: std::collections::HashSet<usize> = bg
+            .into_iter()
+            .chain(
+                zones
+                    .iter()
+                    .flat_map(|z| z.effective_sources().iter().copied()),
+            )
+            .collect();
+        let transforms: strom_types::vision_mixer::PipTransforms = transforms
+            .into_iter()
+            .map(|(input, crop)| {
+                if input >= state.num_inputs {
+                    return Err(PipelineError::InvalidProperty {
+                        element: block_instance_id.to_string(),
+                        property: "transforms".to_string(),
+                        reason: format!(
+                            "Transform input {} out of range (num_inputs={})",
+                            input, state.num_inputs
+                        ),
+                    });
+                }
+                Ok((input, crop.clamped()))
+            })
+            .filter(|r| !matches!(r, Ok((i, c)) if c.is_zero() || !used_inputs.contains(i)))
+            .collect::<Result<_, _>>()?;
+
         let mv_comp_id = format!("{}:mv_comp", block_instance_id);
         let mv_comp = self
             .elements
@@ -1103,6 +1182,7 @@ impl PipelineManager {
         // ---- 2) Persist new state.
         state.set_pip_bg_input(pip_idx, bg);
         state.set_pip_zones(pip_idx, zones.clone());
+        state.set_pip_transforms(pip_idx, transforms.clone());
         if on_pgm {
             state.set_pgm_input(bg);
         }
@@ -1148,8 +1228,9 @@ impl PipelineManager {
             )
         });
 
-        // ---- 4) Morph each affected region: staying pads animate position+size,
-        // entering pads fade in, departing pads fade out.
+        // ---- 4) Morph each affected region: staying pads animate position+size
+        // (and crop, on the GL backend), entering pads fade in, departing pads
+        // fade out.
         if let (Some(old_t), Some(new_t)) = (old_tile, new_tile) {
             let ctrl = TransitionController::new(
                 mv_comp.clone(),
@@ -1161,6 +1242,17 @@ impl PipelineManager {
             {
                 warn!("PiP tile morph failed: {}", e);
             }
+            apply_pip_crop_after_morph(
+                mv_comp,
+                &ctrl,
+                &self.pipeline,
+                &transforms,
+                state.num_inputs,
+                pip_tile_base,
+                &old_t,
+                &new_t,
+                ZONE_MORPH_MS,
+            );
         }
         if let (Some(m), Some(old_p), Some(new_p)) = (mixer, old_pgm, new_pgm) {
             let ctrl = TransitionController::new(m.clone(), cw, ch);
@@ -1169,6 +1261,17 @@ impl PipelineManager {
             {
                 warn!("PGM morph failed: {}", e);
             }
+            apply_pip_crop_after_morph(
+                m,
+                &ctrl,
+                &self.pipeline,
+                &transforms,
+                state.num_inputs,
+                0,
+                &old_p,
+                &new_p,
+                ZONE_MORPH_MS,
+            );
         }
         if let (Some(old_p), Some(new_p)) = (old_pvw, new_pvw) {
             let ctrl = TransitionController::new(
@@ -1181,6 +1284,17 @@ impl PipelineManager {
             {
                 warn!("PVW morph failed: {}", e);
             }
+            apply_pip_crop_after_morph(
+                mv_comp,
+                &ctrl,
+                &self.pipeline,
+                &transforms,
+                state.num_inputs,
+                state.num_inputs + 1,
+                &old_p,
+                &new_p,
+                ZONE_MORPH_MS,
+            );
         }
 
         overlay::trigger_overlay_update(block_instance_id);
@@ -1190,6 +1304,37 @@ impl PipelineManager {
             block_instance_id, pip_idx, bg, zones
         );
         Ok(())
+    }
+
+    /// Read the negotiated input resolutions for a vision mixer block from
+    /// its dist compositor sink pads. `None` for inputs without negotiated
+    /// caps yet (not connected / not prerolled). Inputs can have arbitrary
+    /// resolutions and aspect ratios — nothing scales them before the mixer.
+    pub fn vision_mixer_input_resolutions(
+        &self,
+        block_instance_id: &str,
+        num_inputs: usize,
+    ) -> Vec<Option<strom_types::vision_mixer::InputResolution>> {
+        let mixer_id = format!("{}:mixer", block_instance_id);
+        let Some(mixer) = self.elements.get(&mixer_id) else {
+            return vec![None; num_inputs];
+        };
+        (0..num_inputs)
+            .map(|i| {
+                let pad = find_pad(mixer, &format!("sink_{}", i))?;
+                let caps = pad.current_caps()?;
+                let s = caps.structure(0)?;
+                let w = s.get::<i32>("width").ok()?;
+                let h = s.get::<i32>("height").ok()?;
+                if w <= 0 || h <= 0 {
+                    return None;
+                }
+                Some(strom_types::vision_mixer::InputResolution {
+                    width: w as u32,
+                    height: h as u32,
+                })
+            })
+            .collect()
     }
 
     /// Select a PiP composition as the PVW source.
@@ -1262,6 +1407,7 @@ impl PipelineManager {
             (r.x as i32, r.y as i32, r.w as i32, r.h as i32),
             bg,
             &zones,
+            &state.pip_transforms(pip_idx),
             vision_mixer::MV_BIG_DISPLAY_ZORDER,
             vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
             src_aspect,
@@ -1288,6 +1434,99 @@ fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pad> {
     })
 }
 
+use crate::gst::transitions::CROP_PAD_PROPS;
+
+/// Snap-apply a normalized source crop to a compositor sink pad.
+///
+/// Clears any crop control bindings first (a stale binding from a previous
+/// crop animation would silently override the writes). On the CPU backend a
+/// non-zero crop logs a warning and is ignored. Pixel values come from the
+/// pad's negotiated caps; without caps a non-zero crop is skipped — zones and
+/// transforms are runtime-only, so a crop always arrives while the pipeline
+/// is live, and any input that is actually flowing has negotiated caps.
+///
+/// The sizing-policy follows the crop: glvideomixer's `keep-aspect-ratio`
+/// fits using the *uncropped* input DAR (verified in upstream
+/// `_mixer_pad_get_output_size`), which letterboxes AND distorts cropped
+/// content. `none` renders the cropped window into exactly (width, height) —
+/// geometrically correct because the UI locks the crop aspect to the box.
+fn set_pad_crop(pad: &gst::Pad, crop: &strom_types::vision_mixer::SourceCrop) {
+    if pad.find_property("crop-left").is_none() {
+        if !crop.is_zero() {
+            warn!(
+                "Compositor pad {} has no crop properties (CPU backend) — source crop ignored",
+                pad.name()
+            );
+        }
+        return;
+    }
+    for prop in CROP_PAD_PROPS {
+        if let Some(binding) = pad.control_binding(prop) {
+            pad.remove_control_binding(&binding);
+        }
+    }
+    if crop.is_zero() {
+        for prop in CROP_PAD_PROPS {
+            pad.set_property(prop, 0i32);
+        }
+        pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
+        return;
+    }
+    let caps = pad.current_caps();
+    let px = caps.as_ref().and_then(|c| c.structure(0)).and_then(|s| {
+        let w = s.get::<i32>("width").ok()?;
+        let h = s.get::<i32>("height").ok()?;
+        Some(crop.to_pixels(w, h))
+    });
+    let Some((l, r, t, b)) = px else {
+        debug!(
+            "Pad {} has no negotiated caps yet — source crop skipped",
+            pad.name()
+        );
+        return;
+    };
+    pad.set_property("crop-left", l);
+    pad.set_property("crop-right", r);
+    pad.set_property("crop-top", t);
+    pad.set_property("crop-bottom", b);
+    pad.set_property_from_str("sizing-policy", "none");
+}
+
+/// Apply per-source crop to a region after a zone morph: pads present in both
+/// old and new layouts animate crop alongside the geometry morph; pads about
+/// to be revealed snap to their crop; fading-out pads keep theirs until hidden.
+#[allow(clippy::too_many_arguments)]
+fn apply_pip_crop_after_morph(
+    compositor: &gst::Element,
+    ctrl: &crate::gst::transitions::TransitionController,
+    pipeline: &gst::Pipeline,
+    transforms: &strom_types::vision_mixer::PipTransforms,
+    num_inputs: usize,
+    pad_base: usize,
+    old: &[crate::gst::transitions::PadTarget],
+    new: &[crate::gst::transitions::PadTarget],
+    duration_ms: u64,
+) {
+    let old_set: std::collections::HashSet<usize> = old.iter().map(|t| t.pad_idx).collect();
+    let new_set: std::collections::HashSet<usize> = new.iter().map(|t| t.pad_idx).collect();
+    for i in 0..num_inputs {
+        let pad_idx = pad_base + i;
+        let crop = transforms.get(&i).copied().unwrap_or_default();
+        if old_set.contains(&pad_idx) && new_set.contains(&pad_idx) {
+            // Staying pad — ease the crop in sync with the geometry morph
+            // ("punch-in" zoom). No-op on the CPU backend.
+            if let Err(e) = ctrl.animate_pad_crop(pad_idx, &crop, duration_ms, pipeline) {
+                warn!("Crop morph failed on pad {}: {}", pad_idx, e);
+            }
+        } else if old_set.contains(&pad_idx) {
+            // Departing pad — keeps its crop while fading out; whichever path
+            // reveals it next re-applies the correct crop.
+        } else if let Some(pad) = find_pad(compositor, &format!("sink_{}", pad_idx)) {
+            set_pad_crop(&pad, &crop);
+        }
+    }
+}
+
 /// Compute per-pad targets `(pad_idx, x, y, w, h, zorder)` for a Source rendered
 /// into a compositor region. `pad_base` is the index offset of the first input
 /// pad in the region (e.g. 0 for dist_comp, num_inputs+1 for mv_comp PVW big).
@@ -1307,8 +1546,16 @@ fn pads_for_source(
     if let Some(p) = pip {
         let bg = state.pip_bg_input(p);
         let zones = state.pip_zones(p);
-        let layouts =
-            strom_types::vision_mixer::resolve_zone_pads(rx, ry, rw, rh, &zones, source_aspect);
+        let transforms = state.pip_transforms(p);
+        let layouts = strom_types::vision_mixer::resolve_zone_pads(
+            rx,
+            ry,
+            rw,
+            rh,
+            &zones,
+            source_aspect,
+            &transforms,
+        );
         // Defensive dedupe: `apply_vision_mixer_pip_config` already filters bg
         // out of zone sources, but the on-disk state could become inconsistent
         // (e.g. legacy config or future code that bypasses the API). Two
@@ -1374,6 +1621,8 @@ fn apply_input_group_to_region(
         let Some(pad) = find_pad(compositor, &pad_name) else {
             continue;
         };
+        // Plain-input mode never crops — wipe any crop left by a PiP render.
+        set_pad_crop(&pad, &Default::default());
         // Clear any lingering control bindings from a previous morph/fade so
         // our set_property writes aren't silently overridden by stale values.
         for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
@@ -1408,13 +1657,21 @@ fn apply_pip_layout_to_region(
     region: (i32, i32, i32, i32),
     bg: Option<usize>,
     zones: &[strom_types::vision_mixer::Zone],
+    transforms: &strom_types::vision_mixer::PipTransforms,
     bg_zorder: u32,
     overlay_zorder: u32,
     source_aspect: f64,
 ) {
     let (rx, ry, rw, rh) = region;
-    let layouts =
-        strom_types::vision_mixer::resolve_zone_pads(rx, ry, rw, rh, zones, source_aspect);
+    let layouts = strom_types::vision_mixer::resolve_zone_pads(
+        rx,
+        ry,
+        rw,
+        rh,
+        zones,
+        source_aspect,
+        transforms,
+    );
     // Fast lookup: input → (x, y, w, h, zorder_offset).
     let layout_map: std::collections::HashMap<usize, (i32, i32, i32, i32, u32)> = layouts
         .iter()
@@ -1453,5 +1710,9 @@ fn apply_pip_layout_to_region(
         } else {
             pad.set_property("alpha", 0.0f64);
         }
+        // Crop applies to the source wherever it renders in this PiP; hidden
+        // pads reset to no crop so later non-PiP reveals start clean.
+        let crop = transforms.get(&i).copied().unwrap_or_default();
+        set_pad_crop(&pad, &crop);
     }
 }

@@ -11,6 +11,9 @@ uuid.workspace = true
 utoipa = { workspace = true, optional = true, features = ["uuid"] }
 garde = { workspace = true, optional = true }
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [features]
 default = []
 openapi = ["utoipa"]

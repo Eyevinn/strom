@@ -328,6 +328,106 @@ pub fn resolve_pip_overlay_rects(
         .collect()
 }
 
+/// Smallest fraction of a source axis that must stay visible after cropping.
+/// Keeps `SourceCrop::clamped` from producing zero-width/height frames.
+pub const MIN_CROP_VISIBLE: f32 = 0.01;
+
+/// Normalized per-source crop: the fraction of the source hidden from each
+/// edge. All components are in `0.0..=1.0`; all zero = no crop.
+///
+/// The crop selects which part of the source fills its destination rect —
+/// combined with a zone rect this gives "zoom"/"punch-in" framing (the
+/// cropped region scales to fill the zone box; everything outside is hidden).
+/// Normalized fractions keep the type resolution-independent; the backend
+/// converts to pixels against the negotiated source caps.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SourceCrop {
+    /// Fraction of the source width hidden from the left edge.
+    #[serde(default)]
+    pub left: f32,
+    /// Fraction of the source height hidden from the top edge.
+    #[serde(default)]
+    pub top: f32,
+    /// Fraction of the source width hidden from the right edge.
+    #[serde(default)]
+    pub right: f32,
+    /// Fraction of the source height hidden from the bottom edge.
+    #[serde(default)]
+    pub bottom: f32,
+}
+
+impl SourceCrop {
+    /// Returns `true` when the crop hides nothing (within float tolerance).
+    pub fn is_zero(&self) -> bool {
+        self.left.max(0.0) < 1e-6
+            && self.top.max(0.0) < 1e-6
+            && self.right.max(0.0) < 1e-6
+            && self.bottom.max(0.0) < 1e-6
+    }
+
+    /// Clamp each component into `0..=1` and ensure at least
+    /// [`MIN_CROP_VISIBLE`] of each axis stays visible. Non-finite components
+    /// are treated as 0. Mirrors [`NormRect::clamped`]: clamping is a layout
+    /// concern, not semantic state.
+    pub fn clamped(&self) -> Self {
+        let sanitize = |v: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        let left = sanitize(self.left);
+        let top = sanitize(self.top);
+        let right = sanitize(self.right).min((1.0 - left - MIN_CROP_VISIBLE).max(0.0));
+        let bottom = sanitize(self.bottom).min((1.0 - top - MIN_CROP_VISIBLE).max(0.0));
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    /// Convert to pixel crop values `(left, right, top, bottom)` for a source
+    /// of `src_w` × `src_h` pixels — the value order matches the
+    /// `crop-left`/`crop-right`/`crop-top`/`crop-bottom` compositor pad
+    /// properties. At least one pixel per axis stays visible.
+    pub fn to_pixels(&self, src_w: i32, src_h: i32) -> (i32, i32, i32, i32) {
+        let c = self.clamped();
+        let w = src_w.max(1) as f32;
+        let h = src_h.max(1) as f32;
+        let left = (c.left * w).round() as i32;
+        let top = (c.top * h).round() as i32;
+        let right = ((c.right * w).round() as i32).min(src_w - left - 1).max(0);
+        let bottom = ((c.bottom * h).round() as i32).min(src_h - top - 1).max(0);
+        (
+            left.min(src_w - 1).max(0),
+            right,
+            top.min(src_h - 1).max(0),
+            bottom,
+        )
+    }
+}
+
+/// Negotiated resolution of a video input, read from the compositor sink pad
+/// caps. Inputs can have arbitrary resolutions and aspect ratios — nothing
+/// normalizes them before the mixer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct InputResolution {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Per-source crop transforms within a PiP, keyed by input index.
+///
+/// The crop applies to the input wherever it renders inside that PiP (bg or
+/// any zone), and follows it across zone FIFO reshuffles. A missing key means
+/// no crop. The same input can carry different crops in different PiPs.
+pub type PipTransforms = std::collections::BTreeMap<usize, SourceCrop>;
+
 /// A sub-region of a PiP that hosts one or more overlay sources.
 ///
 /// Sources inside a zone auto-tile within its `rect` (using
@@ -391,6 +491,12 @@ pub struct ZonePadLayout {
 /// `rect` is `None`). Sources inside the zone auto-tile within the projected
 /// rect using [`compute_pip_overlay_rects`].
 ///
+/// A zone holding a *single source with a crop transform* fills its projected
+/// rect exactly instead of auto-tiling: the operator crops the source to the
+/// box ("punch-in" framing), so the aspect-preserving cell math must not
+/// shrink the box back to the source aspect. The UI locks the crop aspect to
+/// the box aspect so the cropped frame fills it without letterboxing.
+///
 /// Duplicate sources across zones are filtered: only the first occurrence
 /// keeps its pad layout. Sources that exceed a zone's `capacity` are
 /// dropped (oldest first), matching [`Zone::effective_sources`].
@@ -401,6 +507,7 @@ pub fn resolve_zone_pads(
     container_h: i32,
     zones: &[Zone],
     source_aspect: f64,
+    transforms: &PipTransforms,
 ) -> Vec<ZonePadLayout> {
     let mut out: Vec<ZonePadLayout> = Vec::new();
     let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -416,7 +523,16 @@ pub fn resolve_zone_pads(
                 .to_pixels(container_x, container_y, container_w, container_h),
             None => (container_x, container_y, container_w, container_h),
         };
-        let cells = compute_pip_overlay_rects(zx, zy, zw, zh, sources.len(), source_aspect);
+        let single_cropped = sources.len() == 1
+            && transforms
+                .get(&sources[0])
+                .map(|c| !c.is_zero())
+                .unwrap_or(false);
+        let cells = if single_cropped {
+            vec![(zx, zy, zw, zh)]
+        } else {
+            compute_pip_overlay_rects(zx, zy, zw, zh, sources.len(), source_aspect)
+        };
         for (i, &input) in sources.iter().enumerate() {
             if !seen.insert(input) {
                 continue;
@@ -714,7 +830,7 @@ mod tests {
             capacity: None,
             sources: vec![0, 1, 2],
         };
-        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0);
+        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0, &PipTransforms::new());
         assert_eq!(layouts.len(), 3);
         // First source covers ~upper-left cell of the 2x2 auto-tile.
         assert_eq!(layouts[0].input, 0);
@@ -748,7 +864,8 @@ mod tests {
             capacity: Some(3),
             sources: vec![1, 2, 3],
         };
-        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[a, b], 16.0 / 9.0);
+        let layouts =
+            resolve_zone_pads(0, 0, 1920, 1080, &[a, b], 16.0 / 9.0, &PipTransforms::new());
         assert_eq!(layouts.len(), 4);
         assert_eq!(layouts[0].input, 5);
         // Zone A: x starts at half the container width (960).
@@ -771,7 +888,8 @@ mod tests {
             capacity: None,
             sources: vec![2, 3],
         };
-        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[a, b], 16.0 / 9.0);
+        let layouts =
+            resolve_zone_pads(0, 0, 1920, 1080, &[a, b], 16.0 / 9.0, &PipTransforms::new());
         // Source 2 should appear once (from zone A); zone B drops it.
         let inputs: Vec<usize> = layouts.iter().map(|l| l.input).collect();
         assert_eq!(inputs, vec![1, 2, 3]);
@@ -785,9 +903,143 @@ mod tests {
             capacity: Some(2),
             sources: vec![1, 2, 3, 4],
         };
-        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0);
+        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0, &PipTransforms::new());
         let inputs: Vec<usize> = layouts.iter().map(|l| l.input).collect();
         assert_eq!(inputs, vec![3, 4]);
+    }
+
+    #[test]
+    fn test_resolve_zone_pads_single_cropped_source_fills_rect() {
+        // A single source WITH a crop transform fills the zone rect exactly
+        // (punch-in framing), bypassing the aspect-preserving cell math.
+        let z = Zone {
+            rect: Some(NormRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.25, // portrait box: 480×1080 — far from 16:9
+                h: 1.0,
+            }),
+            capacity: None,
+            sources: vec![2],
+        };
+        let mut transforms = PipTransforms::new();
+        transforms.insert(
+            2,
+            SourceCrop {
+                left: 0.3,
+                top: 0.0,
+                right: 0.3,
+                bottom: 0.0,
+            },
+        );
+        let layouts = resolve_zone_pads(
+            0,
+            0,
+            1920,
+            1080,
+            std::slice::from_ref(&z),
+            16.0 / 9.0,
+            &transforms,
+        );
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(
+            (layouts[0].x, layouts[0].y, layouts[0].w, layouts[0].h),
+            (0, 0, 480, 1080)
+        );
+
+        // Without a transform the same zone falls back to the 16:9 cell.
+        let layouts = resolve_zone_pads(0, 0, 1920, 1080, &[z], 16.0 / 9.0, &PipTransforms::new());
+        assert_eq!(layouts.len(), 1);
+        assert!(layouts[0].h < 1080, "expected aspect-constrained cell");
+    }
+
+    #[test]
+    fn test_source_crop_default_is_zero() {
+        assert!(SourceCrop::default().is_zero());
+        assert!(!SourceCrop {
+            left: 0.1,
+            ..Default::default()
+        }
+        .is_zero());
+    }
+
+    #[test]
+    fn test_source_crop_clamped_keeps_minimum_visible() {
+        // left + right > 1 → right shrinks so MIN_CROP_VISIBLE remains.
+        let c = SourceCrop {
+            left: 0.7,
+            top: 0.0,
+            right: 0.7,
+            bottom: 0.0,
+        }
+        .clamped();
+        assert_eq!(c.left, 0.7);
+        assert!((c.left + c.right) <= 1.0 - MIN_CROP_VISIBLE + 1e-6);
+    }
+
+    #[test]
+    fn test_source_crop_clamped_sanitizes_garbage() {
+        let c = SourceCrop {
+            left: -0.5,
+            top: f32::NAN,
+            right: 2.0,
+            bottom: f32::INFINITY,
+        }
+        .clamped();
+        assert_eq!(c.left, 0.0);
+        assert_eq!(c.top, 0.0);
+        assert!(c.right <= 1.0 - MIN_CROP_VISIBLE + 1e-6);
+        assert!(c.bottom <= 1.0 - MIN_CROP_VISIBLE + 1e-6);
+    }
+
+    #[test]
+    fn test_source_crop_to_pixels_basic() {
+        // Crop 25% from each side of 1920×1080 → 480/480 horizontal, 270/270 vertical.
+        let c = SourceCrop {
+            left: 0.25,
+            top: 0.25,
+            right: 0.25,
+            bottom: 0.25,
+        };
+        assert_eq!(c.to_pixels(1920, 1080), (480, 480, 270, 270));
+    }
+
+    #[test]
+    fn test_source_crop_to_pixels_zero() {
+        assert_eq!(SourceCrop::default().to_pixels(1280, 720), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_source_crop_to_pixels_never_consumes_full_axis() {
+        // Extreme crop still leaves ≥1 px visible on each axis.
+        let c = SourceCrop {
+            left: 1.0,
+            top: 1.0,
+            right: 1.0,
+            bottom: 1.0,
+        };
+        let (l, r, t, b) = c.to_pixels(100, 100);
+        assert!(
+            l + r < 100,
+            "horizontal crop {} + {} consumed full width",
+            l,
+            r
+        );
+        assert!(
+            t + b < 100,
+            "vertical crop {} + {} consumed full height",
+            t,
+            b
+        );
+    }
+
+    #[test]
+    fn test_source_crop_serde_defaults() {
+        // Missing fields deserialize to 0 (back-compat with older clients).
+        let c: SourceCrop = serde_json::from_str(r#"{"left":0.1}"#).unwrap();
+        assert_eq!(c.left, 0.1);
+        assert_eq!(c.right, 0.0);
+        assert!(serde_json::from_str::<SourceCrop>("{}").unwrap().is_zero());
     }
 
     #[test]

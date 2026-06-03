@@ -625,6 +625,122 @@
         .pip-canvas-zone .zone-handle.ne { right: -4px; top: -4px; cursor: nesw-resize; }
         .pip-canvas-zone .zone-handle.sw { left: -4px; bottom: -4px; cursor: nesw-resize; }
         .pip-canvas-zone .zone-handle.se { right: -4px; bottom: -4px; cursor: nwse-resize; }
+        /* Crop ("zoom"/punch-in) editor — a source-frame canvas with a
+           draggable/resizable crop window. Sits beside the zone canvas in
+           the layout editor. */
+        .pip-crop-wrap {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--pip-text);
+            width: 320px;
+            flex-shrink: 0;
+        }
+        .pip-crop-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .pip-crop-head .pip-crop-title {
+            color: var(--pip-accent-bright);
+            font-weight: 700;
+            letter-spacing: 0.3px;
+        }
+        .pip-crop-select {
+            background: var(--pip-bg-control);
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            color: var(--pip-text);
+            font-size: 11px;
+            font-weight: 600;
+            height: 24px;
+            padding: 0 4px;
+            flex: 1;
+            min-width: 0;
+        }
+        .pip-crop-canvas {
+            position: relative;
+            width: 320px;
+            height: 180px;
+            background: var(--pip-bg-panel);
+            border: 1px solid var(--pip-border);
+            border-radius: 3px;
+            overflow: hidden;
+            flex-shrink: 0;
+            user-select: none;
+        }
+        .pip-crop-canvas .pip-crop-placeholder {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--pip-text-dim);
+            font-size: 11px;
+            text-align: center;
+            padding: 0 16px;
+            pointer-events: none;
+        }
+        .pip-crop-frame {
+            position: absolute;
+            border: 1px solid var(--pip-warn);
+            /* Dim everything outside the crop window. */
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+            box-sizing: border-box;
+            cursor: move;
+            z-index: 2;
+        }
+        .pip-crop-frame .zone-handle {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: var(--pip-warn);
+            border: 1px solid var(--pip-border-strong);
+            z-index: 4;
+        }
+        .pip-crop-frame .zone-handle.nw { left: -4px; top: -4px; cursor: nwse-resize; }
+        .pip-crop-frame .zone-handle.ne { right: -4px; top: -4px; cursor: nesw-resize; }
+        .pip-crop-frame .zone-handle.sw { left: -4px; bottom: -4px; cursor: nesw-resize; }
+        .pip-crop-frame .zone-handle.se { right: -4px; bottom: -4px; cursor: nwse-resize; }
+        .pip-crop-zoom-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--pip-text-dim);
+        }
+        .pip-crop-zoom-row input[type="range"] {
+            flex: 1;
+            min-width: 0;
+            accent-color: var(--pip-accent);
+        }
+        .pip-crop-zoom-val {
+            width: 42px;
+            text-align: right;
+            color: var(--pip-text);
+            font-variant-numeric: tabular-nums;
+        }
+        .pip-crop-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .pip-crop-reset-btn {
+            background: var(--pip-bg-control);
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            color: var(--pip-text);
+            font-size: 11px;
+            font-weight: 600;
+            height: 24px;
+            padding: 0 10px;
+            cursor: pointer;
+        }
+        .pip-crop-reset-btn:hover {
+            color: var(--pip-accent-bright);
+            border-color: var(--pip-accent);
+        }
         .pip-canvas-toolbar {
             display: flex;
             flex-direction: column;
@@ -963,6 +1079,10 @@
     <script src="/static/whep.js"></script>
     <script>
         // ---- Configuration (parsed from safe JSON block) ----
+        // UI revision — bump after edits so the browser-loaded version can be
+        // verified (static files are embedded at compile time).
+        const VM_UI_REV = 6;
+        console.log('vision-mixer.html UI rev', VM_UI_REV);
         const _cfg = JSON.parse(document.getElementById('vm-config').textContent);
         const FLOW_ID = _cfg.flow_id;
         const BLOCK_ID = _cfg.block_id;
@@ -977,6 +1097,12 @@
         // coordinates because that's the broadcast canvas operators think in.
         const PGM_W = (_cfg.pgm_w && _cfg.pgm_w > 0) ? _cfg.pgm_w : 1920;
         const PGM_H = (_cfg.pgm_h && _cfg.pgm_h > 0) ? _cfg.pgm_h : 1080;
+        // Negotiated per-input resolutions ({width, height} or null). Inputs
+        // are NOT normalized to the PGM resolution — each source can have any
+        // resolution/aspect. Refreshed when the layout editor opens.
+        let INPUT_RESOLUTIONS = Array.isArray(_cfg.input_resolutions)
+            ? _cfg.input_resolutions
+            : [];
 
         // ---- State ----
         // PGM/PVW source: each bus shows either an input (number) or a PiP (currentPvwPip/currentPgmPip).
@@ -984,9 +1110,11 @@
         let currentPgm = (_cfg.initial_pgm != null) ? _cfg.initial_pgm : null;
         let currentPvw = (_cfg.initial_pvw != null) ? _cfg.initial_pvw : null;
         let dskEnabled = _cfg.dsk_states || [true, true, true, true];
-        // PiPs: { bg, zones: [{rect, capacity, sources}] } per configured PiP.
-        // A zone with rect=null fills the whole PiP region; sources in a zone
-        // auto-tile within its rect. capacity=null means unlimited.
+        // PiPs: { bg, zones: [{rect, capacity, sources}], transforms } per
+        // configured PiP. A zone with rect=null fills the whole PiP region;
+        // sources in a zone auto-tile within its rect. capacity=null means
+        // unlimited. transforms maps input index → normalized SourceCrop
+        // ({left, top, right, bottom} edge fractions) — the "zoom"/punch-in.
         let pipConfigs = (_cfg.pips || []).map(p => ({
             bg: (p && p.bg != null) ? p.bg : null,
             zones: (p && Array.isArray(p.zones))
@@ -995,7 +1123,10 @@
                     capacity: (z && z.capacity != null) ? z.capacity : null,
                     sources: (z && Array.isArray(z.sources)) ? z.sources.slice() : []
                 }))
-                : []
+                : [],
+            transforms: (p && p.transforms && typeof p.transforms === 'object')
+                ? JSON.parse(JSON.stringify(p.transforms))
+                : {}
         }));
         // Active zone target per PiP — input-chip clicks push into this zone.
         // Defaults to zone 0; user clicks a zone in the canvas to change focus.
@@ -1006,8 +1137,27 @@
 
         function toggleEditPip(pipIdx) {
             editingPipIdx = (editingPipIdx === pipIdx) ? null : pipIdx;
+            // Crop target is editor-scoped — reset when the editor opens/closes.
+            activeCropTarget = null;
             document.body.classList.toggle('editing-layout', editingPipIdx != null);
             buildPipConfigPanel();
+            // Sources negotiate caps after page load — refresh resolutions so
+            // the crop editor works with the real source aspect.
+            if (editingPipIdx != null) refreshInputResolutions();
+        }
+
+        // Re-fetch negotiated input resolutions from the live state endpoint.
+        // Rebuilds the open editor when they arrive.
+        async function refreshInputResolutions() {
+            try {
+                const resp = await fetch(API_BASE + '/state');
+                if (!resp.ok) return;
+                const st = await resp.json();
+                if (Array.isArray(st.input_resolutions)) {
+                    INPUT_RESOLUTIONS = st.input_resolutions;
+                    if (editingPipIdx != null) buildPipConfigPanel();
+                }
+            } catch {}
         }
         // Which PiP is currently shown on each bus (null = bus is showing an input, not a PiP).
         let currentPvwPip = (_cfg.pvw_pip != null) ? _cfg.pvw_pip : null;
@@ -1023,6 +1173,16 @@
         // editor stays visually clean unless the operator wants the guides.
         let snapEnabled = localStorage.getItem('vm-zone-snap') !== 'false';
         let gridVisible = localStorage.getItem('vm-zone-grid') === 'true';
+        // Crop editor state: which input is being crop-edited in the open
+        // layout editor (null = none) and whether the crop frame keeps the
+        // destination box aspect (default ON so the crop fills the box).
+        let activeCropTarget = null;
+        let cropAspectLock = localStorage.getItem('vm-crop-aspect-lock') !== 'false';
+        function toggleCropAspectLock() {
+            cropAspectLock = !cropAspectLock;
+            localStorage.setItem('vm-crop-aspect-lock', cropAspectLock);
+            buildPipConfigPanel();
+        }
         function toggleSnap() {
             snapEnabled = !snapEnabled;
             localStorage.setItem('vm-zone-snap', snapEnabled);
@@ -1246,18 +1406,21 @@
         // Inputs that participate in a PiP composition (bg + every zone source).
         // Mirrors `collect_pip_inputs` in overlay.rs so the bus buttons and the
         // multiview status rings agree on what "visible via this PiP" means.
+        // Mirror Rust `Zone::effective_sources`: cap to `capacity`, keeping
+        // the newest entries, so the UI and the backend agree even if
+        // sources outgrow capacity.
+        function effectiveZoneSources(zone) {
+            return (zone.capacity != null && zone.capacity < zone.sources.length)
+                ? zone.sources.slice(zone.sources.length - zone.capacity)
+                : zone.sources;
+        }
+
         function collectPipInputs(pipCfg) {
             const set = new Set();
             if (!pipCfg) return set;
             if (pipCfg.bg != null) set.add(pipCfg.bg);
             for (const zone of pipCfg.zones) {
-                // Mirror Rust `Zone::effective_sources`: cap to `capacity`,
-                // keeping the newest entries, so the bus tally and the
-                // multiview ring agree even if sources outgrow capacity.
-                const srcs = (zone.capacity != null && zone.capacity < zone.sources.length)
-                    ? zone.sources.slice(zone.sources.length - zone.capacity)
-                    : zone.sources;
-                for (const src of srcs) set.add(src);
+                for (const src of effectiveZoneSources(zone)) set.add(src);
             }
             return set;
         }
@@ -1369,11 +1532,41 @@
                 .catch(e => setStatus('Preview error: ' + e.message));
         }
 
+        // Replace any non-finite number (NaN/Infinity) in rects and crops.
+        // JSON.stringify turns NaN into null, which the backend rejects with
+        // 422 — and since the poison stays in pipConfigs, every later update
+        // for the PiP would fail too, freezing the editor until reload.
+        function sanitizePipConfig(cfg) {
+            const fin = (v, fb) => (Number.isFinite(v) ? v : fb);
+            cfg.zones.forEach(z => {
+                if (z.rect) {
+                    z.rect.x = fin(z.rect.x, 0);
+                    z.rect.y = fin(z.rect.y, 0);
+                    z.rect.w = fin(z.rect.w, 1);
+                    z.rect.h = fin(z.rect.h, 1);
+                }
+            });
+            Object.keys(cfg.transforms || {}).forEach(k => {
+                const c = cfg.transforms[k];
+                if (!c) { delete cfg.transforms[k]; return; }
+                c.left = fin(c.left, 0);
+                c.top = fin(c.top, 0);
+                c.right = fin(c.right, 0);
+                c.bottom = fin(c.bottom, 0);
+            });
+        }
+
         function postPipConfig(pipIdx) {
             const cfg = pipConfigs[pipIdx];
+            sanitizePipConfig(cfg);
+            // Keep aspect-locked crops in sync with their destination boxes —
+            // a zone resize/move changes the box aspect, and a stale crop
+            // aspect would letterbox or distort the fill.
+            refitLockedCrops(cfg);
             return apiPut('/pip/' + pipIdx, {
                 bg: cfg.bg,
-                zones: cfg.zones
+                zones: cfg.zones,
+                transforms: cfg.transforms
             }).then(r => {
                 pipConfigs[pipIdx] = {
                     bg: r.bg,
@@ -1381,7 +1574,10 @@
                         rect: z.rect ? { ...z.rect } : null,
                         capacity: z.capacity != null ? z.capacity : null,
                         sources: Array.isArray(z.sources) ? z.sources.slice() : []
-                    }))
+                    })),
+                    transforms: (r.transforms && typeof r.transforms === 'object')
+                        ? JSON.parse(JSON.stringify(r.transforms))
+                        : {}
                 };
                 // Keep activeZoneIdx within bounds after server-side cleanup.
                 const nz = pipConfigs[pipIdx].zones.length;
@@ -1523,6 +1719,504 @@
             postPipConfig(pipIdx);
         }
 
+        // ---- Crop ("zoom"/punch-in) editor ----
+        // The backend stores a normalized SourceCrop (edge fractions). The
+        // editor works on the visible *window* instead: {x, y, w, h} in
+        // source-normalized coordinates — what remains after cropping. The
+        // window scales to fill the destination box, so window = punch-in.
+        //
+        // PGM aspect is only a *fallback* — every source can have its own
+        // resolution/aspect, so all window math goes through srcAspectFor().
+        const PGM_ASPECT = PGM_W / PGM_H;
+
+        // Real aspect of an input's frames (negotiated caps), falling back to
+        // the PGM aspect until caps are known.
+        function srcAspectFor(input) {
+            const r = INPUT_RESOLUTIONS[input];
+            return (r && r.width > 0 && r.height > 0) ? (r.width / r.height) : PGM_ASPECT;
+        }
+
+        function getCrop(cfg, input) {
+            const c = (cfg.transforms && cfg.transforms[input]) || {};
+            return {
+                left: c.left || 0, top: c.top || 0,
+                right: c.right || 0, bottom: c.bottom || 0
+            };
+        }
+        function cropIsZero(c) {
+            return (c.left || 0) < 1e-4 && (c.top || 0) < 1e-4
+                && (c.right || 0) < 1e-4 && (c.bottom || 0) < 1e-4;
+        }
+        function cropToWindow(c) {
+            return {
+                x: c.left, y: c.top,
+                w: Math.max(0.05, 1 - c.left - c.right),
+                h: Math.max(0.05, 1 - c.top - c.bottom)
+            };
+        }
+        function windowToCrop(w) {
+            const cl = v => Math.max(0, Math.min(1, v));
+            return {
+                left: cl(w.x), top: cl(w.y),
+                right: cl(1 - w.x - w.w), bottom: cl(1 - w.y - w.h)
+            };
+        }
+        function clampCropWindow(win) {
+            const w = Math.max(0.05, Math.min(1, win.w));
+            const h = Math.max(0.05, Math.min(1, win.h));
+            return {
+                x: Math.max(0, Math.min(1 - w, win.x)),
+                y: Math.max(0, Math.min(1 - h, win.y)),
+                w, h
+            };
+        }
+
+        // Destination box aspect (real pixels) for an input inside the PiP.
+        // A zone holding a single source fills its rect when cropped (mirrors
+        // the backend resolve_zone_pads rule); multi-source zones auto-tile
+        // into PGM-aspect cells, and the bg fills the PGM-aspect region.
+        // Drives the aspect lock so the cropped window fills its box exactly
+        // — nothing outside the box is visible.
+        function cropBoxAspect(cfg, input) {
+            for (const zone of cfg.zones) {
+                const srcs = effectiveZoneSources(zone);
+                if (!srcs.includes(input)) continue;
+                if (srcs.length === 1) {
+                    const r = zone.rect || { x: 0, y: 0, w: 1, h: 1 };
+                    const wpx = r.w * PGM_W, hpx = r.h * PGM_H;
+                    if (wpx > 0 && hpx > 0) return wpx / hpx;
+                }
+                return PGM_ASPECT;
+            }
+            return PGM_ASPECT; // bg (fills the region) or unplaced
+        }
+
+        // Window w/h ratio (in normalized source coords) that renders as the
+        // real-pixel aspect `boxAspect` for a source with aspect `srcAspect`,
+        // and the largest window with that ratio.
+        function cropWindowRatio(boxAspect, srcAspect) { return boxAspect / srcAspect; }
+        function maxCropWindow(ratio) {
+            return ratio >= 1 ? { w: 1, h: 1 / ratio } : { w: ratio, h: 1 };
+        }
+        // Re-fit a window to a target ratio, keeping its center.
+        function fitWindowToRatio(win, ratio) {
+            let w = Math.min(win.w, win.h * ratio);
+            let h = w / ratio;
+            const cx = win.x + win.w / 2, cy = win.y + win.h / 2;
+            return clampCropWindow({ x: cx - w / 2, y: cy - h / 2, w, h });
+        }
+
+        function commitCropWindow(pipIdx, input, win) {
+            const cfg = pipConfigs[pipIdx];
+            const crop = windowToCrop(clampCropWindow(win));
+            if (cropIsZero(crop)) delete cfg.transforms[input];
+            else cfg.transforms[input] = crop;
+            postPipConfig(pipIdx);
+        }
+
+        // Re-fit every aspect-locked crop to its current destination box.
+        // Single-source zones fill their rect when cropped, so the crop window
+        // must track the rect's aspect as the operator reshapes the zone.
+        // No-op when the lock is off or for windows that already fit.
+        function refitLockedCrops(cfg) {
+            if (!cropAspectLock || !cfg.transforms) return;
+            for (const zone of cfg.zones) {
+                const srcs = effectiveZoneSources(zone);
+                if (srcs.length !== 1) continue;
+                const input = srcs[0];
+                const c = cfg.transforms[input];
+                if (!c || cropIsZero(c)) continue;
+                const ratio = cropWindowRatio(cropBoxAspect(cfg, input), srcAspectFor(input));
+                const fitted = fitWindowToRatio(cropToWindow(getCrop(cfg, input)), ratio);
+                cfg.transforms[input] = windowToCrop(fitted);
+            }
+        }
+        function resetCrop(pipIdx, input) {
+            delete pipConfigs[pipIdx].transforms[input];
+            postPipConfig(pipIdx);
+        }
+
+        // Update one component of the crop window from a pixel value entered
+        // in SOURCE coordinates. Position fields preserve size; size fields
+        // preserve position (and the box aspect when the lock is on). Snap
+        // applies like the zone px inputs, flashing the matching grid line on
+        // the crop canvas during the roundtrip.
+        function setCropWindowPx(pipIdx, input, field, pixelValue) {
+            const cfg = pipConfigs[pipIdx];
+            const parsed = parseFloat(pixelValue);
+            if (!Number.isFinite(parsed)) return;
+            const res = INPUT_RESOLUTIONS[input];
+            const srcW = (res && res.width > 0) ? res.width : PGM_W;
+            const srcH = (res && res.height > 0) ? res.height : PGM_H;
+            const dim = (field === 'x' || field === 'w') ? srcW : srcH;
+            const snapped = snapEdgeDetect(parsed / dim);
+            const norm = snapped.value;
+            const ratio = cropWindowRatio(cropBoxAspect(cfg, input), srcAspectFor(input));
+            const next = { ...cropToWindow(getCrop(cfg, input)) };
+            if (field === 'x') {
+                next.x = norm;
+            } else if (field === 'y') {
+                next.y = norm;
+            } else if (field === 'w') {
+                next.w = norm;
+                if (cropAspectLock) next.h = next.w / ratio;
+            } else if (field === 'h') {
+                next.h = norm;
+                if (cropAspectLock) next.w = next.h * ratio;
+            }
+            if (snapped.anchor != null) {
+                const canvas = document.querySelector('.pip-crop-canvas');
+                const axis = (field === 'x' || field === 'w') ? 'x' : 'y';
+                showSnapHighlight(canvas, axis, snapped.anchor);
+            }
+            commitCropWindow(pipIdx, input, next);
+        }
+
+        function buildCropSection(p, cfg) {
+            const wrap = document.createElement('div');
+            wrap.className = 'pip-crop-wrap';
+
+            // Candidate targets: bg + every zone source. The backend prunes
+            // transforms for inputs that leave the PiP, so no stale entries.
+            const targets = [];
+            if (cfg.bg != null) targets.push(cfg.bg);
+            cfg.zones.forEach(z => effectiveZoneSources(z).forEach(s => {
+                if (!targets.includes(s)) targets.push(s);
+            }));
+
+            // Default target: the active zone's single source — the common
+            // punch-in case ("zoom into the person in this box").
+            if (activeCropTarget == null || !targets.includes(activeCropTarget)) {
+                activeCropTarget = null;
+                const az = cfg.zones[Math.min(activeZoneIdx[p], Math.max(0, cfg.zones.length - 1))];
+                if (az) {
+                    const srcs = effectiveZoneSources(az);
+                    if (srcs.length === 1) activeCropTarget = srcs[0];
+                }
+            }
+
+            const head = document.createElement('div');
+            head.className = 'pip-crop-head';
+            const title = document.createElement('span');
+            title.className = 'pip-crop-title';
+            title.textContent = 'Crop / Zoom';
+            head.appendChild(title);
+            const sel = document.createElement('select');
+            sel.className = 'pip-crop-select';
+            const none = document.createElement('option');
+            none.value = '';
+            none.textContent = '— select source —';
+            sel.appendChild(none);
+            targets.forEach(i => {
+                const o = document.createElement('option');
+                o.value = String(i);
+                const cropped = !cropIsZero(getCrop(cfg, i));
+                const res = INPUT_RESOLUTIONS[i];
+                o.textContent = (INPUT_LABELS[i] || ('Input ' + (i + 1)))
+                    + (cfg.bg === i ? ' (BG)' : '')
+                    + (res ? ' · ' + res.width + '×' + res.height : '')
+                    + (cropped ? ' ✂' : '');
+                if (activeCropTarget === i) o.selected = true;
+                sel.appendChild(o);
+            });
+            sel.onchange = () => {
+                activeCropTarget = sel.value === '' ? null : parseInt(sel.value, 10);
+                buildPipConfigPanel();
+            };
+            head.appendChild(sel);
+            wrap.appendChild(head);
+
+            const srcCanvas = document.createElement('div');
+            srcCanvas.className = 'pip-crop-canvas';
+
+            if (activeCropTarget == null) {
+                const ph = document.createElement('div');
+                ph.className = 'pip-crop-placeholder';
+                ph.textContent = targets.length > 0
+                    ? 'Select a source to crop/zoom'
+                    : 'Add a source to the PiP first';
+                srcCanvas.appendChild(ph);
+                wrap.appendChild(srcCanvas);
+                return wrap;
+            }
+
+            const input = activeCropTarget;
+            const srcAspect = srcAspectFor(input);
+            const boxAspect = cropBoxAspect(cfg, input);
+            const ratio = cropWindowRatio(boxAspect, srcAspect);
+            let win = cropToWindow(getCrop(cfg, input));
+
+            // The source canvas mirrors the source frame — render it in the
+            // source's real aspect so the framing reads true.
+            srcCanvas.style.height =
+                Math.max(72, Math.min(320, Math.round(320 / srcAspect))) + 'px';
+
+            // Same snap-anchor grid as the zone canvas (quarters + thirds of
+            // the source frame — framing a face on a third reads well).
+            if (gridVisible) srcCanvas.appendChild(buildGridOverlay());
+
+            const frame = document.createElement('div');
+            frame.className = 'pip-crop-frame';
+            const applyFrameStyle = (w) => {
+                frame.style.left = (w.x * 100) + '%';
+                frame.style.top = (w.y * 100) + '%';
+                frame.style.width = (w.w * 100) + '%';
+                frame.style.height = (w.h * 100) + '%';
+            };
+            applyFrameStyle(win);
+            ['nw', 'ne', 'sw', 'se'].forEach(corner => {
+                const h = document.createElement('div');
+                h.className = 'zone-handle ' + corner;
+                h.dataset.corner = corner;
+                frame.appendChild(h);
+            });
+            srcCanvas.appendChild(frame);
+            wrap.appendChild(srcCanvas);
+
+            // Zoom slider: 1× = the largest window for the current aspect.
+            // `input` events update the frame live; `change` commits via the
+            // API (mirrors the drag-then-single-POST pattern).
+            const zoomRow = document.createElement('div');
+            zoomRow.className = 'pip-crop-zoom-row';
+            zoomRow.append('Zoom');
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = '1';
+            slider.max = '5';
+            slider.step = '0.01';
+            const zoomVal = document.createElement('span');
+            zoomVal.className = 'pip-crop-zoom-val';
+            const currentRatio = () => cropAspectLock ? ratio : (win.w / win.h);
+            // Never report below 1×: an uncropped (full-frame) window shows as
+            // 1.00× even though the largest box-aspect window would be smaller.
+            const currentZoom = () => Math.max(1, maxCropWindow(currentRatio()).w / win.w);
+            const syncZoomUi = () => {
+                slider.value = String(Math.min(5, currentZoom()));
+                zoomVal.textContent = currentZoom().toFixed(2) + '×';
+            };
+            const applyZoom = (z) => {
+                const r = currentRatio();
+                const mw = maxCropWindow(r);
+                const cx = win.x + win.w / 2, cy = win.y + win.h / 2;
+                const w = mw.w / z, h = mw.h / z;
+                win = clampCropWindow({ x: cx - w / 2, y: cy - h / 2, w, h });
+                applyFrameStyle(win);
+                zoomVal.textContent = currentZoom().toFixed(2) + '×';
+            };
+            slider.oninput = () => applyZoom(parseFloat(slider.value));
+            slider.onchange = () => commitCropWindow(p, input, win);
+            syncZoomUi();
+            zoomRow.appendChild(slider);
+            zoomRow.appendChild(zoomVal);
+            wrap.appendChild(zoomRow);
+
+            // Pixel-precise crop window editor, in SOURCE pixels (each input
+            // has its own resolution). X/Y = window top-left, W/H = window
+            // size. Same snap + round-trip behavior as the zone px inputs.
+            const res = INPUT_RESOLUTIONS[input];
+            const srcW = (res && res.width > 0) ? res.width : PGM_W;
+            const srcH = (res && res.height > 0) ? res.height : PGM_H;
+            const winPx = {
+                x: Math.round(win.x * srcW),
+                y: Math.round(win.y * srcH),
+                w: Math.round(win.w * srcW),
+                h: Math.round(win.h * srcH),
+            };
+            const mkCropPxInput = (field, max) => {
+                const inp = document.createElement('input');
+                inp.className = 'pip-zone-px-input';
+                inp.type = 'number';
+                inp.min = (field === 'w' || field === 'h') ? '1' : '0';
+                inp.max = String(max);
+                inp.step = '1';
+                inp.value = String(winPx[field]);
+                inp.title = field.toUpperCase() + ' of the crop window in source pixels ('
+                    + srcW + '×' + srcH + ')';
+                inp.onchange = () => setCropWindowPx(p, input, field, inp.value);
+                return inp;
+            };
+            const mkPxLabel = (text) => {
+                const l = document.createElement('span');
+                l.className = 'pip-zone-px-label';
+                l.textContent = text;
+                return l;
+            };
+            const cropPxRow1 = document.createElement('div');
+            cropPxRow1.className = 'pip-zone-px-row';
+            cropPxRow1.appendChild(mkPxLabel('X'));
+            cropPxRow1.appendChild(mkCropPxInput('x', srcW));
+            cropPxRow1.appendChild(mkPxLabel('Y'));
+            cropPxRow1.appendChild(mkCropPxInput('y', srcH));
+            wrap.appendChild(cropPxRow1);
+            const cropPxRow2 = document.createElement('div');
+            cropPxRow2.className = 'pip-zone-px-row';
+            cropPxRow2.appendChild(mkPxLabel('W'));
+            cropPxRow2.appendChild(mkCropPxInput('w', srcW));
+            cropPxRow2.appendChild(mkPxLabel('H'));
+            cropPxRow2.appendChild(mkCropPxInput('h', srcH));
+            wrap.appendChild(cropPxRow2);
+
+            const actions = document.createElement('div');
+            actions.className = 'pip-crop-actions';
+            const lockLabel = document.createElement('label');
+            lockLabel.className = 'pip-zone-toggle';
+            const lockCb = document.createElement('input');
+            lockCb.type = 'checkbox';
+            lockCb.checked = cropAspectLock;
+            lockCb.onchange = () => {
+                toggleCropAspectLock();
+                // Turning the lock on re-fits the current window so the crop
+                // fills the destination box without letterboxing.
+                if (cropAspectLock && !cropIsZero(getCrop(cfg, input))) {
+                    commitCropWindow(p, input, fitWindowToRatio(win, ratio));
+                }
+            };
+            lockLabel.appendChild(lockCb);
+            lockLabel.append(' Lock box aspect');
+            lockLabel.title = 'Keep the crop window at the destination box aspect so it fills the box exactly';
+            actions.appendChild(lockLabel);
+            const resetBtn = document.createElement('button');
+            resetBtn.className = 'pip-crop-reset-btn';
+            resetBtn.textContent = 'Reset';
+            resetBtn.title = 'Remove crop/zoom for this source';
+            resetBtn.disabled = cropIsZero(getCrop(cfg, input));
+            resetBtn.onclick = () => resetCrop(p, input);
+            actions.appendChild(resetBtn);
+            wrap.appendChild(actions);
+
+            const hint = document.createElement('div');
+            hint.className = 'pip-canvas-hint';
+            hint.textContent = 'The frame is the visible part of the source — it scales to fill the box. Drag to pan, corners or the slider to zoom. X/Y/W/H are in source pixels. Snap/Grid toggles are shared with the zone editor.';
+            wrap.appendChild(hint);
+
+            attachCropDrag(frame, srcCanvas, p, input, ratio, {
+                get: () => win,
+                set: (w) => { win = w; applyFrameStyle(win); syncZoomUi(); }
+            });
+
+            return wrap;
+        }
+
+        // Drag-and-resize for the crop window. Move = pan; corner handles =
+        // zoom (aspect-locked to the destination box when the lock is on).
+        // Sends a single POST on mouseup, like attachZoneDrag.
+        function attachCropDrag(frameEl, canvasEl, pipIdx, input, ratio, winRef) {
+            frameEl.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                const canvasRect = canvasEl.getBoundingClientRect();
+                // A panel rebuild may have detached this canvas (0×0 rect) —
+                // dividing by it would poison the window with NaN. Bail.
+                if (!canvasEl.isConnected || canvasRect.width <= 0 || canvasRect.height <= 0) {
+                    return;
+                }
+                const startX = e.clientX;
+                const startY = e.clientY;
+                const handle = e.target.closest('.zone-handle');
+                const corner = handle ? handle.dataset.corner : null;
+                let initial = { ...winRef.get() };
+                // First interaction with the lock on: snap the window to the
+                // box aspect so what you frame is exactly what fills the box.
+                if (cropAspectLock) {
+                    const fitted = fitWindowToRatio(initial, ratio);
+                    if (Math.abs(fitted.w - initial.w) + Math.abs(fitted.h - initial.h) > 0.0001) {
+                        initial = fitted;
+                        winRef.set(fitted);
+                    }
+                }
+                let dirty = false;
+
+                const onMove = (ev) => {
+                    const dx = (ev.clientX - startX) / canvasRect.width;
+                    const dy = (ev.clientY - startY) / canvasRect.height;
+                    let next = { ...initial };
+                    // Snap anchors mirror the zone editor: quarters + thirds
+                    // of the source frame. Track which anchor each axis hit
+                    // so the matching grid line lights up.
+                    let snapX = null;
+                    let snapY = null;
+                    if (!corner) {
+                        const sx = snapMoveAxisDetect(initial.x + dx, initial.w);
+                        const sy = snapMoveAxisDetect(initial.y + dy, initial.h);
+                        next.x = sx.value;
+                        next.y = sy.value;
+                        snapX = sx.anchor;
+                        snapY = sy.anchor;
+                    } else {
+                        const right = initial.x + initial.w;
+                        const bottom = initial.y + initial.h;
+                        if (corner === 'nw') {
+                            const sx = snapEdgeDetect(initial.x + dx);
+                            const sy = snapEdgeDetect(initial.y + dy);
+                            next.x = sx.value;
+                            next.y = sy.value;
+                            next.w = right - next.x;
+                            next.h = bottom - next.y;
+                            snapX = sx.anchor;
+                            snapY = sy.anchor;
+                        } else if (corner === 'ne') {
+                            const sy = snapEdgeDetect(initial.y + dy);
+                            const sr = snapEdgeDetect(right + dx);
+                            next.y = sy.value;
+                            next.w = sr.value - initial.x;
+                            next.h = bottom - next.y;
+                            snapX = sr.anchor;
+                            snapY = sy.anchor;
+                        } else if (corner === 'sw') {
+                            const sx = snapEdgeDetect(initial.x + dx);
+                            const sb = snapEdgeDetect(bottom + dy);
+                            next.x = sx.value;
+                            next.w = right - next.x;
+                            next.h = sb.value - initial.y;
+                            snapX = sx.anchor;
+                            snapY = sb.anchor;
+                        } else if (corner === 'se') {
+                            const sr = snapEdgeDetect(right + dx);
+                            const sb = snapEdgeDetect(bottom + dy);
+                            next.w = sr.value - initial.x;
+                            next.h = sb.value - initial.y;
+                            snapX = sr.anchor;
+                            snapY = sb.anchor;
+                        }
+                        next.w = Math.max(0.05, next.w);
+                        next.h = Math.max(0.05, next.h);
+                        if (cropAspectLock) {
+                            // Constrain to the box aspect, anchoring the corner
+                            // opposite to the one being dragged. Height derives
+                            // from width, so only the horizontal snap is real.
+                            next.h = next.w / ratio;
+                            if (next.h > 1) { next.h = 1; next.w = next.h * ratio; }
+                            if (corner === 'nw' || corner === 'ne') {
+                                next.y = bottom - next.h;
+                            }
+                            if (corner === 'nw' || corner === 'sw') {
+                                next.x = right - next.w;
+                            }
+                            snapY = null;
+                        }
+                    }
+                    next = clampCropWindow(next);
+                    if (Math.abs(next.x - initial.x) + Math.abs(next.y - initial.y)
+                        + Math.abs(next.w - initial.w) + Math.abs(next.h - initial.h) > 0.0001) {
+                        dirty = true;
+                    }
+                    winRef.set(next);
+                    clearSnapHighlights(canvasEl);
+                    showSnapHighlight(canvasEl, 'x', snapX);
+                    showSnapHighlight(canvasEl, 'y', snapY);
+                };
+                const onUp = () => {
+                    document.removeEventListener('mousemove', onMove);
+                    document.removeEventListener('mouseup', onUp);
+                    clearSnapHighlights(canvasEl);
+                    if (dirty) commitCropWindow(pipIdx, input, winRef.get());
+                };
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+            });
+        }
+
         function buildPipConfigPanel() {
             const panel = document.getElementById('pipConfigPanel');
             if (NUM_PIPS === 0) {
@@ -1534,7 +2228,7 @@
             panel.innerHTML = '';
 
             for (let p = 0; p < NUM_PIPS; p++) {
-                const cfg = pipConfigs[p] || { bg: null, zones: [] };
+                const cfg = pipConfigs[p] || { bg: null, zones: [], transforms: {} };
                 const block = document.createElement('div');
                 block.className = 'pip-config-block';
 
@@ -1626,26 +2320,7 @@
                 // snap anchor. Thirds get a brighter (gold) line so the rule-
                 // of-thirds intersections read at a glance; quarters stay
                 // subtle. Sits above the BG fill and below the zones.
-                if (gridVisible) {
-                    const grid = document.createElement('div');
-                    grid.className = 'pip-canvas-grid';
-                    SNAP_ANCHORS.forEach(a => {
-                        if (a === 0 || a === 1) return; // edges are the canvas border
-                        const isThird = SNAP_THIRDS.some(t => Math.abs(t - a) < 1e-6);
-                        const cls = 'pip-grid-line ' + (isThird ? 'third' : 'quarter');
-                        const vl = document.createElement('div');
-                        vl.className = cls + ' v';
-                        vl.style.left = (a * 100) + '%';
-                        vl.dataset.anchor = String(a);
-                        grid.appendChild(vl);
-                        const hl = document.createElement('div');
-                        hl.className = cls + ' h';
-                        hl.style.top = (a * 100) + '%';
-                        hl.dataset.anchor = String(a);
-                        grid.appendChild(hl);
-                    });
-                    canvas.appendChild(grid);
-                }
+                if (gridVisible) canvas.appendChild(buildGridOverlay());
 
                 cfg.zones.forEach((zone, zi) => {
                     const isAuto = zone.rect == null;
@@ -1866,6 +2541,7 @@
                 toolbar.appendChild(hint);
                 canvasWrap.appendChild(toolbar);
                 editor.appendChild(canvasWrap);
+                editor.appendChild(buildCropSection(p, cfg));
 
                 block.appendChild(editor);
                 panel.appendChild(block);
@@ -1880,6 +2556,31 @@
         const SNAP_THIRDS = [1 / 3, 2 / 3];
         const SNAP_ANCHORS = [0, ...SNAP_QUARTERS, ...SNAP_THIRDS, 1].sort((a, b) => a - b);
         const SNAP_TOL = 0.022; // ~10px on a 480-px canvas; tight enough to not fight free dragging
+
+        // Build the snap-anchor grid overlay (vertical + horizontal lines at
+        // every anchor; thirds gold, quarters subtle). Shared between the
+        // zone canvas and the crop canvas — `showSnapHighlight` finds the
+        // lines via data-anchor inside whichever canvas hosts them.
+        function buildGridOverlay() {
+            const grid = document.createElement('div');
+            grid.className = 'pip-canvas-grid';
+            SNAP_ANCHORS.forEach(a => {
+                if (a === 0 || a === 1) return; // edges are the canvas border
+                const isThird = SNAP_THIRDS.some(t => Math.abs(t - a) < 1e-6);
+                const cls = 'pip-grid-line ' + (isThird ? 'third' : 'quarter');
+                const vl = document.createElement('div');
+                vl.className = cls + ' v';
+                vl.style.left = (a * 100) + '%';
+                vl.dataset.anchor = String(a);
+                grid.appendChild(vl);
+                const hl = document.createElement('div');
+                hl.className = cls + ' h';
+                hl.style.top = (a * 100) + '%';
+                hl.dataset.anchor = String(a);
+                grid.appendChild(hl);
+            });
+            return grid;
+        }
 
         // Snap a single coordinate to a nearby anchor. Returns the snapped
         // value plus the matched anchor (null when no snap happens or when
@@ -1944,6 +2645,14 @@
                 e.preventDefault();
                 e.stopPropagation();
                 const canvasRect = canvas.getBoundingClientRect();
+                // The zone-activation listener on this element may have just
+                // rebuilt the panel (same mousedown event) — this element and
+                // its canvas are then detached and the rect is 0×0. Dividing
+                // by it would poison the rect with NaN, so bail; the user
+                // drags again on the freshly-built zone.
+                if (!canvas.isConnected || canvasRect.width <= 0 || canvasRect.height <= 0) {
+                    return;
+                }
                 const startX = e.clientX;
                 const startY = e.clientY;
                 const cfg = pipConfigs[pipIdx];

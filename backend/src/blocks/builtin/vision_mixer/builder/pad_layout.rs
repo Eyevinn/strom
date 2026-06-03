@@ -31,7 +31,16 @@ fn initial_pad_geom_for_input(
         return (rx, ry, rw, rh, 1.0, bg_zorder as u64);
     }
     let zones = p.pip_zones.get(pip_idx).map(Vec::as_slice).unwrap_or(&[]);
-    let layouts = strom_types::vision_mixer::resolve_zone_pads(rx, ry, rw, rh, zones, src_aspect);
+    // Transforms are runtime-only (like zones) — always empty at build time.
+    let layouts = strom_types::vision_mixer::resolve_zone_pads(
+        rx,
+        ry,
+        rw,
+        rh,
+        zones,
+        src_aspect,
+        &strom_types::vision_mixer::PipTransforms::new(),
+    );
     if let Some(l) = layouts.iter().find(|l| l.input == input) {
         (
             l.x,

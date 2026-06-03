@@ -1156,6 +1156,15 @@ pub struct UpdatePipConfigRequest {
     /// zone are also in z-order (oldest first).
     #[serde(default)]
     pub zones: Vec<crate::vision_mixer::Zone>,
+    /// Per-source crop ("zoom"/"punch-in"), keyed by input index. Applies to
+    /// the source wherever it renders inside this PiP (bg or zone). Missing
+    /// key = no crop. See [`crate::vision_mixer::SourceCrop`].
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = std::collections::HashMap<String, crate::vision_mixer::SourceCrop>)
+    )]
+    pub transforms: crate::vision_mixer::PipTransforms,
 }
 
 /// Response after updating a PiP composition.
@@ -1169,6 +1178,14 @@ pub struct UpdatePipConfigResponse {
     /// `NormRect`s are clamped to `[0,1]`. Duplicate sources or out-of-range
     /// indices are rejected with 400 rather than silently sanitized.
     pub zones: Vec<crate::vision_mixer::Zone>,
+    /// Authoritative per-source crop state. Identical to the request except
+    /// that crop fractions are clamped (see `SourceCrop::clamped`).
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = std::collections::HashMap<String, crate::vision_mixer::SourceCrop>)
+    )]
+    pub transforms: crate::vision_mixer::PipTransforms,
 }
 
 /// Response after selecting a preview source.
@@ -1198,6 +1215,13 @@ pub struct PipState {
     pub bg: Option<usize>,
     /// Overlay zones (FIFO order, oldest first inside each zone).
     pub zones: Vec<crate::vision_mixer::Zone>,
+    /// Per-source crop transforms, keyed by input index.
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = std::collections::HashMap<String, crate::vision_mixer::SourceCrop>)
+    )]
+    pub transforms: crate::vision_mixer::PipTransforms,
 }
 
 /// Current runtime state of a vision mixer block.
@@ -1224,6 +1248,12 @@ pub struct VisionMixerState {
     pub overlay_alpha: f64,
     /// Per-PiP runtime state (length = configured `num_pips`).
     pub pips: Vec<PipState>,
+    /// Negotiated resolution per input (length = configured `num_inputs`).
+    /// `None` for inputs whose caps are not negotiated yet. Inputs can have
+    /// arbitrary resolutions/aspects — clients must not assume the PGM aspect
+    /// (the crop editor needs the real source aspect for its window math).
+    #[serde(default)]
+    pub input_resolutions: Vec<Option<crate::vision_mixer::InputResolution>>,
 }
 
 /// Request to set the multiview overlay alpha on a vision mixer block.

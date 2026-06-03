@@ -153,22 +153,31 @@ async fn render_vision_mixer_page(
     // therefore empty until the operator configures them.
     let pips: Vec<serde_json::Value> = (0..num_pips)
         .map(|i| {
-            let (bg, zones) = if let Some(s) = overlay.as_ref() {
-                (s.pip_bg_input(i), s.pip_zones(i))
+            let (bg, zones, transforms) = if let Some(s) = overlay.as_ref() {
+                (s.pip_bg_input(i), s.pip_zones(i), s.pip_transforms(i))
             } else {
                 (
                     vm_props::parse_pip_bg(&vm_block.properties, i, num_inputs),
                     Vec::<strom_types::vision_mixer::Zone>::new(),
+                    strom_types::vision_mixer::PipTransforms::new(),
                 )
             };
             serde_json::json!({
                 "bg": bg,
                 "zones": zones,
+                "transforms": transforms,
             })
         })
         .collect();
     let pvw_pip: Option<usize> = overlay.as_ref().and_then(|s| s.pvw_pip());
     let pgm_pip: Option<usize> = overlay.as_ref().and_then(|s| s.pgm_pip());
+
+    // Negotiated per-input resolutions (None until caps arrive). The crop
+    // editor needs the real source aspect — inputs are NOT normalized to the
+    // PGM resolution/aspect.
+    let input_resolutions = state
+        .vision_mixer_input_resolutions(flow_id, block_id, num_inputs)
+        .await;
 
     // Build a single JSON config object (safe injection via <script type="application/json">)
     let config = serde_json::json!({
@@ -188,6 +197,7 @@ async fn render_vision_mixer_page(
         "pgm_pip": pgm_pip,
         "pgm_w": pgm_w,
         "pgm_h": pgm_h,
+        "input_resolutions": input_resolutions,
     });
 
     let html = VISION_MIXER_HTML.replace("{{VM_CONFIG_JSON}}", &config.to_string());

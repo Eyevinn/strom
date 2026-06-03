@@ -13,7 +13,7 @@ use tracing::{debug, info};
 
 use super::{
     plan_transition, PadAction, PadTarget, TransitionController, TransitionError, TransitionType,
-    ZHandling,
+    ZHandling, CROP_PAD_PROPS,
 };
 
 impl TransitionController {
@@ -586,9 +586,22 @@ impl TransitionController {
 
     /// Remove all control bindings from a pad. Must cover every property the
     /// transition setup helpers can bind: alpha (fades + step-off), xpos/ypos/
-    /// width/height (position animation), and zorder (morph z lift/step).
+    /// width/height (position animation), zorder (morph z lift/step), and the
+    /// GL mixer crop properties (crop morph — absent on the CPU backend, where
+    /// `control_binding` simply returns `None`).
     fn clear_control_bindings(&self, pad: &gst::Pad) {
-        for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
+        for prop in [
+            "alpha",
+            "xpos",
+            "ypos",
+            "width",
+            "height",
+            "zorder",
+            "crop-left",
+            "crop-right",
+            "crop-top",
+            "crop-bottom",
+        ] {
             if let Some(binding) = pad.control_binding(prop) {
                 pad.remove_control_binding(&binding);
                 debug!("Removed {} control binding from pad {}", prop, pad.name());
@@ -762,6 +775,101 @@ impl TransitionController {
             plan.len()
         );
 
+        Ok(())
+    }
+
+    /// Animate the GL mixer crop properties on a sink pad from their current
+    /// values to the pixel values for `target` (normalized crop × the pad's
+    /// negotiated source caps), with the same easing as the geometry morph.
+    /// No-op when the pad lacks crop properties (CPU `compositor` backend has
+    /// none) or has no negotiated caps yet (nothing is flowing to crop).
+    pub fn animate_pad_crop(
+        &self,
+        pad_idx: usize,
+        target: &vision_mixer::SourceCrop,
+        duration_ms: u64,
+        pipeline: &gst::Pipeline,
+    ) -> Result<(), TransitionError> {
+        let pad = self.get_sink_pad(pad_idx)?;
+        if pad.find_property("crop-left").is_none() {
+            return Ok(());
+        }
+        let caps = pad.current_caps();
+        let Some((src_w, src_h)) = caps
+            .as_ref()
+            .and_then(|c| c.structure(0))
+            .and_then(|s| Some((s.get::<i32>("width").ok()?, s.get::<i32>("height").ok()?)))
+        else {
+            debug!(
+                "Pad {} has no negotiated caps yet — crop animation skipped",
+                pad.name()
+            );
+            return Ok(());
+        };
+        let (l, r, t, b) = target.to_pixels(src_w, src_h);
+        // Sizing-policy follows the crop (see `set_pad_crop` for why):
+        // `keep-aspect-ratio` fits by the *uncropped* DAR and would letterbox
+        // + distort cropped content; `none` fills (width, height) exactly.
+        // When animating *to* zero crop the UVs stay cropped during the
+        // punch-out, so `none` must persist until the animation completes —
+        // flip back afterwards (only if the crop actually reached zero; a
+        // newer animation may have taken over in the meantime).
+        if !target.is_zero() {
+            pad.set_property_from_str("sizing-policy", "none");
+        } else if CROP_PAD_PROPS.iter().all(|p| pad.property::<i32>(p) == 0) {
+            pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
+        } else {
+            let pad_weak = pad.downgrade();
+            gst::glib::timeout_add_once(
+                std::time::Duration::from_millis(duration_ms + 100),
+                move || {
+                    let Some(pad) = pad_weak.upgrade() else {
+                        return;
+                    };
+                    if CROP_PAD_PROPS.iter().all(|p| pad.property::<i32>(p) == 0) {
+                        pad.set_property_from_str("sizing-policy", "keep-aspect-ratio");
+                    }
+                },
+            );
+        }
+        let current_time = self.query_stream_time(pipeline)?;
+        let end_time = current_time + gst::ClockTime::from_mseconds(duration_ms);
+
+        let mut control_sources = Vec::new();
+        for (prop, to) in [
+            ("crop-left", l),
+            ("crop-right", r),
+            ("crop-top", t),
+            ("crop-bottom", b),
+        ] {
+            // Clear a stale binding first so reads + writes hit the real value.
+            if let Some(binding) = pad.control_binding(prop) {
+                pad.remove_control_binding(&binding);
+            }
+            let from = pad.property::<i32>(prop);
+            if from == to {
+                pad.set_property(prop, to);
+                continue;
+            }
+            control_sources.push(self.setup_int_animation(
+                &pad,
+                prop,
+                current_time,
+                end_time,
+                from,
+                to,
+            )?);
+        }
+        if !control_sources.is_empty() {
+            let key = self.next_key(&format!("crop_p{}", pad_idx));
+            if let Ok(mut transitions) = self.active_transitions.lock() {
+                transitions.insert(key, control_sources);
+            }
+            debug!(
+                "Crop animation started on pad {}: -> ({}, {}, {}, {}) over {}ms",
+                pad_idx, l, r, t, b, duration_ms
+            );
+        }
         Ok(())
     }
 

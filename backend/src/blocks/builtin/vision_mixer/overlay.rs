@@ -65,6 +65,9 @@ pub struct VisionMixerOverlayState {
     /// A zone with `rect: None` fills the entire PiP region; sources inside a
     /// zone auto-tile within its rect.
     pub pip_zones: Vec<std::sync::Mutex<Vec<Zone>>>,
+    /// Per-source crop transforms per configured PiP, keyed by input index.
+    /// Like zones these are runtime-only (configured via the /pip endpoint).
+    pub pip_transforms: Vec<std::sync::Mutex<strom_types::vision_mixer::PipTransforms>>,
     /// Number of configured PiP tiles (also `pip_bg.len()` / `pip_zones.len()`).
     pub num_pips: usize,
     /// Number of inputs.
@@ -160,6 +163,9 @@ impl VisionMixerOverlayState {
         let pip_zones = (0..pip.num_pips)
             .map(|i| std::sync::Mutex::new(pip.pip_zones.get(i).cloned().unwrap_or_default()))
             .collect();
+        let pip_transforms = (0..pip.num_pips)
+            .map(|_| std::sync::Mutex::new(strom_types::vision_mixer::PipTransforms::new()))
+            .collect();
 
         Self {
             pgm_input: AtomicU64::new(pgm_input as u64),
@@ -168,6 +174,7 @@ impl VisionMixerOverlayState {
             pvw_pip: AtomicU64::new(pip.pvw_pip.map(|x| x as u64).unwrap_or(NO_PIP)),
             pip_bg,
             pip_zones,
+            pip_transforms,
             num_pips: pip.num_pips,
             num_inputs,
             ftb_active: AtomicBool::new(false),
@@ -269,6 +276,28 @@ impl VisionMixerOverlayState {
         if let Some(slot) = self.pip_zones.get(pip_idx) {
             if let Ok(mut v) = slot.lock() {
                 *v = zones;
+            }
+        }
+    }
+
+    /// Get the per-source crop transforms for a configured PiP (empty if the
+    /// PiP doesn't exist or has no transforms).
+    pub fn pip_transforms(&self, pip_idx: usize) -> strom_types::vision_mixer::PipTransforms {
+        self.pip_transforms
+            .get(pip_idx)
+            .and_then(|m| m.lock().ok().map(|v| v.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Replace the per-source crop transforms for a configured PiP.
+    pub fn set_pip_transforms(
+        &self,
+        pip_idx: usize,
+        transforms: strom_types::vision_mixer::PipTransforms,
+    ) {
+        if let Some(slot) = self.pip_transforms.get(pip_idx) {
+            if let Ok(mut v) = slot.lock() {
+                *v = transforms;
             }
         }
     }

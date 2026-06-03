@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.6.0"
+    "version": "0.6.2-dev"
   },
   "paths": {
     "/api/auth/status": {
@@ -6318,6 +6318,26 @@
           }
         }
       },
+      "InputResolution": {
+        "type": "object",
+        "description": "Negotiated resolution of a video input, read from the compositor sink pad\ncaps. Inputs can have arbitrary resolutions and aspect ratios — nothing\nnormalizes them before the mixer.",
+        "required": [
+          "width",
+          "height"
+        ],
+        "properties": {
+          "height": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "width": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "Ipv4AddressInfo": {
         "type": "object",
         "description": "IPv4 address information.",
@@ -6939,6 +6959,16 @@
             ],
             "description": "Background input index, or `None` if no bg is set.",
             "minimum": 0
+          },
+          "transforms": {
+            "type": "object",
+            "description": "Per-source crop transforms, keyed by input index.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceCrop"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "zones": {
             "type": "array",
@@ -7764,6 +7794,32 @@
           }
         ],
         "description": "A source that can be assigned to PGM or PVW.\n\nJSON encoding is externally tagged: `{\"input\": 5}` or `{\"pip\": 1}`.\nThe [`FromStr`] / [`fmt::Display`] impls use a separate compact form\n(`\"input:N\"` / `\"pip:N\"`, case-insensitive) for stored block properties."
+      },
+      "SourceCrop": {
+        "type": "object",
+        "description": "Normalized per-source crop: the fraction of the source hidden from each\nedge. All components are in `0.0..=1.0`; all zero = no crop.\n\nThe crop selects which part of the source fills its destination rect —\ncombined with a zone rect this gives \"zoom\"/\"punch-in\" framing (the\ncropped region scales to fill the zone box; everything outside is hidden).\nNormalized fractions keep the type resolution-independent; the backend\nconverts to pixels against the negotiated source caps.",
+        "properties": {
+          "bottom": {
+            "type": "number",
+            "format": "float",
+            "description": "Fraction of the source height hidden from the bottom edge."
+          },
+          "left": {
+            "type": "number",
+            "format": "float",
+            "description": "Fraction of the source width hidden from the left edge."
+          },
+          "right": {
+            "type": "number",
+            "format": "float",
+            "description": "Fraction of the source width hidden from the right edge."
+          },
+          "top": {
+            "type": "number",
+            "format": "float",
+            "description": "Fraction of the source height hidden from the top edge."
+          }
+        }
       },
       "SourceFlowInfo": {
         "type": "object",
@@ -10489,6 +10545,16 @@
             "description": "Background input index. Omit/null for no bg.",
             "minimum": 0
           },
+          "transforms": {
+            "type": "object",
+            "description": "Per-source crop (\"zoom\"/\"punch-in\"), keyed by input index. Applies to\nthe source wherever it renders inside this PiP (bg or zone). Missing\nkey = no crop. See [`crate::vision_mixer::SourceCrop`].",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceCrop"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "zones": {
             "type": "array",
             "items": {
@@ -10520,6 +10586,16 @@
           "pip_idx": {
             "type": "integer",
             "minimum": 0
+          },
+          "transforms": {
+            "type": "object",
+            "description": "Authoritative per-source crop state. Identical to the request except\nthat crop fractions are clamped (see `SourceCrop::clamped`).",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceCrop"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "zones": {
             "type": "array",
@@ -10577,6 +10653,20 @@
           "ftb_active": {
             "type": "boolean",
             "description": "Whether Fade to Black is currently active."
+          },
+          "input_resolutions": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/InputResolution"
+                }
+              ]
+            },
+            "description": "Negotiated resolution per input (length = configured `num_inputs`).\n`None` for inputs whose caps are not negotiated yet. Inputs can have\narbitrary resolutions/aspects — clients must not assume the PGM aspect\n(the crop editor needs the real source aspect for its window math)."
           },
           "overlay_alpha": {
             "type": "number",
