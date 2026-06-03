@@ -184,6 +184,7 @@ just like a regular input.
 | **Zone capacity** | Max number of overlay sources allowed in the zone. When full, pushing a new source **evicts the oldest** (FIFO). Capacity `1` is "swap mode" — replacing the source cross-fades. |
 | **Auto-tile** | When a zone holds multiple sources, they auto-tile in a grid (1, 2 side-by-side, 2+1, 2×2, 3×2, etc.). Each source is fitted with its **own** aspect ratio — a 2.39:1 source letterboxes inside its cell instead of being stretched. |
 | **Source crop ("punch-in")** | Each source in a PiP can carry a crop window: the visible part of the source that scales to fill its box. Think virtual PTZ — zoom into a person's face from a wide shot. See §4.4. |
+| **Zone border** | A colored frame drawn around each source box in the zone — on the **PGM output** and mirrored on the multiview (PiP tiles and the PVW display, proportionally scaled). The border belongs to the box (it survives source swaps in the zone) and is rendered live by the mixer itself, so it tracks morphs, takes and punch-ins frame by frame. Sits below the DSK stack. Set per zone: color + width in PGM pixels — the width normalizes to each render target, so 4 px on air looks like 4 px-equivalent everywhere (0 = off). |
 
 ### 4.2 Limits
 
@@ -209,7 +210,8 @@ two side-by-side panels:
   anchors; **Grid** draws the guide lines (thirds in gold). Both
   toggles are shared with the crop panel.
 - The control row under the canvas shows the active zone's exact
-  **X/Y/W/H in PGM pixels** plus its **capacity** (blank = `∞`).
+  **X/Y/W/H in PGM pixels**, its **capacity** (blank = `∞`), and its
+  **border** (color swatch + width in PGM pixels; width 0 = no border).
 - Push **inputs** into the active zone with the numbered chips. The
   zone fills up, auto-tiles, and starts evicting once it hits capacity.
 
@@ -472,5 +474,6 @@ is live and takes effect immediately.
 | **Zone** | A rectangular sub-region inside a PiP that hosts overlay sources. Has its own position, size, and capacity (FIFO eviction when full). |
 | **Crop / punch-in** | A per-source window inside a PiP: the visible part of the source, scaled to fill its box. Virtual PTZ. Remembered when the source leaves the PiP; cleared only with **Reset**. |
 | **Aspect lock** | Crop-editor toggle (default on) that keeps the crop window at the destination box's aspect so the crop fills the box edge to edge. |
+| **Zone border** | A colored frame around each source box in a zone, drawn live on the PGM output by the mixer itself. Belongs to the box — survives source swaps. |
 | **Multiview** | The operator monitor output showing PVW, PGM, all input thumbnails, all PiP thumbnails, clock, labels and VU meters. |
 | **Source** | A bus assignment, either `input:N` (a regular input) or `pip:N` (a PiP composition). |

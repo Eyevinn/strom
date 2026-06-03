@@ -88,6 +88,10 @@ pub struct VisionMixerOverlayState {
     pub num_dsk_inputs: usize,
     /// Pre-computed layout (immutable after construction).
     pub layout: OverlayLayout,
+    /// PGM (distribution) canvas size — the reference for resolution-
+    /// normalized units like zone-border width (set at build, immutable).
+    pub pgm_w: u32,
+    pub pgm_h: u32,
     /// Input labels (set at build time, read-only after).
     pub labels: Vec<String>,
     /// Monotonic instant captured at construction for wall-clock derivation.
@@ -143,6 +147,8 @@ impl VisionMixerOverlayState {
         pvw_input: usize,
         labels: Vec<String>,
         layout: OverlayLayout,
+        pgm_w: u32,
+        pgm_h: u32,
         show_vu_meters: bool,
         pip: PipInitialState,
     ) -> Self {
@@ -190,6 +196,8 @@ impl VisionMixerOverlayState {
                 .collect(),
             num_dsk_inputs,
             layout,
+            pgm_w,
+            pgm_h,
             labels,
             instant_base: now_instant,
             base_utc_secs: utc_secs,
@@ -686,6 +694,139 @@ fn hash_pip_compose(state: &VisionMixerOverlayState) -> u64 {
     h
 }
 
+/// Collect the multiview pads that should carry a zone border right now:
+/// every PiP tile's bordered zone sources, plus the PVW big region when PVW
+/// shows a PiP. Returns `(pad_index, border_width_scale, zone_index, pip)`
+/// tuples — geometry is read live from the pads so borders track morphs.
+/// The width scale normalizes the PGM-pixel border width to the region
+/// (`region_width / pgm_width`), keeping borders proportionally identical
+/// across PGM, PVW and tiles regardless of resolution.
+fn border_pad_set(state: &VisionMixerOverlayState) -> Vec<(usize, f64, usize, usize)> {
+    let n = state.num_inputs;
+    let pgm_w = state.pgm_w.max(1) as f64;
+    let mut out = Vec::new();
+    for p in 0..state.num_pips {
+        let zones = state.pip_zones(p);
+        let has_border = zones
+            .iter()
+            .any(|z| z.border.as_ref().map(|b| b.is_visible()).unwrap_or(false));
+        if !has_border {
+            continue;
+        }
+        // PiP tile pads (always rendered).
+        if let Some(tile) = state.layout.pip_tile_rects.get(p) {
+            let scale = tile.w / pgm_w;
+            for (zi, zone) in zones.iter().enumerate() {
+                if zone.border.as_ref().map(|b| b.is_visible()) != Some(true) {
+                    continue;
+                }
+                for &input in zone.effective_sources() {
+                    out.push((2 * n + 1 + p * n + input, scale, zi, p));
+                }
+            }
+        }
+        // PVW big region when this PiP is on PVW.
+        if state.pvw_pip() == Some(p) {
+            let scale = state.layout.pvw_rect.w / pgm_w;
+            for (zi, zone) in zones.iter().enumerate() {
+                if zone.border.as_ref().map(|b| b.is_visible()) != Some(true) {
+                    continue;
+                }
+                for &input in zone.effective_sources() {
+                    out.push((n + 1 + input, scale, zi, p));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Hash the live geometry of every border-carrying multiview pad. Included
+/// in the renderer dirty-check so borders re-render while their boxes morph.
+fn hash_border_geometry(
+    state: &VisionMixerOverlayState,
+    mv_comp: &gst::glib::WeakRef<gst::Element>,
+) -> u64 {
+    let pads = border_pad_set(state);
+    if pads.is_empty() {
+        return 0;
+    }
+    let Some(mv) = mv_comp.upgrade() else {
+        return 0;
+    };
+    let mut h: u64 = 0xB04DE4 ^ 0x9E3779B97F4A7C15;
+    let mut mix = |v: u64| {
+        h = h.rotate_left(13) ^ v.wrapping_mul(0x100000001B3);
+    };
+    for (idx, scale, zi, p) in pads {
+        let Some(pad) = find_mv_pad(&mv, idx) else {
+            continue;
+        };
+        mix(idx as u64);
+        mix(zi as u64);
+        mix(p as u64);
+        mix(scale.to_bits());
+        mix(pad.property::<i32>("xpos") as u64);
+        mix(pad.property::<i32>("ypos") as u64);
+        mix(pad.property::<i32>("width") as u64);
+        mix(pad.property::<i32>("height") as u64);
+        mix(pad.property::<f64>("alpha").to_bits());
+    }
+    h
+}
+
+/// Find a request pad on the multiview compositor (request pads are not
+/// always reachable via `static_pad`).
+fn find_mv_pad(mv: &gst::Element, idx: usize) -> Option<gst::Pad> {
+    let name = format!("sink_{}", idx);
+    mv.static_pad(&name)
+        .or_else(|| mv.pads().into_iter().find(|p| p.name().as_str() == name))
+}
+
+/// Draw zone borders around the live source boxes on PiP tiles and the PVW
+/// big display. Colors are R↔B swapped like the rest of the overlay (cairo's
+/// BGRA memory then lands as correct RGBA).
+fn draw_zone_borders(
+    state: &VisionMixerOverlayState,
+    cr: &cairo::Context,
+    mv_comp: &gst::glib::WeakRef<gst::Element>,
+) {
+    let pads = border_pad_set(state);
+    if pads.is_empty() {
+        return;
+    }
+    let Some(mv) = mv_comp.upgrade() else {
+        return;
+    };
+    for (idx, scale, zi, p) in pads {
+        let zones = state.pip_zones(p);
+        let Some(border) = zones.get(zi).and_then(|z| z.border.as_ref()) else {
+            continue;
+        };
+        let Some((r, g, b, a)) = border.rgba() else {
+            continue;
+        };
+        let Some(pad) = find_mv_pad(&mv, idx) else {
+            continue;
+        };
+        let pad_alpha = pad.property::<f64>("alpha");
+        if pad_alpha <= 0.01 {
+            continue;
+        }
+        let x = pad.property::<i32>("xpos") as f64;
+        let y = pad.property::<i32>("ypos") as f64;
+        let w = pad.property::<i32>("width") as f64;
+        let h = pad.property::<i32>("height") as f64;
+        // Scale the PGM-pixel width to this region, but keep at least a
+        // hairline so thin borders don't vanish on small tiles.
+        let bw = (border.clamped_width() as f64 * scale).max(1.0);
+        cr.set_source_rgba(b, g, r, a * pad_alpha);
+        cr.set_line_width(bw);
+        cr.rectangle(x - bw / 2.0, y - bw / 2.0, w + bw, h + bw);
+        let _ = cr.stroke();
+    }
+}
+
 /// Helper to get text extents, returning (width, height) with a fallback.
 fn text_size(cr: &cairo::Context, text: &str) -> (f64, f64) {
     match cr.text_extents(text) {
@@ -737,6 +878,10 @@ pub struct OverlayRenderer {
     pub appsrc: gst_app::AppSrc,
     caps: gst::Caps,
     state: Arc<VisionMixerOverlayState>,
+    /// The multiview compositor, for live pad-geometry reads when drawing
+    /// zone borders on PiP tiles and the PVW big display. Weak — the
+    /// renderer registry must not keep the pipeline alive.
+    mv_comp: gst::glib::WeakRef<gst::Element>,
     width: i32,
     height: i32,
     surface: Option<cairo::ImageSurface>,
@@ -760,6 +905,10 @@ pub struct OverlayRenderer {
     /// that affect which thumbnails get a via-PiP status ring but no other
     /// tracked atomic changed.
     last_pip_compose_hash: u64,
+    /// Hash of live zone-border geometry (mv pad rects + alphas). Read every
+    /// tick when any zone has a border, so borders track morphs frame by
+    /// frame on the multiview too.
+    last_border_hash: u64,
 }
 
 // SAFETY: OverlayRenderer is accessed via Mutex from the timer thread and API
@@ -772,6 +921,7 @@ impl OverlayRenderer {
         appsrc: gst_app::AppSrc,
         caps: gst::Caps,
         state: Arc<VisionMixerOverlayState>,
+        mv_comp: gst::glib::WeakRef<gst::Element>,
         width: i32,
         height: i32,
     ) -> Self {
@@ -779,6 +929,7 @@ impl OverlayRenderer {
             appsrc,
             caps,
             state,
+            mv_comp,
             width,
             height,
             surface: None,
@@ -792,6 +943,7 @@ impl OverlayRenderer {
             last_pgm_pip: u64::MAX - 2,
             last_pvw_pip: u64::MAX - 2,
             last_pip_compose_hash: u64::MAX - 3,
+            last_border_hash: u64::MAX - 4,
         }
     }
 
@@ -811,6 +963,7 @@ impl OverlayRenderer {
         let show_vu = self.state.show_vu_meters();
         let meters_hash = if show_vu { hash_meters(&self.state) } else { 0 };
         let pip_compose_hash = hash_pip_compose(&self.state);
+        let border_hash = hash_border_geometry(&self.state, &self.mv_comp);
 
         let dirty = self.last_pgm != pgm_packed
             || self.last_pvw != pvw_packed
@@ -820,7 +973,8 @@ impl OverlayRenderer {
             || self.last_clock_secs != clock_secs
             || self.last_show_vu != show_vu
             || (show_vu && self.last_meters_hash != meters_hash)
-            || self.last_pip_compose_hash != pip_compose_hash;
+            || self.last_pip_compose_hash != pip_compose_hash
+            || self.last_border_hash != border_hash;
 
         if dirty {
             let pgm = (pgm_packed != NO_SOURCE).then_some(pgm_packed as usize);
@@ -848,6 +1002,7 @@ impl OverlayRenderer {
                 self.last_show_vu = show_vu;
                 self.last_meters_hash = meters_hash;
                 self.last_pip_compose_hash = pip_compose_hash;
+                self.last_border_hash = border_hash;
             }
             pushed
         } else {
@@ -886,7 +1041,7 @@ impl OverlayRenderer {
             cr.set_operator(cairo::Operator::Clear);
             let _ = cr.paint();
             cr.set_operator(cairo::Operator::Over);
-            render_overlay(&self.state, &cr, pgm, pvw, ftb, h, m, s);
+            render_overlay(&self.state, &cr, &self.mv_comp, pgm, pvw, ftb, h, m, s);
         }
 
         let t_cairo = t0.elapsed();
@@ -1146,6 +1301,7 @@ fn draw_status_border(
 fn render_overlay(
     state: &VisionMixerOverlayState,
     cr: &cairo::Context,
+    mv_comp: &gst::glib::WeakRef<gst::Element>,
     pgm: Option<usize>,
     pvw: Option<usize>,
     ftb: bool,
@@ -1154,6 +1310,11 @@ fn render_overlay(
     s: u32,
 ) {
     let layout = &state.layout;
+
+    // Zone borders on the PiP tiles and the PVW big display, drawn first so
+    // PVW/PGM rings and labels stay on top. (The PGM big display shows the
+    // dist output, which already carries its borders.)
+    draw_zone_borders(state, cr, mv_comp);
 
     // --- PVW large border ---
     cr.set_source_rgb(PVW_R, PVW_G, PVW_B);

@@ -10860,6 +10860,17 @@
         "type": "object",
         "description": "A sub-region of a PiP that hosts one or more overlay sources.\n\nSources inside a zone auto-tile within its `rect` (using\n[`compute_pip_overlay_rects`]) so the zone behaves like a \"mini-PiP\"\nnested inside the parent PiP region. The `capacity` puts a cap on how\nmany sources can occupy the zone; pushing a new source into a full zone\nis expected to evict the oldest (client-side FIFO).",
         "properties": {
+          "border": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ZoneBorder",
+                "description": "Border drawn around each source box in this zone (None = no border).\nRendered live on the PGM overlay — follows morphs/takes/punch-ins."
+              }
+            ]
+          },
           "capacity": {
             "type": [
               "integer",
@@ -10886,6 +10897,25 @@
               "minimum": 0
             },
             "description": "Current sources (FIFO, oldest first). Sources auto-tile within `rect`."
+          }
+        }
+      },
+      "ZoneBorder": {
+        "type": "object",
+        "description": "Border drawn around each source box in a zone.\n\nRendered by the mixer itself on a PGM-side overlay — borders are a\nfunction of the mixer's own live geometry (boxes move with morphs, takes\nand punch-ins), so no external graphics source could stay in sync.",
+        "required": [
+          "color",
+          "width"
+        ],
+        "properties": {
+          "color": {
+            "type": "string",
+            "description": "Border color as `#RRGGBB` or `#RRGGBBAA` hex."
+          },
+          "width": {
+            "type": "number",
+            "format": "float",
+            "description": "Border width in PGM canvas pixels, drawn outward from the box edge.\nEvery render target scales it by `region_width / pgm_width`, so the\nborder looks proportionally identical on PGM, the PVW big display and\nthe PiP thumbnails regardless of resolution."
           }
         }
       }

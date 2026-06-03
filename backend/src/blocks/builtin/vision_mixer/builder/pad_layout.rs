@@ -149,6 +149,25 @@ pub(super) fn build_pad_properties(
         );
     }
 
+    // --- PGM graphics overlay pad (zone borders): sink_{N + DSK} ---
+    {
+        let pad_name = format!("sink_{}", p.num_inputs + p.num_dsk_inputs);
+        let props = dist_pads.entry(pad_name).or_default();
+        props.insert("xpos".to_string(), PropertyValue::Int(0));
+        props.insert("ypos".to_string(), PropertyValue::Int(0));
+        props.insert("width".to_string(), PropertyValue::Int(p.pgm_w as i64));
+        props.insert("height".to_string(), PropertyValue::Int(p.pgm_h as i64));
+        props.insert("alpha".to_string(), PropertyValue::Float(1.0));
+        props.insert(
+            "zorder".to_string(),
+            PropertyValue::UInt(vision_mixer::DIST_PGM_OVERLAY_ZORDER as u64),
+        );
+        props.insert(
+            "sizing-policy".to_string(),
+            PropertyValue::String("none".to_string()),
+        );
+    }
+
     // --- Multiview compositor pad properties ---
     let mv_pads = pad_props.entry(mv_comp_id).or_default();
 

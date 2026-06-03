@@ -441,6 +441,16 @@
         .pip-editor-ctrl .pip-zone-cap-input {
             width: 40px;
         }
+        /* Compact color swatch for the zone border. */
+        .pip-zone-border-color {
+            width: 28px;
+            height: 24px;
+            padding: 0;
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            background: var(--pip-bg-control);
+            cursor: pointer;
+        }
         /* One shared one-line legend for the whole editor. */
         .pip-editor-footer {
             font-size: 10px;
@@ -1079,7 +1089,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.20-dark-spinners | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.21-zone-borders | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1127,7 +1137,8 @@
                 ? p.zones.map(z => ({
                     rect: z && z.rect ? { ...z.rect } : null,
                     capacity: (z && z.capacity != null) ? z.capacity : null,
-                    sources: (z && Array.isArray(z.sources)) ? z.sources.slice() : []
+                    sources: (z && Array.isArray(z.sources)) ? z.sources.slice() : [],
+                    border: (z && z.border) ? { ...z.border } : null
                 }))
                 : [],
             transforms: (p && p.transforms && typeof p.transforms === 'object')
@@ -1551,6 +1562,7 @@
                     z.rect.w = fin(z.rect.w, 1);
                     z.rect.h = fin(z.rect.h, 1);
                 }
+                if (z.border) z.border.width = fin(z.border.width, 0);
             });
             Object.keys(cfg.transforms || {}).forEach(k => {
                 const c = cfg.transforms[k];
@@ -1579,7 +1591,8 @@
                     zones: (r.zones || []).map(z => ({
                         rect: z.rect ? { ...z.rect } : null,
                         capacity: z.capacity != null ? z.capacity : null,
-                        sources: Array.isArray(z.sources) ? z.sources.slice() : []
+                        sources: Array.isArray(z.sources) ? z.sources.slice() : [],
+                        border: z.border ? { ...z.border } : null
                     })),
                     transforms: (r.transforms && typeof r.transforms === 'object')
                         ? JSON.parse(JSON.stringify(r.transforms))
@@ -1658,7 +1671,8 @@
             cfg.zones.push({
                 rect: { x: 0.55, y: 0.10, w: 0.42, h: 0.42 },
                 capacity: null,
-                sources: []
+                sources: [],
+                border: null
             });
             activeZoneIdx[pipIdx] = cfg.zones.length - 1;
             postPipConfig(pipIdx);
@@ -1669,6 +1683,19 @@
             if (activeZoneIdx[pipIdx] >= pipConfigs[pipIdx].zones.length) {
                 activeZoneIdx[pipIdx] = Math.max(0, pipConfigs[pipIdx].zones.length - 1);
             }
+            postPipConfig(pipIdx);
+        }
+
+        // Set or clear the active zone's border. Width 0 clears it; the
+        // border is the BOX's styling (it survives source swaps in the zone)
+        // and is drawn live on the PGM output around the actual source boxes.
+        function setZoneBorder(pipIdx, zoneIdx, color, width) {
+            const zone = pipConfigs[pipIdx].zones[zoneIdx];
+            if (!zone) return;
+            const w = parseFloat(width);
+            zone.border = (Number.isFinite(w) && w > 0)
+                ? { color: color, width: w }
+                : null;
             postPipConfig(pipIdx);
         }
 
@@ -2530,6 +2557,33 @@
                     capInput.value = zone.capacity != null ? String(zone.capacity) : '';
                     capInput.onchange = () => setZoneCapacity(p, zi, capInput.value);
                     zoneCtrl.appendChild(capInput);
+
+                    // Border: the box's styling — survives source swaps in the
+                    // zone, drawn live on PGM around the actual source boxes.
+                    // Width 0 (or blank) = no border.
+                    zoneCtrl.append('border');
+                    const borderColor = document.createElement('input');
+                    borderColor.type = 'color';
+                    borderColor.className = 'pip-zone-border-color';
+                    borderColor.value = (zone.border && /^#[0-9a-fA-F]{6}/.test(zone.border.color))
+                        ? zone.border.color.slice(0, 7)
+                        : '#cc0000';
+                    borderColor.title = 'Border color (drawn on PGM around each source box in the zone)';
+                    const borderWidth = document.createElement('input');
+                    borderWidth.className = 'pip-zone-cap-input';
+                    borderWidth.type = 'number';
+                    borderWidth.min = '0';
+                    borderWidth.max = '64';
+                    borderWidth.step = '1';
+                    borderWidth.placeholder = '0';
+                    borderWidth.title = 'Border width in PGM pixels (0 = no border)';
+                    borderWidth.value = zone.border ? String(zone.border.width) : '';
+                    const commitBorder = () =>
+                        setZoneBorder(p, zi, borderColor.value, borderWidth.value);
+                    borderColor.onchange = commitBorder;
+                    borderWidth.onchange = commitBorder;
+                    zoneCtrl.appendChild(borderColor);
+                    zoneCtrl.appendChild(borderWidth);
                     zoneCol.appendChild(zoneCtrl);
                 }
 

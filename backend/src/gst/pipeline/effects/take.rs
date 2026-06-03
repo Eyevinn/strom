@@ -382,11 +382,14 @@ impl PipelineManager {
                         }
                     } else if let Some(state) = overlay_state.as_ref() {
                         let dsk_idx = idx - num_video_inputs;
-                        let enabled = dsk_idx < state.dsk_enabled.len()
-                            && state.dsk_enabled[dsk_idx]
+                        if dsk_idx < state.dsk_enabled.len() {
+                            let enabled = state.dsk_enabled[dsk_idx]
                                 .load(std::sync::atomic::Ordering::Relaxed);
-                        let alpha = if enabled { 1.0f64 } else { 0.0f64 };
-                        pad.set_property("alpha", alpha);
+                            let alpha = if enabled { 1.0f64 } else { 0.0f64 };
+                            pad.set_property("alpha", alpha);
+                        }
+                        // Pads beyond the DSK range (the PGM graphics overlay)
+                        // are left alone — their content is state-driven.
                     }
                 }
             }

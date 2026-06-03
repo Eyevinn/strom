@@ -169,6 +169,12 @@ pub const MV_PVW_PIP_OVERLAY_ZORDER: u32 = 11;
 /// cairo overlay z-order (200) so DSK + labels still render on top.
 pub const TRANSITION_FOREGROUND_ZORDER: u32 = 50;
 
+/// Z-order for the PGM graphics overlay pad (zone borders) on the
+/// distribution compositor. Above all video pads — including morphing pads
+/// lifted to [`TRANSITION_FOREGROUND_ZORDER`] (+ offsets ≤ ~20) — and below
+/// DSK at [`DIST_DSK_BASE_ZORDER`] so lower thirds cover the borders.
+pub const DIST_PGM_OVERLAY_ZORDER: u32 = 90;
+
 /// Z-order for the PiP background pad on the multiview compositor.
 /// Above thumbnails (1) and the big PVW/PGM display (10), below cairo overlay (200).
 pub const MV_PIP_BG_ZORDER: u32 = 20;
@@ -485,6 +491,60 @@ pub fn effective_source_aspect(src_aspect: f64, crop: Option<&SourceCrop>) -> f6
 /// (capacity 1, pushing between sources) keep each source's punch-in framing.
 pub type PipTransforms = std::collections::BTreeMap<usize, SourceCrop>;
 
+/// Border drawn around each source box in a zone.
+///
+/// Rendered by the mixer itself on a PGM-side overlay — borders are a
+/// function of the mixer's own live geometry (boxes move with morphs, takes
+/// and punch-ins), so no external graphics source could stay in sync.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct ZoneBorder {
+    /// Border color as `#RRGGBB` or `#RRGGBBAA` hex.
+    pub color: String,
+    /// Border width in PGM canvas pixels, drawn outward from the box edge.
+    /// Every render target scales it by `region_width / pgm_width`, so the
+    /// border looks proportionally identical on PGM, the PVW big display and
+    /// the PiP thumbnails regardless of resolution.
+    pub width: f32,
+}
+
+/// Maximum zone border width in PGM canvas pixels.
+pub const MAX_ZONE_BORDER_WIDTH: f32 = 64.0;
+
+impl ZoneBorder {
+    /// Parse `color` into RGBA components in `0.0..=1.0`. Accepts `#RRGGBB`
+    /// and `#RRGGBBAA` (case-insensitive). Returns `None` for anything else.
+    pub fn rgba(&self) -> Option<(f64, f64, f64, f64)> {
+        let s = self.color.trim().strip_prefix('#')?;
+        if !(s.len() == 6 || s.len() == 8) || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let p = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).ok();
+        let (r, g, b) = (p(0)?, p(2)?, p(4)?);
+        let a = if s.len() == 8 { p(6)? } else { 255 };
+        Some((
+            r as f64 / 255.0,
+            g as f64 / 255.0,
+            b as f64 / 255.0,
+            a as f64 / 255.0,
+        ))
+    }
+
+    /// Clamp the width into `0..=MAX_ZONE_BORDER_WIDTH` (non-finite → 0).
+    pub fn clamped_width(&self) -> f32 {
+        if self.width.is_finite() {
+            self.width.clamp(0.0, MAX_ZONE_BORDER_WIDTH)
+        } else {
+            0.0
+        }
+    }
+
+    /// A border that would actually draw something.
+    pub fn is_visible(&self) -> bool {
+        self.clamped_width() > 0.0 && self.rgba().map(|c| c.3 > 0.0).unwrap_or(false)
+    }
+}
+
 /// A sub-region of a PiP that hosts one or more overlay sources.
 ///
 /// Sources inside a zone auto-tile within its `rect` (using
@@ -507,6 +567,10 @@ pub struct Zone {
     /// Current sources (FIFO, oldest first). Sources auto-tile within `rect`.
     #[serde(default)]
     pub sources: Vec<usize>,
+    /// Border drawn around each source box in this zone (None = no border).
+    /// Rendered live on the PGM overlay — follows morphs/takes/punch-ins.
+    #[serde(default)]
+    pub border: Option<ZoneBorder>,
 }
 
 impl Zone {
@@ -870,6 +934,7 @@ mod tests {
         let z = Zone {
             rect: None,
             capacity: None,
+            border: None,
             sources: vec![1, 2, 3],
         };
         assert_eq!(z.effective_sources(), &[1, 2, 3]);
@@ -880,6 +945,7 @@ mod tests {
         let z = Zone {
             rect: None,
             capacity: Some(2),
+            border: None,
             sources: vec![1, 2, 3, 4],
         };
         assert_eq!(z.effective_sources(), &[3, 4]);
@@ -891,6 +957,7 @@ mod tests {
         let z = Zone {
             rect: None,
             capacity: None,
+            border: None,
             sources: vec![0, 1, 2],
         };
         let layouts = resolve_zone_pads(
@@ -924,6 +991,7 @@ mod tests {
                 h: 1.0,
             }),
             capacity: Some(1),
+            border: None,
             sources: vec![5],
         };
         let b = Zone {
@@ -934,6 +1002,7 @@ mod tests {
                 h: 0.25,
             }),
             capacity: Some(3),
+            border: None,
             sources: vec![1, 2, 3],
         };
         let layouts = resolve_zone_pads(
@@ -961,11 +1030,13 @@ mod tests {
         let a = Zone {
             rect: None,
             capacity: None,
+            border: None,
             sources: vec![1, 2],
         };
         let b = Zone {
             rect: None,
             capacity: None,
+            border: None,
             sources: vec![2, 3],
         };
         let layouts = resolve_zone_pads(
@@ -989,6 +1060,7 @@ mod tests {
         let z = Zone {
             rect: None,
             capacity: Some(2),
+            border: None,
             sources: vec![1, 2, 3, 4],
         };
         let layouts = resolve_zone_pads(
@@ -1017,6 +1089,7 @@ mod tests {
                 h: 1.0,
             }),
             capacity: None,
+            border: None,
             sources: vec![2],
         };
         let mut aspects = SourceAspects::new();
@@ -1110,6 +1183,49 @@ mod tests {
             effective_source_aspect(1.5, Some(&SourceCrop::default())),
             1.5
         );
+    }
+
+    #[test]
+    fn test_zone_border_rgba_parsing() {
+        let b = |c: &str| ZoneBorder {
+            color: c.to_string(),
+            width: 4.0,
+        };
+        assert_eq!(b("#CC0000").rgba(), Some((0.8, 0.0, 0.0, 1.0)));
+        let (r, g, bl, a) = b("#00ff0080").rgba().unwrap();
+        assert_eq!((r, g, bl), (0.0, 1.0, 0.0));
+        assert!((a - 128.0 / 255.0).abs() < 1e-9);
+        // Case-insensitive + surrounding whitespace tolerated.
+        assert!(b(" #aAbBcC ").rgba().is_some());
+        // Rejected: missing #, wrong length, non-hex.
+        assert_eq!(b("CC0000").rgba(), None);
+        assert_eq!(b("#CC00").rgba(), None);
+        assert_eq!(b("#GG0000").rgba(), None);
+    }
+
+    #[test]
+    fn test_zone_border_width_and_visibility() {
+        let mk = |color: &str, width: f32| ZoneBorder {
+            color: color.to_string(),
+            width,
+        };
+        assert_eq!(mk("#fff000", 1000.0).clamped_width(), MAX_ZONE_BORDER_WIDTH);
+        assert_eq!(mk("#fff000", f32::NAN).clamped_width(), 0.0);
+        assert!(mk("#CC0000", 4.0).is_visible());
+        assert!(!mk("#CC0000", 0.0).is_visible()); // zero width
+        assert!(!mk("#CC000000", 4.0).is_visible()); // alpha 0
+        assert!(!mk("not-a-color", 4.0).is_visible()); // unparseable
+    }
+
+    #[test]
+    fn test_zone_border_serde_default() {
+        // Older clients omit `border` — deserializes to None.
+        let z: Zone = serde_json::from_str(r#"{"sources":[1]}"#).unwrap();
+        assert!(z.border.is_none());
+        let z: Zone =
+            serde_json::from_str(r##"{"sources":[1],"border":{"color":"#CC0000","width":4.0}}"##)
+                .unwrap();
+        assert!(z.border.unwrap().is_visible());
     }
 
     #[test]

@@ -386,17 +386,20 @@ impl PipelineManager {
             let name = pad.name();
             if name.starts_with("sink_") {
                 if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
+                    let pgm_overlay_idx = state.num_inputs + state.num_dsk_inputs;
                     let (start_alpha, end_alpha) = if now_active {
                         // FTB on: fade current alpha to 0
                         let current = pad.property::<f64>("alpha");
                         (current, 0.0)
-                    } else if active_pad_idxs.contains(&idx) {
+                    } else if active_pad_idxs.contains(&idx) || idx == pgm_overlay_idx {
+                        // Restore the source pads AND the PGM graphics overlay
+                        // (zone borders) — its content is state-driven, the
+                        // pad itself is always full alpha.
                         (0.0, 1.0)
-                    } else if idx >= state.num_inputs {
+                    } else if idx >= state.num_inputs && idx < pgm_overlay_idx {
                         let dsk_idx = idx - state.num_inputs;
-                        let enabled = dsk_idx < state.dsk_enabled.len()
-                            && state.dsk_enabled[dsk_idx]
-                                .load(std::sync::atomic::Ordering::Relaxed);
+                        let enabled =
+                            state.dsk_enabled[dsk_idx].load(std::sync::atomic::Ordering::Relaxed);
                         if enabled {
                             (0.0, 1.0)
                         } else {
@@ -559,10 +562,28 @@ impl PipelineManager {
                         });
                     }
                 }
+                // Border: clamp width like rects; reject unparseable colors
+                // (a typo'd hex should fail loudly, not draw nothing).
+                if let Some(b) = &z.border {
+                    if b.rgba().is_none() {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!(
+                                "Invalid border color {:?} (expected #RRGGBB or #RRGGBBAA)",
+                                b.color
+                            ),
+                        });
+                    }
+                }
                 Ok(strom_types::vision_mixer::Zone {
                     rect: z.rect.map(|r| r.clamped()),
                     capacity: z.capacity,
                     sources: z.sources,
+                    border: z.border.map(|b| strom_types::vision_mixer::ZoneBorder {
+                        width: b.clamped_width(),
+                        color: b.color,
+                    }),
                 })
             })
             .collect::<Result<_, _>>()?;
