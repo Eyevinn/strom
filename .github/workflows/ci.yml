@@ -24,6 +24,10 @@ env:
   SCCACHE_S3_USE_SSL: "true"
   AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+  # Dependabot- and fork-triggered runs don't receive Actions secrets, and
+  # sccache hard-fails on empty S3 credentials. Fall back to building without
+  # the compile cache instead (cargo ignores an empty RUSTC_WRAPPER).
+  RUSTC_WRAPPER: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID != '' && 'sccache' || '' }}
 
 jobs:
   # Fast checks on Linux: fmt + clippy + test
@@ -59,6 +63,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Check formatting
@@ -66,23 +71,15 @@ jobs:
 
       - name: Run Clippy on backend
         run: cargo clippy --package strom --all-targets --features efp,nvidia -- -D warnings
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Run Clippy on MCP server
         run: cargo clippy --package strom-mcp-server --all-targets -- -D warnings
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Run tests on backend
         run: cargo test --package strom --features efp,nvidia
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Run tests on MCP server
         run: cargo test --package strom-mcp-server
-        env:
-          RUSTC_WRAPPER: sccache
 
   # WASM: clippy + build frontend
   check-wasm:
@@ -118,19 +115,16 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy on frontend
         run: cargo clippy --package strom-frontend --target wasm32-unknown-unknown --all-features -- -D warnings
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Build frontend
         run: |
           cd frontend
           trunk build --release
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Upload frontend dist
         uses: actions/upload-artifact@v7
@@ -187,6 +181,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
         uses: mozilla-actions/sccache-action@v0.0.10
 
       # Must NOT share a key with check-linux: rust-cache saves only once per
@@ -242,8 +237,6 @@ jobs:
           fi
           tar -xJ -C /tmp -f /tmp/cargo-zigbuild.tar.xz
           install -m 0755 /tmp/cargo-zigbuild-x86_64-unknown-linux-gnu/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
-        env:
-          RUSTC_WRAPPER: sccache
 
       # Cached apt install — avoids re-downloading the GStreamer dev stack
       # (~1 min) on every build. The package list must stay identical to
@@ -264,7 +257,6 @@ jobs:
       - name: Build
         env:
           RUSTFLAGS: "-L /usr/lib/x86_64-linux-gnu"
-          RUSTC_WRAPPER: sccache
         run: |
           cargo zigbuild --release --package strom --features efp --target x86_64-unknown-linux-gnu.2.31
           cargo zigbuild --release --package strom-mcp-server --target x86_64-unknown-linux-gnu.2.31
@@ -304,6 +296,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
         uses: mozilla-actions/sccache-action@v0.0.10
 
       # save-if main: see check-linux.
@@ -352,8 +345,6 @@ jobs:
           fi
           tar -xJ -C /tmp -f /tmp/cargo-zigbuild.tar.xz
           install -m 0755 /tmp/cargo-zigbuild-aarch64-unknown-linux-gnu/cargo-zigbuild "$HOME/.cargo/bin/cargo-zigbuild"
-        env:
-          RUSTC_WRAPPER: sccache
 
       # Cached apt install — avoids re-downloading the GStreamer dev stack
       # (~1 min) on every build. The package list must stay identical to
@@ -374,7 +365,6 @@ jobs:
       - name: Build
         env:
           RUSTFLAGS: "-L /usr/lib/aarch64-linux-gnu"
-          RUSTC_WRAPPER: sccache
         run: |
           cargo zigbuild --release --package strom --features efp --target aarch64-unknown-linux-gnu.2.31
           cargo zigbuild --release --package strom-mcp-server --target aarch64-unknown-linux-gnu.2.31
@@ -450,28 +440,23 @@ jobs:
       # stale or evicted by the next manual run. sccache via MinIO covers
       # recompiles instead.
       - name: Setup sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy
         run: |
           cargo clippy --package strom --features nvidia -- -D warnings
           cargo clippy --package strom-mcp-server -- -D warnings
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Run tests
         run: |
           cargo test --package strom --features nvidia
           cargo test --package strom-mcp-server
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Build
         run: |
           cargo build --release --package strom
           cargo build --release --package strom-mcp-server
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Upload backend binary
         uses: actions/upload-artifact@v7
@@ -525,28 +510,23 @@ jobs:
 
       # No rust-cache here: workflow_dispatch-only, see the Windows job.
       - name: Setup sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy
         run: |
           cargo clippy --package strom --features efp,nvidia -- -D warnings
           cargo clippy --package strom-mcp-server -- -D warnings
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Run tests
         run: |
           cargo test --package strom --features efp,nvidia
           cargo test --package strom-mcp-server
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Build
         run: |
           cargo build --release --package strom --features efp
           cargo build --release --package strom-mcp-server
-        env:
-          RUSTC_WRAPPER: sccache
 
       - name: Upload backend binary
         uses: actions/upload-artifact@v7
