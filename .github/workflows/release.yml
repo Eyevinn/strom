@@ -12,8 +12,10 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_BUILD_JOBS: 2
   # sccache -> self-hosted MinIO (S3) cache in OSC. Tag builds run weeks apart,
-  # so the rust-cache target/ is usually evicted (10 GB GHA ceiling) and every
-  # release recompiles cold. A persistent remote compiler cache cuts that.
+  # so a GHA-cached target/ would always be evicted (10 GB repo ceiling) and
+  # every release recompiles cold — that is why this workflow deliberately has
+  # NO Swatinem/rust-cache steps: saving ~5-7 GB of one-shot caches per tag
+  # only evicted the CI workflow's hot caches. sccache is the persistent cache.
   # Requires repo secrets SCCACHE_S3_ACCESS_KEY_ID / SCCACHE_S3_SECRET_ACCESS_KEY.
   SCCACHE_BUCKET: strom
   SCCACHE_ENDPOINT: https://eyevinnlab-rustcache.minio-minio.auto.prod.osaas.io
@@ -45,12 +47,6 @@ jobs:
         if: steps.cache-trunk.outputs.cache-hit != 'true'
         run: |
           wget -qO- https://github.com/trunk-rs/trunk/releases/download/v${{ env.TRUNK_VERSION }}/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf- -C ~/.cargo/bin
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: frontend-wasm
-          cache-on-failure: true
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -244,12 +240,6 @@ jobs:
         with:
           name: frontend-dist
           path: backend/dist
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-${{ matrix.platform }}
-          cache-on-failure: true
 
       # Linux: Build with zigbuild for glibc compatibility
       - name: Build backend (Linux - glibc ${{ matrix.glibc }})
