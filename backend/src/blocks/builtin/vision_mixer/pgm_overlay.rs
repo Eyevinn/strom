@@ -25,6 +25,50 @@ use tracing::{debug, warn};
 
 use super::overlay::{self, VisionMixerOverlayState};
 
+/// How far ahead of the compositor's current position border geometry is
+/// evaluated. An overlay frame pushed now is composited 1–3 output frames
+/// later; sampling the pads' *current* values would draw the border where
+/// the box was, trailing it during morphs/takes. Instead the control
+/// bindings driving the animation are evaluated at (position + lead) so the
+/// border lands where the box will be at composite time.
+pub(crate) const BORDER_LEAD_MS: u64 = 66;
+
+/// Read a pad's geometry + alpha as they will be at `eval_t`: animated
+/// properties are evaluated through their control bindings at that
+/// timestamp; properties without a binding read their current value.
+pub(crate) fn pad_geometry_at(
+    pad: &gst::Pad,
+    eval_t: Option<gst::ClockTime>,
+) -> (i32, i32, i32, i32, f64) {
+    fn int_at(pad: &gst::Pad, prop: &str, t: Option<gst::ClockTime>) -> i32 {
+        if let (Some(t), Some(binding)) = (t, pad.control_binding(prop)) {
+            if let Some(v) = gst::prelude::ControlBindingExt::value(&binding, t) {
+                if let Ok(v) = v.get::<i32>() {
+                    return v;
+                }
+            }
+        }
+        pad.property::<i32>(prop)
+    }
+    fn f64_at(pad: &gst::Pad, prop: &str, t: Option<gst::ClockTime>) -> f64 {
+        if let (Some(t), Some(binding)) = (t, pad.control_binding(prop)) {
+            if let Some(v) = gst::prelude::ControlBindingExt::value(&binding, t) {
+                if let Ok(v) = v.get::<f64>() {
+                    return v;
+                }
+            }
+        }
+        pad.property::<f64>(prop)
+    }
+    (
+        int_at(pad, "xpos", eval_t),
+        int_at(pad, "ypos", eval_t),
+        int_at(pad, "width", eval_t),
+        int_at(pad, "height", eval_t),
+        f64_at(pad, "alpha", eval_t),
+    )
+}
+
 /// One border rectangle to draw: the box's live rect, its style and the
 /// box's current alpha (borders fade with their box).
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +137,11 @@ impl PgmOverlayRenderer {
             return Vec::new();
         };
         let zones = self.state.pip_zones(p);
+        // Evaluate animated geometry at composite time, not sampling time —
+        // otherwise borders trail their boxes during morphs/takes.
+        let eval_t = mixer
+            .query_position::<gst::ClockTime>()
+            .map(|pos| pos + gst::ClockTime::from_mseconds(BORDER_LEAD_MS));
         let mut out = Vec::new();
         for zone in &zones {
             let Some(border) = &zone.border else { continue };
@@ -107,15 +156,15 @@ impl PgmOverlayRenderer {
                 else {
                     continue;
                 };
-                let pad_alpha = pad.property::<f64>("alpha");
+                let (x, y, w, h, pad_alpha) = pad_geometry_at(&pad, eval_t);
                 if pad_alpha <= 0.01 {
                     continue;
                 }
                 out.push(BorderDraw {
-                    x: pad.property::<i32>("xpos") as f64,
-                    y: pad.property::<i32>("ypos") as f64,
-                    w: pad.property::<i32>("width") as f64,
-                    h: pad.property::<i32>("height") as f64,
+                    x: x as f64,
+                    y: y as f64,
+                    w: w as f64,
+                    h: h as f64,
                     width: bw,
                     rgba,
                     pad_alpha,

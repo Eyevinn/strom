@@ -754,6 +754,9 @@ fn hash_border_geometry(
     let Some(mv) = mv_comp.upgrade() else {
         return 0;
     };
+    let eval_t = mv
+        .query_position::<gst::ClockTime>()
+        .map(|pos| pos + gst::ClockTime::from_mseconds(super::pgm_overlay::BORDER_LEAD_MS));
     let mut h: u64 = 0xB04DE4 ^ 0x9E3779B97F4A7C15;
     let mut mix = |v: u64| {
         h = h.rotate_left(13) ^ v.wrapping_mul(0x100000001B3);
@@ -762,15 +765,16 @@ fn hash_border_geometry(
         let Some(pad) = find_mv_pad(&mv, idx) else {
             continue;
         };
+        let (x, y, w, hh, alpha) = super::pgm_overlay::pad_geometry_at(&pad, eval_t);
         mix(idx as u64);
         mix(zi as u64);
         mix(p as u64);
         mix(scale.to_bits());
-        mix(pad.property::<i32>("xpos") as u64);
-        mix(pad.property::<i32>("ypos") as u64);
-        mix(pad.property::<i32>("width") as u64);
-        mix(pad.property::<i32>("height") as u64);
-        mix(pad.property::<f64>("alpha").to_bits());
+        mix(x as u64);
+        mix(y as u64);
+        mix(w as u64);
+        mix(hh as u64);
+        mix(alpha.to_bits());
     }
     h
 }
@@ -798,6 +802,11 @@ fn draw_zone_borders(
     let Some(mv) = mv_comp.upgrade() else {
         return;
     };
+    // Evaluate animated geometry at composite time, not sampling time —
+    // otherwise borders trail their boxes during morphs/takes.
+    let eval_t = mv
+        .query_position::<gst::ClockTime>()
+        .map(|pos| pos + gst::ClockTime::from_mseconds(super::pgm_overlay::BORDER_LEAD_MS));
     for (idx, scale, zi, p) in pads {
         let zones = state.pip_zones(p);
         let Some(border) = zones.get(zi).and_then(|z| z.border.as_ref()) else {
@@ -809,14 +818,14 @@ fn draw_zone_borders(
         let Some(pad) = find_mv_pad(&mv, idx) else {
             continue;
         };
-        let pad_alpha = pad.property::<f64>("alpha");
+        let (px, py, pw, ph, pad_alpha) = super::pgm_overlay::pad_geometry_at(&pad, eval_t);
         if pad_alpha <= 0.01 {
             continue;
         }
-        let x = pad.property::<i32>("xpos") as f64;
-        let y = pad.property::<i32>("ypos") as f64;
-        let w = pad.property::<i32>("width") as f64;
-        let h = pad.property::<i32>("height") as f64;
+        let x = px as f64;
+        let y = py as f64;
+        let w = pw as f64;
+        let h = ph as f64;
         // Scale the PGM-pixel width to this region, but keep at least a
         // hairline so thin borders don't vanish on small tiles.
         let bw = (border.clamped_width() as f64 * scale).max(1.0);
