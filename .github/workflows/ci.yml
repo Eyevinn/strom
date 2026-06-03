@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -59,7 +59,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -89,7 +89,7 @@ jobs:
     name: Check & Build (WASM)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable with WASM target
         uses: dtolnay/rust-toolchain@stable
@@ -99,7 +99,7 @@ jobs:
 
       - name: Cache trunk binary
         id: cache-trunk
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/trunk
           key: trunk-${{ env.TRUNK_VERSION }}-${{ runner.os }}
@@ -118,7 +118,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy on frontend
         run: cargo clippy --package strom-frontend --target wasm32-unknown-unknown --all-features -- -D warnings
@@ -133,7 +133,7 @@ jobs:
           RUSTC_WRAPPER: sccache
 
       - name: Upload frontend dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: backend/dist
@@ -145,7 +145,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Extract version from Cargo.toml
         id: version
@@ -187,7 +187,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # Must NOT share a key with check-linux: rust-cache saves only once per
       # key and skips saving on a full-match restore. check-linux finishes
@@ -203,13 +203,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache Zig tarball
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/zig.tar.xz
           key: zig-0.13.0-linux-x86_64
 
       - name: Cache cargo-zigbuild tarball
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/cargo-zigbuild.tar.xz
           key: cargo-zigbuild-0.22.3-linux-x86_64
@@ -256,7 +256,7 @@ jobs:
           version: 1.5
 
       - name: Download frontend dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: backend/dist
@@ -270,7 +270,7 @@ jobs:
           cargo zigbuild --release --package strom-mcp-server --target x86_64-unknown-linux-gnu.2.31
 
       - name: Upload backend binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-linux-x86_64-x86_64-unknown-linux-gnu
           path: target/x86_64-unknown-linux-gnu/release/strom
@@ -278,7 +278,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload MCP server binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64-x86_64-unknown-linux-gnu
           path: target/x86_64-unknown-linux-gnu/release/strom-mcp-server
@@ -292,7 +292,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Extract version from Cargo.toml
         id: version
@@ -304,7 +304,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # save-if main: see check-linux.
       - name: Cache Rust dependencies
@@ -315,13 +315,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache Zig tarball
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/zig.tar.xz
           key: zig-0.13.0-linux-aarch64
 
       - name: Cache cargo-zigbuild tarball
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/cargo-zigbuild.tar.xz
           key: cargo-zigbuild-0.22.3-linux-aarch64
@@ -366,7 +366,7 @@ jobs:
           version: 1.5
 
       - name: Download frontend dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: backend/dist
@@ -380,7 +380,7 @@ jobs:
           cargo zigbuild --release --package strom-mcp-server --target aarch64-unknown-linux-gnu.2.31
 
       - name: Upload backend binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-linux-arm64-aarch64-unknown-linux-gnu
           path: target/aarch64-unknown-linux-gnu/release/strom
@@ -388,7 +388,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload MCP server binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-mcp-server-v${{ steps.version.outputs.version }}-linux-arm64-aarch64-unknown-linux-gnu
           path: target/aarch64-unknown-linux-gnu/release/strom-mcp-server
@@ -404,7 +404,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Extract version from Cargo.toml
         id: version
@@ -440,7 +440,7 @@ jobs:
           echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
 
       - name: Download frontend dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: backend/dist
@@ -450,7 +450,7 @@ jobs:
       # stale or evicted by the next manual run. sccache via MinIO covers
       # recompiles instead.
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy
         run: |
@@ -474,7 +474,7 @@ jobs:
           RUSTC_WRAPPER: sccache
 
       - name: Upload backend binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc
           path: target/release/strom.exe
@@ -482,7 +482,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload MCP server binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-mcp-server-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc
           path: target/release/strom-mcp-server.exe
@@ -498,7 +498,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Extract version from Cargo.toml
         id: version
@@ -518,14 +518,14 @@ jobs:
           echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
 
       - name: Download frontend dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: backend/dist
 
       # No rust-cache here: workflow_dispatch-only, see the Windows job.
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy
         run: |
@@ -549,7 +549,7 @@ jobs:
           RUSTC_WRAPPER: sccache
 
       - name: Upload backend binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin
           path: target/release/strom
@@ -557,7 +557,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload MCP server binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-mcp-server-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin
           path: target/release/strom-mcp-server

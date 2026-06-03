@@ -29,7 +29,7 @@ jobs:
     name: Build Frontend (WASM)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable with WASM target
         uses: dtolnay/rust-toolchain@stable
@@ -38,7 +38,7 @@ jobs:
 
       - name: Cache trunk binary
         id: cache-trunk
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/trunk
           key: trunk-${{ env.TRUNK_VERSION }}-${{ runner.os }}
@@ -49,7 +49,7 @@ jobs:
           wget -qO- https://github.com/trunk-rs/trunk/releases/download/v${{ env.TRUNK_VERSION }}/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf- -C ~/.cargo/bin
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Build frontend
         run: |
@@ -59,7 +59,7 @@ jobs:
           RUSTC_WRAPPER: sccache
 
       - name: Upload frontend dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: backend/dist
@@ -97,7 +97,7 @@ jobs:
             binary_ext: ""
             features: "efp"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Extract version from tag
         id: version
@@ -113,7 +113,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # Linux: Install Zig and cargo-zigbuild for glibc 2.31 compatibility
       - name: Determine Zig/cargo-zigbuild arch (Linux)
@@ -133,14 +133,14 @@ jobs:
 
       - name: Cache Zig tarball (Linux)
         if: startsWith(matrix.platform, 'linux')
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/zig.tar.xz
           key: zig-0.13.0-linux-${{ env.ZIG_ARCH }}
 
       - name: Cache cargo-zigbuild tarball (Linux)
         if: startsWith(matrix.platform, 'linux')
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/cargo-zigbuild.tar.xz
           key: cargo-zigbuild-0.22.3-linux-${{ env.ZIG_ARCH }}
@@ -236,7 +236,7 @@ jobs:
 
       # Download the pre-built frontend from the frontend build job
       - name: Download frontend dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist
           path: backend/dist
@@ -274,7 +274,7 @@ jobs:
           cargo build --release --package strom-mcp-server --target ${{ matrix.target }}
 
       - name: Upload backend binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/strom${{ matrix.binary_ext }}
@@ -282,7 +282,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload MCP server binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: strom-mcp-server-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/strom-mcp-server${{ matrix.binary_ext }}
@@ -296,7 +296,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Extract version from tag
         id: version
@@ -305,7 +305,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -342,7 +342,7 @@ jobs:
           ls -lh release-assets/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: false
           prerelease: false
