@@ -115,6 +115,25 @@ A PiP can be put on PVW *or* on PGM, just like any other source.
 | `push_left/right/up/down` | Old and new picture move **together** — the new one pushes the old out of frame. | Yes. |
 | `dip_to_black` | Fade out to black over the first half, fade the new picture in over the second. | Yes. |
 
+**Shader transitions** (GPU backend with Shader FX enabled — see §3.4):
+
+| Type | What it does |
+|---|---|
+| `wipe_left/right/up/down` | Soft-edged directional wipe; the new picture is revealed by a sweeping edge. |
+| `clock_wipe` | Radial sweep from 12 o'clock, clockwise. |
+| `iris_open` / `iris_close` | Circle grows from the center / reveal runs outside-in. |
+| `blinds` | Venetian-blind slats. |
+| `checker_wipe` | Checkerboard cells flip in pseudo-random order. |
+| `noise_dissolve` | Granular film-style dissolve. |
+| `luma_wipe` | The new picture appears darkest-areas-first. |
+| `ripple` | Expanding circular wave with decaying distortion. |
+| `glitch_cut` | Digital glitch burst (RGB split, tearing) hiding a hard cut at its peak. |
+| `flash_dissolve` | White flash riding on a crossfade. |
+| `whip_pan_left/right` | Push with heavy directional motion blur — reads as a camera whip. |
+| `punch_zoom` | Zoom kick with camera shake around the cut. |
+| `pixelate_take` | The frame dissolves into blocks across the cut and resolves back. |
+| `film_burn` | The frame burns through hot orange-white at the cut. |
+
 **Duration**: 0 – 60 000 ms. **Default 300 ms.**
 
 **Mixed aspect ratios.** Sources keep their own aspect (a 2.39:1 source
@@ -133,7 +152,10 @@ requested type (`transition_type`) and what actually ran
 
 Concretely: **any animated transition other than `fade` involving a PiP**
 on either bus (input ↔ PiP, or PiP ↔ PiP) downgrades to `fade`. Slide and
-push geometry is not defined for heterogeneous-source pairs.
+push geometry is not defined for heterogeneous-source pairs. Master-FX
+takes (`glitch_cut`, `flash_dissolve`, ...) keep their full-frame effect
+on top of the fade. All shader transitions downgrade to `fade` when the
+FX engine is unavailable (CPU backend, or Shader FX disabled).
 
 ### 3.3 Cut vs Take/Auto
 
@@ -142,7 +164,26 @@ push geometry is not defined for heterogeneous-source pairs.
 | **Cut** | Take with `cut` (0 ms). Instant. |
 | **Take / Auto** | Take with the currently selected transition type at the currently selected duration. |
 
-### 3.4 Fade-to-Black (FTB)
+### 3.4 Shader FX engine (GPU only)
+
+With the GPU backend and the **Shader FX** block property enabled
+(default on), the mixer carries a custom-GLSL effects engine:
+
+- **Shader transitions** — the wipe and master-FX takes in §3.1. Pick
+  them with the WIPE / FX buttons on the operator page.
+- **Looks** — persistent per-source effects applied wherever the source
+  appears (PGM, PVW, thumbnails, PiPs): chroma key, pixelate, blur,
+  duotone, vignette, VHS, old film, edge glow. A look can also sit on the
+  **PGM master** output. Open with the LOOKS button.
+
+Looks are runtime state (like DSK toggles): they reset when the flow
+restarts. A master-FX take temporarily owns the master slot, so it
+replaces any master look (input looks are unaffected).
+
+On the CPU backend the FX controls are hidden and effect requests are
+rejected.
+
+### 3.5 Fade-to-Black (FTB)
 
 FTB is independent of the take engine.
 
