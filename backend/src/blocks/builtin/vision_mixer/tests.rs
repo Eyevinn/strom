@@ -310,7 +310,7 @@ fn overlay_registries_round_trip() {
         gst::glib::WeakRef::new(),
         1280,
         720,
-        (50, 1),
+        strom_types::vision_mixer::DEFAULT_LATENCY_MS,
     )));
 
     register_overlay_state(block_id, Arc::clone(&state));

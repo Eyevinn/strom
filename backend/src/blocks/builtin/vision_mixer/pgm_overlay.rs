@@ -26,19 +26,20 @@ use tracing::{debug, warn};
 use super::overlay::{self, VisionMixerOverlayState};
 
 /// How far ahead of the compositor's current position border geometry is
-/// evaluated: one output frame period, derived from the actual framerate
-/// (PGM and multiview can differ — each renderer passes its own).
+/// evaluated: the compositor's configured aggregation latency (the mixer
+/// block's `latency` property, set on both compositors at build time).
 ///
 /// `query_position()` reports the stream time of the frame the compositor is
-/// currently producing; a buffer pushed now lands in the next output frame,
-/// one period later. Sampling the pads' *current* values instead drew the
-/// border where the box was (trailing); two periods overshot (leading) —
-/// one period was confirmed empirically on both backends. Evaluating the
-/// control bindings at (position + lead) lands the border where the box
-/// will be at composite time.
-pub(crate) fn border_lead(framerate: (i32, i32)) -> gst::ClockTime {
-    let frame_ns = (framerate.1.max(1) as u64 * 1_000_000_000) / framerate.0.max(1) as u64;
-    gst::ClockTime::from_nseconds(frame_ns)
+/// currently producing — a frame whose deadline passed `latency` ago. A
+/// border buffer timestamped now lands in the output frame composited
+/// `latency` from now, so the control bindings must be evaluated at
+/// (position + latency) for the border to land where its box will be at
+/// composite time. With the default 20 ms latency this happens to equal one
+/// output frame period at 50 fps — an earlier version derived the lead from
+/// the framerate, which trailed by ~480 ms on a mixer configured with 500 ms
+/// latency.
+pub(crate) fn border_lead(latency_ms: u64) -> gst::ClockTime {
+    gst::ClockTime::from_mseconds(latency_ms)
 }
 
 /// Read a pad's geometry + alpha as they will be at `eval_t`: animated
@@ -106,7 +107,8 @@ pub struct PgmOverlayRenderer {
     /// Hash of the last drawn border list (empty list hashes too) — geometry
     /// reads happen every tick, drawing only when something moved.
     last_hash: u64,
-    /// Geometry look-ahead, one output frame period (see [`border_lead`]).
+    /// Geometry look-ahead, the compositor's aggregation latency (see
+    /// [`border_lead`]).
     lead: gst::ClockTime,
 }
 
@@ -124,7 +126,7 @@ impl PgmOverlayRenderer {
         mixer: glib::WeakRef<gst::Element>,
         width: i32,
         height: i32,
-        framerate: (i32, i32),
+        latency_ms: u64,
     ) -> Self {
         Self {
             appsrc,
@@ -136,7 +138,7 @@ impl PgmOverlayRenderer {
             surface: None,
             last_data: None,
             last_hash: u64::MAX,
-            lead: border_lead(framerate),
+            lead: border_lead(latency_ms),
         }
     }
 
@@ -414,6 +416,7 @@ pub fn setup_pgm_overlay_renderer(
     width: i32,
     height: i32,
     pgm_framerate: (i32, i32),
+    latency_ms: u64,
     ctx: &crate::blocks::BlockBuildContext,
 ) {
     let renderer = Arc::new(Mutex::new(PgmOverlayRenderer::new(
@@ -423,7 +426,7 @@ pub fn setup_pgm_overlay_renderer(
         mixer,
         width,
         height,
-        pgm_framerate,
+        latency_ms,
     )));
     register_pgm_overlay_renderer(block_id, Arc::clone(&renderer));
 

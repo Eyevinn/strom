@@ -1693,6 +1693,14 @@
             const zone = pipConfigs[pipIdx].zones[zoneIdx];
             if (!zone) return;
             const w = parseFloat(width);
+            // The native color picker is 6-digit only; an API-set #RRGGBBAA
+            // would lose its alpha on any re-commit (e.g. a width edit).
+            // Keep the stored value while its RGB part is unchanged.
+            const prev = zone.border && zone.border.color;
+            if (prev && /^#[0-9a-fA-F]{8}$/.test(prev)
+                && prev.slice(0, 7).toLowerCase() === String(color).toLowerCase()) {
+                color = prev;
+            }
             zone.border = (Number.isFinite(w) && w > 0)
                 ? { color: color, width: w }
                 : null;

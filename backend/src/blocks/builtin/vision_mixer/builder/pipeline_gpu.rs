@@ -473,6 +473,7 @@ pub(super) fn build_gpu_pipeline(
             p.pgm_w as i32,
             p.pgm_h as i32,
             p.pgm_framerate,
+            p.latency_ms,
             ctx,
         );
     }

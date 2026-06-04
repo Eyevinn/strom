@@ -345,7 +345,7 @@ pub(super) fn setup_overlay_renderer(
         mv_comp,
         p.mv_w as i32,
         p.mv_h as i32,
-        p.mv_framerate,
+        p.latency_ms,
     )));
 
     let block_id = p.instance_id.to_string();

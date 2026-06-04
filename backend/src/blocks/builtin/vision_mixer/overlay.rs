@@ -694,14 +694,23 @@ fn hash_pip_compose(state: &VisionMixerOverlayState) -> u64 {
     h
 }
 
+/// One multiview pad that should carry a zone border right now, with its
+/// resolved style. The width scale normalizes the PGM-pixel border width to
+/// the region (`region_width / pgm_width`), keeping borders proportionally
+/// identical across PGM, PVW and tiles regardless of resolution.
+struct MvBorder {
+    pad_idx: usize,
+    scale: f64,
+    /// Border width in PGM pixels (clamped).
+    width: f64,
+    rgba: (f64, f64, f64, f64),
+}
+
 /// Collect the multiview pads that should carry a zone border right now:
 /// every PiP tile's bordered zone sources, plus the PVW big region when PVW
-/// shows a PiP. Returns `(pad_index, border_width_scale, zone_index, pip)`
-/// tuples — geometry is read live from the pads so borders track morphs.
-/// The width scale normalizes the PGM-pixel border width to the region
-/// (`region_width / pgm_width`), keeping borders proportionally identical
-/// across PGM, PVW and tiles regardless of resolution.
-fn border_pad_set(state: &VisionMixerOverlayState) -> Vec<(usize, f64, usize, usize)> {
+/// shows a PiP. Style is resolved here (once per tick) — geometry is read
+/// live from the pads afterwards so borders track morphs.
+fn border_pad_set(state: &VisionMixerOverlayState) -> Vec<MvBorder> {
     let n = state.num_inputs;
     let pgm_w = state.pgm_w.max(1) as f64;
     let mut out = Vec::new();
@@ -713,27 +722,30 @@ fn border_pad_set(state: &VisionMixerOverlayState) -> Vec<(usize, f64, usize, us
         if !has_border {
             continue;
         }
-        // PiP tile pads (always rendered).
+        // Tile pads always render; the PVW big region only when this PiP is
+        // on PVW.
+        let mut regions: Vec<(f64, usize)> = Vec::new();
         if let Some(tile) = state.layout.pip_tile_rects.get(p) {
-            let scale = tile.w / pgm_w;
-            for (zi, zone) in zones.iter().enumerate() {
-                if zone.border.as_ref().map(|b| b.is_visible()) != Some(true) {
-                    continue;
-                }
-                for &input in zone.effective_sources() {
-                    out.push((2 * n + 1 + p * n + input, scale, zi, p));
-                }
-            }
+            regions.push((tile.w / pgm_w, 2 * n + 1 + p * n));
         }
-        // PVW big region when this PiP is on PVW.
         if state.pvw_pip() == Some(p) {
-            let scale = state.layout.pvw_rect.w / pgm_w;
-            for (zi, zone) in zones.iter().enumerate() {
-                if zone.border.as_ref().map(|b| b.is_visible()) != Some(true) {
-                    continue;
-                }
+            regions.push((state.layout.pvw_rect.w / pgm_w, n + 1));
+        }
+        for zone in &zones {
+            let Some(border) = &zone.border else { continue };
+            if !border.is_visible() {
+                continue;
+            }
+            let Some(rgba) = border.rgba() else { continue };
+            let width = border.clamped_width() as f64;
+            for &(scale, base) in &regions {
                 for &input in zone.effective_sources() {
-                    out.push((n + 1 + input, scale, zi, p));
+                    out.push(MvBorder {
+                        pad_idx: base + input,
+                        scale,
+                        width,
+                        rgba,
+                    });
                 }
             }
         }
@@ -741,15 +753,16 @@ fn border_pad_set(state: &VisionMixerOverlayState) -> Vec<(usize, f64, usize, us
     out
 }
 
-/// Hash the live geometry of every border-carrying multiview pad. Included
-/// in the renderer dirty-check so borders re-render while their boxes morph.
+/// Hash the live geometry + style of every border-carrying multiview pad.
+/// Included in the renderer dirty-check so borders re-render while their
+/// boxes morph and when only their style (color/width) changes.
 fn hash_border_geometry(
     state: &VisionMixerOverlayState,
     mv_comp: &gst::glib::WeakRef<gst::Element>,
     lead: gst::ClockTime,
 ) -> u64 {
-    let pads = border_pad_set(state);
-    if pads.is_empty() {
+    let borders = border_pad_set(state);
+    if borders.is_empty() {
         return 0;
     }
     let Some(mv) = mv_comp.upgrade() else {
@@ -760,15 +773,18 @@ fn hash_border_geometry(
     let mut mix = |v: u64| {
         h = h.rotate_left(13) ^ v.wrapping_mul(0x100000001B3);
     };
-    for (idx, scale, zi, p) in pads {
-        let Some(pad) = find_mv_pad(&mv, idx) else {
+    for b in &borders {
+        let Some(pad) = find_mv_pad(&mv, b.pad_idx) else {
             continue;
         };
         let (x, y, w, hh, alpha) = super::pgm_overlay::pad_geometry_at(&pad, eval_t);
-        mix(idx as u64);
-        mix(zi as u64);
-        mix(p as u64);
-        mix(scale.to_bits());
+        mix(b.pad_idx as u64);
+        mix(b.scale.to_bits());
+        mix(b.width.to_bits());
+        mix(b.rgba.0.to_bits());
+        mix(b.rgba.1.to_bits());
+        mix(b.rgba.2.to_bits());
+        mix(b.rgba.3.to_bits());
         mix(x as u64);
         mix(y as u64);
         mix(w as u64);
@@ -795,8 +811,8 @@ fn draw_zone_borders(
     mv_comp: &gst::glib::WeakRef<gst::Element>,
     lead: gst::ClockTime,
 ) {
-    let pads = border_pad_set(state);
-    if pads.is_empty() {
+    let borders = border_pad_set(state);
+    if borders.is_empty() {
         return;
     }
     let Some(mv) = mv_comp.upgrade() else {
@@ -805,15 +821,9 @@ fn draw_zone_borders(
     // Evaluate animated geometry at composite time, not sampling time —
     // otherwise borders trail their boxes during morphs/takes.
     let eval_t = mv.query_position::<gst::ClockTime>().map(|pos| pos + lead);
-    for (idx, scale, zi, p) in pads {
-        let zones = state.pip_zones(p);
-        let Some(border) = zones.get(zi).and_then(|z| z.border.as_ref()) else {
-            continue;
-        };
-        let Some((r, g, b, a)) = border.rgba() else {
-            continue;
-        };
-        let Some(pad) = find_mv_pad(&mv, idx) else {
+    for bd in &borders {
+        let (r, g, b, a) = bd.rgba;
+        let Some(pad) = find_mv_pad(&mv, bd.pad_idx) else {
             continue;
         };
         let (px, py, pw, ph, pad_alpha) = super::pgm_overlay::pad_geometry_at(&pad, eval_t);
@@ -826,7 +836,7 @@ fn draw_zone_borders(
         let h = ph as f64;
         // Scale the PGM-pixel width to this region, but keep at least a
         // hairline so thin borders don't vanish on small tiles.
-        let bw = (border.clamped_width() as f64 * scale).max(1.0);
+        let bw = (bd.width * bd.scale).max(1.0);
         cr.set_source_rgba(b, g, r, a * pad_alpha);
         cr.set_line_width(bw);
         cr.rectangle(x - bw / 2.0, y - bw / 2.0, w + bw, h + bw);
@@ -916,8 +926,8 @@ pub struct OverlayRenderer {
     /// tick when any zone has a border, so borders track morphs frame by
     /// frame on the multiview too.
     last_border_hash: u64,
-    /// Border geometry look-ahead, one output frame period (see
-    /// `pgm_overlay::border_lead`).
+    /// Border geometry look-ahead, the compositor's aggregation latency
+    /// (see `pgm_overlay::border_lead`).
     border_lead: gst::ClockTime,
 }
 
@@ -934,7 +944,7 @@ impl OverlayRenderer {
         mv_comp: gst::glib::WeakRef<gst::Element>,
         width: i32,
         height: i32,
-        mv_framerate: (i32, i32),
+        latency_ms: u64,
     ) -> Self {
         Self {
             appsrc,
@@ -943,7 +953,7 @@ impl OverlayRenderer {
             mv_comp,
             width,
             height,
-            border_lead: super::pgm_overlay::border_lead(mv_framerate),
+            border_lead: super::pgm_overlay::border_lead(latency_ms),
             surface: None,
             last_overlay_data: None,
             last_pgm: u64::MAX,
