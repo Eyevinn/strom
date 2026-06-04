@@ -268,8 +268,10 @@ pub(super) fn build_gpu_pipeline(
                     .collect::<Vec<_>>()
             }))
             .collect();
+        // Low framerate: the color only changes on border edits and the
+        // mixer keeps compositing the latest buffer between pushes.
         let underlay_caps: gst::Caps =
-            "video/x-raw,format=RGBA,width=16,height=16,framerate=30/1,pixel-aspect-ratio=1/1"
+            "video/x-raw,format=RGBA,width=16,height=16,framerate=5/1,pixel-aspect-ratio=1/1"
                 .parse()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("underlay caps: {}", e)))?;
         for name in &underlay_chains {

@@ -1110,7 +1110,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.27-transition-picker | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.28-review-fixes | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -2416,6 +2416,11 @@
             panel.classList.toggle('editing', editingPipIdx != null);
             panel.innerHTML = '';
 
+            // Presets are browser-global — parse localStorage once per
+            // rebuild, not once per PiP.
+            const presets = loadPipPresets();
+            const presetNames = Object.keys(presets).sort((a, b) => a.localeCompare(b));
+
             for (let p = 0; p < NUM_PIPS; p++) {
                 const cfg = pipConfigs[p] || { bg: null, zones: [], transforms: {} };
                 const block = document.createElement('div');
@@ -2771,8 +2776,6 @@
                 presetLbl.textContent = 'Layout';
                 presetLbl.title = 'Layout presets — full PiP composition: zones with sources, background, and crop/zoom settings';
                 presetCtrl.appendChild(presetLbl);
-                const presets = loadPipPresets();
-                const presetNames = Object.keys(presets).sort((a, b) => a.localeCompare(b));
                 const presetSel = document.createElement('select');
                 presetSel.className = 'pip-bg-select';
                 const presetPh = document.createElement('option');

@@ -165,9 +165,12 @@ pub const MV_PVW_PIP_OVERLAY_ZORDER: u32 = 11;
 
 /// Z-order used for the *shared* pad during a morph transition — lifted above
 /// any other video pad so the source that morphs visually covers the non-shared
-/// pads underneath. Must stay below [`DIST_DSK_BASE_ZORDER`] (100) and below the
-/// cairo overlay z-order (200) so DSK + labels still render on top.
-pub const TRANSITION_FOREGROUND_ZORDER: u32 = 50;
+/// pads underneath. Must sit above the highest static zone slot
+/// ([`MV_PIP_OVERLAY_ZORDER`] 21 + 2·14 + 1 = 50 at [`MAX_PIP_OVERLAYS`])
+/// and keep lifted values (this + new_z) below [`DIST_DSK_BASE_ZORDER`]
+/// (100) on the dist mixer (dist new_z ≤ 31) and below the multiview
+/// overlay (200) on mv_comp (mv new_z ≤ 50).
+pub const TRANSITION_FOREGROUND_ZORDER: u32 = 60;
 
 /// Compositor z-order for a zone source's *content* pad.
 ///

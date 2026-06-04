@@ -251,15 +251,15 @@ pub(super) fn build_cpu_pipeline(
                     .collect::<Vec<_>>()
             }))
             .collect();
-        // Match the forced compositor output format when set (videotestsrc
-        // supports all raw formats), RGBA otherwise.
-        let underlay_fmt = p.output_format.as_deref().unwrap_or("RGBA");
-        let underlay_caps: gst::Caps = format!(
-            "video/x-raw,format={},width=16,height=16,framerate=30/1,pixel-aspect-ratio=1/1",
-            underlay_fmt
-        )
-        .parse()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("underlay caps: {}", e)))?;
+        // Always RGBA — the compositor's convert pads handle per-pad format
+        // conversion, and an alpha-less forced output_format (I420/NV12)
+        // would silently drop the alpha of #RRGGBBAA border colors. Low
+        // framerate: the color only changes on border edits and the
+        // compositor keeps compositing the latest buffer between pushes.
+        let underlay_caps: gst::Caps =
+            "video/x-raw,format=RGBA,width=16,height=16,framerate=5/1,pixel-aspect-ratio=1/1"
+                .parse()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("underlay caps: {}", e)))?;
         for name in &underlay_chains {
             let src_id = p.id(&format!("{}_src", name));
             let cf_id = p.id(&format!("{}_caps", name));
