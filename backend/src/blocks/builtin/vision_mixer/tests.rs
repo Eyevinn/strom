@@ -307,10 +307,8 @@ fn overlay_registries_round_trip() {
         appsrc,
         caps,
         Arc::clone(&state),
-        gst::glib::WeakRef::new(),
         1280,
         720,
-        strom_types::vision_mixer::DEFAULT_LATENCY_MS,
     )));
 
     register_overlay_state(block_id, Arc::clone(&state));

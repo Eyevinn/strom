@@ -30,8 +30,6 @@ pub(super) fn build_gpu_pipeline(
     // not hold strong element references (pads own their probes; a strong
     // ref would create a cycle that leaks the pipeline on restart).
     let dist_weak = dist_comp.downgrade();
-    let dist_weak_pgm = dist_comp.downgrade();
-    let mv_weak_overlay = mv_comp.downgrade();
     let mv_weak = mv_comp.downgrade();
     elems.push((mixer_id.clone(), dist_comp));
     elems.push((mv_comp_id.clone(), mv_comp));
@@ -253,50 +251,56 @@ pub(super) fn build_gpu_pipeline(
     ));
     // Link to mv_comp is added AFTER all other mv_comp links (pad ordering matters)
 
-    // --- PGM graphics overlay (zone borders): appsrc → glupload → dist mixer ---
-    // Mixer-state-driven decorations drawn by the mixer itself (borders track
-    // live pad geometry). Sits below the DSK stack on the dist compositor.
-    // Only built when PiPs are configured — zones (and thus borders) cannot
-    // exist without them, and skipping it saves a pad + a render thread.
-    let pgm_ov_last_id = p.id("glupload_pgm_overlay");
-    let pgm_overlay = if p.num_pips > 0 {
-        let appsrc_pgm_ov_id = p.id("appsrc_pgm_overlay");
-        let pgm_ov_caps_str = format!(
-            "video/x-raw,format=RGBA,width={},height={},pixel-aspect-ratio=1/1,framerate={}/{},interlace-mode=progressive,multiview-mode=mono",
-            p.pgm_w, p.pgm_h, p.pgm_framerate.0, p.pgm_framerate.1
-        );
-        let pgm_ov_caps: gst::Caps = pgm_ov_caps_str
-            .parse()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("pgm overlay caps: {}", e)))?;
-        let appsrc_pgm_ov = gst_app::AppSrc::builder()
-            .name(&appsrc_pgm_ov_id)
-            .format(gst::Format::Time)
-            .is_live(false)
-            .automatic_eos(false)
-            .do_timestamp(true)
-            .max_buffers(2)
-            .leaky_type(gst_app::AppLeakyType::Upstream)
-            .build();
-        let q_pgm_ov_id = p.id("queue_pgm_overlay");
-        elems.push((appsrc_pgm_ov_id.clone(), appsrc_pgm_ov.clone().upcast()));
-        elems.push((q_pgm_ov_id.clone(), elements::make_queue(&q_pgm_ov_id)?));
-        elems.push((
-            pgm_ov_last_id.clone(),
-            elements::make_element("glupload", &pgm_ov_last_id)?,
-        ));
-        links.push((
-            ElementPadRef::pad(&appsrc_pgm_ov_id, "src"),
-            ElementPadRef::pad(&q_pgm_ov_id, "sink"),
-        ));
-        links.push((
-            ElementPadRef::pad(&q_pgm_ov_id, "src"),
-            ElementPadRef::pad(&pgm_ov_last_id, "sink"),
-        ));
-        Some((appsrc_pgm_ov, pgm_ov_caps))
-    } else {
-        None
-    };
-    // Link to the dist mixer is added after the DSK links (pad ordering).
+    // --- Border underlay sources ---
+    // Zone borders render as solid-color compositor pads directly beneath
+    // their content pads (see `gst::underlay`). One tiny videotestsrc per
+    // (region, input); the border color is set at runtime via
+    // `foreground-color`. Non-live → contributes no latency. Only built when
+    // PiPs are configured — zones (and thus borders) cannot exist without
+    // them.
+    if p.num_pips > 0 {
+        let underlay_chains: Vec<String> = (0..p.num_inputs)
+            .map(|i| format!("underlay_dist_{}", i))
+            .chain((0..p.num_inputs).map(|i| format!("underlay_pvw_{}", i)))
+            .chain((0..p.num_pips).flat_map(|pip| {
+                (0..p.num_inputs)
+                    .map(move |i| format!("underlay_pip_{}_{}", pip, i))
+                    .collect::<Vec<_>>()
+            }))
+            .collect();
+        let underlay_caps: gst::Caps =
+            "video/x-raw,format=RGBA,width=16,height=16,framerate=30/1,pixel-aspect-ratio=1/1"
+                .parse()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("underlay caps: {}", e)))?;
+        for name in &underlay_chains {
+            let src_id = p.id(&format!("{}_src", name));
+            let cf_id = p.id(&format!("{}_caps", name));
+            let up_id = p.id(&format!("{}_upload", name));
+            let src = gst::ElementFactory::make("videotestsrc")
+                .name(&src_id)
+                .property("is-live", false)
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", src_id, e)))?;
+            src.set_property_from_str("pattern", "solid-color");
+            let cf = gst::ElementFactory::make("capsfilter")
+                .name(&cf_id)
+                .property("caps", &underlay_caps)
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", cf_id, e)))?;
+            elems.push((src_id.clone(), src));
+            elems.push((cf_id.clone(), cf));
+            elems.push((up_id.clone(), elements::make_element("glupload", &up_id)?));
+            links.push((
+                ElementPadRef::pad(&src_id, "src"),
+                ElementPadRef::pad(&cf_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&cf_id, "src"),
+                ElementPadRef::pad(&up_id, "sink"),
+            ));
+        }
+    }
+    // Links to the compositor pads are added below in pad-index order.
 
     // --- Per-input elements ---
     for i in 0..p.num_inputs {
@@ -369,16 +373,20 @@ pub(super) fn build_gpu_pipeline(
         ));
     }
 
-    // PGM graphics overlay pad — after the DSK links so it lands at
-    // sink_{num_inputs + num_dsk_inputs}.
-    if pgm_overlay.is_some() {
-        links.push((
-            ElementPadRef::pad(&pgm_ov_last_id, "src"),
-            ElementPadRef::pad(
-                &mixer_id,
-                format!("sink_{}", p.num_inputs + p.num_dsk_inputs),
-            ),
-        ));
+    // Dist border underlays — after the DSK links so input i's underlay
+    // lands at sink_{num_inputs + num_dsk_inputs + i} (glvideomixer pads are
+    // auto-created in link order).
+    if p.num_pips > 0 {
+        for i in 0..p.num_inputs {
+            let up_id = p.id(&format!("underlay_dist_{}_upload", i));
+            links.push((
+                ElementPadRef::pad(&up_id, "src"),
+                ElementPadRef::pad(
+                    &mixer_id,
+                    format!("sink_{}", p.num_inputs + p.num_dsk_inputs + i),
+                ),
+            ));
+        }
     }
 
     // Multiview compositor thumbnails: tee_i.src_1 → queue → mv_comp
@@ -439,12 +447,36 @@ pub(super) fn build_gpu_pipeline(
         }
     }
 
-    // Overlay pad: glupload_overlay → mv_comp (must be last link to get correct pad index)
+    // Overlay pad: glupload_overlay → mv_comp (pad order matters on the GL
+    // mixer — this must precede the underlay links below).
     let overlay_pad_idx = 2 * p.num_inputs + 1 + p.num_pips * p.num_inputs;
     links.push((
         ElementPadRef::pad(&up_overlay_id, "src"),
         ElementPadRef::pad(&mv_comp_id, format!("sink_{}", overlay_pad_idx)),
     ));
+
+    // Multiview border underlays — after the overlay pad: PVW underlays at
+    // sink_{2N+2+P+i}, then tile underlays at sink_{2N+2+P+N+pip*N+i}.
+    if p.num_pips > 0 {
+        let mv_underlay_base = overlay_pad_idx + 1;
+        for i in 0..p.num_inputs {
+            let up_id = p.id(&format!("underlay_pvw_{}_upload", i));
+            links.push((
+                ElementPadRef::pad(&up_id, "src"),
+                ElementPadRef::pad(&mv_comp_id, format!("sink_{}", mv_underlay_base + i)),
+            ));
+        }
+        for pip_idx in 0..p.num_pips {
+            for i in 0..p.num_inputs {
+                let up_id = p.id(&format!("underlay_pip_{}_{}_upload", pip_idx, i));
+                let sink_idx = mv_underlay_base + p.num_inputs * (1 + pip_idx) + i;
+                links.push((
+                    ElementPadRef::pad(&up_id, "src"),
+                    ElementPadRef::pad(&mv_comp_id, format!("sink_{}", sink_idx)),
+                ));
+            }
+        }
+    }
 
     // --- Pad properties (applied after linking when auto-created pads exist) ---
     let pad_properties = pad_layout::build_pad_properties(p, &mv_layout);
@@ -453,30 +485,7 @@ pub(super) fn build_gpu_pipeline(
     audio_meter::append_audio_meter_chains(p, &mut elems, &mut links)?;
 
     // --- Set up overlay appsrc renderer ---
-    let overlay_state = setup_overlay_renderer(
-        p,
-        &appsrc_overlay,
-        &overlay_caps,
-        &mv_layout,
-        mv_weak_overlay,
-        ctx,
-    );
-
-    // --- PGM graphics overlay renderer (zone borders) ---
-    if let Some((appsrc_pgm_ov, pgm_ov_caps)) = &pgm_overlay {
-        super::super::pgm_overlay::setup_pgm_overlay_renderer(
-            p.instance_id,
-            appsrc_pgm_ov,
-            pgm_ov_caps,
-            std::sync::Arc::clone(&overlay_state),
-            dist_weak_pgm,
-            p.pgm_w as i32,
-            p.pgm_h as i32,
-            p.pgm_framerate,
-            p.latency_ms,
-            ctx,
-        );
-    }
+    let overlay_state = setup_overlay_renderer(p, &appsrc_overlay, &overlay_caps, &mv_layout, ctx);
 
     // --- Reactive explicit geometry ---
     // Input pads run sizing-policy=none; aspect-correct rects are re-applied

@@ -1482,10 +1482,6 @@ impl AppState {
                     crate::blocks::builtin::vision_mixer::overlay::unregister_overlay_renderer(
                         &block.id,
                     );
-                    // Same lifecycle for the PGM graphics overlay (zone borders).
-                    crate::blocks::builtin::vision_mixer::pgm_overlay::unregister_pgm_overlay_renderer(
-                        &block.id,
-                    );
                 }
             }
         }

@@ -186,6 +186,7 @@ mod tests {
             w,
             h,
             zorder: z,
+            underlay: None,
         }
     }
 

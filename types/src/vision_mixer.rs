@@ -169,11 +169,25 @@ pub const MV_PVW_PIP_OVERLAY_ZORDER: u32 = 11;
 /// cairo overlay z-order (200) so DSK + labels still render on top.
 pub const TRANSITION_FOREGROUND_ZORDER: u32 = 50;
 
-/// Z-order for the PGM graphics overlay pad (zone borders) on the
-/// distribution compositor. Above all video pads — including morphing pads
-/// lifted to [`TRANSITION_FOREGROUND_ZORDER`] (+ offsets ≤ ~20) — and below
-/// DSK at [`DIST_DSK_BASE_ZORDER`] so lower thirds cover the borders.
-pub const DIST_PGM_OVERLAY_ZORDER: u32 = 90;
+/// Compositor z-order for a zone source's *content* pad.
+///
+/// Zone slots use a doubled z-order scheme so every content pad has a slot
+/// directly beneath it for its border underlay pad: content sits at
+/// `overlay_zorder + 2·slot + 1`, its underlay at [`underlay_zorder`] (one
+/// below). Box k's underlay thereby renders *above* box k-1's content — an
+/// overlapping higher zone covers the lower zone's border exactly like a
+/// stacked framed card.
+pub fn zone_content_zorder(overlay_zorder: u32, slot_offset: u32) -> u32 {
+    overlay_zorder + 2 * slot_offset + 1
+}
+
+/// Z-order of the border underlay pad paired with a content pad: always the
+/// slot directly beneath it. Holds in every state — static zone layouts (the
+/// doubled scheme of [`zone_content_zorder`]) and transition lifts
+/// ([`TRANSITION_FOREGROUND_ZORDER`] + new_z preserves odd spacing).
+pub fn underlay_zorder(content_zorder: u32) -> u32 {
+    content_zorder.saturating_sub(1)
+}
 
 /// Z-order for the PiP background pad on the multiview compositor.
 /// Above thumbnails (1) and the big PVW/PGM display (10), below cairo overlay (200).
@@ -539,6 +553,28 @@ impl ZoneBorder {
         }
     }
 
+    /// Pack the color as `0xAARRGGBB` (big-endian ARGB — the format
+    /// `videotestsrc`'s `foreground-color` property expects). `None` for
+    /// unparseable colors, like [`Self::rgba`].
+    pub fn argb(&self) -> Option<u32> {
+        let (r, g, b, a) = self.rgba()?;
+        let q = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u32;
+        Some((q(a) << 24) | (q(r) << 16) | (q(g) << 8) | q(b))
+    }
+
+    /// Resolve into the `Copy` form carried by [`ZonePadLayout`]. `None`
+    /// when the border would not draw anything (zero width, invalid color,
+    /// or fully transparent).
+    pub fn resolved(&self) -> Option<ResolvedBorder> {
+        if !self.is_visible() {
+            return None;
+        }
+        Some(ResolvedBorder {
+            width: self.clamped_width(),
+            argb: self.argb()?,
+        })
+    }
+
     /// A border that would actually draw something.
     pub fn is_visible(&self) -> bool {
         self.clamped_width() > 0.0 && self.rgba().map(|c| c.3 > 0.0).unwrap_or(false)
@@ -592,6 +628,15 @@ impl Zone {
     }
 }
 
+/// A zone border resolved into `Copy`-friendly form for per-pad layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedBorder {
+    /// Border width in PGM canvas pixels (clamped, > 0).
+    pub width: f32,
+    /// Border color packed as `0xAARRGGBB`.
+    pub argb: u32,
+}
+
 /// Per-pad layout produced by [`resolve_zone_pads`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ZonePadLayout {
@@ -600,9 +645,14 @@ pub struct ZonePadLayout {
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    /// 0-based offset relative to the zone's `overlay_zorder`. Sources
-    /// later in the zone's FIFO render on top of earlier ones.
+    /// 0-based slot offset within the PiP. Sources later in a zone's FIFO
+    /// render on top of earlier ones; pass through [`zone_content_zorder`]
+    /// for the actual compositor z-order (slots are doubled to leave room
+    /// for border underlay pads).
     pub zorder_offset: u32,
+    /// The hosting zone's border, when it would actually draw. Rendered as
+    /// a solid-color underlay pad directly beneath this source's pad.
+    pub border: Option<ResolvedBorder>,
 }
 
 /// Compute pixel-space pad layouts for every source across every zone.
@@ -672,6 +722,7 @@ pub fn resolve_zone_pads(
                 w,
                 h,
                 zorder_offset: out.len() as u32,
+                border: zone.border.as_ref().and_then(|b| b.resolved()),
             });
         }
     }

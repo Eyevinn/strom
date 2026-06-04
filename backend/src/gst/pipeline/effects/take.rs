@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use crate::gst::crop::set_pad_crop;
 
 use super::mixer_layout::{
-    apply_input_group_to_region, apply_pip_crop_after_morph, apply_pip_layout_to_region, find_pad,
+    apply_input_group_to_region, apply_pip_crop_after_morph, apply_pip_layout_to_region,
     pads_for_source,
 };
 
@@ -67,7 +67,9 @@ impl PipelineManager {
             None => Some(to_input),
         };
 
-        // Auto-cancel FTB if active
+        // Auto-cancel FTB if active. Zone-border underlays need no special
+        // handling here: they are regular pads driven by the take paths
+        // below exactly like their content pads.
         let was_ftb = overlay_state
             .as_ref()
             .map(|s| {
@@ -80,20 +82,6 @@ impl PipelineManager {
                 "Auto-cancelling FTB before transition on {}",
                 block_instance_id
             );
-            // FTB bound the PGM graphics overlay pad's alpha (fading zone
-            // borders toward 0 along with the picture). Cancelling only flips
-            // the flag — strip that binding and restore full alpha here, or
-            // borders stay frozen at whatever the fade last wrote. Covers
-            // both the classic and the PiP-aware take paths.
-            if let Some(state) = overlay_state.as_ref() {
-                let overlay_pad_name = format!("sink_{}", state.num_inputs + state.num_dsk_inputs);
-                if let Some(pad) = find_pad(mixer, &overlay_pad_name) {
-                    if let Some(binding) = pad.control_binding("alpha") {
-                        pad.remove_control_binding(&binding);
-                    }
-                    pad.set_property("alpha", 1.0f64);
-                }
-            }
         }
 
         let (canvas_width, canvas_height) = self.dist_canvas_size(block_instance_id);
@@ -150,6 +138,21 @@ impl PipelineManager {
                 };
                 let src_aspects =
                     self.vision_mixer_source_aspects(block_instance_id, state.num_inputs);
+                let pgm_w = state.pgm_w.max(1) as f64;
+                let dist_underlay =
+                    state
+                        .dist_underlay_base()
+                        .map(|base| crate::gst::underlay::UnderlayCtx {
+                            base,
+                            scale: canvas_width as f64 / pgm_w,
+                        });
+                let pvw_underlay =
+                    state
+                        .mv_pvw_underlay_base()
+                        .map(|base| crate::gst::underlay::UnderlayCtx {
+                            base,
+                            scale: state.layout.pvw_rect.w / pgm_w,
+                        });
 
                 let old_dist_targets = pads_for_source(
                     state,
@@ -161,6 +164,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                     src_aspect,
                     &src_aspects,
+                    dist_underlay,
                 );
                 let new_dist_targets = pads_for_source(
                     state,
@@ -172,6 +176,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                     src_aspect,
                     &src_aspects,
+                    dist_underlay,
                 );
                 let old_pvw_targets = pads_for_source(
                     state,
@@ -183,6 +188,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                     src_aspect,
                     &src_aspects,
+                    pvw_underlay,
                 );
                 let new_pvw_targets = pads_for_source(
                     state,
@@ -194,6 +200,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                     src_aspect,
                     &src_aspects,
+                    pvw_underlay,
                 );
 
                 if is_cut {
@@ -211,6 +218,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                             src_aspect,
                             &src_aspects,
+                            dist_underlay,
                         );
                     } else {
                         apply_input_group_to_region(
@@ -222,6 +230,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::DIST_PGM_ZORDER,
                             src_aspect,
                             &src_aspects,
+                            dist_underlay,
                         );
                     }
                     if let Some(p) = new_pvw_pip {
@@ -237,6 +246,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                             src_aspect,
                             &src_aspects,
+                            pvw_underlay,
                         );
                     } else {
                         apply_input_group_to_region(
@@ -248,6 +258,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
                             src_aspect,
                             &src_aspects,
+                            pvw_underlay,
                         );
                     }
                 } else {
@@ -402,12 +413,9 @@ impl PipelineManager {
                             let alpha = if enabled { 1.0f64 } else { 0.0f64 };
                             pad.set_property("alpha", alpha);
                         } else {
-                            // The PGM graphics overlay pad: its content is
-                            // state-driven, but the loop above just stripped
-                            // any alpha binding (e.g. a mid-flight FTB-off
-                            // restore fade) — a take always lands with FTB
-                            // off, so pin the pad back to full alpha.
-                            pad.set_property("alpha", 1.0f64);
+                            // Border underlay pads: classic takes are
+                            // input↔input — no zones on PGM, no borders.
+                            pad.set_property("alpha", 0.0f64);
                         }
                     }
                 }

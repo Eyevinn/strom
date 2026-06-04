@@ -26,7 +26,6 @@ mod elements;
 pub(crate) mod geometry;
 pub(crate) mod layout;
 pub mod overlay;
-pub(crate) mod pgm_overlay;
 pub(crate) mod properties;
 #[cfg(test)]
 mod tests;

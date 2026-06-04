@@ -120,8 +120,32 @@ pub struct TransitionController {
     next_transition_id: Arc<AtomicU64>,
 }
 
+/// Target state for a content pad's border underlay — the solid-color pad
+/// sitting directly beneath it in z-order that renders the zone border as a
+/// frame around the box. Geometry is the content rect inflated outward by
+/// the region-scaled border width (and clamped to the region), computed by
+/// `pads_for_source` where the region is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnderlayTarget {
+    /// Compositor sink index of the underlay pad.
+    pub pad_idx: usize,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// Border color as `0xAARRGGBB` (written to the underlay source's
+    /// `foreground-color`).
+    pub argb: u32,
+}
+
 /// A pad's target geometry + zorder in a composition. Used by [`plan_transition`]
 /// and [`TransitionController::animate_pad_transition`].
+///
+/// `underlay` rides along outside the planner's view: [`plan_transition`]
+/// decides actions from the content geometry only, and the controller drives
+/// each content pad's underlay in lockstep with whatever action the content
+/// pad got (underlay zorder = content zorder − 1 throughout — see
+/// `strom_types::vision_mixer::underlay_zorder`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PadTarget {
     pub pad_idx: usize,
@@ -130,6 +154,9 @@ pub struct PadTarget {
     pub w: i32,
     pub h: i32,
     pub zorder: u32,
+    /// Border underlay state for this pad, when its zone has a visible
+    /// border (`None` = no border → underlay hidden).
+    pub underlay: Option<UnderlayTarget>,
 }
 
 /// How a morphing pad's zorder is handled during the animation.

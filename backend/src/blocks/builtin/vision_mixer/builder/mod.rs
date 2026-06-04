@@ -292,7 +292,6 @@ pub(super) fn setup_overlay_renderer(
     appsrc: &gst_app::AppSrc,
     overlay_caps: &gst::Caps,
     mv_layout: &layout::OverlayLayout,
-    mv_comp: gst::glib::WeakRef<gst::Element>,
     ctx: &BlockBuildContext,
 ) -> Arc<VisionMixerOverlayState> {
     let pip_initial = overlay::PipInitialState {
@@ -342,10 +341,8 @@ pub(super) fn setup_overlay_renderer(
         appsrc.clone(),
         overlay_caps.clone(),
         Arc::clone(&overlay_state),
-        mv_comp,
         p.mv_w as i32,
         p.mv_h as i32,
-        p.latency_ms,
     )));
 
     let block_id = p.instance_id.to_string();

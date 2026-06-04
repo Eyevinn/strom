@@ -51,11 +51,28 @@ fn initial_pad_geom_for_input(
             l.w,
             l.h,
             1.0,
-            (overlay_zorder + l.zorder_offset) as u64,
+            vision_mixer::zone_content_zorder(overlay_zorder, l.zorder_offset) as u64,
         )
     } else {
         (0, 0, 1, 1, 0.0, bg_zorder as u64)
     }
+}
+
+/// Initial properties for a border underlay pad: hidden, explicit geometry.
+/// Zones (and thus borders) are runtime-only, so every underlay starts
+/// invisible; the layout appliers position and reveal them when a bordered
+/// zone appears.
+fn underlay_initial_props(props: &mut HashMap<String, PropertyValue>, zorder: u32) {
+    props.insert("xpos".to_string(), PropertyValue::Int(0));
+    props.insert("ypos".to_string(), PropertyValue::Int(0));
+    props.insert("width".to_string(), PropertyValue::Int(1));
+    props.insert("height".to_string(), PropertyValue::Int(1));
+    props.insert("alpha".to_string(), PropertyValue::Float(0.0));
+    props.insert("zorder".to_string(), PropertyValue::UInt(zorder as u64));
+    props.insert(
+        "sizing-policy".to_string(),
+        PropertyValue::String("none".to_string()),
+    );
 }
 
 /// Build pad_properties for compositor sink pads (applied after linking).
@@ -149,24 +166,17 @@ pub(super) fn build_pad_properties(
         );
     }
 
-    // --- PGM graphics overlay pad (zone borders): sink_{N + DSK} ---
+    // --- Dist border underlay pads: sink_{N + DSK + i} ---
     // Only present when PiPs are configured (see the pipeline builders).
+    // Hidden at build — zones are runtime-only.
     if p.num_pips > 0 {
-        let pad_name = format!("sink_{}", p.num_inputs + p.num_dsk_inputs);
-        let props = dist_pads.entry(pad_name).or_default();
-        props.insert("xpos".to_string(), PropertyValue::Int(0));
-        props.insert("ypos".to_string(), PropertyValue::Int(0));
-        props.insert("width".to_string(), PropertyValue::Int(p.pgm_w as i64));
-        props.insert("height".to_string(), PropertyValue::Int(p.pgm_h as i64));
-        props.insert("alpha".to_string(), PropertyValue::Float(1.0));
-        props.insert(
-            "zorder".to_string(),
-            PropertyValue::UInt(vision_mixer::DIST_PGM_OVERLAY_ZORDER as u64),
-        );
-        props.insert(
-            "sizing-policy".to_string(),
-            PropertyValue::String("none".to_string()),
-        );
+        for i in 0..p.num_inputs {
+            let pad_name = format!("sink_{}", p.num_inputs + p.num_dsk_inputs + i);
+            underlay_initial_props(
+                dist_pads.entry(pad_name).or_default(),
+                vision_mixer::DIST_PIP_OVERLAY_ZORDER,
+            );
+        }
     }
 
     // --- Multiview compositor pad properties ---
@@ -302,8 +312,9 @@ pub(super) fn build_pad_properties(
     }
 
     // --- Overlay pad: fullscreen, highest zorder ---
+    let overlay_pad_idx = 2 * p.num_inputs + 1 + p.num_pips * p.num_inputs;
     {
-        let overlay_pad_name = format!("sink_{}", 2 * p.num_inputs + 1 + p.num_pips * p.num_inputs);
+        let overlay_pad_name = format!("sink_{}", overlay_pad_idx);
         let props = mv_pads.entry(overlay_pad_name).or_default();
         props.insert("xpos".to_string(), PropertyValue::Int(0));
         props.insert("ypos".to_string(), PropertyValue::Int(0));
@@ -314,6 +325,30 @@ pub(super) fn build_pad_properties(
             "zorder".to_string(),
             PropertyValue::UInt(vision_mixer::MV_OVERLAY_ZORDER as u64),
         );
+    }
+
+    // --- Multiview border underlay pads (PVW big + PiP tiles), hidden ---
+    if p.num_pips > 0 {
+        let mv_underlay_base = overlay_pad_idx + 1;
+        for i in 0..p.num_inputs {
+            let pad_name = format!("sink_{}", mv_underlay_base + i);
+            underlay_initial_props(
+                mv_pads.entry(pad_name).or_default(),
+                vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
+            );
+        }
+        for pip_idx in 0..p.num_pips {
+            for i in 0..p.num_inputs {
+                let pad_name = format!(
+                    "sink_{}",
+                    mv_underlay_base + p.num_inputs * (1 + pip_idx) + i
+                );
+                underlay_initial_props(
+                    mv_pads.entry(pad_name).or_default(),
+                    vision_mixer::MV_PIP_OVERLAY_ZORDER,
+                );
+            }
+        }
     }
 
     pad_props

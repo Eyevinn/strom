@@ -13,7 +13,7 @@ use tracing::{debug, info};
 
 use super::{
     plan_transition, PadAction, PadTarget, TransitionController, TransitionError, TransitionType,
-    ZHandling,
+    UnderlayTarget, ZHandling,
 };
 
 impl TransitionController {
@@ -663,9 +663,17 @@ impl TransitionController {
         let plan = plan_transition(outgoing, incoming);
         let mut control_sources = Vec::new();
 
+        // Border underlays ride along with their content pads: for each
+        // planned content action, the pad's underlay (old and/or new state
+        // from the targets) is driven through the same timeline.
+        let out_map: HashMap<usize, &PadTarget> = outgoing.iter().map(|t| (t.pad_idx, t)).collect();
+        let in_map: HashMap<usize, &PadTarget> = incoming.iter().map(|t| (t.pad_idx, t)).collect();
+
         for (idx, action) in &plan {
             let pad = self.get_sink_pad(*idx)?;
             self.clear_control_bindings(&pad);
+            let old_u = out_map.get(idx).and_then(|t| t.underlay);
+            let new_u = in_map.get(idx).and_then(|t| t.underlay);
 
             match *action {
                 PadAction::Morph {
@@ -737,22 +745,27 @@ impl TransitionController {
                         from_h,
                         to_h,
                     )?);
+                    self.morph_underlay(
+                        old_u,
+                        new_u,
+                        (from_x, from_y, from_w, from_h),
+                        (to_x, to_y, to_w, to_h),
+                        z_handling,
+                        current_time,
+                        end_time,
+                        &mut control_sources,
+                    )?;
                 }
-                PadAction::AffirmStatic { x, y, w, h, zorder } => {
-                    pad.set_property("alpha", 1.0f64);
-                    pad.set_property("zorder", zorder);
+                PadAction::AffirmStatic { x, y, w, h, zorder }
+                | PadAction::HoldFullAlpha { x, y, w, h, zorder } => {
                     pad.set_property("xpos", x);
                     pad.set_property("ypos", y);
                     pad.set_property("width", w);
                     pad.set_property("height", h);
-                }
-                PadAction::HoldFullAlpha { x, y, w, h, zorder } => {
-                    pad.set_property("xpos", x);
-                    pad.set_property("ypos", y);
-                    pad.set_property("width", w);
-                    pad.set_property("height", h);
                     pad.set_property("zorder", zorder);
                     pad.set_property("alpha", 1.0f64);
+                    // Underlay snaps with its content pad.
+                    self.snap_underlay(old_u, new_u, zorder)?;
                 }
                 PadAction::FadeIn { x, y, w, h, zorder } => {
                     pad.set_property("xpos", x);
@@ -768,6 +781,20 @@ impl TransitionController {
                         0.0,
                         1.0,
                     )?);
+                    if let Some(u) = new_u {
+                        // Border fades in with its box.
+                        let upad = self.place_underlay(&u, zorder)?;
+                        upad.set_property("alpha", 0.0f64);
+                        control_sources.push(self.setup_alpha_animation(
+                            &upad,
+                            current_time,
+                            end_time,
+                            0.0,
+                            1.0,
+                        )?);
+                    } else if let Some(u) = old_u {
+                        self.hide_underlay_pad(u.pad_idx)?;
+                    }
                 }
                 PadAction::FadeOut => {
                     control_sources.push(self.setup_alpha_animation(
@@ -777,6 +804,17 @@ impl TransitionController {
                         1.0,
                         0.0,
                     )?);
+                    if let Some(u) = old_u {
+                        let upad = self.get_sink_pad(u.pad_idx)?;
+                        self.clear_control_bindings(&upad);
+                        control_sources.push(self.setup_alpha_animation(
+                            &upad,
+                            current_time,
+                            end_time,
+                            1.0,
+                            0.0,
+                        )?);
+                    }
                 }
                 PadAction::StepOffAtEnd => {
                     control_sources.push(self.setup_alpha_step_off(
@@ -784,6 +822,15 @@ impl TransitionController {
                         current_time,
                         end_time,
                     )?);
+                    if let Some(u) = old_u {
+                        let upad = self.get_sink_pad(u.pad_idx)?;
+                        self.clear_control_bindings(&upad);
+                        control_sources.push(self.setup_alpha_step_off(
+                            &upad,
+                            current_time,
+                            end_time,
+                        )?);
+                    }
                 }
             }
         }
@@ -801,6 +848,159 @@ impl TransitionController {
             plan.len()
         );
 
+        Ok(())
+    }
+
+    /// Place an underlay pad at its target rect/color, directly beneath the
+    /// given content zorder. Alpha is left to the caller. Clears stale
+    /// control bindings first.
+    fn place_underlay(
+        &self,
+        u: &UnderlayTarget,
+        content_zorder: u32,
+    ) -> Result<gst::Pad, TransitionError> {
+        let pad = self.get_sink_pad(u.pad_idx)?;
+        self.clear_control_bindings(&pad);
+        crate::gst::underlay::set_underlay_color(&pad, u.argb);
+        pad.set_property("xpos", u.x);
+        pad.set_property("ypos", u.y);
+        pad.set_property("width", u.w);
+        pad.set_property("height", u.h);
+        pad.set_property("zorder", vision_mixer::underlay_zorder(content_zorder));
+        Ok(pad)
+    }
+
+    /// Hide an underlay pad (its content pad has no border in the new state).
+    fn hide_underlay_pad(&self, pad_idx: usize) -> Result<(), TransitionError> {
+        let pad = self.get_sink_pad(pad_idx)?;
+        self.clear_control_bindings(&pad);
+        pad.set_property("alpha", 0.0f64);
+        Ok(())
+    }
+
+    /// Snap a content pad's underlay to its new state (used for the
+    /// non-animating content actions).
+    fn snap_underlay(
+        &self,
+        old_u: Option<UnderlayTarget>,
+        new_u: Option<UnderlayTarget>,
+        content_zorder: u32,
+    ) -> Result<(), TransitionError> {
+        if let Some(u) = new_u {
+            let pad = self.place_underlay(&u, content_zorder)?;
+            pad.set_property("alpha", 1.0f64);
+        } else if let Some(u) = old_u {
+            self.hide_underlay_pad(u.pad_idx)?;
+        }
+        Ok(())
+    }
+
+    /// Drive a morphing content pad's underlay through the same timeline:
+    /// geometry animates from the old underlay rect to the new one, z-order
+    /// mirrors the content's lift/snap one slot below, and alpha fades when
+    /// the border appears/disappears mid-morph. When one side has no border,
+    /// its rect is synthesized by inflating that side's content rect with
+    /// the other side's inflation so the frame still tracks the box.
+    #[allow(clippy::too_many_arguments)]
+    fn morph_underlay(
+        &self,
+        old_u: Option<UnderlayTarget>,
+        new_u: Option<UnderlayTarget>,
+        from_rect: (i32, i32, i32, i32),
+        to_rect: (i32, i32, i32, i32),
+        z_handling: ZHandling,
+        current_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        control_sources: &mut Vec<InterpolationControlSource>,
+    ) -> Result<(), TransitionError> {
+        let Some(spec) = new_u.or(old_u) else {
+            return Ok(());
+        };
+        // Synthesized inflation for the side that lacks a border: use the
+        // other side's (uniform outward inflation, derivable from its spec).
+        let inflate = |content: (i32, i32, i32, i32), u: &UnderlayTarget, u_content_w: i32| {
+            let bw = ((u.w - u_content_w) / 2).max(1);
+            (
+                content.0 - bw,
+                content.1 - bw,
+                content.2 + 2 * bw,
+                content.3 + 2 * bw,
+            )
+        };
+        let (fx, fy, fw, fh) = match old_u {
+            Some(u) => (u.x, u.y, u.w, u.h),
+            None => inflate(from_rect, &spec, to_rect.2),
+        };
+        let (tx, ty, tw, th) = match new_u {
+            Some(u) => (u.x, u.y, u.w, u.h),
+            None => inflate(to_rect, &spec, from_rect.2),
+        };
+
+        let pad = self.get_sink_pad(spec.pad_idx)?;
+        self.clear_control_bindings(&pad);
+        crate::gst::underlay::set_underlay_color(&pad, spec.argb);
+
+        // Z mirrors the content pad, one slot below — including the lift.
+        match z_handling {
+            ZHandling::SnapToNew(z) => pad.set_property("zorder", vision_mixer::underlay_zorder(z)),
+            ZHandling::LiftAndStep { new_z } => {
+                let lifted = vision_mixer::TRANSITION_FOREGROUND_ZORDER + new_z;
+                pad.set_property("zorder", vision_mixer::underlay_zorder(lifted));
+                control_sources.push(self.setup_zorder_step(
+                    &pad,
+                    current_time,
+                    end_time,
+                    vision_mixer::underlay_zorder(lifted),
+                    vision_mixer::underlay_zorder(new_z),
+                )?);
+            }
+        }
+
+        pad.set_property("xpos", fx);
+        pad.set_property("ypos", fy);
+        pad.set_property("width", fw);
+        pad.set_property("height", fh);
+        for (prop, from, to) in [
+            ("xpos", fx, tx),
+            ("ypos", fy, ty),
+            ("width", fw, tw),
+            ("height", fh, th),
+        ] {
+            control_sources.push(self.setup_int_animation(
+                pad.upcast_ref(),
+                prop,
+                current_time,
+                end_time,
+                from,
+                to,
+            )?);
+        }
+
+        // Alpha: steady when bordered on both sides; fades in/out when the
+        // border appears or disappears during the morph.
+        match (old_u.is_some(), new_u.is_some()) {
+            (true, true) => pad.set_property("alpha", 1.0f64),
+            (false, true) => {
+                pad.set_property("alpha", 0.0f64);
+                control_sources.push(self.setup_alpha_animation(
+                    &pad,
+                    current_time,
+                    end_time,
+                    0.0,
+                    1.0,
+                )?);
+            }
+            (true, false) => {
+                control_sources.push(self.setup_alpha_animation(
+                    &pad,
+                    current_time,
+                    end_time,
+                    1.0,
+                    0.0,
+                )?);
+            }
+            (false, false) => unreachable!("spec exists"),
+        }
         Ok(())
     }
 
