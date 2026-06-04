@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Vision Mixer - Strom</title>
-    <!-- page version: 2 (shader FX engine) — bump on every edit; verify in browser console -->
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body {
@@ -168,7 +167,8 @@
             display: flex;
             flex-direction: column;
             gap: 6px;
-            min-width: 180px;
+            /* Wide enough that the 6-column wipe grid keeps readable labels. */
+            min-width: 250px;
             flex-shrink: 0;
             border-left: 1px solid #444;
             padding-left: 16px;
@@ -260,6 +260,77 @@
         .type-btn:hover { border-color: #666; }
         .dir-row.hidden { display: none; }
         .dir-btn { font-size: 13px; }
+        /* Wipe shape / master FX pickers: grids so the many buttons keep a
+           uniform, readable size instead of squeezing into one flex row. */
+        .wipe-grid, .fx-grid {
+            display: grid;
+            gap: 4px;
+        }
+        .wipe-grid { grid-template-columns: repeat(6, 1fr); }
+        .fx-grid { grid-template-columns: repeat(4, 1fr); }
+        .wipe-grid.hidden, .fx-grid.hidden { display: none; }
+        .wipe-grid .type-btn, .fx-grid .type-btn {
+            font-size: 10px;
+            letter-spacing: 0;
+            padding: 0 2px;
+            min-width: 0;
+        }
+        /* Shader looks panel */
+        .fx-looks-title {
+            font-weight: bold;
+            color: #ccc;
+            margin-bottom: 6px;
+        }
+        .fx-looks-hint {
+            font-weight: normal;
+            color: #777;
+            font-size: 11px;
+        }
+        .fx-look-row {
+            display: grid;
+            grid-template-columns: 110px 120px 1fr;
+            align-items: center;
+            gap: 8px;
+            padding: 3px 0;
+            border-bottom: 1px solid #2a2a2a;
+        }
+        .fx-look-row:last-child { border-bottom: none; }
+        .fx-look-label {
+            color: #aaa;
+            font-size: 12px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .fx-look-row select {
+            background: #2a2a2a;
+            color: #ddd;
+            border: 1px solid #444;
+            border-radius: 3px;
+            height: 24px;
+            width: 100%;
+        }
+        .fx-look-params {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .fx-look-params label { color: #888; font-size: 11px; }
+        .fx-look-params input[type="range"] { width: 90px; }
+        .fx-look-params input[type="color"] {
+            width: 28px;
+            height: 22px;
+            padding: 0;
+            border: 1px solid #444;
+            border-radius: 3px;
+            background: #2a2a2a;
+        }
+        .fx-look-params .fx-val {
+            color: #888;
+            font-size: 11px;
+            min-width: 30px;
+        }
 
         /* Duration row */
         .duration-row {
@@ -1097,11 +1168,11 @@
                 <button class="type-btn dir-btn" data-dir="up" onclick="setTransitionDir('up')">&#8593;</button>
                 <button class="type-btn dir-btn" data-dir="down" onclick="setTransitionDir('down')">&#8595;</button>
             </div>
-            <div class="type-row dir-row hidden" id="wipeRow" title="Wipe shape">
-                <button class="type-btn wipe-btn active" data-wipe="wipe_left" onclick="setWipeShape('wipe_left')">&#8592;</button>
-                <button class="type-btn wipe-btn" data-wipe="wipe_right" onclick="setWipeShape('wipe_right')">&#8594;</button>
-                <button class="type-btn wipe-btn" data-wipe="wipe_up" onclick="setWipeShape('wipe_up')">&#8593;</button>
-                <button class="type-btn wipe-btn" data-wipe="wipe_down" onclick="setWipeShape('wipe_down')">&#8595;</button>
+            <div class="wipe-grid hidden" id="wipeRow" title="Wipe shape">
+                <button class="type-btn wipe-btn dir-btn active" data-wipe="wipe_left" onclick="setWipeShape('wipe_left')">&#8592;</button>
+                <button class="type-btn wipe-btn dir-btn" data-wipe="wipe_right" onclick="setWipeShape('wipe_right')">&#8594;</button>
+                <button class="type-btn wipe-btn dir-btn" data-wipe="wipe_up" onclick="setWipeShape('wipe_up')">&#8593;</button>
+                <button class="type-btn wipe-btn dir-btn" data-wipe="wipe_down" onclick="setWipeShape('wipe_down')">&#8595;</button>
                 <button class="type-btn wipe-btn" data-wipe="clock_wipe" onclick="setWipeShape('clock_wipe')" title="Radial clock sweep">CLOCK</button>
                 <button class="type-btn wipe-btn" data-wipe="iris_open" onclick="setWipeShape('iris_open')" title="Circle grows from center">IRIS+</button>
                 <button class="type-btn wipe-btn" data-wipe="iris_close" onclick="setWipeShape('iris_close')" title="Reveals outside-in">IRIS&#8722;</button>
@@ -1111,7 +1182,7 @@
                 <button class="type-btn wipe-btn" data-wipe="luma_wipe" onclick="setWipeShape('luma_wipe')" title="Dark areas reveal first">LUMA</button>
                 <button class="type-btn wipe-btn" data-wipe="ripple" onclick="setWipeShape('ripple')" title="Expanding wave">RIPPLE</button>
             </div>
-            <div class="type-row dir-row hidden" id="fxRow" title="Master FX take">
+            <div class="fx-grid hidden" id="fxRow" title="Master FX take">
                 <button class="type-btn fxk-btn active" data-fx="glitch_cut" onclick="setFxKind('glitch_cut')" title="Digital glitch hides a hard cut">GLITCH</button>
                 <button class="type-btn fxk-btn" data-fx="flash_dissolve" onclick="setFxKind('flash_dissolve')" title="White flash over a crossfade">FLASH</button>
                 <button class="type-btn fxk-btn" data-fx="whip_pan_left" onclick="setFxKind('whip_pan_left')" title="Camera whip with motion blur">WHIP&#8592;</button>
@@ -1140,7 +1211,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.28-review-fixes | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.29-shader-fx-ui | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1556,35 +1627,35 @@
             const key = fxTargetKey(target);
             const def = FX_CATALOG.find(c => c.type === e.type) || FX_CATALOG[0];
             const tj = JSON.stringify(target).replace(/"/g, '&quot;');
-            let html = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:3px 0;">';
-            html += '<span style="min-width:90px;color:#aaa;">' + label + '</span>';
+            let html = '<div class="fx-look-row">';
+            html += '<span class="fx-look-label" title="' + label + '">' + label + '</span>';
             html += '<select onchange="onFxTypeChange(JSON.parse(this.dataset.t), this.value)" data-t="' + tj + '">';
             FX_CATALOG.forEach(c => {
                 html += '<option value="' + c.type + '"' + (c.type === e.type ? ' selected' : '') + '>' + c.label + '</option>';
             });
             html += '</select>';
+            html += '<div class="fx-look-params">';
             def.params.forEach(pr => {
                 const v = (e[pr.k] != null) ? e[pr.k] : pr.d;
-                html += '<label style="color:#888;font-size:11px;">' + pr.label + '</label>';
+                html += '<label>' + pr.label + '</label>';
                 if (pr.t === 'color') {
                     html += '<input type="color" value="' + v + '" data-t="' + tj + '"'
                         + ' oninput="onFxParamInput(JSON.parse(this.dataset.t), \'' + pr.k + '\', this.value, false)">';
                 } else {
                     html += '<input type="range" min="' + pr.min + '" max="' + pr.max + '" step="' + pr.step + '" value="' + v + '" data-t="' + tj + '"'
-                        + ' style="width:90px;"'
                         + ' oninput="onFxParamInput(JSON.parse(this.dataset.t), \'' + pr.k + '\', this.value, true)">';
-                    html += '<span id="fxval_' + key + '_' + pr.k + '" style="color:#888;font-size:11px;min-width:28px;">' + v + '</span>';
+                    html += '<span class="fx-val" id="fxval_' + key + '_' + pr.k + '">' + v + '</span>';
                 }
             });
-            html += '</div>';
+            html += '</div></div>';
             return html;
         }
 
         function buildFxPanel() {
             const panel = document.getElementById('fxPanel');
             if (!FX_AVAILABLE || !fxPanelOpen) { panel.style.display = 'none'; return; }
-            let html = '<div style="font-weight:bold;color:#ccc;margin-bottom:4px;">Shader Looks'
-                + ' <span style="font-weight:normal;color:#777;font-size:11px;">'
+            let html = '<div class="fx-looks-title">Shader Looks'
+                + ' <span class="fx-looks-hint">'
                 + 'Source looks follow the source everywhere; the master look sits on PGM '
                 + '(replaced by FX takes).</span></div>';
             html += fxRowHtml('master', 'PGM MASTER');
@@ -3488,7 +3559,6 @@
 
         // ---- Init ----
         window.onload = () => {
-            console.log('vision-mixer page version 2 (shader FX engine)');
             document.title = 'Vision Mixer | Strom | ' + location.host;
             buildBuses();
             updateButtons();
