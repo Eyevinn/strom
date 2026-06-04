@@ -11064,6 +11064,126 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "CRT monitor: barrel distortion, scanlines, RGB grille.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Overall intensity (0..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "crt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Newspaper-print halftone dots.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "dot_size": {
+                "type": "number",
+                "format": "float",
+                "description": "Dot grid size in pixels (3..40)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "halftone"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Thermal-camera false color over luma.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Blend between original (0) and thermal (1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "thermal"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Night-vision scope: green phosphor, lifted shadows, grain, vignette.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Blend between original (0) and night vision (1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "night_vision"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Color quantization into bands (screen-print / toon).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "levels": {
+                "type": "number",
+                "format": "float",
+                "description": "Number of levels per channel (2..16)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "posterize"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Underwater: wavy refraction, blue-green grade, caustic shimmer.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Overall intensity (0..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "underwater"
+                ]
+              }
+            }
           }
         ],
         "description": "A persistent video effect (\"look\") applied to a vision mixer input or to\nthe PGM master output.\n\nJSON encoding is internally tagged on `type`:\n`{\"type\": \"pixelate\", \"block_size\": 24.0}`.\n\nAll numeric parameters are clamped server-side (see [`VideoEffect::sanitized`]);\ncolors are `#RRGGBB` hex strings."

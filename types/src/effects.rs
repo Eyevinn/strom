@@ -92,6 +92,42 @@ pub enum VideoEffect {
         #[serde(default = "default_half")]
         intensity: f32,
     },
+    /// CRT monitor: barrel distortion, scanlines, RGB grille.
+    Crt {
+        /// Overall intensity (0..1).
+        #[serde(default = "default_half")]
+        intensity: f32,
+    },
+    /// Newspaper-print halftone dots.
+    Halftone {
+        /// Dot grid size in pixels (3..40).
+        #[serde(default = "default_dot_size")]
+        dot_size: f32,
+    },
+    /// Thermal-camera false color over luma.
+    Thermal {
+        /// Blend between original (0) and thermal (1).
+        #[serde(default = "default_one")]
+        intensity: f32,
+    },
+    /// Night-vision scope: green phosphor, lifted shadows, grain, vignette.
+    NightVision {
+        /// Blend between original (0) and night vision (1).
+        #[serde(default = "default_one")]
+        intensity: f32,
+    },
+    /// Color quantization into bands (screen-print / toon).
+    Posterize {
+        /// Number of levels per channel (2..16).
+        #[serde(default = "default_levels")]
+        levels: f32,
+    },
+    /// Underwater: wavy refraction, blue-green grade, caustic shimmer.
+    Underwater {
+        /// Overall intensity (0..1).
+        #[serde(default = "default_half")]
+        intensity: f32,
+    },
 }
 
 fn default_key_color() -> String {
@@ -133,6 +169,12 @@ fn default_vignette_softness() -> f32 {
 fn default_glow_color() -> String {
     "#00FFD0".to_string()
 }
+fn default_dot_size() -> f32 {
+    8.0
+}
+fn default_levels() -> f32 {
+    5.0
+}
 
 /// Parse `#RRGGBB` (case-insensitive) into RGB components in `0.0..=1.0`.
 pub fn parse_hex_rgb(color: &str) -> Option<(f32, f32, f32)> {
@@ -170,6 +212,12 @@ impl VideoEffect {
             VideoEffect::Vhs { .. } => "vhs",
             VideoEffect::OldFilm { .. } => "old_film",
             VideoEffect::EdgeGlow { .. } => "edge_glow",
+            VideoEffect::Crt { .. } => "crt",
+            VideoEffect::Halftone { .. } => "halftone",
+            VideoEffect::Thermal { .. } => "thermal",
+            VideoEffect::NightVision { .. } => "night_vision",
+            VideoEffect::Posterize { .. } => "posterize",
+            VideoEffect::Underwater { .. } => "underwater",
         }
     }
 
@@ -217,6 +265,24 @@ impl VideoEffect {
             },
             VideoEffect::EdgeGlow { color, intensity } => VideoEffect::EdgeGlow {
                 color: check_color("color", color)?,
+                intensity: clamp(*intensity, 0.0, 1.0),
+            },
+            VideoEffect::Crt { intensity } => VideoEffect::Crt {
+                intensity: clamp(*intensity, 0.0, 1.0),
+            },
+            VideoEffect::Halftone { dot_size } => VideoEffect::Halftone {
+                dot_size: clamp(*dot_size, 3.0, 40.0),
+            },
+            VideoEffect::Thermal { intensity } => VideoEffect::Thermal {
+                intensity: clamp(*intensity, 0.0, 1.0),
+            },
+            VideoEffect::NightVision { intensity } => VideoEffect::NightVision {
+                intensity: clamp(*intensity, 0.0, 1.0),
+            },
+            VideoEffect::Posterize { levels } => VideoEffect::Posterize {
+                levels: clamp(*levels, 2.0, 16.0),
+            },
+            VideoEffect::Underwater { intensity } => VideoEffect::Underwater {
                 intensity: clamp(*intensity, 0.0, 1.0),
             },
         })

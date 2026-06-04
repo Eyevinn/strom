@@ -117,6 +117,12 @@ const LOOK_VIGNETTE: &str = include_str!("glsl/look_vignette.glsl");
 const LOOK_VHS: &str = include_str!("glsl/look_vhs.glsl");
 const LOOK_OLD_FILM: &str = include_str!("glsl/look_old_film.glsl");
 const LOOK_EDGE_GLOW: &str = include_str!("glsl/look_edge_glow.glsl");
+const LOOK_CRT: &str = include_str!("glsl/look_crt.glsl");
+const LOOK_HALFTONE: &str = include_str!("glsl/look_halftone.glsl");
+const LOOK_THERMAL: &str = include_str!("glsl/look_thermal.glsl");
+const LOOK_NIGHT_VISION: &str = include_str!("glsl/look_night_vision.glsl");
+const LOOK_POSTERIZE: &str = include_str!("glsl/look_posterize.glsl");
+const LOOK_UNDERWATER: &str = include_str!("glsl/look_underwater.glsl");
 
 const WIPE_LINEAR: &str = include_str!("glsl/wipe_linear.glsl");
 const WIPE_CLOCK: &str = include_str!("glsl/wipe_clock.glsl");
@@ -125,14 +131,25 @@ const WIPE_BLINDS: &str = include_str!("glsl/wipe_blinds.glsl");
 const WIPE_CHECKER: &str = include_str!("glsl/wipe_checker.glsl");
 const WIPE_NOISE: &str = include_str!("glsl/wipe_noise.glsl");
 const WIPE_LUMA: &str = include_str!("glsl/wipe_luma.glsl");
-const WIPE_RIPPLE: &str = include_str!("glsl/wipe_ripple.glsl");
+const WIPE_MELT: &str = include_str!("glsl/wipe_melt.glsl");
+const WIPE_BARN_DOORS: &str = include_str!("glsl/wipe_barn_doors.glsl");
+const WIPE_HEART: &str = include_str!("glsl/wipe_heart.glsl");
+const WIPE_STAR: &str = include_str!("glsl/wipe_star.glsl");
+const WIPE_PINWHEEL: &str = include_str!("glsl/wipe_pinwheel.glsl");
+const WIPE_CROSSHATCH: &str = include_str!("glsl/wipe_crosshatch.glsl");
+const WIPE_HEX: &str = include_str!("glsl/wipe_hex.glsl");
+const WIPE_WARP: &str = include_str!("glsl/wipe_warp.glsl");
 
 const MASTER_GLITCH: &str = include_str!("glsl/master_glitch.glsl");
 const MASTER_FLASH: &str = include_str!("glsl/master_flash.glsl");
 const MASTER_WHIP: &str = include_str!("glsl/master_whip.glsl");
 const MASTER_PUNCH: &str = include_str!("glsl/master_punch.glsl");
 const MASTER_PIXELATE: &str = include_str!("glsl/master_pixelate.glsl");
-const MASTER_BURN: &str = include_str!("glsl/master_burn.glsl");
+const MASTER_ZOOM_BLUR: &str = include_str!("glsl/master_zoom_blur.glsl");
+const MASTER_SPIN: &str = include_str!("glsl/master_spin.glsl");
+const MASTER_ROLL: &str = include_str!("glsl/master_roll.glsl");
+const MASTER_NEGATIVE: &str = include_str!("glsl/master_negative.glsl");
+const MASTER_RIPPLE: &str = include_str!("glsl/master_ripple.glsl");
 
 /// Default soft-edge width for wipes, in normalized ordering units.
 const DEFAULT_WIPE_SOFTNESS: f32 = 0.05;
@@ -304,6 +321,30 @@ pub fn effect_shader(effect: &VideoEffect) -> (String, gst::Structure) {
                 ]),
             )
         }
+        VideoEffect::Crt { intensity } => (
+            compose_look(LOOK_CRT),
+            uniforms(&[("u_intensity", *intensity)]),
+        ),
+        VideoEffect::Halftone { dot_size } => (
+            compose_look(LOOK_HALFTONE),
+            uniforms(&[("u_dot", *dot_size)]),
+        ),
+        VideoEffect::Thermal { intensity } => (
+            compose_look(LOOK_THERMAL),
+            uniforms(&[("u_intensity", *intensity)]),
+        ),
+        VideoEffect::NightVision { intensity } => (
+            compose_look(LOOK_NIGHT_VISION),
+            uniforms(&[("u_intensity", *intensity)]),
+        ),
+        VideoEffect::Posterize { levels } => (
+            compose_look(LOOK_POSTERIZE),
+            uniforms(&[("u_levels", *levels)]),
+        ),
+        VideoEffect::Underwater { intensity } => (
+            compose_look(LOOK_UNDERWATER),
+            uniforms(&[("u_intensity", *intensity)]),
+        ),
     }
 }
 
@@ -321,7 +362,14 @@ pub enum WipeKind {
     Checker,
     Noise,
     Luma,
-    Ripple,
+    Melt,
+    BarnDoors,
+    Heart,
+    Star,
+    Pinwheel,
+    Crosshatch,
+    Hex,
+    Warp,
 }
 
 impl WipeKind {
@@ -338,7 +386,14 @@ impl WipeKind {
             WipeKind::Checker => "checker_wipe",
             WipeKind::Noise => "noise_dissolve",
             WipeKind::Luma => "luma_wipe",
-            WipeKind::Ripple => "ripple",
+            WipeKind::Melt => "melt",
+            WipeKind::BarnDoors => "barn_doors",
+            WipeKind::Heart => "heart_iris",
+            WipeKind::Star => "star_wipe",
+            WipeKind::Pinwheel => "pinwheel",
+            WipeKind::Crosshatch => "crosshatch",
+            WipeKind::Hex => "hex_dissolve",
+            WipeKind::Warp => "warp_wipe",
         }
     }
 
@@ -354,7 +409,14 @@ impl WipeKind {
             WipeKind::Checker => compose_wipe(WIPE_CHECKER, false),
             WipeKind::Noise => compose_wipe(WIPE_NOISE, false),
             WipeKind::Luma => compose_wipe(WIPE_LUMA, false),
-            WipeKind::Ripple => compose_wipe(WIPE_RIPPLE, true),
+            WipeKind::Melt => compose_wipe(WIPE_MELT, true),
+            WipeKind::BarnDoors => compose_wipe(WIPE_BARN_DOORS, false),
+            WipeKind::Heart => compose_wipe(WIPE_HEART, false),
+            WipeKind::Star => compose_wipe(WIPE_STAR, false),
+            WipeKind::Pinwheel => compose_wipe(WIPE_PINWHEEL, false),
+            WipeKind::Crosshatch => compose_wipe(WIPE_CROSSHATCH, false),
+            WipeKind::Hex => compose_wipe(WIPE_HEX, false),
+            WipeKind::Warp => compose_wipe(WIPE_WARP, true),
         }
     }
 
@@ -406,10 +468,17 @@ impl WipeKind {
             WipeKind::IrisOpen => pairs.push(("u_iris_close", 0.0)),
             WipeKind::IrisClose => pairs.push(("u_iris_close", 1.0)),
             WipeKind::Blinds => pairs.push(("u_count", 12.0)),
-            WipeKind::Checker => pairs.extend([("u_cols", 10.0f32), ("u_rows", 6.0f32)]),
-            WipeKind::Noise => pairs.push(("u_cell", 3.0)),
+            WipeKind::Checker => pairs.extend([("u_cols", 20.0f32), ("u_rows", 11.0f32)]),
+            WipeKind::Noise => pairs.push(("u_cell", 90.0)),
             WipeKind::Luma => {}
-            WipeKind::Ripple => {}
+            WipeKind::Melt => {}
+            WipeKind::BarnDoors => {}
+            WipeKind::Heart => {}
+            WipeKind::Star => {}
+            WipeKind::Pinwheel => pairs.push(("u_blades", 6.0)),
+            WipeKind::Crosshatch => {}
+            WipeKind::Hex => pairs.push(("u_cell_px", 48.0)),
+            WipeKind::Warp => pairs.extend([("u_dx", -1.0f32), ("u_dy", 0.0f32)]),
         }
         uniforms(&pairs)
     }
@@ -436,7 +505,11 @@ pub enum MasterFxKind {
     WhipRight,
     Punch,
     Pixelate,
-    Burn,
+    ZoomBlur,
+    Spin,
+    Roll,
+    Negative,
+    Ripple,
 }
 
 impl MasterFxKind {
@@ -448,7 +521,11 @@ impl MasterFxKind {
             MasterFxKind::WhipRight => "whip_pan_right",
             MasterFxKind::Punch => "punch_zoom",
             MasterFxKind::Pixelate => "pixelate_take",
-            MasterFxKind::Burn => "film_burn",
+            MasterFxKind::ZoomBlur => "zoom_blur",
+            MasterFxKind::Spin => "spin",
+            MasterFxKind::Roll => "tv_roll",
+            MasterFxKind::Negative => "negative_flash",
+            MasterFxKind::Ripple => "ripple",
         }
     }
 
@@ -458,8 +535,10 @@ impl MasterFxKind {
             MasterFxKind::Glitch
             | MasterFxKind::Punch
             | MasterFxKind::Pixelate
-            | MasterFxKind::Burn => MasterBase::DelayedCut,
-            MasterFxKind::Flash => MasterBase::Fade,
+            | MasterFxKind::ZoomBlur
+            | MasterFxKind::Spin
+            | MasterFxKind::Roll => MasterBase::DelayedCut,
+            MasterFxKind::Flash | MasterFxKind::Negative | MasterFxKind::Ripple => MasterBase::Fade,
             MasterFxKind::WhipLeft => MasterBase::Push(-1, 0),
             MasterFxKind::WhipRight => MasterBase::Push(1, 0),
         }
@@ -473,7 +552,11 @@ impl MasterFxKind {
             MasterFxKind::WhipLeft | MasterFxKind::WhipRight => compose_master(MASTER_WHIP),
             MasterFxKind::Punch => compose_master(MASTER_PUNCH),
             MasterFxKind::Pixelate => compose_master(MASTER_PIXELATE),
-            MasterFxKind::Burn => compose_master(MASTER_BURN),
+            MasterFxKind::ZoomBlur => compose_master(MASTER_ZOOM_BLUR),
+            MasterFxKind::Spin => compose_master(MASTER_SPIN),
+            MasterFxKind::Roll => compose_master(MASTER_ROLL),
+            MasterFxKind::Negative => compose_master(MASTER_NEGATIVE),
+            MasterFxKind::Ripple => compose_master(MASTER_RIPPLE),
         }
     }
 
@@ -497,8 +580,12 @@ impl MasterFxKind {
                 ("u_intensity", 1.0f32),
             ]),
             MasterFxKind::Punch => pairs.push(("u_intensity", 1.0)),
-            MasterFxKind::Pixelate => pairs.push(("u_max_block", 64.0)),
-            MasterFxKind::Burn => pairs.push(("u_intensity", 1.0)),
+            MasterFxKind::Pixelate => pairs.push(("u_max_block", 160.0)),
+            MasterFxKind::ZoomBlur => pairs.push(("u_intensity", 1.0)),
+            MasterFxKind::Spin => pairs.push(("u_intensity", 1.0)),
+            MasterFxKind::Roll => pairs.push(("u_intensity", 1.0)),
+            MasterFxKind::Negative => pairs.push(("u_intensity", 1.0)),
+            MasterFxKind::Ripple => pairs.push(("u_intensity", 1.0)),
         }
         uniforms(&pairs)
     }
@@ -534,6 +621,12 @@ pub fn all_fragments() -> Vec<(String, String)> {
             color: "#00FFD0".into(),
             intensity: 0.5,
         },
+        VideoEffect::Crt { intensity: 0.5 },
+        VideoEffect::Halftone { dot_size: 8.0 },
+        VideoEffect::Thermal { intensity: 1.0 },
+        VideoEffect::NightVision { intensity: 1.0 },
+        VideoEffect::Posterize { levels: 5.0 },
+        VideoEffect::Underwater { intensity: 0.5 },
     ];
     for e in &looks {
         v.push((format!("look_{}", e.kind()), effect_shader(e).0));
@@ -546,7 +639,14 @@ pub fn all_fragments() -> Vec<(String, String)> {
         WipeKind::Checker,
         WipeKind::Noise,
         WipeKind::Luma,
-        WipeKind::Ripple,
+        WipeKind::Melt,
+        WipeKind::BarnDoors,
+        WipeKind::Heart,
+        WipeKind::Star,
+        WipeKind::Pinwheel,
+        WipeKind::Crosshatch,
+        WipeKind::Hex,
+        WipeKind::Warp,
     ] {
         v.push((k.name().to_string(), k.fragment()));
     }
@@ -556,7 +656,11 @@ pub fn all_fragments() -> Vec<(String, String)> {
         MasterFxKind::WhipLeft,
         MasterFxKind::Punch,
         MasterFxKind::Pixelate,
-        MasterFxKind::Burn,
+        MasterFxKind::ZoomBlur,
+        MasterFxKind::Spin,
+        MasterFxKind::Roll,
+        MasterFxKind::Negative,
+        MasterFxKind::Ripple,
     ] {
         v.push((k.name().to_string(), k.fragment()));
     }

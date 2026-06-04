@@ -1179,8 +1179,15 @@
                 <button class="type-btn wipe-btn" data-wipe="blinds" onclick="setWipeShape('blinds')">BLINDS</button>
                 <button class="type-btn wipe-btn" data-wipe="checker_wipe" onclick="setWipeShape('checker_wipe')">CHECK</button>
                 <button class="type-btn wipe-btn" data-wipe="noise_dissolve" onclick="setWipeShape('noise_dissolve')" title="Granular film dissolve">NOISE</button>
-                <button class="type-btn wipe-btn" data-wipe="luma_wipe" onclick="setWipeShape('luma_wipe')" title="Dark areas reveal first">LUMA</button>
-                <button class="type-btn wipe-btn" data-wipe="ripple" onclick="setWipeShape('ripple')" title="Expanding wave">RIPPLE</button>
+                <button class="type-btn wipe-btn" data-wipe="luma_wipe" onclick="setWipeShape('luma_wipe')" title="Dark areas hand over first">LUMA</button>
+                <button class="type-btn wipe-btn" data-wipe="melt" onclick="setWipeShape('melt')" title="Doom-style melt — the picture drips away in columns">MELT</button>
+                <button class="type-btn wipe-btn" data-wipe="barn_doors" onclick="setWipeShape('barn_doors')" title="Opens from a center seam outward">BARN</button>
+                <button class="type-btn wipe-btn" data-wipe="heart_iris" onclick="setWipeShape('heart_iris')" title="Heart grows from the center">HEART</button>
+                <button class="type-btn wipe-btn" data-wipe="star_wipe" onclick="setWipeShape('star_wipe')" title="Five-point star grows from the center">STAR</button>
+                <button class="type-btn wipe-btn" data-wipe="pinwheel" onclick="setWipeShape('pinwheel')" title="Radial blades sweep around the center">PINWHL</button>
+                <button class="type-btn wipe-btn" data-wipe="crosshatch" onclick="setWipeShape('crosshatch')" title="Ink-sketch hatch dissolve">HATCH</button>
+                <button class="type-btn wipe-btn" data-wipe="hex_dissolve" onclick="setWipeShape('hex_dissolve')" title="Chunky hexagon cells">HEX</button>
+                <button class="type-btn wipe-btn" data-wipe="warp_wipe" onclick="setWipeShape('warp_wipe')" title="Directional wipe with smear">WARP</button>
             </div>
             <div class="fx-grid hidden" id="fxRow" title="Master FX take">
                 <button class="type-btn fxk-btn active" data-fx="glitch_cut" onclick="setFxKind('glitch_cut')" title="Digital glitch hides a hard cut">GLITCH</button>
@@ -1188,8 +1195,12 @@
                 <button class="type-btn fxk-btn" data-fx="whip_pan_left" onclick="setFxKind('whip_pan_left')" title="Camera whip with motion blur">WHIP&#8592;</button>
                 <button class="type-btn fxk-btn" data-fx="whip_pan_right" onclick="setFxKind('whip_pan_right')" title="Camera whip with motion blur">WHIP&#8594;</button>
                 <button class="type-btn fxk-btn" data-fx="punch_zoom" onclick="setFxKind('punch_zoom')" title="Zoom kick with shake">PUNCH</button>
-                <button class="type-btn fxk-btn" data-fx="pixelate_take" onclick="setFxKind('pixelate_take')" title="Dissolve into blocks and back">PIXEL</button>
-                <button class="type-btn fxk-btn" data-fx="film_burn" onclick="setFxKind('film_burn')" title="Frame burns through orange-white">BURN</button>
+                <button class="type-btn fxk-btn" data-fx="pixelate_take" onclick="setFxKind('pixelate_take')" title="Dissolve into coarse blocks and back">PIXEL</button>
+                <button class="type-btn fxk-btn" data-fx="zoom_blur" onclick="setFxKind('zoom_blur')" title="Radial streak blur through the cut">ZOOM</button>
+                <button class="type-btn fxk-btn" data-fx="spin" onclick="setFxKind('spin')" title="Frame twists through the cut">SPIN</button>
+                <button class="type-btn fxk-btn" data-fx="tv_roll" onclick="setFxKind('tv_roll')" title="TV sync-loss vertical roll">ROLL</button>
+                <button class="type-btn fxk-btn" data-fx="negative_flash" onclick="setFxKind('negative_flash')" title="Frame inverts through the crossfade">NEG</button>
+                <button class="type-btn fxk-btn" data-fx="ripple" onclick="setFxKind('ripple')" title="Water ring ripples both pictures through a crossfade">RIPPLE</button>
             </div>
             <div class="duration-row">
                 <label>Duration:</label>
@@ -1211,7 +1222,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.29-shader-fx-ui | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.30-fx-catalog | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1567,6 +1578,24 @@
             ]},
             { type: 'edge_glow', label: 'Edge Glow', params: [
                 { k: 'color', label: 'Color', t: 'color', d: '#00FFD0' },
+                { k: 'intensity', label: 'Intensity', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
+            ]},
+            { type: 'crt', label: 'CRT', params: [
+                { k: 'intensity', label: 'Intensity', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
+            ]},
+            { type: 'halftone', label: 'Halftone', params: [
+                { k: 'dot_size', label: 'Dot', t: 'range', min: 3, max: 40, step: 1, d: 8 },
+            ]},
+            { type: 'thermal', label: 'Thermal', params: [
+                { k: 'intensity', label: 'Intensity', t: 'range', min: 0, max: 1, step: 0.01, d: 1 },
+            ]},
+            { type: 'night_vision', label: 'Night Vision', params: [
+                { k: 'intensity', label: 'Intensity', t: 'range', min: 0, max: 1, step: 0.01, d: 1 },
+            ]},
+            { type: 'posterize', label: 'Posterize', params: [
+                { k: 'levels', label: 'Levels', t: 'range', min: 2, max: 16, step: 1, d: 5 },
+            ]},
+            { type: 'underwater', label: 'Underwater', params: [
                 { k: 'intensity', label: 'Intensity', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
             ]},
         ];

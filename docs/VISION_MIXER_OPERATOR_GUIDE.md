@@ -126,13 +126,23 @@ A PiP can be put on PVW *or* on PGM, just like any other source.
 | `checker_wipe` | Checkerboard cells flip in pseudo-random order. |
 | `noise_dissolve` | Granular film-style dissolve. |
 | `luma_wipe` | The outgoing picture hands over darkest-areas-first. |
-| `ripple` | Expanding circular wave with decaying distortion. |
+| `melt` | Doom-style melt — the picture drips away in columns. |
+| `barn_doors` | Opens from a center seam outward. |
+| `heart_iris` / `star_wipe` | A heart / five-point star grows from the center. |
+| `pinwheel` | Radial blades sweep around the center. |
+| `crosshatch` | Ink-sketch hatch dissolve. |
+| `hex_dissolve` | Chunky hexagon cells change over in random order. |
+| `warp_wipe` | Directional wipe with a smeared edge. |
 | `glitch_cut` | Digital glitch burst (RGB split, tearing) hiding a hard cut at its peak. |
 | `flash_dissolve` | White flash riding on a crossfade. |
 | `whip_pan_left/right` | Push with heavy directional motion blur — reads as a camera whip. |
 | `punch_zoom` | Zoom kick with camera shake around the cut. |
-| `pixelate_take` | The frame dissolves into blocks across the cut and resolves back. |
-| `film_burn` | The frame burns through hot orange-white at the cut. |
+| `pixelate_take` | The frame dissolves into coarse blocks across the cut and resolves back. |
+| `zoom_blur` | Radial streak blur through the cut. |
+| `spin` | The frame twists through the cut. |
+| `tv_roll` | TV sync-loss vertical roll through the cut. |
+| `negative_flash` | The frame inverts through a crossfade. |
+| `ripple` | A water ring distorts the whole program through a crossfade. |
 
 **Duration**: 0 – 60 000 ms. **Default 300 ms.**
 
@@ -173,7 +183,8 @@ With the GPU backend and the **Shader FX** block property enabled
   them with the WIPE / FX buttons on the operator page.
 - **Looks** — persistent per-source effects applied wherever the source
   appears (PGM, PVW, thumbnails, PiPs): chroma key, pixelate, blur,
-  duotone, vignette, VHS, old film, edge glow. A look can also sit on the
+  duotone, vignette, VHS, old film, edge glow, CRT, halftone, thermal,
+  night vision, posterize, underwater. A look can also sit on the
   **PGM master** output. Open with the LOOKS button.
 
 Looks are runtime state (like DSK toggles): they reset when the flow
