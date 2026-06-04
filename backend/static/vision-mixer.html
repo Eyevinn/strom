@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Vision Mixer - Strom</title>
+    <!-- page version: 2 (shader FX engine) — bump on every edit; verify in browser console -->
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body {
@@ -1071,24 +1072,53 @@
         <!-- PiP composition panel (populated when num_pips > 0) -->
         <div class="pip-config-panel" id="pipConfigPanel" style="display:none;"></div>
 
+        <!-- Shader FX (looks) panel (populated when the FX engine is available) -->
+        <div class="pip-config-panel" id="fxPanel" style="display:none;"></div>
+
         <!-- Transition controls -->
         <div class="transition-panel">
             <div class="transition-buttons">
                 <button class="take-btn cut" onclick="doCut()" title="Cut (X)">CUT</button>
                 <button class="take-btn auto" id="autoBtn" onclick="doAuto()" title="Auto transition (Space)">AUTO</button>
                 <button class="take-btn auto" id="ftbBtn" onclick="doFtb()" title="Fade to Black (F)">FTB</button>
+                <button class="take-btn auto fx-only" id="fxLooksBtn" onclick="toggleFxPanel()" title="Shader looks: chroma key, blur, VHS, ... (GPU FX engine)">LOOKS</button>
             </div>
             <div class="type-row">
                 <button class="type-btn active" data-type="fade" onclick="setTransitionType('fade')">MIX</button>
                 <button class="type-btn" data-type="dip_to_black" onclick="setTransitionType('dip_to_black')">DIP</button>
                 <button class="type-btn" data-type="push" onclick="setTransitionType('push')" title="Push — both pictures move together">PUSH</button>
                 <button class="type-btn" data-type="slide" onclick="setTransitionType('slide')" title="Slide — new picture slides in over the old">SLIDE</button>
+                <button class="type-btn fx-only" data-type="wipe" onclick="setTransitionType('wipe')" title="Shader wipe (GPU FX engine)">WIPE</button>
+                <button class="type-btn fx-only" data-type="fx" onclick="setTransitionType('fx')" title="Master FX take (GPU FX engine)">FX</button>
             </div>
             <div class="type-row dir-row hidden" id="dirRow" title="Direction of motion">
                 <button class="type-btn dir-btn active" data-dir="left" onclick="setTransitionDir('left')">&#8592;</button>
                 <button class="type-btn dir-btn" data-dir="right" onclick="setTransitionDir('right')">&#8594;</button>
                 <button class="type-btn dir-btn" data-dir="up" onclick="setTransitionDir('up')">&#8593;</button>
                 <button class="type-btn dir-btn" data-dir="down" onclick="setTransitionDir('down')">&#8595;</button>
+            </div>
+            <div class="type-row dir-row hidden" id="wipeRow" title="Wipe shape">
+                <button class="type-btn wipe-btn active" data-wipe="wipe_left" onclick="setWipeShape('wipe_left')">&#8592;</button>
+                <button class="type-btn wipe-btn" data-wipe="wipe_right" onclick="setWipeShape('wipe_right')">&#8594;</button>
+                <button class="type-btn wipe-btn" data-wipe="wipe_up" onclick="setWipeShape('wipe_up')">&#8593;</button>
+                <button class="type-btn wipe-btn" data-wipe="wipe_down" onclick="setWipeShape('wipe_down')">&#8595;</button>
+                <button class="type-btn wipe-btn" data-wipe="clock_wipe" onclick="setWipeShape('clock_wipe')" title="Radial clock sweep">CLOCK</button>
+                <button class="type-btn wipe-btn" data-wipe="iris_open" onclick="setWipeShape('iris_open')" title="Circle grows from center">IRIS+</button>
+                <button class="type-btn wipe-btn" data-wipe="iris_close" onclick="setWipeShape('iris_close')" title="Reveals outside-in">IRIS&#8722;</button>
+                <button class="type-btn wipe-btn" data-wipe="blinds" onclick="setWipeShape('blinds')">BLINDS</button>
+                <button class="type-btn wipe-btn" data-wipe="checker_wipe" onclick="setWipeShape('checker_wipe')">CHECK</button>
+                <button class="type-btn wipe-btn" data-wipe="noise_dissolve" onclick="setWipeShape('noise_dissolve')" title="Granular film dissolve">NOISE</button>
+                <button class="type-btn wipe-btn" data-wipe="luma_wipe" onclick="setWipeShape('luma_wipe')" title="Dark areas reveal first">LUMA</button>
+                <button class="type-btn wipe-btn" data-wipe="ripple" onclick="setWipeShape('ripple')" title="Expanding wave">RIPPLE</button>
+            </div>
+            <div class="type-row dir-row hidden" id="fxRow" title="Master FX take">
+                <button class="type-btn fxk-btn active" data-fx="glitch_cut" onclick="setFxKind('glitch_cut')" title="Digital glitch hides a hard cut">GLITCH</button>
+                <button class="type-btn fxk-btn" data-fx="flash_dissolve" onclick="setFxKind('flash_dissolve')" title="White flash over a crossfade">FLASH</button>
+                <button class="type-btn fxk-btn" data-fx="whip_pan_left" onclick="setFxKind('whip_pan_left')" title="Camera whip with motion blur">WHIP&#8592;</button>
+                <button class="type-btn fxk-btn" data-fx="whip_pan_right" onclick="setFxKind('whip_pan_right')" title="Camera whip with motion blur">WHIP&#8594;</button>
+                <button class="type-btn fxk-btn" data-fx="punch_zoom" onclick="setFxKind('punch_zoom')" title="Zoom kick with shake">PUNCH</button>
+                <button class="type-btn fxk-btn" data-fx="pixelate_take" onclick="setFxKind('pixelate_take')" title="Dissolve into blocks and back">PIXEL</button>
+                <button class="type-btn fxk-btn" data-fx="film_burn" onclick="setFxKind('film_burn')" title="Frame burns through orange-white">BURN</button>
             </div>
             <div class="duration-row">
                 <label>Duration:</label>
@@ -1200,15 +1230,25 @@
         // Which PiP is currently shown on each bus (null = bus is showing an input, not a PiP).
         let currentPvwPip = (_cfg.pvw_pip != null) ? _cfg.pvw_pip : null;
         let currentPgmPip = (_cfg.pgm_pip != null) ? _cfg.pgm_pip : null;
-        // Transition selection: base type + direction (push/slide only).
+        // Transition selection: base type + direction (push/slide only),
+        // wipe shape (wipe base) or master FX kind (fx base).
         let transitionBase = 'fade';
         let transitionDir = 'left';
+        let wipeShape = 'wipe_left';
+        let fxKind = 'glitch_cut';
         let transitionDurationMs = 1000;
         function currentTransitionType() {
-            return (transitionBase === 'push' || transitionBase === 'slide')
-                ? transitionBase + '_' + transitionDir
-                : transitionBase;
+            if (transitionBase === 'push' || transitionBase === 'slide')
+                return transitionBase + '_' + transitionDir;
+            if (transitionBase === 'wipe') return wipeShape;
+            if (transitionBase === 'fx') return fxKind;
+            return transitionBase;
         }
+        // Shader FX engine availability (GPU backend with Shader FX enabled).
+        // Resolved from the /state endpoint; gates the WIPE/FX/LOOKS UI.
+        let FX_AVAILABLE = false;
+        let inputEffects = [];
+        let masterEffect = { type: 'none' };
         let transitioning = false;
         let ftbActive = _cfg.ftb_active || false;
         let overlayAlpha = _cfg.overlay_alpha != null ? _cfg.overlay_alpha : 1.0;
@@ -1421,15 +1461,195 @@
             document.getElementById('overlayAlphaValue').textContent = overlayAlpha.toFixed(2);
         }
 
+        // ---- Shader FX looks (per-source + master effects) ----
+        // Catalog mirrors strom_types::effects::VideoEffect. Param edits are
+        // throttled; the backend only swaps uniforms when the kind is
+        // unchanged, so sliders are cheap.
+        const FX_CATALOG = [
+            { type: 'none', label: 'None', params: [] },
+            { type: 'chroma_key', label: 'Chroma Key', params: [
+                { k: 'key_color', label: 'Key', t: 'color', d: '#00B140' },
+                { k: 'similarity', label: 'Similarity', t: 'range', min: 0, max: 1, step: 0.01, d: 0.35 },
+                { k: 'smoothness', label: 'Soft', t: 'range', min: 0, max: 1, step: 0.01, d: 0.1 },
+                { k: 'spill', label: 'Spill', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
+            ]},
+            { type: 'pixelate', label: 'Pixelate', params: [
+                { k: 'block_size', label: 'Block', t: 'range', min: 2, max: 200, step: 1, d: 24 },
+            ]},
+            { type: 'blur', label: 'Blur', params: [
+                { k: 'radius', label: 'Radius', t: 'range', min: 0, max: 20, step: 0.5, d: 6 },
+            ]},
+            { type: 'duotone', label: 'Duotone', params: [
+                { k: 'low', label: 'Low', t: 'color', d: '#000000' },
+                { k: 'high', label: 'High', t: 'color', d: '#FFFFFF' },
+                { k: 'mix', label: 'Mix', t: 'range', min: 0, max: 1, step: 0.01, d: 1 },
+            ]},
+            { type: 'vignette', label: 'Vignette', params: [
+                { k: 'amount', label: 'Amount', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
+                { k: 'softness', label: 'Soft', t: 'range', min: 0.01, max: 1, step: 0.01, d: 0.5 },
+            ]},
+            { type: 'vhs', label: 'VHS', params: [
+                { k: 'intensity', label: 'Intensity', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
+            ]},
+            { type: 'old_film', label: 'Old Film', params: [
+                { k: 'intensity', label: 'Intensity', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
+            ]},
+            { type: 'edge_glow', label: 'Edge Glow', params: [
+                { k: 'color', label: 'Color', t: 'color', d: '#00FFD0' },
+                { k: 'intensity', label: 'Intensity', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
+            ]},
+        ];
+        let fxPanelOpen = false;
+        const fxPostTimers = {};
+
+        function fxTargetKey(target) {
+            return target === 'master' ? 'master' : 'input' + target.input;
+        }
+
+        function postEffect(target, effect) {
+            const key = fxTargetKey(target);
+            if (fxPostTimers[key]) clearTimeout(fxPostTimers[key]);
+            fxPostTimers[key] = setTimeout(() => {
+                delete fxPostTimers[key];
+                apiPost('/effect', { target: target, effect: effect })
+                    .then(r => setStatus(r.message))
+                    .catch(e => setStatus('Effect error: ' + e.message));
+            }, 80);
+        }
+
+        function effectFor(target) {
+            return target === 'master'
+                ? masterEffect
+                : (inputEffects[target.input] || { type: 'none' });
+        }
+
+        function setEffectLocal(target, effect) {
+            if (target === 'master') masterEffect = effect;
+            else inputEffects[target.input] = effect;
+        }
+
+        function defaultEffect(type) {
+            const def = FX_CATALOG.find(c => c.type === type);
+            const e = { type: type };
+            (def ? def.params : []).forEach(pr => { e[pr.k] = pr.d; });
+            return e;
+        }
+
+        function onFxTypeChange(target, type) {
+            const e = defaultEffect(type);
+            setEffectLocal(target, e);
+            postEffect(target, e);
+            buildFxPanel();
+        }
+
+        function onFxParamInput(target, key, value, isNumber) {
+            const e = Object.assign({}, effectFor(target));
+            e[key] = isNumber ? parseFloat(value) : value;
+            setEffectLocal(target, e);
+            postEffect(target, e);
+            const span = document.getElementById('fxval_' + fxTargetKey(target) + '_' + key);
+            if (span && isNumber) span.textContent = parseFloat(value);
+        }
+
+        function fxRowHtml(target, label) {
+            const e = effectFor(target);
+            const key = fxTargetKey(target);
+            const def = FX_CATALOG.find(c => c.type === e.type) || FX_CATALOG[0];
+            const tj = JSON.stringify(target).replace(/"/g, '&quot;');
+            let html = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:3px 0;">';
+            html += '<span style="min-width:90px;color:#aaa;">' + label + '</span>';
+            html += '<select onchange="onFxTypeChange(JSON.parse(this.dataset.t), this.value)" data-t="' + tj + '">';
+            FX_CATALOG.forEach(c => {
+                html += '<option value="' + c.type + '"' + (c.type === e.type ? ' selected' : '') + '>' + c.label + '</option>';
+            });
+            html += '</select>';
+            def.params.forEach(pr => {
+                const v = (e[pr.k] != null) ? e[pr.k] : pr.d;
+                html += '<label style="color:#888;font-size:11px;">' + pr.label + '</label>';
+                if (pr.t === 'color') {
+                    html += '<input type="color" value="' + v + '" data-t="' + tj + '"'
+                        + ' oninput="onFxParamInput(JSON.parse(this.dataset.t), \'' + pr.k + '\', this.value, false)">';
+                } else {
+                    html += '<input type="range" min="' + pr.min + '" max="' + pr.max + '" step="' + pr.step + '" value="' + v + '" data-t="' + tj + '"'
+                        + ' style="width:90px;"'
+                        + ' oninput="onFxParamInput(JSON.parse(this.dataset.t), \'' + pr.k + '\', this.value, true)">';
+                    html += '<span id="fxval_' + key + '_' + pr.k + '" style="color:#888;font-size:11px;min-width:28px;">' + v + '</span>';
+                }
+            });
+            html += '</div>';
+            return html;
+        }
+
+        function buildFxPanel() {
+            const panel = document.getElementById('fxPanel');
+            if (!FX_AVAILABLE || !fxPanelOpen) { panel.style.display = 'none'; return; }
+            let html = '<div style="font-weight:bold;color:#ccc;margin-bottom:4px;">Shader Looks'
+                + ' <span style="font-weight:normal;color:#777;font-size:11px;">'
+                + 'Source looks follow the source everywhere; the master look sits on PGM '
+                + '(replaced by FX takes).</span></div>';
+            html += fxRowHtml('master', 'PGM MASTER');
+            for (let i = 0; i < NUM_INPUTS; i++) {
+                html += fxRowHtml({ input: i }, INPUT_LABELS[i] || ('Input ' + (i + 1)));
+            }
+            panel.innerHTML = html;
+            panel.style.display = '';
+        }
+
+        function toggleFxPanel() {
+            fxPanelOpen = !fxPanelOpen;
+            buildFxPanel();
+        }
+
+        // Resolve FX engine availability + current effects from /state.
+        async function fetchFxState() {
+            try {
+                const resp = await fetch(API_BASE + '/state');
+                if (!resp.ok) return;
+                const st = await resp.json();
+                FX_AVAILABLE = !!st.fx_available;
+                if (Array.isArray(st.input_effects) && st.input_effects.length) {
+                    inputEffects = st.input_effects;
+                }
+                if (st.master_effect) masterEffect = st.master_effect;
+                updateFxAvailabilityUi();
+                buildFxPanel();
+            } catch {}
+        }
+
         // ---- Transition type & duration ----
         function setTransitionType(base) {
             transitionBase = base;
             document.querySelectorAll('.type-btn[data-type]').forEach(b => {
                 b.classList.toggle('active', b.dataset.type === base);
             });
-            // Direction picker applies to push/slide only.
+            // Sub-pickers: direction (push/slide), wipe shape, master FX kind.
             document.getElementById('dirRow')
                 .classList.toggle('hidden', base !== 'push' && base !== 'slide');
+            document.getElementById('wipeRow').classList.toggle('hidden', base !== 'wipe');
+            document.getElementById('fxRow').classList.toggle('hidden', base !== 'fx');
+        }
+
+        function setWipeShape(shape) {
+            wipeShape = shape;
+            document.querySelectorAll('.wipe-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.wipe === shape);
+            });
+        }
+
+        function setFxKind(kind) {
+            fxKind = kind;
+            document.querySelectorAll('.fxk-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.fx === kind);
+            });
+        }
+
+        function updateFxAvailabilityUi() {
+            document.querySelectorAll('.fx-only').forEach(b => {
+                b.style.display = FX_AVAILABLE ? '' : 'none';
+            });
+            if (!FX_AVAILABLE && (transitionBase === 'wipe' || transitionBase === 'fx')) {
+                setTransitionType('fade');
+            }
         }
 
         function setTransitionDir(dir) {
@@ -3194,6 +3414,7 @@
                 updateFtbButton();
                 updateDskButtons();
                 updateOverlayAlphaUi();
+                fetchFxState();
                 setStatus('Reconnected - state synced');
             } catch (e) {
                 setStatus('Resync failed: ' + e.message);
@@ -3236,6 +3457,17 @@
                             updateFtbButton();
                         }
                     }
+                    if (event.type === 'VisionMixerEffectChanged' && event.data) {
+                        const d = event.data;
+                        if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
+                            if (d.target === 'master') masterEffect = d.effect;
+                            else if (d.target && d.target.input != null) inputEffects[d.target.input] = d.effect;
+                            // Don't rebuild under the operator's pointer mid-drag.
+                            if (!document.getElementById('fxPanel').contains(document.activeElement)) {
+                                buildFxPanel();
+                            }
+                        }
+                    }
                     if (event.type === 'VisionMixerOverlayAlphaChanged' && event.data) {
                         const d = event.data;
                         if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID && !overlayAlphaDragging) {
@@ -3256,12 +3488,15 @@
 
         // ---- Init ----
         window.onload = () => {
+            console.log('vision-mixer page version 2 (shader FX engine)');
             document.title = 'Vision Mixer | Strom | ' + location.host;
             buildBuses();
             updateButtons();
             initDskUi();
             buildPipConfigPanel();
             updateFtbButton();
+            updateFxAvailabilityUi();
+            fetchFxState();
             connectMultiview();
             connectWebSocket();
             if (controlsMinimized) document.body.classList.add('minimized');
