@@ -372,6 +372,17 @@ impl WipeKind {
         self.uniforms_with_invert(start_s, duration_s, false)
     }
 
+    /// Uniforms that park the wipe at p=0 (`u_start` far in the future):
+    /// fully opaque when inverted, fully hidden when upright. Used while
+    /// waiting for the branch's first buffer to latch the real `u_start` —
+    /// the branch's PTS timebase is NOT the mixer's (SRT/TS sources carry
+    /// PCR-derived timestamps that can sit seconds-to-hours away from the
+    /// mixer's output position), so the start time must be sampled from
+    /// the branch itself.
+    pub fn parked_uniforms(&self, inverted: bool) -> gst::Structure {
+        self.uniforms_with_invert(1.0e30, 1.0, inverted)
+    }
+
     fn uniforms_with_invert(
         &self,
         start_s: f64,

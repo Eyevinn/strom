@@ -33,6 +33,11 @@ fn apply_shader(elem: &gst::Element, fragment: &str, uniforms: &gst::Structure) 
 /// shader swap, whose mask is fully open. Two-three output frames.
 const WIPE_ALPHA_LEAD_MS: u64 = 60;
 
+/// Grace added to mixer-side cleanup steps at the end of a wipe: the shader
+/// timeline starts at the branch's first latched buffer, slightly after the
+/// mixer-side `now`, so cleanup must not land before the mask completes.
+const WIPE_END_GRACE_MS: u64 = 150;
+
 /// Neutralize a transition shader without recompiling: with `u_duration = 0`
 /// wipe masks evaluate to fully revealed and master envelopes to zero — both
 /// behave as identity. `u_invert` must be reset too: uniform values persist
@@ -46,6 +51,60 @@ fn neutral_uniforms() -> gst::Structure {
         .field("u_duration", 0.0f32)
         .field("u_invert", 0.0f32)
         .build()
+}
+
+/// Program a wipe on a TAKE slot, latching `u_start` from the branch's own
+/// first buffer PTS.
+///
+/// The shader's `time` uniform is the RAW buffer PTS of the branch, which
+/// is NOT the mixer's output timeline: SRT/TS sources carry PCR-derived
+/// timestamps that sit seconds-to-hours away from the mixer position (local
+/// test sources happen to match, which is why wipes "worked" only when the
+/// masked branch was local). The fragment is installed immediately with
+/// parked uniforms (p=0: opaque for inverted, hidden for upright), then a
+/// self-removing one-shot pad probe samples the first buffer's PTS and
+/// programs the real `u_start` in the branch's own timebase.
+///
+/// Probe hygiene: fires once and removes itself (not a hot-path probe);
+/// captures only a weak element ref (pads own their probes — a strong ref
+/// would leak the pipeline).
+fn program_wipe_at_first_buffer(
+    fx: &gst::Element,
+    kind: WipeKind,
+    duration_s: f64,
+    inverted: bool,
+) {
+    apply_shader(fx, &kind.fragment(), &kind.parked_uniforms(inverted));
+    let Some(pad) = fx.static_pad("sink") else {
+        return;
+    };
+    let weak = fx.downgrade();
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+        let Some(buffer) = info.buffer() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        // Wait for a timestamped buffer; latch and remove.
+        let Some(pts) = buffer.pts() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Some(fx) = weak.upgrade() else {
+            return gst::PadProbeReturn::Remove;
+        };
+        let start_s = pts.nseconds() as f64 / 1e9;
+        let uniforms = if inverted {
+            kind.run_uniforms(start_s, duration_s)
+        } else {
+            kind.run_uniforms_upright(start_s, duration_s)
+        };
+        fx.set_property("uniforms", uniforms);
+        debug!(
+            "{}: wipe '{}' latched u_start={:.3}s from branch PTS",
+            fx.name(),
+            kind.name(),
+            start_s
+        );
+        gst::PadProbeReturn::Remove
+    });
 }
 
 impl PipelineManager {
@@ -220,7 +279,10 @@ impl PipelineManager {
             .current_stream_time(&self.pipeline)
             .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
         let end = now + gst::ClockTime::from_mseconds(duration_ms);
-        let start_s = now.nseconds() as f64 / 1e9;
+        // The wipe's shader timeline starts at the branch's next buffer,
+        // which composites slightly after `now` — give the mixer-side
+        // cleanup steps a grace period so they land after the mask is done.
+        let end_grace = end + gst::ClockTime::from_mseconds(WIPE_END_GRACE_MS);
         let dur_s = duration_ms as f64 / 1000.0;
         let err = |e: crate::gst::transitions::TransitionError| {
             PipelineError::TransitionError(e.to_string())
@@ -231,13 +293,13 @@ impl PipelineManager {
             let fx = self
                 .fx_element(&format!("{}:fx_take_{}", block_instance_id, from_input))?
                 .clone();
-            // Outgoing holds while its inverted mask (run_uniforms sets
-            // u_invert=1, evaluated against buffer PTS) wipes it away;
-            // snaps off at the end as the safety net.
+            // Outgoing holds while its inverted mask (u_invert=1, u_start
+            // latched from the branch's own PTS) wipes it away; snaps off
+            // after the mask completes as the safety net.
             controller
-                .alpha_step(from_input, now, 1.0, end, 0.0)
+                .alpha_step(from_input, now, 1.0, end_grace, 0.0)
                 .map_err(err)?;
-            apply_shader(&fx, &kind.fragment(), &kind.run_uniforms(start_s, dur_s));
+            program_wipe_at_first_buffer(&fx, kind, dur_s, true);
 
             // Incoming below outgoing, fully opaque — revealed as the mask
             // eats away. The next take's classic reset restores the plain
@@ -252,15 +314,11 @@ impl PipelineManager {
                 .fx_element(&format!("{}:fx_take_{}", block_instance_id, to_input))?
                 .clone();
             // Mask on the incoming source, composited above the outgoing.
-            // Its mask is ~0 for the first frames, so delaying alpha-on by
-            // two output frames hides exactly the pre-swap in-flight
-            // buffers without visibly delaying the wipe.
+            // Parked at p=0 (hidden) until its branch PTS latches, so
+            // delaying alpha-on by two output frames hides exactly the
+            // pre-swap in-flight buffers without visibly delaying the wipe.
             let alpha_on = now + gst::ClockTime::from_mseconds(WIPE_ALPHA_LEAD_MS.min(duration_ms));
-            apply_shader(
-                &fx,
-                &kind.fragment(),
-                &kind.run_uniforms_upright(start_s, dur_s),
-            );
+            program_wipe_at_first_buffer(&fx, kind, dur_s, false);
             to_pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER + 1);
             controller
                 .alpha_step(to_input, now, 0.0, alpha_on, 1.0)
@@ -269,9 +327,9 @@ impl PipelineManager {
             // remnants outside it fade over the wipe instead of popping
             // off at the end (the slide transition's remnant rule).
             if crate::gst::transitions::rect_contains(to_rect, from_rect) {
-                controller.alpha_step(from_input, now, 1.0, end, 0.0)
+                controller.alpha_step(from_input, now, 1.0, end_grace, 0.0)
             } else {
-                controller.animate_alpha(from_input, now, end, 1.0, 0.0)
+                controller.animate_alpha(from_input, now, end_grace, 1.0, 0.0)
             }
             .map_err(err)?;
         }
