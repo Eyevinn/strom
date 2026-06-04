@@ -1257,6 +1257,18 @@ pub struct VisionMixerState {
     /// (the crop editor needs the real source aspect for its window math).
     #[serde(default)]
     pub input_resolutions: Vec<Option<crate::vision_mixer::InputResolution>>,
+    /// Whether the shader FX engine is built into this pipeline (GPU backend
+    /// with Shader FX enabled). When `false`, effect endpoints reject and
+    /// shader transitions downgrade to Fade.
+    #[serde(default)]
+    pub fx_available: bool,
+    /// Current per-input video effects (length = configured `num_inputs`).
+    /// Empty when the FX engine is unavailable.
+    #[serde(default)]
+    pub input_effects: Vec<crate::effects::VideoEffect>,
+    /// Current master (PGM) video effect.
+    #[serde(default)]
+    pub master_effect: crate::effects::VideoEffect,
 }
 
 /// Request to set the multiview overlay alpha on a vision mixer block.

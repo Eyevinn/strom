@@ -363,6 +363,16 @@ pub enum StromEvent {
         block_id: String,
         active: bool,
     },
+    /// Vision mixer video effect changed (shader FX engine)
+    VisionMixerEffectChanged {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_id: String,
+        /// Where the effect was applied (an input or the PGM master).
+        target: crate::effects::EffectTarget,
+        /// The effect as applied (after parameter clamping).
+        effect: crate::effects::VideoEffect,
+    },
 }
 
 impl StromEvent {
@@ -796,6 +806,20 @@ impl StromEvent {
                     block_id,
                     flow_id,
                     if *active { "ON" } else { "OFF" }
+                )
+            }
+            StromEvent::VisionMixerEffectChanged {
+                flow_id,
+                block_id,
+                target,
+                effect,
+            } => {
+                format!(
+                    "Vision mixer {} in flow {}: effect '{}' on {}",
+                    block_id,
+                    flow_id,
+                    effect.kind(),
+                    target
                 )
             }
         }
