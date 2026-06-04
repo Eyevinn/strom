@@ -2264,6 +2264,44 @@ impl AppState {
         Ok(active)
     }
 
+    /// Set a shader video effect on a vision mixer block (input look or PGM
+    /// master). GPU FX engine only.
+    pub async fn set_vision_mixer_effect(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        target: strom_types::effects::EffectTarget,
+        effect: &strom_types::effects::VideoEffect,
+    ) -> Result<strom_types::effects::VideoEffect, PipelineError> {
+        let pipelines = self.inner.pipelines.read().await;
+        let manager = pipelines.get(flow_id).ok_or_else(|| {
+            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
+        })?;
+        let applied = manager.set_vision_mixer_effect(block_instance_id, target, effect)?;
+        drop(pipelines);
+
+        self.inner
+            .events
+            .broadcast(StromEvent::VisionMixerEffectChanged {
+                flow_id: *flow_id,
+                block_id: block_instance_id.to_string(),
+                target,
+                effect: applied.clone(),
+            });
+
+        Ok(applied)
+    }
+
+    /// Whether the shader FX engine is built into a vision mixer block's
+    /// running pipeline.
+    pub async fn vision_mixer_fx_available(&self, flow_id: &FlowId, block_id: &str) -> bool {
+        let pipelines = self.inner.pipelines.read().await;
+        pipelines
+            .get(flow_id)
+            .map(|m| m.vision_mixer_fx_available(block_id))
+            .unwrap_or(false)
+    }
+
     /// Reset accumulated loudness measurements on an EBU R128 meter block.
     pub async fn reset_loudness(
         &self,

@@ -7,6 +7,8 @@
 //!     DSK, FTB, overlay alpha, PiP configuration, input resolutions.
 //!   - [`mixer_layout`] — pad geometry/crop appliers shared by the take
 //!     engine, the mixer ops and the reactive geometry probe.
+//!   - [`shader_fx`] — shader FX engine ops: per-source looks, master
+//!     effects, wipe takes and master envelopes (GPU backend only).
 //!   - [`misc`] — block-generic effects (input animation, loudness reset,
 //!     recorder split, thumbnail capture).
 
@@ -17,6 +19,7 @@ use gstreamer::prelude::*;
 mod misc;
 mod mixer_layout;
 mod mixer_ops;
+mod shader_fx;
 mod take;
 
 pub(crate) use mixer_layout::{apply_input_group_to_region, apply_pip_layout_to_region, find_pad};

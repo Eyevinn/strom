@@ -277,6 +277,21 @@ fn vision_mixer_definition() -> BlockDefinition {
             live: false,
             persist: None,
         },
+        // Shader FX engine (GPU path only)
+        ExposedProperty {
+            name: "enable_fx".to_string(),
+            label: "Shader FX".to_string(),
+            description: "Build the shader FX engine (per-source looks, wipe transitions, master FX) into the pipeline. GPU backend only — ignored on CPU.".to_string(),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(DEFAULT_ENABLE_FX)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: "enable_fx".to_string(),
+                transform: None,
+            },
+            live: false,
+            persist: None,
+        },
         // Show VU meters in multiview overlay
         ExposedProperty {
             name: "show_vu_meters".to_string(),

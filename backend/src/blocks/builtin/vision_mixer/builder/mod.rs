@@ -147,6 +147,7 @@ impl BlockBuilder for VisionMixerBuilder {
         let gl_download =
             properties::parse_bool(props, "gl_download", vision_mixer::DEFAULT_GL_DOWNLOAD);
         let show_vu_meters = properties::parse_show_vu_meters(props);
+        let enable_fx = properties::parse_bool(props, "enable_fx", vision_mixer::DEFAULT_ENABLE_FX);
 
         let pref = props
             .get("compositor_preference")
@@ -188,6 +189,7 @@ impl BlockBuilder for VisionMixerBuilder {
             output_format,
             gl_download,
             show_vu_meters,
+            enable_fx,
         };
 
         match backend {
@@ -222,6 +224,8 @@ pub(super) struct PipelineParams<'a> {
     pub(super) output_format: Option<String>,
     pub(super) gl_download: bool,
     pub(super) show_vu_meters: bool,
+    /// Build shader FX slots (GPU pipeline only; the CPU builder ignores it).
+    pub(super) enable_fx: bool,
 }
 
 impl<'a> PipelineParams<'a> {

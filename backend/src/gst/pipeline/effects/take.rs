@@ -84,6 +84,11 @@ impl PipelineManager {
             );
         }
 
+        // Reset transition shader slots (uniform-only) so an interrupted
+        // wipe or master envelope can't linger into this take. No-op when
+        // the FX engine isn't built.
+        self.reset_take_fx(block_instance_id);
+
         let (canvas_width, canvas_height) = self.dist_canvas_size(block_instance_id);
 
         // --- PiP-aware Take ---
@@ -326,6 +331,22 @@ impl PipelineManager {
                         &new_pvw_targets,
                         duration_ms,
                     );
+
+                    // Master-FX takes keep their full-frame envelope on the
+                    // PiP path too — the pad animation underneath is the
+                    // fade above, but the glitch/flash/punch still lands.
+                    if let Some(TransitionType::MasterFx(kind)) = parsed {
+                        if self.vision_mixer_fx_available(block_instance_id) {
+                            if let Ok(now) = dist_controller.current_stream_time(&self.pipeline) {
+                                let _ = self.apply_master_envelope(
+                                    block_instance_id,
+                                    kind,
+                                    now,
+                                    duration_ms,
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // Persist new state.
@@ -437,9 +458,35 @@ impl PipelineManager {
         let from = old_pgm.unwrap_or(from_input);
         let to = new_pgm.unwrap_or(to_input);
         let controller = TransitionController::new(mixer.clone(), canvas_width, canvas_height);
-        controller
-            .transition(from, to, trans_type, duration_ms, &self.pipeline)
-            .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
+
+        // Shader transitions need the FX engine — downgrade to Fade when it
+        // isn't built (CPU backend or Shader FX disabled).
+        let trans_type = match trans_type {
+            TransitionType::Wipe(_) | TransitionType::MasterFx(_)
+                if !self.vision_mixer_fx_available(block_instance_id) =>
+            {
+                info!(
+                    "Transition '{}' downgraded to Fade on {} — shader FX engine not available",
+                    transition_type, block_instance_id
+                );
+                TransitionType::Fade
+            }
+            t => t,
+        };
+
+        match trans_type {
+            TransitionType::Wipe(kind) => {
+                self.shader_wipe_take(block_instance_id, &controller, from, to, kind, duration_ms)?;
+            }
+            TransitionType::MasterFx(kind) => {
+                self.master_fx_take(block_instance_id, &controller, from, to, kind, duration_ms)?;
+            }
+            t => {
+                controller
+                    .transition(from, to, t, duration_ms, &self.pipeline)
+                    .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
+            }
+        }
 
         let actual_kind = if duration_ms == 0 {
             TransitionType::Cut.to_string()
