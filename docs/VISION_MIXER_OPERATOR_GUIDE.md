@@ -125,7 +125,7 @@ A PiP can be put on PVW *or* on PGM, just like any other source.
 | `blinds` | Venetian-blind slats. |
 | `checker_wipe` | Checkerboard cells flip in pseudo-random order. |
 | `noise_dissolve` | Granular film-style dissolve. |
-| `luma_wipe` | The new picture appears darkest-areas-first. |
+| `luma_wipe` | The outgoing picture hands over darkest-areas-first. |
 | `ripple` | Expanding circular wave with decaying distortion. |
 | `glitch_cut` | Digital glitch burst (RGB split, tearing) hiding a hard cut at its peak. |
 | `flash_dissolve` | White flash riding on a crossfade. |

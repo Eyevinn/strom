@@ -12,5 +12,6 @@ void main() {
     vec2 dn = (v_texcoord - 0.5) * vec2(width / height, 1.0);
     float maxr = length(vec2(0.5 * width / height, 0.5));
     float m = reveal(length(dn) / maxr, p, 0.1);
+    m = mix(m, 1.0 - m, u_invert);
     gl_FragColor = vec4(src.rgb, src.a * m);
 }

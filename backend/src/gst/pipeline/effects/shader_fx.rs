@@ -30,12 +30,16 @@ fn apply_shader(elem: &gst::Element, fragment: &str, uniforms: &gst::Structure) 
 
 /// Neutralize a transition shader without recompiling: with `u_duration = 0`
 /// wipe masks evaluate to fully revealed and master envelopes to zero — both
-/// behave as identity. On slots still holding the identity fragment the
-/// uniforms have no matching locations and are silently ignored.
+/// behave as identity. `u_invert` must be reset too: uniform values persist
+/// on the GL program, and a leftover inverted wipe at p=1 would otherwise
+/// flip "fully revealed" into "fully transparent" and black out the branch.
+/// On slots holding the identity fragment the uniforms have no matching
+/// locations and are silently ignored.
 fn neutral_uniforms() -> gst::Structure {
     gst::Structure::builder("uniforms")
         .field("u_start", 0.0f32)
         .field("u_duration", 0.0f32)
+        .field("u_invert", 0.0f32)
         .build()
 }
 
@@ -152,8 +156,15 @@ impl PipelineManager {
         }
     }
 
-    /// Run a shader-mask wipe: the incoming source's TAKE slot reveals it
-    /// over the outgoing source (which holds and snaps off at the end).
+    /// Run a shader-mask wipe — inverted: the OUTGOING source's TAKE slot
+    /// masks it away on top of the incoming source sitting underneath.
+    ///
+    /// This orientation is what makes the start glitch-free. The mask runs
+    /// upstream of the mixer, so at take time there are always buffers in
+    /// flight that were rendered before the shader swap (mask fully opaque).
+    /// With the outgoing source carrying the mask, those buffers render as
+    /// "PGM unchanged"; masking the incoming source instead would flash the
+    /// destination for the in-flight frames the moment its pad turns opaque.
     pub(crate) fn shader_wipe_take(
         &self,
         block_instance_id: &str,
@@ -163,8 +174,11 @@ impl PipelineManager {
         kind: WipeKind,
         duration_ms: u64,
     ) -> Result<(), PipelineError> {
+        if from_input == to_input {
+            return Ok(());
+        }
         let fx = self
-            .fx_element(&format!("{}:fx_take_{}", block_instance_id, to_input))?
+            .fx_element(&format!("{}:fx_take_{}", block_instance_id, from_input))?
             .clone();
         let mixer_id = format!("{}:mixer", block_instance_id);
         let mixer = self
@@ -183,21 +197,26 @@ impl PipelineManager {
             .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
         let end = now + gst::ClockTime::from_mseconds(duration_ms);
 
-        // Outgoing stays fully visible under the wipe, snaps off at the end.
+        // Outgoing holds while its mask wipes it away, snaps off at the end
+        // (also the safety net if the shader swap were ever to misfire).
         controller
             .alpha_step(from_input, now, 1.0, end, 0.0)
             .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
 
-        // Program the mask before the incoming pad becomes visible. Buffers
-        // reaching the TAKE slot carry PTS at/after `now`, so the reveal
-        // starts from p=0 on the mixer's output timeline.
+        // The inverted mask on the outgoing branch (run_uniforms sets
+        // u_invert=1): fully opaque at p=0, gone at p=1, evaluated against
+        // buffer PTS so the sweep tracks the mixer's output timeline.
         let start_s = now.nseconds() as f64 / 1e9;
         let dur_s = duration_ms as f64 / 1000.0;
         apply_shader(&fx, &kind.fragment(), &kind.run_uniforms(start_s, dur_s));
 
-        // Incoming above outgoing, fully opaque — the mask does the reveal.
-        // The next take's classic reset restores the plain PGM zorder.
-        to_pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER + 1);
+        // Incoming below outgoing, fully opaque — revealed as the outgoing
+        // mask eats away. The next take's classic reset restores the plain
+        // PGM zorder on whichever pad is then active.
+        to_pad.set_property(
+            "zorder",
+            strom_types::vision_mixer::DIST_PGM_ZORDER.saturating_sub(1),
+        );
         to_pad.set_property("alpha", 1.0f64);
 
         info!(
@@ -252,6 +271,9 @@ impl PipelineManager {
         kind: MasterFxKind,
         duration_ms: u64,
     ) -> Result<(), PipelineError> {
+        if from_input == to_input {
+            return Ok(());
+        }
         let now = controller
             .current_stream_time(&self.pipeline)
             .map_err(|e| PipelineError::TransitionError(e.to_string()))?;

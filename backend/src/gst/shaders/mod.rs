@@ -91,12 +91,14 @@ float envelope() {
 /// over-blend against the outgoing source does the rest.
 const WIPE_DECLS: &str = r#"
 uniform float u_softness;
+uniform float u_invert;
 "#;
 
 const WIPE_MAIN: &str = r#"
 void main() {
     vec4 src = texture2D(tex, v_texcoord);
     float m = clamp(wipe_mask(v_texcoord, progress()), 0.0, 1.0);
+    m = mix(m, 1.0 - m, u_invert);
     gl_FragColor = vec4(src.rgb, src.a * m);
 }
 "#;
@@ -363,6 +365,12 @@ impl WipeKind {
             ("u_start", start_s as f32),
             ("u_duration", duration_s as f32),
             ("u_softness", DEFAULT_WIPE_SOFTNESS),
+            // The take engine always runs wipes inverted: the mask removes
+            // the OUTGOING source, revealing the incoming one underneath.
+            // In-flight buffers rendered before the shader swap then show as
+            // "PGM unchanged" instead of flashing the destination (the
+            // mask/alpha race is structurally impossible this way around).
+            ("u_invert", 1.0),
         ];
         match self {
             // Direction matches the slide convention: wipe_left's edge enters
