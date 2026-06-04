@@ -554,6 +554,26 @@ impl TransitionController {
         Ok(())
     }
 
+    /// Program an eased alpha fade on an input's pad between two times.
+    /// Public for the shader take paths in `effects::shader_fx` (remnant
+    /// fade-out when wipe rects don't cover each other).
+    pub fn animate_alpha(
+        &self,
+        input_index: usize,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        start_value: f64,
+        end_value: f64,
+    ) -> Result<(), TransitionError> {
+        let pad = self.get_sink_pad(input_index)?;
+        let cs = self.setup_alpha_animation(&pad, start_time, end_time, start_value, end_value)?;
+        let key = self.next_key(&format!("alpha_fade_{}", input_index));
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.insert(key, vec![cs]);
+        }
+        Ok(())
+    }
+
     /// Compute ease-in-out value using cosine interpolation.
     /// t should be in range 0.0 to 1.0, returns value in same range.
     /// This creates more noticeable acceleration/deceleration than smoothstep.

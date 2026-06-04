@@ -18,6 +18,7 @@ mod controller;
 mod plan;
 
 pub use plan::plan_transition;
+pub(crate) use plan::rect_contains;
 
 /// Transition type for scene switching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

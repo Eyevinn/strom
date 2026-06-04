@@ -28,6 +28,11 @@ fn apply_shader(elem: &gst::Element, fragment: &str, uniforms: &gst::Structure) 
     elem.set_property("update-shader", true);
 }
 
+/// How long the incoming pad stays transparent at the start of a classic
+/// (upright-mask) wipe — covers the in-flight buffers rendered before the
+/// shader swap, whose mask is fully open. Two-three output frames.
+const WIPE_ALPHA_LEAD_MS: u64 = 60;
+
 /// Neutralize a transition shader without recompiling: with `u_duration = 0`
 /// wipe masks evaluate to fully revealed and master envelopes to zero — both
 /// behave as identity. `u_invert` must be reset too: uniform values persist
@@ -156,15 +161,23 @@ impl PipelineManager {
         }
     }
 
-    /// Run a shader-mask wipe — inverted: the OUTGOING source's TAKE slot
-    /// masks it away on top of the incoming source sitting underneath.
+    /// Run a shader-mask wipe. Two orientations, picked by geometry:
     ///
-    /// This orientation is what makes the start glitch-free. The mask runs
-    /// upstream of the mixer, so at take time there are always buffers in
-    /// flight that were rendered before the shader swap (mask fully opaque).
-    /// With the outgoing source carrying the mask, those buffers render as
-    /// "PGM unchanged"; masking the incoming source instead would flash the
-    /// destination for the in-flight frames the moment its pad turns opaque.
+    /// **Inverted (preferred)** — when the outgoing rect covers the incoming
+    /// rect: the OUTGOING source's TAKE slot masks it away on top of the
+    /// incoming source sitting underneath. The mask runs upstream of the
+    /// mixer, so at take time there are always in-flight buffers rendered
+    /// before the shader swap (mask fully opaque); with the outgoing source
+    /// carrying the mask those render as "PGM unchanged" — glitch-free by
+    /// construction.
+    ///
+    /// **Classic** — when the outgoing rect does NOT cover the incoming one
+    /// (e.g. a letterboxed 2.39:1 source out, 16:9 in): inverting would pop
+    /// the destination instantly in the uncovered regions, so the mask goes
+    /// on the INCOMING source above instead. Its pad alpha turns on a couple
+    /// of frames late to let pre-swap in-flight buffers (mask fully open)
+    /// drain — same flash, different cure. Outgoing remnants outside the
+    /// incoming rect fade over the wipe (the slide transition's rule).
     pub(crate) fn shader_wipe_take(
         &self,
         block_instance_id: &str,
@@ -177,54 +190,99 @@ impl PipelineManager {
         if from_input == to_input {
             return Ok(());
         }
-        let fx = self
-            .fx_element(&format!("{}:fx_take_{}", block_instance_id, from_input))?
-            .clone();
         let mixer_id = format!("{}:mixer", block_instance_id);
         let mixer = self
             .elements
             .get(&mixer_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
-        let to_pad = mixer
-            .static_pad(&format!("sink_{}", to_input))
-            .ok_or_else(|| PipelineError::PadNotFound {
-                element: mixer_id,
-                pad: format!("sink_{}", to_input),
-            })?;
+        let pad = |idx: usize| {
+            mixer
+                .static_pad(&format!("sink_{}", idx))
+                .ok_or_else(|| PipelineError::PadNotFound {
+                    element: mixer_id.clone(),
+                    pad: format!("sink_{}", idx),
+                })
+        };
+        let from_pad = pad(from_input)?;
+        let to_pad = pad(to_input)?;
+        let rect = |p: &gst::Pad| {
+            (
+                p.property::<i32>("xpos"),
+                p.property::<i32>("ypos"),
+                p.property::<i32>("width"),
+                p.property::<i32>("height"),
+            )
+        };
+        let from_rect = rect(&from_pad);
+        let to_rect = rect(&to_pad);
 
         let now = controller
             .current_stream_time(&self.pipeline)
             .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
         let end = now + gst::ClockTime::from_mseconds(duration_ms);
-
-        // Outgoing holds while its mask wipes it away, snaps off at the end
-        // (also the safety net if the shader swap were ever to misfire).
-        controller
-            .alpha_step(from_input, now, 1.0, end, 0.0)
-            .map_err(|e| PipelineError::TransitionError(e.to_string()))?;
-
-        // The inverted mask on the outgoing branch (run_uniforms sets
-        // u_invert=1): fully opaque at p=0, gone at p=1, evaluated against
-        // buffer PTS so the sweep tracks the mixer's output timeline.
         let start_s = now.nseconds() as f64 / 1e9;
         let dur_s = duration_ms as f64 / 1000.0;
-        apply_shader(&fx, &kind.fragment(), &kind.run_uniforms(start_s, dur_s));
+        let err = |e: crate::gst::transitions::TransitionError| {
+            PipelineError::TransitionError(e.to_string())
+        };
 
-        // Incoming below outgoing, fully opaque — revealed as the outgoing
-        // mask eats away. The next take's classic reset restores the plain
-        // PGM zorder on whichever pad is then active.
-        to_pad.set_property(
-            "zorder",
-            strom_types::vision_mixer::DIST_PGM_ZORDER.saturating_sub(1),
-        );
-        to_pad.set_property("alpha", 1.0f64);
+        let inverted = crate::gst::transitions::rect_contains(from_rect, to_rect);
+        if inverted {
+            let fx = self
+                .fx_element(&format!("{}:fx_take_{}", block_instance_id, from_input))?
+                .clone();
+            // Outgoing holds while its inverted mask (run_uniforms sets
+            // u_invert=1, evaluated against buffer PTS) wipes it away;
+            // snaps off at the end as the safety net.
+            controller
+                .alpha_step(from_input, now, 1.0, end, 0.0)
+                .map_err(err)?;
+            apply_shader(&fx, &kind.fragment(), &kind.run_uniforms(start_s, dur_s));
+
+            // Incoming below outgoing, fully opaque — revealed as the mask
+            // eats away. The next take's classic reset restores the plain
+            // PGM zorder on whichever pad is then active.
+            to_pad.set_property(
+                "zorder",
+                strom_types::vision_mixer::DIST_PGM_ZORDER.saturating_sub(1),
+            );
+            to_pad.set_property("alpha", 1.0f64);
+        } else {
+            let fx = self
+                .fx_element(&format!("{}:fx_take_{}", block_instance_id, to_input))?
+                .clone();
+            // Mask on the incoming source, composited above the outgoing.
+            // Its mask is ~0 for the first frames, so delaying alpha-on by
+            // two output frames hides exactly the pre-swap in-flight
+            // buffers without visibly delaying the wipe.
+            let alpha_on = now + gst::ClockTime::from_mseconds(WIPE_ALPHA_LEAD_MS.min(duration_ms));
+            apply_shader(
+                &fx,
+                &kind.fragment(),
+                &kind.run_uniforms_upright(start_s, dur_s),
+            );
+            to_pad.set_property("zorder", strom_types::vision_mixer::DIST_PGM_ZORDER + 1);
+            controller
+                .alpha_step(to_input, now, 0.0, alpha_on, 1.0)
+                .map_err(err)?;
+            // The incoming rect doesn't cover the outgoing one here, so
+            // remnants outside it fade over the wipe instead of popping
+            // off at the end (the slide transition's remnant rule).
+            if crate::gst::transitions::rect_contains(to_rect, from_rect) {
+                controller.alpha_step(from_input, now, 1.0, end, 0.0)
+            } else {
+                controller.animate_alpha(from_input, now, end, 1.0, 0.0)
+            }
+            .map_err(err)?;
+        }
 
         info!(
-            "Shader wipe '{}' started: {} -> {} ({}ms) on {}",
+            "Shader wipe '{}' started: {} -> {} ({}ms, {}) on {}",
             kind.name(),
             from_input,
             to_input,
             duration_ms,
+            if inverted { "inverted" } else { "classic" },
             block_instance_id
         );
         Ok(())

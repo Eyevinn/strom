@@ -359,18 +359,30 @@ impl WipeKind {
     }
 
     /// Uniforms for one run of this wipe starting at `start_s` (buffer-PTS
-    /// seconds) over `duration_s`.
+    /// seconds) over `duration_s`. Inverted (`u_invert=1`) masks the
+    /// OUTGOING source away over the incoming one underneath; upright
+    /// reveals the INCOMING source on top — see
+    /// `effects::shader_fx::shader_wipe_take` for when each is used.
     pub fn run_uniforms(&self, start_s: f64, duration_s: f64) -> gst::Structure {
+        self.uniforms_with_invert(start_s, duration_s, true)
+    }
+
+    /// Upright-mask variant of [`Self::run_uniforms`].
+    pub fn run_uniforms_upright(&self, start_s: f64, duration_s: f64) -> gst::Structure {
+        self.uniforms_with_invert(start_s, duration_s, false)
+    }
+
+    fn uniforms_with_invert(
+        &self,
+        start_s: f64,
+        duration_s: f64,
+        inverted: bool,
+    ) -> gst::Structure {
         let mut pairs: Vec<(&str, f32)> = vec![
             ("u_start", start_s as f32),
             ("u_duration", duration_s as f32),
             ("u_softness", DEFAULT_WIPE_SOFTNESS),
-            // The take engine always runs wipes inverted: the mask removes
-            // the OUTGOING source, revealing the incoming one underneath.
-            // In-flight buffers rendered before the shader swap then show as
-            // "PGM unchanged" instead of flashing the destination (the
-            // mask/alpha race is structurally impossible this way around).
-            ("u_invert", 1.0),
+            ("u_invert", if inverted { 1.0 } else { 0.0 }),
         ];
         match self {
             // Direction matches the slide convention: wipe_left's edge enters
