@@ -803,7 +803,11 @@
             padding: 6px 12px;
             cursor: pointer;
         }
-        .pip-zone-add-btn:hover {
+        .pip-zone-add-btn:disabled {
+            color: var(--pip-text-muted);
+            cursor: default;
+        }
+        .pip-zone-add-btn:hover:not(:disabled) {
             border-color: var(--pip-accent);
             color: #fff;
         }
@@ -1089,7 +1093,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.21-zone-borders | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.24-pip-presets-full | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1717,6 +1721,107 @@
                 zone.sources.splice(0, zone.sources.length - zone.capacity);
             }
             postPipConfig(pipIdx);
+        }
+
+        // ---- Layout presets ----
+        // Named snapshots of a full PiP composition: zones (rect/capacity/
+        // border + sources by input index), bg, and all non-default crop
+        // transforms. Crops are included even for sources currently outside
+        // the PiP — strom retains those and re-applies them when the source
+        // returns (swap-zone workflow), so a preset carries them too.
+        // Stored browser-wide in localStorage so a preset saved on one
+        // PiP/flow can be loaded on any other. Loading is best-effort:
+        // sources, bg and crops whose input index does not exist on this
+        // mixer are silently skipped; everything else applies.
+        const PIP_PRESETS_KEY = 'vm-pip-layout-presets';
+        let selectedPipPreset = '';
+
+        function loadPipPresets() {
+            try {
+                const obj = JSON.parse(localStorage.getItem(PIP_PRESETS_KEY) || '{}');
+                return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function storePipPresets(presets) {
+            localStorage.setItem(PIP_PRESETS_KEY, JSON.stringify(presets));
+        }
+
+        function savePipLayoutPreset(pipIdx) {
+            const cfg = pipConfigs[pipIdx];
+            if (!cfg || cfg.zones.length === 0) {
+                setStatus('No zones to save as a layout preset');
+                return;
+            }
+            const name = (window.prompt('Layout preset name:', selectedPipPreset) || '').trim();
+            if (!name) return;
+            const presets = loadPipPresets();
+            // Keep every non-default crop — including ones for sources not
+            // currently in the PiP (strom retains those the same way).
+            const transforms = {};
+            Object.keys(cfg.transforms || {}).forEach(k => {
+                const c = cfg.transforms[k];
+                if (c && !cropIsZero(c)) transforms[k] = { ...c };
+            });
+            presets[name] = {
+                bg: cfg.bg != null ? cfg.bg : null,
+                zones: cfg.zones.map(z => ({
+                    rect: z.rect ? { ...z.rect } : null,
+                    capacity: z.capacity != null ? z.capacity : null,
+                    sources: z.sources.slice(),
+                    border: z.border ? { ...z.border } : null
+                })),
+                transforms: transforms
+            };
+            storePipPresets(presets);
+            selectedPipPreset = name;
+            buildPipConfigPanel();
+            setStatus('Layout preset "' + name + '" saved');
+        }
+
+        function applyPipLayoutPreset(pipIdx, name) {
+            const preset = loadPipPresets()[name];
+            if (!preset || !Array.isArray(preset.zones)) {
+                setStatus('Layout preset not found: ' + name);
+                return;
+            }
+            const cfg = pipConfigs[pipIdx];
+            // Best-effort: silently drop any input index that does not
+            // exist on this mixer (preset may come from a bigger one), the
+            // bg double-booked as a zone source, and cross-zone duplicates
+            // — the backend rejects all three for the whole request.
+            const validInput = i => Number.isInteger(i) && i >= 0 && i < NUM_INPUTS;
+            cfg.bg = validInput(preset.bg) ? preset.bg : null;
+            const seen = new Set();
+            cfg.zones = preset.zones.map(z => ({
+                rect: z.rect ? { ...z.rect } : null,
+                capacity: z.capacity != null ? z.capacity : null,
+                sources: (Array.isArray(z.sources) ? z.sources : [])
+                    .filter(s => validInput(s) && s !== cfg.bg && !seen.has(s) && seen.add(s)),
+                border: z.border ? { ...z.border } : null
+            }));
+            // Restore the full crop map — also entries for sources not in
+            // the PiP right now; they re-apply when the source is pushed in.
+            cfg.transforms = {};
+            Object.keys(preset.transforms || {}).forEach(k => {
+                const c = preset.transforms[k];
+                if (c && validInput(parseInt(k, 10))) cfg.transforms[k] = { ...c };
+            });
+            activeZoneIdx[pipIdx] = 0;
+            postPipConfig(pipIdx);
+        }
+
+        function deletePipLayoutPreset(name) {
+            if (!name) return;
+            if (!window.confirm('Delete layout preset "' + name + '"?')) return;
+            const presets = loadPipPresets();
+            delete presets[name];
+            storePipPresets(presets);
+            if (selectedPipPreset === name) selectedPipPreset = '';
+            buildPipConfigPanel();
+            setStatus('Layout preset "' + name + '" deleted');
         }
 
         // Update one component of an explicit (non-auto) zone rect from a pixel
@@ -2594,6 +2699,58 @@
                     zoneCtrl.appendChild(borderWidth);
                     zoneCol.appendChild(zoneCtrl);
                 }
+
+                // Layout preset row: save/load/delete named zone layouts
+                // (geometry only) stored browser-wide in localStorage.
+                const presetCtrl = document.createElement('div');
+                presetCtrl.className = 'pip-editor-ctrl';
+                const presetLbl = document.createElement('span');
+                presetLbl.className = 'pip-editor-ctrl-label';
+                presetLbl.textContent = 'Layout';
+                presetLbl.title = 'Layout presets — full PiP composition: zones with sources, background, and crop/zoom settings';
+                presetCtrl.appendChild(presetLbl);
+                const presets = loadPipPresets();
+                const presetNames = Object.keys(presets).sort((a, b) => a.localeCompare(b));
+                const presetSel = document.createElement('select');
+                presetSel.className = 'pip-bg-select';
+                const presetPh = document.createElement('option');
+                presetPh.value = '';
+                presetPh.textContent = presetNames.length ? '— preset —' : '(no presets)';
+                presetSel.appendChild(presetPh);
+                presetNames.forEach(n => {
+                    const o = document.createElement('option');
+                    o.value = n;
+                    o.textContent = n;
+                    if (selectedPipPreset === n) o.selected = true;
+                    presetSel.appendChild(o);
+                });
+                presetSel.onchange = () => {
+                    selectedPipPreset = presetSel.value;
+                    buildPipConfigPanel();
+                };
+                presetCtrl.appendChild(presetSel);
+                const mkPresetBtn = (text, title, handler, disabled) => {
+                    const b = document.createElement('button');
+                    b.className = 'pip-zone-add-btn';
+                    b.textContent = text;
+                    b.title = title;
+                    b.disabled = !!disabled;
+                    b.onclick = handler;
+                    return b;
+                };
+                presetCtrl.appendChild(mkPresetBtn('Save',
+                    'Save this PiP\'s full composition — zones, sources, background, and all crop/zoom settings (also for sources not currently in the PiP)',
+                    () => savePipLayoutPreset(p),
+                    cfg.zones.length === 0));
+                presetCtrl.appendChild(mkPresetBtn('Load',
+                    'Replace this PiP\'s composition with the preset (best effort — sources that do not exist on this mixer are skipped)',
+                    () => applyPipLayoutPreset(p, selectedPipPreset),
+                    !selectedPipPreset));
+                presetCtrl.appendChild(mkPresetBtn('Delete',
+                    'Delete the selected preset from this browser',
+                    () => deletePipLayoutPreset(selectedPipPreset),
+                    !selectedPipPreset));
+                zoneCol.appendChild(presetCtrl);
 
                 editorRow.appendChild(zoneCol);
                 editorRow.appendChild(buildCropSection(p, cfg));

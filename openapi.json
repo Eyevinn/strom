@@ -1099,6 +1099,66 @@
       }
     },
     "/api/flows/{flow_id}/blocks/{block_id}/pip/{pip_idx}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Get the current composition of a single PiP on a vision mixer block.",
+        "description": "Returns the same per-PiP state as the corresponding entry in\n`VisionMixerState::pips`. Useful for exporting one PiP's composition\n(e.g. to save it as a reusable layout preset); restore it with a `PUT`\nto the same path.",
+        "operationId": "get_pip_config",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pip_idx",
+            "in": "path",
+            "description": "PiP index (0-based)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current PiP composition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Block has no live state (pipeline not running) or PiP index out of range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "put": {
         "tags": [
           "flows"
