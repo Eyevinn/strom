@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use super::{PadAction, PadTarget, ZHandling};
 
 /// Returns true if `outer` fully contains `inner`.
-fn rect_contains(outer: (i32, i32, i32, i32), inner: (i32, i32, i32, i32)) -> bool {
+pub(super) fn rect_contains(outer: (i32, i32, i32, i32), inner: (i32, i32, i32, i32)) -> bool {
     outer.0 <= inner.0
         && outer.1 <= inner.1
         && outer.0 + outer.2 >= inner.0 + inner.2

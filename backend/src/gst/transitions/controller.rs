@@ -222,9 +222,13 @@ impl TransitionController {
 
         let mut control_sources = Vec::new();
 
-        // Get where the from_pad currently is (this is where to_pad should end up)
-        let target_x = from_pad.property::<i32>("xpos");
-        let target_y = from_pad.property::<i32>("ypos");
+        // Where the incoming pad must END: its OWN aspect-fitted rect. The
+        // classic-take reset positions every pad before the transition runs,
+        // and with explicit geometry (sizing-policy=none) pads of different
+        // aspect ratios have different rects — borrowing the outgoing pad's
+        // position would land e.g. a 2.39:1 source at a 16:9 source's y.
+        let target_x = to_pad.property::<i32>("xpos");
+        let target_y = to_pad.property::<i32>("ypos");
 
         // To pad starts off-screen and slides over the from_pad
         // Direction: slide_left means new content comes from the right
@@ -265,8 +269,30 @@ impl TransitionController {
             control_sources.push(cs);
         }
 
-        // After transition completes, hide from_pad
-        let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
+        // End-of-slide handling for the outgoing pad — the planner's rule
+        // ("what's visible needs a transition; what's hidden doesn't"):
+        // when the incoming rect fully covers the outgoing one, the old
+        // picture is hidden at landing — snap it off (classic slide). With
+        // mismatched aspect ratios the incoming rect can leave parts of the
+        // old picture visible (letterbox/pillarbox remnants) — fade the old
+        // picture out over the slide instead, so nothing pops at the end.
+        let from_rect = (
+            from_pad.property::<i32>("xpos"),
+            from_pad.property::<i32>("ypos"),
+            from_pad.property::<i32>("width"),
+            from_pad.property::<i32>("height"),
+        );
+        let to_rect = (
+            target_x,
+            target_y,
+            to_pad.property::<i32>("width"),
+            to_pad.property::<i32>("height"),
+        );
+        let cs = if super::plan::rect_contains(to_rect, from_rect) {
+            self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?
+        } else {
+            self.setup_alpha_animation(&from_pad, start_time, end_time, 1.0, 0.0)?
+        };
         control_sources.push(cs);
 
         let key = self.next_key(&format!("slide_{}_{}", from_input, to_input));
@@ -312,11 +338,15 @@ impl TransitionController {
         let from_end_x = from_start_x + dx * self.canvas_width;
         let from_end_y = from_start_y + dy * self.canvas_height;
 
-        // To pad enters from opposite side
-        let to_start_x = from_start_x - dx * self.canvas_width;
-        let to_start_y = from_start_y - dy * self.canvas_height;
-        let to_end_x = from_start_x; // Ends where from started
-        let to_end_y = from_start_y;
+        // To pad enters from the opposite side and ends at its OWN
+        // aspect-fitted rect (set by the classic-take reset). With explicit
+        // geometry, pads of different aspect ratios have different rects —
+        // ending where the outgoing pad started would land e.g. a 2.39:1
+        // source at a 16:9 source's y.
+        let to_end_x = to_pad.property::<i32>("xpos");
+        let to_end_y = to_pad.property::<i32>("ypos");
+        let to_start_x = to_end_x - dx * self.canvas_width;
+        let to_start_y = to_end_y - dy * self.canvas_height;
 
         // Set initial position for to_pad
         to_pad.set_property("xpos", to_start_x);
