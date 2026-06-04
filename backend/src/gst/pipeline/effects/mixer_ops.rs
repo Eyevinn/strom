@@ -322,9 +322,7 @@ impl PipelineManager {
     ) -> Result<bool, PipelineError> {
         use crate::blocks::builtin::vision_mixer::overlay;
         use gstreamer_controller::prelude::*;
-        use gstreamer_controller::{
-            DirectControlBinding, InterpolationControlSource, InterpolationMode,
-        };
+        use gstreamer_controller::{InterpolationControlSource, InterpolationMode};
 
         let mixer_id = format!("{}:mixer", block_instance_id);
         let mixer = self
@@ -422,13 +420,16 @@ impl PipelineManager {
                         continue;
                     }
 
-                    // Clear any existing alpha control binding
-                    if let Some(binding) = pad.control_binding("alpha") {
-                        pad.remove_control_binding(&binding);
-                    }
-
-                    let cs = InterpolationControlSource::new();
-                    cs.set_mode(InterpolationMode::Linear);
+                    // Persistent alpha binding, wiped and ready to program
+                    // (bindings are never removed — see
+                    // crate::gst::control_bindings).
+                    let Some(cs) = crate::gst::control_bindings::fresh_control_source(
+                        pad.upcast_ref(),
+                        "alpha",
+                        InterpolationMode::Linear,
+                    ) else {
+                        continue;
+                    };
 
                     // Ease-in-out keyframes
                     let duration_ns = (end_time - current_time).nseconds() as f64;
@@ -442,14 +443,13 @@ impl PipelineManager {
                         cs.set(time, value);
                     }
 
-                    let binding = DirectControlBinding::new(&pad, "alpha", &cs);
-                    let _ = pad.add_control_binding(&binding);
                     control_sources.push(cs);
                 }
             }
         }
 
-        // Keep control sources alive until the animation completes, then clean up bindings
+        // Once the fade completes, neutralize the alpha bindings (keyframe
+        // wipe) so later direct alpha writes (DSK toggles, takes) stick.
         if !control_sources.is_empty() {
             let cleanup_mixer = mixer.clone();
             let cleanup_duration = duration_ms + 100; // small margin
@@ -457,9 +457,10 @@ impl PipelineManager {
                 std::time::Duration::from_millis(cleanup_duration),
                 move || {
                     for pad in cleanup_mixer.sink_pads() {
-                        if let Some(binding) = pad.control_binding("alpha") {
-                            pad.remove_control_binding(&binding);
-                        }
+                        crate::gst::control_bindings::wipe_control_binding(
+                            pad.upcast_ref(),
+                            "alpha",
+                        );
                     }
                     drop(control_sources);
                 },

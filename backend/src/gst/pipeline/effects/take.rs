@@ -376,11 +376,12 @@ impl PipelineManager {
             let name = pad.name();
             if name.starts_with("sink_") {
                 if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
-                    for prop in ["alpha", "xpos", "ypos", "width", "height"] {
-                        if let Some(binding) = pad.control_binding(prop) {
-                            pad.remove_control_binding(&binding);
-                        }
-                    }
+                    // Neutralize lingering animation bindings (keyframe wipe
+                    // — never removed, see crate::gst::control_bindings).
+                    crate::gst::control_bindings::wipe_control_bindings(
+                        pad.upcast_ref(),
+                        &["alpha", "xpos", "ypos", "width", "height"],
+                    );
                     if idx < num_video_inputs {
                         // Classic takes are input↔input — wipe any crop left
                         // behind by an earlier PiP render on these pads.

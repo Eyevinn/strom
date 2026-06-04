@@ -23,15 +23,16 @@ pub(crate) fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pa
 use crate::gst::crop::set_pad_crop;
 use crate::gst::underlay::{set_underlay_color, underlay_rect, UnderlayCtx};
 
-/// Remove any lingering control bindings (from a previous morph/fade) on the
-/// properties layout code writes — a stale binding would silently override
-/// `set_property`.
+/// Neutralize any lingering control bindings (from a previous morph/fade) on
+/// the properties layout code writes — a stale binding would silently
+/// override `set_property`. Bindings are wiped (keyframes cleared), never
+/// removed — see `crate::gst::control_bindings` for the streaming-thread
+/// use-after-free this avoids.
 pub(super) fn clear_layout_bindings(pad: &gst::Pad) {
-    for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
-        if let Some(binding) = pad.control_binding(prop) {
-            pad.remove_control_binding(&binding);
-        }
-    }
+    crate::gst::control_bindings::wipe_control_bindings(
+        pad.upcast_ref(),
+        &["alpha", "xpos", "ypos", "width", "height", "zorder"],
+    );
 }
 
 /// Snap an underlay pad to its target: positioned, colored, visible,

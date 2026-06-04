@@ -4,7 +4,7 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_controller::prelude::*;
-use gstreamer_controller::{DirectControlBinding, InterpolationControlSource, InterpolationMode};
+use gstreamer_controller::{InterpolationControlSource, InterpolationMode};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -444,8 +444,7 @@ impl TransitionController {
         to_pad.set_property("alpha", 0.0f64);
 
         // First half: fade out from_pad (1.0 -> 0.0) with easing
-        let cs_from = InterpolationControlSource::new();
-        cs_from.set_mode(InterpolationMode::Linear);
+        let cs_from = Self::fresh_cs(from_pad.upcast_ref(), "alpha", InterpolationMode::Linear)?;
 
         // Add eased keyframes for first half (fade out)
         let num_keyframes = vision_mixer::TRANSITION_KEYFRAMES;
@@ -469,15 +468,10 @@ impl TransitionController {
             ));
         }
 
-        let binding = DirectControlBinding::new(&from_pad, "alpha", &cs_from);
-        from_pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
         control_sources.push(cs_from);
 
         // Second half: fade in to_pad (0.0 -> 1.0) with easing
-        let cs_to = InterpolationControlSource::new();
-        cs_to.set_mode(InterpolationMode::Linear);
+        let cs_to = Self::fresh_cs(to_pad.upcast_ref(), "alpha", InterpolationMode::Linear)?;
 
         // Stay at 0 until midpoint
         if !cs_to.set(start_time, 0.0) {
@@ -501,10 +495,6 @@ impl TransitionController {
             }
         }
 
-        let binding = DirectControlBinding::new(&to_pad, "alpha", &cs_to);
-        to_pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
         control_sources.push(cs_to);
 
         let key = self.next_key(&format!("dip_{}_{}", from_input, to_input));
@@ -530,6 +520,19 @@ impl TransitionController {
         (1.0 - (t * std::f64::consts::PI).cos()) / 2.0
     }
 
+    /// The persistent control source for `obj.prop`, wiped and ready to
+    /// program (see `crate::gst::control_bindings` for why bindings are
+    /// never removed).
+    fn fresh_cs(
+        obj: &gst::Object,
+        prop: &str,
+        mode: InterpolationMode,
+    ) -> Result<InterpolationControlSource, TransitionError> {
+        crate::gst::control_bindings::fresh_control_source(obj, prop, mode).ok_or_else(|| {
+            TransitionError::ControlSourceError(format!("No animatable binding for {}", prop))
+        })
+    }
+
     /// Set up alpha property animation on a pad with ease-in-out curve.
     fn setup_alpha_animation(
         &self,
@@ -539,8 +542,7 @@ impl TransitionController {
         start_value: f64,
         end_value: f64,
     ) -> Result<InterpolationControlSource, TransitionError> {
-        let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::Linear);
+        let cs = Self::fresh_cs(pad.upcast_ref(), "alpha", InterpolationMode::Linear)?;
 
         let duration = (end_time - start_time).nseconds() as f64;
         let value_range = end_value - start_value;
@@ -560,12 +562,6 @@ impl TransitionController {
                 )));
             }
         }
-
-        // Create binding and attach to pad
-        let binding = DirectControlBinding::new(pad, "alpha", &cs);
-        pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
 
         debug!(
             "Alpha animation (eased): {} -> {} on pad {}",
@@ -589,8 +585,7 @@ impl TransitionController {
         start_value: i32,
         end_value: i32,
     ) -> Result<InterpolationControlSource, TransitionError> {
-        let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::Linear);
+        let cs = Self::fresh_cs(pad, property, InterpolationMode::Linear)?;
 
         // Get property range for normalization
         let pspec = pad.find_property(property).ok_or_else(|| {
@@ -624,11 +619,6 @@ impl TransitionController {
             }
         }
 
-        let binding = DirectControlBinding::new(pad, property, &cs);
-        pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
-
         debug!(
             "Int animation (eased) ({}): {} -> {} on pad {}",
             property,
@@ -640,29 +630,29 @@ impl TransitionController {
         Ok(cs)
     }
 
-    /// Remove all control bindings from a pad. Must cover every property the
-    /// transition setup helpers can bind: alpha (fades + step-off), xpos/ypos/
-    /// width/height (position animation), zorder (morph z lift/step), and the
-    /// GL mixer crop properties (crop morph — absent on the CPU backend, where
+    /// Neutralize all control bindings on a pad by wiping their keyframes
+    /// (bindings stay attached — see `crate::gst::control_bindings` for why
+    /// they must never be removed). Covers every property the transition
+    /// setup helpers can bind: alpha (fades + step-off), xpos/ypos/width/
+    /// height (position animation), zorder (morph z lift/step), and the GL
+    /// mixer crop properties (crop morph — absent on the CPU backend, where
     /// `control_binding` simply returns `None`).
     fn clear_control_bindings(&self, pad: &gst::Pad) {
-        for prop in [
-            "alpha",
-            "xpos",
-            "ypos",
-            "width",
-            "height",
-            "zorder",
-            "crop-left",
-            "crop-right",
-            "crop-top",
-            "crop-bottom",
-        ] {
-            if let Some(binding) = pad.control_binding(prop) {
-                pad.remove_control_binding(&binding);
-                debug!("Removed {} control binding from pad {}", prop, pad.name());
-            }
-        }
+        crate::gst::control_bindings::wipe_control_bindings(
+            pad.upcast_ref(),
+            &[
+                "alpha",
+                "xpos",
+                "ypos",
+                "width",
+                "height",
+                "zorder",
+                "crop-left",
+                "crop-right",
+                "crop-top",
+                "crop-bottom",
+            ],
+        );
     }
 
     /// Animate a transition between two pad compositions ("PiP morph" style).
@@ -1074,10 +1064,10 @@ impl TransitionController {
 
         let mut control_sources = Vec::new();
         for (prop, to) in props.into_iter().zip([l, r, t, b]) {
-            // Clear a stale binding first so reads + writes hit the real value.
-            if let Some(binding) = carrier.control_binding(prop) {
-                carrier.remove_control_binding(&binding);
-            }
+            // Neutralize a stale binding first so reads + writes hit the
+            // real value (keyframe wipe — bindings are never removed, see
+            // crate::gst::control_bindings).
+            crate::gst::control_bindings::wipe_control_binding(carrier.upcast_ref(), prop);
             let from = carrier.property::<i32>(prop);
             if from == to {
                 carrier.set_property(prop, to);
@@ -1118,8 +1108,7 @@ impl TransitionController {
         start_z: u32,
         end_z: u32,
     ) -> Result<InterpolationControlSource, TransitionError> {
-        let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::None);
+        let cs = Self::fresh_cs(pad.upcast_ref(), "zorder", InterpolationMode::None)?;
 
         // DirectControlBinding scales the source value by the property paramspec
         // range, so we have to express absolute zorder values as a 0..1 ratio.
@@ -1143,10 +1132,6 @@ impl TransitionController {
                 "Failed to set zorder end keyframe".to_string(),
             ));
         }
-        let binding = DirectControlBinding::new(pad, "zorder", &cs);
-        pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add zorder control binding: {}", e))
-        })?;
         Ok(cs)
     }
 
@@ -1160,8 +1145,8 @@ impl TransitionController {
         start_time: gst::ClockTime,
         end_time: gst::ClockTime,
     ) -> Result<InterpolationControlSource, TransitionError> {
-        let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::None); // constant-between-keyframes
+        // None mode = constant-between-keyframes.
+        let cs = Self::fresh_cs(pad.upcast_ref(), "alpha", InterpolationMode::None)?;
         if !cs.set(start_time, 1.0) {
             return Err(TransitionError::ControlSourceError(
                 "Failed to set start keyframe".to_string(),
@@ -1172,10 +1157,6 @@ impl TransitionController {
                 "Failed to set end keyframe".to_string(),
             ));
         }
-        let binding = DirectControlBinding::new(pad, "alpha", &cs);
-        pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
         Ok(cs)
     }
 
