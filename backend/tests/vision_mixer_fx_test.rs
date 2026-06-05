@@ -3,7 +3,9 @@
 //! Builds a real vision mixer flow on the GPU (OpenGL) backend, starts it,
 //! and exercises the FX surface: FX slot presence, applying looks (input +
 //! master), shader wipe takes and master-FX takes. Runs on software GL
-//! (llvmpipe), so it works in CI — skips when GL is unavailable.
+//! (llvmpipe) — skips when the environment cannot actually create a GL
+//! context (probed like `shader_validation_test`; merely having the GL
+//! plugins installed is not enough, as headless CI runners show).
 
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
@@ -14,6 +16,47 @@ use strom_types::Flow;
 use tempfile::NamedTempFile;
 
 const BLOCK_ID: &str = "vmfx";
+
+/// Probe whether this environment can actually render through GL: the GL
+/// plugins being installed is not enough — on headless CI runners the
+/// elements exist but no GL context can be created, and a GPU pipeline
+/// builds, starts and then silently never produces a frame. Same probe as
+/// `shader_validation_test`: a trivial `gltestsrc ! glshader ! fakesink`
+/// run must reach EOS.
+fn gl_environment_available() -> bool {
+    use gstreamer::prelude::*;
+    if gstreamer::ElementFactory::find("glvideomixerelement").is_none()
+        || gstreamer::ElementFactory::find("glshader").is_none()
+        || gstreamer::ElementFactory::find("gltestsrc").is_none()
+    {
+        return false;
+    }
+    let Ok(pipeline) = gstreamer::parse::launch(
+        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! glshader name=fx ! fakesink sync=false",
+    ) else {
+        return false;
+    };
+    let Ok(pipeline) = pipeline.downcast::<gstreamer::Pipeline>() else {
+        return false;
+    };
+    if let Some(fx) = pipeline.by_name("fx") {
+        fx.set_property("fragment", strom::gst::shaders::identity_fragment());
+    }
+    if pipeline.set_state(gstreamer::State::Playing).is_err() {
+        return false;
+    }
+    let bus = pipeline.bus().expect("pipeline has a bus");
+    // 20 s budget: software GL context creation can be slow on loaded CI.
+    let ok = matches!(
+        bus.timed_pop_filtered(
+            gstreamer::ClockTime::from_seconds(20),
+            &[gstreamer::MessageType::Eos, gstreamer::MessageType::Error],
+        ),
+        Some(msg) if matches!(msg.view(), gstreamer::MessageView::Eos(_))
+    );
+    let _ = pipeline.set_state(gstreamer::State::Null);
+    ok
+}
 
 /// A flow with a single vision mixer block forced onto the GPU backend.
 /// Inputs are left unlinked — force-live compositors output regardless.
@@ -46,10 +89,8 @@ fn build_vm_flow() -> Flow {
 async fn vision_mixer_fx_engine_end_to_end() {
     gstreamer::init().unwrap();
 
-    if gstreamer::ElementFactory::find("glvideomixerelement").is_none()
-        || gstreamer::ElementFactory::find("glshader").is_none()
-    {
-        eprintln!("SKIP: GStreamer GL elements not available");
+    if !gl_environment_available() {
+        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
         return;
     }
 
@@ -226,10 +267,8 @@ async fn wipe_between_letterboxed_sources_animates() {
     use gstreamer::prelude::*;
     gstreamer::init().unwrap();
 
-    if gstreamer::ElementFactory::find("glvideomixerelement").is_none()
-        || gstreamer::ElementFactory::find("glshader").is_none()
-    {
-        eprintln!("SKIP: GStreamer GL elements not available");
+    if !gl_environment_available() {
+        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
         return;
     }
 
