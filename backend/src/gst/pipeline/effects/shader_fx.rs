@@ -2,9 +2,12 @@
 //! takes and master envelopes.
 //!
 //! GPU backend only: the FX `glshader` slots (`fx_look_{i}`, `fx_take_{i}`,
-//! `fx_pgm`) exist only in the GPU pipeline with `enable_fx`. Every entry
-//! point degrades gracefully (error for explicit effect ops, Fade fallback
-//! for takes) when the slots are absent.
+//! `fx_pgm`, `fx_pgm_take`) exist only in the GPU pipeline with `enable_fx`.
+//! The PGM output mirrors the per-input look/take split: `fx_pgm` carries
+//! the persistent master look, `fx_pgm_take` the master-FX take envelope —
+//! independent slots, so a take never evicts the look. Every entry point
+//! degrades gracefully (error for explicit effect ops, Fade fallback for
+//! takes) when the slots are absent.
 //!
 //! Animation is evaluated inside the shaders at composite time (the `time`
 //! uniform is buffer PTS): Rust programs `u_start`/`u_duration` once per
@@ -192,7 +195,8 @@ impl PipelineManager {
     /// Reset transition shader state at the start of every take so an
     /// interrupted wipe can't leave a half-masked source behind, and a
     /// lingering master envelope can't replay. Uniform-only (no recompiles).
-    /// The MASTER slot is left alone while it carries a persistent look.
+    /// Only TAKE slots are touched — the look slots (`fx_look_{i}`,
+    /// `fx_pgm`) carry persistent effects and are never reset here.
     pub(crate) fn reset_take_fx(&self, block_instance_id: &str) {
         let Some(state) = overlay::get_overlay_state(block_instance_id) else {
             return;
@@ -208,15 +212,11 @@ impl PipelineManager {
                 e.set_property("uniforms", neutral_uniforms());
             }
         }
-        let master_is_look = state
-            .master_effect
-            .lock()
-            .map(|e| *e != VideoEffect::None)
-            .unwrap_or(false);
-        if !master_is_look {
-            if let Some(e) = self.elements.get(&format!("{}:fx_pgm", block_instance_id)) {
-                e.set_property("uniforms", neutral_uniforms());
-            }
+        if let Some(e) = self
+            .elements
+            .get(&format!("{}:fx_pgm_take", block_instance_id))
+        {
+            e.set_property("uniforms", neutral_uniforms());
         }
     }
 
@@ -346,8 +346,9 @@ impl PipelineManager {
         Ok(())
     }
 
-    /// Program the PGM MASTER slot with a take envelope (peaks at the cut
-    /// point, identity before/after). Replaces any persistent master look.
+    /// Program the PGM TAKE slot with a take envelope (peaks at the cut
+    /// point, identity before/after). Runs on `fx_pgm_take`, downstream of
+    /// the look slot, so a persistent master look keeps running underneath.
     pub(crate) fn apply_master_envelope(
         &self,
         block_instance_id: &str,
@@ -355,29 +356,16 @@ impl PipelineManager {
         start: gst::ClockTime,
         duration_ms: u64,
     ) -> Result<(), PipelineError> {
-        let fx = self.fx_element(&format!("{}:fx_pgm", block_instance_id))?;
+        let fx = self.fx_element(&format!("{}:fx_pgm_take", block_instance_id))?;
         let start_s = start.nseconds() as f64 / 1e9;
         let dur_s = duration_ms as f64 / 1000.0;
         apply_shader(fx, &kind.fragment(), &kind.run_uniforms(start_s, dur_s));
-        if let Some(state) = overlay::get_overlay_state(block_instance_id) {
-            if let Ok(mut e) = state.master_effect.lock() {
-                if *e != VideoEffect::None {
-                    debug!(
-                        "Master envelope '{}' replaced persistent master effect '{}' on {}",
-                        kind.name(),
-                        e.kind(),
-                        block_instance_id
-                    );
-                }
-                *e = VideoEffect::None;
-            }
-        }
         Ok(())
     }
 
     /// Run a master-FX take: a basic pad transition underneath (delayed cut,
     /// fade or push, per [`MasterFxKind::base`]) with the envelope shader on
-    /// the PGM MASTER slot on top.
+    /// the PGM TAKE slot on top.
     pub(crate) fn master_fx_take(
         &self,
         block_instance_id: &str,

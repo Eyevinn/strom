@@ -191,8 +191,8 @@ With the GPU backend and the **Shader FX** block property enabled
   **PGM master** output. Open with the LOOKS button.
 
 Looks are runtime state (like DSK toggles): they reset when the flow
-restarts. A master-FX take temporarily owns the master slot, so it
-replaces any master look (input looks are unaffected).
+restarts. Looks and master-FX takes run on independent slots, so a take
+plays on top of the master look and the look stays on afterwards.
 
 On the CPU backend the FX controls are hidden and effect requests are
 rejected.

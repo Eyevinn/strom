@@ -496,7 +496,8 @@ pub enum MasterBase {
     Push(i32, i32),
 }
 
-/// Full-frame master FX transitions, applied to the PGM MASTER slot.
+/// Full-frame master FX transitions, applied to the PGM TAKE slot
+/// (`fx_pgm_take`, downstream of the master-look slot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MasterFxKind {
     Glitch,

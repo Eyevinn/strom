@@ -87,8 +87,9 @@ pub struct VisionMixerOverlayState {
     /// Current per-input video effects (shader FX engine — GPU backend only;
     /// stays `None` on the CPU backend). Runtime-only, like DSK toggles.
     pub input_effects: Vec<std::sync::Mutex<strom_types::effects::VideoEffect>>,
-    /// Current master (PGM) video effect. Cleared when a master-FX take
-    /// reprograms the MASTER slot.
+    /// Current master (PGM) video effect. Survives master-FX takes — the
+    /// take envelope runs on its own slot (`fx_pgm_take`) downstream of
+    /// the look slot.
     pub master_effect: std::sync::Mutex<strom_types::effects::VideoEffect>,
     /// Number of DSK inputs.
     pub num_dsk_inputs: usize,

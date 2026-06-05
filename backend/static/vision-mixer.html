@@ -1234,7 +1234,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.33-looks-height | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.34-pgm-take-slot | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1706,8 +1706,8 @@
             if (!open) { panel.style.display = 'none'; return; }
             let html = '<div class="fx-looks-title">Shader Looks'
                 + ' <span class="fx-looks-hint">'
-                + 'Source looks follow the source everywhere; the master look sits on PGM '
-                + '(replaced by FX takes).</span></div>';
+                + 'Source looks follow the source everywhere; the master look sits on PGM.'
+                + '</span></div>';
             html += fxRowHtml('master', 'PGM MASTER');
             for (let i = 0; i < NUM_INPUTS; i++) {
                 html += fxRowHtml({ input: i }, INPUT_LABELS[i] || ('Input ' + (i + 1)));

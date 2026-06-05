@@ -58,17 +58,28 @@ pub(super) fn build_gpu_pipeline(
     elems.push((tee_pgm_id.clone(), tee_pgm));
     elems.push((q_dist_out_id.clone(), queue_dist_out));
     if p.enable_fx {
-        // MASTER FX slot: mixer → fx_pgm → queue_post_dist. Identity shader
-        // by default; master effects and take envelopes are programmed at
-        // runtime (see gst::pipeline::effects::shader_fx).
+        // MASTER FX slots: mixer → fx_pgm → fx_pgm_take → queue_post_dist.
+        // Identity shaders by default. Two slots, mirroring the per-input
+        // look/take split: fx_pgm carries the persistent master look,
+        // fx_pgm_take the master-FX take envelope on top of it — so a take
+        // no longer evicts the look (see gst::pipeline::effects::shader_fx).
         let fx_pgm_id = p.id("fx_pgm");
+        let fx_pgm_take_id = p.id("fx_pgm_take");
         elems.push((fx_pgm_id.clone(), elements::make_glshader(&fx_pgm_id)?));
+        elems.push((
+            fx_pgm_take_id.clone(),
+            elements::make_glshader(&fx_pgm_take_id)?,
+        ));
         links.push((
             ElementPadRef::pad(&mixer_id, "src"),
             ElementPadRef::pad(&fx_pgm_id, "sink"),
         ));
         links.push((
             ElementPadRef::pad(&fx_pgm_id, "src"),
+            ElementPadRef::pad(&fx_pgm_take_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&fx_pgm_take_id, "src"),
             ElementPadRef::pad(&q_post_dist_id, "sink"),
         ));
     } else {

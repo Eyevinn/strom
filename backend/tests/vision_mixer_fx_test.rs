@@ -153,6 +153,37 @@ async fn vision_mixer_fx_engine_end_to_end() {
         .expect("glitch take failed");
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
+    // The master look and the take envelope run on independent PGM slots:
+    // the vignette look must still sit on fx_pgm (a take must not evict
+    // it) and the glitch envelope on fx_pgm_take.
+    {
+        use gstreamer::prelude::*;
+        let look = manager
+            .pipeline()
+            .by_name(&format!("{}:fx_pgm", BLOCK_ID))
+            .expect("fx_pgm slot missing");
+        let frag = look
+            .property::<Option<String>>("fragment")
+            .unwrap_or_default();
+        assert!(
+            frag.contains("u_amount"),
+            "master look evicted from fx_pgm by the FX take; fragment now: {}",
+            &frag[..frag.len().min(120)]
+        );
+        let take = manager
+            .pipeline()
+            .by_name(&format!("{}:fx_pgm_take", BLOCK_ID))
+            .expect("fx_pgm_take slot missing");
+        let frag = take
+            .property::<Option<String>>("fragment")
+            .unwrap_or_default();
+        assert!(
+            frag.contains("envelope"),
+            "glitch envelope not on fx_pgm_take; fragment now: {}",
+            &frag[..frag.len().min(120)]
+        );
+    }
+
     // The pipeline must still be alive and rolling after the FX work —
     // a shader compile failure would have posted an error and torn it down.
     use gstreamer::prelude::ElementExtManual;
