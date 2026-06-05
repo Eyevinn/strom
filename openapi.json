@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.6.2-dev"
+    "version": "0.6.3"
   },
   "paths": {
     "/api/auth/status": {
