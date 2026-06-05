@@ -13,20 +13,24 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
-/// Run one fragment through a short GL pipeline. Returns `Err(message)` if
-/// the pipeline posts an error (shader compile failure, context failure, ...).
-fn run_fragment(fragment: &str) -> Result<(), String> {
-    let pipeline = gst::parse::launch(
-        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! glshader name=fx ! fakesink sync=false",
-    )
-    .map_err(|e| format!("parse: {}", e))?
-    .downcast::<gst::Pipeline>()
-    .map_err(|_| "not a pipeline".to_string())?;
+/// Run a launch line until EOS. With `fragment`, the `glshader` element named
+/// `fx` is set up exactly like production (`make_glshader`): fragment property
+/// plus `attach_create_shader_handler`. The handler degrades a failed compile
+/// to passthrough and posts a WARNING on the bus — the test treats that
+/// warning as a failure, so broken fragments cannot hide behind the fallback.
+fn run_gl_pipeline(launch: &str, fragment: Option<&str>) -> Result<(), String> {
+    let pipeline = gst::parse::launch(launch)
+        .map_err(|e| format!("parse: {}", e))?
+        .downcast::<gst::Pipeline>()
+        .map_err(|_| "not a pipeline".to_string())?;
 
-    let fx = pipeline
-        .by_name("fx")
-        .ok_or_else(|| "glshader element not found".to_string())?;
-    fx.set_property("fragment", fragment);
+    if let Some(fragment) = fragment {
+        let fx = pipeline
+            .by_name("fx")
+            .ok_or_else(|| "glshader element not found".to_string())?;
+        fx.set_property("fragment", fragment);
+        strom::gst::shaders::attach_create_shader_handler(&fx);
+    }
 
     pipeline
         .set_state(gst::State::Playing)
@@ -35,19 +39,63 @@ fn run_fragment(fragment: &str) -> Result<(), String> {
     let bus = pipeline.bus().expect("pipeline has a bus");
     // 20 s budget: software GL context creation can be slow on loaded CI.
     let timeout = gst::ClockTime::from_seconds(20);
-    let result =
-        match bus.timed_pop_filtered(timeout, &[gst::MessageType::Eos, gst::MessageType::Error]) {
-            None => Err("timeout waiting for EOS".to_string()),
+    let result = loop {
+        match bus.timed_pop_filtered(
+            timeout,
+            &[
+                gst::MessageType::Eos,
+                gst::MessageType::Error,
+                gst::MessageType::Warning,
+            ],
+        ) {
+            None => break Err("timeout waiting for EOS".to_string()),
             Some(msg) => match msg.view() {
-                gst::MessageView::Eos(_) => Ok(()),
+                gst::MessageView::Eos(_) => break Ok(()),
                 gst::MessageView::Error(e) => {
-                    Err(format!("{} ({})", e.error(), e.debug().unwrap_or_default()))
+                    break Err(format!("{} ({})", e.error(), e.debug().unwrap_or_default()))
+                }
+                gst::MessageView::Warning(w) => {
+                    let text = w.error().to_string();
+                    if text.contains("shader compile failed") {
+                        break Err(format!(
+                            "compile fell back to passthrough: {} ({})",
+                            text,
+                            w.debug().unwrap_or_default()
+                        ));
+                    }
+                    // Unrelated warning — keep waiting.
                 }
                 _ => unreachable!("filtered"),
             },
-        };
+        }
+    };
     let _ = pipeline.set_state(gst::State::Null);
     result
+}
+
+/// Run one fragment through a short GL pipeline with the production shader
+/// setup. Returns `Err(message)` on compile failure or pipeline error.
+fn run_fragment(fragment: &str) -> Result<(), String> {
+    run_gl_pipeline(
+        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! glshader name=fx ! fakesink sync=false",
+        Some(fragment),
+    )
+}
+
+/// Can this environment create a GL context at all? Probed with a GL pipeline
+/// that contains no `glshader`, so a shader compile bug can never masquerade
+/// as "no GL here" and silently skip the whole test.
+fn gl_environment_available() -> bool {
+    match run_gl_pipeline(
+        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
+        None,
+    ) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("SKIP: GL environment unavailable ({})", e);
+            false
+        }
+    }
 }
 
 #[test]
@@ -61,12 +109,9 @@ fn all_shader_fragments_compile() {
         return;
     }
 
-    // Environment probe: the identity fragment is trivially valid — if it
-    // fails, this machine cannot create a GL context (headless without
-    // llvmpipe). Skip rather than fail.
-    let identity = strom::gst::shaders::identity_fragment();
-    if let Err(e) = run_fragment(&identity) {
-        eprintln!("SKIP: GL environment unavailable ({})", e);
+    // Environment probe: skip only when no GL context can be created at all
+    // (headless without llvmpipe) — never on a shader compile failure.
+    if !gl_environment_available() {
         return;
     }
 
@@ -107,8 +152,7 @@ fn runtime_fragment_swap_takes_effect() {
         eprintln!("SKIP: GStreamer GL elements not available");
         return;
     }
-    if run_fragment(&strom::gst::shaders::identity_fragment()).is_err() {
-        eprintln!("SKIP: GL environment unavailable");
+    if !gl_environment_available() {
         return;
     }
 
