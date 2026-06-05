@@ -472,6 +472,13 @@ fn set_encoder_properties(
         encoder.set_property_from_str("speed-preset", preset_nick);
         // x264/x265: tune - optimize for specific use case
         encoder.set_property_from_str("tune", tune);
+        // VBV buffer capacity in ms. Set explicitly instead of relying on the
+        // upstream default (600 ms) so single frames cannot spike far above
+        // the target bitrate — large frame bursts overflow shallow buffers on
+        // constrained viewer paths (observed as bursty packet loss on WebRTC).
+        if encoder.has_property("vbv-buf-capacity") {
+            encoder.set_property_from_str("vbv-buf-capacity", "500");
+        }
     } else if encoder_name.starts_with("nv") {
         // NVENC encoders: bitrate in kbps
         encoder.set_property_from_str("bitrate", &bitrate_str);
@@ -497,6 +504,22 @@ fn set_encoder_properties(
             RateControl::CBR => "cbr",
         };
         encoder.set_property_from_str(rc_property, rc_nick);
+
+        // NVENC defaults leave VBR excursions unconstrained: max-bitrate is
+        // unset and vbv-buffer-size=0 ("NVENC default"), so single frames can
+        // spike to ~10x the average frame size. Those frames leave the NIC as
+        // line-rate packet bursts that overflow shallow buffers on constrained
+        // viewer paths (observed as bursty packet loss on WebRTC outputs).
+        // - max-bitrate: cap VBR at 1.2x target (ignored in CBR mode)
+        // - vbv-buffer-size (kbits): 0.5 s worth of target bitrate, bounding
+        //   how large any single frame can get
+        if encoder.has_property("max-bitrate") {
+            let max_bitrate = bitrate.saturating_mul(12) / 10;
+            encoder.set_property_from_str("max-bitrate", &max_bitrate.to_string());
+        }
+        if encoder.has_property("vbv-buffer-size") {
+            encoder.set_property_from_str("vbv-buffer-size", &(bitrate / 2).to_string());
+        }
 
         // NVENC: Disable adaptive I-frame insertion to respect gop-size
         if encoder.has_property("i-adapt") {
