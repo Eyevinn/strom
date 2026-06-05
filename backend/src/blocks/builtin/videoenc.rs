@@ -565,26 +565,39 @@ fn set_encoder_properties(
             let realtime = tune == "zerolatency";
             encoder.set_property_from_str("realtime", if realtime { "true" } else { "false" });
         }
-        // VideoToolbox rate control: respect the requested mode. Newer vtenc
-        // exposes a rate-control enum (abr/cbr); CBR gives predictable
-        // bandwidth over constrained SRT/WebRTC links. CQP has no VT
-        // equivalent, so fall back to ABR.
+        // VideoToolbox rate control. Measured on Apple Silicon hardware
+        // (GStreamer 1.28, 720p30, 5 Mbit/s target, noise content):
+        //
+        // - ABR does NOT follow the bitrate: vtenc unconditionally sets
+        //   kVTCompressionPropertyKey_Quality (property default 0.5) after
+        //   AverageBitRate, and the hardware then encodes at constant quality
+        //   and ignores the bitrate target entirely (~95 Mbit/s measured
+        //   against a 5 Mbit/s target; a direct VTCompressionSession with the
+        //   same settings minus Quality tracks the target fine). Upstream
+        //   GStreamer bug.
+        // - CBR uses a different VT key (ConstantBitRate) that IS honored in
+        //   steady state.
+        //
+        // So map VBR to CBR too: a user asking for VBR means "roughly the
+        // target bitrate", never "unbounded constant quality". CQP maps to
+        // ABR, whose constant-quality behavior is exactly what CQP requests
+        // (the encoder's `quality` property is the dial). Note: scene changes
+        // still produce a multi-frame overshoot (~2-4 MB at 720p30) that no
+        // exposed VT property bounds, in CBR as well — for strictly capped
+        // bursts (e.g. WebRTC on constrained paths) use a software encoder
+        // (x264 with VBV) via encoder_preference=software.
         if encoder.has_property("rate-control") {
             let rc = match rate_control {
-                RateControl::CBR => "cbr",
-                RateControl::VBR | RateControl::CQP => "abr",
+                RateControl::CBR | RateControl::VBR => "cbr",
+                RateControl::CQP => "abr",
             };
             encoder.set_property_from_str("rate-control", rc);
         }
-        // VideoToolbox ABR leaves peak behavior unconstrained: data-rate-limits
-        // defaults to disabled, so single frames can spike far above the
-        // target bitrate — the same failure mode as the NVENC VBR fix above
-        // (line-rate packet bursts overflowing shallow buffers on constrained
-        // viewer paths). Cap output at 1.2x target averaged over a 0.5 s
-        // window (kVTCompressionPropertyKey_DataRateLimits) — the VT
-        // equivalent of the NVENC max-bitrate + vbv-buffer-size pair. vtenc
-        // itself skips this in CBR mode, matching NVENC's "ignored in CBR"
-        // semantics.
+        // data-rate-limits (the VT counterpart of a VBV cap, 1.2x target over
+        // a 0.5 s window). vtenc skips it in CBR mode, and on Apple Silicon
+        // hardware it is accepted (noErr) but measured to have no effect even
+        // in ABR. Still set it: it costs nothing where ignored and other
+        // VideoToolbox backends may honor it on the ABR (CQP) path.
         if bitrate > 0 && encoder.has_property("data-rate-limits") {
             let max_kbps = bitrate.saturating_mul(12) / 10;
             encoder.set_property_from_str("data-rate-limits", &format!("{},0.5", max_kbps));
