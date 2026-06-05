@@ -2,6 +2,54 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.6.2] - 2026-06-05
+
+### Added
+- Vision Mixer: shader FX engine (GPU) — custom-GLSL looks, wipe transitions, and master FX takes (#626)
+  - 14 parameterized looks (chroma key, blur, pixelate, vignette, VHS, CRT, thermal, …) per input or on the PGM master
+  - 19 shader wipes and 11 master-FX takes; operator UI tiers production staples up front with novelty effects behind a MORE toggle
+  - Master look and FX takes run on independent PGM slots — a take never evicts the look
+  - Self-animating shaders (time uniform from buffer PTS): frame-accurate with zero per-frame CPU
+- Vision Mixer: zone borders as compositor underlay pads, per-PiP layout presets (#625)
+- Vision Mixer: per-source crop/zoom (punch-in) for PiP compositions (#622)
+- Devices: show exposing API prefix in device picker and sort the list (#614)
+
+### Changed
+- Pipeline: split `effects.rs` into focused sub-modules (#624)
+
+### Fixed
+- Vision mixer: aspect-aware wipe orientation, per-branch PTS latching for SRT sources, destination-flash kill at wipe start (#626)
+- Vision mixer: slide/push geometry for mixed aspect ratios (#625)
+- Video encoder: decouple VideoToolbox realtime from quality, wire rate-control + keyframe duration (#612)
+- Tests: vision mixer FX tests skip without a working GL context, event-driven sampling (#627)
+
+### CI
+- Route sccache through self-hosted MinIO (S3) cache, build without sccache when credentials are unavailable (#611, #623)
+- Trim GHA cache footprint and split rust-cache keys; bump actions to Node 24 runtimes (#615, #613, #616)
+
+### Dependencies
+- Bump uuid (#621), serial_test (#620), egui (#619), sysinfo (#618), socket2 (#617)
+
+---
+
+## [0.6.1] - 2026-06-02
+
+### Added
+- Setup: non-interactive NVIDIA driver install via REBOOT env var (#608)
+
+### Fixed
+- Sources: deinterlace interlaced SRT/EFP inputs for the GL vision mixer (#606)
+- Vision mixer UX: pixel zone editor, snap feedback, honest bus tally (#603)
+- Clocks: restore PTP statistics panel hidden behind domain list (#610)
+- QoS: drop upstream QoS events at sink source to stop a GstEvent leak (#609)
+
+### Documentation
+- Open Live setup guide for a local Strom instance (#604)
+- Documentation overhaul — Open Live, archive, slimmer README, AI authorship (#605)
+- Correct changelog release dates to match git tags (#607)
+
+---
+
 ## [0.6.0] - 2026-05-28
 
 ### Added
