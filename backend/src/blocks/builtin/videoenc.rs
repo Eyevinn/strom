@@ -576,6 +576,19 @@ fn set_encoder_properties(
             };
             encoder.set_property_from_str("rate-control", rc);
         }
+        // VideoToolbox ABR leaves peak behavior unconstrained: data-rate-limits
+        // defaults to disabled, so single frames can spike far above the
+        // target bitrate — the same failure mode as the NVENC VBR fix above
+        // (line-rate packet bursts overflowing shallow buffers on constrained
+        // viewer paths). Cap output at 1.2x target averaged over a 0.5 s
+        // window (kVTCompressionPropertyKey_DataRateLimits) — the VT
+        // equivalent of the NVENC max-bitrate + vbv-buffer-size pair. vtenc
+        // itself skips this in CBR mode, matching NVENC's "ignored in CBR"
+        // semantics.
+        if bitrate > 0 && encoder.has_property("data-rate-limits") {
+            let max_kbps = bitrate.saturating_mul(12) / 10;
+            encoder.set_property_from_str("data-rate-limits", &format!("{},0.5", max_kbps));
+        }
         // VideoToolbox: cap the wall-clock gap between keyframes in addition
         // to the frame-based max-keyframe-interval set below. WebRTC clients
         // need a keyframe to start decoding when they join, so an unbounded
