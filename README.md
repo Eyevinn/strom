@@ -28,7 +28,7 @@ Run this service in the cloud with a single click.
 - **Real-time Control** - Start, stop, and monitor pipelines via REST API or WebSocket
 - **Element Discovery** - Browse and configure any installed GStreamer element
 - **Reusable Blocks** - Pre-built inputs, outputs, and processing blocks (mixers, encoders, WebRTC, AES67, SRT, NDI, DeckLink, …)
-- **Vision Mixer** - Broadcast-style PVW/PGM video switcher with web control UI
+- **Vision Mixer** - Broadcast-style PVW/PGM video switcher with web control UI and a GPU shader FX engine (GLSL looks, wipes, and master FX takes)
 - **Audio Mixer** - Digital mixing console with channel processing, aux sends, groups, and metering
 - **WebRTC / AES67 / SRT / NDI / DeckLink** - Wide protocol and hardware I/O coverage
 - **HTML Rendering** - Render web pages as video sources using CEF (via `strom-full` Docker image)
