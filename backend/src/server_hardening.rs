@@ -200,12 +200,15 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FirstByteTimeoutStream<S> {
 }
 
 /// How often the fd watchdog samples usage.
+#[cfg(target_os = "linux")]
 const FD_WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Usage ratio above which a warning is logged (once per excursion).
+#[cfg(target_os = "linux")]
 const FD_WARN_RATIO: f64 = 0.80;
 
 /// Usage ratio above which an error is logged on every sample.
+#[cfg(target_os = "linux")]
 const FD_ERROR_RATIO: f64 = 0.95;
 
 /// Current open fd count and the soft `RLIMIT_NOFILE` limit.
