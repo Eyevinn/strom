@@ -686,21 +686,51 @@ async fn setup_tls(config: &Config) -> Option<axum_server::tls_rustls::RustlsCon
 }
 
 /// Start the HTTP(S) server, binding to the given address.
+///
+/// The accept path is hardened against fd exhaustion from abandoned
+/// connections (TCP keepalive, TLS handshake timeout, header read timeout,
+/// fd-usage watchdog) — see `server_hardening` for the rationale.
 async fn serve_with_tls(
     addr: SocketAddr,
     app: axum::Router,
     handle: axum_server::Handle<SocketAddr>,
     tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
 ) -> anyhow::Result<()> {
+    use strom::server_hardening::{
+        FirstByteTimeoutAcceptor, KeepaliveAcceptor, HEADER_READ_TIMEOUT, TLS_HANDSHAKE_TIMEOUT,
+    };
+
+    strom::server_hardening::spawn_fd_watchdog();
+
     if let Some(tls_config) = tls_config {
         info!("Server listening on https://{}", addr);
-        axum_server::bind_rustls(addr, tls_config)
+        let acceptor = FirstByteTimeoutAcceptor::new(
+            axum_server::tls_rustls::RustlsAcceptor::new(tls_config)
+                .handshake_timeout(TLS_HANDSHAKE_TIMEOUT)
+                .acceptor(KeepaliveAcceptor),
+        );
+        let mut server = axum_server::bind(addr).acceptor(acceptor);
+        server
+            .http_builder()
+            .http1()
+            // hyper panics if a timeout is set without a timer; axum-server
+            // does not install one by default.
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT);
+        server
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else {
         info!("Server listening on http://{}", addr);
-        axum_server::bind(addr)
+        let mut server =
+            axum_server::bind(addr).acceptor(FirstByteTimeoutAcceptor::new(KeepaliveAcceptor));
+        server
+            .http_builder()
+            .http1()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .header_read_timeout(HEADER_READ_TIMEOUT);
+        server
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;

@@ -36,6 +36,7 @@ pub mod openapi;
 pub mod paths;
 pub mod ptp_monitor;
 pub mod rtsp_server;
+pub mod server_hardening;
 pub mod sharing;
 pub mod state;
 pub mod stats;
