@@ -6629,6 +6629,7 @@ dependencies = [
  "gstreamer-video",
  "hostname",
  "http-body-util",
+ "hyper-util",
  "image",
  "libc",
  "mdns-sd",
