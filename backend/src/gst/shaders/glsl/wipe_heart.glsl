@@ -10,7 +10,10 @@ float in_heart(vec2 q, float s) {
 
 float wipe_mask(vec2 uv, float p) {
     vec2 q = (uv - 0.5) * vec2(width / height, 1.0) * 1.5;
-    q.y = -q.y - 0.1; // texture y points down; nudge toward optical center
+    // Texture y points down, so flip. The heart curve is taller above the
+    // origin (lobes reach ~1.2, tip -1.0), so shift the evaluation point up
+    // to drop the rendered shape onto the optical center.
+    q.y = -q.y + 0.1;
     float lo = 0.01;
     float hi = 1.0;
     if (in_heart(q, hi) < 0.0) {
