@@ -115,7 +115,10 @@ A PiP can be put on PVW *or* on PGM, just like any other source.
 | `push_left/right/up/down` | Old and new picture move **together** — the new one pushes the old out of frame. | Yes. |
 | `dip_to_black` | Fade out to black over the first half, fade the new picture in over the second. | Yes. |
 
-**Shader transitions** (GPU backend with Shader FX enabled — see §3.4):
+**Shader transitions** (GPU backend with Shader FX enabled — see §3.4).
+On the operator page the production staples (directional wipes, iris,
+barn doors, luma) are shown directly; the novelty shapes and most master
+FX sit behind a **MORE** toggle. The API accepts all types regardless:
 
 | Type | What it does |
 |---|---|

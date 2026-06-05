@@ -275,6 +275,13 @@
             padding: 0 2px;
             min-width: 0;
         }
+        /* Standard/More tiers: the broadcast-staple shapes are always visible;
+           novelty shapes sit behind a MORE toggle so the default picker reads
+           like a production switcher, not an effects demo. */
+        .wipe-grid .novelty, .fx-grid .novelty { display: none; }
+        .wipe-grid.expanded .novelty, .fx-grid.expanded .novelty { display: flex; }
+        .more-btn { color: #666; border-style: dashed; }
+        .more-btn:hover { color: #aaa; }
         /* Shader looks panel */
         .fx-looks-title {
             font-weight: bold;
@@ -1173,34 +1180,36 @@
                 <button class="type-btn wipe-btn dir-btn" data-wipe="wipe_right" onclick="setWipeShape('wipe_right')">&#8594;</button>
                 <button class="type-btn wipe-btn dir-btn" data-wipe="wipe_up" onclick="setWipeShape('wipe_up')">&#8593;</button>
                 <button class="type-btn wipe-btn dir-btn" data-wipe="wipe_down" onclick="setWipeShape('wipe_down')">&#8595;</button>
-                <button class="type-btn wipe-btn" data-wipe="clock_wipe" onclick="setWipeShape('clock_wipe')" title="Radial clock sweep">CLOCK</button>
                 <button class="type-btn wipe-btn" data-wipe="iris_open" onclick="setWipeShape('iris_open')" title="Circle grows from center">IRIS+</button>
                 <button class="type-btn wipe-btn" data-wipe="iris_close" onclick="setWipeShape('iris_close')" title="Reveals outside-in">IRIS&#8722;</button>
-                <button class="type-btn wipe-btn" data-wipe="blinds" onclick="setWipeShape('blinds')">BLINDS</button>
-                <button class="type-btn wipe-btn" data-wipe="checker_wipe" onclick="setWipeShape('checker_wipe')">CHECK</button>
-                <button class="type-btn wipe-btn" data-wipe="noise_dissolve" onclick="setWipeShape('noise_dissolve')" title="Granular film dissolve">NOISE</button>
-                <button class="type-btn wipe-btn" data-wipe="luma_wipe" onclick="setWipeShape('luma_wipe')" title="Dark areas hand over first">LUMA</button>
-                <button class="type-btn wipe-btn" data-wipe="melt" onclick="setWipeShape('melt')" title="Doom-style melt — the picture drips away in columns">MELT</button>
                 <button class="type-btn wipe-btn" data-wipe="barn_doors" onclick="setWipeShape('barn_doors')" title="Opens from a center seam outward">BARN</button>
-                <button class="type-btn wipe-btn" data-wipe="heart_iris" onclick="setWipeShape('heart_iris')" title="Heart grows from the center">HEART</button>
-                <button class="type-btn wipe-btn" data-wipe="star_wipe" onclick="setWipeShape('star_wipe')" title="Five-point star grows from the center">STAR</button>
-                <button class="type-btn wipe-btn" data-wipe="pinwheel" onclick="setWipeShape('pinwheel')" title="Radial blades sweep around the center">PINWHL</button>
-                <button class="type-btn wipe-btn" data-wipe="crosshatch" onclick="setWipeShape('crosshatch')" title="Ink-sketch hatch dissolve">HATCH</button>
-                <button class="type-btn wipe-btn" data-wipe="hex_dissolve" onclick="setWipeShape('hex_dissolve')" title="Chunky hexagon cells">HEX</button>
-                <button class="type-btn wipe-btn" data-wipe="warp_wipe" onclick="setWipeShape('warp_wipe')" title="Directional wipe with smear">WARP</button>
+                <button class="type-btn wipe-btn" data-wipe="luma_wipe" onclick="setWipeShape('luma_wipe')" title="Dark areas hand over first">LUMA</button>
+                <button class="type-btn more-btn" id="wipeMoreBtn" onclick="toggleMore('wipeRow')" title="Show novelty wipe shapes">MORE&#9662;</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="clock_wipe" onclick="setWipeShape('clock_wipe')" title="Radial clock sweep">CLOCK</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="blinds" onclick="setWipeShape('blinds')">BLINDS</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="checker_wipe" onclick="setWipeShape('checker_wipe')">CHECK</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="noise_dissolve" onclick="setWipeShape('noise_dissolve')" title="Granular film dissolve">NOISE</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="melt" onclick="setWipeShape('melt')" title="Doom-style melt — the picture drips away in columns">MELT</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="heart_iris" onclick="setWipeShape('heart_iris')" title="Heart grows from the center">HEART</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="star_wipe" onclick="setWipeShape('star_wipe')" title="Five-point star grows from the center">STAR</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="pinwheel" onclick="setWipeShape('pinwheel')" title="Radial blades sweep around the center">PINWHL</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="crosshatch" onclick="setWipeShape('crosshatch')" title="Ink-sketch hatch dissolve">HATCH</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="hex_dissolve" onclick="setWipeShape('hex_dissolve')" title="Chunky hexagon cells">HEX</button>
+                <button class="type-btn wipe-btn novelty" data-wipe="warp_wipe" onclick="setWipeShape('warp_wipe')" title="Directional wipe with smear">WARP</button>
             </div>
             <div class="fx-grid hidden" id="fxRow" title="Master FX take">
-                <button class="type-btn fxk-btn active" data-fx="glitch_cut" onclick="setFxKind('glitch_cut')" title="Digital glitch hides a hard cut">GLITCH</button>
-                <button class="type-btn fxk-btn" data-fx="flash_dissolve" onclick="setFxKind('flash_dissolve')" title="White flash over a crossfade">FLASH</button>
-                <button class="type-btn fxk-btn" data-fx="whip_pan_left" onclick="setFxKind('whip_pan_left')" title="Camera whip with motion blur">WHIP&#8592;</button>
-                <button class="type-btn fxk-btn" data-fx="whip_pan_right" onclick="setFxKind('whip_pan_right')" title="Camera whip with motion blur">WHIP&#8594;</button>
-                <button class="type-btn fxk-btn" data-fx="punch_zoom" onclick="setFxKind('punch_zoom')" title="Zoom kick with shake">PUNCH</button>
-                <button class="type-btn fxk-btn" data-fx="pixelate_take" onclick="setFxKind('pixelate_take')" title="Dissolve into coarse blocks and back">PIXEL</button>
-                <button class="type-btn fxk-btn" data-fx="zoom_blur" onclick="setFxKind('zoom_blur')" title="Radial streak blur through the cut">ZOOM</button>
-                <button class="type-btn fxk-btn" data-fx="spin" onclick="setFxKind('spin')" title="Frame twists through the cut">SPIN</button>
-                <button class="type-btn fxk-btn" data-fx="tv_roll" onclick="setFxKind('tv_roll')" title="TV sync-loss vertical roll">ROLL</button>
-                <button class="type-btn fxk-btn" data-fx="negative_flash" onclick="setFxKind('negative_flash')" title="Frame inverts through the crossfade">NEG</button>
-                <button class="type-btn fxk-btn" data-fx="ripple" onclick="setFxKind('ripple')" title="Water ring ripples both pictures through a crossfade">RIPPLE</button>
+                <button class="type-btn fxk-btn active" data-fx="flash_dissolve" onclick="setFxKind('flash_dissolve')" title="White flash over a crossfade">FLASH</button>
+                <button class="type-btn more-btn" id="fxMoreBtn" onclick="toggleMore('fxRow')" title="Show novelty FX takes">MORE&#9662;</button>
+                <button class="type-btn fxk-btn novelty" data-fx="glitch_cut" onclick="setFxKind('glitch_cut')" title="Digital glitch hides a hard cut">GLITCH</button>
+                <button class="type-btn fxk-btn novelty" data-fx="whip_pan_left" onclick="setFxKind('whip_pan_left')" title="Camera whip with motion blur">WHIP&#8592;</button>
+                <button class="type-btn fxk-btn novelty" data-fx="whip_pan_right" onclick="setFxKind('whip_pan_right')" title="Camera whip with motion blur">WHIP&#8594;</button>
+                <button class="type-btn fxk-btn novelty" data-fx="punch_zoom" onclick="setFxKind('punch_zoom')" title="Zoom kick with shake">PUNCH</button>
+                <button class="type-btn fxk-btn novelty" data-fx="pixelate_take" onclick="setFxKind('pixelate_take')" title="Dissolve into coarse blocks and back">PIXEL</button>
+                <button class="type-btn fxk-btn novelty" data-fx="zoom_blur" onclick="setFxKind('zoom_blur')" title="Radial streak blur through the cut">ZOOM</button>
+                <button class="type-btn fxk-btn novelty" data-fx="spin" onclick="setFxKind('spin')" title="Frame twists through the cut">SPIN</button>
+                <button class="type-btn fxk-btn novelty" data-fx="tv_roll" onclick="setFxKind('tv_roll')" title="TV sync-loss vertical roll">ROLL</button>
+                <button class="type-btn fxk-btn novelty" data-fx="negative_flash" onclick="setFxKind('negative_flash')" title="Frame inverts through the crossfade">NEG</button>
+                <button class="type-btn fxk-btn novelty" data-fx="ripple" onclick="setFxKind('ripple')" title="Water ring ripples both pictures through a crossfade">RIPPLE</button>
             </div>
             <div class="duration-row">
                 <label>Duration:</label>
@@ -1222,7 +1231,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.30-fx-catalog | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.31-fx-tiers | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1317,7 +1326,7 @@
         let transitionBase = 'fade';
         let transitionDir = 'left';
         let wipeShape = 'wipe_left';
-        let fxKind = 'glitch_cut';
+        let fxKind = 'flash_dissolve';
         let transitionDurationMs = 1000;
         function currentTransitionType() {
             if (transitionBase === 'push' || transitionBase === 'slide')
@@ -1546,19 +1555,20 @@
         // ---- Shader FX looks (per-source + master effects) ----
         // Catalog mirrors strom_types::effects::VideoEffect. Param edits are
         // throttled; the backend only swaps uniforms when the kind is
-        // unchanged, so sliders are cheap.
+        // unchanged, so sliders are cheap. `std: true` marks the production
+        // staples; the rest render under a "Stylized" optgroup.
         const FX_CATALOG = [
-            { type: 'none', label: 'None', params: [] },
-            { type: 'chroma_key', label: 'Chroma Key', params: [
+            { type: 'none', label: 'None', params: [], std: true },
+            { type: 'chroma_key', label: 'Chroma Key', std: true, params: [
                 { k: 'key_color', label: 'Key', t: 'color', d: '#00B140' },
                 { k: 'similarity', label: 'Similarity', t: 'range', min: 0, max: 1, step: 0.01, d: 0.35 },
                 { k: 'smoothness', label: 'Soft', t: 'range', min: 0, max: 1, step: 0.01, d: 0.1 },
                 { k: 'spill', label: 'Spill', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
             ]},
-            { type: 'pixelate', label: 'Pixelate', params: [
+            { type: 'pixelate', label: 'Pixelate', std: true, params: [
                 { k: 'block_size', label: 'Block', t: 'range', min: 2, max: 200, step: 1, d: 24 },
             ]},
-            { type: 'blur', label: 'Blur', params: [
+            { type: 'blur', label: 'Blur', std: true, params: [
                 { k: 'radius', label: 'Radius', t: 'range', min: 0, max: 20, step: 0.5, d: 6 },
             ]},
             { type: 'duotone', label: 'Duotone', params: [
@@ -1566,7 +1576,7 @@
                 { k: 'high', label: 'High', t: 'color', d: '#FFFFFF' },
                 { k: 'mix', label: 'Mix', t: 'range', min: 0, max: 1, step: 0.01, d: 1 },
             ]},
-            { type: 'vignette', label: 'Vignette', params: [
+            { type: 'vignette', label: 'Vignette', std: true, params: [
                 { k: 'amount', label: 'Amount', t: 'range', min: 0, max: 1, step: 0.01, d: 0.5 },
                 { k: 'softness', label: 'Soft', t: 'range', min: 0.01, max: 1, step: 0.01, d: 0.5 },
             ]},
@@ -1659,10 +1669,12 @@
             let html = '<div class="fx-look-row">';
             html += '<span class="fx-look-label" title="' + label + '">' + label + '</span>';
             html += '<select onchange="onFxTypeChange(JSON.parse(this.dataset.t), this.value)" data-t="' + tj + '">';
-            FX_CATALOG.forEach(c => {
-                html += '<option value="' + c.type + '"' + (c.type === e.type ? ' selected' : '') + '>' + c.label + '</option>';
-            });
-            html += '</select>';
+            const optionHtml = c =>
+                '<option value="' + c.type + '"' + (c.type === e.type ? ' selected' : '') + '>' + c.label + '</option>';
+            FX_CATALOG.filter(c => c.std).forEach(c => { html += optionHtml(c); });
+            html += '<optgroup label="Stylized">';
+            FX_CATALOG.filter(c => !c.std).forEach(c => { html += optionHtml(c); });
+            html += '</optgroup></select>';
             html += '<div class="fx-look-params">';
             def.params.forEach(pr => {
                 const v = (e[pr.k] != null) ? e[pr.k] : pr.d;
@@ -1741,6 +1753,33 @@
             document.querySelectorAll('.fxk-btn').forEach(b => {
                 b.classList.toggle('active', b.dataset.fx === kind);
             });
+        }
+
+        // Standard/More tiers in the wipe and FX pickers. Expansion persists
+        // browser-wide (same pattern as the other vm-* UI prefs) so operators
+        // who use the novelty shapes keep them open across reloads.
+        const MORE_BTN = { wipeRow: 'wipeMoreBtn', fxRow: 'fxMoreBtn' };
+        function applyMoreState(gridId, expanded) {
+            document.getElementById(gridId).classList.toggle('expanded', expanded);
+            const btn = document.getElementById(MORE_BTN[gridId]);
+            btn.innerHTML = expanded ? 'LESS&#9652;' : 'MORE&#9662;';
+            // A collapsed grid hides the active button of a novelty selection;
+            // fall back to the tier default so the picker never lies.
+            if (!expanded) {
+                const active = document.querySelector('#' + gridId + ' .novelty.active');
+                if (active) {
+                    if (gridId === 'wipeRow') setWipeShape('wipe_left');
+                    else setFxKind('flash_dissolve');
+                }
+            }
+        }
+        function toggleMore(gridId) {
+            const expanded = !document.getElementById(gridId).classList.contains('expanded');
+            localStorage.setItem('vm-more-' + gridId, expanded);
+            applyMoreState(gridId, expanded);
+        }
+        for (const gridId of Object.keys(MORE_BTN)) {
+            if (localStorage.getItem('vm-more-' + gridId) === 'true') applyMoreState(gridId, true);
         }
 
         function updateFxAvailabilityUi() {
