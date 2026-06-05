@@ -141,6 +141,10 @@ pub const DEFAULT_MULTIVIEW_FRAMERATE: &str = "30/1";
 /// Whether to download GPU memory to system memory on output (GPU path only).
 pub const DEFAULT_GL_DOWNLOAD: bool = false;
 
+/// Whether to build the shader FX slots (looks, wipes, master FX) into the
+/// GPU pipeline. GPU path only — the CPU compositor has no FX engine.
+pub const DEFAULT_ENABLE_FX: bool = true;
+
 // --- Z-order constants for compositor pads ---
 
 /// Z-order for thumbnail pads on the multiview compositor.

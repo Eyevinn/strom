@@ -14,6 +14,7 @@ pub mod api;
 pub mod auth;
 pub mod block;
 pub mod discovery;
+pub mod effects;
 pub mod element;
 pub mod events;
 pub mod flow;

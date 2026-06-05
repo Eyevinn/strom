@@ -7,6 +7,7 @@ pub(crate) mod crop;
 pub mod discovery;
 pub mod pipeline;
 pub mod pipeline_monitor;
+pub mod shaders;
 pub mod thread_priority;
 pub mod thumbnail;
 pub mod thumbnail_tap;

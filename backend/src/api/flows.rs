@@ -1908,6 +1908,22 @@ pub async fn get_vision_mixer_state(
         .vision_mixer_input_resolutions(&flow_id, &block_id, overlay.num_inputs)
         .await;
 
+    let fx_available = state.vision_mixer_fx_available(&flow_id, &block_id).await;
+    let input_effects: Vec<strom_types::effects::VideoEffect> = if fx_available {
+        overlay
+            .input_effects
+            .iter()
+            .map(|m| m.lock().map(|e| e.clone()).unwrap_or_default())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let master_effect = overlay
+        .master_effect
+        .lock()
+        .map(|e| e.clone())
+        .unwrap_or_default();
+
     Ok(Json(strom_types::api::VisionMixerState {
         program_input: overlay.pgm_input(),
         preview_input: overlay.pvw_input(),
@@ -1920,6 +1936,9 @@ pub async fn get_vision_mixer_state(
         overlay_alpha: overlay.overlay_alpha(),
         pips,
         input_resolutions,
+        fx_available,
+        input_effects,
+        master_effect,
     }))
 }
 
@@ -2072,6 +2091,49 @@ pub async fn fade_to_black(
     Ok(Json(strom_types::api::FadeToBlackResponse {
         message: format!("FTB {}", if active { "activated" } else { "deactivated" }),
         active,
+    }))
+}
+
+/// Set a shader video effect on a vision mixer block (input look or PGM master).
+///
+/// Requires the shader FX engine (GPU backend with Shader FX enabled) —
+/// returns 400 when the engine is not built into the running pipeline.
+#[utoipa::path(
+    post,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/effect",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block instance ID")
+    ),
+    request_body = strom_types::effects::SetVideoEffectRequest,
+    responses(
+        (status = 200, description = "Effect applied", body = strom_types::effects::SetVideoEffectResponse),
+        (status = 400, description = "Invalid request or FX engine unavailable", body = ErrorResponse),
+    )
+)]
+pub async fn set_vision_mixer_effect(
+    State(state): State<AppState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+    Json(req): Json<strom_types::effects::SetVideoEffectRequest>,
+) -> Result<Json<strom_types::effects::SetVideoEffectResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let applied = state
+        .set_vision_mixer_effect(&flow_id, &block_id, req.target, &req.effect)
+        .await
+        .map_err(|e| {
+            error!("Failed to set video effect: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_details(
+                    "Failed to set video effect",
+                    e.to_string(),
+                )),
+            )
+        })?;
+
+    Ok(Json(strom_types::effects::SetVideoEffectResponse {
+        message: format!("Effect '{}' applied to {}", applied.kind(), req.target),
+        effect: applied,
     }))
 }
 

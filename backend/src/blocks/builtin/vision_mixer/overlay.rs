@@ -84,6 +84,13 @@ pub struct VisionMixerOverlayState {
     overlay_alpha: AtomicU64,
     /// DSK enabled states (one per DSK input, max 4).
     pub dsk_enabled: Vec<AtomicBool>,
+    /// Current per-input video effects (shader FX engine — GPU backend only;
+    /// stays `None` on the CPU backend). Runtime-only, like DSK toggles.
+    pub input_effects: Vec<std::sync::Mutex<strom_types::effects::VideoEffect>>,
+    /// Current master (PGM) video effect. Survives master-FX takes — the
+    /// take envelope runs on its own slot (`fx_pgm_take`) downstream of
+    /// the look slot.
+    pub master_effect: std::sync::Mutex<strom_types::effects::VideoEffect>,
     /// Number of DSK inputs.
     pub num_dsk_inputs: usize,
     /// Pre-computed layout (immutable after construction).
@@ -194,6 +201,10 @@ impl VisionMixerOverlayState {
             dsk_enabled: (0..num_dsk_inputs)
                 .map(|_| AtomicBool::new(false))
                 .collect(),
+            input_effects: (0..num_inputs)
+                .map(|_| std::sync::Mutex::new(strom_types::effects::VideoEffect::None))
+                .collect(),
+            master_effect: std::sync::Mutex::new(strom_types::effects::VideoEffect::None),
             num_dsk_inputs,
             layout,
             pgm_w,

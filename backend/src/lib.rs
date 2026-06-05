@@ -199,6 +199,10 @@ pub async fn create_app_with_config(
             post(api::flows::fade_to_black),
         )
         .route(
+            "/flows/{flow_id}/blocks/{block_id}/effect",
+            post(api::flows::set_vision_mixer_effect),
+        )
+        .route(
             "/flows/{flow_id}/blocks/{block_id}/multiview-endpoint",
             get(api::vision_mixer_page::get_multiview_endpoint),
         )

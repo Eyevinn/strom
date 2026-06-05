@@ -7,6 +7,7 @@
 //!   - [`plan`] — pure `plan_transition` decision function (no GStreamer deps).
 //!   - [`controller`] — `TransitionController` impl that drives compositor pads.
 
+use crate::gst::shaders::{MasterFxKind, WipeKind};
 use gstreamer as gst;
 use gstreamer_controller::InterpolationControlSource;
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ mod controller;
 mod plan;
 
 pub use plan::plan_transition;
+pub(crate) use plan::rect_contains;
 
 /// Transition type for scene switching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,12 @@ pub enum TransitionType {
     PushDown,
     /// Dip to black then reveal new source.
     DipToBlack,
+    /// Shader-mask wipe on the incoming source (GPU FX engine). Downgrades
+    /// to Fade when the engine is unavailable (CPU backend or enable_fx=false).
+    Wipe(crate::gst::shaders::WipeKind),
+    /// Full-frame master FX (glitch, flash, whip, ...) riding on a basic pad
+    /// transition (GPU FX engine). Downgrades like [`Self::Wipe`].
+    MasterFx(crate::gst::shaders::MasterFxKind),
 }
 
 impl std::str::FromStr for TransitionType {
@@ -61,6 +69,36 @@ impl std::str::FromStr for TransitionType {
             "push_up" | "pushup" => Ok(Self::PushUp),
             "push_down" | "pushdown" => Ok(Self::PushDown),
             "dip_to_black" | "diptoblack" | "dip" => Ok(Self::DipToBlack),
+            "wipe_left" => Ok(Self::Wipe(WipeKind::Left)),
+            "wipe_right" => Ok(Self::Wipe(WipeKind::Right)),
+            "wipe_up" => Ok(Self::Wipe(WipeKind::Up)),
+            "wipe_down" => Ok(Self::Wipe(WipeKind::Down)),
+            "clock_wipe" | "clockwipe" | "clock" => Ok(Self::Wipe(WipeKind::Clock)),
+            "iris_open" | "iris_in" => Ok(Self::Wipe(WipeKind::IrisOpen)),
+            "iris_close" | "iris_out" => Ok(Self::Wipe(WipeKind::IrisClose)),
+            "blinds" => Ok(Self::Wipe(WipeKind::Blinds)),
+            "checker_wipe" | "checker" => Ok(Self::Wipe(WipeKind::Checker)),
+            "noise_dissolve" | "noise" => Ok(Self::Wipe(WipeKind::Noise)),
+            "luma_wipe" | "luma" => Ok(Self::Wipe(WipeKind::Luma)),
+            "melt" | "doom" => Ok(Self::Wipe(WipeKind::Melt)),
+            "barn_doors" | "barndoors" => Ok(Self::Wipe(WipeKind::BarnDoors)),
+            "heart_iris" | "heart" => Ok(Self::Wipe(WipeKind::Heart)),
+            "star_wipe" | "star" => Ok(Self::Wipe(WipeKind::Star)),
+            "pinwheel" => Ok(Self::Wipe(WipeKind::Pinwheel)),
+            "crosshatch" => Ok(Self::Wipe(WipeKind::Crosshatch)),
+            "hex_dissolve" | "hex" => Ok(Self::Wipe(WipeKind::Hex)),
+            "warp_wipe" | "warp" => Ok(Self::Wipe(WipeKind::Warp)),
+            "glitch_cut" | "glitch" => Ok(Self::MasterFx(MasterFxKind::Glitch)),
+            "flash_dissolve" | "flash" => Ok(Self::MasterFx(MasterFxKind::Flash)),
+            "whip_pan_left" | "whip_left" => Ok(Self::MasterFx(MasterFxKind::WhipLeft)),
+            "whip_pan_right" | "whip_right" => Ok(Self::MasterFx(MasterFxKind::WhipRight)),
+            "punch_zoom" | "punch" => Ok(Self::MasterFx(MasterFxKind::Punch)),
+            "pixelate_take" => Ok(Self::MasterFx(MasterFxKind::Pixelate)),
+            "zoom_blur" | "zoomblur" => Ok(Self::MasterFx(MasterFxKind::ZoomBlur)),
+            "spin" => Ok(Self::MasterFx(MasterFxKind::Spin)),
+            "tv_roll" | "roll" => Ok(Self::MasterFx(MasterFxKind::Roll)),
+            "negative_flash" | "negative" => Ok(Self::MasterFx(MasterFxKind::Negative)),
+            "ripple" => Ok(Self::MasterFx(MasterFxKind::Ripple)),
             _ => Err(format!("Unknown transition type: {}", s)),
         }
     }
@@ -80,6 +118,8 @@ impl std::fmt::Display for TransitionType {
             Self::PushUp => "push_up",
             Self::PushDown => "push_down",
             Self::DipToBlack => "dip_to_black",
+            Self::Wipe(k) => k.name(),
+            Self::MasterFx(k) => k.name(),
         })
     }
 }

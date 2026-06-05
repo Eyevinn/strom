@@ -67,6 +67,7 @@ use utoipa::OpenApi;
         crate::api::flows::set_overlay_alpha,
         crate::api::flows::toggle_dsk,
         crate::api::flows::fade_to_black,
+        crate::api::flows::set_vision_mixer_effect,
         crate::api::vision_mixer_page::get_multiview_endpoint,
         crate::api::flows::animate_input,
         crate::api::flows::debug_graph,
@@ -253,6 +254,10 @@ use utoipa::OpenApi;
             DskToggleResponse,
             FadeToBlackRequest,
             FadeToBlackResponse,
+            strom_types::effects::VideoEffect,
+            strom_types::effects::EffectTarget,
+            strom_types::effects::SetVideoEffectRequest,
+            strom_types::effects::SetVideoEffectResponse,
             // Discovery types
             DiscoveredStreamResponse,
             DeviceResponse,

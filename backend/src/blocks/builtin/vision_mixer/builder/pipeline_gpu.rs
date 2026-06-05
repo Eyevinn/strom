@@ -57,10 +57,37 @@ pub(super) fn build_gpu_pipeline(
     elems.push((q_post_dist_id.clone(), queue_post_dist));
     elems.push((tee_pgm_id.clone(), tee_pgm));
     elems.push((q_dist_out_id.clone(), queue_dist_out));
-    links.push((
-        ElementPadRef::pad(&mixer_id, "src"),
-        ElementPadRef::pad(&q_post_dist_id, "sink"),
-    ));
+    if p.enable_fx {
+        // MASTER FX slots: mixer → fx_pgm → fx_pgm_take → queue_post_dist.
+        // Identity shaders by default. Two slots, mirroring the per-input
+        // look/take split: fx_pgm carries the persistent master look,
+        // fx_pgm_take the master-FX take envelope on top of it — so a take
+        // no longer evicts the look (see gst::pipeline::effects::shader_fx).
+        let fx_pgm_id = p.id("fx_pgm");
+        let fx_pgm_take_id = p.id("fx_pgm_take");
+        elems.push((fx_pgm_id.clone(), elements::make_glshader(&fx_pgm_id)?));
+        elems.push((
+            fx_pgm_take_id.clone(),
+            elements::make_glshader(&fx_pgm_take_id)?,
+        ));
+        links.push((
+            ElementPadRef::pad(&mixer_id, "src"),
+            ElementPadRef::pad(&fx_pgm_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&fx_pgm_id, "src"),
+            ElementPadRef::pad(&fx_pgm_take_id, "sink"),
+        ));
+        links.push((
+            ElementPadRef::pad(&fx_pgm_take_id, "src"),
+            ElementPadRef::pad(&q_post_dist_id, "sink"),
+        ));
+    } else {
+        links.push((
+            ElementPadRef::pad(&mixer_id, "src"),
+            ElementPadRef::pad(&q_post_dist_id, "sink"),
+        ));
+    }
     links.push((
         ElementPadRef::pad(&q_post_dist_id, "src"),
         ElementPadRef::pad(&tee_pgm_id, "sink"),
@@ -337,7 +364,7 @@ pub(super) fn build_gpu_pipeline(
             elems.push((q_pip_id.clone(), elements::make_queue(&q_pip_id)?));
         }
 
-        // queue → glupload → glcolorconvert → tee
+        // queue → glupload → glcolorconvert → [fx_look] → tee
         links.push((
             ElementPadRef::pad(&q_id, "src"),
             ElementPadRef::pad(&up_id, "sink"),
@@ -346,10 +373,26 @@ pub(super) fn build_gpu_pipeline(
             ElementPadRef::pad(&up_id, "src"),
             ElementPadRef::pad(&cc_id, "sink"),
         ));
-        links.push((
-            ElementPadRef::pad(&cc_id, "src"),
-            ElementPadRef::pad(&tee_id, "sink"),
-        ));
+        if p.enable_fx {
+            // LOOK FX slot: persistent per-source effects (chroma key,
+            // pixelate, ...). Sits before the tee so the look follows the
+            // source everywhere: PGM, PVW, thumbnails and PiPs.
+            let fx_look_id = p.id(&format!("fx_look_{}", i));
+            elems.push((fx_look_id.clone(), elements::make_glshader(&fx_look_id)?));
+            links.push((
+                ElementPadRef::pad(&cc_id, "src"),
+                ElementPadRef::pad(&fx_look_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&fx_look_id, "src"),
+                ElementPadRef::pad(&tee_id, "sink"),
+            ));
+        } else {
+            links.push((
+                ElementPadRef::pad(&cc_id, "src"),
+                ElementPadRef::pad(&tee_id, "sink"),
+            ));
+        }
     }
 
     // --- Compositor links (order matters: linker auto-creates sink pads sequentially) ---
@@ -361,10 +404,26 @@ pub(super) fn build_gpu_pipeline(
             ElementPadRef::pad(&tee_id, "src_0"),
             ElementPadRef::pad(&q_dist_id, "sink"),
         ));
-        links.push((
-            ElementPadRef::pad(&q_dist_id, "src"),
-            ElementPadRef::pad(&mixer_id, format!("sink_{}", i)),
-        ));
+        if p.enable_fx {
+            // TAKE FX slot: wipe-mask shaders for the incoming source during
+            // shader transitions. Dist branch only — multiview thumbnails
+            // and PVW stay clean during a wipe.
+            let fx_take_id = p.id(&format!("fx_take_{}", i));
+            elems.push((fx_take_id.clone(), elements::make_glshader(&fx_take_id)?));
+            links.push((
+                ElementPadRef::pad(&q_dist_id, "src"),
+                ElementPadRef::pad(&fx_take_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&fx_take_id, "src"),
+                ElementPadRef::pad(&mixer_id, format!("sink_{}", i)),
+            ));
+        } else {
+            links.push((
+                ElementPadRef::pad(&q_dist_id, "src"),
+                ElementPadRef::pad(&mixer_id, format!("sink_{}", i)),
+            ));
+        }
     }
     // DSK inputs on dist compositor (after video inputs)
     for i in 0..p.num_dsk_inputs {

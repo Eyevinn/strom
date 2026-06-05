@@ -168,6 +168,21 @@ pub fn make_meter_fakesink(name: &str) -> Result<gst::Element, BlockBuildError> 
         .map_err(|e| BlockBuildError::ElementCreation(format!("fakesink: {}", e)))
 }
 
+/// Create a `glshader` FX slot, pre-loaded with the identity fragment so it
+/// negotiates and renders as a passthrough until an effect is programmed.
+/// The `create-shader` handler enables runtime fragment swaps — without it
+/// the fragment property is inert once the first shader is compiled.
+/// GPU pipeline only — the CPU path has no FX slots.
+pub fn make_glshader(name: &str) -> Result<gst::Element, BlockBuildError> {
+    let elem = gst::ElementFactory::make("glshader")
+        .name(name)
+        .property("fragment", crate::gst::shaders::identity_fragment())
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("glshader: {}", e)))?;
+    crate::gst::shaders::attach_create_shader_handler(&elem);
+    Ok(elem)
+}
+
 /// Create a simple GStreamer element by factory name.
 pub fn make_element(factory: &str, name: &str) -> Result<gst::Element, BlockBuildError> {
     gst::ElementFactory::make(factory)

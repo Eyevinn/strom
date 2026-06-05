@@ -146,6 +146,13 @@ impl TransitionController {
             TransitionType::DipToBlack => {
                 self.transition_dip_to_black(from_input, to_input, current_time, end_time)
             }
+            // Shader transitions are orchestrated by the take engine (they
+            // need the FX glshader elements, which live outside the mixer).
+            // Reaching here means the FX engine is unavailable — fall back
+            // to a plain crossfade.
+            TransitionType::Wipe(_) | TransitionType::MasterFx(_) => {
+                self.transition_fade(from_input, to_input, current_time, end_time)
+            }
         }
     }
 
@@ -509,6 +516,61 @@ impl TransitionController {
             (end_time - start_time).mseconds()
         );
 
+        Ok(())
+    }
+
+    /// The mixer's current stream-time — the timebase for control-binding
+    /// keyframes AND for the `time` uniform the FX shaders see (buffer PTS).
+    /// Public for the shader take paths in `effects::shader_fx`.
+    pub fn current_stream_time(
+        &self,
+        pipeline: &gst::Pipeline,
+    ) -> Result<gst::ClockTime, TransitionError> {
+        self.query_stream_time(pipeline)
+    }
+
+    /// Program a constant-then-step alpha on an input's pad: hold `v0` from
+    /// `t0`, step to `v1` at `t1` (None-mode control source). Used by the
+    /// shader take paths for delayed cuts and end-of-wipe step-offs.
+    pub fn alpha_step(
+        &self,
+        input_index: usize,
+        t0: gst::ClockTime,
+        v0: f64,
+        t1: gst::ClockTime,
+        v1: f64,
+    ) -> Result<(), TransitionError> {
+        let pad = self.get_sink_pad(input_index)?;
+        let cs = Self::fresh_cs(pad.upcast_ref(), "alpha", InterpolationMode::None)?;
+        if !cs.set(t0, v0) || !cs.set(t1, v1) {
+            return Err(TransitionError::ControlSourceError(
+                "Failed to set alpha step keyframes".to_string(),
+            ));
+        }
+        let key = self.next_key(&format!("alpha_step_{}", input_index));
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.insert(key, vec![cs]);
+        }
+        Ok(())
+    }
+
+    /// Program an eased alpha fade on an input's pad between two times.
+    /// Public for the shader take paths in `effects::shader_fx` (remnant
+    /// fade-out when wipe rects don't cover each other).
+    pub fn animate_alpha(
+        &self,
+        input_index: usize,
+        start_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        start_value: f64,
+        end_value: f64,
+    ) -> Result<(), TransitionError> {
+        let pad = self.get_sink_pad(input_index)?;
+        let cs = self.setup_alpha_animation(&pad, start_time, end_time, start_value, end_value)?;
+        let key = self.next_key(&format!("alpha_fade_{}", input_index));
+        if let Ok(mut transitions) = self.active_transitions.lock() {
+            transitions.insert(key, vec![cs]);
+        }
         Ok(())
     }
 

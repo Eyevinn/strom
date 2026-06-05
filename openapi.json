@@ -878,6 +878,68 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/effect": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Set a shader video effect on a vision mixer block (input look or PGM master).",
+        "description": "Requires the shader FX engine (GPU backend with Shader FX enabled) —\nreturns 400 when the engine is not built into the running pipeline.",
+        "operationId": "set_vision_mixer_effect",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Vision mixer block instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetVideoEffectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Effect applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetVideoEffectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or FX engine unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/blocks/{block_id}/ftb": {
       "post": {
         "tags": [
@@ -5390,6 +5452,32 @@
           }
         }
       },
+      "EffectTarget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A video input by index — the effect follows the source everywhere\n(PGM, PVW, thumbnails, PiPs).",
+            "required": [
+              "input"
+            ],
+            "properties": {
+              "input": {
+                "type": "integer",
+                "description": "A video input by index — the effect follows the source everywhere\n(PGM, PVW, thumbnails, PiPs).",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "string",
+            "description": "The PGM master output — applied after composition.",
+            "enum": [
+              "master"
+            ]
+          }
+        ],
+        "description": "Where a [`VideoEffect`] is applied on a vision mixer block."
+      },
       "Element": {
         "type": "object",
         "description": "Represents a GStreamer element instance in a flow.",
@@ -7822,6 +7910,41 @@
           }
         }
       },
+      "SetVideoEffectRequest": {
+        "type": "object",
+        "description": "Request to set a video effect on a vision mixer block.",
+        "required": [
+          "target",
+          "effect"
+        ],
+        "properties": {
+          "effect": {
+            "$ref": "#/components/schemas/VideoEffect",
+            "description": "The effect to apply. `{\"type\": \"none\"}` clears."
+          },
+          "target": {
+            "$ref": "#/components/schemas/EffectTarget",
+            "description": "Where to apply the effect."
+          }
+        }
+      },
+      "SetVideoEffectResponse": {
+        "type": "object",
+        "description": "Response after setting a video effect.",
+        "required": [
+          "message",
+          "effect"
+        ],
+        "properties": {
+          "effect": {
+            "$ref": "#/components/schemas/VideoEffect",
+            "description": "The effect as applied (after parameter clamping)."
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
       "Source": {
         "oneOf": [
           {
@@ -10111,6 +10234,49 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Vision mixer video effect changed (shader FX engine)",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "Vision mixer video effect changed (shader FX engine)",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "target",
+                  "effect"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "effect": {
+                    "$ref": "#/components/schemas/VideoEffect",
+                    "description": "The effect as applied (after parameter clamping)."
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "target": {
+                    "$ref": "#/components/schemas/EffectTarget",
+                    "description": "Where the effect was applied (an input or the PGM master)."
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "VisionMixerEffectChanged"
+                ]
+              }
+            }
           }
         ],
         "description": "Event types that can be broadcast to all connected clients.",
@@ -10693,6 +10859,335 @@
           }
         }
       },
+      "VideoEffect": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "No effect (identity passthrough).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "none"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Chroma key: pixels close to `key_color` become transparent.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "key_color": {
+                "type": "string",
+                "description": "Key color as `#RRGGBB` (typically green `#00B140` or blue)."
+              },
+              "similarity": {
+                "type": "number",
+                "format": "float",
+                "description": "Chroma distance below which pixels are fully keyed (0..1)."
+              },
+              "smoothness": {
+                "type": "number",
+                "format": "float",
+                "description": "Soft edge width added above `similarity` (0..1)."
+              },
+              "spill": {
+                "type": "number",
+                "format": "float",
+                "description": "Spill suppression amount — desaturates key-colored fringes (0..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "chroma_key"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Mosaic pixelation (privacy or stylization).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "block_size": {
+                "type": "number",
+                "format": "float",
+                "description": "Block size in source pixels (2..200)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "pixelate"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Gaussian-ish blur (9-tap, single pass).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "radius": {
+                "type": "number",
+                "format": "float",
+                "description": "Blur radius in source pixels (0..20)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "blur"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Two-color luma mapping. `low`=black point color, `high`=white point\ncolor. Grayscale = `#000000`/`#FFFFFF`, sepia = `#2B1D0E`/`#FFF1DF`.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "high": {
+                "type": "string"
+              },
+              "low": {
+                "type": "string"
+              },
+              "mix": {
+                "type": "number",
+                "format": "float",
+                "description": "Blend between original (0) and duotone (1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "duotone"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Darkened corners.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "amount": {
+                "type": "number",
+                "format": "float",
+                "description": "Strength of the darkening (0..1)."
+              },
+              "softness": {
+                "type": "number",
+                "format": "float",
+                "description": "Falloff softness (0.01..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "vignette"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Animated VHS look: chroma shift, scanlines, tape noise.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Overall intensity (0..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "vhs"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Animated old-film look: grain, flicker, scratches, warm tone.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Overall intensity (0..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "old_film"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Edge detection glow added on top of the image.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "color": {
+                "type": "string",
+                "description": "Glow color as `#RRGGBB`."
+              },
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Glow strength (0..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "edge_glow"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "CRT monitor: barrel distortion, scanlines, RGB grille.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Overall intensity (0..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "crt"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Newspaper-print halftone dots.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "dot_size": {
+                "type": "number",
+                "format": "float",
+                "description": "Dot grid size in pixels (3..40)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "halftone"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Thermal-camera false color over luma.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Blend between original (0) and thermal (1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "thermal"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Night-vision scope: green phosphor, lifted shadows, grain, vignette.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Blend between original (0) and night vision (1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "night_vision"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Color quantization into bands (screen-print / toon).",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "levels": {
+                "type": "number",
+                "format": "float",
+                "description": "Number of levels per channel (2..16)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "posterize"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Underwater: wavy refraction, blue-green grade, caustic shimmer.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "intensity": {
+                "type": "number",
+                "format": "float",
+                "description": "Overall intensity (0..1)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "underwater"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A persistent video effect (\"look\") applied to a vision mixer input or to\nthe PGM master output.\n\nJSON encoding is internally tagged on `type`:\n`{\"type\": \"pixelate\", \"block_size\": 24.0}`.\n\nAll numeric parameters are clamped server-side (see [`VideoEffect::sanitized`]);\ncolors are `#RRGGBB` hex strings."
+      },
       "VisionMixerState": {
         "type": "object",
         "description": "Current runtime state of a vision mixer block.\n\nThis is the snapshot a client uses to reconcile on (re)connect when WS\nevents have not yet arrived. Static config (input count, labels, DSK\ncount) is *not* included — that lives on the block resource itself.",
@@ -10714,6 +11209,17 @@
             "type": "boolean",
             "description": "Whether Fade to Black is currently active."
           },
+          "fx_available": {
+            "type": "boolean",
+            "description": "Whether the shader FX engine is built into this pipeline (GPU backend\nwith Shader FX enabled). When `false`, effect endpoints reject and\nshader transitions downgrade to Fade."
+          },
+          "input_effects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VideoEffect"
+            },
+            "description": "Current per-input video effects (length = configured `num_inputs`).\nEmpty when the FX engine is unavailable."
+          },
           "input_resolutions": {
             "type": "array",
             "items": {
@@ -10727,6 +11233,10 @@
               ]
             },
             "description": "Negotiated resolution per input (length = configured `num_inputs`).\n`None` for inputs whose caps are not negotiated yet. Inputs can have\narbitrary resolutions/aspects — clients must not assume the PGM aspect\n(the crop editor needs the real source aspect for its window math)."
+          },
+          "master_effect": {
+            "$ref": "#/components/schemas/VideoEffect",
+            "description": "Current master (PGM) video effect."
           },
           "overlay_alpha": {
             "type": "number",
