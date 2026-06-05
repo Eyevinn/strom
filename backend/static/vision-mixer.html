@@ -49,7 +49,8 @@
             max-height: 280px;
             overflow: hidden;
         }
-        body.editing-layout .controls {
+        body.editing-layout .controls,
+        body.fx-panel-open .controls {
             max-height: 70vh;
         }
 
@@ -1233,7 +1234,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.32-fx-panel-width | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.33-looks-height | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1696,7 +1697,13 @@
 
         function buildFxPanel() {
             const panel = document.getElementById('fxPanel');
-            if (!FX_AVAILABLE || !fxPanelOpen) { panel.style.display = 'none'; return; }
+            const open = FX_AVAILABLE && fxPanelOpen;
+            // Same mechanism as the PiP layout editor: lift the panel's own
+            // 22vh cap (.editing -> 70vh) and the controls bar's cap with it,
+            // so the looks list shows all rows instead of scrolling.
+            panel.classList.toggle('editing', open);
+            document.body.classList.toggle('fx-panel-open', open);
+            if (!open) { panel.style.display = 'none'; return; }
             let html = '<div class="fx-looks-title">Shader Looks'
                 + ' <span class="fx-looks-hint">'
                 + 'Source looks follow the source everywhere; the master look sits on PGM '
