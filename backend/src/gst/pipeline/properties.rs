@@ -668,6 +668,20 @@ impl PipelineManager {
             element_id, pad_name, prop_name, prop_value
         );
 
+        // Some pad properties are version- or backend-specific. The clearest
+        // example is `sizing-policy`, which exists on `GstVideoAggregatorPad`
+        // and `GstGLVideoMixerPad` only from GStreamer 1.24 onward. On 1.22
+        // calling `set_property_from_str` for a missing property panics
+        // ("property '...' of type '...' not found"), which would crash the
+        // tokio worker building the pipeline. Skip gracefully instead.
+        if !pad.has_property(prop_name) {
+            debug!(
+                "Pad {}:{} has no property '{}' (likely a GStreamer version/backend difference) - skipping",
+                element_id, pad_name, prop_name
+            );
+            return Ok(());
+        }
+
         // Use set_property_from_str for all types - GStreamer handles type conversion automatically
         let value_str = match prop_value {
             PropertyValue::String(v) => v.clone(),
