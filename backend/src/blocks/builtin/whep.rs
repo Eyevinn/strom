@@ -1021,13 +1021,16 @@ fn build_whepserversink(
         whepserversink.set_property("turn-servers", turn_servers);
     }
 
-    // Disable FEC and RTX (retransmission) to avoid bandwidth overhead
-    // These are enabled by default in webrtcsink and can significantly increase bandwidth:
-    // - FEC adds redundancy packets (can add ~50% overhead)
-    // - RTX sends duplicate packets for retransmission
-    // For pre-encoded video at high bitrates, these can cause near-double bandwidth usage
+    // Disable FEC but keep RTX (retransmission) enabled.
+    // - FEC adds proactive redundancy packets on every stream (~50% constant
+    //   overhead, near-double bandwidth for pre-encoded high-bitrate video),
+    //   so it stays off.
+    // - RTX is reactive: it costs nothing while no packets are lost and only
+    //   resends the exact packets the client NACKs. Without it, every loss
+    //   escalates to PLI -> forced keyframe, which is far more expensive and
+    //   leaves the picture broken until the keyframe arrives.
     whepserversink.set_property("do-fec", false);
-    whepserversink.set_property("do-retransmission", false);
+    whepserversink.set_property("do-retransmission", true);
 
     // Access the signaller child and set its properties
     // Bind to localhost only - axum will proxy external requests
