@@ -682,6 +682,20 @@ fn set_encoder_properties(
         }
     }
 
+    // Rate-limit force-keyunit requests (GstVideoEncoder base-class property,
+    // present on all encoders; default 0 = honor every request). WebRTC
+    // viewers send a PLI on picture loss and webrtcsink converts each one
+    // into a force-keyunit event. With no floor, a burst-induced loss spiral
+    // (big frame -> loss -> PLI -> outsized IDR -> more loss -> more PLIs)
+    // makes the encoder emit back-to-back keyframes and multiplies the burst
+    // it started from. A 1 s floor caps PLI-driven IDRs at one per second:
+    // new viewers and genuine recoveries still get their keyframe quickly,
+    // but a PLI storm can no longer drive the output to many times the
+    // target bitrate.
+    if encoder.has_property("min-force-key-unit-interval") {
+        encoder.set_property("min-force-key-unit-interval", 1_000_000_000u64);
+    }
+
     info!(
         "Set encoder properties: bitrate={} kbps, preset={}, tune={}, rate_control={:?}, gop={}",
         bitrate, quality_preset, tune, rate_control, keyframe_interval
