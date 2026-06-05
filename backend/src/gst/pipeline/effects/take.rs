@@ -67,7 +67,9 @@ impl PipelineManager {
             None => Some(to_input),
         };
 
-        // Auto-cancel FTB if active
+        // Auto-cancel FTB if active. Zone-border underlays need no special
+        // handling here: they are regular pads driven by the take paths
+        // below exactly like their content pads.
         let was_ftb = overlay_state
             .as_ref()
             .map(|s| {
@@ -136,6 +138,21 @@ impl PipelineManager {
                 };
                 let src_aspects =
                     self.vision_mixer_source_aspects(block_instance_id, state.num_inputs);
+                let pgm_w = state.pgm_w.max(1) as f64;
+                let dist_underlay =
+                    state
+                        .dist_underlay_base()
+                        .map(|base| crate::gst::underlay::UnderlayCtx {
+                            base,
+                            scale: canvas_width as f64 / pgm_w,
+                        });
+                let pvw_underlay =
+                    state
+                        .mv_pvw_underlay_base()
+                        .map(|base| crate::gst::underlay::UnderlayCtx {
+                            base,
+                            scale: state.layout.pvw_rect.w / pgm_w,
+                        });
 
                 let old_dist_targets = pads_for_source(
                     state,
@@ -147,6 +164,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                     src_aspect,
                     &src_aspects,
+                    dist_underlay,
                 );
                 let new_dist_targets = pads_for_source(
                     state,
@@ -158,6 +176,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                     src_aspect,
                     &src_aspects,
+                    dist_underlay,
                 );
                 let old_pvw_targets = pads_for_source(
                     state,
@@ -169,6 +188,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                     src_aspect,
                     &src_aspects,
+                    pvw_underlay,
                 );
                 let new_pvw_targets = pads_for_source(
                     state,
@@ -180,6 +200,7 @@ impl PipelineManager {
                     strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                     src_aspect,
                     &src_aspects,
+                    pvw_underlay,
                 );
 
                 if is_cut {
@@ -197,6 +218,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                             src_aspect,
                             &src_aspects,
+                            dist_underlay,
                         );
                     } else {
                         apply_input_group_to_region(
@@ -208,6 +230,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::DIST_PGM_ZORDER,
                             src_aspect,
                             &src_aspects,
+                            dist_underlay,
                         );
                     }
                     if let Some(p) = new_pvw_pip {
@@ -223,6 +246,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                             src_aspect,
                             &src_aspects,
+                            pvw_underlay,
                         );
                     } else {
                         apply_input_group_to_region(
@@ -234,6 +258,7 @@ impl PipelineManager {
                             strom_types::vision_mixer::MV_BIG_DISPLAY_ZORDER,
                             src_aspect,
                             &src_aspects,
+                            pvw_underlay,
                         );
                     }
                 } else {
@@ -351,11 +376,12 @@ impl PipelineManager {
             let name = pad.name();
             if name.starts_with("sink_") {
                 if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
-                    for prop in ["alpha", "xpos", "ypos", "width", "height"] {
-                        if let Some(binding) = pad.control_binding(prop) {
-                            pad.remove_control_binding(&binding);
-                        }
-                    }
+                    // Neutralize lingering animation bindings (keyframe wipe
+                    // — never removed, see crate::gst::control_bindings).
+                    crate::gst::control_bindings::wipe_control_bindings(
+                        pad.upcast_ref(),
+                        &["alpha", "xpos", "ypos", "width", "height"],
+                    );
                     if idx < num_video_inputs {
                         // Classic takes are input↔input — wipe any crop left
                         // behind by an earlier PiP render on these pads.
@@ -382,11 +408,16 @@ impl PipelineManager {
                         }
                     } else if let Some(state) = overlay_state.as_ref() {
                         let dsk_idx = idx - num_video_inputs;
-                        let enabled = dsk_idx < state.dsk_enabled.len()
-                            && state.dsk_enabled[dsk_idx]
+                        if dsk_idx < state.dsk_enabled.len() {
+                            let enabled = state.dsk_enabled[dsk_idx]
                                 .load(std::sync::atomic::Ordering::Relaxed);
-                        let alpha = if enabled { 1.0f64 } else { 0.0f64 };
-                        pad.set_property("alpha", alpha);
+                            let alpha = if enabled { 1.0f64 } else { 0.0f64 };
+                            pad.set_property("alpha", alpha);
+                        } else {
+                            // Border underlay pads: classic takes are
+                            // input↔input — no zones on PGM, no borders.
+                            pad.set_property("alpha", 0.0f64);
+                        }
                     }
                 }
             }

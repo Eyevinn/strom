@@ -251,6 +251,59 @@ pub(super) fn build_gpu_pipeline(
     ));
     // Link to mv_comp is added AFTER all other mv_comp links (pad ordering matters)
 
+    // --- Border underlay sources ---
+    // Zone borders render as solid-color compositor pads directly beneath
+    // their content pads (see `gst::underlay`). One tiny videotestsrc per
+    // (region, input); the border color is set at runtime via
+    // `foreground-color`. Non-live → contributes no latency. Only built when
+    // PiPs are configured — zones (and thus borders) cannot exist without
+    // them.
+    if p.num_pips > 0 {
+        let underlay_chains: Vec<String> = (0..p.num_inputs)
+            .map(|i| format!("underlay_dist_{}", i))
+            .chain((0..p.num_inputs).map(|i| format!("underlay_pvw_{}", i)))
+            .chain((0..p.num_pips).flat_map(|pip| {
+                (0..p.num_inputs)
+                    .map(move |i| format!("underlay_pip_{}_{}", pip, i))
+                    .collect::<Vec<_>>()
+            }))
+            .collect();
+        // Low framerate: the color only changes on border edits and the
+        // mixer keeps compositing the latest buffer between pushes.
+        let underlay_caps: gst::Caps =
+            "video/x-raw,format=RGBA,width=16,height=16,framerate=5/1,pixel-aspect-ratio=1/1"
+                .parse()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("underlay caps: {}", e)))?;
+        for name in &underlay_chains {
+            let src_id = p.id(&format!("{}_src", name));
+            let cf_id = p.id(&format!("{}_caps", name));
+            let up_id = p.id(&format!("{}_upload", name));
+            let src = gst::ElementFactory::make("videotestsrc")
+                .name(&src_id)
+                .property("is-live", false)
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", src_id, e)))?;
+            src.set_property_from_str("pattern", "solid-color");
+            let cf = gst::ElementFactory::make("capsfilter")
+                .name(&cf_id)
+                .property("caps", &underlay_caps)
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", cf_id, e)))?;
+            elems.push((src_id.clone(), src));
+            elems.push((cf_id.clone(), cf));
+            elems.push((up_id.clone(), elements::make_element("glupload", &up_id)?));
+            links.push((
+                ElementPadRef::pad(&src_id, "src"),
+                ElementPadRef::pad(&cf_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&cf_id, "src"),
+                ElementPadRef::pad(&up_id, "sink"),
+            ));
+        }
+    }
+    // Links to the compositor pads are added below in pad-index order.
+
     // --- Per-input elements ---
     for i in 0..p.num_inputs {
         let q_id = p.id(&format!("queue_{}", i));
@@ -322,6 +375,22 @@ pub(super) fn build_gpu_pipeline(
         ));
     }
 
+    // Dist border underlays — after the DSK links so input i's underlay
+    // lands at sink_{num_inputs + num_dsk_inputs + i} (glvideomixer pads are
+    // auto-created in link order).
+    if p.num_pips > 0 {
+        for i in 0..p.num_inputs {
+            let up_id = p.id(&format!("underlay_dist_{}_upload", i));
+            links.push((
+                ElementPadRef::pad(&up_id, "src"),
+                ElementPadRef::pad(
+                    &mixer_id,
+                    format!("sink_{}", p.num_inputs + p.num_dsk_inputs + i),
+                ),
+            ));
+        }
+    }
+
     // Multiview compositor thumbnails: tee_i.src_1 → queue → mv_comp
     for i in 0..p.num_inputs {
         let tee_id = p.id(&format!("tee_{}", i));
@@ -380,12 +449,36 @@ pub(super) fn build_gpu_pipeline(
         }
     }
 
-    // Overlay pad: glupload_overlay → mv_comp (must be last link to get correct pad index)
+    // Overlay pad: glupload_overlay → mv_comp (pad order matters on the GL
+    // mixer — this must precede the underlay links below).
     let overlay_pad_idx = 2 * p.num_inputs + 1 + p.num_pips * p.num_inputs;
     links.push((
         ElementPadRef::pad(&up_overlay_id, "src"),
         ElementPadRef::pad(&mv_comp_id, format!("sink_{}", overlay_pad_idx)),
     ));
+
+    // Multiview border underlays — after the overlay pad: PVW underlays at
+    // sink_{2N+2+P+i}, then tile underlays at sink_{2N+2+P+N+pip*N+i}.
+    if p.num_pips > 0 {
+        let mv_underlay_base = overlay_pad_idx + 1;
+        for i in 0..p.num_inputs {
+            let up_id = p.id(&format!("underlay_pvw_{}_upload", i));
+            links.push((
+                ElementPadRef::pad(&up_id, "src"),
+                ElementPadRef::pad(&mv_comp_id, format!("sink_{}", mv_underlay_base + i)),
+            ));
+        }
+        for pip_idx in 0..p.num_pips {
+            for i in 0..p.num_inputs {
+                let up_id = p.id(&format!("underlay_pip_{}_{}_upload", pip_idx, i));
+                let sink_idx = mv_underlay_base + p.num_inputs * (1 + pip_idx) + i;
+                links.push((
+                    ElementPadRef::pad(&up_id, "src"),
+                    ElementPadRef::pad(&mv_comp_id, format!("sink_{}", sink_idx)),
+                ));
+            }
+        }
+    }
 
     // --- Pad properties (applied after linking when auto-created pads exist) ---
     let pad_properties = pad_layout::build_pad_properties(p, &mv_layout);

@@ -4,7 +4,7 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_controller::prelude::*;
-use gstreamer_controller::{DirectControlBinding, InterpolationControlSource, InterpolationMode};
+use gstreamer_controller::{InterpolationControlSource, InterpolationMode};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,7 @@ use tracing::{debug, info};
 
 use super::{
     plan_transition, PadAction, PadTarget, TransitionController, TransitionError, TransitionType,
-    ZHandling,
+    UnderlayTarget, ZHandling,
 };
 
 impl TransitionController {
@@ -222,9 +222,13 @@ impl TransitionController {
 
         let mut control_sources = Vec::new();
 
-        // Get where the from_pad currently is (this is where to_pad should end up)
-        let target_x = from_pad.property::<i32>("xpos");
-        let target_y = from_pad.property::<i32>("ypos");
+        // Where the incoming pad must END: its OWN aspect-fitted rect. The
+        // classic-take reset positions every pad before the transition runs,
+        // and with explicit geometry (sizing-policy=none) pads of different
+        // aspect ratios have different rects — borrowing the outgoing pad's
+        // position would land e.g. a 2.39:1 source at a 16:9 source's y.
+        let target_x = to_pad.property::<i32>("xpos");
+        let target_y = to_pad.property::<i32>("ypos");
 
         // To pad starts off-screen and slides over the from_pad
         // Direction: slide_left means new content comes from the right
@@ -265,8 +269,30 @@ impl TransitionController {
             control_sources.push(cs);
         }
 
-        // After transition completes, hide from_pad
-        let cs = self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?;
+        // End-of-slide handling for the outgoing pad — the planner's rule
+        // ("what's visible needs a transition; what's hidden doesn't"):
+        // when the incoming rect fully covers the outgoing one, the old
+        // picture is hidden at landing — snap it off (classic slide). With
+        // mismatched aspect ratios the incoming rect can leave parts of the
+        // old picture visible (letterbox/pillarbox remnants) — fade the old
+        // picture out over the slide instead, so nothing pops at the end.
+        let from_rect = (
+            from_pad.property::<i32>("xpos"),
+            from_pad.property::<i32>("ypos"),
+            from_pad.property::<i32>("width"),
+            from_pad.property::<i32>("height"),
+        );
+        let to_rect = (
+            target_x,
+            target_y,
+            to_pad.property::<i32>("width"),
+            to_pad.property::<i32>("height"),
+        );
+        let cs = if super::plan::rect_contains(to_rect, from_rect) {
+            self.setup_alpha_animation(&from_pad, end_time, end_time, 1.0, 0.0)?
+        } else {
+            self.setup_alpha_animation(&from_pad, start_time, end_time, 1.0, 0.0)?
+        };
         control_sources.push(cs);
 
         let key = self.next_key(&format!("slide_{}_{}", from_input, to_input));
@@ -312,11 +338,15 @@ impl TransitionController {
         let from_end_x = from_start_x + dx * self.canvas_width;
         let from_end_y = from_start_y + dy * self.canvas_height;
 
-        // To pad enters from opposite side
-        let to_start_x = from_start_x - dx * self.canvas_width;
-        let to_start_y = from_start_y - dy * self.canvas_height;
-        let to_end_x = from_start_x; // Ends where from started
-        let to_end_y = from_start_y;
+        // To pad enters from the opposite side and ends at its OWN
+        // aspect-fitted rect (set by the classic-take reset). With explicit
+        // geometry, pads of different aspect ratios have different rects —
+        // ending where the outgoing pad started would land e.g. a 2.39:1
+        // source at a 16:9 source's y.
+        let to_end_x = to_pad.property::<i32>("xpos");
+        let to_end_y = to_pad.property::<i32>("ypos");
+        let to_start_x = to_end_x - dx * self.canvas_width;
+        let to_start_y = to_end_y - dy * self.canvas_height;
 
         // Set initial position for to_pad
         to_pad.set_property("xpos", to_start_x);
@@ -414,8 +444,7 @@ impl TransitionController {
         to_pad.set_property("alpha", 0.0f64);
 
         // First half: fade out from_pad (1.0 -> 0.0) with easing
-        let cs_from = InterpolationControlSource::new();
-        cs_from.set_mode(InterpolationMode::Linear);
+        let cs_from = Self::fresh_cs(from_pad.upcast_ref(), "alpha", InterpolationMode::Linear)?;
 
         // Add eased keyframes for first half (fade out)
         let num_keyframes = vision_mixer::TRANSITION_KEYFRAMES;
@@ -439,15 +468,10 @@ impl TransitionController {
             ));
         }
 
-        let binding = DirectControlBinding::new(&from_pad, "alpha", &cs_from);
-        from_pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
         control_sources.push(cs_from);
 
         // Second half: fade in to_pad (0.0 -> 1.0) with easing
-        let cs_to = InterpolationControlSource::new();
-        cs_to.set_mode(InterpolationMode::Linear);
+        let cs_to = Self::fresh_cs(to_pad.upcast_ref(), "alpha", InterpolationMode::Linear)?;
 
         // Stay at 0 until midpoint
         if !cs_to.set(start_time, 0.0) {
@@ -471,10 +495,6 @@ impl TransitionController {
             }
         }
 
-        let binding = DirectControlBinding::new(&to_pad, "alpha", &cs_to);
-        to_pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
         control_sources.push(cs_to);
 
         let key = self.next_key(&format!("dip_{}_{}", from_input, to_input));
@@ -500,6 +520,19 @@ impl TransitionController {
         (1.0 - (t * std::f64::consts::PI).cos()) / 2.0
     }
 
+    /// The persistent control source for `obj.prop`, wiped and ready to
+    /// program (see `crate::gst::control_bindings` for why bindings are
+    /// never removed).
+    fn fresh_cs(
+        obj: &gst::Object,
+        prop: &str,
+        mode: InterpolationMode,
+    ) -> Result<InterpolationControlSource, TransitionError> {
+        crate::gst::control_bindings::fresh_control_source(obj, prop, mode).ok_or_else(|| {
+            TransitionError::ControlSourceError(format!("No animatable binding for {}", prop))
+        })
+    }
+
     /// Set up alpha property animation on a pad with ease-in-out curve.
     fn setup_alpha_animation(
         &self,
@@ -509,8 +542,7 @@ impl TransitionController {
         start_value: f64,
         end_value: f64,
     ) -> Result<InterpolationControlSource, TransitionError> {
-        let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::Linear);
+        let cs = Self::fresh_cs(pad.upcast_ref(), "alpha", InterpolationMode::Linear)?;
 
         let duration = (end_time - start_time).nseconds() as f64;
         let value_range = end_value - start_value;
@@ -530,12 +562,6 @@ impl TransitionController {
                 )));
             }
         }
-
-        // Create binding and attach to pad
-        let binding = DirectControlBinding::new(pad, "alpha", &cs);
-        pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
 
         debug!(
             "Alpha animation (eased): {} -> {} on pad {}",
@@ -559,8 +585,7 @@ impl TransitionController {
         start_value: i32,
         end_value: i32,
     ) -> Result<InterpolationControlSource, TransitionError> {
-        let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::Linear);
+        let cs = Self::fresh_cs(pad, property, InterpolationMode::Linear)?;
 
         // Get property range for normalization
         let pspec = pad.find_property(property).ok_or_else(|| {
@@ -594,11 +619,6 @@ impl TransitionController {
             }
         }
 
-        let binding = DirectControlBinding::new(pad, property, &cs);
-        pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
-
         debug!(
             "Int animation (eased) ({}): {} -> {} on pad {}",
             property,
@@ -610,29 +630,29 @@ impl TransitionController {
         Ok(cs)
     }
 
-    /// Remove all control bindings from a pad. Must cover every property the
-    /// transition setup helpers can bind: alpha (fades + step-off), xpos/ypos/
-    /// width/height (position animation), zorder (morph z lift/step), and the
-    /// GL mixer crop properties (crop morph — absent on the CPU backend, where
+    /// Neutralize all control bindings on a pad by wiping their keyframes
+    /// (bindings stay attached — see `crate::gst::control_bindings` for why
+    /// they must never be removed). Covers every property the transition
+    /// setup helpers can bind: alpha (fades + step-off), xpos/ypos/width/
+    /// height (position animation), zorder (morph z lift/step), and the GL
+    /// mixer crop properties (crop morph — absent on the CPU backend, where
     /// `control_binding` simply returns `None`).
     fn clear_control_bindings(&self, pad: &gst::Pad) {
-        for prop in [
-            "alpha",
-            "xpos",
-            "ypos",
-            "width",
-            "height",
-            "zorder",
-            "crop-left",
-            "crop-right",
-            "crop-top",
-            "crop-bottom",
-        ] {
-            if let Some(binding) = pad.control_binding(prop) {
-                pad.remove_control_binding(&binding);
-                debug!("Removed {} control binding from pad {}", prop, pad.name());
-            }
-        }
+        crate::gst::control_bindings::wipe_control_bindings(
+            pad.upcast_ref(),
+            &[
+                "alpha",
+                "xpos",
+                "ypos",
+                "width",
+                "height",
+                "zorder",
+                "crop-left",
+                "crop-right",
+                "crop-top",
+                "crop-bottom",
+            ],
+        );
     }
 
     /// Animate a transition between two pad compositions ("PiP morph" style).
@@ -663,9 +683,17 @@ impl TransitionController {
         let plan = plan_transition(outgoing, incoming);
         let mut control_sources = Vec::new();
 
+        // Border underlays ride along with their content pads: for each
+        // planned content action, the pad's underlay (old and/or new state
+        // from the targets) is driven through the same timeline.
+        let out_map: HashMap<usize, &PadTarget> = outgoing.iter().map(|t| (t.pad_idx, t)).collect();
+        let in_map: HashMap<usize, &PadTarget> = incoming.iter().map(|t| (t.pad_idx, t)).collect();
+
         for (idx, action) in &plan {
             let pad = self.get_sink_pad(*idx)?;
             self.clear_control_bindings(&pad);
+            let old_u = out_map.get(idx).and_then(|t| t.underlay);
+            let new_u = in_map.get(idx).and_then(|t| t.underlay);
 
             match *action {
                 PadAction::Morph {
@@ -737,22 +765,27 @@ impl TransitionController {
                         from_h,
                         to_h,
                     )?);
+                    self.morph_underlay(
+                        old_u,
+                        new_u,
+                        (from_x, from_y, from_w, from_h),
+                        (to_x, to_y, to_w, to_h),
+                        z_handling,
+                        current_time,
+                        end_time,
+                        &mut control_sources,
+                    )?;
                 }
-                PadAction::AffirmStatic { x, y, w, h, zorder } => {
-                    pad.set_property("alpha", 1.0f64);
-                    pad.set_property("zorder", zorder);
+                PadAction::AffirmStatic { x, y, w, h, zorder }
+                | PadAction::HoldFullAlpha { x, y, w, h, zorder } => {
                     pad.set_property("xpos", x);
                     pad.set_property("ypos", y);
                     pad.set_property("width", w);
                     pad.set_property("height", h);
-                }
-                PadAction::HoldFullAlpha { x, y, w, h, zorder } => {
-                    pad.set_property("xpos", x);
-                    pad.set_property("ypos", y);
-                    pad.set_property("width", w);
-                    pad.set_property("height", h);
                     pad.set_property("zorder", zorder);
                     pad.set_property("alpha", 1.0f64);
+                    // Underlay snaps with its content pad.
+                    self.snap_underlay(old_u, new_u, zorder)?;
                 }
                 PadAction::FadeIn { x, y, w, h, zorder } => {
                     pad.set_property("xpos", x);
@@ -768,6 +801,20 @@ impl TransitionController {
                         0.0,
                         1.0,
                     )?);
+                    if let Some(u) = new_u {
+                        // Border fades in with its box.
+                        let upad = self.place_underlay(&u, zorder)?;
+                        upad.set_property("alpha", 0.0f64);
+                        control_sources.push(self.setup_alpha_animation(
+                            &upad,
+                            current_time,
+                            end_time,
+                            0.0,
+                            1.0,
+                        )?);
+                    } else if let Some(u) = old_u {
+                        self.hide_underlay_pad(u.pad_idx)?;
+                    }
                 }
                 PadAction::FadeOut => {
                     control_sources.push(self.setup_alpha_animation(
@@ -777,6 +824,17 @@ impl TransitionController {
                         1.0,
                         0.0,
                     )?);
+                    if let Some(u) = old_u {
+                        let upad = self.get_sink_pad(u.pad_idx)?;
+                        self.clear_control_bindings(&upad);
+                        control_sources.push(self.setup_alpha_animation(
+                            &upad,
+                            current_time,
+                            end_time,
+                            1.0,
+                            0.0,
+                        )?);
+                    }
                 }
                 PadAction::StepOffAtEnd => {
                     control_sources.push(self.setup_alpha_step_off(
@@ -784,6 +842,15 @@ impl TransitionController {
                         current_time,
                         end_time,
                     )?);
+                    if let Some(u) = old_u {
+                        let upad = self.get_sink_pad(u.pad_idx)?;
+                        self.clear_control_bindings(&upad);
+                        control_sources.push(self.setup_alpha_step_off(
+                            &upad,
+                            current_time,
+                            end_time,
+                        )?);
+                    }
                 }
             }
         }
@@ -801,6 +868,159 @@ impl TransitionController {
             plan.len()
         );
 
+        Ok(())
+    }
+
+    /// Place an underlay pad at its target rect/color, directly beneath the
+    /// given content zorder. Alpha is left to the caller. Clears stale
+    /// control bindings first.
+    fn place_underlay(
+        &self,
+        u: &UnderlayTarget,
+        content_zorder: u32,
+    ) -> Result<gst::Pad, TransitionError> {
+        let pad = self.get_sink_pad(u.pad_idx)?;
+        self.clear_control_bindings(&pad);
+        crate::gst::underlay::set_underlay_color(&pad, u.argb);
+        pad.set_property("xpos", u.x);
+        pad.set_property("ypos", u.y);
+        pad.set_property("width", u.w);
+        pad.set_property("height", u.h);
+        pad.set_property("zorder", vision_mixer::underlay_zorder(content_zorder));
+        Ok(pad)
+    }
+
+    /// Hide an underlay pad (its content pad has no border in the new state).
+    fn hide_underlay_pad(&self, pad_idx: usize) -> Result<(), TransitionError> {
+        let pad = self.get_sink_pad(pad_idx)?;
+        self.clear_control_bindings(&pad);
+        pad.set_property("alpha", 0.0f64);
+        Ok(())
+    }
+
+    /// Snap a content pad's underlay to its new state (used for the
+    /// non-animating content actions).
+    fn snap_underlay(
+        &self,
+        old_u: Option<UnderlayTarget>,
+        new_u: Option<UnderlayTarget>,
+        content_zorder: u32,
+    ) -> Result<(), TransitionError> {
+        if let Some(u) = new_u {
+            let pad = self.place_underlay(&u, content_zorder)?;
+            pad.set_property("alpha", 1.0f64);
+        } else if let Some(u) = old_u {
+            self.hide_underlay_pad(u.pad_idx)?;
+        }
+        Ok(())
+    }
+
+    /// Drive a morphing content pad's underlay through the same timeline:
+    /// geometry animates from the old underlay rect to the new one, z-order
+    /// mirrors the content's lift/snap one slot below, and alpha fades when
+    /// the border appears/disappears mid-morph. When one side has no border,
+    /// its rect is synthesized by inflating that side's content rect with
+    /// the other side's inflation so the frame still tracks the box.
+    #[allow(clippy::too_many_arguments)]
+    fn morph_underlay(
+        &self,
+        old_u: Option<UnderlayTarget>,
+        new_u: Option<UnderlayTarget>,
+        from_rect: (i32, i32, i32, i32),
+        to_rect: (i32, i32, i32, i32),
+        z_handling: ZHandling,
+        current_time: gst::ClockTime,
+        end_time: gst::ClockTime,
+        control_sources: &mut Vec<InterpolationControlSource>,
+    ) -> Result<(), TransitionError> {
+        let Some(spec) = new_u.or(old_u) else {
+            return Ok(());
+        };
+        // Synthesized inflation for the side that lacks a border: use the
+        // other side's (uniform outward inflation, derivable from its spec).
+        let inflate = |content: (i32, i32, i32, i32), u: &UnderlayTarget, u_content_w: i32| {
+            let bw = ((u.w - u_content_w) / 2).max(1);
+            (
+                content.0 - bw,
+                content.1 - bw,
+                content.2 + 2 * bw,
+                content.3 + 2 * bw,
+            )
+        };
+        let (fx, fy, fw, fh) = match old_u {
+            Some(u) => (u.x, u.y, u.w, u.h),
+            None => inflate(from_rect, &spec, to_rect.2),
+        };
+        let (tx, ty, tw, th) = match new_u {
+            Some(u) => (u.x, u.y, u.w, u.h),
+            None => inflate(to_rect, &spec, from_rect.2),
+        };
+
+        let pad = self.get_sink_pad(spec.pad_idx)?;
+        self.clear_control_bindings(&pad);
+        crate::gst::underlay::set_underlay_color(&pad, spec.argb);
+
+        // Z mirrors the content pad, one slot below — including the lift.
+        match z_handling {
+            ZHandling::SnapToNew(z) => pad.set_property("zorder", vision_mixer::underlay_zorder(z)),
+            ZHandling::LiftAndStep { new_z } => {
+                let lifted = vision_mixer::TRANSITION_FOREGROUND_ZORDER + new_z;
+                pad.set_property("zorder", vision_mixer::underlay_zorder(lifted));
+                control_sources.push(self.setup_zorder_step(
+                    &pad,
+                    current_time,
+                    end_time,
+                    vision_mixer::underlay_zorder(lifted),
+                    vision_mixer::underlay_zorder(new_z),
+                )?);
+            }
+        }
+
+        pad.set_property("xpos", fx);
+        pad.set_property("ypos", fy);
+        pad.set_property("width", fw);
+        pad.set_property("height", fh);
+        for (prop, from, to) in [
+            ("xpos", fx, tx),
+            ("ypos", fy, ty),
+            ("width", fw, tw),
+            ("height", fh, th),
+        ] {
+            control_sources.push(self.setup_int_animation(
+                pad.upcast_ref(),
+                prop,
+                current_time,
+                end_time,
+                from,
+                to,
+            )?);
+        }
+
+        // Alpha: steady when bordered on both sides; fades in/out when the
+        // border appears or disappears during the morph.
+        match (old_u.is_some(), new_u.is_some()) {
+            (true, true) => pad.set_property("alpha", 1.0f64),
+            (false, true) => {
+                pad.set_property("alpha", 0.0f64);
+                control_sources.push(self.setup_alpha_animation(
+                    &pad,
+                    current_time,
+                    end_time,
+                    0.0,
+                    1.0,
+                )?);
+            }
+            (true, false) => {
+                control_sources.push(self.setup_alpha_animation(
+                    &pad,
+                    current_time,
+                    end_time,
+                    1.0,
+                    0.0,
+                )?);
+            }
+            (false, false) => unreachable!("spec exists"),
+        }
         Ok(())
     }
 
@@ -844,10 +1064,10 @@ impl TransitionController {
 
         let mut control_sources = Vec::new();
         for (prop, to) in props.into_iter().zip([l, r, t, b]) {
-            // Clear a stale binding first so reads + writes hit the real value.
-            if let Some(binding) = carrier.control_binding(prop) {
-                carrier.remove_control_binding(&binding);
-            }
+            // Neutralize a stale binding first so reads + writes hit the
+            // real value (keyframe wipe — bindings are never removed, see
+            // crate::gst::control_bindings).
+            crate::gst::control_bindings::wipe_control_binding(carrier.upcast_ref(), prop);
             let from = carrier.property::<i32>(prop);
             if from == to {
                 carrier.set_property(prop, to);
@@ -888,8 +1108,7 @@ impl TransitionController {
         start_z: u32,
         end_z: u32,
     ) -> Result<InterpolationControlSource, TransitionError> {
-        let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::None);
+        let cs = Self::fresh_cs(pad.upcast_ref(), "zorder", InterpolationMode::None)?;
 
         // DirectControlBinding scales the source value by the property paramspec
         // range, so we have to express absolute zorder values as a 0..1 ratio.
@@ -913,10 +1132,6 @@ impl TransitionController {
                 "Failed to set zorder end keyframe".to_string(),
             ));
         }
-        let binding = DirectControlBinding::new(pad, "zorder", &cs);
-        pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add zorder control binding: {}", e))
-        })?;
         Ok(cs)
     }
 
@@ -930,8 +1145,8 @@ impl TransitionController {
         start_time: gst::ClockTime,
         end_time: gst::ClockTime,
     ) -> Result<InterpolationControlSource, TransitionError> {
-        let cs = InterpolationControlSource::new();
-        cs.set_mode(InterpolationMode::None); // constant-between-keyframes
+        // None mode = constant-between-keyframes.
+        let cs = Self::fresh_cs(pad.upcast_ref(), "alpha", InterpolationMode::None)?;
         if !cs.set(start_time, 1.0) {
             return Err(TransitionError::ControlSourceError(
                 "Failed to set start keyframe".to_string(),
@@ -942,10 +1157,6 @@ impl TransitionController {
                 "Failed to set end keyframe".to_string(),
             ));
         }
-        let binding = DirectControlBinding::new(pad, "alpha", &cs);
-        pad.add_control_binding(&binding).map_err(|e| {
-            TransitionError::GstError(format!("Failed to add control binding: {}", e))
-        })?;
         Ok(cs)
     }
 

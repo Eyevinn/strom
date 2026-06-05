@@ -88,6 +88,10 @@ pub struct VisionMixerOverlayState {
     pub num_dsk_inputs: usize,
     /// Pre-computed layout (immutable after construction).
     pub layout: OverlayLayout,
+    /// PGM (distribution) canvas size — the reference for resolution-
+    /// normalized units like zone-border width (set at build, immutable).
+    pub pgm_w: u32,
+    pub pgm_h: u32,
     /// Input labels (set at build time, read-only after).
     pub labels: Vec<String>,
     /// Monotonic instant captured at construction for wall-clock derivation.
@@ -143,6 +147,8 @@ impl VisionMixerOverlayState {
         pvw_input: usize,
         labels: Vec<String>,
         layout: OverlayLayout,
+        pgm_w: u32,
+        pgm_h: u32,
         show_vu_meters: bool,
         pip: PipInitialState,
     ) -> Self {
@@ -190,6 +196,8 @@ impl VisionMixerOverlayState {
                 .collect(),
             num_dsk_inputs,
             layout,
+            pgm_w,
+            pgm_h,
             labels,
             instant_base: now_instant,
             base_utc_secs: utc_secs,
@@ -324,6 +332,26 @@ impl VisionMixerOverlayState {
             }
         }
         changed
+    }
+
+    /// Sink index of input 0's border underlay pad on the dist compositor
+    /// (input i's underlay = base + i). `None` when the mixer has no PiPs —
+    /// underlay pads exist only when zones can (see the pipeline builders).
+    pub fn dist_underlay_base(&self) -> Option<usize> {
+        (self.num_pips > 0).then(|| self.num_inputs + self.num_dsk_inputs)
+    }
+
+    /// Sink index of input 0's border underlay pad for the multiview PVW big
+    /// region. `None` when the mixer has no PiPs.
+    pub fn mv_pvw_underlay_base(&self) -> Option<usize> {
+        (self.num_pips > 0).then(|| 2 * self.num_inputs + 2 + self.num_pips * self.num_inputs)
+    }
+
+    /// Sink index of input 0's border underlay pad for PiP tile `pip_idx`
+    /// on the multiview compositor. `None` when the mixer has no PiPs.
+    pub fn mv_pip_underlay_base(&self, pip_idx: usize) -> Option<usize> {
+        self.mv_pvw_underlay_base()
+            .map(|b| b + self.num_inputs * (1 + pip_idx))
     }
 
     /// Whether VU meters should be rendered.
@@ -1039,9 +1067,18 @@ pub fn start_overlay_timer(
             debug!("Overlay timer started for {}", block_id);
             // Wait for pipeline to reach PLAYING before pushing first frame.
             // The appsrc needs caps negotiation to complete first.
+            // Identity check, not just presence: a fast flow restart can
+            // re-register a NEW renderer under the same block id before this
+            // thread observes the unregistration — presence alone would keep
+            // the old thread (and its strong AppSrc ref) alive forever.
+            let still_mine = |r: &Arc<Mutex<OverlayRenderer>>| {
+                get_overlay_renderer(&block_id)
+                    .map(|cur| Arc::ptr_eq(&cur, r))
+                    .unwrap_or(false)
+            };
             let ready = loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                if get_overlay_renderer(&block_id).is_none() {
+                if !still_mine(&renderer) {
                     break false;
                 }
                 if let Ok(r) = renderer.lock() {
@@ -1072,7 +1109,7 @@ pub fn start_overlay_timer(
                     // spinning a catch-up burst.
                     next_tick = now;
                 }
-                if get_overlay_renderer(&block_id).is_none() {
+                if !still_mine(&renderer) {
                     debug!("Overlay timer stopping for {}", block_id);
                     break;
                 }
@@ -1142,6 +1179,10 @@ fn draw_status_border(
 }
 
 /// Render overlay content to a cairo context (called only when state changes).
+///
+/// Zone borders are NOT drawn here — they are compositor underlay pads
+/// (see `gst::underlay`), composited beneath their content pads on every
+/// region including the PiP tiles and the PVW big display.
 #[allow(clippy::too_many_arguments)]
 fn render_overlay(
     state: &VisionMixerOverlayState,

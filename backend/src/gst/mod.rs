@@ -2,6 +2,7 @@
 
 mod block_expansion;
 pub mod buffer_age_probe;
+pub(crate) mod control_bindings;
 pub(crate) mod crop;
 pub mod discovery;
 pub mod pipeline;
@@ -10,6 +11,7 @@ pub mod thread_priority;
 pub mod thumbnail;
 pub mod thumbnail_tap;
 pub mod transitions;
+pub(crate) mod underlay;
 pub mod video_frame;
 pub mod volume_ramp;
 pub mod whep_probe;

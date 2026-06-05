@@ -289,6 +289,8 @@ fn overlay_registries_round_trip() {
         1,
         vec!["A".into(), "B".into(), "C".into(), "D".into()],
         lo,
+        1920,
+        1080,
         false,
         super::overlay::PipInitialState::default(),
     ));

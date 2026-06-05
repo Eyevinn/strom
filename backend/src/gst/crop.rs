@@ -64,11 +64,9 @@ pub(crate) fn source_dims_for_pad(pad: &gst::Pad) -> Option<(i32, i32)> {
 pub(crate) fn set_pad_crop(pad: &gst::Pad, crop: &strom_types::vision_mixer::SourceCrop) {
     if pad.find_property("crop-left").is_some() {
         // --- GL backend: crop pad properties. ---
-        for prop in CROP_PAD_PROPS {
-            if let Some(binding) = pad.control_binding(prop) {
-                pad.remove_control_binding(&binding);
-            }
-        }
+        // Neutralize stale crop-animation bindings (keyframe wipe — never
+        // removed, see crate::gst::control_bindings).
+        crate::gst::control_bindings::wipe_control_bindings(pad.upcast_ref(), &CROP_PAD_PROPS);
         if crop.is_zero() {
             for prop in CROP_PAD_PROPS {
                 pad.set_property(prop, 0i32);
@@ -92,13 +90,12 @@ pub(crate) fn set_pad_crop(pad: &gst::Pad, crop: &strom_types::vision_mixer::Sou
 
     if let Some(vc) = upstream_videocrop(pad) {
         // --- CPU backend: upstream videocrop element. ---
-        // Clear stale crop animation bindings first — they would silently
-        // override the writes below.
-        for prop in VIDEOCROP_PROPS {
-            if let Some(binding) = vc.control_binding(prop) {
-                vc.remove_control_binding(&binding);
-            }
-        }
+        // Neutralize stale crop-animation bindings first — they would
+        // silently override the writes below. videocrop syncs control
+        // values on EVERY buffer, so the keyframe-wipe protocol (never
+        // remove a binding) is what keeps this from racing the streaming
+        // thread — see crate::gst::control_bindings.
+        crate::gst::control_bindings::wipe_control_bindings(vc.upcast_ref(), &VIDEOCROP_PROPS);
         if crop.is_zero() {
             for prop in VIDEOCROP_PROPS {
                 vc.set_property(prop, 0i32);

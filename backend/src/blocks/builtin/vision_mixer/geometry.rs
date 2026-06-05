@@ -21,6 +21,7 @@ use super::overlay;
 use crate::gst::pipeline::effects::{
     apply_input_group_to_region, apply_pip_layout_to_region, find_pad,
 };
+use crate::gst::underlay::UnderlayCtx;
 
 /// Install CAPS event probes on every input video sink pad of the dist and
 /// multiview compositors. Each caps arrival/change triggers a full geometry
@@ -144,6 +145,16 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
         16.0 / 9.0
     };
 
+    let pgm_w = state.pgm_w.max(1) as f64;
+    let dist_underlay = state.dist_underlay_base().map(|base| UnderlayCtx {
+        base,
+        scale: cw as f64 / pgm_w,
+    });
+    let pvw_underlay = state.mv_pvw_underlay_base().map(|base| UnderlayCtx {
+        base,
+        scale: state.layout.pvw_rect.w / pgm_w,
+    });
+
     // --- Dist compositor (PGM) — skip while FTB drives the alphas. ---
     if !state.ftb_active.load(std::sync::atomic::Ordering::Relaxed) {
         if let Some(p) = state.pgm_pip() {
@@ -159,6 +170,7 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
                 vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                 fallback,
                 &aspects,
+                dist_underlay,
             );
         } else {
             apply_input_group_to_region(
@@ -170,6 +182,7 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
                 vision_mixer::DIST_PGM_ZORDER,
                 fallback,
                 &aspects,
+                dist_underlay,
             );
         }
     }
@@ -204,6 +217,7 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
             vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
             fallback,
             &aspects,
+            pvw_underlay,
         );
     } else {
         apply_input_group_to_region(
@@ -215,6 +229,7 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
             vision_mixer::MV_BIG_DISPLAY_ZORDER,
             fallback,
             &aspects,
+            pvw_underlay,
         );
     }
 
@@ -224,6 +239,10 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
             continue;
         };
         let region = (tile.x as i32, tile.y as i32, tile.w as i32, tile.h as i32);
+        let tile_underlay = state.mv_pip_underlay_base(p).map(|base| UnderlayCtx {
+            base,
+            scale: tile.w / pgm_w,
+        });
         apply_pip_layout_to_region(
             mv_comp,
             2 * n + 1 + p * n,
@@ -236,6 +255,7 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
             vision_mixer::MV_PIP_OVERLAY_ZORDER,
             fallback,
             &aspects,
+            tile_underlay,
         );
     }
 

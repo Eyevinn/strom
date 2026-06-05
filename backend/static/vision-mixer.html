@@ -257,6 +257,8 @@
             color: #fff;
         }
         .type-btn:hover { border-color: #666; }
+        .dir-row.hidden { display: none; }
+        .dir-btn { font-size: 13px; }
 
         /* Duration row */
         .duration-row {
@@ -441,6 +443,16 @@
         .pip-editor-ctrl .pip-zone-cap-input {
             width: 40px;
         }
+        /* Compact color swatch for the zone border. */
+        .pip-zone-border-color {
+            width: 28px;
+            height: 24px;
+            padding: 0;
+            border: 1px solid var(--pip-border-strong);
+            border-radius: 3px;
+            background: var(--pip-bg-control);
+            cursor: pointer;
+        }
         /* One shared one-line legend for the whole editor. */
         .pip-editor-footer {
             font-size: 10px;
@@ -549,6 +561,14 @@
         .pip-overlay-chip.disabled {
             opacity: 0.4;
             cursor: not-allowed;
+        }
+        /* Source sits in another zone of this PiP: taken (dimmed fill),
+           clicking moves it to the active zone. */
+        .pip-overlay-chip.elsewhere {
+            background: var(--pip-bg-control);
+            border-color: var(--pip-accent);
+            border-style: dashed;
+            color: var(--pip-text-dim);
         }
 
         /* PiP zone editor — visual canvas per PiP */
@@ -793,7 +813,11 @@
             padding: 6px 12px;
             cursor: pointer;
         }
-        .pip-zone-add-btn:hover {
+        .pip-zone-add-btn:disabled {
+            color: var(--pip-text-muted);
+            cursor: default;
+        }
+        .pip-zone-add-btn:hover:not(:disabled) {
             border-color: var(--pip-accent);
             color: #fff;
         }
@@ -1057,7 +1081,14 @@
             <div class="type-row">
                 <button class="type-btn active" data-type="fade" onclick="setTransitionType('fade')">MIX</button>
                 <button class="type-btn" data-type="dip_to_black" onclick="setTransitionType('dip_to_black')">DIP</button>
-                <button class="type-btn" data-type="push_left" onclick="setTransitionType('push_left')">PUSH</button>
+                <button class="type-btn" data-type="push" onclick="setTransitionType('push')" title="Push — both pictures move together">PUSH</button>
+                <button class="type-btn" data-type="slide" onclick="setTransitionType('slide')" title="Slide — new picture slides in over the old">SLIDE</button>
+            </div>
+            <div class="type-row dir-row hidden" id="dirRow" title="Direction of motion">
+                <button class="type-btn dir-btn active" data-dir="left" onclick="setTransitionDir('left')">&#8592;</button>
+                <button class="type-btn dir-btn" data-dir="right" onclick="setTransitionDir('right')">&#8594;</button>
+                <button class="type-btn dir-btn" data-dir="up" onclick="setTransitionDir('up')">&#8593;</button>
+                <button class="type-btn dir-btn" data-dir="down" onclick="setTransitionDir('down')">&#8595;</button>
             </div>
             <div class="duration-row">
                 <label>Duration:</label>
@@ -1079,7 +1110,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.20-dark-spinners | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.28-review-fixes | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1127,7 +1158,8 @@
                 ? p.zones.map(z => ({
                     rect: z && z.rect ? { ...z.rect } : null,
                     capacity: (z && z.capacity != null) ? z.capacity : null,
-                    sources: (z && Array.isArray(z.sources)) ? z.sources.slice() : []
+                    sources: (z && Array.isArray(z.sources)) ? z.sources.slice() : [],
+                    border: (z && z.border) ? { ...z.border } : null
                 }))
                 : [],
             transforms: (p && p.transforms && typeof p.transforms === 'object')
@@ -1168,8 +1200,15 @@
         // Which PiP is currently shown on each bus (null = bus is showing an input, not a PiP).
         let currentPvwPip = (_cfg.pvw_pip != null) ? _cfg.pvw_pip : null;
         let currentPgmPip = (_cfg.pgm_pip != null) ? _cfg.pgm_pip : null;
-        let transitionType = 'fade';
+        // Transition selection: base type + direction (push/slide only).
+        let transitionBase = 'fade';
+        let transitionDir = 'left';
         let transitionDurationMs = 1000;
+        function currentTransitionType() {
+            return (transitionBase === 'push' || transitionBase === 'slide')
+                ? transitionBase + '_' + transitionDir
+                : transitionBase;
+        }
         let transitioning = false;
         let ftbActive = _cfg.ftb_active || false;
         let overlayAlpha = _cfg.overlay_alpha != null ? _cfg.overlay_alpha : 1.0;
@@ -1298,7 +1337,7 @@
         }
 
         function doAuto() {
-            doTake(transitionType, transitionDurationMs);
+            doTake(currentTransitionType(), transitionDurationMs);
         }
 
         // ---- FTB (Fade to Black) ----
@@ -1383,10 +1422,20 @@
         }
 
         // ---- Transition type & duration ----
-        function setTransitionType(type) {
-            transitionType = type;
-            document.querySelectorAll('.type-btn').forEach(b => {
-                b.classList.toggle('active', b.dataset.type === type);
+        function setTransitionType(base) {
+            transitionBase = base;
+            document.querySelectorAll('.type-btn[data-type]').forEach(b => {
+                b.classList.toggle('active', b.dataset.type === base);
+            });
+            // Direction picker applies to push/slide only.
+            document.getElementById('dirRow')
+                .classList.toggle('hidden', base !== 'push' && base !== 'slide');
+        }
+
+        function setTransitionDir(dir) {
+            transitionDir = dir;
+            document.querySelectorAll('.dir-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.dir === dir);
             });
         }
 
@@ -1551,6 +1600,7 @@
                     z.rect.w = fin(z.rect.w, 1);
                     z.rect.h = fin(z.rect.h, 1);
                 }
+                if (z.border) z.border.width = fin(z.border.width, 0);
             });
             Object.keys(cfg.transforms || {}).forEach(k => {
                 const c = cfg.transforms[k];
@@ -1579,7 +1629,8 @@
                     zones: (r.zones || []).map(z => ({
                         rect: z.rect ? { ...z.rect } : null,
                         capacity: z.capacity != null ? z.capacity : null,
-                        sources: Array.isArray(z.sources) ? z.sources.slice() : []
+                        sources: Array.isArray(z.sources) ? z.sources.slice() : [],
+                        border: z.border ? { ...z.border } : null
                     })),
                     transforms: (r.transforms && typeof r.transforms === 'object')
                         ? JSON.parse(JSON.stringify(r.transforms))
@@ -1612,26 +1663,40 @@
             postPipConfig(pipIdx);
         }
 
-        // Toggle an input on the active zone.
-        //  - Already in any zone → remove it.
-        //  - Otherwise → push into active zone (FIFO evicts oldest at capacity).
+        // Select a zone as the active push target and point Crop/Zoom at its
+        // first source — selecting a box usually means "work on this box".
+        // (Picking another crop target in the dropdown stays sticky until the
+        // next zone switch.)
+        function selectZone(pipIdx, zoneIdx) {
+            activeZoneIdx[pipIdx] = zoneIdx;
+            const z = pipConfigs[pipIdx] && pipConfigs[pipIdx].zones[zoneIdx];
+            const srcs = z ? effectiveZoneSources(z) : [];
+            activeCropTarget = srcs.length > 0 ? srcs[0] : null;
+        }
+
+        // Toggle an input on the ACTIVE zone (the chips act as that zone's
+        // checkboxes):
+        //  - In the active zone → remove it.
+        //  - In another zone → MOVE it to the active zone.
+        //  - Not in any zone → push into the active zone (FIFO evicts oldest
+        //    at capacity).
         // An input can only appear in one place at a time (single compositor pad).
         function toggleSourceOnActiveZone(pipIdx, input) {
             const cfg = pipConfigs[pipIdx];
             if (cfg.bg === input) return; // bg already occupies this input's pad
-            // If already in any zone, clicking again removes it.
-            let wasPresent = false;
+            const ziCur = Math.min(activeZoneIdx[pipIdx], Math.max(0, cfg.zones.length - 1));
+            const inActiveZone = !!(cfg.zones[ziCur] && cfg.zones[ziCur].sources.includes(input));
+            // Strip from every zone first (single pad — one place at a time).
             cfg.zones.forEach(z => {
-                if (z.sources.includes(input)) {
-                    z.sources = z.sources.filter(s => s !== input);
-                    wasPresent = true;
-                }
+                z.sources = z.sources.filter(s => s !== input);
             });
-            if (wasPresent) {
+            if (inActiveZone) {
+                // Unchecked: removed from the active zone.
                 postPipConfig(pipIdx);
                 return;
             }
-            // Not present anywhere — push into active zone, evicting oldest if full.
+            // Checked: push into the active zone (moving it if it sat in
+            // another zone), evicting oldest if full.
             if (cfg.zones.length === 0) {
                 cfg.zones.push({ rect: null, capacity: null, sources: [] });
                 activeZoneIdx[pipIdx] = 0;
@@ -1658,9 +1723,10 @@
             cfg.zones.push({
                 rect: { x: 0.55, y: 0.10, w: 0.42, h: 0.42 },
                 capacity: null,
-                sources: []
+                sources: [],
+                border: null
             });
-            activeZoneIdx[pipIdx] = cfg.zones.length - 1;
+            selectZone(pipIdx, cfg.zones.length - 1);
             postPipConfig(pipIdx);
         }
 
@@ -1669,6 +1735,27 @@
             if (activeZoneIdx[pipIdx] >= pipConfigs[pipIdx].zones.length) {
                 activeZoneIdx[pipIdx] = Math.max(0, pipConfigs[pipIdx].zones.length - 1);
             }
+            postPipConfig(pipIdx);
+        }
+
+        // Set or clear the active zone's border. Width 0 clears it; the
+        // border is the BOX's styling (it survives source swaps in the zone)
+        // and is drawn live on the PGM output around the actual source boxes.
+        function setZoneBorder(pipIdx, zoneIdx, color, width) {
+            const zone = pipConfigs[pipIdx].zones[zoneIdx];
+            if (!zone) return;
+            const w = parseFloat(width);
+            // The native color picker is 6-digit only; an API-set #RRGGBBAA
+            // would lose its alpha on any re-commit (e.g. a width edit).
+            // Keep the stored value while its RGB part is unchanged.
+            const prev = zone.border && zone.border.color;
+            if (prev && /^#[0-9a-fA-F]{8}$/.test(prev)
+                && prev.slice(0, 7).toLowerCase() === String(color).toLowerCase()) {
+                color = prev;
+            }
+            zone.border = (Number.isFinite(w) && w > 0)
+                ? { color: color, width: w }
+                : null;
             postPipConfig(pipIdx);
         }
 
@@ -1682,6 +1769,107 @@
                 zone.sources.splice(0, zone.sources.length - zone.capacity);
             }
             postPipConfig(pipIdx);
+        }
+
+        // ---- Layout presets ----
+        // Named snapshots of a full PiP composition: zones (rect/capacity/
+        // border + sources by input index), bg, and all non-default crop
+        // transforms. Crops are included even for sources currently outside
+        // the PiP — strom retains those and re-applies them when the source
+        // returns (swap-zone workflow), so a preset carries them too.
+        // Stored browser-wide in localStorage so a preset saved on one
+        // PiP/flow can be loaded on any other. Loading is best-effort:
+        // sources, bg and crops whose input index does not exist on this
+        // mixer are silently skipped; everything else applies.
+        const PIP_PRESETS_KEY = 'vm-pip-layout-presets';
+        let selectedPipPreset = '';
+
+        function loadPipPresets() {
+            try {
+                const obj = JSON.parse(localStorage.getItem(PIP_PRESETS_KEY) || '{}');
+                return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function storePipPresets(presets) {
+            localStorage.setItem(PIP_PRESETS_KEY, JSON.stringify(presets));
+        }
+
+        function savePipLayoutPreset(pipIdx) {
+            const cfg = pipConfigs[pipIdx];
+            if (!cfg || cfg.zones.length === 0) {
+                setStatus('No zones to save as a layout preset');
+                return;
+            }
+            const name = (window.prompt('Layout preset name:', selectedPipPreset) || '').trim();
+            if (!name) return;
+            const presets = loadPipPresets();
+            // Keep every non-default crop — including ones for sources not
+            // currently in the PiP (strom retains those the same way).
+            const transforms = {};
+            Object.keys(cfg.transforms || {}).forEach(k => {
+                const c = cfg.transforms[k];
+                if (c && !cropIsZero(c)) transforms[k] = { ...c };
+            });
+            presets[name] = {
+                bg: cfg.bg != null ? cfg.bg : null,
+                zones: cfg.zones.map(z => ({
+                    rect: z.rect ? { ...z.rect } : null,
+                    capacity: z.capacity != null ? z.capacity : null,
+                    sources: z.sources.slice(),
+                    border: z.border ? { ...z.border } : null
+                })),
+                transforms: transforms
+            };
+            storePipPresets(presets);
+            selectedPipPreset = name;
+            buildPipConfigPanel();
+            setStatus('Layout preset "' + name + '" saved');
+        }
+
+        function applyPipLayoutPreset(pipIdx, name) {
+            const preset = loadPipPresets()[name];
+            if (!preset || !Array.isArray(preset.zones)) {
+                setStatus('Layout preset not found: ' + name);
+                return;
+            }
+            const cfg = pipConfigs[pipIdx];
+            // Best-effort: silently drop any input index that does not
+            // exist on this mixer (preset may come from a bigger one), the
+            // bg double-booked as a zone source, and cross-zone duplicates
+            // — the backend rejects all three for the whole request.
+            const validInput = i => Number.isInteger(i) && i >= 0 && i < NUM_INPUTS;
+            cfg.bg = validInput(preset.bg) ? preset.bg : null;
+            const seen = new Set();
+            cfg.zones = preset.zones.map(z => ({
+                rect: z.rect ? { ...z.rect } : null,
+                capacity: z.capacity != null ? z.capacity : null,
+                sources: (Array.isArray(z.sources) ? z.sources : [])
+                    .filter(s => validInput(s) && s !== cfg.bg && !seen.has(s) && seen.add(s)),
+                border: z.border ? { ...z.border } : null
+            }));
+            // Restore the full crop map — also entries for sources not in
+            // the PiP right now; they re-apply when the source is pushed in.
+            cfg.transforms = {};
+            Object.keys(preset.transforms || {}).forEach(k => {
+                const c = preset.transforms[k];
+                if (c && validInput(parseInt(k, 10))) cfg.transforms[k] = { ...c };
+            });
+            selectZone(pipIdx, 0);
+            postPipConfig(pipIdx);
+        }
+
+        function deletePipLayoutPreset(name) {
+            if (!name) return;
+            if (!window.confirm('Delete layout preset "' + name + '"?')) return;
+            const presets = loadPipPresets();
+            delete presets[name];
+            storePipPresets(presets);
+            if (selectedPipPreset === name) selectedPipPreset = '';
+            buildPipConfigPanel();
+            setStatus('Layout preset "' + name + '" deleted');
         }
 
         // Update one component of an explicit (non-auto) zone rect from a pixel
@@ -2228,6 +2416,11 @@
             panel.classList.toggle('editing', editingPipIdx != null);
             panel.innerHTML = '';
 
+            // Presets are browser-global — parse localStorage once per
+            // rebuild, not once per PiP.
+            const presets = loadPipPresets();
+            const presetNames = Object.keys(presets).sort((a, b) => a.localeCompare(b));
+
             for (let p = 0; p < NUM_PIPS; p++) {
                 const cfg = pipConfigs[p] || { bg: null, zones: [], transforms: {} };
                 const block = document.createElement('div');
@@ -2245,8 +2438,16 @@
                 label.textContent = 'PiP ' + (p + 1);
                 row.appendChild(label);
 
-                // Push chips — click toggles input on/off in the active zone.
-                const inputsAlreadyShown = new Set(cfg.zones.flatMap(z => z.sources));
+                // Push chips — checkboxes for the ACTIVE zone: checked = in
+                // the selected zone; a source sitting in another zone shows
+                // dimmed (it's taken) and clicking it moves it here.
+                const zi0 = Math.min(activeZoneIdx[p], Math.max(0, cfg.zones.length - 1));
+                const activeZoneSources = new Set(cfg.zones[zi0] ? cfg.zones[zi0].sources : []);
+                // input → 1-based zone number for sources in OTHER zones.
+                const zoneOf = new Map();
+                cfg.zones.forEach((z, k) => {
+                    if (k !== zi0) z.sources.forEach(s => zoneOf.set(s, k + 1));
+                });
                 for (let i = 0; i < NUM_INPUTS; i++) {
                     const chip = document.createElement('span');
                     chip.className = 'pip-overlay-chip';
@@ -2254,12 +2455,18 @@
                         chip.classList.add('disabled');
                         chip.title = 'Used as background';
                     } else {
-                        chip.title = inputsAlreadyShown.has(i)
-                            ? 'Remove Input ' + (i + 1) + ' from PiP'
-                            : 'Push Input ' + (i + 1) + ' to active zone';
+                        if (activeZoneSources.has(i)) {
+                            chip.title = 'Remove Input ' + (i + 1) + ' from zone Z' + (zi0 + 1);
+                        } else if (zoneOf.has(i)) {
+                            chip.title = 'Move Input ' + (i + 1) + ' from zone Z'
+                                + zoneOf.get(i) + ' to zone Z' + (zi0 + 1);
+                        } else {
+                            chip.title = 'Push Input ' + (i + 1) + ' to zone Z' + (zi0 + 1);
+                        }
                         chip.onclick = () => toggleSourceOnActiveZone(p, i);
                     }
-                    if (inputsAlreadyShown.has(i)) chip.classList.add('active');
+                    if (activeZoneSources.has(i)) chip.classList.add('active');
+                    else if (zoneOf.has(i)) chip.classList.add('elsewhere');
                     chip.textContent = String(i + 1);
                     row.appendChild(chip);
                 }
@@ -2280,7 +2487,7 @@
                         sel.appendChild(lbl);
                         sel.appendChild(cnt);
                         sel.onclick = () => {
-                            activeZoneIdx[p] = zi;
+                            selectZone(p, zi);
                             buildPipConfigPanel();
                         };
                         row.appendChild(sel);
@@ -2447,7 +2654,7 @@
                     z.addEventListener('mousedown', (ev) => {
                         if (ev.target.closest('.zone-source-chip, .zone-remove')) return;
                         if (activeZoneIdx[p] !== zi) {
-                            activeZoneIdx[p] = zi;
+                            selectZone(p, zi);
                             buildPipConfigPanel();
                         }
                     });
@@ -2530,8 +2737,85 @@
                     capInput.value = zone.capacity != null ? String(zone.capacity) : '';
                     capInput.onchange = () => setZoneCapacity(p, zi, capInput.value);
                     zoneCtrl.appendChild(capInput);
+
+                    // Border: the box's styling — survives source swaps in the
+                    // zone, drawn live on PGM around the actual source boxes.
+                    // Width 0 (or blank) = no border.
+                    zoneCtrl.append('border');
+                    const borderColor = document.createElement('input');
+                    borderColor.type = 'color';
+                    borderColor.className = 'pip-zone-border-color';
+                    borderColor.value = (zone.border && /^#[0-9a-fA-F]{6}/.test(zone.border.color))
+                        ? zone.border.color.slice(0, 7)
+                        : '#cc0000';
+                    borderColor.title = 'Border color (drawn on PGM around each source box in the zone)';
+                    const borderWidth = document.createElement('input');
+                    borderWidth.className = 'pip-zone-cap-input';
+                    borderWidth.type = 'number';
+                    borderWidth.min = '0';
+                    borderWidth.max = '64';
+                    borderWidth.step = '1';
+                    borderWidth.placeholder = '0';
+                    borderWidth.title = 'Border width in PGM pixels (0 = no border)';
+                    borderWidth.value = zone.border ? String(zone.border.width) : '';
+                    const commitBorder = () =>
+                        setZoneBorder(p, zi, borderColor.value, borderWidth.value);
+                    borderColor.onchange = commitBorder;
+                    borderWidth.onchange = commitBorder;
+                    zoneCtrl.appendChild(borderColor);
+                    zoneCtrl.appendChild(borderWidth);
                     zoneCol.appendChild(zoneCtrl);
                 }
+
+                // Layout preset row: save/load/delete named zone layouts
+                // (geometry only) stored browser-wide in localStorage.
+                const presetCtrl = document.createElement('div');
+                presetCtrl.className = 'pip-editor-ctrl';
+                const presetLbl = document.createElement('span');
+                presetLbl.className = 'pip-editor-ctrl-label';
+                presetLbl.textContent = 'Layout';
+                presetLbl.title = 'Layout presets — full PiP composition: zones with sources, background, and crop/zoom settings';
+                presetCtrl.appendChild(presetLbl);
+                const presetSel = document.createElement('select');
+                presetSel.className = 'pip-bg-select';
+                const presetPh = document.createElement('option');
+                presetPh.value = '';
+                presetPh.textContent = presetNames.length ? '— preset —' : '(no presets)';
+                presetSel.appendChild(presetPh);
+                presetNames.forEach(n => {
+                    const o = document.createElement('option');
+                    o.value = n;
+                    o.textContent = n;
+                    if (selectedPipPreset === n) o.selected = true;
+                    presetSel.appendChild(o);
+                });
+                presetSel.onchange = () => {
+                    selectedPipPreset = presetSel.value;
+                    buildPipConfigPanel();
+                };
+                presetCtrl.appendChild(presetSel);
+                const mkPresetBtn = (text, title, handler, disabled) => {
+                    const b = document.createElement('button');
+                    b.className = 'pip-zone-add-btn';
+                    b.textContent = text;
+                    b.title = title;
+                    b.disabled = !!disabled;
+                    b.onclick = handler;
+                    return b;
+                };
+                presetCtrl.appendChild(mkPresetBtn('Save',
+                    'Save this PiP\'s full composition — zones, sources, background, and all crop/zoom settings (also for sources not currently in the PiP)',
+                    () => savePipLayoutPreset(p),
+                    cfg.zones.length === 0));
+                presetCtrl.appendChild(mkPresetBtn('Load',
+                    'Replace this PiP\'s composition with the preset (best effort — sources that do not exist on this mixer are skipped)',
+                    () => applyPipLayoutPreset(p, selectedPipPreset),
+                    !selectedPipPreset));
+                presetCtrl.appendChild(mkPresetBtn('Delete',
+                    'Delete the selected preset from this browser',
+                    () => deletePipLayoutPreset(selectedPipPreset),
+                    !selectedPipPreset));
+                zoneCol.appendChild(presetCtrl);
 
                 editorRow.appendChild(zoneCol);
                 editorRow.appendChild(buildCropSection(p, cfg));

@@ -1704,6 +1704,63 @@ pub async fn select_preview(
     }))
 }
 
+/// Get the current composition of a single PiP on a vision mixer block.
+///
+/// Returns the same per-PiP state as the corresponding entry in
+/// `VisionMixerState::pips`. Useful for exporting one PiP's composition
+/// (e.g. to save it as a reusable layout preset); restore it with a `PUT`
+/// to the same path.
+#[utoipa::path(
+    get,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/pip/{pip_idx}",
+    tag = "flows",
+    params(
+        ("flow_id" = String, Path, description = "Flow ID (UUID)"),
+        ("block_id" = String, Path, description = "Vision mixer block instance ID"),
+        ("pip_idx" = usize, Path, description = "PiP index (0-based)")
+    ),
+    responses(
+        (status = 200, description = "Current PiP composition", body = strom_types::api::PipState),
+        (status = 404, description = "Block has no live state (pipeline not running) or PiP index out of range", body = ErrorResponse),
+    )
+)]
+pub async fn get_pip_config(
+    Path((flow_id, block_id, pip_idx)): Path<(FlowId, String, usize)>,
+) -> Result<Json<strom_types::api::PipState>, (StatusCode, Json<ErrorResponse>)> {
+    let overlay = crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::with_details(
+                    "Vision mixer state not available",
+                    format!(
+                        "No live overlay state for block {} in flow {} (pipeline not running)",
+                        block_id, flow_id
+                    ),
+                )),
+            )
+        })?;
+
+    if pip_idx >= overlay.num_pips {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::with_details(
+                "PiP index out of range",
+                format!(
+                    "PiP index {} out of range (block {} has {} PiPs)",
+                    pip_idx, block_id, overlay.num_pips
+                ),
+            )),
+        ));
+    }
+
+    Ok(Json(strom_types::api::PipState {
+        bg: overlay.pip_bg_input(pip_idx),
+        zones: overlay.pip_zones(pip_idx),
+        transforms: overlay.pip_transforms(pip_idx),
+    }))
+}
+
 /// Update a PiP composition (background + overlay inputs) on a vision mixer block.
 ///
 /// The change is applied live to all places where the PiP is currently visible:

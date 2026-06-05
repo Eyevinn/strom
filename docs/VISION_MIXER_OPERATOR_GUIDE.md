@@ -28,7 +28,7 @@ flowchart LR
     PIPS["PiP Compositions<br/>0 … 4 (configurable)"]:::stage
     PVW["PVW (Preview) Bus<br/>green"]:::pvw
     PGM["PGM (Program) Bus<br/>red"]:::pgm
-    TRANS["Transition Engine<br/>cut · fade · slide"]:::stage
+    TRANS["Transition Engine<br/>cut · fade · slide · push · dip"]:::stage
     DSK["DSK Layers<br/>0 … 4 (alpha key)"]:::stage
     FTB["Fade-to-Black"]:::stage
     PGM_OUT["PGM Out<br/>(distribution)"]:::out
@@ -111,12 +111,18 @@ A PiP can be put on PVW *or* on PGM, just like any other source.
 |---|---|---|
 | `cut` | Instant swap, no animation. | No (always 0). |
 | `fade` *(default)* | Cross-fade (alpha blend) between PVW and PGM. | Yes. |
-| `slide_left` | New source slides in from the right, pushing the old to the left. | Yes. |
-| `slide_right` | Same, mirrored. | Yes. |
-| `slide_up` | New source slides in from the bottom. | Yes. |
-| `slide_down` | New source slides in from the top. | Yes. |
+| `slide_left/right/up/down` | New picture slides in **over** the old one, which stays in place until covered. The direction names the motion. | Yes. |
+| `push_left/right/up/down` | Old and new picture move **together** — the new one pushes the old out of frame. | Yes. |
+| `dip_to_black` | Fade out to black over the first half, fade the new picture in over the second. | Yes. |
 
 **Duration**: 0 – 60 000 ms. **Default 300 ms.**
+
+**Mixed aspect ratios.** Sources keep their own aspect (a 2.39:1 source
+letterboxes on a 16:9 program), so the incoming picture's rectangle may
+not cover the outgoing one. Slides handle this gracefully: when parts of
+the old picture would stay visible next to the incoming rectangle, those
+remnants fade out during the slide instead of popping away at the end.
+Pushes always carry the old picture fully out of frame.
 
 ### 3.2 Engine downgrade
 
@@ -125,9 +131,9 @@ different transition. When that happens the response reports both the
 requested type (`transition_type`) and what actually ran
 (`actual_transition_type`).
 
-Concretely: **slide animations between a regular input and a PiP** (or
-between two different PiPs) downgrade to `fade`. The slide geometry is
-not defined for heterogeneous-source pairs.
+Concretely: **any animated transition other than `fade` involving a PiP**
+on either bus (input ↔ PiP, or PiP ↔ PiP) downgrades to `fade`. Slide and
+push geometry is not defined for heterogeneous-source pairs.
 
 ### 3.3 Cut vs Take/Auto
 
@@ -184,6 +190,7 @@ just like a regular input.
 | **Zone capacity** | Max number of overlay sources allowed in the zone. When full, pushing a new source **evicts the oldest** (FIFO). Capacity `1` is "swap mode" — replacing the source cross-fades. |
 | **Auto-tile** | When a zone holds multiple sources, they auto-tile in a grid (1, 2 side-by-side, 2+1, 2×2, 3×2, etc.). Each source is fitted with its **own** aspect ratio — a 2.39:1 source letterboxes inside its cell instead of being stretched. |
 | **Source crop ("punch-in")** | Each source in a PiP can carry a crop window: the visible part of the source that scales to fill its box. Think virtual PTZ — zoom into a person's face from a wide shot. See §4.4. |
+| **Zone border** | A colored frame around each source box in the zone — on the **PGM output** and mirrored on the multiview (PiP tiles and the PVW display, proportionally scaled). The border belongs to the box (it survives source swaps in the zone) and is composited as part of the mix, so it tracks morphs, takes and punch-ins frame-accurately and **fades with its box** (FTB, capacity-1 cross-fades). The frame sits fully *outside* the picture edge (it never covers content), and where zones overlap the upper zone covers the lower zone's frame — like stacked framed cards. Sits below the DSK stack. Set per zone: color (`#RRGGBB` or `#RRGGBBAA`) + width in PGM pixels — the width normalizes to each render target, so 4 px on air looks like 4 px-equivalent everywhere (0 = off). |
 
 ### 4.2 Limits
 
@@ -209,9 +216,21 @@ two side-by-side panels:
   anchors; **Grid** draws the guide lines (thirds in gold). Both
   toggles are shared with the crop panel.
 - The control row under the canvas shows the active zone's exact
-  **X/Y/W/H in PGM pixels** plus its **capacity** (blank = `∞`).
-- Push **inputs** into the active zone with the numbered chips. The
-  zone fills up, auto-tiles, and starts evicting once it hits capacity.
+  **X/Y/W/H in PGM pixels**, its **capacity** (blank = `∞`), and its
+  **border** (color swatch + width in PGM pixels; width 0 = no border).
+- The numbered **source chips** are checkboxes for the **active zone**:
+  filled = in this zone (click removes), dashed outline = sitting in
+  another zone of the same PiP (click **moves** it here), empty = free
+  (click pushes it in). The zone auto-tiles and starts evicting once it
+  hits capacity.
+- Selecting a zone (zone buttons, clicking a zone in the canvas) also
+  points the Crop/Zoom panel at that zone's first source.
+- **Layout presets** (bottom row): save the PiP's current composition —
+  zones, sources, background and all crop settings — under a name, and
+  load or delete saved presets. Presets are stored in the browser
+  (localStorage) and shared across all PiPs, mixers and flows in it.
+  Loading is best-effort: sources whose input number doesn't exist on
+  the target mixer are silently skipped.
 
 **Crop / Zoom panel** (right) — see §4.4.
 
@@ -382,11 +401,12 @@ action.
 | **Select PGM source** *(direct)* | Cut a source straight to PGM, bypassing PVW. | Source: `input:N` or `pip:N` |
 | **Take (Auto)** | Animate the transition from PGM to PVW using the currently selected type/duration. Old PGM becomes the new PVW. | Implicit (uses current PVW + selected transition) |
 | **Cut** | Take with `cut` (zero duration). Instant. | — |
-| **Set transition type** | Select which animation Auto will use. | One of `cut`, `fade`, `slide_left`, `slide_right`, `slide_up`, `slide_down` |
+| **Set transition type** | Select which animation Auto will use. | One of `cut`, `fade`, `dip_to_black`, `slide_left/right/up/down`, `push_left/right/up/down` |
 | **Set transition duration** | Set the length of fade/slide takes. | 0 – 60 000 ms (default 300) |
 | **Fade-to-Black** | Toggle FTB on PGM (first press fades to black, second press fades back). | Duration in ms (0 = instant). |
 | **DSK on/off** | Toggle one DSK channel on or off. | DSK number (1 – 4) + `enabled: true/false` |
-| **Configure PiP** | Set a PiP's background, zones (positions, capacities, source lists) and per-source crop transforms. Live, no restart — staying sources morph, crops animate. | `pip_idx`, `bg`, `zones[]`, `transforms{}` |
+| **Configure PiP** | Set a PiP's background, zones (positions, capacities, source lists, borders) and per-source crop transforms. Live, no restart — staying sources morph, crops animate. | `pip_idx`, `bg`, `zones[]`, `transforms{}` |
+| **Get PiP composition** | Export one PiP's current composition (the save half of save/restore — restore by sending it back to Configure PiP). Used by the layout presets and external tooling. | `pip_idx` |
 | **Set multiview overlay alpha** | Fade the multiview overlay (borders, labels, clock, VU meters). | `alpha`: 0.0 – 1.0 |
 | **Get state** | Snapshot of current PVW/PGM/DSK/FTB/PiP state. Useful when reconnecting to the mixer mid-show. | — |
 
@@ -464,13 +484,15 @@ is live and takes effect immediately.
 | **Take** | Atomic swap of PVW ↔ PGM, animated (Auto) or instant (Cut). |
 | **Cut** | Zero-duration take. |
 | **Auto** | Animated take, using the currently selected transition type and duration. |
-| **Transition** | The animation that takes one source to another (`cut`, `fade`, `slide_*`). |
-| **Engine downgrade** | When the engine cannot honor the requested transition (e.g. `slide_left` between an input and a PiP) it falls back to `fade`. The response reports both requested and actual. |
+| **Transition** | The animation that takes one source to another (`cut`, `fade`, `dip_to_black`, `slide_*`, `push_*`). |
+| **Engine downgrade** | When the engine cannot honor the requested transition (any non-fade animation involving a PiP) it falls back to `fade`. The response reports both requested and actual. |
 | **FTB (Fade-to-Black)** | Forced fade of PGM to black, independent of takes. |
 | **DSK (Downstream Keyer)** | Alpha-keyed graphics overlay on the PGM output, sitting above the entire PGM composition. |
 | **PiP (Picture-in-Picture)** | A reusable multi-source composition (background + overlay zones) that can be taken to PVW/PGM like any input. |
 | **Zone** | A rectangular sub-region inside a PiP that hosts overlay sources. Has its own position, size, and capacity (FIFO eviction when full). |
 | **Crop / punch-in** | A per-source window inside a PiP: the visible part of the source, scaled to fill its box. Virtual PTZ. Remembered when the source leaves the PiP; cleared only with **Reset**. |
 | **Aspect lock** | Crop-editor toggle (default on) that keeps the crop window at the destination box's aspect so the crop fills the box edge to edge. |
+| **Zone border** | A colored frame around each source box in a zone, composited into the PGM output and the multiview. Belongs to the box — survives source swaps, follows morphs, fades with FTB. |
+| **Layout preset** | A named, browser-stored snapshot of a PiP's full composition (zones, sources, background, crops) that can be loaded onto any PiP. |
 | **Multiview** | The operator monitor output showing PVW, PGM, all input thumbnails, all PiP thumbnails, clock, labels and VU meters. |
 | **Source** | A bus assignment, either `input:N` (a regular input) or `pip:N` (a PiP composition). |

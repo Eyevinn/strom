@@ -21,6 +21,51 @@ pub(crate) fn find_pad(element: &gst::Element, pad_name: &str) -> Option<gst::Pa
 }
 
 use crate::gst::crop::set_pad_crop;
+use crate::gst::underlay::{set_underlay_color, underlay_rect, UnderlayCtx};
+
+/// Neutralize any lingering control bindings (from a previous morph/fade) on
+/// the properties layout code writes — a stale binding would silently
+/// override `set_property`. Bindings are wiped (keyframes cleared), never
+/// removed — see `crate::gst::control_bindings` for the streaming-thread
+/// use-after-free this avoids.
+pub(super) fn clear_layout_bindings(pad: &gst::Pad) {
+    crate::gst::control_bindings::wipe_control_bindings(
+        pad.upcast_ref(),
+        &["alpha", "xpos", "ypos", "width", "height", "zorder"],
+    );
+}
+
+/// Snap an underlay pad to its target: positioned, colored, visible,
+/// directly beneath its content pad in z-order.
+pub(super) fn show_underlay(
+    compositor: &gst::Element,
+    t: &crate::gst::transitions::UnderlayTarget,
+    content_zorder: u32,
+) {
+    let Some(pad) = find_pad(compositor, &format!("sink_{}", t.pad_idx)) else {
+        return;
+    };
+    clear_layout_bindings(&pad);
+    set_underlay_color(&pad, t.argb);
+    pad.set_property("xpos", t.x);
+    pad.set_property("ypos", t.y);
+    pad.set_property("width", t.w);
+    pad.set_property("height", t.h);
+    pad.set_property(
+        "zorder",
+        strom_types::vision_mixer::underlay_zorder(content_zorder),
+    );
+    pad.set_property("alpha", 1.0f64);
+}
+
+/// Hide an underlay pad (no border on its content pad right now).
+pub(super) fn hide_underlay(compositor: &gst::Element, pad_idx: usize) {
+    let Some(pad) = find_pad(compositor, &format!("sink_{}", pad_idx)) else {
+        return;
+    };
+    clear_layout_bindings(&pad);
+    pad.set_property("alpha", 0.0f64);
+}
 
 /// Apply per-source crop to a region after a zone morph: pads present in both
 /// old and new layouts animate crop alongside the geometry morph; pads about
@@ -64,6 +109,9 @@ pub(super) fn apply_pip_crop_after_morph(
 /// Geometry is explicit (pads run `sizing-policy=none`): every rect is
 /// aspect-fitted with the source's effective aspect (crop-adjusted), so an
 /// odd-aspect source letterboxes correctly and a locked crop fills its box.
+///
+/// When `underlay` is given, zone sources in bordered zones also carry an
+/// [`crate::gst::transitions::UnderlayTarget`] for their border underlay pad.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pads_for_source(
     state: &crate::blocks::builtin::vision_mixer::overlay::VisionMixerOverlayState,
@@ -75,8 +123,9 @@ pub(super) fn pads_for_source(
     overlay_zorder: u32,
     fallback_aspect: f64,
     src_aspects: &strom_types::vision_mixer::SourceAspects,
+    underlay: Option<UnderlayCtx>,
 ) -> Vec<crate::gst::transitions::PadTarget> {
-    use crate::gst::transitions::PadTarget;
+    use crate::gst::transitions::{PadTarget, UnderlayTarget};
     use strom_types::vision_mixer::{aspect_fit_rect, effective_source_aspect};
     let (rx, ry, rw, rh) = region;
     if let Some(p) = pip {
@@ -113,6 +162,7 @@ pub(super) fn pads_for_source(
                 w,
                 h,
                 zorder: bg_zorder,
+                underlay: None,
             });
             seen_pad_idxs.insert(pad_base + b);
         }
@@ -127,7 +177,25 @@ pub(super) fn pads_for_source(
                 y: l.y,
                 w: l.w,
                 h: l.h,
-                zorder: overlay_zorder + l.zorder_offset,
+                zorder: strom_types::vision_mixer::zone_content_zorder(
+                    overlay_zorder,
+                    l.zorder_offset,
+                ),
+                underlay: match (underlay, l.border) {
+                    (Some(u), Some(b)) => {
+                        let (ux, uy, uw, uh) =
+                            underlay_rect((l.x, l.y, l.w, l.h), b.width, region, u.scale);
+                        Some(UnderlayTarget {
+                            pad_idx: u.base + l.input,
+                            x: ux,
+                            y: uy,
+                            w: uw,
+                            h: uh,
+                            argb: b.argb,
+                        })
+                    }
+                    _ => None,
+                },
             });
         }
         out
@@ -145,6 +213,7 @@ pub(super) fn pads_for_source(
                     w,
                     h,
                     zorder: bg_zorder,
+                    underlay: None,
                 }
             })
             .into_iter()
@@ -154,7 +223,8 @@ pub(super) fn pads_for_source(
 
 /// Apply a single-input source layout (aspect-fitted into the region) to a
 /// contiguous range of compositor sink pads. Pads not equal to the active
-/// input are hidden.
+/// input are hidden. Plain inputs never have borders, so the region's
+/// underlay pads (when it has any) are all hidden too.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_input_group_to_region(
     compositor: &gst::Element,
@@ -165,6 +235,7 @@ pub(crate) fn apply_input_group_to_region(
     fg_zorder: u32,
     fallback_aspect: f64,
     src_aspects: &strom_types::vision_mixer::SourceAspects,
+    underlay: Option<UnderlayCtx>,
 ) {
     let (rx, ry, rw, rh) = region;
     for i in 0..num_inputs {
@@ -176,11 +247,7 @@ pub(crate) fn apply_input_group_to_region(
         set_pad_crop(&pad, &Default::default());
         // Clear any lingering control bindings from a previous morph/fade so
         // our set_property writes aren't silently overridden by stale values.
-        for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
-            if let Some(binding) = pad.control_binding(prop) {
-                pad.remove_control_binding(&binding);
-            }
-        }
+        clear_layout_bindings(&pad);
         if Some(i) == active {
             let aspect = src_aspects.get(&i).copied().unwrap_or(fallback_aspect);
             let (x, y, w, h) = strom_types::vision_mixer::aspect_fit_rect(rx, ry, rw, rh, aspect);
@@ -192,6 +259,9 @@ pub(crate) fn apply_input_group_to_region(
             pad.set_property("zorder", fg_zorder);
         } else {
             pad.set_property("alpha", 0.0f64);
+        }
+        if let Some(u) = underlay {
+            hide_underlay(compositor, u.base + i);
         }
     }
 }
@@ -215,6 +285,7 @@ pub(crate) fn apply_pip_layout_to_region(
     overlay_zorder: u32,
     fallback_aspect: f64,
     src_aspects: &strom_types::vision_mixer::SourceAspects,
+    underlay: Option<UnderlayCtx>,
 ) {
     use strom_types::vision_mixer::{aspect_fit_rect, effective_source_aspect};
     let (rx, ry, rw, rh) = region;
@@ -228,11 +299,9 @@ pub(crate) fn apply_pip_layout_to_region(
         transforms,
         src_aspects,
     );
-    // Fast lookup: input → (x, y, w, h, zorder_offset).
-    let layout_map: std::collections::HashMap<usize, (i32, i32, i32, i32, u32)> = layouts
-        .iter()
-        .map(|l| (l.input, (l.x, l.y, l.w, l.h, l.zorder_offset)))
-        .collect();
+    // Fast lookup: input → its zone pad layout (rect + slot + border).
+    let layout_map: std::collections::HashMap<usize, &strom_types::vision_mixer::ZonePadLayout> =
+        layouts.iter().map(|l| (l.input, l)).collect();
 
     for i in 0..num_inputs {
         let pad_name = format!("sink_{}", pad_base + i);
@@ -242,11 +311,10 @@ pub(crate) fn apply_pip_layout_to_region(
         // Clear any lingering control bindings from a previous fade — otherwise
         // they keep driving the property and our set_property calls below would
         // be invisible until the next take rebuilds bindings.
-        for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
-            if let Some(binding) = pad.control_binding(prop) {
-                pad.remove_control_binding(&binding);
-            }
-        }
+        clear_layout_bindings(&pad);
+        // Border underlay for this input: shown only for a zone source whose
+        // zone has a visible border; hidden otherwise (incl. bg + hidden pads).
+        let mut underlay_shown = false;
         if Some(i) == bg {
             let aspect = effective_source_aspect(
                 src_aspects.get(&i).copied().unwrap_or(fallback_aspect),
@@ -259,15 +327,39 @@ pub(crate) fn apply_pip_layout_to_region(
             pad.set_property("height", h);
             pad.set_property("alpha", 1.0f64);
             pad.set_property("zorder", bg_zorder);
-        } else if let Some(&(ox, oy, ow, oh, off)) = layout_map.get(&i) {
-            pad.set_property("xpos", ox);
-            pad.set_property("ypos", oy);
-            pad.set_property("width", ow);
-            pad.set_property("height", oh);
+        } else if let Some(l) = layout_map.get(&i) {
+            let content_zorder =
+                strom_types::vision_mixer::zone_content_zorder(overlay_zorder, l.zorder_offset);
+            pad.set_property("xpos", l.x);
+            pad.set_property("ypos", l.y);
+            pad.set_property("width", l.w);
+            pad.set_property("height", l.h);
             pad.set_property("alpha", 1.0f64);
-            pad.set_property("zorder", overlay_zorder + off);
+            pad.set_property("zorder", content_zorder);
+            if let (Some(u), Some(b)) = (underlay, l.border) {
+                let (ux, uy, uw, uh) =
+                    underlay_rect((l.x, l.y, l.w, l.h), b.width, region, u.scale);
+                show_underlay(
+                    compositor,
+                    &crate::gst::transitions::UnderlayTarget {
+                        pad_idx: u.base + i,
+                        x: ux,
+                        y: uy,
+                        w: uw,
+                        h: uh,
+                        argb: b.argb,
+                    },
+                    content_zorder,
+                );
+                underlay_shown = true;
+            }
         } else {
             pad.set_property("alpha", 0.0f64);
+        }
+        if let Some(u) = underlay {
+            if !underlay_shown {
+                hide_underlay(compositor, u.base + i);
+            }
         }
         // Crop applies to the source wherever it renders in this PiP —
         // including hidden pads, whose retained transform stays staged so the

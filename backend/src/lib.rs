@@ -180,7 +180,7 @@ pub async fn create_app_with_config(
         )
         .route(
             "/flows/{flow_id}/blocks/{block_id}/pip/{pip_idx}",
-            put(api::flows::update_pip_config),
+            get(api::flows::get_pip_config).put(api::flows::update_pip_config),
         )
         .route(
             "/flows/{flow_id}/blocks/{block_id}/state",

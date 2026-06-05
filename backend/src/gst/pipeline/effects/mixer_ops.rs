@@ -10,8 +10,10 @@ use tracing::{info, warn};
 use crate::gst::crop::set_pad_crop;
 
 use super::mixer_layout::{
-    apply_pip_crop_after_morph, apply_pip_layout_to_region, find_pad, pads_for_source,
+    apply_pip_crop_after_morph, apply_pip_layout_to_region, clear_layout_bindings, find_pad,
+    hide_underlay, pads_for_source,
 };
+use crate::gst::underlay::UnderlayCtx;
 
 impl PipelineManager {
     /// Select a preview input on a vision mixer block.
@@ -60,16 +62,15 @@ impl PipelineManager {
         state.set_pvw_pip(None);
         if leaving_pip {
             // Clear any lingering control bindings from a previous PiP-aware
-            // fade, then hide every PVW big pad. The new selection below
-            // re-activates only the chosen one.
+            // fade, then hide every PVW big pad (and their border underlays).
+            // The new selection below re-activates only the chosen one.
             for i in 0..num_inputs {
                 if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + i)) {
-                    for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
-                        if let Some(binding) = pad.control_binding(prop) {
-                            pad.remove_control_binding(&binding);
-                        }
-                    }
+                    clear_layout_bindings(&pad);
                     pad.set_property("alpha", 0.0f64);
+                }
+                if let Some(base) = state.mv_pvw_underlay_base() {
+                    hide_underlay(mv_comp, base + i);
                 }
             }
         }
@@ -169,17 +170,17 @@ impl PipelineManager {
         // output automatically, so no pad manipulation needed for PGM.
         // Only update PVW: hide all old PVW pads, show new PVW pad.
 
-        // Hide all PVW candidate pads first. Clear any control bindings too —
-        // a previous fade may have left lingering bindings that would otherwise
-        // override our property writes below.
+        // Hide all PVW candidate pads (and their border underlays) first.
+        // Clear any control bindings too — a previous fade may have left
+        // lingering bindings that would otherwise override our property
+        // writes below.
         for i in 0..num_inputs {
             if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", num_inputs + 1 + i)) {
-                for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
-                    if let Some(binding) = pad.control_binding(prop) {
-                        pad.remove_control_binding(&binding);
-                    }
-                }
+                clear_layout_bindings(&pad);
                 pad.set_property("alpha", 0.0f64);
+            }
+            if let Some(base) = state.mv_pvw_underlay_base() {
+                hide_underlay(mv_comp, base + i);
             }
         }
 
@@ -321,9 +322,7 @@ impl PipelineManager {
     ) -> Result<bool, PipelineError> {
         use crate::blocks::builtin::vision_mixer::overlay;
         use gstreamer_controller::prelude::*;
-        use gstreamer_controller::{
-            DirectControlBinding, InterpolationControlSource, InterpolationMode,
-        };
+        use gstreamer_controller::{InterpolationControlSource, InterpolationMode};
 
         let mixer_id = format!("{}:mixer", block_instance_id);
         let mixer = self
@@ -356,6 +355,10 @@ impl PipelineManager {
         let active_pad_idxs: std::collections::HashSet<usize> = if now_active {
             std::collections::HashSet::new()
         } else {
+            let dist_underlay = state.dist_underlay_base().map(|base| UnderlayCtx {
+                base,
+                scale: cw as f64 / state.pgm_w.max(1) as f64,
+            });
             pads_for_source(
                 &state,
                 state.pgm_pip(),
@@ -366,9 +369,12 @@ impl PipelineManager {
                 strom_types::vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                 src_aspect,
                 &self.vision_mixer_source_aspects(block_instance_id, state.num_inputs),
+                dist_underlay,
             )
             .into_iter()
-            .map(|t| t.pad_idx)
+            // Restore bordered zone sources' underlay pads along with their
+            // content pads.
+            .flat_map(|t| std::iter::once(t.pad_idx).chain(t.underlay.map(|u| u.pad_idx)))
             .collect()
         };
 
@@ -387,16 +393,20 @@ impl PipelineManager {
             if name.starts_with("sink_") {
                 if let Ok(idx) = name.trim_start_matches("sink_").parse::<usize>() {
                     let (start_alpha, end_alpha) = if now_active {
-                        // FTB on: fade current alpha to 0
+                        // FTB on: fade current alpha to 0. Covers content,
+                        // DSK and border underlay pads alike.
                         let current = pad.property::<f64>("alpha");
                         (current, 0.0)
                     } else if active_pad_idxs.contains(&idx) {
+                        // Restore the current PGM source's pads — content
+                        // and the underlays of its bordered zone sources.
                         (0.0, 1.0)
-                    } else if idx >= state.num_inputs {
+                    } else if idx >= state.num_inputs
+                        && idx < state.num_inputs + state.num_dsk_inputs
+                    {
                         let dsk_idx = idx - state.num_inputs;
-                        let enabled = dsk_idx < state.dsk_enabled.len()
-                            && state.dsk_enabled[dsk_idx]
-                                .load(std::sync::atomic::Ordering::Relaxed);
+                        let enabled =
+                            state.dsk_enabled[dsk_idx].load(std::sync::atomic::Ordering::Relaxed);
                         if enabled {
                             (0.0, 1.0)
                         } else {
@@ -410,13 +420,16 @@ impl PipelineManager {
                         continue;
                     }
 
-                    // Clear any existing alpha control binding
-                    if let Some(binding) = pad.control_binding("alpha") {
-                        pad.remove_control_binding(&binding);
-                    }
-
-                    let cs = InterpolationControlSource::new();
-                    cs.set_mode(InterpolationMode::Linear);
+                    // Persistent alpha binding, wiped and ready to program
+                    // (bindings are never removed — see
+                    // crate::gst::control_bindings).
+                    let Some(cs) = crate::gst::control_bindings::fresh_control_source(
+                        pad.upcast_ref(),
+                        "alpha",
+                        InterpolationMode::Linear,
+                    ) else {
+                        continue;
+                    };
 
                     // Ease-in-out keyframes
                     let duration_ns = (end_time - current_time).nseconds() as f64;
@@ -430,14 +443,13 @@ impl PipelineManager {
                         cs.set(time, value);
                     }
 
-                    let binding = DirectControlBinding::new(&pad, "alpha", &cs);
-                    let _ = pad.add_control_binding(&binding);
                     control_sources.push(cs);
                 }
             }
         }
 
-        // Keep control sources alive until the animation completes, then clean up bindings
+        // Once the fade completes, neutralize the alpha bindings (keyframe
+        // wipe) so later direct alpha writes (DSK toggles, takes) stick.
         if !control_sources.is_empty() {
             let cleanup_mixer = mixer.clone();
             let cleanup_duration = duration_ms + 100; // small margin
@@ -445,9 +457,10 @@ impl PipelineManager {
                 std::time::Duration::from_millis(cleanup_duration),
                 move || {
                     for pad in cleanup_mixer.sink_pads() {
-                        if let Some(binding) = pad.control_binding("alpha") {
-                            pad.remove_control_binding(&binding);
-                        }
+                        crate::gst::control_bindings::wipe_control_binding(
+                            pad.upcast_ref(),
+                            "alpha",
+                        );
                     }
                     drop(control_sources);
                 },
@@ -559,10 +572,28 @@ impl PipelineManager {
                         });
                     }
                 }
+                // Border: clamp width like rects; reject unparseable colors
+                // (a typo'd hex should fail loudly, not draw nothing).
+                if let Some(b) = &z.border {
+                    if b.rgba().is_none() {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!(
+                                "Invalid border color {:?} (expected #RRGGBB or #RRGGBBAA)",
+                                b.color
+                            ),
+                        });
+                    }
+                }
                 Ok(strom_types::vision_mixer::Zone {
                     rect: z.rect.map(|r| r.clamped()),
                     capacity: z.capacity,
                     sources: z.sources,
+                    border: z.border.map(|b| strom_types::vision_mixer::ZoneBorder {
+                        width: b.clamped_width(),
+                        color: b.color,
+                    }),
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -626,6 +657,20 @@ impl PipelineManager {
         };
         let pip_tile_base = 2 * state.num_inputs + 1 + pip_idx * state.num_inputs;
 
+        let pgm_w = state.pgm_w.max(1) as f64;
+        let tile_underlay = state.mv_pip_underlay_base(pip_idx).map(|base| UnderlayCtx {
+            base,
+            scale: pip_tile_rect.map(|r| r.2 as f64).unwrap_or(0.0) / pgm_w,
+        });
+        let dist_underlay = state.dist_underlay_base().map(|base| UnderlayCtx {
+            base,
+            scale: cw as f64 / pgm_w,
+        });
+        let pvw_underlay = state.mv_pvw_underlay_base().map(|base| UnderlayCtx {
+            base,
+            scale: state.layout.pvw_rect.w / pgm_w,
+        });
+
         let old_tile = pip_tile_rect.map(|reg| {
             pads_for_source(
                 &state,
@@ -637,6 +682,7 @@ impl PipelineManager {
                 vision_mixer::MV_PIP_OVERLAY_ZORDER,
                 src_aspect,
                 &src_aspects,
+                tile_underlay,
             )
         });
         let old_pgm = if on_pgm {
@@ -650,6 +696,7 @@ impl PipelineManager {
                 vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                 src_aspect,
                 &src_aspects,
+                dist_underlay,
             ))
         } else {
             None
@@ -665,6 +712,7 @@ impl PipelineManager {
                 vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                 src_aspect,
                 &src_aspects,
+                pvw_underlay,
             ))
         } else {
             None
@@ -693,6 +741,7 @@ impl PipelineManager {
                 vision_mixer::MV_PIP_OVERLAY_ZORDER,
                 src_aspect,
                 &src_aspects,
+                tile_underlay,
             )
         });
         let new_pgm = on_pgm.then(|| {
@@ -706,6 +755,7 @@ impl PipelineManager {
                 vision_mixer::DIST_PIP_OVERLAY_ZORDER,
                 src_aspect,
                 &src_aspects,
+                dist_underlay,
             )
         });
         let new_pvw = on_pvw.then(|| {
@@ -719,6 +769,7 @@ impl PipelineManager {
                 vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
                 src_aspect,
                 &src_aspects,
+                pvw_underlay,
             )
         });
 
@@ -875,18 +926,18 @@ impl PipelineManager {
             .get(&mv_comp_id)
             .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-        // Hide *all* previous PVW big pads — covers both input-group leftovers
-        // and PiP-overlay leftovers when transitioning between source kinds.
-        // Clear control bindings first so the alpha=0 actually takes effect
-        // (a stale binding from a previous morph would otherwise override).
+        // Hide *all* previous PVW big pads (and their border underlays) —
+        // covers both input-group leftovers and PiP-overlay leftovers when
+        // transitioning between source kinds. Clear control bindings first
+        // so the alpha=0 actually takes effect (a stale binding from a
+        // previous morph would otherwise override).
         for i in 0..state.num_inputs {
             if let Some(pad) = find_pad(mv_comp, &format!("sink_{}", state.num_inputs + 1 + i)) {
-                for prop in ["alpha", "xpos", "ypos", "width", "height", "zorder"] {
-                    if let Some(binding) = pad.control_binding(prop) {
-                        pad.remove_control_binding(&binding);
-                    }
-                }
+                clear_layout_bindings(&pad);
                 pad.set_property("alpha", 0.0f64);
+            }
+            if let Some(base) = state.mv_pvw_underlay_base() {
+                hide_underlay(mv_comp, base + i);
             }
         }
 
@@ -905,6 +956,10 @@ impl PipelineManager {
         } else {
             16.0 / 9.0
         };
+        let pvw_underlay = state.mv_pvw_underlay_base().map(|base| UnderlayCtx {
+            base,
+            scale: r.w / state.pgm_w.max(1) as f64,
+        });
         apply_pip_layout_to_region(
             mv_comp,
             state.num_inputs + 1,
@@ -917,6 +972,7 @@ impl PipelineManager {
             vision_mixer::MV_PVW_PIP_OVERLAY_ZORDER,
             src_aspect,
             &self.vision_mixer_source_aspects(block_instance_id, state.num_inputs),
+            pvw_underlay,
         );
 
         overlay::trigger_overlay_update(block_instance_id);
