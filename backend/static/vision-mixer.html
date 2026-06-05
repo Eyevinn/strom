@@ -44,7 +44,9 @@
             gap: 16px;
             align-items: stretch;
             transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.2s ease;
-            max-height: 200px;
+            /* Cap, not a fixed height: the bar only grows past ~200px when a
+               wipe/FX picker is expanded (4 grid rows ≈ 270px worst case). */
+            max-height: 280px;
             overflow: hidden;
         }
         body.editing-layout .controls {
@@ -167,8 +169,9 @@
             display: flex;
             flex-direction: column;
             gap: 6px;
-            /* Wide enough that the 6-column wipe grid keeps readable labels. */
-            min-width: 250px;
+            /* Wide enough that the 6-column wipe/FX grids keep readable
+               labels and the type row breathes. */
+            min-width: 340px;
             flex-shrink: 0;
             border-left: 1px solid #444;
             padding-left: 16px;
@@ -266,8 +269,7 @@
             display: grid;
             gap: 4px;
         }
-        .wipe-grid { grid-template-columns: repeat(6, 1fr); }
-        .fx-grid { grid-template-columns: repeat(4, 1fr); }
+        .wipe-grid, .fx-grid { grid-template-columns: repeat(6, 1fr); }
         .wipe-grid.hidden, .fx-grid.hidden { display: none; }
         .wipe-grid .type-btn, .fx-grid .type-btn {
             font-size: 10px;
@@ -1231,7 +1233,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.31-fx-tiers | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.32-fx-panel-width | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
