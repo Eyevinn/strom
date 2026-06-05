@@ -215,7 +215,11 @@ fn build_shader(
 pub fn attach_create_shader_handler(elem: &gst::Element) {
     elem.connect("create-shader", false, |args| {
         let element = args[0].get::<gst::Element>().ok()?;
-        let fragment = element.property::<Option<String>>("fragment")?;
+        // An unset fragment property must not return None (process abort,
+        // see below) — treat it as a request for passthrough instead.
+        let fragment = element
+            .property::<Option<String>>("fragment")
+            .unwrap_or_else(identity_fragment);
         let Some(context) = element.property::<Option<gst_gl::GLContext>>("context") else {
             // No context means we cannot build any shader to return; this
             // should be unreachable (the signal fires from the GL thread).
