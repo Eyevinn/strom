@@ -21,8 +21,9 @@ const BLOCK_ID: &str = "vmfx";
 /// plugins being installed is not enough — on headless CI runners the
 /// elements exist but no GL context can be created, and a GPU pipeline
 /// builds, starts and then silently never produces a frame. Same probe as
-/// `shader_validation_test`: a trivial `gltestsrc ! glshader ! fakesink`
-/// run must reach EOS.
+/// `shader_validation_test`: a trivial shader-free GL run must reach EOS
+/// (no `glshader` in the probe — a shader compile bug must fail the test,
+/// not skip it).
 fn gl_environment_available() -> bool {
     use gstreamer::prelude::*;
     if gstreamer::ElementFactory::find("glvideomixerelement").is_none()
@@ -32,16 +33,13 @@ fn gl_environment_available() -> bool {
         return false;
     }
     let Ok(pipeline) = gstreamer::parse::launch(
-        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! glshader name=fx ! fakesink sync=false",
+        "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
     ) else {
         return false;
     };
     let Ok(pipeline) = pipeline.downcast::<gstreamer::Pipeline>() else {
         return false;
     };
-    if let Some(fx) = pipeline.by_name("fx") {
-        fx.set_property("fragment", strom::gst::shaders::identity_fragment());
-    }
     if pipeline.set_state(gstreamer::State::Playing).is_err() {
         return false;
     }

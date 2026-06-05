@@ -24,11 +24,14 @@
 //! # Compatibility
 //!
 //! All GLSL is written in GLES2 style (`varying`, `texture2D`,
-//! `gl_FragColor`, no `#version`) — the same dialect `gleffects` ships, which
-//! compiles on desktop GL compatibility contexts and GLES alike. A failed
-//! shader compile posts a GST element error and kills the pipeline, so only
-//! fragments from this module (CI-validated, see `shader_validation_test`)
-//! may ever reach a `glshader` element.
+//! `gl_FragColor`, no `#version`) — the same dialect `gleffects` ships. Like
+//! `gleffects`, fragments are compiled with profile `ES | COMPATIBILITY` (see
+//! [`attach_create_shader_handler`]): on desktop compat GL and GLES the
+//! source compiles as-is, and on core-only contexts (macOS exposes only
+//! OpenGL 3.2+ core) GStreamer prepends `#version 100`, which the driver
+//! accepts via `GL_ARB_ES2_compatibility`. Only fragments from this module
+//! (CI-validated, see `shader_validation_test`) may ever reach a `glshader`
+//! element.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -161,28 +164,65 @@ pub fn identity_fragment() -> String {
 
 const GL_FRAGMENT_SHADER: u32 = 0x8B30;
 
+/// Compile a complete `glshader` program (default vertex + `fragment`) for
+/// `context`.
+///
+/// The fragment compiles with profile `ES | COMPATIBILITY` and no explicit
+/// version — exactly how GStreamer compiles its own default vertex stage and
+/// the `gleffects` fragments. On desktop compat GL and GLES the GLES2-style
+/// source compiles as-is; on core-only contexts (macOS) GStreamer prepends
+/// `#version 100`, which the driver accepts via `GL_ARB_ES2_compatibility`.
+/// Do not pass a core version/profile here instead: GStreamer never prepends
+/// a `#version` line for non-ES profiles (the source would fail with
+/// "#version required and missing"), and a core-profile fragment could not
+/// link against the ES-compiled default vertex stage anyway.
+fn build_shader(
+    context: &gst_gl::GLContext,
+    fragment: &str,
+) -> Result<gst_gl::GLShader, gst::glib::Error> {
+    let shader = gst_gl::GLShader::new(context);
+    let vertex = gst_gl::GLSLStage::new_default_vertex(context);
+    shader.compile_attach_stage(&vertex)?;
+
+    let frag_stage = gst_gl::GLSLStage::with_string(
+        context,
+        GL_FRAGMENT_SHADER,
+        gst_gl::GLSLVersion::None,
+        gst_gl::GLSLProfile::ES | gst_gl::GLSLProfile::COMPATIBILITY,
+        fragment,
+    );
+    shader.compile_attach_stage(&frag_stage)?;
+    shader.link()?;
+    Ok(shader)
+}
+
 /// Attach the `create-shader` handler that makes runtime fragment swaps
 /// work. `glshader` only compiles from its `fragment` property while it has
 /// **no** shader (the first frame); once one exists, the property is inert
-/// and `update-shader=true` merely emits `create-shader` — with no handler
-/// the existing shader is kept (see `_maybe_recompile_shader` in
-/// gstglfiltershader.c). This handler compiles the element's current
-/// `fragment` string on the GL thread and returns the new shader.
+/// and `update-shader=true` merely emits `create-shader`. This handler
+/// compiles the element's current `fragment` string on the GL thread and
+/// returns the new shader.
 ///
-/// On compile failure it logs and returns `None`, which keeps the previous
-/// shader running — a runtime swap can never kill the pipeline (unlike the
-/// initial property-path compile, which posts an element error).
+/// The signal's return type is a **non-nullable** `GstGLShader`: returning
+/// `None` panics the glib-rs marshaller inside the C signal emission, which
+/// cannot unwind and aborts the whole process. So on compile failure we fall
+/// back to a freshly compiled identity (passthrough) shader rather than
+/// `None` — a bad runtime swap degrades to passthrough instead of killing the
+/// process.
 ///
 /// The closure captures nothing — the element arrives as a signal argument
 /// (no strong-ref cycles, per the project rule for GStreamer closures).
 pub fn attach_create_shader_handler(elem: &gst::Element) {
     elem.connect("create-shader", false, |args| {
-        let element = match args[0].get::<gst::Element>() {
-            Ok(e) => e,
-            Err(_) => return None,
-        };
-        let fragment = element.property::<Option<String>>("fragment")?;
+        let element = args[0].get::<gst::Element>().ok()?;
+        // An unset fragment property must not return None (process abort,
+        // see below) — treat it as a request for passthrough instead.
+        let fragment = element
+            .property::<Option<String>>("fragment")
+            .unwrap_or_else(identity_fragment);
         let Some(context) = element.property::<Option<gst_gl::GLContext>>("context") else {
+            // No context means we cannot build any shader to return; this
+            // should be unreachable (the signal fires from the GL thread).
             error!(
                 "{}: create-shader fired without a GL context",
                 element.name()
@@ -190,33 +230,52 @@ pub fn attach_create_shader_handler(elem: &gst::Element) {
             return None;
         };
 
-        let shader = gst_gl::GLShader::new(&context);
-        let vertex = gst_gl::GLSLStage::new_default_vertex(&context);
-        if let Err(e) = shader.compile_attach_stage(&vertex) {
-            error!("{}: vertex stage failed: {}", element.name(), e);
-            return None;
+        match build_shader(&context, &fragment) {
+            Ok(shader) => {
+                debug!("{}: runtime shader swap compiled OK", element.name());
+                Some(shader.to_value())
+            }
+            Err(e) => {
+                error!(
+                    "{}: fragment compile failed, falling back to passthrough: {}",
+                    element.name(),
+                    e
+                );
+                // Make the degraded FX observable on the bus (also lets the
+                // shader validation test detect compile failures).
+                gst::element_warning!(
+                    element,
+                    gst::ResourceError::Failed,
+                    ("FX shader compile failed, running passthrough: {}", e)
+                );
+                match build_shader(&context, &identity_fragment()) {
+                    Ok(shader) => Some(shader.to_value()),
+                    Err(e2) => {
+                        error!(
+                            "{}: identity fallback also failed to compile: {}",
+                            element.name(),
+                            e2
+                        );
+                        // Last resort: GStreamer's own default passthrough
+                        // shader, compiled by a code path independent of
+                        // build_shader. Returning None here aborts the whole
+                        // process (non-nullable signal return), so this must
+                        // be tried first.
+                        match gst_gl::GLShader::new_default(&context) {
+                            Ok(shader) => Some(shader.to_value()),
+                            Err(e3) => {
+                                error!(
+                                    "{}: default shader fallback also failed: {}",
+                                    element.name(),
+                                    e3
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
+            }
         }
-        let frag_stage = gst_gl::GLSLStage::with_string(
-            &context,
-            GL_FRAGMENT_SHADER,
-            gst_gl::GLSLVersion::None,
-            gst_gl::GLSLProfile::empty(),
-            &fragment,
-        );
-        if let Err(e) = shader.compile_attach_stage(&frag_stage) {
-            error!(
-                "{}: fragment compile failed (keeping previous shader): {}",
-                element.name(),
-                e
-            );
-            return None;
-        }
-        if let Err(e) = shader.link() {
-            error!("{}: shader link failed: {}", element.name(), e);
-            return None;
-        }
-        debug!("{}: runtime shader swap compiled OK", element.name());
-        Some(shader.to_value())
     });
 }
 
