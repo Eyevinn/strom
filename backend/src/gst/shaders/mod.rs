@@ -126,6 +126,7 @@ const LOOK_THERMAL: &str = include_str!("glsl/look_thermal.glsl");
 const LOOK_NIGHT_VISION: &str = include_str!("glsl/look_night_vision.glsl");
 const LOOK_POSTERIZE: &str = include_str!("glsl/look_posterize.glsl");
 const LOOK_UNDERWATER: &str = include_str!("glsl/look_underwater.glsl");
+const LOOK_COLOR_CORRECT: &str = include_str!("glsl/look_color_correct.glsl");
 
 const WIPE_LINEAR: &str = include_str!("glsl/wipe_linear.glsl");
 const WIPE_CLOCK: &str = include_str!("glsl/wipe_clock.glsl");
@@ -403,6 +404,24 @@ pub fn effect_shader(effect: &VideoEffect) -> (String, gst::Structure) {
         VideoEffect::Underwater { intensity } => (
             compose_look(LOOK_UNDERWATER),
             uniforms(&[("u_intensity", *intensity)]),
+        ),
+        VideoEffect::ColorCorrect {
+            brightness,
+            contrast,
+            saturation,
+            gamma,
+            temperature,
+            tint,
+        } => (
+            compose_look(LOOK_COLOR_CORRECT),
+            uniforms(&[
+                ("u_brightness", *brightness),
+                ("u_contrast", *contrast),
+                ("u_saturation", *saturation),
+                ("u_gamma", *gamma),
+                ("u_temperature", *temperature),
+                ("u_tint", *tint),
+            ]),
         ),
     }
 }
@@ -687,6 +706,14 @@ pub fn all_fragments() -> Vec<(String, String)> {
         VideoEffect::NightVision { intensity: 1.0 },
         VideoEffect::Posterize { levels: 5.0 },
         VideoEffect::Underwater { intensity: 0.5 },
+        VideoEffect::ColorCorrect {
+            brightness: 0.1,
+            contrast: 1.2,
+            saturation: 1.1,
+            gamma: 0.9,
+            temperature: 0.2,
+            tint: -0.1,
+        },
     ];
     for e in &looks {
         v.push((format!("look_{}", e.kind()), effect_shader(e).0));

@@ -128,6 +128,30 @@ pub enum VideoEffect {
         #[serde(default = "default_half")]
         intensity: f32,
     },
+    /// Primary color correction + white balance — the camera-matching tool.
+    /// Every control is neutral at its default, so an untouched correction is
+    /// an identity pass. Applied in a fixed order: white balance, brightness,
+    /// contrast, gamma, saturation.
+    ColorCorrect {
+        /// Additive brightness offset (-1..1, neutral 0).
+        #[serde(default = "default_zero")]
+        brightness: f32,
+        /// Contrast multiplier around mid-gray (0..2, neutral 1).
+        #[serde(default = "default_one")]
+        contrast: f32,
+        /// Saturation: 0 = grayscale, 1 = unchanged, up to 2 (0..2, neutral 1).
+        #[serde(default = "default_one")]
+        saturation: f32,
+        /// Midtone gamma curve (0.1..3, neutral 1).
+        #[serde(default = "default_one")]
+        gamma: f32,
+        /// White balance temperature: warm (+) / cool (-) (-1..1, neutral 0).
+        #[serde(default = "default_zero")]
+        temperature: f32,
+        /// White balance tint: magenta (+) / green (-) (-1..1, neutral 0).
+        #[serde(default = "default_zero")]
+        tint: f32,
+    },
 }
 
 fn default_key_color() -> String {
@@ -156,6 +180,9 @@ fn default_duotone_high() -> String {
 }
 fn default_one() -> f32 {
     1.0
+}
+fn default_zero() -> f32 {
+    0.0
 }
 fn default_half() -> f32 {
     0.5
@@ -218,6 +245,7 @@ impl VideoEffect {
             VideoEffect::NightVision { .. } => "night_vision",
             VideoEffect::Posterize { .. } => "posterize",
             VideoEffect::Underwater { .. } => "underwater",
+            VideoEffect::ColorCorrect { .. } => "color_correct",
         }
     }
 
@@ -284,6 +312,21 @@ impl VideoEffect {
             },
             VideoEffect::Underwater { intensity } => VideoEffect::Underwater {
                 intensity: clamp(*intensity, 0.0, 1.0),
+            },
+            VideoEffect::ColorCorrect {
+                brightness,
+                contrast,
+                saturation,
+                gamma,
+                temperature,
+                tint,
+            } => VideoEffect::ColorCorrect {
+                brightness: clamp(*brightness, -1.0, 1.0),
+                contrast: clamp(*contrast, 0.0, 2.0),
+                saturation: clamp(*saturation, 0.0, 2.0),
+                gamma: clamp(*gamma, 0.1, 3.0),
+                temperature: clamp(*temperature, -1.0, 1.0),
+                tint: clamp(*tint, -1.0, 1.0),
             },
         })
     }

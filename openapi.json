@@ -11184,6 +11184,51 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Primary color correction + white balance — the camera-matching tool.\nEvery control is neutral at its default, so an untouched correction is\nan identity pass. Applied in a fixed order: white balance, brightness,\ncontrast, gamma, saturation.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "brightness": {
+                "type": "number",
+                "format": "float",
+                "description": "Additive brightness offset (-1..1, neutral 0)."
+              },
+              "contrast": {
+                "type": "number",
+                "format": "float",
+                "description": "Contrast multiplier around mid-gray (0..2, neutral 1)."
+              },
+              "gamma": {
+                "type": "number",
+                "format": "float",
+                "description": "Midtone gamma curve (0.1..3, neutral 1)."
+              },
+              "saturation": {
+                "type": "number",
+                "format": "float",
+                "description": "Saturation: 0 = grayscale, 1 = unchanged, up to 2 (0..2, neutral 1)."
+              },
+              "temperature": {
+                "type": "number",
+                "format": "float",
+                "description": "White balance temperature: warm (+) / cool (-) (-1..1, neutral 0)."
+              },
+              "tint": {
+                "type": "number",
+                "format": "float",
+                "description": "White balance tint: magenta (+) / green (-) (-1..1, neutral 0)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "color_correct"
+                ]
+              }
+            }
           }
         ],
         "description": "A persistent video effect (\"look\") applied to a vision mixer input or to\nthe PGM master output.\n\nJSON encoding is internally tagged on `type`:\n`{\"type\": \"pixelate\", \"block_size\": 24.0}`.\n\nAll numeric parameters are clamped server-side (see [`VideoEffect::sanitized`]);\ncolors are `#RRGGBB` hex strings."
