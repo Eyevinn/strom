@@ -4,11 +4,18 @@ uniform float u_intensity;
 
 void main() {
     vec2 uv = v_texcoord;
+    // Bound the timebase before it seeds a hash: absolute `time` grows
+    // unbounded and after ~a day of uptime float32 ULP swamps the per-line
+    // hash step, collapsing jitter/tear into a frozen pattern. A look has no
+    // take-relative anchor, so wrap (~68 min period, imperceptible for tape
+    // damage). The fract(time) noise below is already bounded. (See
+    // master_glitch for the precision rationale.)
+    float bt = mod(time, 4096.0);
     // Per-line horizontal jitter, re-rolled ~15x per second.
-    float jitter = (hash12(vec2(floor(uv.y * height), floor(time * 15.0))) - 0.5)
+    float jitter = (hash12(vec2(floor(uv.y * height), floor(bt * 15.0))) - 0.5)
         * 0.003 * u_intensity;
     // Occasional wider tear band.
-    float band = step(0.985, hash12(vec2(floor(time * 7.0), floor(uv.y * 30.0))))
+    float band = step(0.985, hash12(vec2(floor(bt * 7.0), floor(uv.y * 30.0))))
         * 0.02 * u_intensity;
     uv.x += jitter + band;
     // Chroma shift: sample R and B slightly apart.
