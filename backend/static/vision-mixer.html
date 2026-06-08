@@ -321,13 +321,18 @@
             width: 100%;
         }
         .fx-look-params {
-            display: flex;
+            display: grid;
+            grid-template-columns: repeat(4, max-content);
+            align-items: center;
+            gap: 4px 12px;
+        }
+        .fx-param {
+            display: inline-flex;
             align-items: center;
             gap: 6px;
-            flex-wrap: wrap;
         }
         .fx-look-params label { color: #888; font-size: 11px; }
-        .fx-look-params input[type="range"] { width: 90px; }
+        .fx-look-params input[type="range"] { width: 80px; }
         .fx-look-params input[type="color"] {
             width: 28px;
             height: 22px;
@@ -1234,7 +1239,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.36-color-correct-hue | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.37-fx-param-grid | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1690,7 +1695,7 @@
             html += '<div class="fx-look-params">';
             def.params.forEach(pr => {
                 const v = (e[pr.k] != null) ? e[pr.k] : pr.d;
-                html += '<label>' + pr.label + '</label>';
+                html += '<span class="fx-param"><label>' + pr.label + '</label>';
                 if (pr.t === 'color') {
                     html += '<input type="color" value="' + v + '" data-t="' + tj + '"'
                         + ' oninput="onFxParamInput(JSON.parse(this.dataset.t), \'' + pr.k + '\', this.value, false)">';
@@ -1699,6 +1704,7 @@
                         + ' oninput="onFxParamInput(JSON.parse(this.dataset.t), \'' + pr.k + '\', this.value, true)">';
                     html += '<span class="fx-val" id="fxval_' + key + '_' + pr.k + '">' + v + '</span>';
                 }
+                html += '</span>';
             });
             html += '</div></div>';
             return html;
