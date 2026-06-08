@@ -142,6 +142,9 @@ pub enum VideoEffect {
         /// Saturation: 0 = grayscale, 1 = unchanged, up to 2 (0..2, neutral 1).
         #[serde(default = "default_one")]
         saturation: f32,
+        /// Hue rotation: -1..1 maps to -180..180 degrees (neutral 0).
+        #[serde(default = "default_zero")]
+        hue: f32,
         /// Midtone gamma curve (0.1..3, neutral 1).
         #[serde(default = "default_one")]
         gamma: f32,
@@ -317,6 +320,7 @@ impl VideoEffect {
                 brightness,
                 contrast,
                 saturation,
+                hue,
                 gamma,
                 temperature,
                 tint,
@@ -324,6 +328,7 @@ impl VideoEffect {
                 brightness: clamp(*brightness, -1.0, 1.0),
                 contrast: clamp(*contrast, 0.0, 2.0),
                 saturation: clamp(*saturation, 0.0, 2.0),
+                hue: clamp(*hue, -1.0, 1.0),
                 gamma: clamp(*gamma, 0.1, 3.0),
                 temperature: clamp(*temperature, -1.0, 1.0),
                 tint: clamp(*tint, -1.0, 1.0),
