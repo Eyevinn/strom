@@ -7,7 +7,14 @@ void main() {
     // Widened envelope: ramps up fast, holds near peak around the cut.
     float e = pow(envelope(), 0.4) * u_intensity;
     vec2 uv = v_texcoord;
-    float t = floor(time * 30.0);
+    // Frame counter for the per-band hashes. MUST be take-relative, not
+    // absolute `time`: with absolute PTS the argument to the sin()-based
+    // hash grows to ~1e8 after a day of runtime, where float32 ULP (~32)
+    // exceeds the per-band step (~13). Adjacent bands then collapse to the
+    // same hash and all displacement freezes into a uniform (invisible)
+    // shift — leaving only the hash-free RGB split. `time - u_start` stays
+    // in 0..duration, so the hash is well-conditioned for any uptime.
+    float t = floor((time - u_start) * 30.0);
     // Horizontal block displacement: random bands shift sideways hard.
     float band = floor(uv.y * 24.0);
     float shift = (hash12(vec2(band, t)) - 0.5) * 0.55 * e

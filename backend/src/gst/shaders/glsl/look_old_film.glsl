@@ -5,7 +5,12 @@ uniform float u_intensity;
 
 void main() {
     vec2 uv = v_texcoord;
-    float t = floor(time * 24.0) / 24.0;
+    // Bound the timebase before deriving the hash seed: absolute `time` grows
+    // unbounded, and after ~a day of uptime float32 ULP exceeds the per-frame
+    // step so the grain/flicker freezes. A look has no take-relative anchor
+    // (no u_start), so wrap instead — the ~68 min period is imperceptible for
+    // random damage. (See master_glitch for the precision rationale.)
+    float t = floor(mod(time, 4096.0) * 24.0) / 24.0;
     vec4 src = texture2D(tex, uv);
     float y = luma(src.rgb);
     vec3 warm = vec3(y * 1.05, y * 0.95, y * 0.78);
