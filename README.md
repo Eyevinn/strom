@@ -4,7 +4,7 @@
 
 **Strom** is a GStreamer media pipeline engine with a visual, web-based GUI. At its core it builds, runs, and manages real-time media pipelines; the node-based editor lets you design and control complex media flows without writing code.
 
-> **Used by [Open Live](https://github.com/Eyevinn/open-live):** Strom is a standalone GStreamer flow engine, but [Open Live](https://github.com/Eyevinn/open-live) — an open-source live production platform with [Open Live Studio](https://github.com/Eyevinn/open-live-studio) as its web-based production interface — uses Strom as a media backend, driving it over its REST and WebSocket APIs. See [docs/OPEN_LIVE_SETUP.md](docs/OPEN_LIVE_SETUP.md) for running your own Strom instance for Open Live.
+> **Used by [Open Live](https://github.com/Eyevinn/open-live):** Strom is a standalone GStreamer flow engine, but [Open Live](https://github.com/Eyevinn/open-live) — an open-source live production platform with [Open Live Studio](https://github.com/Eyevinn/open-live-studio) as its web-based production interface — uses Strom as a media backend, driving it over its REST and WebSocket APIs. Try the hosted platform at [openlive.apps.osaas.io](https://openlive.apps.osaas.io/), or see [docs/OPEN_LIVE_SETUP.md](docs/OPEN_LIVE_SETUP.md) for running your own Strom instance for Open Live.
 
 ---
 <div align="center">
@@ -63,7 +63,7 @@ Use `eyevinntechnology/strom-full:latest` for the image with HTML rendering (CEF
 - **Pre-built binaries** (Linux, macOS, Windows MSI) — see [GitHub Releases](https://github.com/Eyevinn/strom/releases).
 - **Docker / Docker Compose** (production, GPU, reverse proxy) — see [docs/DOCKER.md](docs/DOCKER.md) and [docs/DOCKER_GPU_SETUP.md](docs/DOCKER_GPU_SETUP.md).
 - **Build from source** — see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-- **Deploy for Open Live** — see [docs/OPEN_LIVE_SETUP.md](docs/OPEN_LIVE_SETUP.md).
+- **Deploy for Open Live** — try the hosted platform at [openlive.apps.osaas.io](https://openlive.apps.osaas.io/), or see [docs/OPEN_LIVE_SETUP.md](docs/OPEN_LIVE_SETUP.md).
 
 ### First steps
 
