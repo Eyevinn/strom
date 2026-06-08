@@ -20,5 +20,7 @@ vec3 thermal_palette(float t) {
 void main() {
     vec4 src = texture2D(tex, v_texcoord);
     vec3 heat = thermal_palette(luma(src.rgb));
-    gl_FragColor = vec4(mix(src.rgb, heat, u_intensity), src.a);
+    vec3 rgb = mix(src.rgb, heat, u_intensity);
+    // The smooth false-color ramp bands hard on flat areas without dither.
+    gl_FragColor = vec4(dither(rgb, v_texcoord * vec2(width, height)), src.a);
 }

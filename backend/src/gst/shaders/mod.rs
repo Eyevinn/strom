@@ -60,6 +60,15 @@ float luma(vec3 c) {
 float hash12(vec2 p) {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
+// Triangular-PDF dither (~1 LSB at 8-bit) to break up banding on smooth
+// gradients. Two decorrelated hashes give a TPDF in (-1, 1), which has flat
+// noise-power and no DC bias — strictly better than a single-hash (RPDF)
+// term. The pattern is static (no time seed) so flat areas don't crawl.
+// Apply to a [0,1] color immediately before output.
+vec3 dither(vec3 c, vec2 p) {
+    float n = hash12(p) + hash12(p + 19.19) - 1.0;
+    return c + n / 255.0;
+}
 // Soft-edged reveal: 1 where the ordering value d has been passed by the
 // sweep at progress p, with a soft band of width s. At p=0 nothing is
 // revealed, at p=1 everything is (for any d in 0..1).

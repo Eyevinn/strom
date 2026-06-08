@@ -52,5 +52,8 @@ void main() {
     // Gamma on non-negative values (pow of a negative is undefined).
     c = pow(max(c, 0.0), vec3(1.0 / max(u_gamma, 0.001)));
 
-    gl_FragColor = vec4(clamp(c, 0.0, 1.0), src.a);
+    // Dither: contrast/gamma stretching pulls source steps apart into visible
+    // bands on skies and walls; a sub-LSB TPDF term hides them.
+    c = dither(clamp(c, 0.0, 1.0), v_texcoord * vec2(width, height));
+    gl_FragColor = vec4(c, src.a);
 }
