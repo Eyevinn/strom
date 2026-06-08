@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.6.4"
+    "version": "0.6.5-dev"
   },
   "paths": {
     "/api/auth/status": {
@@ -10932,7 +10932,7 @@
           },
           {
             "type": "object",
-            "description": "Gaussian-ish blur (9-tap, single pass).",
+            "description": "Disc-bokeh defocus blur (24-tap Vogel spiral, single pass).",
             "required": [
               "type"
             ],
@@ -10940,7 +10940,7 @@
               "radius": {
                 "type": "number",
                 "format": "float",
-                "description": "Blur radius in source pixels (0..20)."
+                "description": "Blur radius in source pixels (0..40)."
               },
               "type": {
                 "type": "string",

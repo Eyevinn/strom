@@ -45,9 +45,9 @@ pub enum VideoEffect {
         #[serde(default = "default_block_size")]
         block_size: f32,
     },
-    /// Gaussian-ish blur (9-tap, single pass).
+    /// Disc-bokeh defocus blur (24-tap Vogel spiral, single pass).
     Blur {
-        /// Blur radius in source pixels (0..20).
+        /// Blur radius in source pixels (0..40).
         #[serde(default = "default_blur_radius")]
         radius: f32,
     },
@@ -277,7 +277,7 @@ impl VideoEffect {
                 block_size: clamp(*block_size, 2.0, 200.0),
             },
             VideoEffect::Blur { radius } => VideoEffect::Blur {
-                radius: clamp(*radius, 0.0, 20.0),
+                radius: clamp(*radius, 0.0, 40.0),
             },
             VideoEffect::Duotone { low, high, mix } => VideoEffect::Duotone {
                 low: check_color("low", low)?,
