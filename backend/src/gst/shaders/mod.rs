@@ -82,10 +82,16 @@ float progress() {
     float p = fx_linear_p();
     return p * p * (3.0 - 2.0 * p);
 }
-// Master FX envelope: 0 -> 1 -> 0, peaking at the cut point.
+// Master FX envelope: 0 -> 1 -> 0, peaking at the cut point. A parabola, not
+// sin(pi*p): the parabola is EXACTLY 0 at p=0 and p=1 (clamp() pins the
+// endpoints, and 4*1*(1-1) folds to a clean 0), whereas sin() of a float pi
+// literal leaves a ~1e-8 residual. FX that take a fractional power of the
+// envelope (e.g. glitch's pow(e, 0.4)) amplify that residual into persistent,
+// driver-dependent block artifacts that never clear after the transition.
 float envelope() {
     if (u_duration <= 0.0) return 0.0;
-    return sin(fx_linear_p() * 3.14159265);
+    float p = fx_linear_p();
+    return 4.0 * p * (1.0 - p);
 }
 "#;
 
