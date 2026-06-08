@@ -40,7 +40,14 @@ pub(super) fn build_gpu_pipeline(
     } else {
         16.0 / 9.0
     };
-    let mv_layout = layout::compute_layout(p.mv_w, p.mv_h, p.num_inputs, p.num_pips, source_aspect);
+    let mv_layout = layout::compute_layout(
+        p.mv_w,
+        p.mv_h,
+        p.num_inputs,
+        p.num_pips,
+        source_aspect,
+        p.swap_pvw_pgm,
+    );
 
     // --- Distribution output chain ---
     // queue_post_dist decouples the compositor from downstream processing.
