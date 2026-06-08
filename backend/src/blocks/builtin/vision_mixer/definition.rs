@@ -237,6 +237,25 @@ fn vision_mixer_definition() -> BlockDefinition {
             live: false,
             persist: None,
         },
+        // Swap PVW/PGM positions in the multiview layout
+        ExposedProperty {
+            name: "swap_pvw_pgm".to_string(),
+            label: "Swap PVW/PGM Positions".to_string(),
+            description:
+                "Mirror the multiview layout so PGM is on the left and PVW on the right."
+                    .to_string(),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(
+                strom_types::vision_mixer::DEFAULT_SWAP_PVW_PGM,
+            )),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: "swap_pvw_pgm".to_string(),
+                transform: None,
+            },
+            live: false,
+            persist: None,
+        },
         // Output pixel format
         ExposedProperty {
             name: "output_format".to_string(),

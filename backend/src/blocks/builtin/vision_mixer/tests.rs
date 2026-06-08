@@ -73,7 +73,7 @@ const ASPECT_16_9: f64 = 16.0 / 9.0;
 
 #[test]
 fn test_layout_compute_basic() {
-    let l = layout::compute_layout(1920, 1080, 4, 0, ASPECT_16_9);
+    let l = layout::compute_layout(1920, 1080, 4, 0, ASPECT_16_9, false);
     assert_eq!(l.num_inputs, 4);
     assert_eq!(l.thumbnail_rects.len(), 4);
     assert_eq!(l.label_positions.len(), 4);
@@ -98,10 +98,23 @@ fn test_layout_compute_basic() {
 }
 
 #[test]
+fn test_layout_swap_pvw_pgm() {
+    let normal = layout::compute_layout(1920, 1080, 4, 0, ASPECT_16_9, false);
+    let swapped = layout::compute_layout(1920, 1080, 4, 0, ASPECT_16_9, true);
+    // Swap mirrors the two big rects: PGM is now on the left, PVW on the right.
+    assert!(swapped.pgm_rect.x < swapped.pvw_rect.x);
+    // The geometry is exactly mirrored — swapped PVW sits where PGM was.
+    assert_eq!(swapped.pvw_rect.x as i32, normal.pgm_rect.x as i32);
+    assert_eq!(swapped.pgm_rect.x as i32, normal.pvw_rect.x as i32);
+    // Labels follow their rects, so they swap sides too.
+    assert!(swapped.pgm_label_pos.x < swapped.pvw_label_pos.x);
+}
+
+#[test]
 fn test_layout_compute_10_inputs() {
     // 10 slots → (5, 2) grid (cell aspect ≈ 1.43, zero empty cells beats
     // any alternative on the combined aspect+empty cost).
-    let l = layout::compute_layout(1920, 1080, 10, 0, ASPECT_16_9);
+    let l = layout::compute_layout(1920, 1080, 10, 0, ASPECT_16_9, false);
     assert_eq!(l.thumbnail_rects.len(), 10);
     // First 5 in row 1, next 5 in row 2
     let row1_y = l.thumbnail_rects[0].y;
@@ -122,7 +135,7 @@ fn test_layout_compute_with_pip_tile() {
     // 4 inputs + 1 PiP tile = 5 slots → (3, 2) grid: 3 in row 1, 2 in row 2.
     // PiP is slot 4 → row 1 (second row), col 1. Last input is slot 3 →
     // row 1, col 0. Same row, PiP to the right of last input.
-    let l = layout::compute_layout(1920, 1080, 4, 1, ASPECT_16_9);
+    let l = layout::compute_layout(1920, 1080, 4, 1, ASPECT_16_9, false);
     assert_eq!(l.num_inputs, 4);
     assert_eq!(l.num_pips, 1);
     assert_eq!(l.thumbnail_rects.len(), 4);
@@ -157,7 +170,7 @@ fn test_layout_compute_with_pip_tile() {
 
 #[test]
 fn test_pip_overlay_rects_tile_within_bg() {
-    let l = layout::compute_layout(1920, 1080, 4, 1, ASPECT_16_9);
+    let l = layout::compute_layout(1920, 1080, 4, 1, ASPECT_16_9, false);
     let (bx, by, bw, bh) = layout::pip_bg_pad_position(&l, 0);
 
     // Two overlays → side-by-side aspect-preserving cells within the PiP tile.
@@ -281,7 +294,7 @@ fn overlay_registries_round_trip() {
 
     let block_id = "test-vm-overlay-cleanup-block-id";
 
-    let lo = layout::compute_layout(1280, 720, 4, 0, ASPECT_16_9);
+    let lo = layout::compute_layout(1280, 720, 4, 0, ASPECT_16_9, false);
     let state = Arc::new(VisionMixerOverlayState::new(
         4,
         0,

@@ -183,6 +183,7 @@ pub fn compute_layout(
     num_inputs: usize,
     num_pips: usize,
     source_aspect: f64,
+    swap_pvw_pgm: bool,
 ) -> OverlayLayout {
     let cw = canvas_width as f64;
     let ch = canvas_height as f64;
@@ -202,8 +203,16 @@ pub fn compute_layout(
     let (big_w, big_h) = fit_to_aspect(half_w_box, top_h_box, source_aspect);
     let big_pad_left = ((half_w_box - big_w) / 2.0).max(0.0);
     let big_pad_top = ((top_h_box - big_h) / 2.0).max(0.0);
-    let pvw_x = gap + big_pad_left;
-    let pgm_x = gap * 2.0 + half_w_box + big_pad_left;
+    // PVW occupies the left half and PGM the right by default; swap_pvw_pgm
+    // mirrors them. The label positions, borders and compositor pads all
+    // derive from these rects, so swapping the x coords flips everything.
+    let left_x = gap + big_pad_left;
+    let right_x = gap * 2.0 + half_w_box + big_pad_left;
+    let (pvw_x, pgm_x) = if swap_pvw_pgm {
+        (right_x, left_x)
+    } else {
+        (left_x, right_x)
+    };
     let big_y = gap + big_pad_top;
     let pvw_rect = Rect::new(pvw_x, big_y, big_w, big_h);
     let pgm_rect = Rect::new(pgm_x, big_y, big_w, big_h);

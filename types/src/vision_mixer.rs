@@ -145,6 +145,11 @@ pub const DEFAULT_GL_DOWNLOAD: bool = false;
 /// GPU pipeline. GPU path only — the CPU compositor has no FX engine.
 pub const DEFAULT_ENABLE_FX: bool = true;
 
+/// Whether to swap the PVW and PGM positions in the multiview layout. When
+/// false (default) PVW is on the left and PGM on the right; when true they
+/// are mirrored.
+pub const DEFAULT_SWAP_PVW_PGM: bool = false;
+
 // --- Z-order constants for compositor pads ---
 
 /// Z-order for thumbnail pads on the multiview compositor.
