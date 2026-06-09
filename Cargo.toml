@@ -51,7 +51,11 @@ garde = { version = "0.23", features = ["derive"] }
 # Frontend
 egui = "0.34"
 egui-phosphor = "0.12"
-eframe = { version = "0.34", features = ["default_fonts", "persistence", "glow"] }
+# default-features disabled: eframe 0.34's `default` set includes `wgpu`, which
+# would otherwise be pulled into the WASM build where wgpu fails to compile.
+# Native-only renderer/platform features (wgpu, accesskit, wayland, x11) are
+# re-added on the non-wasm target in frontend/Cargo.toml.
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "persistence", "glow"] }
 egui_extras = { version = "0.34", features = ["image"] }
 egui_plot = "0.35"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
