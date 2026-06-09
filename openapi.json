@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.6.4"
+    "version": "0.6.5-dev"
   },
   "paths": {
     "/api/auth/status": {
@@ -10932,7 +10932,7 @@
           },
           {
             "type": "object",
-            "description": "Gaussian-ish blur (9-tap, single pass).",
+            "description": "Disc-bokeh defocus blur (24-tap Vogel spiral, single pass).",
             "required": [
               "type"
             ],
@@ -10940,7 +10940,7 @@
               "radius": {
                 "type": "number",
                 "format": "float",
-                "description": "Blur radius in source pixels (0..20)."
+                "description": "Blur radius in source pixels (0..40)."
               },
               "type": {
                 "type": "string",
@@ -11181,6 +11181,56 @@
                 "type": "string",
                 "enum": [
                   "underwater"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Primary color correction + white balance — the camera-matching tool.\nEvery control is neutral at its default, so an untouched correction is\nan identity pass. Applied in a fixed order: white balance, brightness,\ncontrast, hue, saturation, gamma.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "brightness": {
+                "type": "number",
+                "format": "float",
+                "description": "Additive brightness offset (-1..1, neutral 0)."
+              },
+              "contrast": {
+                "type": "number",
+                "format": "float",
+                "description": "Contrast multiplier around mid-gray (0..2, neutral 1)."
+              },
+              "gamma": {
+                "type": "number",
+                "format": "float",
+                "description": "Midtone gamma curve (0.1..3, neutral 1)."
+              },
+              "hue": {
+                "type": "number",
+                "format": "float",
+                "description": "Hue rotation: -1..1 maps to -180..180 degrees (neutral 0)."
+              },
+              "saturation": {
+                "type": "number",
+                "format": "float",
+                "description": "Saturation: 0 = grayscale, 1 = unchanged, up to 2 (0..2, neutral 1)."
+              },
+              "temperature": {
+                "type": "number",
+                "format": "float",
+                "description": "White balance temperature: warm (+) / cool (-) (-1..1, neutral 0)."
+              },
+              "tint": {
+                "type": "number",
+                "format": "float",
+                "description": "White balance tint: magenta (+) / green (-) (-1..1, neutral 0)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "color_correct"
                 ]
               }
             }

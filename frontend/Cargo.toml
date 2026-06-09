@@ -45,6 +45,10 @@ base64 = "0.22"
 
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# web_screen_reader (screen-reader accessibility) was part of eframe's `default`
+# set, which is disabled at the workspace level; re-add it for WASM. glow renderer
+# comes from the workspace-level features.
+eframe = { workspace = true, features = ["web_screen_reader"] }
 # Cross-platform time - needs wasm-bindgen feature for WASM
 instant = { version = "0.1", features = ["wasm-bindgen"] }
 gloo-net.workspace = true
@@ -60,8 +64,10 @@ wasm-bindgen = "0.2"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # System hostname detection (for generating external URLs)
 hostname = "0.4"
-# Enable wgpu renderer for native (macOS Metal support) - not available for WASM
-eframe = { workspace = true, features = ["wgpu"] }
+# Enable wgpu renderer for native (macOS Metal support) - not available for WASM.
+# accesskit/wayland/x11 were part of eframe's `default` set, which is disabled at
+# the workspace level to keep wgpu out of the WASM build; re-add them here.
+eframe = { workspace = true, features = ["wgpu", "accesskit", "wayland", "x11"] }
 # Cross-platform time (standard for native)
 instant = "0.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }

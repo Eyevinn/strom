@@ -16,5 +16,7 @@ void main() {
         vec3(u_high_r, u_high_g, u_high_b),
         y
     );
-    gl_FragColor = vec4(mix(src.rgb, duo, u_mix), src.a);
+    vec3 rgb = mix(src.rgb, duo, u_mix);
+    // The two-color ramp bands hard across smooth luma gradients; dither it.
+    gl_FragColor = vec4(dither(rgb, v_texcoord * vec2(width, height)), src.a);
 }

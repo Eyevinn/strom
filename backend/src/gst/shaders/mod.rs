@@ -60,6 +60,15 @@ float luma(vec3 c) {
 float hash12(vec2 p) {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
+// Triangular-PDF dither (~1 LSB at 8-bit) to break up banding on smooth
+// gradients. Two decorrelated hashes give a TPDF in (-1, 1), which has flat
+// noise-power and no DC bias — strictly better than a single-hash (RPDF)
+// term. The pattern is static (no time seed) so flat areas don't crawl.
+// Apply to a [0,1] color immediately before output.
+vec3 dither(vec3 c, vec2 p) {
+    float n = hash12(p) + hash12(p + 19.19) - 1.0;
+    return c + n / 255.0;
+}
 // Soft-edged reveal: 1 where the ordering value d has been passed by the
 // sweep at progress p, with a soft band of width s. At p=0 nothing is
 // revealed, at p=1 everything is (for any d in 0..1).
@@ -82,10 +91,16 @@ float progress() {
     float p = fx_linear_p();
     return p * p * (3.0 - 2.0 * p);
 }
-// Master FX envelope: 0 -> 1 -> 0, peaking at the cut point.
+// Master FX envelope: 0 -> 1 -> 0, peaking at the cut point. A parabola, not
+// sin(pi*p): the parabola is EXACTLY 0 at p=0 and p=1 (clamp() pins the
+// endpoints, and 4*1*(1-1) folds to a clean 0), whereas sin() of a float pi
+// literal leaves a ~1e-8 residual. FX that take a fractional power of the
+// envelope (e.g. glitch's pow(e, 0.4)) amplify that residual into persistent,
+// driver-dependent block artifacts that never clear after the transition.
 float envelope() {
     if (u_duration <= 0.0) return 0.0;
-    return sin(fx_linear_p() * 3.14159265);
+    float p = fx_linear_p();
+    return 4.0 * p * (1.0 - p);
 }
 "#;
 
@@ -126,6 +141,7 @@ const LOOK_THERMAL: &str = include_str!("glsl/look_thermal.glsl");
 const LOOK_NIGHT_VISION: &str = include_str!("glsl/look_night_vision.glsl");
 const LOOK_POSTERIZE: &str = include_str!("glsl/look_posterize.glsl");
 const LOOK_UNDERWATER: &str = include_str!("glsl/look_underwater.glsl");
+const LOOK_COLOR_CORRECT: &str = include_str!("glsl/look_color_correct.glsl");
 
 const WIPE_LINEAR: &str = include_str!("glsl/wipe_linear.glsl");
 const WIPE_CLOCK: &str = include_str!("glsl/wipe_clock.glsl");
@@ -403,6 +419,26 @@ pub fn effect_shader(effect: &VideoEffect) -> (String, gst::Structure) {
         VideoEffect::Underwater { intensity } => (
             compose_look(LOOK_UNDERWATER),
             uniforms(&[("u_intensity", *intensity)]),
+        ),
+        VideoEffect::ColorCorrect {
+            brightness,
+            contrast,
+            saturation,
+            hue,
+            gamma,
+            temperature,
+            tint,
+        } => (
+            compose_look(LOOK_COLOR_CORRECT),
+            uniforms(&[
+                ("u_brightness", *brightness),
+                ("u_contrast", *contrast),
+                ("u_saturation", *saturation),
+                ("u_hue", *hue),
+                ("u_gamma", *gamma),
+                ("u_temperature", *temperature),
+                ("u_tint", *tint),
+            ]),
         ),
     }
 }
@@ -687,6 +723,15 @@ pub fn all_fragments() -> Vec<(String, String)> {
         VideoEffect::NightVision { intensity: 1.0 },
         VideoEffect::Posterize { levels: 5.0 },
         VideoEffect::Underwater { intensity: 0.5 },
+        VideoEffect::ColorCorrect {
+            brightness: 0.1,
+            contrast: 1.2,
+            saturation: 1.1,
+            hue: 0.1,
+            gamma: 0.9,
+            temperature: 0.2,
+            tint: -0.1,
+        },
     ];
     for e in &looks {
         v.push((format!("look_{}", e.kind()), effect_shader(e).0));
