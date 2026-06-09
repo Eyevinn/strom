@@ -36,8 +36,13 @@ void main() {
     }
     vec3 rgb = acc / 7.0;
 
-    // Dark blanking/retrace bar at the seam.
-    float bar = (1.0 - smoothstep(0.0, 0.05, seam)) * u_intensity;
+    // Dark blanking/retrace bar at the seam, gated by roll speed (like the
+    // tear above) so it vanishes the instant the frame locks. vel is exactly
+    // 0 at p=0 and p=1, and the roll ends on an integer wrap there, which
+    // pins the seam to the top/bottom edges — without this gate the bar would
+    // leave a permanent dark band along both edges after the transition.
+    float bar = (1.0 - smoothstep(0.0, 0.05, seam))
+        * clamp(vel * 0.05, 0.0, 1.0) * u_intensity;
     rgb *= 1.0 - 0.85 * bar;
 
     gl_FragColor = vec4(rgb, texture2D(tex, vec2(v_texcoord.x, yc)).a);
