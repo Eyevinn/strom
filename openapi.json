@@ -11187,7 +11187,7 @@
           },
           {
             "type": "object",
-            "description": "Primary color correction + white balance — the camera-matching tool.\nEvery control is neutral at its default, so an untouched correction is\nan identity pass. Applied in a fixed order: white balance, brightness,\ncontrast, gamma, saturation.",
+            "description": "Primary color correction + white balance — the camera-matching tool.\nEvery control is neutral at its default, so an untouched correction is\nan identity pass. Applied in a fixed order: white balance, brightness,\ncontrast, hue, saturation, gamma.",
             "required": [
               "type"
             ],

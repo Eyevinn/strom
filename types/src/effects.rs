@@ -131,7 +131,7 @@ pub enum VideoEffect {
     /// Primary color correction + white balance — the camera-matching tool.
     /// Every control is neutral at its default, so an untouched correction is
     /// an identity pass. Applied in a fixed order: white balance, brightness,
-    /// contrast, gamma, saturation.
+    /// contrast, hue, saturation, gamma.
     ColorCorrect {
         /// Additive brightness offset (-1..1, neutral 0).
         #[serde(default = "default_zero")]
