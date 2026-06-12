@@ -185,10 +185,16 @@ With the GPU backend and the **Shader FX** block property enabled
 - **Shader transitions** — the wipe and master-FX takes in §3.1. Pick
   them with the WIPE / FX buttons on the operator page.
 - **Looks** — persistent per-source effects applied wherever the source
-  appears (PGM, PVW, thumbnails, PiPs): chroma key, pixelate, blur,
-  duotone, vignette, VHS, old film, edge glow, CRT, halftone, thermal,
-  night vision, posterize, underwater. A look can also sit on the
-  **PGM master** output. Open with the LOOKS button.
+  appears (PGM, PVW, thumbnails, PiPs): color correct, chroma key,
+  pixelate, blur, duotone, vignette, VHS, old film, edge glow, CRT,
+  halftone, thermal, night vision, posterize, underwater. A look can also
+  sit on the **PGM master** output. Open with the LOOKS button.
+  - **Color Correct** is the camera-matching tool: brightness, contrast,
+    gamma, saturation, hue, plus white balance (temperature and tint).
+    Every control is neutral at its default, so a freshly added Color
+    Correct does nothing until you move a slider — reach for it to match
+    a mismatched camera or set a white point, on a single source or on
+    the PGM master.
 
 Looks are runtime state (like DSK toggles): they reset when the flow
 restarts. Looks and master-FX takes run on independent slots, so a take
@@ -407,8 +413,8 @@ The multiview is the operator's monitor. Default resolution 1280×720 @
 
 | Element | Where | Notes |
 |---|---|---|
-| **PVW big display** | Top-left of canvas | Shows the current preview source (Input or PiP). |
-| **PGM big display** | Top-right of canvas | Shows the live program. |
+| **PVW big display** | Top-left of canvas | Shows the current preview source (Input or PiP). Moves to the top-right when PVW/PGM positions are swapped. |
+| **PGM big display** | Top-right of canvas | Shows the live program. Moves to the top-left when PVW/PGM positions are swapped. |
 | **Thumbnail grid** | Bottom half | One tile per input, then one tile per configured PiP. Grid columns/rows are chosen automatically based on slot count and source aspect (16:9). |
 | **PVW border** | Around the PVW display **and** around the source tile currently routed to PVW | **Green.** |
 | **PGM border** | Around the PGM display **and** around the source tile currently routed to PGM | **Red.** |
@@ -419,6 +425,12 @@ The multiview is the operator's monitor. Default resolution 1280×720 @
 | **VU meters** | Thin vertical bar bottom-left of each thumbnail, plus one on PVW and one on PGM | See §6.2. Can be globally disabled with the **Show VU Meters** block property. |
 | **FTB badge** | Centered on PGM display | Appears when Fade-to-Black is engaged. |
 | **Multiview overlay alpha** | Whole overlay | A live operator control fades the entire overlay (borders, labels, clock, VU meters) from 0.0 → 1.0. Useful for clean screenshots / OB cleanfeeds when the multiview is doubling as a confidence monitor. |
+
+By default PVW sits on the left and PGM on the right. The **Swap PVW/PGM
+positions** block property mirrors the layout (PGM left, PVW right) —
+labels, borders, VU meters and big-display positions all follow. It only
+changes the on-screen layout, never the video routing, and applies when
+the pipeline is built (not live).
 
 ### 6.2 VU meter colors
 
@@ -489,6 +501,7 @@ WebSocket event so multiple operator panels stay in sync in real time.
 | Show VU meters on multiview | **On** |
 | Initial PGM input | Input 0 |
 | Initial PVW input | Input 1 |
+| Swap PVW/PGM positions on multiview | Off (PVW left, PGM right) |
 | Compositor latency | 20 ms |
 | Min upstream latency | 20 ms |
 

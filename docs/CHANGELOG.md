@@ -2,6 +2,44 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.6.5] - 2026-06-12
+
+### Added
+- Vision Mixer: ColorCorrect look — primary correction (brightness, contrast, gamma, saturation) plus white balance (temperature, tint) and hue rotation, computed in YCbCr; a strict superset of `glcolorbalance` for camera matching. Neutral at every default, so an untouched correction is an identity pass. (#639)
+- Vision Mixer: swappable multiview PVW/PGM positions via the `swap_pvw_pgm` block property (#637)
+
+### Changed
+- Vision Mixer: dithered looks — ~1 LSB TPDF dither on color-correct, blur, duotone and thermal to kill 8-bit banding; 24-tap Vogel-spiral blur with aspect-corrected circular bokeh; fixed-raster CRT scanlines and aperture grille; blur radius cap raised to 40 px (#639)
+- Vision Mixer: FX look parameters laid out in a 4-column grid (#639)
+
+### Fixed
+- Vision Mixer: glitch, roll and punch transitions left driver-dependent residual artifacts after completion — transition envelopes now settle to an exact identity pass (#639)
+- Frontend: keep `wgpu` out of the WASM build after the eframe 0.34.2 default-feature regression (#639)
+
+---
+
+## [0.6.4] - 2026-06-08
+
+### Fixed
+- Vision Mixer: shader FX time-precision freeze over long uptime, heart wipe pop, real TV roll (#636)
+- Video encoder: tame VideoToolbox burst behavior (#635)
+- Vision Mixer: FX shader crash on macOS core-profile GL (#634)
+- Pipeline: skip missing pad properties instead of panicking (#633)
+
+---
+
+## [0.6.3] - 2026-06-05
+
+### Fixed
+- Video encoder: cap VBR excursions and bound frame sizes via VBV (#631)
+- Server: harden the HTTP(S) accept path against fd exhaustion (#630)
+- WHEP: re-enable RTX retransmission, keep FEC disabled (#629)
+
+### Documentation
+- Add 0.6.1 and 0.6.2 release notes (#628)
+
+---
+
 ## [0.6.2] - 2026-06-05
 
 ### Added
