@@ -24,7 +24,7 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 tokio = { version = "1.52", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tower-http = { version = "0.7", features = ["fs", "cors", "trace"] }
 cairo-rs = { version = "0.22", features = ["v1_16"] }
 gstreamer = { version = "0.25", features = ["v1_20"] }
 gstreamer-app = { version = "0.25", features = ["v1_20"] }
