@@ -99,8 +99,11 @@ fn set_high_priority() -> Result<(), String> {
                 Ok(())
             }
             Err(e) => {
-                // Fall back to trying nice value
-                warn!("Could not set crossplatform priority, trying nice: {}", e);
+                // Fall back to trying nice value. Debug, not warn: this is an
+                // intermediate step that fires per thread (every segment rotation
+                // for splitmuxsink). The final outcome is logged once per flow by
+                // the bus handler's failure arm.
+                debug!("Could not set crossplatform priority, trying nice: {}", e);
                 set_nice_value(-10)
             }
         }
