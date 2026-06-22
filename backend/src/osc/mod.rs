@@ -34,18 +34,38 @@ struct CachedSat {
     fetched_at: Instant,
 }
 
-/// Mints and caches OSC Service Access Tokens from a single Personal Access Token.
+/// Reserved credential key for the default (fallback) PAT, seeded from the
+/// `STROM_OSC_PAT` env var. Per-flow keys are flow UUIDs, so this never collides.
+const DEFAULT_KEY: &str = "__default__";
+
+/// A non-secret fingerprint of a PAT, used as a SAT cache key. A SAT is fully
+/// determined by `(PAT, service_id)`, so flows sharing a PAT share one cached
+/// SAT, while different tenants (different PATs) never do. We hash rather than
+/// key on the PAT itself so the secret isn't duplicated across map keys.
+fn pat_fingerprint(pat: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    pat.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Mints and caches OSC Service Access Tokens from Personal Access Tokens.
 ///
-/// The PAT is mutable at runtime ([`set_pat`](Self::set_pat)); replacing it clears
-/// the SAT cache so subsequent tokens are minted from the new PAT.
+/// Supports a shared, multi-tenant Strom: PATs are keyed by an opaque credential
+/// key (in practice the Strom flow id), so different OSC users never reach each
+/// other's services. A `default` PAT (from `STROM_OSC_PAT` / the keyless API)
+/// is used when no per-key PAT is registered — the single-tenant case. The SAT
+/// cache is keyed by `(credential_key, service_id)` so a SAT minted for one
+/// tenant is never handed to another.
 pub struct SatProvider {
-    /// The PAT, or `None` until configured (via env or the API).
-    pat: RwLock<Option<String>>,
+    /// PAT per credential key. The reserved [`DEFAULT_KEY`] holds the fallback PAT.
+    pats: RwLock<HashMap<String, String>>,
     token_url: String,
     http: reqwest::Client,
-    /// Per-service-id SAT cache. A `tokio::Mutex` held across the mint serializes
-    /// concurrent callers for the same service so we never mint duplicates.
-    cache: Mutex<HashMap<String, CachedSat>>,
+    /// SAT cache keyed by `(pat_fingerprint, service_id)` — so flows on the same
+    /// PAT share a SAT and different tenants never do. A `tokio::Mutex` held
+    /// across the mint serializes concurrent callers so we never mint duplicates.
+    cache: Mutex<HashMap<(u64, String), CachedSat>>,
 }
 
 #[derive(Deserialize)]
@@ -54,54 +74,90 @@ struct ServiceTokenResp {
 }
 
 impl SatProvider {
-    pub fn new(pat: Option<String>, token_url: Option<String>) -> Result<Self> {
+    pub fn new(default_pat: Option<String>, token_url: Option<String>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .context("building OSC token HTTP client")?;
+        let mut pats = HashMap::new();
+        if let Some(pat) = default_pat.filter(|p| !p.is_empty()) {
+            pats.insert(DEFAULT_KEY.to_string(), pat);
+        }
         Ok(Self {
-            pat: RwLock::new(pat.filter(|p| !p.is_empty())),
+            pats: RwLock::new(pats),
             token_url: token_url.unwrap_or_else(|| DEFAULT_TOKEN_URL.to_string()),
             http,
             cache: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Whether a PAT is currently configured.
-    pub fn has_pat(&self) -> bool {
-        self.pat.read().map(|p| p.is_some()).unwrap_or(false)
+    /// Whether a PAT usable for `credential_key` exists — its own, or the default.
+    pub fn has_pat_for(&self, credential_key: &str) -> bool {
+        self.pats
+            .read()
+            .map(|m| m.contains_key(credential_key) || m.contains_key(DEFAULT_KEY))
+            .unwrap_or(false)
     }
 
-    /// Set (or replace) the PAT at runtime and clear cached SATs, so the next
-    /// `token` call mints from the new PAT.
-    pub async fn set_pat(&self, pat: String) {
-        if let Ok(mut guard) = self.pat.write() {
-            *guard = Some(pat);
+    /// Whether the default (fallback) PAT is set.
+    pub fn has_default_pat(&self) -> bool {
+        self.pats
+            .read()
+            .map(|m| m.contains_key(DEFAULT_KEY))
+            .unwrap_or(false)
+    }
+
+    /// The per-flow credential keys with a registered PAT (excludes the default).
+    pub fn configured_keys(&self) -> Vec<String> {
+        self.pats
+            .read()
+            .map(|m| m.keys().filter(|k| *k != DEFAULT_KEY).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Register (or replace) the PAT for one credential key (the flow id). Clears
+    /// the SAT cache so a rotated PAT takes effect immediately; PAT changes are
+    /// rare control-plane events, so dropping the whole (cheap to refill) cache is
+    /// simpler than tracking which entries a given key fed.
+    pub async fn set_pat(&self, credential_key: String, pat: String) {
+        if let Ok(mut m) = self.pats.write() {
+            m.insert(credential_key.clone(), pat);
         }
         self.cache.lock().await.clear();
-        info!("OSC: PAT set; SAT cache cleared");
+        info!("OSC: PAT set for credential {}", credential_key);
     }
 
-    /// Forget the PAT and all cached SATs.
-    pub async fn clear_pat(&self) {
-        if let Ok(mut guard) = self.pat.write() {
-            *guard = None;
+    /// Forget one credential key's PAT and clear the SAT cache.
+    pub async fn clear_pat(&self, credential_key: &str) {
+        if let Ok(mut m) = self.pats.write() {
+            m.remove(credential_key);
         }
         self.cache.lock().await.clear();
-        info!("OSC: PAT cleared");
+        info!("OSC: PAT cleared for credential {}", credential_key);
     }
 
-    /// Return a valid SAT for `service_id`, minting or refreshing as needed.
-    pub async fn token(&self, service_id: &str) -> Result<String> {
+    /// Return a valid SAT for `(credential_key, service_id)`, minting or refreshing
+    /// as needed. The PAT is the one registered for `credential_key`, else the
+    /// default; the SAT is cached by the PAT, so flows sharing a PAT share it.
+    pub async fn token(&self, credential_key: &str, service_id: &str) -> Result<String> {
+        let pat = self.resolve_pat(credential_key).ok_or_else(|| {
+            anyhow!(
+                "OSC PAT not configured for credential '{}' — set STROM_OSC_PAT / \
+                 OSC_ACCESS_TOKEN, or push it via PUT /api/osc/pat/{}",
+                credential_key,
+                credential_key
+            )
+        })?;
+        let cache_key = (pat_fingerprint(&pat), service_id.to_string());
         let mut cache = self.cache.lock().await;
-        if let Some(c) = cache.get(service_id) {
+        if let Some(c) = cache.get(&cache_key) {
             if c.fetched_at.elapsed() < SAT_REFRESH_AFTER {
                 return Ok(c.token.clone());
             }
         }
-        let token = self.mint(service_id).await?;
+        let token = self.mint(&pat, service_id).await?;
         cache.insert(
-            service_id.to_string(),
+            cache_key,
             CachedSat {
                 token: token.clone(),
                 fetched_at: Instant::now(),
@@ -110,20 +166,16 @@ impl SatProvider {
         Ok(token)
     }
 
-    /// Exchange the PAT for a fresh SAT scoped to `service_id`.
-    async fn mint(&self, service_id: &str) -> Result<String> {
-        let pat = self
-            .pat
-            .read()
-            .ok()
-            .and_then(|p| p.clone())
-            .ok_or_else(|| {
-                anyhow!(
-                    "OSC PAT not configured — set STROM_OSC_PAT / OSC_ACCESS_TOKEN, \
-                     or push it via PUT /api/osc/pat"
-                )
-            })?;
+    /// The PAT for a credential key: its own if registered, else the default.
+    fn resolve_pat(&self, credential_key: &str) -> Option<String> {
+        let m = self.pats.read().ok()?;
+        m.get(credential_key)
+            .or_else(|| m.get(DEFAULT_KEY))
+            .cloned()
+    }
 
+    /// Exchange a PAT for a fresh SAT scoped to `service_id`.
+    async fn mint(&self, pat: &str, service_id: &str) -> Result<String> {
         debug!("OSC: minting SAT for service {}", service_id);
         let resp = self
             .http
@@ -154,10 +206,10 @@ impl SatProvider {
 
 /// The process-wide OSC SAT provider, built on first use.
 ///
-/// The PAT is seeded from `STROM_OSC_PAT` (or `OSC_ACCESS_TOKEN`) if set, and can
-/// be supplied or replaced later at runtime via [`SatProvider::set_pat`]. Always
-/// returns a provider; callers check [`SatProvider::has_pat`] to know whether a
-/// PAT is available yet.
+/// The default PAT is seeded from `STROM_OSC_PAT` (or `OSC_ACCESS_TOKEN`) if set,
+/// and per-flow PATs can be supplied at runtime via [`SatProvider::set_pat`].
+/// Always returns a provider; callers check [`SatProvider::has_pat_for`] to know
+/// whether a PAT is available for a given credential yet.
 pub fn sat_provider() -> Arc<SatProvider> {
     static PROVIDER: OnceLock<Arc<SatProvider>> = OnceLock::new();
     PROVIDER
@@ -227,16 +279,45 @@ mod tests {
     }
 
     #[test]
-    fn pat_lifecycle() {
+    fn no_pat_resolves_to_nothing() {
         let p = SatProvider::new(None, None).unwrap();
-        assert!(!p.has_pat());
-        // set_pat / clear_pat need a runtime for the cache lock.
+        assert!(!p.has_default_pat());
+        assert!(!p.has_pat_for("flow-a"));
+        assert!(p.configured_keys().is_empty());
+        assert_eq!(p.resolve_pat("flow-a"), None);
+    }
+
+    #[test]
+    fn per_flow_pats_isolate_and_fall_back_to_env_default() {
+        // Default PAT is seeded from env (here: the constructor), per-flow PATs
+        // are pushed at runtime.
+        let p = SatProvider::new(Some("pat-default".to_string()), None).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        rt.block_on(p.set_pat("secret".to_string()));
-        assert!(p.has_pat());
-        rt.block_on(p.clear_pat());
-        assert!(!p.has_pat());
+
+        assert!(p.has_default_pat());
+        // Any flow falls back to the default until it has its own PAT.
+        assert!(p.has_pat_for("flow-a"));
+        assert_eq!(p.resolve_pat("flow-a").as_deref(), Some("pat-default"));
+
+        // A per-flow PAT overrides the default for that flow only.
+        rt.block_on(p.set_pat("flow-a".to_string(), "pat-a".to_string()));
+        assert_eq!(p.resolve_pat("flow-a").as_deref(), Some("pat-a"));
+        assert_eq!(p.resolve_pat("flow-b").as_deref(), Some("pat-default"));
+        assert_eq!(p.configured_keys(), vec!["flow-a".to_string()]);
+
+        // Clearing flow-a falls back to the default again.
+        rt.block_on(p.clear_pat("flow-a"));
+        assert_eq!(p.resolve_pat("flow-a").as_deref(), Some("pat-default"));
+        assert!(p.configured_keys().is_empty());
+    }
+
+    #[test]
+    fn same_pat_shares_a_cache_key_distinct_pats_do_not() {
+        // The SAT cache keys by PAT fingerprint, so two flows on the same PAT
+        // collapse to one cache entry while different PATs stay separate.
+        assert_eq!(pat_fingerprint("pat-a"), pat_fingerprint("pat-a"));
+        assert_ne!(pat_fingerprint("pat-a"), pat_fingerprint("pat-b"));
     }
 }

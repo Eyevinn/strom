@@ -4028,7 +4028,7 @@
           "System"
         ],
         "summary": "Get the OSC PAT configuration status",
-        "description": "Reports whether a Personal Access Token is currently configured (via the\n`STROM_OSC_PAT` / `OSC_ACCESS_TOKEN` env var or a previous API call). The\ntoken value itself is never returned.",
+        "description": "Reports whether the default PAT is configured and which per-flow credential\nkeys have a PAT registered. Token values are never returned.",
         "operationId": "get_osc_pat_status",
         "responses": {
           "200": {
@@ -4042,14 +4042,27 @@
             }
           }
         }
-      },
+      }
+    },
+    "/api/osc/pat/{key}": {
       "put": {
         "tags": [
           "System"
         ],
-        "summary": "Set the OSC Personal Access Token at runtime",
-        "description": "Stores the PAT in memory (not persisted) and clears any cached Service Access\nTokens so the next request mints from the new PAT.",
-        "operationId": "set_osc_pat",
+        "summary": "Set a per-flow OSC Personal Access Token",
+        "description": "Registers a PAT for one credential key (the flow id). Flows resolve their own\nPAT first, falling back to the default — isolating OSC tenants on a shared\ninstance. Held in memory only.",
+        "operationId": "set_osc_pat_keyed",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Credential key (flow id) the PAT is scoped to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -4087,9 +4100,19 @@
         "tags": [
           "System"
         ],
-        "summary": "Clear the OSC Personal Access Token",
-        "description": "Forgets the in-memory PAT and all cached Service Access Tokens.",
-        "operationId": "clear_osc_pat",
+        "summary": "Clear a per-flow OSC Personal Access Token",
+        "operationId": "clear_osc_pat_keyed",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Credential key (flow id) to clear",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "PAT cleared",
@@ -7036,14 +7059,22 @@
       },
       "OscAuthStatusResponse": {
         "type": "object",
-        "description": "Status of the OSC Personal Access Token configuration.",
+        "description": "Status of the OSC Personal Access Token configuration. Token values are never\nreturned.",
         "required": [
-          "configured"
+          "configured",
+          "keys"
         ],
         "properties": {
           "configured": {
             "type": "boolean",
-            "description": "Whether a PAT is currently configured (via env var or the API). The token\nvalue itself is never returned."
+            "description": "Whether the default (fallback) PAT is configured (via env var or the\nkeyless API). Used for single-tenant deployments."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Credential keys (flow ids) that have a per-flow PAT registered. Used to\nisolate OSC tenants on a shared Strom instance."
           }
         }
       },

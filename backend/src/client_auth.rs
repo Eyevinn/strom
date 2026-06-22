@@ -26,10 +26,14 @@ pub enum AuthMethod {
     /// Static bearer token (a long-lived, pre-shared token).
     Bearer(String),
     /// OSC PAT/SAT: mint a short-lived Service Access Token from the OSC Personal
-    /// Access Token configured on this Strom instance, refreshed per service id.
+    /// Access Token registered under `credential_key` (in practice the flow id),
+    /// falling back to the instance default PAT. Refreshed per service id.
     Osc {
         provider: Arc<SatProvider>,
         service_id: String,
+        /// Credential key the PAT is looked up under — isolates OSC tenants on a
+        /// shared Strom instance.
+        credential_key: String,
     },
     // Future schemes slot in here as new variants, e.g.
     //   Basic { username: String, password: String },
@@ -47,8 +51,9 @@ impl AuthMethod {
             AuthMethod::Osc {
                 provider,
                 service_id,
+                credential_key,
             } => {
-                let sat = provider.token(service_id).await?;
+                let sat = provider.token(credential_key, service_id).await?;
                 req.header(AUTHORIZATION, format!("Bearer {}", sat))
             }
         })

@@ -18,6 +18,7 @@
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::client_auth::AuthMethod;
+use crate::osc::SatProvider;
 use crate::tams::client::{FlowSpec, TamsClient};
 use crate::tams::uploader::{channel, new_tail_slot, spawn_uploader, FragmentReady, TailFragment};
 use gst::glib;
@@ -180,7 +181,7 @@ impl BlockBuilder for TamsOutputBuilder {
         // short-lived Service Access Tokens from the OSC PAT configured on this Strom
         // instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).
         let auth_mode = prop_str(properties, "auth_mode").unwrap_or_else(|| "static".to_string());
-        let auth = match auth_mode.as_str() {
+        let auth_plan = match auth_mode.as_str() {
             "osc" => {
                 let provider = crate::osc::sat_provider();
                 let service_id = prop_str(properties, "osc_service_id")
@@ -192,31 +193,24 @@ impl BlockBuilder for TamsOutputBuilder {
                                 .to_string(),
                         )
                     })?;
-                // The PAT may not be set yet — it can arrive at runtime via the API
-                // (e.g. pushed by Open Live). If it never does, segment uploads fail
-                // with a clear TamsError until it is configured.
-                if !provider.has_pat() {
-                    warn!(
-                        "TAMS Output {}: OSC PAT/SAT mode but no PAT configured yet \
-                         (set STROM_OSC_PAT / OSC_ACCESS_TOKEN, or push via PUT /api/osc/pat)",
-                        instance_id
-                    );
-                }
                 info!(
                     "TAMS Output {}: OSC PAT/SAT auth for service {}",
                     instance_id, service_id
                 );
-                AuthMethod::Osc {
+                AuthPlan::Osc {
                     provider,
                     service_id,
                 }
             }
-            _ => match prop_str(properties, "api_token")
-                .or_else(|| std::env::var("STROM_TAMS_API_TOKEN").ok())
-            {
-                Some(t) => AuthMethod::Bearer(t),
-                None => AuthMethod::None,
-            },
+            _ => {
+                let auth = match prop_str(properties, "api_token")
+                    .or_else(|| std::env::var("STROM_TAMS_API_TOKEN").ok())
+                {
+                    Some(t) => AuthMethod::Bearer(t),
+                    None => AuthMethod::None,
+                };
+                AuthPlan::Fixed(auth)
+            }
         };
 
         let segment_secs =
@@ -243,9 +237,6 @@ impl BlockBuilder for TamsOutputBuilder {
             _ => Container::Mp4,
         };
 
-        let client = TamsClient::new(&gateway_url, auth)
-            .map_err(|e| BlockBuildError::InvalidConfiguration(format!("TAMS client: {:#}", e)))?;
-
         let mut elements: Vec<(String, gst::Element)> = Vec::new();
 
         match container {
@@ -270,7 +261,8 @@ impl BlockBuilder for TamsOutputBuilder {
                         segment_secs,
                         &[Essence::Video],
                         true,
-                        client.clone(),
+                        gateway_url.clone(),
+                        auth_plan.clone(),
                         spec,
                         ctx,
                         &mut elements,
@@ -294,7 +286,8 @@ impl BlockBuilder for TamsOutputBuilder {
                         segment_secs,
                         &[Essence::Audio],
                         true,
-                        client.clone(),
+                        gateway_url.clone(),
+                        auth_plan.clone(),
                         spec,
                         ctx,
                         &mut elements,
@@ -327,7 +320,8 @@ impl BlockBuilder for TamsOutputBuilder {
                     segment_secs,
                     &inputs,
                     false, // codec is the container; no per-essence detection
-                    client,
+                    gateway_url.clone(),
+                    auth_plan,
                     spec,
                     ctx,
                     &mut elements,
@@ -351,6 +345,38 @@ impl BlockBuilder for TamsOutputBuilder {
             bus_message_handler: None,
             pad_properties: HashMap::new(),
         })
+    }
+}
+
+/// Auth configuration resolved per flow at pipeline start.
+///
+/// OSC mode keys its PAT by the flow id, which is only known in the element-setup
+/// closure — not at block-build time. So we carry the recipe and finalize the
+/// concrete [`AuthMethod`] once the flow id is available.
+#[derive(Clone)]
+enum AuthPlan {
+    /// Flow-id-independent auth (static bearer token, or none).
+    Fixed(AuthMethod),
+    /// OSC PAT/SAT; the credential key is the flow id, filled in at setup.
+    Osc {
+        provider: Arc<SatProvider>,
+        service_id: String,
+    },
+}
+
+impl AuthPlan {
+    fn resolve(&self, credential_key: &str) -> AuthMethod {
+        match self {
+            AuthPlan::Fixed(auth) => auth.clone(),
+            AuthPlan::Osc {
+                provider,
+                service_id,
+            } => AuthMethod::Osc {
+                provider: provider.clone(),
+                service_id: service_id.clone(),
+                credential_key: credential_key.to_string(),
+            },
+        }
     }
 }
 
@@ -391,7 +417,8 @@ fn build_flow_chain(
     segment_secs: u64,
     inputs: &[Essence],
     detect_codec: bool,
-    client: TamsClient,
+    gateway_url: String,
+    auth_plan: AuthPlan,
     spec: FlowSpec,
     ctx: &BlockBuildContext,
     elements: &mut Vec<(String, gst::Element)>,
@@ -606,6 +633,27 @@ fn build_flow_chain(
     let file_ext = container.file_ext().to_string();
     let tail_segment_ns = segment_secs.saturating_mul(1_000_000_000);
     ctx.register_element_setup(Box::new(move |flow_id, events| {
+        // OSC auth keys its PAT by the flow id (tenant isolation on a shared
+        // instance), which is only known here — so finalize the gateway client now.
+        let credential_key = flow_id.to_string();
+        if let AuthPlan::Osc { provider, .. } = &auth_plan {
+            if !provider.has_pat_for(&credential_key) {
+                warn!(
+                    "TAMS {}: OSC mode but no PAT for flow {} yet — uploads will fail \
+                     until one is configured (STROM_OSC_PAT / OSC_ACCESS_TOKEN, or push \
+                     via PUT /api/osc/pat/{})",
+                    block_id, credential_key, credential_key
+                );
+            }
+        }
+        let client = match TamsClient::new(&gateway_url, auth_plan.resolve(&credential_key)) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("TAMS {}: failed to build gateway client: {:#}", block_id, e);
+                return;
+            }
+        };
+
         let (tx, rx) = channel();
         // Holds the currently-open (not-yet-rotated) fragment; flushed on shutdown.
         let tail = new_tail_slot();

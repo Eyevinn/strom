@@ -913,13 +913,17 @@ pub struct SetOscPatRequest {
     pub pat: String,
 }
 
-/// Status of the OSC Personal Access Token configuration.
+/// Status of the OSC Personal Access Token configuration. Token values are never
+/// returned.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct OscAuthStatusResponse {
-    /// Whether a PAT is currently configured (via env var or the API). The token
-    /// value itself is never returned.
+    /// Whether the default (fallback) PAT is configured (via env var or the
+    /// keyless API). Used for single-tenant deployments.
     pub configured: bool,
+    /// Credential keys (flow ids) that have a per-flow PAT registered. Used to
+    /// isolate OSC tenants on a shared Strom instance.
+    pub keys: Vec<String>,
 }
 
 // ============================================================================
