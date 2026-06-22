@@ -1,12 +1,12 @@
 //! TAMS Output block: records pre-encoded streams into a TAMS store.
 //!
 //! Two container modes (the `container` property):
-//! - **MP4 (default):** each essence goes to its own `splitmuxsink` (mp4mux) and is
+//! - **MPEG-TS (default):** all essences are muxed by one `mpegtsmux`/`splitmuxsink`
+//!   into TS segments and registered on a single NMOS `format:mux` flow.
+//!   Broadcast-native, inherent A/V sync, fewer objects.
+//! - **MP4:** each essence goes to its own `splitmuxsink` (mp4mux) and is
 //!   registered as a separate single-essence TAMS flow (video flow + audio flow
 //!   grouped under one Source). Canonical TAMS model, max flexibility.
-//! - **MPEG-TS:** all essences are muxed by one `mpegtsmux`/`splitmuxsink` into TS
-//!   segments and registered on a single NMOS `format:mux` flow. Broadcast-native,
-//!   inherent A/V sync, fewer objects.
 //!
 //! Each split file is a complete, GOP-aligned, independently decodable container =
 //! one TAMS segment. Files are written to a temp dir; the uploader uploads each as a
@@ -40,7 +40,7 @@ pub struct TamsOutputBuilder;
 const DEFAULT_SEGMENT_SECS: u64 = 2;
 const DEFAULT_NUM_VIDEO_TRACKS: usize = 1;
 const DEFAULT_NUM_AUDIO_TRACKS: usize = 1;
-const DEFAULT_CONTAINER: &str = "mp4";
+const DEFAULT_CONTAINER: &str = "mpegts";
 
 /// Segment container format.
 #[derive(Clone, Copy, PartialEq)]
@@ -846,12 +846,12 @@ fn tams_output_definition() -> BlockDefinition {
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue {
-                            value: "mp4".to_string(),
-                            label: Some("MP4 (separate flows)".to_string()),
-                        },
-                        EnumValue {
                             value: "mpegts".to_string(),
                             label: Some("MPEG-TS (muxed)".to_string()),
+                        },
+                        EnumValue {
+                            value: "mp4".to_string(),
+                            label: Some("MP4 (separate flows)".to_string()),
                         },
                     ],
                 },
