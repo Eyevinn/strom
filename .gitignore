@@ -23,6 +23,10 @@ config.toml
 .strom.toml
 *.log
 
+# Local secrets / env (never commit)
+.env
+.envrc
+
 # OS
 .DS_Store
 Thumbs.db

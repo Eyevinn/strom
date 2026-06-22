@@ -6563,6 +6563,7 @@ dependencies = [
  "clap",
  "crossterm",
  "directories",
+ "dotenvy",
  "eframe",
  "figment",
  "flate2",

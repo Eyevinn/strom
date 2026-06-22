@@ -16,6 +16,8 @@ efp = ["dep:gst-plugin-efp"]
 # Internal
 strom-types = { path = "../types", features = ["openapi", "validation"] }
 garde.workspace = true
+# Load a local .env file at startup (e.g. STROM_OSC_PAT)
+dotenvy = "0.15"
 
 # Web framework
 axum.workspace = true

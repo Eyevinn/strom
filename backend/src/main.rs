@@ -218,6 +218,11 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Load environment variables from a local .env file if present (e.g.
+    // STROM_OSC_PAT). Real environment variables always take precedence, and a
+    // missing .env is fine — this is a no-op in production deployments.
+    let _ = dotenvy::dotenv();
+
     // Initialize process startup time before anything else
     strom::version::init_process_startup_time();
 
