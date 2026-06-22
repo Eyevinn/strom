@@ -325,6 +325,10 @@ pub async fn create_app_with_config(
         .route("/log-level", put(api::logging::set_log_level))
         .route("/gst-log-level", get(api::logging::get_gst_log_level))
         .route("/gst-log-level", put(api::logging::set_gst_log_level))
+        // OSC authentication (PAT for minting Service Access Tokens)
+        .route("/osc/pat", get(api::osc::get_osc_pat_status))
+        .route("/osc/pat", put(api::osc::set_osc_pat))
+        .route("/osc/pat", delete(api::osc::clear_osc_pat))
         // Apply authentication middleware to all protected routes
         .layer(middleware::from_fn(auth::auth_middleware));
 

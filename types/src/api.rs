@@ -899,6 +899,30 @@ impl ErrorResponse {
 }
 
 // ============================================================================
+// OSC Authentication API Types
+// ============================================================================
+
+/// Request to set the OSC Personal Access Token (PAT) at runtime.
+///
+/// The PAT is used to mint short-lived Service Access Tokens for OSC-hosted
+/// services (e.g. a TAMS gateway). It is held in memory only — not persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SetOscPatRequest {
+    /// The OSC Personal Access Token.
+    pub pat: String,
+}
+
+/// Status of the OSC Personal Access Token configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct OscAuthStatusResponse {
+    /// Whether a PAT is currently configured (via env var or the API). The token
+    /// value itself is never returned.
+    pub configured: bool,
+}
+
+// ============================================================================
 // Logging API Types
 // ============================================================================
 

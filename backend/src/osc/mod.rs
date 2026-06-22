@@ -1,11 +1,12 @@
 //! Eyevinn Open Source Cloud (OSC) service authentication.
 //!
 //! OSC uses a two-token model instead of plain OIDC:
-//! - a long-lived **Personal Access Token (PAT)**, configured once per Strom
-//!   instance via the `STROM_OSC_PAT` env var (the OSC SDK's `OSC_ACCESS_TOKEN`
-//!   is accepted as a fallback);
-//! - short-lived **Service Access Tokens (SATs)**, minted from the PAT and
-//!   scoped to a single OSC service type. A SAT lives ~1 hour.
+//! - a long-lived **Personal Access Token (PAT)**, configured per Strom instance
+//!   via the `STROM_OSC_PAT` env var (the OSC SDK's `OSC_ACCESS_TOKEN` is accepted
+//!   as a fallback), or pushed at runtime over the API — the latter lets a control
+//!   plane like Open Live hand its PAT to a freshly provisioned Strom VM;
+//! - short-lived **Service Access Tokens (SATs)**, minted from the PAT and scoped
+//!   to a single OSC service type. A SAT lives ~1 hour.
 //!
 //! This module exchanges the PAT for SATs on demand and caches them per service
 //! id, refreshing before expiry. It is OSC-wide, not TAMS-specific, so any
@@ -16,10 +17,10 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 /// Default OSC token-exchange endpoint. Overridable via `STROM_OSC_TOKEN_URL`.
 const DEFAULT_TOKEN_URL: &str = "https://token.svc.prod.osaas.io/servicetoken";
@@ -34,8 +35,12 @@ struct CachedSat {
 }
 
 /// Mints and caches OSC Service Access Tokens from a single Personal Access Token.
+///
+/// The PAT is mutable at runtime ([`set_pat`](Self::set_pat)); replacing it clears
+/// the SAT cache so subsequent tokens are minted from the new PAT.
 pub struct SatProvider {
-    pat: String,
+    /// The PAT, or `None` until configured (via env or the API).
+    pat: RwLock<Option<String>>,
     token_url: String,
     http: reqwest::Client,
     /// Per-service-id SAT cache. A `tokio::Mutex` held across the mint serializes
@@ -49,17 +54,41 @@ struct ServiceTokenResp {
 }
 
 impl SatProvider {
-    pub fn new(pat: String, token_url: Option<String>) -> Result<Self> {
+    pub fn new(pat: Option<String>, token_url: Option<String>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .context("building OSC token HTTP client")?;
         Ok(Self {
-            pat,
+            pat: RwLock::new(pat.filter(|p| !p.is_empty())),
             token_url: token_url.unwrap_or_else(|| DEFAULT_TOKEN_URL.to_string()),
             http,
             cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Whether a PAT is currently configured.
+    pub fn has_pat(&self) -> bool {
+        self.pat.read().map(|p| p.is_some()).unwrap_or(false)
+    }
+
+    /// Set (or replace) the PAT at runtime and clear cached SATs, so the next
+    /// `token` call mints from the new PAT.
+    pub async fn set_pat(&self, pat: String) {
+        if let Ok(mut guard) = self.pat.write() {
+            *guard = Some(pat);
+        }
+        self.cache.lock().await.clear();
+        info!("OSC: PAT set; SAT cache cleared");
+    }
+
+    /// Forget the PAT and all cached SATs.
+    pub async fn clear_pat(&self) {
+        if let Ok(mut guard) = self.pat.write() {
+            *guard = None;
+        }
+        self.cache.lock().await.clear();
+        info!("OSC: PAT cleared");
     }
 
     /// Return a valid SAT for `service_id`, minting or refreshing as needed.
@@ -83,11 +112,23 @@ impl SatProvider {
 
     /// Exchange the PAT for a fresh SAT scoped to `service_id`.
     async fn mint(&self, service_id: &str) -> Result<String> {
+        let pat = self
+            .pat
+            .read()
+            .ok()
+            .and_then(|p| p.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "OSC PAT not configured — set STROM_OSC_PAT / OSC_ACCESS_TOKEN, \
+                     or push it via PUT /api/osc/pat"
+                )
+            })?;
+
         debug!("OSC: minting SAT for service {}", service_id);
         let resp = self
             .http
             .post(&self.token_url)
-            .header("x-pat-jwt", format!("Bearer {}", self.pat))
+            .header("x-pat-jwt", format!("Bearer {}", pat))
             .json(&serde_json::json!({ "serviceId": service_id }))
             .send()
             .await
@@ -111,29 +152,27 @@ impl SatProvider {
     }
 }
 
-/// The process-wide OSC SAT provider, built from env on first use.
+/// The process-wide OSC SAT provider, built on first use.
 ///
-/// Returns `None` when no PAT is configured (`STROM_OSC_PAT` /
-/// `OSC_ACCESS_TOKEN` unset), so callers can fall back to other auth modes.
-pub fn sat_provider() -> Option<Arc<SatProvider>> {
-    static PROVIDER: OnceLock<Option<Arc<SatProvider>>> = OnceLock::new();
+/// The PAT is seeded from `STROM_OSC_PAT` (or `OSC_ACCESS_TOKEN`) if set, and can
+/// be supplied or replaced later at runtime via [`SatProvider::set_pat`]. Always
+/// returns a provider; callers check [`SatProvider::has_pat`] to know whether a
+/// PAT is available yet.
+pub fn sat_provider() -> Arc<SatProvider> {
+    static PROVIDER: OnceLock<Arc<SatProvider>> = OnceLock::new();
     PROVIDER
         .get_or_init(|| {
             let pat = std::env::var("STROM_OSC_PAT")
                 .ok()
                 .or_else(|| std::env::var("OSC_ACCESS_TOKEN").ok())
                 .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())?;
+                .filter(|p| !p.is_empty());
             let token_url = std::env::var("STROM_OSC_TOKEN_URL")
                 .ok()
                 .filter(|u| !u.is_empty());
-            match SatProvider::new(pat, token_url) {
-                Ok(p) => Some(Arc::new(p)),
-                Err(e) => {
-                    error!("OSC: failed to build SAT provider: {:#}", e);
-                    None
-                }
-            }
+            Arc::new(
+                SatProvider::new(pat, token_url).expect("building OSC SAT provider (HTTP client)"),
+            )
         })
         .clone()
 }
@@ -185,5 +224,19 @@ mod tests {
     fn returns_none_for_non_osc_urls() {
         assert_eq!(derive_service_id("http://localhost:8000"), None);
         assert_eq!(derive_service_id("https://tams.example.com/flows"), None);
+    }
+
+    #[test]
+    fn pat_lifecycle() {
+        let p = SatProvider::new(None, None).unwrap();
+        assert!(!p.has_pat());
+        // set_pat / clear_pat need a runtime for the cache lock.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(p.set_pat("secret".to_string()));
+        assert!(p.has_pat());
+        rt.block_on(p.clear_pat());
+        assert!(!p.has_pat());
     }
 }

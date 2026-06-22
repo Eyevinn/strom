@@ -182,13 +182,7 @@ impl BlockBuilder for TamsOutputBuilder {
         let auth_mode = prop_str(properties, "auth_mode").unwrap_or_else(|| "static".to_string());
         let auth = match auth_mode.as_str() {
             "osc" => {
-                let provider = crate::osc::sat_provider().ok_or_else(|| {
-                    BlockBuildError::InvalidConfiguration(
-                        "TAMS Output: OSC PAT/SAT mode requires a Personal Access Token \
-                         (set STROM_OSC_PAT or OSC_ACCESS_TOKEN)"
-                            .to_string(),
-                    )
-                })?;
+                let provider = crate::osc::sat_provider();
                 let service_id = prop_str(properties, "osc_service_id")
                     .or_else(|| crate::osc::derive_service_id(&gateway_url))
                     .ok_or_else(|| {
@@ -198,6 +192,16 @@ impl BlockBuilder for TamsOutputBuilder {
                                 .to_string(),
                         )
                     })?;
+                // The PAT may not be set yet — it can arrive at runtime via the API
+                // (e.g. pushed by Open Live). If it never does, segment uploads fail
+                // with a clear TamsError until it is configured.
+                if !provider.has_pat() {
+                    warn!(
+                        "TAMS Output {}: OSC PAT/SAT mode but no PAT configured yet \
+                         (set STROM_OSC_PAT / OSC_ACCESS_TOKEN, or push via PUT /api/osc/pat)",
+                        instance_id
+                    );
+                }
                 info!(
                     "TAMS Output {}: OSC PAT/SAT auth for service {}",
                     instance_id, service_id

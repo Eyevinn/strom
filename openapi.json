@@ -4022,6 +4022,88 @@
         }
       }
     },
+    "/api/osc/pat": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get the OSC PAT configuration status",
+        "description": "Reports whether a Personal Access Token is currently configured (via the\n`STROM_OSC_PAT` / `OSC_ACCESS_TOKEN` env var or a previous API call). The\ntoken value itself is never returned.",
+        "operationId": "get_osc_pat_status",
+        "responses": {
+          "200": {
+            "description": "OSC PAT status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OscAuthStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Set the OSC Personal Access Token at runtime",
+        "description": "Stores the PAT in memory (not persisted) and clears any cached Service Access\nTokens so the next request mints from the new PAT.",
+        "operationId": "set_osc_pat",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetOscPatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "PAT updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OscAuthStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Clear the OSC Personal Access Token",
+        "description": "Forgets the in-memory PAT and all cached Service Access Tokens.",
+        "operationId": "clear_osc_pat",
+        "responses": {
+          "200": {
+            "description": "PAT cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OscAuthStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sources": {
       "get": {
         "tags": [
@@ -6952,6 +7034,19 @@
           }
         }
       },
+      "OscAuthStatusResponse": {
+        "type": "object",
+        "description": "Status of the OSC Personal Access Token configuration.",
+        "required": [
+          "configured"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether a PAT is currently configured (via env var or the API). The token\nvalue itself is never returned."
+          }
+        }
+      },
       "OverlayAlphaRequest": {
         "type": "object",
         "description": "Request to set the multiview overlay alpha on a vision mixer block.",
@@ -7891,6 +7986,19 @@
           "filter": {
             "type": "string",
             "description": "The new log filter string (e.g. \"info,strom::api=debug\")"
+          }
+        }
+      },
+      "SetOscPatRequest": {
+        "type": "object",
+        "description": "Request to set the OSC Personal Access Token (PAT) at runtime.\n\nThe PAT is used to mint short-lived Service Access Tokens for OSC-hosted\nservices (e.g. a TAMS gateway). It is held in memory only — not persisted.",
+        "required": [
+          "pat"
+        ],
+        "properties": {
+          "pat": {
+            "type": "string",
+            "description": "The OSC Personal Access Token."
           }
         }
       },
