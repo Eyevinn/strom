@@ -780,7 +780,7 @@ fn tams_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "auth_mode".to_string(),
                 label: "Authentication".to_string(),
-                description: "How to authenticate to the gateway. Static API Token = a long-lived bearer token (for gateways run outside OSC). OSC PAT/SAT = mint short-lived Service Access Tokens from the OSC Personal Access Token configured on this Strom instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).".to_string(),
+                description: "How to authenticate to the gateway. Static API Token = a bearer token. OSC PAT/SAT = mint short-lived Service Access Tokens from the OSC Personal Access Token configured on this Strom instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue {
