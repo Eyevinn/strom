@@ -89,6 +89,7 @@ pub fn spawn_uploader(
     tokio::spawn(async move {
         let tams_flow_id = flow_spec.flow_id.clone();
         let mut flow_created = false;
+        let mut segments_registered: u64 = 0;
 
         info!(
             "TAMS {}: uploader started for flow {} ({})",
@@ -105,6 +106,7 @@ pub fn spawn_uploader(
                 &events,
                 strom_flow_id,
                 &block_id,
+                &mut segments_registered,
                 frag,
             )
             .await;
@@ -130,6 +132,7 @@ pub fn spawn_uploader(
                     &events,
                     strom_flow_id,
                     &block_id,
+                    &mut segments_registered,
                     frag,
                 )
                 .await;
@@ -156,6 +159,7 @@ async fn process_fragment(
     events: &EventBroadcaster,
     strom_flow_id: FlowId,
     block_id: &str,
+    segments_registered: &mut u64,
     frag: FragmentReady,
 ) {
     let tams_flow_id = flow_spec.flow_id.clone();
@@ -168,7 +172,7 @@ async fn process_fragment(
         match retry(MAX_ATTEMPTS, || client.ensure_flow(flow_spec)).await {
             Ok(()) => {
                 *flow_created = true;
-                debug!("TAMS {}: flow {} created", block_id, tams_flow_id);
+                info!("TAMS {}: flow {} created", block_id, tams_flow_id);
             }
             Err(e) => {
                 let msg = format!("failed to create flow {}: {:#}", tams_flow_id, e);
@@ -193,10 +197,19 @@ async fn process_fragment(
             events.broadcast(StromEvent::TamsSegmentRegistered {
                 flow_id: strom_flow_id,
                 block_id: block_id.to_string(),
-                tams_flow_id,
+                tams_flow_id: tams_flow_id.clone(),
                 object_id,
                 timerange,
             });
+            *segments_registered += 1;
+            // Surface progress at info so a healthy uploader is visible without
+            // debug logging: the first segment, then every 30th thereafter.
+            if *segments_registered == 1 || segments_registered.is_multiple_of(30) {
+                info!(
+                    "TAMS {}: {} segments registered on flow {}",
+                    block_id, *segments_registered, tams_flow_id
+                );
+            }
             delete_uploaded(&frag.path);
         }
         Err(e) => {
