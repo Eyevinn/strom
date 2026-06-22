@@ -53,10 +53,11 @@ fn pat_fingerprint(pat: &str) -> u64 {
 ///
 /// Supports a shared, multi-tenant Strom: PATs are keyed by an opaque credential
 /// key (in practice the Strom flow id), so different OSC users never reach each
-/// other's services. A `default` PAT (from `STROM_OSC_PAT` / the keyless API)
-/// is used when no per-key PAT is registered — the single-tenant case. The SAT
-/// cache is keyed by `(credential_key, service_id)` so a SAT minted for one
-/// tenant is never handed to another.
+/// other's services. A `default` PAT (from `STROM_OSC_PAT`) is used when no
+/// per-key PAT is registered — the single-tenant case. The SAT cache is keyed by
+/// `(pat_fingerprint, service_id)`: SATs are per service and follow the PAT, so
+/// flows sharing a PAT (same tenant) share a SAT per service while different
+/// tenants never do.
 pub struct SatProvider {
     /// PAT per credential key. The reserved [`DEFAULT_KEY`] holds the fallback PAT.
     pats: RwLock<HashMap<String, String>>,
