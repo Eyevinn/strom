@@ -12,8 +12,9 @@
 //! - `POST /flows/{id}/segments`  register a segment on the flow timeline
 //! - `GET  /flows/{id}/segments?timerange=[..)`  list segments (presigned GET URLs)
 
+use crate::client_auth::AuthMethod;
 use anyhow::{anyhow, Context, Result};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::CONTENT_TYPE;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -74,13 +75,12 @@ struct PutUrlResp {
 pub struct TamsClient {
     /// Base URL without trailing slash, e.g. `http://localhost:8000`.
     base_url: String,
-    /// Optional bearer token (gateway `API_TOKEN`, when it enforces its own auth).
-    token: Option<String>,
+    auth: AuthMethod,
     http: reqwest::Client,
 }
 
 impl TamsClient {
-    pub fn new(base_url: impl Into<String>, token: Option<String>) -> Result<Self> {
+    pub fn new(base_url: impl Into<String>, auth: AuthMethod) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -88,16 +88,9 @@ impl TamsClient {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         Ok(Self {
             base_url,
-            token: token.filter(|t| !t.is_empty()),
+            auth,
             http,
         })
-    }
-
-    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.token {
-            Some(t) => req.header(AUTHORIZATION, format!("Bearer {}", t)),
-            None => req,
-        }
     }
 
     /// Create or replace a flow (and, gateway-side, its source). Idempotent.
@@ -127,7 +120,9 @@ impl TamsClient {
         }
 
         let resp = self
-            .auth(self.http.put(&url))
+            .auth
+            .apply(self.http.put(&url))
+            .await?
             .json(&body)
             .send()
             .await
@@ -149,7 +144,9 @@ impl TamsClient {
         let url = format!("{}/flows/{}/storage", self.base_url, flow_id);
         let body = serde_json::json!({ "limit": 1, "content_type": content_type });
         let resp = self
-            .auth(self.http.post(&url))
+            .auth
+            .apply(self.http.post(&url))
+            .await?
             .json(&body)
             .send()
             .await
@@ -206,7 +203,9 @@ impl TamsClient {
         let url = format!("{}/flows/{}/segments", self.base_url, flow_id);
         let body = serde_json::json!({ "object_id": object_id, "timerange": timerange });
         let resp = self
-            .auth(self.http.post(&url))
+            .auth
+            .apply(self.http.post(&url))
+            .await?
             .json(&body)
             .send()
             .await
@@ -233,7 +232,7 @@ mod tests {
 
     #[test]
     fn base_url_trailing_slash_trimmed() {
-        let c = TamsClient::new("http://localhost:8000/", None).unwrap();
+        let c = TamsClient::new("http://localhost:8000/", AuthMethod::None).unwrap();
         assert_eq!(c.base_url, "http://localhost:8000");
     }
 }

@@ -17,6 +17,7 @@
 //! encoder block upstream). See `docs/archive/TAMS_INTEGRATION_PLAN.md`.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::client_auth::AuthMethod;
 use crate::tams::client::{FlowSpec, TamsClient};
 use crate::tams::uploader::{channel, new_tail_slot, spawn_uploader, FragmentReady, TailFragment};
 use gst::glib;
@@ -174,8 +175,45 @@ impl BlockBuilder for TamsOutputBuilder {
                         .to_string(),
                 )
             })?;
-        let api_token = prop_str(properties, "api_token")
-            .or_else(|| std::env::var("STROM_TAMS_API_TOKEN").ok());
+        // Auth mode selects how the gateway is authenticated. "static" (default) uses
+        // a long-lived bearer token (for TAMS gateways run outside OSC); "osc" mints
+        // short-lived Service Access Tokens from the OSC PAT configured on this Strom
+        // instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).
+        let auth_mode = prop_str(properties, "auth_mode").unwrap_or_else(|| "static".to_string());
+        let auth = match auth_mode.as_str() {
+            "osc" => {
+                let provider = crate::osc::sat_provider().ok_or_else(|| {
+                    BlockBuildError::InvalidConfiguration(
+                        "TAMS Output: OSC PAT/SAT mode requires a Personal Access Token \
+                         (set STROM_OSC_PAT or OSC_ACCESS_TOKEN)"
+                            .to_string(),
+                    )
+                })?;
+                let service_id = prop_str(properties, "osc_service_id")
+                    .or_else(|| crate::osc::derive_service_id(&gateway_url))
+                    .ok_or_else(|| {
+                        BlockBuildError::InvalidProperty(
+                            "TAMS Output: OSC mode could not derive the service id from \
+                             gateway_url — set the OSC Service ID property"
+                                .to_string(),
+                        )
+                    })?;
+                info!(
+                    "TAMS Output {}: OSC PAT/SAT auth for service {}",
+                    instance_id, service_id
+                );
+                AuthMethod::Osc {
+                    provider,
+                    service_id,
+                }
+            }
+            _ => match prop_str(properties, "api_token")
+                .or_else(|| std::env::var("STROM_TAMS_API_TOKEN").ok())
+            {
+                Some(t) => AuthMethod::Bearer(t),
+                None => AuthMethod::None,
+            },
+        };
 
         let segment_secs =
             prop_u64(properties, "segment_duration_secs", DEFAULT_SEGMENT_SECS).max(1);
@@ -201,7 +239,7 @@ impl BlockBuilder for TamsOutputBuilder {
             _ => Container::Mp4,
         };
 
-        let client = TamsClient::new(&gateway_url, api_token)
+        let client = TamsClient::new(&gateway_url, auth)
             .map_err(|e| BlockBuildError::InvalidConfiguration(format!("TAMS client: {:#}", e)))?;
 
         let mut elements: Vec<(String, gst::Element)> = Vec::new();
@@ -739,10 +777,38 @@ fn tams_output_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },
+            ExposedProperty {
+                name: "auth_mode".to_string(),
+                label: "Authentication".to_string(),
+                description: "How to authenticate to the gateway. Static API Token = a long-lived bearer token (for gateways run outside OSC). OSC PAT/SAT = mint short-lived Service Access Tokens from the OSC Personal Access Token configured on this Strom instance (STROM_OSC_PAT / OSC_ACCESS_TOKEN).".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "static".to_string(),
+                            label: Some("Static API Token".to_string()),
+                        },
+                        EnumValue {
+                            value: "osc".to_string(),
+                            label: Some("OSC PAT/SAT".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("static".to_string())),
+                mapping: block_mapping("auth_mode"),
+                live: false,
+                persist: None,
+            },
             simple_prop(
                 "api_token",
                 "API Token",
-                "Bearer token for the gateway (leave empty when behind an access gate).",
+                "Static bearer token for the gateway (Static API Token mode only). Leave empty when behind an access gate. Ignored in OSC PAT/SAT mode.",
+                PropertyType::String,
+                PropertyValue::String(String::new()),
+            ),
+            simple_prop(
+                "osc_service_id",
+                "OSC Service ID",
+                "OSC PAT/SAT mode only. The OSC service type the SAT is scoped to. Leave empty to derive it from the gateway URL (the service-type label of an *.osaas.io host).",
                 PropertyType::String,
                 PropertyValue::String(String::new()),
             ),

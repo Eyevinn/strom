@@ -1,0 +1,189 @@
+//! Eyevinn Open Source Cloud (OSC) service authentication.
+//!
+//! OSC uses a two-token model instead of plain OIDC:
+//! - a long-lived **Personal Access Token (PAT)**, configured once per Strom
+//!   instance via the `STROM_OSC_PAT` env var (the OSC SDK's `OSC_ACCESS_TOKEN`
+//!   is accepted as a fallback);
+//! - short-lived **Service Access Tokens (SATs)**, minted from the PAT and
+//!   scoped to a single OSC service type. A SAT lives ~1 hour.
+//!
+//! This module exchanges the PAT for SATs on demand and caches them per service
+//! id, refreshing before expiry. It is OSC-wide, not TAMS-specific, so any
+//! OSC-backed block can reuse it (the TAMS Output block is the first user).
+//!
+//! See <https://github.com/EyevinnOSC/community/wiki> ("Service Access Tokens").
+
+use anyhow::{anyhow, Context, Result};
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+use tracing::{debug, error, info};
+
+/// Default OSC token-exchange endpoint. Overridable via `STROM_OSC_TOKEN_URL`.
+const DEFAULT_TOKEN_URL: &str = "https://token.svc.prod.osaas.io/servicetoken";
+
+/// SATs live ~1 hour; refresh well before then so an in-flight request never
+/// races expiry. The OSC docs recommend refreshing every ~50 minutes.
+const SAT_REFRESH_AFTER: Duration = Duration::from_secs(50 * 60);
+
+struct CachedSat {
+    token: String,
+    fetched_at: Instant,
+}
+
+/// Mints and caches OSC Service Access Tokens from a single Personal Access Token.
+pub struct SatProvider {
+    pat: String,
+    token_url: String,
+    http: reqwest::Client,
+    /// Per-service-id SAT cache. A `tokio::Mutex` held across the mint serializes
+    /// concurrent callers for the same service so we never mint duplicates.
+    cache: Mutex<HashMap<String, CachedSat>>,
+}
+
+#[derive(Deserialize)]
+struct ServiceTokenResp {
+    token: String,
+}
+
+impl SatProvider {
+    pub fn new(pat: String, token_url: Option<String>) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("building OSC token HTTP client")?;
+        Ok(Self {
+            pat,
+            token_url: token_url.unwrap_or_else(|| DEFAULT_TOKEN_URL.to_string()),
+            http,
+            cache: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Return a valid SAT for `service_id`, minting or refreshing as needed.
+    pub async fn token(&self, service_id: &str) -> Result<String> {
+        let mut cache = self.cache.lock().await;
+        if let Some(c) = cache.get(service_id) {
+            if c.fetched_at.elapsed() < SAT_REFRESH_AFTER {
+                return Ok(c.token.clone());
+            }
+        }
+        let token = self.mint(service_id).await?;
+        cache.insert(
+            service_id.to_string(),
+            CachedSat {
+                token: token.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
+        Ok(token)
+    }
+
+    /// Exchange the PAT for a fresh SAT scoped to `service_id`.
+    async fn mint(&self, service_id: &str) -> Result<String> {
+        debug!("OSC: minting SAT for service {}", service_id);
+        let resp = self
+            .http
+            .post(&self.token_url)
+            .header("x-pat-jwt", format!("Bearer {}", self.pat))
+            .json(&serde_json::json!({ "serviceId": service_id }))
+            .send()
+            .await
+            .with_context(|| format!("POST {}", self.token_url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "OSC servicetoken {} -> {}: {}",
+                self.token_url,
+                status,
+                text
+            ));
+        }
+        let parsed: ServiceTokenResp = resp
+            .json()
+            .await
+            .context("parsing OSC servicetoken response")?;
+        info!("OSC: minted SAT for service {}", service_id);
+        Ok(parsed.token)
+    }
+}
+
+/// The process-wide OSC SAT provider, built from env on first use.
+///
+/// Returns `None` when no PAT is configured (`STROM_OSC_PAT` /
+/// `OSC_ACCESS_TOKEN` unset), so callers can fall back to other auth modes.
+pub fn sat_provider() -> Option<Arc<SatProvider>> {
+    static PROVIDER: OnceLock<Option<Arc<SatProvider>>> = OnceLock::new();
+    PROVIDER
+        .get_or_init(|| {
+            let pat = std::env::var("STROM_OSC_PAT")
+                .ok()
+                .or_else(|| std::env::var("OSC_ACCESS_TOKEN").ok())
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())?;
+            let token_url = std::env::var("STROM_OSC_TOKEN_URL")
+                .ok()
+                .filter(|u| !u.is_empty());
+            match SatProvider::new(pat, token_url) {
+                Ok(p) => Some(Arc::new(p)),
+                Err(e) => {
+                    error!("OSC: failed to build SAT provider: {:#}", e);
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// Derive the OSC service id (the service-type slug) from a service URL.
+///
+/// OSC service URLs look like
+/// `https://<tenant>-<instance>.<service-type>.auto.prod.osaas.io`; a SAT is
+/// scoped to `<service-type>` (the second DNS label). Returns `None` for URLs
+/// that are not OSC-hosted (e.g. a self-hosted gateway), so the caller can ask
+/// for an explicit service id instead.
+pub fn derive_service_id(url: &str) -> Option<String> {
+    let host = url.split("://").nth(1).unwrap_or(url);
+    let host = host.split('/').next()?; // strip path
+    let host = host.split(':').next()?; // strip port
+    if !host.ends_with(".osaas.io") {
+        return None;
+    }
+    let mut labels = host.split('.');
+    let _tenant_instance = labels.next()?; // <tenant>-<instance>
+    let service_type = labels.next()?; // <service-type>
+    if service_type.is_empty() {
+        None
+    } else {
+        Some(service_type.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_service_type_from_osc_url() {
+        assert_eq!(
+            derive_service_id(
+                "https://mytenant-myinstance.eyevinn-tams-gateway.auto.prod.osaas.io"
+            ),
+            Some("eyevinn-tams-gateway".to_string())
+        );
+        // With a path and port.
+        assert_eq!(
+            derive_service_id("https://a-b.eyevinn-test-adserver.auto.prod.osaas.io:443/flows"),
+            Some("eyevinn-test-adserver".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_for_non_osc_urls() {
+        assert_eq!(derive_service_id("http://localhost:8000"), None);
+        assert_eq!(derive_service_id("https://tams.example.com/flows"), None);
+    }
+}
