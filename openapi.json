@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.6.5-dev"
+    "version": "0.6.6-dev"
   },
   "paths": {
     "/api/auth/status": {
@@ -9863,6 +9863,92 @@
                 "type": "string",
                 "enum": [
                   "RecorderAutoStop"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "TAMS Output block successfully uploaded and registered a media segment",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "TAMS Output block successfully uploaded and registered a media segment",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "tams_flow_id",
+                  "object_id",
+                  "timerange"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "object_id": {
+                    "type": "string",
+                    "description": "TAMS object id of the uploaded media object (`<bucket>/<key>`)"
+                  },
+                  "tams_flow_id": {
+                    "type": "string",
+                    "description": "TAMS flow UUID the segment was registered on"
+                  },
+                  "timerange": {
+                    "type": "string",
+                    "description": "TAMS timerange string `[<sec>:<ns>_<sec>:<ns>)`"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "TamsSegmentRegistered"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "TAMS Output block failed to upload or register a segment",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "TAMS Output block failed to upload or register a segment",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "error"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "string",
+                    "description": "Human-readable error description"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "TamsError"
                 ]
               }
             }

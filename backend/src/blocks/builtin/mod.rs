@@ -24,6 +24,7 @@ pub mod mpegtssrt_input;
 pub mod ndi;
 pub mod recorder;
 pub mod spectrum;
+pub mod tams_output;
 pub mod thumbnail;
 pub mod time_offset;
 pub mod videoenc;
@@ -105,6 +106,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
     // Add Spectrum blocks
     blocks.extend(spectrum::get_blocks());
 
+    // Add TAMS Output blocks
+    blocks.extend(tams_output::get_blocks());
+
     // Add Thumbnail blocks
     blocks.extend(thumbnail::get_blocks());
 
@@ -163,6 +167,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.ndi_output" => Some(Arc::new(ndi::NDIOutputBuilder)),
         "builtin.recorder" => Some(Arc::new(recorder::RecorderBuilder)),
         "builtin.spectrum" => Some(Arc::new(spectrum::SpectrumBuilder)),
+        "builtin.tams_output" => Some(Arc::new(tams_output::TamsOutputBuilder)),
         "builtin.thumbnail" => Some(Arc::new(thumbnail::ThumbnailBuilder)),
         "builtin.time_offset" => Some(Arc::new(time_offset::TimeOffsetBuilder)),
         "builtin.videoenc" => Some(Arc::new(videoenc::VideoEncBuilder)),
