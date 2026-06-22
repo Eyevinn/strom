@@ -42,13 +42,17 @@ impl ThreadPriorityState {
         self.threads_configured.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Record a failed priority configuration.
-    fn record_failure(&self, error_msg: String) {
-        // Only store the first error
+    /// Record a failed priority configuration. Returns `true` if this was the
+    /// first failure for this flow, so the caller can log loudly once and stay
+    /// quiet on the identical failures that follow (e.g. a new mux thread every
+    /// segment rotation, all failing the same way).
+    fn record_failure(&self, error_msg: String) -> bool {
         let mut error = self.error.lock().unwrap();
-        if error.is_none() {
+        let is_first = error.is_none();
+        if is_first {
             *error = Some(error_msg);
         }
+        is_first
     }
 
     /// Get the current status.
@@ -313,11 +317,19 @@ pub fn setup_thread_priority_handler(
                                 state_clone.record_success();
                             }
                             Err(e) => {
-                                warn!(
-                                    "Failed to set {:?} priority for streaming thread {} (element: {}, pipeline: {}): {}",
-                                    state_clone.requested, thread_id, owner, flow_name, e
-                                );
-                                state_clone.record_failure(e);
+                                if state_clone.record_failure(e.clone()) {
+                                    warn!(
+                                        "Failed to set {:?} priority for streaming thread {} (element: {}, pipeline: {}): {}. \
+                                         Elevated priority needs CAP_SYS_NICE (grant with: sudo setcap cap_sys_nice+ep <binary>). \
+                                         Continuing at normal priority; further failures for this flow are logged at debug.",
+                                        state_clone.requested, thread_id, owner, flow_name, e
+                                    );
+                                } else {
+                                    debug!(
+                                        "Failed to set {:?} priority for thread {} (element: {}): {} (already warned for this flow)",
+                                        state_clone.requested, thread_id, owner, e
+                                    );
+                                }
                             }
                         }
                     } else {
