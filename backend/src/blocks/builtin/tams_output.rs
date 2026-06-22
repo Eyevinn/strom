@@ -496,7 +496,12 @@ fn build_flow_chain(
             if event.type_() != gst::EventType::Caps {
                 return gst::PadProbeReturn::Ok;
             }
-            if parser_inserted.swap(true, Ordering::SeqCst) {
+            // One-shot: only short-circuit once a parser has actually been linked.
+            // Caps events are serialized on this pad's streaming thread, so a plain
+            // load/store needs no CAS. Crucially we do NOT set the flag here — a
+            // first Caps event that is rejected (raw/unsupported) or whose parser
+            // insertion fails must not permanently disable a later, valid Caps event.
+            if parser_inserted.load(Ordering::SeqCst) {
                 return gst::PadProbeReturn::Ok;
             }
             let caps = match event.view() {
@@ -611,6 +616,9 @@ fn build_flow_chain(
                 );
                 return gst::PadProbeReturn::Ok;
             }
+            // Linked successfully — now consume the one-shot guard so subsequent
+            // Caps events (renegotiation) don't re-insert a second parser.
+            parser_inserted.store(true, Ordering::SeqCst);
             info!(
                 "TAMS Output {}: {} chain linked via {}",
                 instance_id_owned,
@@ -708,6 +716,7 @@ fn build_flow_chain(
                 if !st.initialized {
                     st.initialized = true;
                     st.pts0_ns = pts_ns;
+                    st.last_pts_ns = pts_ns;
                     // If CLOCK_TAI has no offset set (ntp/chrony not disciplining it),
                     // it equals CLOCK_REALTIME — timestamps would be UTC, ~tens of
                     // seconds off true TAI. Warn rather than silently mislabel.
@@ -723,6 +732,22 @@ fn build_flow_chain(
                     }
                     st.t0_tai_ns = tai_now;
                 }
+                // A backward PTS jump (live-source reconnect, encoder/clock restart)
+                // would make `t0 + (pts - pts0)` move backward and overlap the
+                // previous segment. Detect it and re-anchor the timeline to the
+                // current TAI so segments stay monotonic — the real-time gap maps
+                // to a forward jump on the timeline rather than an overlap.
+                if pts_ns < st.last_pts_ns {
+                    let tai_now = tai_clock.time().nseconds();
+                    warn!(
+                        "TAMS {} ({}): PTS went backward ({} -> {} ns), re-anchoring \
+                         segment timeline to current TAI",
+                        block_id_sig, tag, st.last_pts_ns, pts_ns
+                    );
+                    st.t0_tai_ns = tai_now;
+                    st.pts0_ns = pts_ns;
+                }
+                st.last_pts_ns = pts_ns;
                 st.t0_tai_ns + pts_ns.saturating_sub(st.pts0_ns)
             };
 
@@ -740,6 +765,10 @@ fn build_flow_chain(
                             "TAMS {} ({}): dropping segment, uploader channel full: {}",
                             block_id_sig, tag, e
                         );
+                        // The dropped fragment will never be uploaded; remove its
+                        // file so it doesn't leak in the temp dir under sustained
+                        // backpressure. (Cheap unlink at rotation cadence, not per-buffer.)
+                        let _ = std::fs::remove_file(e.into_inner().path);
                     }
                 }
                 *tail = Some(TailFragment {
@@ -787,6 +816,8 @@ struct FragState {
     pts0_ns: u64,
     /// Absolute TAI time (ns) corresponding to `pts0_ns`.
     t0_tai_ns: u64,
+    /// PTS of the previously-opened fragment, to detect a backward PTS jump.
+    last_pts_ns: u64,
 }
 
 /// Get TAMS Output block definitions.

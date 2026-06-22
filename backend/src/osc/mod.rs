@@ -64,8 +64,10 @@ pub struct SatProvider {
     token_url: String,
     http: reqwest::Client,
     /// SAT cache keyed by `(pat_fingerprint, service_id)` — so flows on the same
-    /// PAT share a SAT and different tenants never do. A `tokio::Mutex` held
-    /// across the mint serializes concurrent callers so we never mint duplicates.
+    /// PAT share a SAT and different tenants never do. The lock is released
+    /// before the network mint, so a slow/hung token endpoint never stalls
+    /// unrelated callers (other flows/services) or PAT pushes; a rare concurrent
+    /// double-mint is harmless (both SATs are valid, last write wins).
     cache: Mutex<HashMap<(u64, String), CachedSat>>,
 }
 
@@ -150,14 +152,21 @@ impl SatProvider {
             )
         })?;
         let cache_key = (pat_fingerprint(&pat), service_id.to_string());
-        let mut cache = self.cache.lock().await;
-        if let Some(c) = cache.get(&cache_key) {
-            if c.fetched_at.elapsed() < SAT_REFRESH_AFTER {
-                return Ok(c.token.clone());
+        // Fast path: return a cached, still-fresh SAT. Scope the guard so it is
+        // dropped before the (potentially slow) network mint below.
+        {
+            let cache = self.cache.lock().await;
+            if let Some(c) = cache.get(&cache_key) {
+                if c.fetched_at.elapsed() < SAT_REFRESH_AFTER {
+                    return Ok(c.token.clone());
+                }
             }
         }
+        // Miss or stale: mint WITHOUT holding the cache lock, so a slow token
+        // endpoint can't stall unrelated callers. A concurrent double-mint is
+        // rare and harmless.
         let token = self.mint(&pat, service_id).await?;
-        cache.insert(
+        self.cache.lock().await.insert(
             cache_key,
             CachedSat {
                 token: token.clone(),

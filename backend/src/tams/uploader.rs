@@ -188,8 +188,21 @@ async fn process_fragment(
         }
     }
 
+    // Read the segment off disk once, up front. retry() only re-runs the
+    // network calls below, so a transient HTTP failure no longer re-reads the
+    // whole file from disk on every attempt.
+    let bytes = match tokio::fs::read(&frag.path).await {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = format!("reading segment {}: {}", frag.path.display(), e);
+            error!("TAMS {}: {}; keeping file", block_id, msg);
+            emit_error(events, strom_flow_id, block_id, msg);
+            return; // keep the file for recovery
+        }
+    };
+
     match retry(MAX_ATTEMPTS, || {
-        upload_one(client, &tams_flow_id, content_type, &frag)
+        upload_one(client, &tams_flow_id, content_type, &frag, &bytes)
     })
     .await
     {
@@ -248,21 +261,18 @@ where
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("operation failed")))
 }
 
-/// Read, allocate, upload and register a single fragment.
-/// Returns the registered `(object_id, timerange)` on success.
+/// Allocate, upload and register a single fragment (bytes already read by the
+/// caller). Returns the registered `(object_id, timerange)` on success.
 async fn upload_one(
     client: &TamsClient,
     tams_flow_id: &str,
     content_type: &str,
     frag: &FragmentReady,
+    bytes: &[u8],
 ) -> anyhow::Result<(String, String)> {
-    let bytes = tokio::fs::read(&frag.path)
-        .await
-        .map_err(|e| anyhow::anyhow!("reading {}: {}", frag.path.display(), e))?;
-
     let obj = client.allocate_object(tams_flow_id, content_type).await?;
     client
-        .upload_object(&obj.put_url, &obj.content_type, bytes)
+        .upload_object(&obj.put_url, &obj.content_type, bytes.to_vec())
         .await?;
     let timerange = crate::tams::client::format_timerange(frag.start_ns, frag.end_ns);
     client
