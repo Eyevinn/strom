@@ -36,8 +36,8 @@ RUN ARCH="$(uname -m)" && \
       | tar -xz -C /tmp && \
     install -m0755 "/tmp/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl/sccache" /usr/local/bin/sccache && \
     rm -rf /tmp/sccache-*
-ENV SCCACHE_BUCKET=strom \
-    SCCACHE_ENDPOINT=https://eyevinnlab-rustcache.minio-minio.auto.prod.osaas.io \
+ENV SCCACHE_BUCKET=sccache \
+    SCCACHE_ENDPOINT=https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io \
     SCCACHE_REGION=us-east-1 \
     SCCACHE_S3_USE_SSL=true
 
@@ -91,8 +91,8 @@ RUN ARCH="$(uname -m)" && \
       | tar -xz -C /tmp && \
     install -m0755 "/tmp/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl/sccache" /usr/local/bin/sccache && \
     rm -rf /tmp/sccache-*
-ENV SCCACHE_BUCKET=strom \
-    SCCACHE_ENDPOINT=https://eyevinnlab-rustcache.minio-minio.auto.prod.osaas.io \
+ENV SCCACHE_BUCKET=sccache \
+    SCCACHE_ENDPOINT=https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io \
     SCCACHE_REGION=us-east-1 \
     SCCACHE_S3_USE_SSL=true
 

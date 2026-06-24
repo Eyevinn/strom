@@ -17,9 +17,9 @@ env:
   # ceiling with the docker buildkit blobs. The same backend is reused by the
   # release workflow and the Dockerfile builder, where rust-cache cannot reach.
   # Requires repo secrets SCCACHE_S3_ACCESS_KEY_ID / SCCACHE_S3_SECRET_ACCESS_KEY
-  # (a service account scoped to the strom bucket, no admin).
-  SCCACHE_BUCKET: strom
-  SCCACHE_ENDPOINT: https://eyevinnlab-rustcache.minio-minio.auto.prod.osaas.io
+  # (a service account scoped to the sccache bucket, no admin).
+  SCCACHE_BUCKET: sccache
+  SCCACHE_ENDPOINT: https://olivedev-rustcache.minio-minio.auto.prod-se.osaas.io
   SCCACHE_REGION: us-east-1
   SCCACHE_S3_USE_SSL: "true"
   AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
