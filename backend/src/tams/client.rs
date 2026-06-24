@@ -22,6 +22,35 @@ use std::time::Duration;
 // frontend can share them. Re-exported here for ergonomic use within the backend.
 pub use strom_types::tams::{format_timerange, FORMAT_AUDIO, FORMAT_VIDEO};
 
+/// A non-success HTTP response from the gateway or presigned storage, carrying
+/// the status code so the uploader can decide whether retrying could ever help.
+#[derive(Debug)]
+pub struct HttpStatusError {
+    pub status: reqwest::StatusCode,
+    /// Human context, e.g. `presigned PUT` or `POST http://.../flows/x/segments`.
+    pub context: String,
+    pub body: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} -> {}: {}", self.context, self.status, self.body)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
+impl HttpStatusError {
+    /// A 4xx (other than 408 Request Timeout and 429 Too Many Requests) means the
+    /// request itself must change before it can succeed — retrying the identical
+    /// bytes/headers will fail the same way (e.g. 413 Payload Too Large, 401
+    /// Unauthorized). Network errors and 5xx/408/429 are worth retrying.
+    pub fn is_retryable(&self) -> bool {
+        let code = self.status.as_u16();
+        !((400..500).contains(&code) && code != 408 && code != 429)
+    }
+}
+
 /// Metadata describing a flow to create on the gateway.
 #[derive(Debug, Clone)]
 pub struct FlowSpec {
@@ -129,8 +158,13 @@ impl TamsClient {
             .with_context(|| format!("PUT {}", url))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("PUT {} -> {}: {}", url, status, text));
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HttpStatusError {
+                status,
+                context: format!("PUT {}", url),
+                body,
+            }
+            .into());
         }
         Ok(())
     }
@@ -153,8 +187,13 @@ impl TamsClient {
             .with_context(|| format!("POST {}", url))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("POST {} -> {}: {}", url, status, text));
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HttpStatusError {
+                status,
+                context: format!("POST {}", url),
+                body,
+            }
+            .into());
         }
         let parsed: StorageResponse = resp.json().await.context("parsing storage response")?;
         let obj = parsed
@@ -187,8 +226,13 @@ impl TamsClient {
             .context("PUT presigned S3 url")?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("presigned PUT -> {}: {}", status, text));
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HttpStatusError {
+                status,
+                context: "presigned PUT".to_string(),
+                body,
+            }
+            .into());
         }
         Ok(())
     }
@@ -217,8 +261,13 @@ impl TamsClient {
             return Err(anyhow!("segment registration partially failed: {}", text));
         }
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("POST {} -> {}: {}", url, status, text));
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HttpStatusError {
+                status,
+                context: format!("POST {}", url),
+                body,
+            }
+            .into());
         }
         Ok(())
     }

@@ -262,6 +262,12 @@ where
         match op().await {
             Ok(v) => return Ok(v),
             Err(e) => {
+                // A non-retryable HTTP status (e.g. 413 Payload Too Large, 401
+                // Unauthorized) will fail identically on every attempt — give up
+                // now rather than sleeping through the whole backoff schedule.
+                if !is_retryable(&e) {
+                    return Err(e);
+                }
                 if attempt + 1 < attempts {
                     let backoff = Duration::from_secs(1u64 << attempt);
                     tokio::time::sleep(backoff).await;
@@ -271,6 +277,14 @@ where
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("operation failed")))
+}
+
+/// Whether an error is worth retrying. A gateway/storage HTTP 4xx (except
+/// 408/429) cannot succeed on retry; everything else (network errors, 5xx) can.
+fn is_retryable(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::tams::client::HttpStatusError>()
+        .map(|h| h.is_retryable())
+        .unwrap_or(true)
 }
 
 /// Allocate, upload and register a single fragment (bytes already read by the

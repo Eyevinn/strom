@@ -458,7 +458,7 @@ fn build_flow_chain(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("splitmuxsink: {}", e)))?;
     splitmuxsink.set_property("muxer", &mux);
-    splitmuxsink.set_property("max-size-time", segment_secs * 1_000_000_000);
+    splitmuxsink.set_property("max-size-time", segment_secs.saturating_mul(1_000_000_000));
     // Fallback location template; the format-location-full signal overrides it.
     let fallback = temp_dir.join(format!("seg_%05d.{}", container.file_ext()));
     splitmuxsink.set_property("location", fallback.to_string_lossy().as_ref());
@@ -641,6 +641,30 @@ fn build_flow_chain(
     let file_ext = container.file_ext().to_string();
     let tail_segment_ns = segment_secs.saturating_mul(1_000_000_000);
     ctx.register_element_setup(Box::new(move |flow_id, events| {
+        // Clear segment files left by a previous run of this instance. Failed
+        // uploads are kept on disk, but nothing ever reads them back, so without
+        // this they accumulate across restarts (the temp dir is per-instance and
+        // there is no teardown hook). Safe here: the new run has not written yet.
+        if let Ok(entries) = std::fs::read_dir(&temp_dir_for_setup) {
+            let mut removed = 0u32;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let is_segment = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("seg_"));
+                if is_segment && std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+            if removed > 0 {
+                info!(
+                    "TAMS {}: cleared {} leftover segment(s) from a previous run",
+                    block_id, removed
+                );
+            }
+        }
+
         // OSC auth keys its PAT by the flow id (tenant isolation on a shared
         // instance), which is only known here — so finalize the gateway client now.
         let credential_key = flow_id.to_string();
