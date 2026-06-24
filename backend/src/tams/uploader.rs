@@ -201,6 +201,14 @@ async fn process_fragment(
         }
     };
 
+    debug!(
+        "TAMS {}: uploading segment {} ({} bytes) to flow {}",
+        block_id,
+        frag.path.display(),
+        bytes.len(),
+        tams_flow_id
+    );
+
     match retry(MAX_ATTEMPTS, || {
         upload_one(client, &tams_flow_id, content_type, &frag, &bytes)
     })
@@ -226,7 +234,11 @@ async fn process_fragment(
             delete_uploaded(&frag.path);
         }
         Err(e) => {
-            let msg = format!("segment upload failed after retries: {:#}", e);
+            let msg = format!(
+                "segment upload failed after retries ({} bytes): {:#}",
+                bytes.len(),
+                e
+            );
             error!(
                 "TAMS {}: {}; keeping {}",
                 block_id,
