@@ -40,6 +40,10 @@ pub struct TamsOutputBuilder;
 const DEFAULT_SEGMENT_SECS: u64 = 2;
 const DEFAULT_NUM_VIDEO_TRACKS: usize = 1;
 const DEFAULT_NUM_AUDIO_TRACKS: usize = 1;
+/// Sanity bound on audio tracks: a flow can carry several audio essences (muxed
+/// in MPEG-TS, grouped in MP4), but this guards against a fat-fingered property
+/// exploding into thousands of pads/uploaders. Programs rarely exceed a handful.
+const MAX_AUDIO_TRACKS: usize = 32;
 const DEFAULT_CONTAINER: &str = "mpegts";
 
 /// Segment container format.
@@ -133,8 +137,11 @@ impl BlockBuilder for TamsOutputBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
+        // Video is a single track (splitmuxsink has one `video` pad); audio can be
+        // several (splitmuxsink `audio_%u`), e.g. multiple language/commentary tracks.
         let num_video = prop_usize(properties, "num_video_tracks", DEFAULT_NUM_VIDEO_TRACKS).min(1);
-        let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS).min(1);
+        let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS)
+            .min(MAX_AUDIO_TRACKS);
         let mut inputs = Vec::new();
         if num_video >= 1 {
             inputs.push(ExternalPad {
@@ -145,12 +152,12 @@ impl BlockBuilder for TamsOutputBuilder {
                 internal_pad_name: "sink".to_string(),
             });
         }
-        if num_audio >= 1 {
+        for i in 0..num_audio {
             inputs.push(ExternalPad {
-                label: Some("A0".to_string()),
-                name: "audio_in_0".to_string(),
+                label: Some(format!("A{}", i)),
+                name: format!("audio_in_{}", i),
                 media_type: MediaType::Audio,
-                internal_element_id: "audio_input_0".to_string(),
+                internal_element_id: format!("audio_input_{}", i),
                 internal_pad_name: "sink".to_string(),
             });
         }
@@ -216,7 +223,8 @@ impl BlockBuilder for TamsOutputBuilder {
         let segment_secs =
             prop_u64(properties, "segment_duration_secs", DEFAULT_SEGMENT_SECS).max(1);
         let num_video = prop_usize(properties, "num_video_tracks", DEFAULT_NUM_VIDEO_TRACKS).min(1);
-        let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS).min(1);
+        let num_audio = prop_usize(properties, "num_audio_tracks", DEFAULT_NUM_AUDIO_TRACKS)
+            .min(MAX_AUDIO_TRACKS);
         if num_video == 0 && num_audio == 0 {
             return Err(BlockBuildError::InvalidProperty(
                 "TAMS Output: at least one of video/audio tracks is required".to_string(),
@@ -278,27 +286,29 @@ impl BlockBuilder for TamsOutputBuilder {
                         &mut elements,
                     )?;
                 }
-                if num_audio >= 1 {
-                    let flow_id = derive_id(instance_id, "audio");
-                    members.push((flow_id.clone(), "audio".to_string()));
+                for i in 0..num_audio {
+                    let essence = Essence::Audio(i);
+                    let tag = essence.tag(); // "audio-0", "audio-1", ...
+                    let flow_id = derive_id(instance_id, &tag);
+                    members.push((flow_id.clone(), tag.clone()));
                     let spec = FlowSpec {
                         flow_id,
                         // Own mono-essence Source (see video above).
-                        source_id: derive_id(instance_id, "audio-source"),
+                        source_id: derive_id(instance_id, &format!("{}-source", tag)),
                         format: FORMAT_AUDIO.to_string(),
                         codec: Some("audio/aac".to_string()), // fallback; real codec from caps
                         container: Some(CONTENT_TYPE_MP4.to_string()),
-                        label: label.as_ref().map(|l| format!("{} (audio)", l)),
+                        label: label.as_ref().map(|l| format!("{} ({})", l, tag)),
                         description: description.clone(),
                         tags: tags.clone(),
                         flow_collection: vec![],
                     };
                     build_flow_chain(
                         instance_id,
-                        "audio",
+                        &tag,
                         Container::Mp4,
                         segment_secs,
-                        &[Essence::Audio],
+                        &[essence],
                         true,
                         gateway_url.clone(),
                         auth_plan.clone(),
@@ -335,8 +345,8 @@ impl BlockBuilder for TamsOutputBuilder {
                 if num_video >= 1 {
                     inputs.push(Essence::Video);
                 }
-                if num_audio >= 1 {
-                    inputs.push(Essence::Audio);
+                for i in 0..num_audio {
+                    inputs.push(Essence::Audio(i));
                 }
                 let spec = FlowSpec {
                     flow_id: derive_id(instance_id, "mux"),
@@ -418,23 +428,30 @@ impl AuthPlan {
     }
 }
 
+/// One essence input on a flow. Audio carries its track index so a flow can mux
+/// (MPEG-TS) or group (MP4) several audio tracks. `splitmuxsink` exposes a single
+/// `video` pad but `audio_%u`, so video is always a single track.
 #[derive(Clone, Copy, PartialEq)]
 enum Essence {
     Video,
-    Audio,
+    Audio(usize),
 }
 
 impl Essence {
-    fn input_id(&self) -> &'static str {
+    /// Internal `identity` input element id, matching the external pad mapping
+    /// (`video_in_0` -> `video_input_0`, `audio_in_{i}` -> `audio_input_{i}`).
+    fn input_id(&self) -> String {
         match self {
-            Essence::Video => "video_input_0",
-            Essence::Audio => "audio_input_0",
+            Essence::Video => "video_input_0".to_string(),
+            Essence::Audio(i) => format!("audio_input_{}", i),
         }
     }
-    fn tag(&self) -> &'static str {
+    /// Short unique tag for element/temp-dir naming and the collection role
+    /// (`video`, `audio-0`, `audio-1`, ...).
+    fn tag(&self) -> String {
         match self {
-            Essence::Video => "video",
-            Essence::Audio => "audio",
+            Essence::Video => "video".to_string(),
+            Essence::Audio(i) => format!("audio-{}", i),
         }
     }
 }
@@ -572,7 +589,7 @@ fn build_flow_chain(
                         return gst::PadProbeReturn::Ok;
                     }
                 },
-                Essence::Audio => {
+                Essence::Audio(_) => {
                     let mpegversion = structure.get::<i32>("mpegversion").unwrap_or(0);
                     match caps_name.as_str() {
                         "audio/mpeg" if mpegversion == 1 => ("mpegaudioparse", "audio/mpeg"),
@@ -934,7 +951,7 @@ fn request_sink_pad(
         Essence::Video => splitmuxsink.request_pad_simple("video").ok_or_else(|| {
             BlockBuildError::ElementCreation("splitmuxsink: failed to request video pad".into())
         })?,
-        Essence::Audio => {
+        Essence::Audio(_) => {
             let tmpl = splitmuxsink.pad_template("audio_%u").ok_or_else(|| {
                 BlockBuildError::ElementCreation("splitmuxsink: no audio_%u template".into())
             })?;
@@ -1063,7 +1080,7 @@ fn tams_output_definition() -> BlockDefinition {
             simple_prop(
                 "num_audio_tracks",
                 "Audio Tracks",
-                "Number of audio tracks (0 or 1).",
+                "Number of audio tracks (0 or more; muxed into one MPEG-TS flow, or one MP4 flow each).",
                 PropertyType::Int,
                 PropertyValue::Int(1),
             ),
