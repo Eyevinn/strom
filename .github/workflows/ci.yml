@@ -78,7 +78,7 @@ jobs:
       # Package list must stay identical to build-linux-x86_64 so both jobs
       # share one apt cache entry (the action keys by package list + arch).
       - name: Cache apt packages
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good pkg-config cmake libclang-dev
           version: 1.5
@@ -280,7 +280,7 @@ jobs:
       # check-linux so both x86_64 jobs share one apt cache entry; arm64 gets
       # its own entry automatically (the action keys by list + runner arch).
       - name: Install GStreamer (cached)
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good pkg-config cmake libclang-dev
           version: 1.5
@@ -390,7 +390,7 @@ jobs:
       # check-linux so both x86_64 jobs share one apt cache entry; arm64 gets
       # its own entry automatically (the action keys by list + runner arch).
       - name: Install GStreamer (cached)
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.1
         with:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good pkg-config cmake libclang-dev
           version: 1.5
