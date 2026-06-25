@@ -45,13 +45,21 @@ ENV SCCACHE_BUCKET=sccache \
 COPY . .
 
 # Build frontend (WASM is platform-independent).
-# sccache is enabled only when the AWS credential secrets are present.
+# sccache is enabled only when the credential secrets are present AND the cache
+# backend is reachable. sccache validates its bucket on server start (fast
+# non-zero exit if the bucket is missing or the endpoint is unreachable), so we
+# probe with `sccache --start-server` and wrap rustc only on success. A broken
+# cache degrades to an uncached build instead of failing the image build.
 RUN --mount=type=secret,id=aws_access_key_id \
     --mount=type=secret,id=aws_secret_access_key \
     if [ -s /run/secrets/aws_access_key_id ]; then \
         export AWS_ACCESS_KEY_ID="$(cat /run/secrets/aws_access_key_id)" && \
         export AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/aws_secret_access_key)" && \
-        export RUSTC_WRAPPER=sccache; \
+        if timeout 30 sccache --start-server >/dev/null 2>&1; then \
+            export RUSTC_WRAPPER=sccache; \
+        else \
+            echo "==> sccache backend unreachable - building without compile cache"; \
+        fi; \
     fi && \
     cd frontend && trunk build --release && \
     { command -v sccache >/dev/null && [ -n "$RUSTC_WRAPPER" ] && sccache --show-stats || true; }
@@ -184,12 +192,18 @@ ENV RUST_BACKTRACE=1
 
 # Cross-compilation: Use cargo-zigbuild with glibc 2.36 targeting (Raspberry Pi compatible)
 # Native compilation: Use regular cargo build
+# sccache: see the frontend stage — probe the backend and only wrap rustc when
+# the cache is healthy, so a broken cache never fails the build.
 RUN --mount=type=secret,id=aws_access_key_id \
     --mount=type=secret,id=aws_secret_access_key \
     if [ -s /run/secrets/aws_access_key_id ]; then \
         export AWS_ACCESS_KEY_ID="$(cat /run/secrets/aws_access_key_id)" && \
         export AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/aws_secret_access_key)" && \
-        export RUSTC_WRAPPER=sccache; \
+        if timeout 30 sccache --start-server >/dev/null 2>&1; then \
+            export RUSTC_WRAPPER=sccache; \
+        else \
+            echo "==> sccache backend unreachable - building without compile cache"; \
+        fi; \
     fi && \
     if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ]; then \
     echo "==> Cross-compiling backend with Zig (targeting glibc 2.36)"; \

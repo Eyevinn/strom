@@ -25,8 +25,40 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
 
 jobs:
+  # Probe the sccache S3 backend once so a broken cache degrades to an uncached
+  # build instead of failing the release. sccache treats its configured cache as
+  # a hard requirement (a missing bucket or unreachable endpoint fails every
+  # cargo invocation), so jobs set RUSTC_WRAPPER=sccache only when this reports
+  # the backend healthy. The cache is an optimization, never a dependency.
+  preflight:
+    name: sccache preflight
+    runs-on: ubuntu-latest
+    outputs:
+      cache_ok: ${{ steps.probe.outputs.cache_ok }}
+    steps:
+      - name: Probe sccache S3 backend
+        id: probe
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "No sccache credentials - cache disabled"
+            echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # list-objects-v2 needs only s3:ListBucket, which the scoped service
+          # account has. NoSuchBucket / unreachable endpoint -> non-zero -> off.
+          if timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
+               --cli-connect-timeout 8 --cli-read-timeout 8 \
+               s3api list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1 >/dev/null 2>&1; then
+            echo "sccache backend reachable - cache enabled"
+            echo "cache_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache"
+            echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build-frontend:
     name: Build Frontend (WASM)
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -49,6 +81,7 @@ jobs:
           wget -qO- https://github.com/trunk-rs/trunk/releases/download/v${{ env.TRUNK_VERSION }}/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf- -C ~/.cargo/bin
 
       - name: Setup sccache
+        if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Build frontend
@@ -56,7 +89,7 @@ jobs:
           cd frontend
           trunk build --release
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
 
       - name: Upload frontend dist
         uses: actions/upload-artifact@v7
@@ -67,7 +100,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.platform }}
-    needs: build-frontend
+    needs: [build-frontend, preflight]
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.platform == 'macos' && 60 || 45 }}
     strategy:
@@ -113,6 +146,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
+        if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       # Linux: Install Zig and cargo-zigbuild for glibc 2.31 compatibility
@@ -246,7 +280,7 @@ jobs:
         if: startsWith(matrix.platform, 'linux')
         env:
           RUSTFLAGS: "-L /usr/lib/${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu' || 'x86_64-linux-gnu' }}"
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
         run: |
           set -e
           FEATURES="${{ matrix.features }}"
@@ -262,7 +296,7 @@ jobs:
         if: ${{ !startsWith(matrix.platform, 'linux') }}
         shell: bash
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
         run: |
           set -e
           FEATURES="${{ matrix.features }}"

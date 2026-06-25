@@ -24,17 +24,49 @@ env:
   SCCACHE_S3_USE_SSL: "true"
   AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
-  # Dependabot- and fork-triggered runs don't receive Actions secrets, and
-  # sccache hard-fails on empty S3 credentials. Fall back to building without
-  # the compile cache instead (cargo ignores an empty RUSTC_WRAPPER).
-  RUSTC_WRAPPER: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID != '' && 'sccache' || '' }}
+  # RUSTC_WRAPPER is NOT set globally. sccache treats its configured cache as a
+  # hard requirement: a missing bucket or unreachable endpoint makes every cargo
+  # invocation fail instead of compiling normally. The `preflight` job probes the
+  # backend once and each build job sets RUSTC_WRAPPER=sccache only when
+  # preflight reports it healthy (and credentials are present — forks and
+  # dependabot get none). The cache is an optimization, never a dependency.
 
 jobs:
+  # Probe the sccache S3 backend once so a broken cache degrades to an uncached
+  # build instead of failing CI. Exposes cache_ok consumed by every build job.
+  preflight:
+    name: sccache preflight
+    runs-on: ubuntu-latest
+    outputs:
+      cache_ok: ${{ steps.probe.outputs.cache_ok }}
+    steps:
+      - name: Probe sccache S3 backend
+        id: probe
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "No sccache credentials (fork or dependabot run) - cache disabled"
+            echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # list-objects-v2 needs only s3:ListBucket, which the scoped service
+          # account has. NoSuchBucket / unreachable endpoint -> non-zero -> off.
+          if timeout 25 aws --endpoint-url "$SCCACHE_ENDPOINT" --region "$SCCACHE_REGION" \
+               --cli-connect-timeout 8 --cli-read-timeout 8 \
+               s3api list-objects-v2 --bucket "$SCCACHE_BUCKET" --max-keys 1 >/dev/null 2>&1; then
+            echo "sccache backend reachable - cache enabled"
+            echo "cache_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache"
+            echo "cache_ok=false" >> "$GITHUB_OUTPUT"
+          fi
   # Fast checks on Linux: fmt + clippy + test
   check-linux:
     name: Check (Linux)
+    needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -63,7 +95,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup sccache
-        if: env.AWS_ACCESS_KEY_ID != ''
+        if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Check formatting
@@ -84,7 +116,10 @@ jobs:
   # WASM: clippy + build frontend
   check-wasm:
     name: Check & Build (WASM)
+    needs: preflight
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -115,7 +150,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup sccache
-        if: env.AWS_ACCESS_KEY_ID != ''
+        if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy on frontend
@@ -165,9 +200,11 @@ jobs:
   # Linux x86_64 build
   build-linux-x86_64:
     name: Build (Linux x86_64)
-    needs: check-wasm
+    needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -181,7 +218,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
-        if: env.AWS_ACCESS_KEY_ID != ''
+        if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       # Must NOT share a key with check-linux: rust-cache saves only once per
@@ -280,9 +317,11 @@ jobs:
   # Linux ARM64 build (build only - no native clippy/test)
   build-linux-arm64:
     name: Build (Linux ARM64)
-    needs: check-wasm
+    needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -296,7 +335,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup sccache
-        if: env.AWS_ACCESS_KEY_ID != ''
+        if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       # save-if main: see check-linux.
@@ -390,9 +429,11 @@ jobs:
   build-windows:
     name: Build (Windows)
     if: github.event_name == 'workflow_dispatch'
-    needs: check-wasm
+    needs: [check-wasm, preflight]
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -440,7 +481,7 @@ jobs:
       # stale or evicted by the next manual run. sccache via MinIO covers
       # recompiles instead.
       - name: Setup sccache
-        if: env.AWS_ACCESS_KEY_ID != ''
+        if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy
@@ -479,9 +520,11 @@ jobs:
   build-macos:
     name: Build (macOS)
     if: github.event_name == 'workflow_dispatch'
-    needs: check-wasm
+    needs: [check-wasm, preflight]
     runs-on: macos-latest
     timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -510,7 +553,7 @@ jobs:
 
       # No rust-cache here: workflow_dispatch-only, see the Windows job.
       - name: Setup sccache
-        if: env.AWS_ACCESS_KEY_ID != ''
+        if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Run Clippy
