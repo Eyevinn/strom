@@ -696,25 +696,36 @@ fn build_flow_chain(
     let file_ext = container.file_ext().to_string();
     let tail_segment_ns = segment_secs.saturating_mul(1_000_000_000);
     ctx.register_element_setup(Box::new(move |flow_id, events| {
-        // Clear segment files left by a previous run of this instance. Failed
-        // uploads are kept on disk, but nothing ever reads them back, so without
-        // this they accumulate across restarts (the temp dir is per-instance and
-        // there is no teardown hook). Safe here: the new run has not written yet.
+        // Remove only orphan segment files left by a previous run — plain `seg_*`
+        // files with no `.meta` sidecar. Their timerange is lost so they cannot be
+        // re-registered (e.g. a fragment mid-write when the process was killed, or
+        // one already uploaded but not yet deleted). Parked segments (those WITH a
+        // sidecar) and the sidecars are kept: the uploader's recovery sweep
+        // re-registers them, even across a full restart. Safe here: the new run has
+        // not written yet.
         if let Ok(entries) = std::fs::read_dir(&temp_dir_for_setup) {
             let mut removed = 0u32;
             for entry in entries.flatten() {
                 let path = entry.path();
-                let is_segment = path
+                let name = path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("seg_"));
-                if is_segment && std::fs::remove_file(&path).is_ok() {
+                    .unwrap_or_default();
+                if !name.starts_with("seg_") || name.ends_with(".meta") {
+                    continue;
+                }
+                let mut sidecar = path.clone().into_os_string();
+                sidecar.push(".meta");
+                if std::path::Path::new(&sidecar).exists() {
+                    continue; // parked for recovery — leave it
+                }
+                if std::fs::remove_file(&path).is_ok() {
                     removed += 1;
                 }
             }
             if removed > 0 {
                 info!(
-                    "TAMS {}: cleared {} leftover segment(s) from a previous run",
+                    "TAMS {}: cleared {} orphan segment(s) from a previous run",
                     block_id, removed
                 );
             }
@@ -749,6 +760,7 @@ fn build_flow_chain(
             spec,
             detected_codec,
             content_type,
+            temp_dir_for_setup.clone(),
             flow_id,
             block_id.clone(),
             events,
