@@ -11,8 +11,10 @@ pub const FORMAT_VIDEO: &str = "urn:x-nmos:format:video";
 pub const FORMAT_AUDIO: &str = "urn:x-nmos:format:audio";
 /// NMOS format URN for a data flow.
 pub const FORMAT_DATA: &str = "urn:x-nmos:format:data";
-/// NMOS format URN for a muxed flow (e.g. MPEG-TS carrying video + audio).
-pub const FORMAT_MUX: &str = "urn:x-nmos:format:mux";
+/// NMOS format URN for a multi-essence flow (e.g. MPEG-TS carrying video + audio,
+/// or a Multi-Flow grouping per-essence flows). Note: TAMS uses `:multi`, not the
+/// AMWA NMOS/BCP-006-04 `:mux` — the TAMS content-format enum has no `mux` value.
+pub const FORMAT_MULTI: &str = "urn:x-nmos:format:multi";
 
 /// Container MIME for segmented MP4 essence.
 pub const CONTENT_TYPE_MP4: &str = "video/mp4";

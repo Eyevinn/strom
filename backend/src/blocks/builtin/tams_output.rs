@@ -2,7 +2,7 @@
 //!
 //! Two container modes (the `container` property):
 //! - **MPEG-TS (default):** all essences are muxed by one `mpegtsmux`/`splitmuxsink`
-//!   into TS segments and registered on a single NMOS `format:mux` flow.
+//!   into TS segments and registered on a single NMOS `format:multi` flow.
 //!   Broadcast-native, inherent A/V sync, fewer objects.
 //! - **MP4:** each essence goes to its own `splitmuxsink` (mp4mux) and is
 //!   registered as a separate single-essence TAMS flow (video flow + audio flow
@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use strom_types::tams::{
-    CONTENT_TYPE_MP4, CONTENT_TYPE_MPEGTS, FORMAT_AUDIO, FORMAT_MUX, FORMAT_VIDEO,
+    CONTENT_TYPE_MP4, CONTENT_TYPE_MPEGTS, FORMAT_AUDIO, FORMAT_MULTI, FORMAT_VIDEO,
 };
 use strom_types::{block::*, PropertyValue, *};
 use tracing::{debug, error, info, warn};
@@ -47,7 +47,7 @@ const DEFAULT_CONTAINER: &str = "mpegts";
 enum Container {
     /// Separate single-essence MP4 flows (one per essence). Canonical TAMS model.
     Mp4,
-    /// One muxed MPEG-TS flow (NMOS `format:mux`) carrying all essences together.
+    /// One muxed MPEG-TS flow (NMOS `format:multi`) carrying all essences together.
     MpegTs,
 }
 
@@ -240,19 +240,29 @@ impl BlockBuilder for TamsOutputBuilder {
         let mut elements: Vec<(String, gst::Element)> = Vec::new();
 
         match container {
-            // Separate single-essence MP4 flows: one per essence.
+            // Separate single-essence MP4 flows: one per essence, grouped under a
+            // Multi-Flow. Canonical TAMS model (per-essence flows collected via
+            // flow_collection), giving downstream consumers elemental access.
             Container::Mp4 => {
+                // Members collected by the Multi-Flow: (flow_id, role).
+                let mut members: Vec<(String, String)> = Vec::new();
                 if num_video >= 1 {
+                    let flow_id = derive_id(instance_id, "video");
+                    members.push((flow_id.clone(), "video".to_string()));
                     let spec = FlowSpec {
-                        flow_id: derive_id(instance_id, "video"),
-                        source_id: source_id.clone(),
+                        flow_id,
+                        // Own mono-essence Source. The gateway derives the Multi-Flow's
+                        // source_collection by resolving each member flow to its
+                        // source_id, so members must NOT share the program source.
+                        source_id: derive_id(instance_id, "video-source"),
                         format: FORMAT_VIDEO.to_string(),
-                        codec: "video/h264".to_string(), // fallback; real codec from caps
-                        container: CONTENT_TYPE_MP4.to_string(),
+                        codec: Some("video/h264".to_string()), // fallback; real codec from caps
+                        container: Some(CONTENT_TYPE_MP4.to_string()),
                         // Distinguish the two flows of one recording in flow listings.
                         label: label.as_ref().map(|l| format!("{} (video)", l)),
                         description: description.clone(),
                         tags: tags.clone(),
+                        flow_collection: vec![],
                     };
                     build_flow_chain(
                         instance_id,
@@ -269,15 +279,19 @@ impl BlockBuilder for TamsOutputBuilder {
                     )?;
                 }
                 if num_audio >= 1 {
+                    let flow_id = derive_id(instance_id, "audio");
+                    members.push((flow_id.clone(), "audio".to_string()));
                     let spec = FlowSpec {
-                        flow_id: derive_id(instance_id, "audio"),
-                        source_id: source_id.clone(),
+                        flow_id,
+                        // Own mono-essence Source (see video above).
+                        source_id: derive_id(instance_id, "audio-source"),
                         format: FORMAT_AUDIO.to_string(),
-                        codec: "audio/aac".to_string(), // fallback; real codec from caps
-                        container: CONTENT_TYPE_MP4.to_string(),
+                        codec: Some("audio/aac".to_string()), // fallback; real codec from caps
+                        container: Some(CONTENT_TYPE_MP4.to_string()),
                         label: label.as_ref().map(|l| format!("{} (audio)", l)),
                         description: description.clone(),
                         tags: tags.clone(),
+                        flow_collection: vec![],
                     };
                     build_flow_chain(
                         instance_id,
@@ -293,6 +307,27 @@ impl BlockBuilder for TamsOutputBuilder {
                         &mut elements,
                     )?;
                 }
+                // Group the per-essence flows under one NMOS format:multi Multi-Flow.
+                // It carries no essence of its own — segments live on the member
+                // flows — so it is registered once at startup, not via an uploader.
+                if members.len() >= 2 {
+                    let multi = FlowSpec {
+                        flow_id: derive_id(instance_id, "mux"),
+                        source_id: source_id.clone(),
+                        format: FORMAT_MULTI.to_string(),
+                        // The Multi-Flow carries no segments of its own — its members
+                        // do — but the gateway requires codec/container on every flow.
+                        // Use the canonical mux media type (video/mp2t per BCP-006-04):
+                        // it describes the multiplex these essences reconstitute.
+                        codec: Some(CONTENT_TYPE_MPEGTS.to_string()),
+                        container: Some(CONTENT_TYPE_MPEGTS.to_string()),
+                        label: label.clone(),
+                        description: description.clone(),
+                        tags: tags.clone(),
+                        flow_collection: members,
+                    };
+                    register_multiflow(instance_id, multi, gateway_url.clone(), auth_plan, ctx);
+                }
             }
             // One muxed MPEG-TS flow carrying all essences together.
             Container::MpegTs => {
@@ -306,12 +341,15 @@ impl BlockBuilder for TamsOutputBuilder {
                 let spec = FlowSpec {
                     flow_id: derive_id(instance_id, "mux"),
                     source_id: source_id.clone(),
-                    format: FORMAT_MUX.to_string(),
-                    codec: CONTENT_TYPE_MPEGTS.to_string(),
-                    container: CONTENT_TYPE_MPEGTS.to_string(),
+                    format: FORMAT_MULTI.to_string(),
+                    codec: Some(CONTENT_TYPE_MPEGTS.to_string()),
+                    container: Some(CONTENT_TYPE_MPEGTS.to_string()),
                     label: label.clone(),
                     description: description.clone(),
                     tags: tags.clone(),
+                    // The TS is an opaque mux; its inner essences are NOT exposed as
+                    // separate flows (per AMWA BCP-006-04), so no flow_collection.
+                    flow_collection: vec![],
                 };
                 build_flow_chain(
                     instance_id,
@@ -404,7 +442,7 @@ impl Essence {
 /// Build one TAMS flow chain: N identity inputs -> (dynamic parsers) -> shared
 /// muxer/splitmuxsink -> segment files. For MP4 each chain has a single essence
 /// (one flow per essence); for MPEG-TS a single chain muxes all essences into one
-/// `format:mux` flow. Wires the per-fragment timerange capture + uploader at start.
+/// `format:multi` flow. Wires the per-fragment timerange capture + uploader at start.
 ///
 /// `suffix` distinguishes the temp dir / element names (`video`/`audio`/`mux`).
 /// `detect_codec` controls whether the caps probe overrides the flow's codec label
@@ -812,6 +850,81 @@ fn build_flow_chain(
     Ok(())
 }
 
+/// Register a metadata-only Multi-Flow that groups the per-essence flows via
+/// `flow_collection` (the canonical TAMS multi-essence model). It carries no
+/// segments of its own, so unlike the essence flows it is not created lazily by
+/// an uploader — it is PUT (and re-PUT) on a short schedule at pipeline start so
+/// the gateway can derive its source_collection once the member flows exist.
+/// Best-effort: a failure is logged but never stops the recording, since the
+/// essence flows record independently of the grouping.
+fn register_multiflow(
+    instance_id: &str,
+    spec: FlowSpec,
+    gateway_url: String,
+    auth_plan: AuthPlan,
+    ctx: &BlockBuildContext,
+) {
+    let block_id = instance_id.to_string();
+    ctx.register_element_setup(Box::new(move |flow_id, _events| {
+        // OSC auth keys its PAT by the flow id, matching the essence uploaders.
+        let credential_key = flow_id.to_string();
+        let client = match TamsClient::new(&gateway_url, auth_plan.resolve(&credential_key)) {
+            Ok(c) => c,
+            Err(e) => {
+                error!(
+                    "TAMS {}: failed to build gateway client for multi-flow: {:#}",
+                    block_id, e
+                );
+                return;
+            }
+        };
+        tokio::spawn(async move {
+            let members = spec.flow_collection.len();
+            // The gateway derives the multi-Source's source_collection from the
+            // members' source_ids at PUT time, and does NOT re-derive when members
+            // are registered later. Member flows are created lazily by their
+            // uploaders on the first segment (a few seconds in), so re-PUT the
+            // (idempotent) multi-flow on a short schedule — a PUT after the members
+            // exist resolves them into source_collection. Cumulative PUTs at
+            // ~0/3/11/31s cover both fast and slow source startup.
+            const SCHEDULE_SECS: [u64; 4] = [0, 3, 8, 20];
+            let mut registered = false;
+            for (i, delay) in SCHEDULE_SECS.iter().enumerate() {
+                if *delay > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+                }
+                match client.ensure_flow(&spec).await {
+                    Ok(()) => {
+                        if !registered {
+                            registered = true;
+                            info!(
+                                "TAMS {}: multi-flow {} registered (collects {} essence flows); \
+                                 re-PUT scheduled so the gateway can resolve members for source_collection",
+                                block_id, spec.flow_id, members
+                            );
+                        }
+                    }
+                    Err(e) => warn!(
+                        "TAMS {}: multi-flow {} PUT failed (attempt {}): {:#}",
+                        block_id,
+                        spec.flow_id,
+                        i + 1,
+                        e
+                    ),
+                }
+            }
+            if !registered {
+                error!(
+                    "TAMS {}: multi-flow {} was never registered after {} attempts",
+                    block_id,
+                    spec.flow_id,
+                    SCHEDULE_SECS.len()
+                );
+            }
+        });
+    }));
+}
+
 /// Request the splitmuxsink sink pad for a given essence (`video` or `audio_%u`).
 fn request_sink_pad(
     splitmuxsink: &gst::Element,
@@ -866,7 +979,7 @@ fn tams_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "container".to_string(),
                 label: "Container".to_string(),
-                description: "Segment container. MP4 = separate single-essence flows (one per essence). MPEG-TS = one muxed flow (video+audio together, NMOS format:mux).".to_string(),
+                description: "Segment container. MP4 = separate single-essence flows (one per essence). MPEG-TS = one muxed flow (video+audio together, NMOS format:multi).".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue {

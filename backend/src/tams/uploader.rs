@@ -167,7 +167,7 @@ async fn process_fragment(
     // Lazily create the flow once, preferring the codec detected from caps.
     if !*flow_created {
         if let Some(codec) = detected_codec.lock().ok().and_then(|c| c.clone()) {
-            flow_spec.codec = codec;
+            flow_spec.codec = Some(codec);
         }
         match retry(MAX_ATTEMPTS, || client.ensure_flow(flow_spec)).await {
             Ok(()) => {

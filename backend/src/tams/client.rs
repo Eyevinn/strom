@@ -20,7 +20,7 @@ use std::time::Duration;
 
 // Protocol constants and timerange formatting live in `strom_types::tams` so the
 // frontend can share them. Re-exported here for ergonomic use within the backend.
-pub use strom_types::tams::{format_timerange, FORMAT_AUDIO, FORMAT_VIDEO};
+pub use strom_types::tams::{format_timerange, FORMAT_AUDIO, FORMAT_MULTI, FORMAT_VIDEO};
 
 /// A non-success HTTP response from the gateway or presigned storage, carrying
 /// the status code so the uploader can decide whether retrying could ever help.
@@ -56,18 +56,84 @@ impl HttpStatusError {
 pub struct FlowSpec {
     pub flow_id: String,
     pub source_id: String,
-    /// NMOS format URN (see [`FORMAT_VIDEO`] / [`FORMAT_AUDIO`]).
+    /// NMOS format URN (see [`FORMAT_VIDEO`] / [`FORMAT_AUDIO`] / [`FORMAT_MULTI`]).
     pub format: String,
-    /// Codec string, e.g. `video/h264`, `video/h265`, `audio/aac`.
-    pub codec: String,
-    /// Container MIME, e.g. `video/mp4`.
-    pub container: String,
+    /// Codec string, e.g. `video/h264`, `video/h265`, `audio/aac`. `None` for a
+    /// grouping Multi-Flow that carries no essence of its own.
+    pub codec: Option<String>,
+    /// Container MIME, e.g. `video/mp4`. `None` for a grouping Multi-Flow.
+    pub container: Option<String>,
     /// Human-readable title, stored as the flow's `label`.
     pub label: Option<String>,
     /// Longer free-text, stored as the flow's `description`.
     pub description: Option<String>,
     /// Flow tags (key -> value), e.g. `production` -> `Studio A`.
     pub tags: Vec<(String, String)>,
+    /// Member flows collected by this flow, as `(flow_id, role)` pairs. Non-empty
+    /// only for a Multi-Flow that groups per-essence Flows under one NMOS
+    /// `format:multi` flow (the canonical TAMS multi-essence model). Serialized as
+    /// the TAMS `flow_collection` array of `{ id, role }` objects.
+    pub flow_collection: Vec<(String, String)>,
+}
+
+/// Build the JSON body for `PUT /flows/{id}` from a [`FlowSpec`]. Pure (no I/O) so
+/// the gateway wire format can be unit-tested.
+///
+/// Wire-format contract (matches what the Eyevinn TAMS gateway accepts):
+/// - `id`, `source_id`, `format`, `essence_parameters` always present.
+/// - `codec`/`container` emitted only when `Some` (a grouping Multi-Flow omits them).
+/// - `flow_collection` members are `{ id, role, container_mapping: { track_index } }`,
+///   where `track_index` is the member's position in the collection.
+/// - `label`/`description`/`tags` emitted only when present.
+fn flow_request_body(spec: &FlowSpec) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "id": spec.flow_id,
+        "source_id": spec.source_id,
+        "format": spec.format,
+        "essence_parameters": {},
+    });
+    // codec/container apply to flows that carry essence; a grouping Multi-Flow
+    // omits them and instead lists its members in flow_collection.
+    if let Some(codec) = &spec.codec {
+        body["codec"] = serde_json::Value::String(codec.clone());
+    }
+    if let Some(container) = &spec.container {
+        body["container"] = serde_json::Value::String(container.clone());
+    }
+    if !spec.flow_collection.is_empty() {
+        // Each member is a collection-item (id + role) plus a container_mapping,
+        // which the gateway requires. A grouping Multi-Flow has no real shared
+        // container, so we use the generic, container-agnostic track_index =
+        // position in the collection (video first, then audio).
+        let members: Vec<serde_json::Value> = spec
+            .flow_collection
+            .iter()
+            .enumerate()
+            .map(|(i, (id, role))| {
+                serde_json::json!({
+                    "id": id,
+                    "role": role,
+                    "container_mapping": { "track_index": i },
+                })
+            })
+            .collect();
+        body["flow_collection"] = serde_json::Value::Array(members);
+    }
+    if let Some(label) = &spec.label {
+        body["label"] = serde_json::Value::String(label.clone());
+    }
+    if let Some(description) = &spec.description {
+        body["description"] = serde_json::Value::String(description.clone());
+    }
+    if !spec.tags.is_empty() {
+        let tags: serde_json::Map<String, serde_json::Value> = spec
+            .tags
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        body["tags"] = serde_json::Value::Object(tags);
+    }
+    body
 }
 
 /// A storage object allocated by the gateway, ready to receive bytes.
@@ -125,28 +191,7 @@ impl TamsClient {
     /// Create or replace a flow (and, gateway-side, its source). Idempotent.
     pub async fn ensure_flow(&self, spec: &FlowSpec) -> Result<()> {
         let url = format!("{}/flows/{}", self.base_url, spec.flow_id);
-        let mut body = serde_json::json!({
-            "id": spec.flow_id,
-            "source_id": spec.source_id,
-            "format": spec.format,
-            "codec": spec.codec,
-            "container": spec.container,
-            "essence_parameters": {},
-        });
-        if let Some(label) = &spec.label {
-            body["label"] = serde_json::Value::String(label.clone());
-        }
-        if let Some(description) = &spec.description {
-            body["description"] = serde_json::Value::String(description.clone());
-        }
-        if !spec.tags.is_empty() {
-            let tags: serde_json::Map<String, serde_json::Value> = spec
-                .tags
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                .collect();
-            body["tags"] = serde_json::Value::Object(tags);
-        }
+        let body = flow_request_body(spec);
 
         let resp = self
             .auth
@@ -283,5 +328,75 @@ mod tests {
     fn base_url_trailing_slash_trimmed() {
         let c = TamsClient::new("http://localhost:8000/", AuthMethod::None).unwrap();
         assert_eq!(c.base_url, "http://localhost:8000");
+    }
+
+    fn spec() -> FlowSpec {
+        FlowSpec {
+            flow_id: "flow-1".into(),
+            source_id: "src-1".into(),
+            format: "urn:x-nmos:format:video".into(),
+            codec: Some("video/h264".into()),
+            container: Some("video/mp4".into()),
+            label: None,
+            description: None,
+            tags: vec![],
+            flow_collection: vec![],
+        }
+    }
+
+    #[test]
+    fn mono_flow_body_has_codec_and_no_collection() {
+        let body = flow_request_body(&spec());
+        assert_eq!(body["id"], "flow-1");
+        assert_eq!(body["source_id"], "src-1");
+        assert_eq!(body["format"], "urn:x-nmos:format:video");
+        assert_eq!(body["codec"], "video/h264");
+        assert_eq!(body["container"], "video/mp4");
+        assert!(body.get("essence_parameters").is_some());
+        // Optional fields absent when not set.
+        assert!(body.get("flow_collection").is_none());
+        assert!(body.get("label").is_none());
+        assert!(body.get("tags").is_none());
+    }
+
+    #[test]
+    fn grouping_flow_omits_codec_and_container() {
+        let mut s = spec();
+        s.codec = None;
+        s.container = None;
+        let body = flow_request_body(&s);
+        // A grouping Multi-Flow carries no essence: codec/container must be absent,
+        // not serialized as null.
+        assert!(body.get("codec").is_none());
+        assert!(body.get("container").is_none());
+    }
+
+    #[test]
+    fn flow_collection_members_carry_role_and_track_index() {
+        let mut s = spec();
+        s.format = FORMAT_MULTI.into();
+        s.codec = None;
+        s.container = None;
+        s.flow_collection = vec![
+            ("video-flow".into(), "video".into()),
+            ("audio-flow".into(), "audio".into()),
+        ];
+        let body = flow_request_body(&s);
+        let coll = body["flow_collection"].as_array().expect("array");
+        assert_eq!(coll.len(), 2);
+        assert_eq!(coll[0]["id"], "video-flow");
+        assert_eq!(coll[0]["role"], "video");
+        assert_eq!(coll[0]["container_mapping"]["track_index"], 0);
+        assert_eq!(coll[1]["id"], "audio-flow");
+        assert_eq!(coll[1]["role"], "audio");
+        assert_eq!(coll[1]["container_mapping"]["track_index"], 1);
+    }
+
+    #[test]
+    fn tags_serialized_as_object() {
+        let mut s = spec();
+        s.tags = vec![("prod".into(), "Studio A".into())];
+        let body = flow_request_body(&s);
+        assert_eq!(body["tags"]["prod"], "Studio A");
     }
 }
