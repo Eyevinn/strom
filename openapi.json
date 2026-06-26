@@ -10,7 +10,7 @@
     "license": {
       "name": "MIT OR Apache-2.0"
     },
-    "version": "0.6.5-dev"
+    "version": "0.6.6-dev"
   },
   "paths": {
     "/api/auth/status": {
@@ -4022,6 +4022,111 @@
         }
       }
     },
+    "/api/osc/pat": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Get the OSC PAT configuration status",
+        "description": "Reports whether the default PAT is configured and which per-flow credential\nkeys have a PAT registered. Token values are never returned.",
+        "operationId": "get_osc_pat_status",
+        "responses": {
+          "200": {
+            "description": "OSC PAT status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OscAuthStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/osc/pat/{key}": {
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Set a per-flow OSC Personal Access Token",
+        "description": "Registers a PAT for one credential key (the flow id). Flows resolve their own\nPAT first, falling back to the default — isolating OSC tenants on a shared\ninstance. Held in memory only.",
+        "operationId": "set_osc_pat_keyed",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Credential key (flow id) the PAT is scoped to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetOscPatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "PAT updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OscAuthStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Clear a per-flow OSC Personal Access Token",
+        "operationId": "clear_osc_pat_keyed",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Credential key (flow id) to clear",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PAT cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OscAuthStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sources": {
       "get": {
         "tags": [
@@ -6952,6 +7057,27 @@
           }
         }
       },
+      "OscAuthStatusResponse": {
+        "type": "object",
+        "description": "Status of the OSC Personal Access Token configuration. Token values are never\nreturned.",
+        "required": [
+          "configured",
+          "keys"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether the default (fallback) PAT is configured (via env var or the\nkeyless API). Used for single-tenant deployments."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Credential keys (flow ids) that have a per-flow PAT registered. Used to\nisolate OSC tenants on a shared Strom instance."
+          }
+        }
+      },
       "OverlayAlphaRequest": {
         "type": "object",
         "description": "Request to set the multiview overlay alpha on a vision mixer block.",
@@ -7891,6 +8017,19 @@
           "filter": {
             "type": "string",
             "description": "The new log filter string (e.g. \"info,strom::api=debug\")"
+          }
+        }
+      },
+      "SetOscPatRequest": {
+        "type": "object",
+        "description": "Request to set the OSC Personal Access Token (PAT) at runtime.\n\nThe PAT is used to mint short-lived Service Access Tokens for OSC-hosted\nservices (e.g. a TAMS gateway). It is held in memory only — not persisted.",
+        "required": [
+          "pat"
+        ],
+        "properties": {
+          "pat": {
+            "type": "string",
+            "description": "The OSC Personal Access Token."
           }
         }
       },
@@ -9863,6 +10002,92 @@
                 "type": "string",
                 "enum": [
                   "RecorderAutoStop"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "TAMS Output block successfully uploaded and registered a media segment",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "TAMS Output block successfully uploaded and registered a media segment",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "tams_flow_id",
+                  "object_id",
+                  "timerange"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "object_id": {
+                    "type": "string",
+                    "description": "TAMS object id of the uploaded media object (`<bucket>/<key>`)"
+                  },
+                  "tams_flow_id": {
+                    "type": "string",
+                    "description": "TAMS flow UUID the segment was registered on"
+                  },
+                  "timerange": {
+                    "type": "string",
+                    "description": "TAMS timerange string `[<sec>:<ns>_<sec>:<ns>)`"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "TamsSegmentRegistered"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "TAMS Output block failed to upload or register a segment",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "TAMS Output block failed to upload or register a segment",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "error"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "string",
+                    "description": "Human-readable error description"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "TamsError"
                 ]
               }
             }

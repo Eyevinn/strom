@@ -24,6 +24,7 @@ pub mod network;
 pub mod state;
 pub mod stats;
 pub mod system_monitor;
+pub mod tams;
 pub mod thread_stats;
 pub mod videoenc;
 pub mod vision_mixer;

@@ -899,6 +899,34 @@ impl ErrorResponse {
 }
 
 // ============================================================================
+// OSC Authentication API Types
+// ============================================================================
+
+/// Request to set the OSC Personal Access Token (PAT) at runtime.
+///
+/// The PAT is used to mint short-lived Service Access Tokens for OSC-hosted
+/// services (e.g. a TAMS gateway). It is held in memory only — not persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct SetOscPatRequest {
+    /// The OSC Personal Access Token.
+    pub pat: String,
+}
+
+/// Status of the OSC Personal Access Token configuration. Token values are never
+/// returned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct OscAuthStatusResponse {
+    /// Whether the default (fallback) PAT is configured (via env var or the
+    /// keyless API). Used for single-tenant deployments.
+    pub configured: bool,
+    /// Credential keys (flow ids) that have a per-flow PAT registered. Used to
+    /// isolate OSC tenants on a shared Strom instance.
+    pub keys: Vec<String>,
+}
+
+// ============================================================================
 // Logging API Types
 // ============================================================================
 

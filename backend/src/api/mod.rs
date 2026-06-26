@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod media;
 pub mod mediaplayer;
 pub mod network;
+pub mod osc;
 pub mod probes;
 pub mod sdp_transform;
 pub mod system_clock;
