@@ -368,24 +368,100 @@ fn build_whipserversrc(
                     ElementPadRef::pad(&decodebin_id, "sink"),
                 ));
 
-                // decodebin has dynamic pads — connect pad-added to link to videoconvert
+                // decodebin can autoplug a GL-accelerated decoder (e.g. vtdec_hw),
+                // producing video/x-raw(memory:GLMemory) frames instead of plain
+                // system-memory video/x-raw. videoconvert passes GL memory through
+                // unchanged rather than downloading it, and downstream consumers
+                // (encoders for WHEP Output, etc.) generally only accept
+                // system-memory video/x-raw — without a gldownload, encoding
+                // silently fails ("no codec present that can handle the stream's
+                // type"). A gldownload is only inserted when the negotiated pad
+                // caps actually carry GL memory: gldownload is a GstGLBaseFilter,
+                // which unconditionally requires a negotiated GL context to reach
+                // PLAYING, so inserting it unconditionally would impose a hard GL
+                // dependency on every session and break decode on GL-less hosts
+                // (headless servers, WSL, CPU-only fallback — see gpu.rs). If
+                // caps are ever unavailable, default to the non-GL path: skipping
+                // gldownload when it was needed reproduces the already-diagnosed
+                // GL-memory bug, but inserting it when not needed reproduces a
+                // newer, harder-to-diagnose GL-context failure — the former is
+                // the safer default.
                 let videoconvert_weak = videoconvert.downgrade();
+                let decodebin_weak = decodebin.downgrade();
+                let instance_id_for_pad = instance_id.to_string();
                 decodebin.connect_pad_added(move |_dec, src_pad| {
                     if src_pad.direction() != gst::PadDirection::Src {
                         return;
                     }
-                    if let Some(vc) = videoconvert_weak.upgrade() {
-                        let sink = vc.static_pad("sink").unwrap();
-                        if !sink.is_linked() {
-                            if let Err(e) = src_pad.link(&sink) {
-                                warn!("Failed to link decodebin video pad to videoconvert: {:?}", e);
-                            } else {
-                                info!(
-                                    "WHIP Input: decodebin video pad linked to videoconvert for slot {}",
-                                    slot
-                                );
-                            }
+                    let Some(vc) = videoconvert_weak.upgrade() else {
+                        return;
+                    };
+                    let sink = vc.static_pad("sink").unwrap();
+                    if sink.is_linked() {
+                        return;
+                    }
+
+                    let is_gl_memory = src_pad
+                        .current_caps()
+                        .map(|caps| caps.to_string().contains("memory:GLMemory"))
+                        .unwrap_or(false);
+
+                    if !is_gl_memory {
+                        if let Err(e) = src_pad.link(&sink) {
+                            warn!("Failed to link decodebin video pad to videoconvert: {:?}", e);
+                        } else {
+                            info!(
+                                "WHIP Input: decodebin video pad linked to videoconvert for slot {}",
+                                slot
+                            );
                         }
+                        return;
+                    }
+
+                    let Some(bin) = decodebin_weak
+                        .upgrade()
+                        .and_then(|dec| dec.parent())
+                        .and_then(|p| p.downcast::<gst::Bin>().ok())
+                    else {
+                        warn!("WHIP Input: decodebin has no parent bin, cannot insert gldownload for slot {}", slot);
+                        return;
+                    };
+
+                    let gldownload_id = format!("{}:gldownload_{}", instance_id_for_pad, slot);
+                    let gldownload = match gst::ElementFactory::make("gldownload")
+                        .name(&gldownload_id)
+                        .build()
+                    {
+                        Ok(e) => e,
+                        Err(e) => {
+                            warn!("WHIP Input: failed to create gldownload for slot {}: {:?}", slot, e);
+                            return;
+                        }
+                    };
+
+                    if let Err(e) = bin.add(&gldownload) {
+                        warn!("WHIP Input: failed to add gldownload to bin for slot {}: {:?}", slot, e);
+                        return;
+                    }
+
+                    let gldownload_src = gldownload.static_pad("src").unwrap();
+                    if let Err(e) = gldownload_src.link(&sink) {
+                        warn!("Failed to link gldownload -> videoconvert: {:?}", e);
+                        return;
+                    }
+                    if let Err(e) = gldownload.sync_state_with_parent() {
+                        warn!("WHIP Input: failed to sync gldownload state for slot {}: {:?}", slot, e);
+                        return;
+                    }
+
+                    let gldownload_sink = gldownload.static_pad("sink").unwrap();
+                    if let Err(e) = src_pad.link(&gldownload_sink) {
+                        warn!("Failed to link decodebin video pad to gldownload: {:?}", e);
+                    } else {
+                        info!(
+                            "WHIP Input: decodebin video pad carries GL memory, linked through gldownload for slot {}",
+                            slot
+                        );
                     }
                 });
 
