@@ -167,6 +167,19 @@ fn explicit_track_count(properties: &HashMap<String, PropertyValue>, name: &str)
     })
 }
 
+/// Parse do_retransmission from properties (default: true).
+///
+/// `whepserversink` is send-only, so this is a bandwidth/quality tunable only.
+fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool {
+    properties
+        .get("do_retransmission")
+        .and_then(|v| match v {
+            PropertyValue::Bool(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
 /// Migrate a legacy `mode` property on a WHEP Output block to explicit
 /// `num_audio_tracks` / `num_video_tracks` counts, and drop `mode`.
 ///
@@ -951,6 +964,8 @@ fn build_whepserversink(
         num_audio_tracks, num_video_tracks
     );
 
+    let do_retransmission = parse_do_retransmission(properties);
+
     // Timestamp offset in milliseconds. A negative value shifts playout earlier,
     // reducing end-to-end latency for this output while maintaining A/V sync.
     // Applied as ts-offset on clocksync and appsink inside whepserversink.
@@ -1021,7 +1036,7 @@ fn build_whepserversink(
         whepserversink.set_property("turn-servers", turn_servers);
     }
 
-    // Disable FEC but keep RTX (retransmission) enabled.
+    // Disable FEC; RTX (retransmission) is configurable, default on.
     // - FEC adds proactive redundancy packets on every stream (~50% constant
     //   overhead, near-double bandwidth for pre-encoded high-bitrate video),
     //   so it stays off.
@@ -1030,7 +1045,7 @@ fn build_whepserversink(
     //   escalates to PLI -> forced keyframe, which is far more expensive and
     //   leaves the picture broken until the keyframe arrives.
     whepserversink.set_property("do-fec", false);
-    whepserversink.set_property("do-retransmission", true);
+    whepserversink.set_property("do-retransmission", do_retransmission);
 
     // Access the signaller child and set its properties
     // Bind to localhost only - axum will proxy external requests
@@ -2341,6 +2356,20 @@ fn whep_output_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },
+            ExposedProperty {
+                name: "do_retransmission".to_string(),
+                label: "Retransmission (RTX)".to_string(),
+                description: "Resend lost packets to viewers on request (NACK-based). Disable only to cap the outgoing bitrate — without it, packet loss forces a full keyframe request instead of a cheap resend.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "do_retransmission".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
         ],
         // Note: external_pads here are the static defaults (1 video + 1 audio).
         // The actual pads are determined dynamically by WHEPOutputBuilder::get_external_pads()
@@ -2378,6 +2407,13 @@ fn whep_output_definition() -> BlockDefinition {
 mod tests {
     use super::*;
 
+    /// `whepserversink` comes from the `gst-plugin-webrtc` crate, which is only
+    /// registered by the binary. Tests must register it themselves.
+    fn init_gst() {
+        let _ = gst::init();
+        let _ = gstrswebrtc::plugin_register_static();
+    }
+
     /// Build a property map. `legacy_mode` populates the old "mode" enum
     /// (`Some("audio")` etc.) to exercise the migration path; pass `None` for
     /// new flows. Count values pass through `num_audio_tracks` /
@@ -2414,6 +2450,59 @@ mod tests {
             .filter(|p| matches!(p.media_type, MediaType::Video))
             .map(|p| p.name.clone())
             .collect()
+    }
+
+    /// Build a property map from explicit key/value pairs.
+    fn raw_props(entries: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn do_retransmission_defaults_to_true() {
+        assert!(parse_do_retransmission(&raw_props(&[])));
+    }
+
+    #[test]
+    fn do_retransmission_respects_explicit_true() {
+        assert!(parse_do_retransmission(&raw_props(&[(
+            "do_retransmission",
+            PropertyValue::Bool(true)
+        )])));
+    }
+
+    #[test]
+    fn do_retransmission_respects_explicit_false() {
+        assert!(!parse_do_retransmission(&raw_props(&[(
+            "do_retransmission",
+            PropertyValue::Bool(false)
+        )])));
+    }
+
+    /// The block property must land on the `whepserversink` element itself.
+    /// Hardcoding `do-retransmission` back to a literal fails the `false` case.
+    #[test]
+    fn do_retransmission_reaches_whepserversink() {
+        init_gst();
+
+        for expected in [true, false] {
+            let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+            let result = build_whepserversink(
+                "whep-rtx-test",
+                &raw_props(&[("do_retransmission", PropertyValue::Bool(expected))]),
+                &ctx,
+            )
+            .expect("build_whepserversink failed");
+
+            let (_, sink) = result
+                .elements
+                .iter()
+                .find(|(id, _)| id == "whep-rtx-test:whepserversink")
+                .expect("whepserversink missing from build result");
+            assert_eq!(sink.property::<bool>("do-retransmission"), expected);
+        }
     }
 
     #[test]

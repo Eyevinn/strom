@@ -150,6 +150,17 @@ fn parse_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValue>) ->
         .unwrap_or(400)
 }
 
+/// Parse do_retransmission from properties (default: true).
+fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool {
+    properties
+        .get("do_retransmission")
+        .and_then(|v| match v {
+            PropertyValue::Bool(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
 /// Build WHIP Input per-slot output chains.
 ///
 /// At build time, per-slot chains are created in the main pipeline:
@@ -199,6 +210,7 @@ fn build_whipserversrc(
     // causing the whole video stream to stall (never reaching decodebin)
     // even though the packets arrived fine over the network.
     let jitterbuffer_latency_ms = parse_jitterbuffer_latency_ms(properties);
+    let do_retransmission = parse_do_retransmission(properties);
 
     let max_video_bitrate_kbps = properties
         .get("max_video_bitrate")
@@ -434,8 +446,8 @@ fn build_whipserversrc(
     let turn_server = ctx.turn_server();
 
     info!(
-        "WHIP Input configured: endpoint_id='{}', stun={:?}, turn={:?}, mode={:?}, decode={}, max_sessions={} (whipserversrc created per-session)",
-        endpoint_id, stun_server, turn_server, mode, decode, max_sessions
+        "WHIP Input configured: endpoint_id='{}', stun={:?}, turn={:?}, mode={:?}, decode={}, do_retransmission={}, max_sessions={} (whipserversrc created per-session)",
+        endpoint_id, stun_server, turn_server, mode, decode, do_retransmission, max_sessions
     );
 
     // Register WHIP endpoint with the build context (port=0 placeholder, sessions get their own ports)
@@ -456,6 +468,7 @@ fn build_whipserversrc(
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
             jitterbuffer_latency_ms,
+            do_retransmission,
             dynamic_webrtcbin_store: ctx.dynamic_webrtcbin_store(),
             max_video_bitrate_kbps,
             max_sessions,
@@ -530,6 +543,8 @@ pub fn create_whipserversrc_for_session(
     // Set signaller host-addr
     let signaller = whipserversrc.property::<gst::glib::Object>("signaller");
     signaller.set_property("host-addr", &host_addr);
+
+    whipserversrc.set_property("do-retransmission", config.do_retransmission);
 
     // Configure codec negotiation based on mode
     if config.mode.has_audio() {
@@ -1488,6 +1503,20 @@ fn whip_input_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
+                name: "do_retransmission".to_string(),
+                label: "Retransmission (RTX)".to_string(),
+                description: "Request retransmission of lost packets from the publisher (NACK-based). Without it, any packet loss forces a full keyframe request instead of a cheap resend. Disabling it is an unconfirmed workaround for the intermittent GStreamer depayloader crash on this ingest path.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "do_retransmission".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "max_video_bitrate".to_string(),
                 label: "Max Video Bitrate (kbps)".to_string(),
                 description: "Maximum video bitrate hint sent to the browser via SDP. The browser's encoder will ramp up to this value.".to_string(),
@@ -1705,5 +1734,48 @@ mod tests {
             )])),
             0
         );
+    }
+
+    #[test]
+    fn do_retransmission_defaults_to_true() {
+        assert!(parse_do_retransmission(&props(&[])));
+    }
+
+    #[test]
+    fn do_retransmission_respects_explicit_true() {
+        assert!(parse_do_retransmission(&props(&[(
+            "do_retransmission",
+            PropertyValue::Bool(true)
+        )])));
+    }
+
+    #[test]
+    fn do_retransmission_respects_explicit_false() {
+        assert!(!parse_do_retransmission(&props(&[(
+            "do_retransmission",
+            PropertyValue::Bool(false)
+        )])));
+    }
+
+    /// The block property must reach the `WhipEndpointConfig` handed to the
+    /// session manager, which is the value `create_whipserversrc_for_session`
+    /// applies to `whipserversrc`.
+    #[test]
+    fn do_retransmission_reaches_whip_endpoint_config() {
+        let _ = gst::init();
+
+        for expected in [true, false] {
+            let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+            build_whipserversrc(
+                "whip-rtx-test",
+                &props(&[("do_retransmission", PropertyValue::Bool(expected))]),
+                &ctx,
+            )
+            .expect("build_whipserversrc failed");
+
+            let configs = ctx.take_whip_endpoint_configs();
+            assert_eq!(configs.len(), 1, "expected exactly one endpoint config");
+            assert_eq!(configs[0].1.do_retransmission, expected);
+        }
     }
 }
