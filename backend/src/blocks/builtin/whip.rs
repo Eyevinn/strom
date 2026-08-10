@@ -139,6 +139,17 @@ impl BlockBuilder for WHIPInputBuilder {
 // WHIP Input (whipserversrc - hosts WHIP server)
 // ============================================================================
 
+/// Parse jitterbuffer_latency_ms from properties (default: 400, negative clamps to 0).
+fn parse_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValue>) -> u32 {
+    properties
+        .get("jitterbuffer_latency_ms")
+        .and_then(|v| match v {
+            PropertyValue::Int(i) => Some((*i).max(0) as u32),
+            _ => None,
+        })
+        .unwrap_or(400)
+}
+
 /// Build WHIP Input per-slot output chains.
 ///
 /// At build time, per-slot chains are created in the main pipeline:
@@ -180,6 +191,14 @@ fn build_whipserversrc(
             _ => None,
         })
         .unwrap_or(true);
+
+    // Jitterbuffer latency: how long to buffer before dropping/releasing packets.
+    // Left unset, webrtcbin defaults to 200ms, which combined with
+    // drop-on-latency=true (below) can be too tight for an initial video
+    // keyframe's packet burst on a freshly-created per-session pipeline,
+    // causing the whole video stream to stall (never reaching decodebin)
+    // even though the packets arrived fine over the network.
+    let jitterbuffer_latency_ms = parse_jitterbuffer_latency_ms(properties);
 
     let max_video_bitrate_kbps = properties
         .get("max_video_bitrate")
@@ -436,6 +455,7 @@ fn build_whipserversrc(
             ice_transport_policy: ctx.ice_transport_policy().to_string(),
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
+            jitterbuffer_latency_ms,
             dynamic_webrtcbin_store: ctx.dynamic_webrtcbin_store(),
             max_video_bitrate_kbps,
             max_sessions,
@@ -531,6 +551,7 @@ pub fn create_whipserversrc_for_session(
     let dynamic_webrtcbin_store = config.dynamic_webrtcbin_store.clone();
     let block_id_for_callback = config.instance_id.clone();
     let ice_transport_policy = config.ice_transport_policy.clone();
+    let jitterbuffer_latency_ms = config.jitterbuffer_latency_ms;
     // Flag to ensure only one cleanup request per session (shared across ICE callback,
     // inactivity watchdog, etc.)
     let cleanup_sent = Arc::new(AtomicBool::new(false));
@@ -559,6 +580,14 @@ pub fn create_whipserversrc_for_session(
                     info!(
                         "WHIP Input: Set ice-transport-policy={} on webrtcbin {}",
                         ice_transport_policy, element_name
+                    );
+                }
+
+                if element.has_property("latency") {
+                    element.set_property("latency", jitterbuffer_latency_ms);
+                    info!(
+                        "WHIP Input: Set jitterbuffer latency={}ms on webrtcbin {}",
+                        jitterbuffer_latency_ms, element_name
                     );
                 }
 
@@ -1445,6 +1474,20 @@ fn whip_input_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
+                name: "jitterbuffer_latency_ms".to_string(),
+                label: "Jitterbuffer Latency (ms)".to_string(),
+                description: "How long to buffer incoming RTP before releasing/dropping it. Too low can cause an initial video keyframe's packet burst to be dropped locally on connect, stalling video entirely even though packets arrived fine. Increase if video never starts.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(400)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "jitterbuffer_latency_ms".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "max_video_bitrate".to_string(),
                 label: "Max Video Bitrate (kbps)".to_string(),
                 description: "Maximum video bitrate hint sent to the browser via SDP. The browser's encoder will ramp up to this value.".to_string(),
@@ -1624,4 +1667,43 @@ fn setup_incoming_rtp_handler(
     });
 
     info!("WHIP: Incoming RTP handler installed for {}", instance_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn props(entries: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn jitterbuffer_latency_ms_defaults_to_400() {
+        assert_eq!(parse_jitterbuffer_latency_ms(&props(&[])), 400);
+    }
+
+    #[test]
+    fn jitterbuffer_latency_ms_respects_explicit_value() {
+        assert_eq!(
+            parse_jitterbuffer_latency_ms(&props(&[(
+                "jitterbuffer_latency_ms",
+                PropertyValue::Int(150)
+            )])),
+            150
+        );
+    }
+
+    #[test]
+    fn jitterbuffer_latency_ms_clamps_negative_to_zero() {
+        assert_eq!(
+            parse_jitterbuffer_latency_ms(&props(&[(
+                "jitterbuffer_latency_ms",
+                PropertyValue::Int(-50)
+            )])),
+            0
+        );
+    }
 }
