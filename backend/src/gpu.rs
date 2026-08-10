@@ -1,10 +1,18 @@
 //! GPU capability detection and video conversion mode selection.
 //!
 //! This module detects at startup whether GPU-accelerated video conversion
-//! with CUDA-GL interop is supported. On systems where it works (native Linux
-//! with X11 and NVIDIA drivers), we use `autovideoconvert` for better performance.
-//! On systems where it fails (WSL, headless/GBM, broken interop), we fall back
-//! to software `videoconvert`.
+//! is supported, and picks between `autovideoconvert` (which auto-inserts
+//! bridge elements such as `gldownload`/`glcolorconvert` when GL-memory
+//! frames need to reach a non-GL element, e.g. an encoder) and plain
+//! `videoconvert` (software-only; cannot accept `memory:GLMemory` caps).
+//!
+//! - On macOS there is no CUDA to worry about, so `autovideoconvert` is
+//!   always used (see `detect_gpu_capabilities`).
+//! - On Linux, GPU accel additionally requires CUDA-GL interop with NVENC.
+//!   On systems where it works (native Linux with X11 and NVIDIA drivers),
+//!   we use `autovideoconvert` for better performance. On systems where it
+//!   fails (WSL, headless/GBM, broken interop), we fall back to software
+//!   `videoconvert`.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -224,6 +232,23 @@ pub fn detect_gpu_capabilities() -> VideoConvertMode {
     // Probe GL renderer info early (best-effort, independent of CUDA-GL interop)
     let gl_info = detect_gl_renderer();
     let _ = GL_RENDERER_INFO.set(gl_info);
+
+    // macOS has no CUDA/NVENC, so the interop test below (which is entirely
+    // CUDA-specific) never applies here and would always force the software
+    // fallback. But GL-memory frames still occur on macOS (e.g. from the GL
+    // video mixer) and need bridging to non-GL encoders like vtenc_h264_hw.
+    // autovideoconvert auto-inserts the needed gldownload/glcolorconvert
+    // bridge; plain videoconvert cannot accept memory:GLMemory caps at all.
+    // There's no known autovideoconvert breakage on macOS to guard against
+    // (unlike the WSL/CUDA-GL cases below), so always use it here.
+    if cfg!(target_os = "macos") {
+        info!(
+            "macOS detected - using GPU-accelerated video conversion (autovideoconvert bridges GL memory)"
+        );
+        let mode = VideoConvertMode::GpuAccelerated;
+        let _ = VIDEO_CONVERT_MODE.set(mode);
+        return mode;
+    }
 
     // Fast path: WSL has broken CUDA-GL interop, skip expensive test
     if is_wsl() {
