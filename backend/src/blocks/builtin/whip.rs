@@ -139,6 +139,28 @@ impl BlockBuilder for WHIPInputBuilder {
 // WHIP Input (whipserversrc - hosts WHIP server)
 // ============================================================================
 
+/// Parse do_retransmission from properties (default: true).
+fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool {
+    properties
+        .get("do_retransmission")
+        .and_then(|v| match v {
+            PropertyValue::Bool(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+/// Parse jitterbuffer_latency_ms from properties (default: 400, negative clamps to 0).
+fn parse_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValue>) -> u32 {
+    properties
+        .get("jitterbuffer_latency_ms")
+        .and_then(|v| match v {
+            PropertyValue::Int(i) => Some((*i).max(0) as u32),
+            _ => None,
+        })
+        .unwrap_or(400)
+}
+
 /// Build WHIP Input per-slot output chains.
 ///
 /// At build time, per-slot chains are created in the main pipeline:
@@ -180,6 +202,16 @@ fn build_whipserversrc(
             _ => None,
         })
         .unwrap_or(true);
+
+    let do_retransmission = parse_do_retransmission(properties);
+
+    // Jitterbuffer latency: how long to buffer before dropping/releasing packets.
+    // Left unset, webrtcbin defaults to 200ms, which combined with
+    // drop-on-latency=true (below) can be too tight for an initial video
+    // keyframe's packet burst on a freshly-created per-session pipeline,
+    // causing the whole video stream to stall (never reaching decodebin)
+    // even though the packets arrived fine over the network.
+    let jitterbuffer_latency_ms = parse_jitterbuffer_latency_ms(properties);
 
     let max_video_bitrate_kbps = properties
         .get("max_video_bitrate")
@@ -368,24 +400,100 @@ fn build_whipserversrc(
                     ElementPadRef::pad(&decodebin_id, "sink"),
                 ));
 
-                // decodebin has dynamic pads — connect pad-added to link to videoconvert
+                // decodebin can autoplug a GL-accelerated decoder (e.g. vtdec_hw),
+                // producing video/x-raw(memory:GLMemory) frames instead of plain
+                // system-memory video/x-raw. videoconvert passes GL memory through
+                // unchanged rather than downloading it, and downstream consumers
+                // (encoders for WHEP Output, etc.) generally only accept
+                // system-memory video/x-raw — without a gldownload, encoding
+                // silently fails ("no codec present that can handle the stream's
+                // type"). A gldownload is only inserted when the negotiated pad
+                // caps actually carry GL memory: gldownload is a GstGLBaseFilter,
+                // which unconditionally requires a negotiated GL context to reach
+                // PLAYING, so inserting it unconditionally would impose a hard GL
+                // dependency on every session and break decode on GL-less hosts
+                // (headless servers, WSL, CPU-only fallback — see gpu.rs). If
+                // caps are ever unavailable, default to the non-GL path: skipping
+                // gldownload when it was needed reproduces the already-diagnosed
+                // GL-memory bug, but inserting it when not needed reproduces a
+                // newer, harder-to-diagnose GL-context failure — the former is
+                // the safer default.
                 let videoconvert_weak = videoconvert.downgrade();
+                let decodebin_weak = decodebin.downgrade();
+                let instance_id_for_pad = instance_id.to_string();
                 decodebin.connect_pad_added(move |_dec, src_pad| {
                     if src_pad.direction() != gst::PadDirection::Src {
                         return;
                     }
-                    if let Some(vc) = videoconvert_weak.upgrade() {
-                        let sink = vc.static_pad("sink").unwrap();
-                        if !sink.is_linked() {
-                            if let Err(e) = src_pad.link(&sink) {
-                                warn!("Failed to link decodebin video pad to videoconvert: {:?}", e);
-                            } else {
-                                info!(
-                                    "WHIP Input: decodebin video pad linked to videoconvert for slot {}",
-                                    slot
-                                );
-                            }
+                    let Some(vc) = videoconvert_weak.upgrade() else {
+                        return;
+                    };
+                    let sink = vc.static_pad("sink").unwrap();
+                    if sink.is_linked() {
+                        return;
+                    }
+
+                    let is_gl_memory = src_pad
+                        .current_caps()
+                        .map(|caps| caps.to_string().contains("memory:GLMemory"))
+                        .unwrap_or(false);
+
+                    if !is_gl_memory {
+                        if let Err(e) = src_pad.link(&sink) {
+                            warn!("Failed to link decodebin video pad to videoconvert: {:?}", e);
+                        } else {
+                            info!(
+                                "WHIP Input: decodebin video pad linked to videoconvert for slot {}",
+                                slot
+                            );
                         }
+                        return;
+                    }
+
+                    let Some(bin) = decodebin_weak
+                        .upgrade()
+                        .and_then(|dec| dec.parent())
+                        .and_then(|p| p.downcast::<gst::Bin>().ok())
+                    else {
+                        warn!("WHIP Input: decodebin has no parent bin, cannot insert gldownload for slot {}", slot);
+                        return;
+                    };
+
+                    let gldownload_id = format!("{}:gldownload_{}", instance_id_for_pad, slot);
+                    let gldownload = match gst::ElementFactory::make("gldownload")
+                        .name(&gldownload_id)
+                        .build()
+                    {
+                        Ok(e) => e,
+                        Err(e) => {
+                            warn!("WHIP Input: failed to create gldownload for slot {}: {:?}", slot, e);
+                            return;
+                        }
+                    };
+
+                    if let Err(e) = bin.add(&gldownload) {
+                        warn!("WHIP Input: failed to add gldownload to bin for slot {}: {:?}", slot, e);
+                        return;
+                    }
+
+                    let gldownload_src = gldownload.static_pad("src").unwrap();
+                    if let Err(e) = gldownload_src.link(&sink) {
+                        warn!("Failed to link gldownload -> videoconvert: {:?}", e);
+                        return;
+                    }
+                    if let Err(e) = gldownload.sync_state_with_parent() {
+                        warn!("WHIP Input: failed to sync gldownload state for slot {}: {:?}", slot, e);
+                        return;
+                    }
+
+                    let gldownload_sink = gldownload.static_pad("sink").unwrap();
+                    if let Err(e) = src_pad.link(&gldownload_sink) {
+                        warn!("Failed to link decodebin video pad to gldownload: {:?}", e);
+                    } else {
+                        info!(
+                            "WHIP Input: decodebin video pad carries GL memory, linked through gldownload for slot {}",
+                            slot
+                        );
                     }
                 });
 
@@ -415,8 +523,8 @@ fn build_whipserversrc(
     let turn_server = ctx.turn_server();
 
     info!(
-        "WHIP Input configured: endpoint_id='{}', stun={:?}, turn={:?}, mode={:?}, decode={}, max_sessions={} (whipserversrc created per-session)",
-        endpoint_id, stun_server, turn_server, mode, decode, max_sessions
+        "WHIP Input configured: endpoint_id='{}', stun={:?}, turn={:?}, mode={:?}, decode={}, do_retransmission={}, max_sessions={} (whipserversrc created per-session)",
+        endpoint_id, stun_server, turn_server, mode, decode, do_retransmission, max_sessions
     );
 
     // Register WHIP endpoint with the build context (port=0 placeholder, sessions get their own ports)
@@ -436,6 +544,8 @@ fn build_whipserversrc(
             ice_transport_policy: ctx.ice_transport_policy().to_string(),
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
+            do_retransmission,
+            jitterbuffer_latency_ms,
             dynamic_webrtcbin_store: ctx.dynamic_webrtcbin_store(),
             max_video_bitrate_kbps,
             max_sessions,
@@ -511,6 +621,8 @@ pub fn create_whipserversrc_for_session(
     let signaller = whipserversrc.property::<gst::glib::Object>("signaller");
     signaller.set_property("host-addr", &host_addr);
 
+    whipserversrc.set_property("do-retransmission", config.do_retransmission);
+
     // Configure codec negotiation based on mode
     if config.mode.has_audio() {
         let audio_codecs = gst::Array::new(["OPUS"]);
@@ -531,6 +643,7 @@ pub fn create_whipserversrc_for_session(
     let dynamic_webrtcbin_store = config.dynamic_webrtcbin_store.clone();
     let block_id_for_callback = config.instance_id.clone();
     let ice_transport_policy = config.ice_transport_policy.clone();
+    let jitterbuffer_latency_ms = config.jitterbuffer_latency_ms;
     // Flag to ensure only one cleanup request per session (shared across ICE callback,
     // inactivity watchdog, etc.)
     let cleanup_sent = Arc::new(AtomicBool::new(false));
@@ -559,6 +672,14 @@ pub fn create_whipserversrc_for_session(
                     info!(
                         "WHIP Input: Set ice-transport-policy={} on webrtcbin {}",
                         ice_transport_policy, element_name
+                    );
+                }
+
+                if element.has_property("latency") {
+                    element.set_property("latency", jitterbuffer_latency_ms);
+                    info!(
+                        "WHIP Input: Set jitterbuffer latency={}ms on webrtcbin {}",
+                        jitterbuffer_latency_ms, element_name
                     );
                 }
 
@@ -830,6 +951,41 @@ pub fn create_whipserversrc_for_session(
                     "WHIP Input: Pad {} (stream {}) → appsink → slot {} appsrc ({})",
                     pad_name, stream_num, slot, media_type
                 );
+
+                if media_type == "video" {
+                    // Proactively request a keyframe as soon as the video pad
+                    // connects, and keep retrying for a few seconds. Without
+                    // this, if the publisher's initial keyframe is
+                    // incomplete/lost before decodebin has a decoder element
+                    // to install the DISCONT-triggered recovery probe on (see
+                    // below), decodebin waits forever for a keyframe that
+                    // never arrives — a chicken-and-egg stall that's
+                    // otherwise invisible (packets keep flowing, just never a
+                    // usable one). With RTX disabled (see do_retransmission),
+                    // the keyframe response itself can also be lost with no
+                    // recovery, so a single request isn't reliable — retry a
+                    // few times, spaced out, until decode has had a fair
+                    // chance to succeed.
+                    let retry_pad = pad.clone();
+                    let retry_slot = slot;
+                    std::thread::Builder::new()
+                        .name(format!("whip-keyframe-retry-{}", retry_slot))
+                        .spawn(move || {
+                            for attempt in 0..5 {
+                                let fku = gst_video::UpstreamForceKeyUnitEvent::builder()
+                                    .all_headers(true)
+                                    .build();
+                                retry_pad.send_event(fku);
+                                info!(
+                                    "WHIP Input: Requested keyframe (PLI) on video pad for slot {} (attempt {})",
+                                    retry_slot,
+                                    attempt + 1
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(800));
+                            }
+                        })
+                        .ok();
+                }
 
                 let ts_offset = shared_ts_offset.clone();
                 let main_pipeline_for_ts = main_pipeline_weak.clone();
@@ -1445,6 +1601,34 @@ fn whip_input_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
+                name: "do_retransmission".to_string(),
+                label: "Retransmission (RTX)".to_string(),
+                description: "Request retransmission of lost packets from the publisher (NACK-based). Disable only for diagnostics; without it, any packet loss forces a full keyframe request instead of a cheap resend.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "do_retransmission".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "jitterbuffer_latency_ms".to_string(),
+                label: "Jitterbuffer Latency (ms)".to_string(),
+                description: "How long to buffer incoming RTP before releasing/dropping it. Too low can cause an initial video keyframe's packet burst to be dropped locally on connect, stalling video entirely even though packets arrived fine. Increase if video never starts.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(400)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "jitterbuffer_latency_ms".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "max_video_bitrate".to_string(),
                 label: "Max Video Bitrate (kbps)".to_string(),
                 description: "Maximum video bitrate hint sent to the browser via SDP. The browser's encoder will ramp up to this value.".to_string(),
@@ -1624,4 +1808,64 @@ fn setup_incoming_rtp_handler(
     });
 
     info!("WHIP: Incoming RTP handler installed for {}", instance_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn props(entries: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn do_retransmission_defaults_to_true() {
+        assert!(parse_do_retransmission(&props(&[])));
+    }
+
+    #[test]
+    fn do_retransmission_respects_explicit_true() {
+        assert!(parse_do_retransmission(&props(&[(
+            "do_retransmission",
+            PropertyValue::Bool(true)
+        )])));
+    }
+
+    #[test]
+    fn do_retransmission_respects_explicit_false() {
+        assert!(!parse_do_retransmission(&props(&[(
+            "do_retransmission",
+            PropertyValue::Bool(false)
+        )])));
+    }
+
+    #[test]
+    fn jitterbuffer_latency_ms_defaults_to_400() {
+        assert_eq!(parse_jitterbuffer_latency_ms(&props(&[])), 400);
+    }
+
+    #[test]
+    fn jitterbuffer_latency_ms_respects_explicit_value() {
+        assert_eq!(
+            parse_jitterbuffer_latency_ms(&props(&[(
+                "jitterbuffer_latency_ms",
+                PropertyValue::Int(150)
+            )])),
+            150
+        );
+    }
+
+    #[test]
+    fn jitterbuffer_latency_ms_clamps_negative_to_zero() {
+        assert_eq!(
+            parse_jitterbuffer_latency_ms(&props(&[(
+                "jitterbuffer_latency_ms",
+                PropertyValue::Int(-50)
+            )])),
+            0
+        );
+    }
 }
