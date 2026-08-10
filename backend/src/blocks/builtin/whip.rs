@@ -831,6 +831,41 @@ pub fn create_whipserversrc_for_session(
                     pad_name, stream_num, slot, media_type
                 );
 
+                if media_type == "video" {
+                    // Proactively request a keyframe as soon as the video pad
+                    // connects, and keep retrying for a few seconds. Without
+                    // this, if the publisher's initial keyframe is
+                    // incomplete/lost before decodebin has a decoder element
+                    // to install the existing DISCONT-triggered recovery
+                    // probe on, decodebin waits forever for a keyframe that
+                    // never arrives — a chicken-and-egg stall that's
+                    // otherwise invisible (packets keep flowing, just never a
+                    // usable one). If retransmission is disabled/unavailable,
+                    // the keyframe response itself can also be lost with no
+                    // recovery, so a single request isn't reliable — retry a
+                    // few times, spaced out, until decode has had a fair
+                    // chance to succeed.
+                    let retry_pad = pad.clone();
+                    let retry_slot = slot;
+                    std::thread::Builder::new()
+                        .name(format!("whip-keyframe-retry-{}", retry_slot))
+                        .spawn(move || {
+                            for attempt in 0..5 {
+                                let fku = gst_video::UpstreamForceKeyUnitEvent::builder()
+                                    .all_headers(true)
+                                    .build();
+                                retry_pad.send_event(fku);
+                                info!(
+                                    "WHIP Input: Requested keyframe (PLI) on video pad for slot {} (attempt {})",
+                                    retry_slot,
+                                    attempt + 1
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(800));
+                            }
+                        })
+                        .ok();
+                }
+
                 let ts_offset = shared_ts_offset.clone();
                 let main_pipeline_for_ts = main_pipeline_weak.clone();
                 let media_for_log = media_type.to_string();
