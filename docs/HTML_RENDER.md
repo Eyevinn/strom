@@ -240,7 +240,8 @@ The build uses Ubuntu Questing to match the strom base image's glibc version.
 
 ## Limitations
 
-- **Docker only**: CEF requires X11, which the strom-full image provides via Xvfb
+- **Linux: X11 required**: CEF needs an X server on Linux, which the strom-full image provides via Xvfb. This is why `strom-full` is the supported way to run HTML sources.
+- **macOS: not X11**: CEF renders offscreen through its own macOS path, so Xvfb is not involved and the X11 requirement above does not apply. Running `cefsrc` from a native macOS build is not supported yet — it needs macOS build fixes in gstcefsrc ([centricular/gstcefsrc#110](https://github.com/centricular/gstcefsrc/pull/110)) and, in headless mode, a Cocoa run loop on the main thread (#669). CEF on macOS also refuses to initialise unless the host process is inside an `.app` bundle.
 - **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
