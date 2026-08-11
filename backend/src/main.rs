@@ -299,6 +299,26 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
+    // Give CEF (the `cefsrc` element behind HTML sources and DSK graphics) a
+    // per-instance cache directory. The strom-full Docker image sets
+    // GST_CEF_CACHE_LOCATION in its entrypoint, but native runs get Chromium's
+    // default, which warns
+    //
+    //   Please customize CefSettings.root_cache_path for your application. Use
+    //   of the default value may lead to unintended process singleton behavior.
+    //
+    // and makes Chromium's process singleton shared: a second Strom instance on
+    // the same machine cannot start any cefsrc element, failing in
+    // gst_base_src_start() so the flow start returns 500 "Element failed to
+    // change its state". Deriving the directory from the data directory keeps
+    // instances isolated, and gives CEF a warm on-disk profile, which also cuts
+    // repeat flow-start latency. An explicitly configured value always wins.
+    if std::env::var_os("GST_CEF_CACHE_LOCATION").is_none() {
+        if let Some(data_dir) = config.flows_path.parent() {
+            std::env::set_var("GST_CEF_CACHE_LOCATION", data_dir.join("cef-cache"));
+        }
+    }
+
     // Initialize logging with optional file output and log level
     let (log_reload_handle, default_log_filter) =
         init_logging(config.log_file.as_ref(), config.log_level.as_ref()).unwrap_or_else(|e| {
