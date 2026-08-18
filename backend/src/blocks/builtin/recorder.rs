@@ -17,6 +17,10 @@
 //! audio_in_N (identity) --[pad probe]--> [parser chain] --> splitmuxsink:audio_0..N
 //! ```
 //!
+//! The splitmuxsink sink pads are requested from inside those pad probes, not up front:
+//! splitmuxsink stalls forever if a requested pad is never fed, so a configured-but-
+//! unconnected track must not have a pad at all.
+//!
 //! Output files are written to: {media_path}/{output_dir}/{filename_prefix}_%05d.{ext}
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
@@ -344,76 +348,31 @@ impl BlockBuilder for RecorderBuilder {
         let mut elements: Vec<(String, gst::Element)> =
             vec![(sink_id.clone(), splitmuxsink.clone())];
 
-        // --- Request pads from splitmuxsink ---
-        // All splitmuxsink sink pads are "On request". Pads must be requested before
-        // the pipeline starts; splitmuxsink manages them across file segments internally.
+        // --- splitmuxsink sink pads are requested lazily, from the caps probes below ---
+        //
+        // All splitmuxsink sink pads are "On request", but they must NOT be requested
+        // up front. splitmuxsink only releases a completed GOP once *every* requested
+        // sink pad has advanced to the start of the next GOP. A pad that is requested
+        // but never fed keeps its input running time at NONE forever, so the sink waits
+        // on it indefinitely and the recording stays empty.
+        //
+        // That means a track configured here but left unconnected — or connected but
+        // carrying a codec we cannot handle — must never get a pad. Each input chain
+        // therefore requests its pad from inside its caps probe, at the moment real
+        // data is known to be arriving.
         //
         // splitmuxsink pad templates:
         //   video           -> first video track (request_pad_simple)
         //   video_aux_%u    -> additional video tracks (request_pad via template)
         //   audio_%u        -> audio tracks (request_pad via template)
-        let video_aux_template = if num_video_tracks > 1 {
-            Some(splitmuxsink.pad_template("video_aux_%u").ok_or_else(|| {
-                BlockBuildError::ElementCreation(
-                    "splitmuxsink: no video_aux_%u pad template".to_string(),
-                )
-            })?)
-        } else {
-            None
-        };
-
-        let video_sink_pad_names: Vec<String> = (0..num_video_tracks)
-            .map(|i| {
-                let pad = if i == 0 {
-                    splitmuxsink.request_pad_simple("video").ok_or_else(|| {
-                        BlockBuildError::ElementCreation(
-                            "splitmuxsink: failed to request video pad".to_string(),
-                        )
-                    })?
-                } else {
-                    let tmpl = video_aux_template.as_ref().unwrap();
-                    splitmuxsink.request_pad(tmpl, None, None).ok_or_else(|| {
-                        BlockBuildError::ElementCreation(format!(
-                            "splitmuxsink: failed to request video_aux pad for track {}",
-                            i
-                        ))
-                    })?
-                };
-                debug!(
-                    "Recorder {}: requested splitmuxsink pad: {}",
-                    instance_id,
-                    pad.name()
-                );
-                Ok::<String, BlockBuildError>(pad.name().to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let audio_template = splitmuxsink.pad_template("audio_%u").ok_or_else(|| {
-            BlockBuildError::ElementCreation("splitmuxsink: no audio_%u pad template".to_string())
-        })?;
-
-        let audio_sink_pad_names: Vec<String> = (0..num_audio_tracks)
-            .map(|_| {
-                splitmuxsink
-                    .request_pad(&audio_template, None, None)
-                    .ok_or_else(|| {
-                        BlockBuildError::ElementCreation(
-                            "splitmuxsink: failed to request audio pad".to_string(),
-                        )
-                    })
-                    .map(|p| {
-                        debug!(
-                            "Recorder {}: requested splitmuxsink audio pad: {}",
-                            instance_id,
-                            p.name()
-                        );
-                        p.name().to_string()
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        //
+        // Caveat: mp4mux/qtmux refuses request pads once it has started writing
+        // ("Not providing request pad after stream start"), so a track whose caps only
+        // arrive after the first GOP has been muxed cannot be added any more. Such a
+        // track is dropped with an error rather than stalling the whole recording.
 
         // --- Create video input chains ---
-        for (vi, video_sink_pad_name_for_chain) in video_sink_pad_names.iter().enumerate() {
+        for vi in 0..num_video_tracks {
             let video_input_id = format!("{}:video_input_{}", instance_id, vi);
             let video_input = gst::ElementFactory::make("identity")
                 .name(&video_input_id)
@@ -425,7 +384,6 @@ impl BlockBuilder for RecorderBuilder {
             let parser_inserted = Arc::new(AtomicBool::new(false));
             let splitmuxsink_weak = splitmuxsink.downgrade();
             let instance_id_clone = instance_id.to_string();
-            let video_sink_pad_name_clone = video_sink_pad_name_for_chain.clone();
 
             // Use a pad probe on the identity src pad to detect caps and insert parser
             let src_pad = video_input.static_pad("src").ok_or_else(|| {
@@ -539,15 +497,6 @@ impl BlockBuilder for RecorderBuilder {
                         }
                     };
 
-                    // Get the pre-requested video sink pad from splitmuxsink
-                    let sink_pad = match splitmuxsink.static_pad(&video_sink_pad_name_clone) {
-                        Some(p) => p,
-                        None => {
-                            error!("Recorder {}: could not find pad {} on splitmuxsink", instance_id_clone, video_sink_pad_name_clone);
-                            return gst::PadProbeReturn::Ok;
-                        }
-                    };
-
                     // Each splitmuxsink sink pad needs its own streaming thread. splitmuxsink
                     // blocks one input pad while waiting for the others to reach the next GOP
                     // boundary, so if two pads are fed by a single upstream streaming task (for
@@ -595,8 +544,40 @@ impl BlockBuilder for RecorderBuilder {
                         error!("Recorder {}: failed to link parser to video queue: {:?}", instance_id_clone, e);
                         return gst::PadProbeReturn::Ok;
                     }
+
+                    // Request the splitmuxsink pad only now that this track is known to
+                    // carry supported video — see the note above the input chains.
+                    let requested = if vi == 0 {
+                        splitmuxsink.request_pad_simple("video")
+                    } else {
+                        splitmuxsink
+                            .pad_template("video_aux_%u")
+                            .and_then(|tmpl| splitmuxsink.request_pad(&tmpl, None, None))
+                    };
+                    let sink_pad = match requested {
+                        Some(p) => p,
+                        None => {
+                            error!(
+                                "Recorder {}: splitmuxsink refused a sink pad for video track {}. \
+                                 If the muxer has already started writing it cannot accept new \
+                                 tracks (mp4mux), so this track will not be recorded.",
+                                instance_id_clone, vi
+                            );
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+                    debug!(
+                        "Recorder {}: requested splitmuxsink pad {} for video track {}",
+                        instance_id_clone,
+                        sink_pad.name(),
+                        vi
+                    );
+
                     if let Err(e) = queue_src.link(&sink_pad) {
                         error!("Recorder {}: failed to link video queue to splitmuxsink: {:?}", instance_id_clone, e);
+                        // Never leave a requested pad unlinked: splitmuxsink would wait on
+                        // it forever and the whole recording would stall.
+                        splitmuxsink.release_request_pad(&sink_pad);
                         return gst::PadProbeReturn::Ok;
                     }
 
@@ -609,8 +590,7 @@ impl BlockBuilder for RecorderBuilder {
         }
 
         // --- Create audio input chains ---
-        for (i, audio_sink_pad_name) in audio_sink_pad_names.iter().enumerate() {
-            let audio_sink_pad_name = audio_sink_pad_name.clone();
+        for i in 0..num_audio_tracks {
             let audio_input_id = format!("{}:audio_input_{}", instance_id, i);
             let audio_input = gst::ElementFactory::make("identity")
                 .name(&audio_input_id)
@@ -676,14 +656,6 @@ impl BlockBuilder for RecorderBuilder {
                         }
                     };
 
-                    let sink_pad = match splitmuxsink.static_pad(&audio_sink_pad_name) {
-                        Some(p) => p,
-                        None => {
-                            error!("Recorder {}: could not find {} on splitmuxsink", instance_id_clone, audio_sink_pad_name);
-                            return gst::PadProbeReturn::Ok;
-                        }
-                    };
-
                     // Only accept pre-encoded audio. Raw audio requires an encoder before the recorder.
                     if caps_name == "audio/x-raw" {
                         warn!(
@@ -711,6 +683,7 @@ impl BlockBuilder for RecorderBuilder {
 
                     // parser_factory is always Some here (unknown codecs returned early above)
                     let factory = parser_factory.unwrap();
+
                     let parser_name = format!("{}:audio_{}_parser", instance_id_clone, i);
                     let parser = match gst::ElementFactory::make(factory)
                         .name(&parser_name)
@@ -789,8 +762,39 @@ impl BlockBuilder for RecorderBuilder {
                         error!("Recorder {}: failed to link audio parser to audio queue: {:?}", instance_id_clone, e);
                         return gst::PadProbeReturn::Ok;
                     }
+
+                    // Request the splitmuxsink pad only now that this track is known to
+                    // carry supported audio — see the note above the input chains. The pad
+                    // is named after the input index so track order does not depend on the
+                    // order in which caps happen to arrive.
+                    let requested_name = format!("audio_{}", i);
+                    let requested = splitmuxsink.pad_template("audio_%u").and_then(|tmpl| {
+                        splitmuxsink.request_pad(&tmpl, Some(requested_name.as_str()), None)
+                    });
+                    let sink_pad = match requested {
+                        Some(p) => p,
+                        None => {
+                            error!(
+                                "Recorder {}: splitmuxsink refused a sink pad for audio track {}. \
+                                 If the muxer has already started writing it cannot accept new \
+                                 tracks (mp4mux), so this track will not be recorded.",
+                                instance_id_clone, i
+                            );
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+                    debug!(
+                        "Recorder {}: requested splitmuxsink pad {} for audio track {}",
+                        instance_id_clone,
+                        sink_pad.name(),
+                        i
+                    );
+
                     if let Err(e) = queue_src.link(&sink_pad) {
                         error!("Recorder {}: failed to link audio queue to splitmuxsink: {:?}", instance_id_clone, e);
+                        // Never leave a requested pad unlinked: splitmuxsink would wait on
+                        // it forever and the whole recording would stall.
+                        splitmuxsink.release_request_pad(&sink_pad);
                         return gst::PadProbeReturn::Ok;
                     }
                     info!("Recorder {}: audio_{} chain linked: identity -> {} -> queue -> splitmuxsink", instance_id_clone, i, factory);
