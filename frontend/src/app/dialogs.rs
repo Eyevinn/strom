@@ -147,7 +147,7 @@ impl StromApp {
                                                 flow_label.rect.left_bottom(),
                                                 flow_label.rect.right_bottom(),
                                             ],
-                                            egui::Stroke::new(1.0, Color32::GRAY),
+                                            egui::Stroke::new(1.0_f32, Color32::GRAY),
                                         );
                                     }
                                     if flow_label.clicked() {
@@ -174,7 +174,7 @@ impl StromApp {
                                                 source_label.rect.right_bottom(),
                                             ],
                                             egui::Stroke::new(
-                                                1.0,
+                                                1.0_f32,
                                                 Color32::from_rgb(150, 150, 255),
                                             ),
                                         );

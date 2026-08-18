@@ -14,11 +14,11 @@ fn section_frame(color: Color32, enabled: bool) -> egui::Frame {
                 25 + color.g() / 5,
                 30 + color.b() / 5,
             ))
-            .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.6)))
+            .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.6)))
     } else {
         egui::Frame::NONE
             .fill(Color32::from_rgb(25, 25, 28))
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(40, 40, 44)))
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(40, 40, 44)))
     };
     base.corner_radius(4.0).inner_margin(6.0)
 }

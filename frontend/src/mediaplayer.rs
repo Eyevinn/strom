@@ -379,7 +379,7 @@ pub fn show_compact(ui: &mut Ui, player_data: &MediaPlayerData) -> Option<(Strin
                 rect,
                 CornerRadius::same(2),
                 Color32::TRANSPARENT,
-                Stroke::new(1.0, Color32::from_gray(80)),
+                Stroke::new(1.0_f32, Color32::from_gray(80)),
                 egui::epaint::StrokeKind::Inside,
             );
 
@@ -709,7 +709,7 @@ impl PlaylistEditor {
                                         };
                                         ui.painter().line_segment(
                                             [rect.center_top(), rect.center_bottom()],
-                                            egui::Stroke::new(1.0, color),
+                                            egui::Stroke::new(1.0_f32, color),
                                         );
                                         if resp.dragged() {
                                             if let Some(pos) = ui.ctx().pointer_interact_pos() {

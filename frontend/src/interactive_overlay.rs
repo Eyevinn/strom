@@ -200,7 +200,7 @@ impl OverlayState {
                 painter.rect_stroke(
                     grid_rect,
                     4.0,
-                    egui::Stroke::new(2.0, Color32::from_rgb(60, 60, 80)),
+                    egui::Stroke::new(2.0_f32, Color32::from_rgb(60, 60, 80)),
                     StrokeKind::Inside,
                 );
 
@@ -208,8 +208,10 @@ impl OverlayState {
                 for i in 1..GRID_SIZE {
                     let x = grid_origin.x + i as f32 * cell_size;
                     let y = grid_origin.y + i as f32 * cell_size;
-                    let grid_line =
-                        egui::Stroke::new(0.5, Color32::from_rgba_premultiplied(40, 40, 60, 80));
+                    let grid_line = egui::Stroke::new(
+                        0.5_f32,
+                        Color32::from_rgba_premultiplied(40, 40, 60, 80),
+                    );
                     painter.line_segment(
                         [
                             Pos2::new(x, grid_origin.y),

@@ -50,7 +50,7 @@ impl CompositorEditor {
         painter.rect_stroke(
             screen_output_rect,
             0.0,
-            Stroke::new(2.0, Color32::from_gray(100)),
+            Stroke::new(2.0_f32, Color32::from_gray(100)),
             StrokeKind::Inside,
         );
 
@@ -59,12 +59,12 @@ impl CompositorEditor {
             for x in (0..self.output_width).step_by(self.grid_size as usize) {
                 let p1 = to_screen(Pos2::new(x as f32, 0.0));
                 let p2 = to_screen(Pos2::new(x as f32, self.output_height as f32));
-                painter.line_segment([p1, p2], Stroke::new(1.0, Color32::from_gray(40)));
+                painter.line_segment([p1, p2], Stroke::new(1.0_f32, Color32::from_gray(40)));
             }
             for y in (0..self.output_height).step_by(self.grid_size as usize) {
                 let p1 = to_screen(Pos2::new(0.0, y as f32));
                 let p2 = to_screen(Pos2::new(self.output_width as f32, y as f32));
-                painter.line_segment([p1, p2], Stroke::new(1.0, Color32::from_gray(40)));
+                painter.line_segment([p1, p2], Stroke::new(1.0_f32, Color32::from_gray(40)));
             }
         }
 
@@ -126,7 +126,7 @@ impl CompositorEditor {
                 painter.rect_filled(screen_rect, 0.0, color);
             }
 
-            let border_width = if input.selected { 3.0 } else { 1.0 };
+            let border_width = if input.selected { 3.0_f32 } else { 1.0_f32 };
             let border_color = if input.selected {
                 Color32::WHITE
             } else if dimmed {
@@ -191,7 +191,7 @@ impl CompositorEditor {
                     painter.rect_stroke(
                         screen_handle_rect,
                         2.0,
-                        Stroke::new(1.0, Color32::BLACK),
+                        Stroke::new(1.0_f32, Color32::BLACK),
                         StrokeKind::Inside,
                     );
                 }

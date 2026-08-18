@@ -680,7 +680,7 @@ impl GraphEditor {
                     [from_screen_pos, control1, control2, to_pos],
                     false,
                     Color32::TRANSPARENT,
-                    Stroke::new(2.0, Color32::from_rgb(100, 150, 255)),
+                    Stroke::new(2.0_f32, Color32::from_rgb(100, 150, 255)),
                 ));
             }
 
@@ -742,7 +742,7 @@ impl GraphEditor {
         while x < rect.max.x {
             painter.line_segment(
                 [pos2(x, rect.min.y), pos2(x, rect.max.y)],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
             x += grid_spacing;
         }
@@ -752,7 +752,7 @@ impl GraphEditor {
         while y < rect.max.y {
             painter.line_segment(
                 [pos2(rect.min.x, y), pos2(rect.max.x, y)],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
             y += grid_spacing;
         }
@@ -799,13 +799,13 @@ impl GraphEditor {
         };
 
         let stroke_width = if has_qos_issues {
-            3.0 // Thicker border for QoS issues
+            3.0_f32 // Thicker border for QoS issues
         } else if is_selected {
-            2.5
+            2.5_f32
         } else if is_hovered {
-            1.5
+            1.5_f32
         } else {
-            1.0
+            1.0_f32
         };
 
         let fill_color = if ui.visuals().dark_mode {
@@ -1279,13 +1279,13 @@ impl GraphEditor {
         };
 
         let stroke_width = if has_qos_issues {
-            3.0 // Thicker border for QoS issues
+            3.0_f32 // Thicker border for QoS issues
         } else if is_selected {
-            2.0
+            2.0_f32
         } else if is_hovered {
-            1.5
+            1.5_f32
         } else {
-            1.0
+            1.0_f32
         };
 
         let fill_color = if let Some(color) = custom_fill {
