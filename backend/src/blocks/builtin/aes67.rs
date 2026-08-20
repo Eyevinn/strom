@@ -19,6 +19,8 @@ const AES67_INPUT_DEFAULT_BUFFER_DURATION_MS: i64 =
 // AES67 Output defaults
 const AES67_OUTPUT_DEFAULT_TTL: i64 = 32;
 const AES67_OUTPUT_DEFAULT_QOS_DSCP: &str = "0x2E"; // DSCP EF (Expedited Forwarding) per AES67 standard
+const AES67_OUTPUT_DEFAULT_PAYLOAD_TYPE: i64 =
+    strom_types::block::DEFAULT_AES67_OUTPUT_PAYLOAD_TYPE;
 
 /// Parse DSCP value from string (hex like "0x2E" or "disabled")
 /// Returns the integer value for udpsink qos-dscp property
@@ -663,6 +665,30 @@ impl BlockBuilder for AES67OutputBuilder {
             })
             .unwrap_or_else(|| parse_dscp_value(AES67_OUTPUT_DEFAULT_QOS_DSCP));
 
+        let payload_type = properties
+            .get("payload_type")
+            .and_then(|v| match v {
+                PropertyValue::Int(i) => Some(*i),
+                PropertyValue::String(s) => s.parse::<i64>().ok(),
+                _ => None,
+            })
+            .unwrap_or(AES67_OUTPUT_DEFAULT_PAYLOAD_TYPE);
+
+        if !(0..=127).contains(&payload_type) {
+            return Err(BlockBuildError::InvalidConfiguration(format!(
+                "Invalid RTP payload type: {}. Must be between 0 and 127.",
+                payload_type
+            )));
+        }
+
+        if !(96..=127).contains(&payload_type) {
+            warn!(
+                "AES67 Output [{}]: Payload type {} is outside the dynamic range (96-127). \
+                 AES67 requires a dynamic payload type for L16/L24 streams; receivers may reject the stream.",
+                instance_id, payload_type
+            );
+        }
+
         // Validate packet size fits within AES67/Ethernet MTU constraints
         // RTP payload must fit in ~1440 bytes (1500 MTU - 20 IP - 8 UDP - 12 RTP - ~20 safety margin)
         // Payload size = framecount × channels × bytes_per_sample
@@ -730,6 +756,7 @@ impl BlockBuilder for AES67OutputBuilder {
         let payloader = gst::ElementFactory::make(payloader_type)
             .name(&payloader_id)
             .property("timestamp-offset", 0u32)
+            .property("pt", payload_type as u32)
             .property("min-ptime", ptime_ns)
             .property("max-ptime", ptime_ns)
             .build()
@@ -762,8 +789,8 @@ impl BlockBuilder for AES67OutputBuilder {
         }
 
         debug!(
-            "AES67 Output [{}]: Multicast TTL={}, QoS DSCP={}",
-            instance_id, ttl, qos_dscp
+            "AES67 Output [{}]: Multicast TTL={}, QoS DSCP={}, payload type={}",
+            instance_id, ttl, qos_dscp, payload_type
         );
 
         let udpsink = udpsink_builder
@@ -1023,6 +1050,20 @@ fn aes67_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "ptime".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "payload_type".to_string(),
+                label: "Payload Type".to_string(),
+                description: "RTP payload type used in the packets and announced in the SDP. Must be in the dynamic range 96-127 for AES67.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(AES67_OUTPUT_DEFAULT_PAYLOAD_TYPE)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "payload_type".to_string(),
                     transform: None,
                 },
                 live: false,

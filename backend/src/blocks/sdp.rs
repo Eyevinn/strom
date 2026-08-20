@@ -257,7 +257,18 @@ pub fn generate_aes67_output_sdp(
     // Use provided values or fall back to AES67 defaults: 48kHz, 2 channels
     let sample_rate = sample_rate.unwrap_or(48000);
     let channels = channels.unwrap_or(2);
-    let payload_type = 96; // Dynamic payload type
+
+    // RTP payload type - must match the "pt" property set on the payloader
+    let payload_type = block
+        .properties
+        .get("payload_type")
+        .and_then(|v| match v {
+            PropertyValue::Int(i) => Some(*i),
+            PropertyValue::String(s) => s.parse::<i64>().ok(),
+            _ => None,
+        })
+        .filter(|pt| (0..=127).contains(pt))
+        .unwrap_or(strom_types::block::DEFAULT_AES67_OUTPUT_PAYLOAD_TYPE);
 
     // Determine encoding name based on bit depth
     let encoding = match bit_depth {
@@ -429,6 +440,50 @@ mod tests {
         assert!(sdp.contains("a=mediaclk:sender"));
         // Multicast should have source-filter with default origin IP
         assert!(sdp.contains("a=source-filter: incl IN IP4 239.69.1.1 0.0.0.0"));
+    }
+
+    #[test]
+    fn test_generate_sdp_custom_payload_type() {
+        let mut properties = HashMap::new();
+        properties.insert("payload_type".to_string(), PropertyValue::Int(98));
+
+        let block = BlockInstance {
+            id: "block_0".to_string(),
+            block_definition_id: "builtin.aes67_output".to_string(),
+            name: None,
+            properties,
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        };
+
+        let sdp =
+            generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
+
+        assert!(sdp.contains("m=audio 5004 RTP/AVP 98"));
+        assert!(sdp.contains("a=rtpmap:98 L24/48000/2"));
+    }
+
+    #[test]
+    fn test_generate_sdp_out_of_range_payload_type_falls_back() {
+        let mut properties = HashMap::new();
+        properties.insert("payload_type".to_string(), PropertyValue::Int(200));
+
+        let block = BlockInstance {
+            id: "block_0".to_string(),
+            block_definition_id: "builtin.aes67_output".to_string(),
+            name: None,
+            properties,
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        };
+
+        let sdp =
+            generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
+
+        assert!(sdp.contains("m=audio 5004 RTP/AVP 96"));
+        assert!(sdp.contains("a=rtpmap:96 L24/48000/2"));
     }
 
     #[test]
