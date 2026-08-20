@@ -139,7 +139,15 @@ impl BlockBuilder for WHIPInputBuilder {
 // WHIP Input (whipserversrc - hosts WHIP server)
 // ============================================================================
 
-/// Parse do_retransmission from properties (default: true).
+/// Parse do_retransmission from properties.
+///
+/// Defaults to `false`, which diverges from `whipserversrc`'s own default of
+/// `true`. RTX on the receive leg feeds retransmitted and reordered packets
+/// into `rtph264depay`, which is where an unfixed gst-plugins-base bug
+/// (gstreamer#5057) aborts the whole process from a `g_assert` in
+/// `gst_rtp_base_depayload_handle_buffer`. Remote network input must not be
+/// able to kill the server, so the safe value is the default until upstream
+/// lands a fix; set this to `true` to get RTX back once it does.
 fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool {
     properties
         .get("do_retransmission")
@@ -147,7 +155,7 @@ fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool 
             PropertyValue::Bool(b) => Some(*b),
             _ => None,
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// Parse jitterbuffer_latency_ms from properties (default: 400, negative clamps to 0).
@@ -621,6 +629,7 @@ pub fn create_whipserversrc_for_session(
     let signaller = whipserversrc.property::<gst::glib::Object>("signaller");
     signaller.set_property("host-addr", &host_addr);
 
+    // Defaults to false, unlike whipserversrc itself — see parse_do_retransmission.
     whipserversrc.set_property("do-retransmission", config.do_retransmission);
 
     // Configure codec negotiation based on mode
@@ -1603,9 +1612,9 @@ fn whip_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "do_retransmission".to_string(),
                 label: "Retransmission (RTX)".to_string(),
-                description: "Request retransmission of lost packets from the publisher (NACK-based). Disable only for diagnostics; without it, any packet loss forces a full keyframe request instead of a cheap resend.".to_string(),
+                description: "Request retransmission of lost packets from the publisher (NACK-based). Off by default: RTX on the receive leg can trigger an unfixed gst-plugins-base crash (gstreamer#5057) that aborts the whole process. Enabling it restores cheap resends instead of a full keyframe request on every loss, at that risk.".to_string(),
                 property_type: PropertyType::Bool,
-                default_value: Some(PropertyValue::Bool(true)),
+                default_value: Some(PropertyValue::Bool(false)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "do_retransmission".to_string(),
@@ -1822,8 +1831,9 @@ mod tests {
     }
 
     #[test]
-    fn do_retransmission_defaults_to_true() {
-        assert!(parse_do_retransmission(&props(&[])));
+    fn do_retransmission_defaults_to_false() {
+        // Diverges from whipserversrc's own default; see parse_do_retransmission.
+        assert!(!parse_do_retransmission(&props(&[])));
     }
 
     #[test]

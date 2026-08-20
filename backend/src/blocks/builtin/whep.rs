@@ -168,6 +168,13 @@ fn explicit_track_count(properties: &HashMap<String, PropertyValue>, name: &str)
 }
 
 /// Parse do_retransmission from properties (default: true).
+///
+/// Unlike WHIP Input's identically named property, this one is *not* a
+/// workaround for gstreamer#5057. `whepserversink` is a send-only
+/// `webrtcsink`: the property maps to `do-nack` on a sendonly transceiver and
+/// to `rtprtxsend`, and no depayloader is ever instantiated on this path, so
+/// the crashing assertion is unreachable here. It is exposed purely as an
+/// ordinary bandwidth/quality tunable, and defaults to on.
 fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool {
     properties
         .get("do_retransmission")
@@ -1041,10 +1048,11 @@ fn build_whepserversink(
     // - RTX is reactive: it costs nothing while no packets are lost and only
     //   resends the exact packets the client NACKs. Without it, every loss
     //   escalates to PLI -> forced keyframe, which is far more expensive and
-    //   leaves the picture broken until the keyframe arrives. It can be
-    //   disabled as a workaround for a GStreamer bug where RTX combined with
-    //   RTP header-extension aggregation can crash the process (assertion in
-    //   gst_rtp_base_depayload_handle_buffer on priv->hdrext_buffers).
+    //   leaves the picture broken until the keyframe arrives, so it stays on
+    //   by default. It is exposed only so an operator can trade loss
+    //   resilience for a flat bitrate ceiling; disabling it here does nothing
+    //   for the RTX-related gst-plugins-base crash (gstreamer#5057), which
+    //   lives in a depayloader and so can only be hit on a receive path.
     whepserversink.set_property("do-fec", false);
     whepserversink.set_property("do-retransmission", do_retransmission);
 
@@ -2360,7 +2368,7 @@ fn whep_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "do_retransmission".to_string(),
                 label: "Retransmission (RTX)".to_string(),
-                description: "Resend lost packets to viewers on request (NACK-based). Disable only for diagnostics — a known GStreamer bug can crash the process when RTX is combined with RTP header-extension aggregation; without it, packet loss forces a full keyframe request instead of a cheap resend.".to_string(),
+                description: "Resend lost packets to viewers on request (NACK-based). Disable only to cap the outgoing bitrate — without it, packet loss forces a full keyframe request instead of a cheap resend. This is a send-only path, so unlike the WHIP Input property of the same name it has no bearing on the RTX-related GStreamer depayloader crash.".to_string(),
                 property_type: PropertyType::Bool,
                 default_value: Some(PropertyValue::Bool(true)),
                 mapping: PropertyMapping {
