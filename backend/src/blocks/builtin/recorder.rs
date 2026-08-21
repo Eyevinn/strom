@@ -548,16 +548,59 @@ impl BlockBuilder for RecorderBuilder {
                         }
                     };
 
+                    // Each splitmuxsink sink pad needs its own streaming thread. splitmuxsink
+                    // blocks one input pad while waiting for the others to reach the next GOP
+                    // boundary, so if two pads are fed by a single upstream streaming task (for
+                    // example tsdemux in passthrough mode) the blocked pad holds the only thread
+                    // that could unblock it and the pipeline deadlocks. Default properties: the
+                    // only requirement here is thread decoupling.
+                    let queue_name = format!("{}:video_{}_queue", instance_id_clone, vi);
+                    let queue = match gst::ElementFactory::make("queue").name(&queue_name).build() {
+                        Ok(q) => q,
+                        Err(e) => {
+                            error!("Recorder {}: failed to create video queue: {}", instance_id_clone, e);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+                    if let Err(e) = bin.add(&queue) {
+                        error!("Recorder {}: failed to add video queue to bin: {}", instance_id_clone, e);
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    // Linked from a pad probe while the pipeline is already running, so the new
+                    // element's state has to be synced explicitly.
+                    if let Err(e) = queue.sync_state_with_parent() {
+                        error!("Recorder {}: failed to sync video queue state: {}", instance_id_clone, e);
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    let queue_sink = match queue.static_pad("sink") {
+                        Some(p) => p,
+                        None => {
+                            error!("Recorder {}: video queue has no sink pad", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+                    let queue_src = match queue.static_pad("src") {
+                        Some(p) => p,
+                        None => {
+                            error!("Recorder {}: video queue has no src pad", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
                     if let Err(e) = pad.link(&parser_sink) {
                         error!("Recorder {}: failed to link identity to parser: {:?}", instance_id_clone, e);
                         return gst::PadProbeReturn::Ok;
                     }
-                    if let Err(e) = parser_src.link(&sink_pad) {
-                        error!("Recorder {}: failed to link parser to splitmuxsink: {:?}", instance_id_clone, e);
+                    if let Err(e) = parser_src.link(&queue_sink) {
+                        error!("Recorder {}: failed to link parser to video queue: {:?}", instance_id_clone, e);
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    if let Err(e) = queue_src.link(&sink_pad) {
+                        error!("Recorder {}: failed to link video queue to splitmuxsink: {:?}", instance_id_clone, e);
                         return gst::PadProbeReturn::Ok;
                     }
 
-                    info!("Recorder {}: video chain linked: identity -> {} -> splitmuxsink", instance_id_clone, parser_factory);
+                    info!("Recorder {}: video chain linked: identity -> {} -> queue -> splitmuxsink", instance_id_clone, parser_factory);
                     gst::PadProbeReturn::Ok
                 },
             );
@@ -703,15 +746,54 @@ impl BlockBuilder for RecorderBuilder {
                         }
                     };
 
+                    // See the video leg: one queue per splitmuxsink sink pad, so the pads do not
+                    // block each other on a shared upstream streaming thread. Default properties.
+                    let queue_name = format!("{}:audio_{}_queue", instance_id_clone, i);
+                    let queue = match gst::ElementFactory::make("queue").name(&queue_name).build() {
+                        Ok(q) => q,
+                        Err(e) => {
+                            error!("Recorder {}: failed to create audio queue: {}", instance_id_clone, e);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+                    if let Err(e) = bin.add(&queue) {
+                        error!("Recorder {}: failed to add audio queue to bin: {}", instance_id_clone, e);
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    // Linked from a pad probe while the pipeline is already running, so the new
+                    // element's state has to be synced explicitly.
+                    if let Err(e) = queue.sync_state_with_parent() {
+                        error!("Recorder {}: failed to sync audio queue state: {}", instance_id_clone, e);
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    let queue_sink = match queue.static_pad("sink") {
+                        Some(p) => p,
+                        None => {
+                            error!("Recorder {}: audio queue has no sink pad", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+                    let queue_src = match queue.static_pad("src") {
+                        Some(p) => p,
+                        None => {
+                            error!("Recorder {}: audio queue has no src pad", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
                     if let Err(e) = pad.link(&parser_sink) {
                         error!("Recorder {}: failed to link identity to audio parser: {:?}", instance_id_clone, e);
                         return gst::PadProbeReturn::Ok;
                     }
-                    if let Err(e) = parser_src.link(&sink_pad) {
-                        error!("Recorder {}: failed to link audio parser to splitmuxsink: {:?}", instance_id_clone, e);
+                    if let Err(e) = parser_src.link(&queue_sink) {
+                        error!("Recorder {}: failed to link audio parser to audio queue: {:?}", instance_id_clone, e);
                         return gst::PadProbeReturn::Ok;
                     }
-                    info!("Recorder {}: audio_{} chain linked: identity -> {} -> splitmuxsink", instance_id_clone, i, factory);
+                    if let Err(e) = queue_src.link(&sink_pad) {
+                        error!("Recorder {}: failed to link audio queue to splitmuxsink: {:?}", instance_id_clone, e);
+                        return gst::PadProbeReturn::Ok;
+                    }
+                    info!("Recorder {}: audio_{} chain linked: identity -> {} -> queue -> splitmuxsink", instance_id_clone, i, factory);
 
                     gst::PadProbeReturn::Ok
                 },
