@@ -647,28 +647,51 @@ impl AppState {
 
     /// Add or update a flow and persist to storage.
     pub async fn upsert_flow(&self, mut flow: Flow) -> anyhow::Result<()> {
-        let is_new = {
-            let flows = self.inner.flows.read().await;
-            !flows.contains_key(&flow.id)
-        };
-
         // Filter out transient (persist: false) block properties before this
         // flow definition reaches either the in-memory map or disk. Without
         // this, an explicit save from the frontend would re-engage transient
         // state (e.g. PFL/AFL solo) on the next restart.
         self.strip_transient_properties(&mut flow).await;
 
-        // Update in-memory state
+        // Update in-memory state. `insert` reports whether the id was already
+        // taken, so newness is decided under the same lock that writes it.
+        let is_new = {
+            let mut flows = self.inner.flows.write().await;
+            flows.insert(flow.id, flow.clone()).is_none()
+        };
+
+        self.persist_flow(&flow, is_new).await
+    }
+
+    /// Insert a flow only if its id is not already taken.
+    ///
+    /// Returns `Ok(false)`, leaving the stored flow untouched, when a flow with
+    /// the same id already exists. The check and the insert happen under a
+    /// single write lock, so two concurrent creates supplying the same id
+    /// cannot both succeed and overwrite one another.
+    pub async fn insert_flow_if_absent(&self, mut flow: Flow) -> anyhow::Result<bool> {
+        self.strip_transient_properties(&mut flow).await;
+
         {
             let mut flows = self.inner.flows.write().await;
+            if flows.contains_key(&flow.id) {
+                return Ok(false);
+            }
             flows.insert(flow.id, flow.clone());
         }
 
+        self.persist_flow(&flow, true).await?;
+        Ok(true)
+    }
+
+    /// Persist a flow that is already in the in-memory map, update its PTP
+    /// registration, and broadcast the created/updated event.
+    async fn persist_flow(&self, flow: &Flow, is_new: bool) -> anyhow::Result<()> {
         // Persist to storage (skip ephemeral flows)
         if flow.properties.ephemeral {
             // Remove any previously persisted copy so it doesn't reappear on restart
             let _ = self.inner.storage.delete_flow(&flow.id).await;
-        } else if let Err(e) = self.inner.storage.save_flow(&flow).await {
+        } else if let Err(e) = self.inner.storage.save_flow(flow).await {
             error!("Failed to save flow to storage: {}", e);
             return Err(e.into());
         }

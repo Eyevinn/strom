@@ -115,3 +115,56 @@ async fn assigns_an_id_when_the_caller_sends_nil() {
     );
     assert!(state.get_flow(&body.0.flow.id).await.is_some());
 }
+
+/// Concurrent creates that supply the same id must produce exactly one flow.
+///
+/// The conflict check used to be a `get_flow` followed by a separate
+/// `upsert_flow`, so two creates could both pass the check and the second would
+/// overwrite the first. The id is now claimed inside the same write lock that
+/// checks it. This is a probabilistic guard rather than a strict one — the old
+/// code only lost the race when the tasks actually interleaved — but with this
+/// many concurrent creates it fails reliably against the pre-fix version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_creates_with_the_same_id_yield_one_flow() {
+    gstreamer::init().unwrap();
+    let state = new_state();
+
+    let shared = Flow::new("scratch").id;
+    let attempts = 16;
+
+    let mut handles = Vec::with_capacity(attempts);
+    for i in 0..attempts {
+        let state = state.clone();
+        handles.push(tokio::spawn(async move {
+            let mut flow = Flow::new(format!("racer-{i}"));
+            flow.id = shared;
+            create_flow(State(state), JsonBody(flow)).await
+        }));
+    }
+
+    let mut created = 0;
+    let mut conflicts = 0;
+    for handle in handles {
+        match handle.await.expect("task should not panic") {
+            Ok((status, _)) => {
+                assert_eq!(status, StatusCode::CREATED);
+                created += 1;
+            }
+            Err((status, _)) => {
+                assert_eq!(
+                    status,
+                    StatusCode::CONFLICT,
+                    "a losing create must report a conflict, not a server error"
+                );
+                conflicts += 1;
+            }
+        }
+    }
+
+    assert_eq!(created, 1, "exactly one create may win the id");
+    assert_eq!(conflicts, attempts - 1);
+    assert!(
+        state.get_flow(&shared).await.is_some(),
+        "the winning flow must be stored under the shared id"
+    );
+}
