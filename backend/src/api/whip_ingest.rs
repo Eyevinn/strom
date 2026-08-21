@@ -279,7 +279,7 @@ pub async fn whip_post(
                         "WHIP: All {} proxy attempts failed for endpoint '{}'",
                         max_attempts, endpoint_id
                     );
-                    return resp.into_response();
+                    return *resp;
                 }
             }
         }
@@ -386,7 +386,8 @@ async fn forward_whip_post(
         reqwest::header::HeaderMap,
         axum::body::Bytes,
     ),
-    Response,
+    // Boxed: an axum `Response` Err-variant trips clippy::result_large_err.
+    Box<Response>,
 > {
     let mut req = client
         .post(internal_url)
@@ -401,7 +402,9 @@ async fn forward_whip_post(
         Ok(r) => r,
         Err(e) => {
             error!("Failed to proxy WHIP POST to {}: {}", internal_url, e);
-            return Err((StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response());
+            return Err(Box::new(
+                (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response(),
+            ));
         }
     };
 
@@ -411,7 +414,9 @@ async fn forward_whip_post(
         Ok(b) => b,
         Err(e) => {
             error!("Failed to read proxy response: {}", e);
-            return Err((StatusCode::BAD_GATEWAY, "Failed to read response").into_response());
+            return Err(Box::new(
+                (StatusCode::BAD_GATEWAY, "Failed to read response").into_response(),
+            ));
         }
     };
 

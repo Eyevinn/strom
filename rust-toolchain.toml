@@ -1,0 +1,13 @@
+# Pinned deliberately. Floating on `stable` means every Rust release can turn CI
+# red on changes nobody made: 1.98 both started denying `clippy::result_large_err`
+# in the backend and started passing `--fix-cortex-a53-843419` to the linker,
+# which the pinned zig 0.13.0 in the ARM64 job rejects. Neither is a code defect,
+# but between them they blocked every open PR.
+#
+# rustup honours this file for every cargo/rustc invocation in the repo, so it
+# covers all the `dtolnay/rust-toolchain@stable` steps in CI and local dev alike.
+# Bump it on purpose, with the lint and toolchain fallout fixed in the same PR.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

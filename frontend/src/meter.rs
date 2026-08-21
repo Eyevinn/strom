@@ -412,7 +412,7 @@ pub fn show_compact(ui: &mut Ui, meter_data: &MeterData) {
                     egui::pos2(decay_x, bar_rect.min.y),
                     egui::pos2(decay_x, bar_rect.max.y),
                 ],
-                Stroke::new(2.0, Color32::WHITE),
+                Stroke::new(2.0_f32, Color32::WHITE),
             );
         }
 
@@ -422,7 +422,7 @@ pub fn show_compact(ui: &mut Ui, meter_data: &MeterData) {
                 bar_rect,
                 radius,
                 Color32::TRANSPARENT,
-                Stroke::new(1.0, Color32::from_gray(80)),
+                Stroke::new(1.0_f32, Color32::from_gray(80)),
                 egui::epaint::StrokeKind::Inside,
             );
         }
@@ -529,7 +529,7 @@ pub fn show_full(ui: &mut Ui, meter_data: &MeterData) {
                             egui::pos2(rect.min.x, decay_y),
                             egui::pos2(rect.max.x, decay_y),
                         ],
-                        Stroke::new(2.0, Color32::WHITE),
+                        Stroke::new(2.0_f32, Color32::WHITE),
                     );
                 }
 
@@ -538,7 +538,7 @@ pub fn show_full(ui: &mut Ui, meter_data: &MeterData) {
                     rect,
                     2.0,
                     Color32::TRANSPARENT,
-                    Stroke::new(1.0, Color32::from_gray(100)),
+                    Stroke::new(1.0_f32, Color32::from_gray(100)),
                     egui::epaint::StrokeKind::Inside,
                 );
 
