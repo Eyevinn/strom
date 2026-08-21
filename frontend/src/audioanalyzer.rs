@@ -233,13 +233,21 @@ pub fn show_full(ui: &mut Ui, data: &AudioAnalyzerData) {
             plot_ui.set_plot_bounds_y(-amp..=amp);
             plot_ui.set_plot_bounds_x(0.0..=bin_visible);
 
-            plot_ui.hline(HLine::new("", 0.0).color(COLOR_REF).width(0.5));
+            plot_ui.hline(HLine::new("", 0.0).color(COLOR_REF).width(0.5_f32));
 
-            plot_ui.line(Line::new("L", l_max_points).color(COLOR_L).width(1.0));
-            plot_ui.line(Line::new("L min", l_min_points).color(COLOR_L).width(1.0));
+            plot_ui.line(Line::new("L", l_max_points).color(COLOR_L).width(1.0_f32));
+            plot_ui.line(
+                Line::new("L min", l_min_points)
+                    .color(COLOR_L)
+                    .width(1.0_f32),
+            );
 
-            plot_ui.line(Line::new("R", r_max_points).color(COLOR_R).width(1.0));
-            plot_ui.line(Line::new("R min", r_min_points).color(COLOR_R).width(1.0));
+            plot_ui.line(Line::new("R", r_max_points).color(COLOR_R).width(1.0_f32));
+            plot_ui.line(
+                Line::new("R min", r_min_points)
+                    .color(COLOR_R)
+                    .width(1.0_f32),
+            );
         });
 
     ui.add_space(8.0);
@@ -287,23 +295,27 @@ pub fn show_full(ui: &mut Ui, data: &AudioAnalyzerData) {
             plot_ui.set_plot_bounds_x(-vs_scale..=vs_scale);
             plot_ui.set_plot_bounds_y(-vs_scale..=vs_scale);
 
-            plot_ui.hline(HLine::new("", 0.0).color(COLOR_REF).width(0.5));
-            plot_ui.vline(VLine::new("", 0.0).color(COLOR_REF).width(0.5));
+            plot_ui.hline(HLine::new("", 0.0).color(COLOR_REF).width(0.5_f32));
+            plot_ui.vline(VLine::new("", 0.0).color(COLOR_REF).width(0.5_f32));
 
             // +45deg (mono) diagonal
             plot_ui.line(
                 Line::new("", PlotPoints::new(vec![[-1.0, -1.0], [1.0, 1.0]]))
                     .color(Color32::from_rgb(40, 40, 50))
-                    .width(0.5),
+                    .width(0.5_f32),
             );
             // -45deg (phase inversion) diagonal
             plot_ui.line(
                 Line::new("", PlotPoints::new(vec![[-1.0, 1.0], [1.0, -1.0]]))
                     .color(Color32::from_rgb(40, 40, 50))
-                    .width(0.5),
+                    .width(0.5_f32),
             );
 
-            plot_ui.points(Points::new("L/R", scatter).color(COLOR_VECTOR).radius(1.5));
+            plot_ui.points(
+                Points::new("L/R", scatter)
+                    .color(COLOR_VECTOR)
+                    .radius(1.5_f32),
+            );
         });
 }
 
@@ -344,7 +356,7 @@ fn draw_waveform(painter: &egui::Painter, rect: Rect, data: &AudioAnalyzerData) 
         rect,
         1.0,
         Color32::from_rgb(15, 15, 20),
-        Stroke::new(1.0, Color32::from_gray(50)),
+        Stroke::new(1.0_f32, Color32::from_gray(50)),
         egui::epaint::StrokeKind::Inside,
     );
 
@@ -365,14 +377,14 @@ fn draw_waveform(painter: &egui::Painter, rect: Rect, data: &AudioAnalyzerData) 
             egui::pos2(rect.min.x, l_center_y),
             egui::pos2(rect.max.x, l_center_y),
         ],
-        Stroke::new(0.5, COLOR_REF),
+        Stroke::new(0.5_f32, COLOR_REF),
     );
     painter.line_segment(
         [
             egui::pos2(rect.min.x, r_center_y),
             egui::pos2(rect.max.x, r_center_y),
         ],
-        Stroke::new(0.5, COLOR_REF),
+        Stroke::new(0.5_f32, COLOR_REF),
     );
 
     // Divider between L and R
@@ -381,7 +393,7 @@ fn draw_waveform(painter: &egui::Painter, rect: Rect, data: &AudioAnalyzerData) 
             egui::pos2(rect.min.x, rect.min.y + half_h),
             egui::pos2(rect.max.x, rect.min.y + half_h),
         ],
-        Stroke::new(0.5, COLOR_REF),
+        Stroke::new(0.5_f32, COLOR_REF),
     );
 
     // Draw L waveform
@@ -457,13 +469,13 @@ fn draw_channel_waveform(
         // Vertical min/max bar
         painter.line_segment(
             [egui::pos2(x, y_top), egui::pos2(x, y_bot)],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
 
         // Connect midpoints of adjacent columns to fill gaps
         let mid = egui::pos2(x, (y_top + y_bot) / 2.0);
         if let Some(prev) = prev_mid {
-            painter.line_segment([prev, mid], Stroke::new(1.0, color));
+            painter.line_segment([prev, mid], Stroke::new(1.0_f32, color));
         }
         prev_mid = Some(mid);
     }
@@ -476,7 +488,7 @@ fn draw_vectorscope(painter: &egui::Painter, rect: Rect, data: &AudioAnalyzerDat
         rect,
         1.0,
         Color32::from_rgb(15, 15, 20),
-        Stroke::new(1.0, Color32::from_gray(50)),
+        Stroke::new(1.0_f32, Color32::from_gray(50)),
         egui::epaint::StrokeKind::Inside,
     );
 
@@ -489,14 +501,14 @@ fn draw_vectorscope(painter: &egui::Painter, rect: Rect, data: &AudioAnalyzerDat
             egui::pos2(rect.min.x, center.y),
             egui::pos2(rect.max.x, center.y),
         ],
-        Stroke::new(0.5, COLOR_REF),
+        Stroke::new(0.5_f32, COLOR_REF),
     );
     painter.line_segment(
         [
             egui::pos2(center.x, rect.min.y),
             egui::pos2(center.x, rect.max.y),
         ],
-        Stroke::new(0.5, COLOR_REF),
+        Stroke::new(0.5_f32, COLOR_REF),
     );
 
     // Reference lines: +45deg (mono) and -45deg (phase inversion)
@@ -506,14 +518,14 @@ fn draw_vectorscope(painter: &egui::Painter, rect: Rect, data: &AudioAnalyzerDat
             egui::pos2(center.x - diag_len, center.y - diag_len),
             egui::pos2(center.x + diag_len, center.y + diag_len),
         ],
-        Stroke::new(0.5, Color32::from_rgb(40, 40, 50)),
+        Stroke::new(0.5_f32, Color32::from_rgb(40, 40, 50)),
     );
     painter.line_segment(
         [
             egui::pos2(center.x - diag_len, center.y + diag_len),
             egui::pos2(center.x + diag_len, center.y - diag_len),
         ],
-        Stroke::new(0.5, Color32::from_rgb(40, 40, 50)),
+        Stroke::new(0.5_f32, Color32::from_rgb(40, 40, 50)),
     );
 
     // Draw points: X = L, Y = R (standard vectorscope convention)

@@ -57,6 +57,12 @@
 - Any type referenced by a new `StromEvent` variant must have a `ToSchema` annotation (`#[cfg_attr(feature = "openapi", derive(ToSchema))]`). If the variant introduces new inner types, those need `ToSchema` too.
 - Never modify an existing `StromEvent` variant (rename, change fields, remove) without treating it as an intentional breaking change.
 
+## Tests
+- A regression test must exercise the code it guards — it has to call the changed module, not rebuild equivalent behaviour inline. A test that reconstructs a pipeline topology by hand documents a bug; it does not stop the bug returning.
+- A regression test must fail if the fix is reverted. If it hardcodes the fixed path (e.g. a `use_queues: true` flag with no failing counterpart), it is a demonstration, not a guard — say so in the PR body and explain why a real guard is not feasible.
+- A test that requires a GStreamer element must be able to run in CI. Tests that skip on a missing element pass green and guard nothing, so check the package list in `.github/workflows/ci.yml` before relying on one, and add the missing package in the same PR.
+- State in the PR body which tests you actually ran, and which were skipped or not run. "CI is green" is not the same as "the new test executed".
+
 ## Dead Code
 - Never use blanket `#![allow(dead_code)]`. Each case must be handled individually. Never use `#[allow(dead_code)]` in `strom-types`.
 - For target-specific code (e.g. only used in WASM or only in native), use `#[cfg(target_arch = "wasm32")]` or `#[cfg(not(target_arch = "wasm32"))]` — not `#[allow(dead_code)]`.
