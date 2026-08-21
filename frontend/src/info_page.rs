@@ -1063,7 +1063,7 @@ fn render_box(ui: &mut Ui, title: &str, width: f32, content: impl FnOnce(&mut Ui
     egui::Frame::new()
         .fill(fill_color)
         .corner_radius(8.0)
-        .stroke(Stroke::new(1.0, stroke_color))
+        .stroke(Stroke::new(1.0_f32, stroke_color))
         .inner_margin(BOX_INNER_MARGIN)
         .show(ui, |ui| {
             ui.set_width(width);
@@ -1095,7 +1095,7 @@ fn draw_graph(
         let y = rect.min.y + (i as f32 / 4.0) * rect.height();
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(0.5, grid_color),
+            Stroke::new(0.5_f32, grid_color),
         );
     }
 
@@ -1115,14 +1115,14 @@ fn draw_graph(
         .collect();
 
     if points.len() >= 2 {
-        painter.add(egui::Shape::line(points, Stroke::new(2.0, color)));
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, color)));
     }
 
     // Draw border
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, stroke_color),
+        Stroke::new(1.0_f32, stroke_color),
         egui::StrokeKind::Outside,
     );
 }
