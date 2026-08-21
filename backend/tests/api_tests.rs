@@ -87,9 +87,11 @@ async fn test_create_flow() {
 
     assert_eq!(response_json["flow"]["name"], "Test Flow");
 
-    // The backend must assign a new ID (not reuse the one from the request)
+    // The backend must keep the id the caller supplied (see #672). It used to
+    // overwrite it, which made the required `id` field of the request schema
+    // meaningless and stopped callers starting a flow by an id they chose.
     let returned_id = response_json["flow"]["id"].as_str().unwrap();
-    assert_ne!(returned_id, flow.id.to_string());
+    assert_eq!(returned_id, flow.id.to_string());
 
     // Runtime state must be cleared
     assert_eq!(response_json["flow"]["running"], false);
