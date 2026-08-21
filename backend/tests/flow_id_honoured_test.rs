@@ -99,7 +99,10 @@ async fn assigns_an_id_when_the_caller_sends_nil() {
 
     let mut flow = Flow::new("nil-id");
     flow.id = Default::default(); // uuid nil
-    assert!(flow.id.is_nil(), "precondition: the request carries a nil id");
+    assert!(
+        flow.id.is_nil(),
+        "precondition: the request carries a nil id"
+    );
 
     let (status, body) = create_flow(State(state.clone()), JsonBody(flow))
         .await
