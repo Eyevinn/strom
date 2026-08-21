@@ -1297,4 +1297,51 @@ mod tests {
             "16-bit should allow longer ptime than 24-bit"
         );
     }
+
+    /// The builder must reject an RTP payload type outside the 7-bit range
+    /// (0-127) before it creates a single GStreamer element.
+    ///
+    /// This guards more than a malformed SDP. With the check removed, the build
+    /// walks on to `.property("pt", payload_type as u32)` on the payloader and
+    /// glib panics there — "property 'pt' of type 'GstRtpL24Pay' can't be set
+    /// from given value" — so the range check is what stops a stored
+    /// out-of-range value from taking the process down. GStreamer does not
+    /// clamp it.
+    ///
+    /// The variant and message are asserted rather than just `is_err()`, so a
+    /// rejection from a later check (packet size, bit depth) cannot stand in
+    /// for this one. `gst::init` is called because the panic above only
+    /// reproduces with GStreamer initialised; otherwise element creation aborts
+    /// on the uninitialised library first, which depends on whether another
+    /// test in this binary happened to initialise it.
+    #[test]
+    fn test_aes67_output_rejects_out_of_range_payload_type() {
+        let _ = gst::init();
+
+        let builder = AES67OutputBuilder;
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+
+        for pt in [-1, 128, 200] {
+            let mut properties = HashMap::new();
+            properties.insert("payload_type".to_string(), PropertyValue::Int(pt));
+
+            let result = builder.build("aes67-out-test", &properties, &ctx);
+
+            match result {
+                Err(BlockBuildError::InvalidConfiguration(msg)) => {
+                    assert!(
+                        msg.contains("payload type") && msg.contains(&pt.to_string()),
+                        "payload type {} was rejected, but not by the range check: {}",
+                        pt,
+                        msg
+                    );
+                }
+                Err(other) => panic!(
+                    "payload type {} was rejected by the wrong check: {:?}",
+                    pt, other
+                ),
+                Ok(_) => panic!("payload type {} was accepted", pt),
+            }
+        }
+    }
 }
