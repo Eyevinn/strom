@@ -204,7 +204,7 @@ impl<'a> Widget for CompactSystemMonitor<'a> {
             painter.rect_stroke(
                 rect,
                 2.0,
-                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
                 egui::StrokeKind::Outside,
             );
         }
@@ -230,7 +230,7 @@ fn draw_mini_graph(painter: &egui::Painter, rect: Rect, data: &VecDeque<f32>, co
         .collect();
 
     if points.len() >= 2 {
-        painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
+        painter.add(egui::Shape::line(points, Stroke::new(1.5_f32, color)));
     }
 }
 
@@ -679,7 +679,7 @@ fn draw_large_graph(
         let y = rect.min.y + (i as f32 / 4.0) * rect.height();
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(0.5, grid_color),
+            Stroke::new(0.5_f32, grid_color),
         );
     }
 
@@ -699,14 +699,14 @@ fn draw_large_graph(
         .collect();
 
     if points.len() >= 2 {
-        painter.add(egui::Shape::line(points, Stroke::new(2.0, color)));
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, color)));
     }
 
     // Draw border
     painter.rect_stroke(
         rect,
         2.0,
-        Stroke::new(1.0, stroke_color),
+        Stroke::new(1.0_f32, stroke_color),
         egui::StrokeKind::Outside,
     );
 }

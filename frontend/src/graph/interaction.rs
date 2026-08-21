@@ -33,11 +33,11 @@ impl GraphEditor {
 
             // Determine color and width based on state
             let (color, width) = if is_selected {
-                (Color32::from_rgb(100, 150, 255), 3.0) // Blue and thicker when selected
+                (Color32::from_rgb(100, 150, 255), 3.0_f32) // Blue and thicker when selected
             } else if is_hovered {
-                (Color32::from_rgb(200, 200, 200), 2.5) // Brighter when hovered
+                (Color32::from_rgb(200, 200, 200), 2.5_f32) // Brighter when hovered
             } else {
-                (Color32::from_rgb(150, 150, 150), 2.0) // Default gray
+                (Color32::from_rgb(150, 150, 150), 2.0_f32) // Default gray
             };
 
             painter.add(egui::epaint::CubicBezierShape::from_points_stroke(

@@ -773,7 +773,7 @@ fn draw_large_graph(
         let y = rect.min.y + (i as f32 / 4.0) * rect.height();
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(0.5, Color32::from_gray(40)),
+            Stroke::new(0.5_f32, Color32::from_gray(40)),
         );
     }
 
@@ -785,7 +785,7 @@ fn draw_large_graph(
                 Pos2::new(rect.min.x, y_center),
                 Pos2::new(rect.max.x, y_center),
             ],
-            Stroke::new(1.0, Color32::from_gray(80)),
+            Stroke::new(1.0_f32, Color32::from_gray(80)),
         );
     }
 
@@ -804,14 +804,14 @@ fn draw_large_graph(
         .collect();
 
     if points.len() >= 2 {
-        painter.add(egui::Shape::line(points, Stroke::new(2.0, color)));
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, color)));
     }
 
     // Draw border
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, Color32::from_gray(80)),
+        Stroke::new(1.0_f32, Color32::from_gray(80)),
         egui::StrokeKind::Outside,
     );
 
@@ -847,7 +847,7 @@ fn draw_large_graph_fixed(
         let y = rect.min.y + (i as f32 / 4.0) * rect.height();
         painter.line_segment(
             [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
-            Stroke::new(0.5, Color32::from_gray(40)),
+            Stroke::new(0.5_f32, Color32::from_gray(40)),
         );
     }
 
@@ -877,14 +877,14 @@ fn draw_large_graph_fixed(
         .collect();
 
     if points.len() >= 2 {
-        painter.add(egui::Shape::line(points, Stroke::new(2.0, color)));
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, color)));
     }
 
     // Draw border
     painter.rect_stroke(
         rect,
         4.0,
-        Stroke::new(1.0, Color32::from_gray(80)),
+        Stroke::new(1.0_f32, Color32::from_gray(80)),
         egui::StrokeKind::Outside,
     );
 

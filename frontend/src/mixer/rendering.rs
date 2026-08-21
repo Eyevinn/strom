@@ -792,7 +792,7 @@ impl MixerEditor {
                                     egui::pos2(handle_rect.left() + 2.0, handle_y),
                                     egui::pos2(handle_rect.right() - 2.0, handle_y),
                                 ],
-                                Stroke::new(1.5, Color32::from_gray(40)),
+                                Stroke::new(1.5_f32, Color32::from_gray(40)),
                             );
                         },
                     );
@@ -979,7 +979,7 @@ impl MixerEditor {
                                     egui::pos2(handle_rect.left() + 2.0, handle_y),
                                     egui::pos2(handle_rect.right() - 2.0, handle_y),
                                 ],
-                                Stroke::new(1.5, Color32::from_gray(40)),
+                                Stroke::new(1.5_f32, Color32::from_gray(40)),
                             );
                         },
                     );
