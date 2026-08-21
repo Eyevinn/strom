@@ -3,7 +3,7 @@
 > **Code is the source of truth.** This guide describes intended behaviour and may have
 > drifted from the current implementation. When in doubt, read the code and check the in-app UI.
 
-Strom supports rendering HTML content as video sources using the `cefsrc` GStreamer element from [gstcefsrc](https://github.com/AioCef/gstcefsrc). This enables:
+Strom supports rendering HTML content as video sources using the `cefsrc` GStreamer element from [gstcefsrc](https://github.com/centricular/gstcefsrc). This enables:
 
 - Dynamic HTML/CSS/JavaScript overlays
 - Web-based graphics and animations
@@ -240,12 +240,14 @@ The build uses Ubuntu Questing to match the strom base image's glibc version.
 
 ## Limitations
 
-- **Docker only**: CEF requires X11, which the strom-full image provides via Xvfb
+- **`strom-full` image only**: `cefsrc` comes from the gstcefsrc plugin, which Strom ships only in the `strom-full` image. The plain `strom` image and the native release builds (Linux, macOS, Windows) do not include it.
+- **Linux: X11 required**: CEF needs an X server on Linux, which the strom-full image provides via Xvfb. This is why `strom-full` is the supported way to run HTML sources.
+- **macOS: no native support yet**: CEF renders offscreen through its own macOS path, so Xvfb is not involved and the X11 requirement above does not apply. Native macOS support is tracked in [centricular/gstcefsrc#110](https://github.com/centricular/gstcefsrc/pull/110) (macOS build fixes) and [Eyevinn/strom#669](https://github.com/Eyevinn/strom/pull/669) (a Cocoa run loop on the main thread, needed in headless mode). CEF on macOS also refuses to initialise unless the host process is inside an `.app` bundle, and the macOS release ships a bare executable rather than a bundle.
 - **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
 
 ## References
 
-- [gstcefsrc GitHub](https://github.com/AioCef/gstcefsrc) - GStreamer CEF plugin
-- [CEF Project](https://bitbucket.org/AioCef/cef/overview) - Chromium Embedded Framework
+- [gstcefsrc GitHub](https://github.com/centricular/gstcefsrc) - GStreamer CEF plugin
+- [CEF Project](https://bitbucket.org/chromiumembedded/cef) - Chromium Embedded Framework
