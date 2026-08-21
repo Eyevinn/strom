@@ -298,6 +298,7 @@ fn prepare_flow(flow: &mut Flow) {
     request_body = Flow,
     responses(
         (status = 201, description = "Flow created", body = FlowResponse),
+        (status = 409, description = "A flow with the supplied id already exists", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -318,8 +319,23 @@ pub async fn create_flow(
     info!("Received create flow request: name='{}'", flow.name);
     debug!("Create flow request body: {:?}", flow);
 
-    // Assign a new ID to avoid collisions with imported flows
-    flow.id = FlowId::new_v4();
+    // Honour the client-supplied id. The schema requires it, so silently replacing
+    // it left callers unable to POST a flow and then start it by the id they chose.
+    // A nil uuid is treated as "no id supplied" so a client that omits it still
+    // gets a usable flow rather than one keyed on all-zeros.
+    if flow.id.is_nil() {
+        flow.id = FlowId::new_v4();
+    } else if state.get_flow(&flow.id).await.is_some() {
+        // Import and copy in the frontend already regenerate ids client-side
+        // (`regenerate_flow_ids`), so a collision here means a genuine clash the
+        // caller needs to know about rather than something to paper over.
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new(
+                "A flow with this id already exists; use POST /api/flows/{id} to update it",
+            )),
+        ));
+    }
 
     // Clear runtime state
     flow.running = false;

@@ -739,6 +739,16 @@
               }
             }
           },
+          "409": {
+            "description": "A flow with the supplied id already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
