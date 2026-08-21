@@ -55,7 +55,7 @@ impl MixerEditor {
                 egui::pos2(handle_rect.left() + 2.0, handle_y),
                 egui::pos2(handle_rect.right() - 2.0, handle_y),
             ],
-            Stroke::new(1.5, Color32::from_gray(40)),
+            Stroke::new(1.5_f32, Color32::from_gray(40)),
         );
 
         response
@@ -111,7 +111,7 @@ impl MixerEditor {
                 egui::pos2(handle_rect.left() + 2.0, handle_y),
                 egui::pos2(handle_rect.right() - 2.0, handle_y),
             ],
-            Stroke::new(1.5, Color32::from_gray(40)),
+            Stroke::new(1.5_f32, Color32::from_gray(40)),
         );
 
         response
@@ -167,7 +167,7 @@ impl MixerEditor {
                 egui::pos2(handle_rect.left() + 2.0, handle_y),
                 egui::pos2(handle_rect.right() - 2.0, handle_y),
             ],
-            Stroke::new(1.5, Color32::from_gray(40)),
+            Stroke::new(1.5_f32, Color32::from_gray(40)),
         );
 
         response
@@ -231,7 +231,7 @@ impl MixerEditor {
                         egui::pos2(center.x - a0.cos() * arc_r, center.y - a0.sin() * arc_r),
                         egui::pos2(center.x - a1.cos() * arc_r, center.y - a1.sin() * arc_r),
                     ],
-                    Stroke::new(2.5, arc_color),
+                    Stroke::new(2.5_f32, arc_color),
                 );
             }
         }
@@ -251,7 +251,7 @@ impl MixerEditor {
                     center.y - center_angle.sin() * tick_outer,
                 ),
             ],
-            Stroke::new(1.0, Color32::from_gray(90)),
+            Stroke::new(1.0_f32, Color32::from_gray(90)),
         );
 
         // Pointer line
@@ -270,7 +270,7 @@ impl MixerEditor {
                     center.y - pointer_angle.sin() * outer_r,
                 ),
             ],
-            Stroke::new(1.5, pointer_color),
+            Stroke::new(1.5_f32, pointer_color),
         );
 
         // Border
@@ -279,7 +279,7 @@ impl MixerEditor {
         } else {
             Color32::from_gray(55)
         };
-        painter.circle_stroke(center, radius, Stroke::new(1.0, border_color));
+        painter.circle_stroke(center, radius, Stroke::new(1.0_f32, border_color));
 
         // Tooltip
         let resp = response.on_hover_text(format!("Pan: {}", format_pan(pan)));
@@ -294,7 +294,7 @@ impl MixerEditor {
         painter.rect_stroke(
             rect,
             CornerRadius::same(2),
-            Stroke::new(1.0, Color32::from_rgb(45, 50, 55)),
+            Stroke::new(1.0_f32, Color32::from_rgb(45, 50, 55)),
             egui::epaint::StrokeKind::Inside,
         );
         painter.text(
@@ -367,7 +367,7 @@ impl MixerEditor {
                         egui::pos2(center.x - a0.cos() * arc_r, center.y - a0.sin() * arc_r),
                         egui::pos2(center.x - a1.cos() * arc_r, center.y - a1.sin() * arc_r),
                     ],
-                    Stroke::new(2.5, arc_color),
+                    Stroke::new(2.5_f32, arc_color),
                 );
             }
         }
@@ -387,7 +387,7 @@ impl MixerEditor {
                     center.y - unity_angle.sin() * tick_outer,
                 ),
             ],
-            Stroke::new(1.0, Color32::from_gray(90)),
+            Stroke::new(1.0_f32, Color32::from_gray(90)),
         );
 
         // Pointer indicator line
@@ -410,7 +410,7 @@ impl MixerEditor {
                     center.y - pointer_angle.sin() * outer_r,
                 ),
             ],
-            Stroke::new(1.5, pointer_color),
+            Stroke::new(1.5_f32, pointer_color),
         );
 
         // Border
@@ -419,7 +419,7 @@ impl MixerEditor {
         } else {
             Color32::from_gray(55)
         };
-        painter.circle_stroke(center, radius, Stroke::new(1.0, border_color));
+        painter.circle_stroke(center, radius, Stroke::new(1.0_f32, border_color));
 
         // Hover tooltip
         let db_str = if level > 0.001 {
@@ -495,7 +495,7 @@ impl MixerEditor {
                         egui::pos2(left_rect.min.x, left_decay_y),
                         egui::pos2(left_rect.max.x, left_decay_y),
                     ],
-                    Stroke::new(1.0, Color32::WHITE),
+                    Stroke::new(1.0_f32, Color32::WHITE),
                 );
 
                 let right_decay_y = db_to_y(data.decay[1] as f32, rect.min.y, rect.max.y);
@@ -504,7 +504,7 @@ impl MixerEditor {
                         egui::pos2(right_rect.min.x, right_decay_y),
                         egui::pos2(right_rect.max.x, right_decay_y),
                     ],
-                    Stroke::new(1.0, Color32::WHITE),
+                    Stroke::new(1.0_f32, Color32::WHITE),
                 );
             }
         }
@@ -513,13 +513,13 @@ impl MixerEditor {
         painter.rect_stroke(
             left_rect,
             CornerRadius::same(2),
-            Stroke::new(1.0, Color32::from_gray(60)),
+            Stroke::new(1.0_f32, Color32::from_gray(60)),
             egui::epaint::StrokeKind::Inside,
         );
         painter.rect_stroke(
             right_rect,
             CornerRadius::same(2),
-            Stroke::new(1.0, Color32::from_gray(60)),
+            Stroke::new(1.0_f32, Color32::from_gray(60)),
             egui::epaint::StrokeKind::Inside,
         );
     }
@@ -546,7 +546,7 @@ impl MixerEditor {
 
             painter.line_segment(
                 [egui::pos2(rect.max.x - 3.0, y), egui::pos2(rect.max.x, y)],
-                Stroke::new(1.0, Color32::from_gray(100)),
+                Stroke::new(1.0_f32, Color32::from_gray(100)),
             );
 
             painter.text(

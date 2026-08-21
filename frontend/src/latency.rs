@@ -153,7 +153,7 @@ pub fn show_compact(ui: &mut Ui, latency_data: &LatencyData) {
         rect,
         2.0,
         Color32::from_gray(30),
-        Stroke::new(1.0, Color32::from_gray(60)),
+        Stroke::new(1.0_f32, Color32::from_gray(60)),
         egui::epaint::StrokeKind::Inside,
     );
 
@@ -202,7 +202,7 @@ pub fn show_compact(ui: &mut Ui, latency_data: &LatencyData) {
                 egui::pos2(marker_x, bar_rect.min.y),
                 egui::pos2(marker_x, bar_rect.max.y),
             ],
-            Stroke::new(2.0, Color32::WHITE),
+            Stroke::new(2.0_f32, Color32::WHITE),
         );
     }
 
@@ -331,7 +331,7 @@ pub fn show_full(ui: &mut Ui, element_id: &str, latency_data: &LatencyData) {
                 egui::pos2(marker_x, rect.min.y),
                 egui::pos2(marker_x, rect.max.y),
             ],
-            Stroke::new(2.0, Color32::WHITE),
+            Stroke::new(2.0_f32, Color32::WHITE),
         );
     }
 
@@ -340,7 +340,7 @@ pub fn show_full(ui: &mut Ui, element_id: &str, latency_data: &LatencyData) {
         rect,
         2.0,
         Color32::TRANSPARENT,
-        Stroke::new(1.0, Color32::from_gray(100)),
+        Stroke::new(1.0_f32, Color32::from_gray(100)),
         egui::epaint::StrokeKind::Inside,
     );
 

@@ -99,7 +99,7 @@ pub fn nord_dark() -> Visuals {
 
     // Selection
     visuals.selection.bg_fill = nord::NORD3;
-    visuals.selection.stroke = Stroke::new(1.0, nord::NORD8);
+    visuals.selection.stroke = Stroke::new(1.0_f32, nord::NORD8);
 
     // Hyperlinks
     visuals.hyperlink_color = nord::NORD8;
@@ -111,31 +111,31 @@ pub fn nord_dark() -> Visuals {
     // Widget colors
     visuals.widgets.noninteractive.bg_fill = nord::NORD1;
     visuals.widgets.noninteractive.weak_bg_fill = nord::NORD1;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, nord::NORD3);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, nord::NORD4);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, nord::NORD3);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, nord::NORD4);
 
     visuals.widgets.inactive.bg_fill = nord::NORD2;
     visuals.widgets.inactive.weak_bg_fill = nord::NORD2;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, nord::NORD3);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, nord::NORD4);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, nord::NORD3);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, nord::NORD4);
 
     visuals.widgets.hovered.bg_fill = nord::NORD3;
     visuals.widgets.hovered.weak_bg_fill = nord::NORD3;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, nord::NORD8);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, nord::NORD6);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, nord::NORD8);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, nord::NORD6);
 
     visuals.widgets.active.bg_fill = nord::NORD9;
     visuals.widgets.active.weak_bg_fill = nord::NORD9;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, nord::NORD8);
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, nord::NORD6);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, nord::NORD8);
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0_f32, nord::NORD6);
 
     visuals.widgets.open.bg_fill = nord::NORD2;
     visuals.widgets.open.weak_bg_fill = nord::NORD2;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, nord::NORD8);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, nord::NORD4);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, nord::NORD8);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, nord::NORD4);
 
     // Window stroke
-    visuals.window_stroke = Stroke::new(1.0, nord::NORD3);
+    visuals.window_stroke = Stroke::new(1.0_f32, nord::NORD3);
 
     visuals
 }
@@ -155,7 +155,7 @@ pub fn nord_light() -> Visuals {
 
     // Selection
     visuals.selection.bg_fill = nord::NORD4;
-    visuals.selection.stroke = Stroke::new(1.0, nord::NORD10);
+    visuals.selection.stroke = Stroke::new(1.0_f32, nord::NORD10);
 
     // Hyperlinks
     visuals.hyperlink_color = nord::NORD10;
@@ -167,31 +167,31 @@ pub fn nord_light() -> Visuals {
     // Widget colors
     visuals.widgets.noninteractive.bg_fill = nord::NORD5;
     visuals.widgets.noninteractive.weak_bg_fill = nord::NORD5;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, nord::NORD4);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, nord::NORD1);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, nord::NORD4);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, nord::NORD1);
 
     visuals.widgets.inactive.bg_fill = nord::NORD5;
     visuals.widgets.inactive.weak_bg_fill = nord::NORD5;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, nord::NORD4);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, nord::NORD2);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, nord::NORD4);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, nord::NORD2);
 
     visuals.widgets.hovered.bg_fill = nord::NORD4;
     visuals.widgets.hovered.weak_bg_fill = nord::NORD4;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, nord::NORD10);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, nord::NORD0);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, nord::NORD10);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, nord::NORD0);
 
     visuals.widgets.active.bg_fill = nord::NORD9;
     visuals.widgets.active.weak_bg_fill = nord::NORD9;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, nord::NORD10);
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, nord::NORD6);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, nord::NORD10);
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0_f32, nord::NORD6);
 
     visuals.widgets.open.bg_fill = nord::NORD5;
     visuals.widgets.open.weak_bg_fill = nord::NORD5;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, nord::NORD10);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, nord::NORD1);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, nord::NORD10);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, nord::NORD1);
 
     // Window stroke
-    visuals.window_stroke = Stroke::new(1.0, nord::NORD4);
+    visuals.window_stroke = Stroke::new(1.0_f32, nord::NORD4);
 
     visuals
 }
@@ -211,7 +211,7 @@ pub fn tokyo_night() -> Visuals {
 
     // Selection
     visuals.selection.bg_fill = tokyo::SELECTION;
-    visuals.selection.stroke = Stroke::new(1.0, tokyo::BLUE);
+    visuals.selection.stroke = Stroke::new(1.0_f32, tokyo::BLUE);
 
     // Hyperlinks
     visuals.hyperlink_color = tokyo::CYAN;
@@ -223,31 +223,31 @@ pub fn tokyo_night() -> Visuals {
     // Widget colors
     visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(0x1f, 0x20, 0x2a);
     visuals.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(0x1f, 0x20, 0x2a);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, tokyo::COMMENT);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, tokyo::FG_DARK);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, tokyo::COMMENT);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_DARK);
 
     visuals.widgets.inactive.bg_fill = tokyo::SELECTION;
     visuals.widgets.inactive.weak_bg_fill = tokyo::SELECTION;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, tokyo::COMMENT);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, tokyo::FG_DARK);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, tokyo::COMMENT);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_DARK);
 
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(0x32, 0x38, 0x50);
     visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x32, 0x38, 0x50);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, tokyo::BLUE);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, tokyo::FG_BRIGHT);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, tokyo::BLUE);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_BRIGHT);
 
     visuals.widgets.active.bg_fill = tokyo::BLUE;
     visuals.widgets.active.weak_bg_fill = tokyo::BLUE;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, tokyo::CYAN);
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, tokyo::BG_NIGHT);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, tokyo::CYAN);
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0_f32, tokyo::BG_NIGHT);
 
     visuals.widgets.open.bg_fill = tokyo::SELECTION;
     visuals.widgets.open.weak_bg_fill = tokyo::SELECTION;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, tokyo::BLUE);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, tokyo::FG_DARK);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, tokyo::BLUE);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_DARK);
 
     // Window stroke
-    visuals.window_stroke = Stroke::new(1.0, tokyo::COMMENT);
+    visuals.window_stroke = Stroke::new(1.0_f32, tokyo::COMMENT);
 
     visuals
 }
@@ -267,7 +267,7 @@ pub fn tokyo_night_storm() -> Visuals {
 
     // Selection
     visuals.selection.bg_fill = Color32::from_rgb(0x2d, 0x32, 0x4a);
-    visuals.selection.stroke = Stroke::new(1.0, tokyo::BLUE);
+    visuals.selection.stroke = Stroke::new(1.0_f32, tokyo::BLUE);
 
     // Hyperlinks
     visuals.hyperlink_color = tokyo::CYAN;
@@ -279,31 +279,31 @@ pub fn tokyo_night_storm() -> Visuals {
     // Widget colors
     visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(0x29, 0x2e, 0x42);
     visuals.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(0x29, 0x2e, 0x42);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, tokyo::COMMENT);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, tokyo::FG_BRIGHT);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, tokyo::COMMENT);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_BRIGHT);
 
     visuals.widgets.inactive.bg_fill = Color32::from_rgb(0x2d, 0x32, 0x4a);
     visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(0x2d, 0x32, 0x4a);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, tokyo::COMMENT);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, tokyo::FG_BRIGHT);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, tokyo::COMMENT);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_BRIGHT);
 
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(0x38, 0x3e, 0x5a);
     visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x38, 0x3e, 0x5a);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, tokyo::BLUE);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, tokyo::FG_BRIGHT);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, tokyo::BLUE);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_BRIGHT);
 
     visuals.widgets.active.bg_fill = tokyo::BLUE;
     visuals.widgets.active.weak_bg_fill = tokyo::BLUE;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, tokyo::CYAN);
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, tokyo::BG_STORM);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, tokyo::CYAN);
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0_f32, tokyo::BG_STORM);
 
     visuals.widgets.open.bg_fill = Color32::from_rgb(0x2d, 0x32, 0x4a);
     visuals.widgets.open.weak_bg_fill = Color32::from_rgb(0x2d, 0x32, 0x4a);
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, tokyo::BLUE);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, tokyo::FG_BRIGHT);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, tokyo::BLUE);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_BRIGHT);
 
     // Window stroke
-    visuals.window_stroke = Stroke::new(1.0, tokyo::COMMENT);
+    visuals.window_stroke = Stroke::new(1.0_f32, tokyo::COMMENT);
 
     visuals
 }
@@ -323,7 +323,7 @@ pub fn tokyo_night_light() -> Visuals {
 
     // Selection
     visuals.selection.bg_fill = Color32::from_rgb(0xc4, 0xc8, 0xda);
-    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0x29, 0x59, 0xaa));
+    visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(0x29, 0x59, 0xaa));
 
     // Hyperlinks
     visuals.hyperlink_color = Color32::from_rgb(0x29, 0x59, 0xaa);
@@ -338,31 +338,31 @@ pub fn tokyo_night_light() -> Visuals {
     visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(0xd0, 0xd1, 0xd6);
     visuals.widgets.noninteractive.weak_bg_fill = Color32::from_rgb(0xd0, 0xd1, 0xd6);
     visuals.widgets.noninteractive.bg_stroke =
-        Stroke::new(1.0, Color32::from_rgb(0xb0, 0xb1, 0xb6));
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, tokyo::FG_LIGHT);
+        Stroke::new(1.0_f32, Color32::from_rgb(0xb0, 0xb1, 0xb6));
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_LIGHT);
 
     visuals.widgets.inactive.bg_fill = Color32::from_rgb(0xca, 0xcb, 0xd0);
     visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(0xca, 0xcb, 0xd0);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0xb0, 0xb1, 0xb6));
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, tokyo::FG_LIGHT);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0xb0, 0xb1, 0xb6));
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_LIGHT);
 
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(0xc0, 0xc4, 0xd0);
     visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(0xc0, 0xc4, 0xd0);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, light_accent);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, tokyo::FG_LIGHT);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, light_accent);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_LIGHT);
 
     visuals.widgets.active.bg_fill = light_accent;
     visuals.widgets.active.weak_bg_fill = light_accent;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0x1e, 0x40, 0x80));
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0x1e, 0x40, 0x80));
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0_f32, Color32::WHITE);
 
     visuals.widgets.open.bg_fill = Color32::from_rgb(0xc8, 0xcc, 0xda);
     visuals.widgets.open.weak_bg_fill = Color32::from_rgb(0xc8, 0xcc, 0xda);
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, light_accent);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, tokyo::FG_LIGHT);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, light_accent);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, tokyo::FG_LIGHT);
 
     // Window stroke
-    visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(0xb0, 0xb1, 0xb6));
+    visuals.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0xb0, 0xb1, 0xb6));
 
     visuals
 }
@@ -385,7 +385,7 @@ pub fn claude_dark() -> Visuals {
 
     // Selection
     visuals.selection.bg_fill = claude::BG_DARK_SURFACE;
-    visuals.selection.stroke = Stroke::new(1.0, claude::ORANGE);
+    visuals.selection.stroke = Stroke::new(1.0_f32, claude::ORANGE);
 
     // Hyperlinks
     visuals.hyperlink_color = claude::ORANGE_LIGHT;
@@ -397,31 +397,31 @@ pub fn claude_dark() -> Visuals {
     // Widget colors
     visuals.widgets.noninteractive.bg_fill = claude::BG_DARK_ELEVATED;
     visuals.widgets.noninteractive.weak_bg_fill = claude::BG_DARK_ELEVATED;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, claude::BG_DARK_SURFACE);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, claude::TEXT_CREAM);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, claude::BG_DARK_SURFACE);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_CREAM);
 
     visuals.widgets.inactive.bg_fill = claude::BG_DARK_ELEVATED;
     visuals.widgets.inactive.weak_bg_fill = claude::BG_DARK_ELEVATED;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, claude::BG_DARK_SURFACE);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, claude::TEXT_MUTED);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, claude::BG_DARK_SURFACE);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_MUTED);
 
     visuals.widgets.hovered.bg_fill = claude::BG_DARK_SURFACE;
     visuals.widgets.hovered.weak_bg_fill = claude::BG_DARK_SURFACE;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, claude::TERRACOTTA);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, claude::TEXT_CREAM);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, claude::TERRACOTTA);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_CREAM);
 
     visuals.widgets.active.bg_fill = claude::TERRACOTTA;
     visuals.widgets.active.weak_bg_fill = claude::TERRACOTTA;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, claude::ORANGE);
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, claude::TEXT_CREAM);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, claude::ORANGE);
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0_f32, claude::TEXT_CREAM);
 
     visuals.widgets.open.bg_fill = claude::BG_DARK_SURFACE;
     visuals.widgets.open.weak_bg_fill = claude::BG_DARK_SURFACE;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, claude::TERRACOTTA);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, claude::TEXT_CREAM);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, claude::TERRACOTTA);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_CREAM);
 
     // Window stroke
-    visuals.window_stroke = Stroke::new(1.0, claude::BG_DARK_SURFACE);
+    visuals.window_stroke = Stroke::new(1.0_f32, claude::BG_DARK_SURFACE);
 
     visuals
 }
@@ -444,7 +444,7 @@ pub fn claude_light() -> Visuals {
 
     // Selection
     visuals.selection.bg_fill = Color32::from_rgb(0xe8, 0xd5, 0xc4);
-    visuals.selection.stroke = Stroke::new(1.0, claude::CORAL);
+    visuals.selection.stroke = Stroke::new(1.0_f32, claude::CORAL);
 
     // Hyperlinks
     visuals.hyperlink_color = claude::CORAL;
@@ -456,31 +456,31 @@ pub fn claude_light() -> Visuals {
     // Widget colors
     visuals.widgets.noninteractive.bg_fill = claude::BG_LIGHT_ELEVATED;
     visuals.widgets.noninteractive.weak_bg_fill = claude::BG_LIGHT_ELEVATED;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, claude::BG_LIGHT_SURFACE);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, claude::TEXT_DARK);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, claude::BG_LIGHT_SURFACE);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_DARK);
 
     visuals.widgets.inactive.bg_fill = claude::BG_LIGHT_ELEVATED;
     visuals.widgets.inactive.weak_bg_fill = claude::BG_LIGHT_ELEVATED;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, claude::BG_LIGHT_SURFACE);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, claude::TEXT_DARK_MUTED);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, claude::BG_LIGHT_SURFACE);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_DARK_MUTED);
 
     visuals.widgets.hovered.bg_fill = claude::BG_LIGHT_SURFACE;
     visuals.widgets.hovered.weak_bg_fill = claude::BG_LIGHT_SURFACE;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, claude::CORAL);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, claude::TEXT_DARK);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, claude::CORAL);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_DARK);
 
     visuals.widgets.active.bg_fill = claude::CORAL;
     visuals.widgets.active.weak_bg_fill = claude::CORAL;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, claude::TERRACOTTA);
-    visuals.widgets.active.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, claude::TERRACOTTA);
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0_f32, Color32::WHITE);
 
     visuals.widgets.open.bg_fill = claude::BG_LIGHT_SURFACE;
     visuals.widgets.open.weak_bg_fill = claude::BG_LIGHT_SURFACE;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0, claude::CORAL);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0, claude::TEXT_DARK);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, claude::CORAL);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, claude::TEXT_DARK);
 
     // Window stroke
-    visuals.window_stroke = Stroke::new(1.0, claude::BG_LIGHT_SURFACE);
+    visuals.window_stroke = Stroke::new(1.0_f32, claude::BG_LIGHT_SURFACE);
 
     visuals
 }

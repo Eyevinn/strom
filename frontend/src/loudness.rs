@@ -320,7 +320,7 @@ pub fn show_compact(ui: &mut Ui, data: &LoudnessData) {
                 bar_rect,
                 radius,
                 Color32::TRANSPARENT,
-                Stroke::new(1.0, Color32::from_gray(80)),
+                Stroke::new(1.0_f32, Color32::from_gray(80)),
                 egui::epaint::StrokeKind::Inside,
             );
         }
@@ -441,7 +441,7 @@ pub fn show_full(ui: &mut Ui, data: &LoudnessData) {
             m_rect,
             2.0,
             Color32::TRANSPARENT,
-            Stroke::new(1.0, Color32::from_gray(100)),
+            Stroke::new(1.0_f32, Color32::from_gray(100)),
             egui::epaint::StrokeKind::Inside,
         );
 
@@ -458,7 +458,7 @@ pub fn show_full(ui: &mut Ui, data: &LoudnessData) {
             s_rect,
             2.0,
             Color32::TRANSPARENT,
-            Stroke::new(1.0, Color32::from_gray(100)),
+            Stroke::new(1.0_f32, Color32::from_gray(100)),
             egui::epaint::StrokeKind::Inside,
         );
 
@@ -471,7 +471,7 @@ pub fn show_full(ui: &mut Ui, data: &LoudnessData) {
                     egui::pos2(rect.min.x - 2.0, i_y),
                     egui::pos2(rect.min.x + total_width + 2.0, i_y),
                 ],
-                Stroke::new(2.0, Color32::WHITE),
+                Stroke::new(2.0_f32, Color32::WHITE),
             );
         }
 
@@ -492,7 +492,7 @@ pub fn show_full(ui: &mut Ui, data: &LoudnessData) {
                         egui::pos2(bracket_x, top_y),
                         egui::pos2(bracket_x, bottom_y),
                     ],
-                    Stroke::new(1.5, bracket_color),
+                    Stroke::new(1.5_f32, bracket_color),
                 );
                 // Top cap
                 painter.line_segment(
@@ -500,7 +500,7 @@ pub fn show_full(ui: &mut Ui, data: &LoudnessData) {
                         egui::pos2(bracket_x - 3.0, top_y),
                         egui::pos2(bracket_x + 3.0, top_y),
                     ],
-                    Stroke::new(1.5, bracket_color),
+                    Stroke::new(1.5_f32, bracket_color),
                 );
                 // Bottom cap
                 painter.line_segment(
@@ -508,7 +508,7 @@ pub fn show_full(ui: &mut Ui, data: &LoudnessData) {
                         egui::pos2(bracket_x - 3.0, bottom_y),
                         egui::pos2(bracket_x + 3.0, bottom_y),
                     ],
-                    Stroke::new(1.5, bracket_color),
+                    Stroke::new(1.5_f32, bracket_color),
                 );
             }
         }
@@ -554,7 +554,7 @@ pub fn show_full(ui: &mut Ui, data: &LoudnessData) {
                     rect,
                     2.0,
                     Color32::from_gray(40),
-                    Stroke::new(1.0, Color32::from_gray(80)),
+                    Stroke::new(1.0_f32, Color32::from_gray(80)),
                     egui::epaint::StrokeKind::Inside,
                 );
                 if tp_level > 0.0 {

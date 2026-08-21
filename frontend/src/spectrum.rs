@@ -231,7 +231,7 @@ pub fn show_compact(ui: &mut Ui, spectrum_data: &SpectrumData) {
         rect,
         1.0,
         Color32::TRANSPARENT,
-        Stroke::new(1.0, Color32::from_gray(60)),
+        Stroke::new(1.0_f32, Color32::from_gray(60)),
         egui::epaint::StrokeKind::Inside,
     );
 }
@@ -280,7 +280,7 @@ pub fn show_full(ui: &mut Ui, spectrum_data: &SpectrumData) {
             rect,
             2.0,
             Color32::from_rgb(15, 15, 15),
-            Stroke::new(1.0, Color32::from_gray(80)),
+            Stroke::new(1.0_f32, Color32::from_gray(80)),
             egui::epaint::StrokeKind::Inside,
         );
 
@@ -298,7 +298,7 @@ pub fn show_full(ui: &mut Ui, spectrum_data: &SpectrumData) {
                 let y = inner_bottom - inner_height * level;
                 painter.line_segment(
                     [egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)],
-                    Stroke::new(0.5, Color32::from_gray(40)),
+                    Stroke::new(0.5_f32, Color32::from_gray(40)),
                 );
                 painter.text(
                     egui::pos2(rect.max.x - 28.0, y - 6.0),
