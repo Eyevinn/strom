@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Which extra platform builds to run (they are off for push/PR because of cost)"
+        type: choice
+        default: both
+        options: [both, macos, windows, none]
 
 env:
   CARGO_TERM_COLOR: always
@@ -428,7 +434,7 @@ jobs:
   # Only runs manually (workflow_dispatch) to save CI cost (2× multiplier).
   build-windows:
     name: Build (Windows)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","windows"]'), inputs.platforms)
     needs: [check-wasm, preflight]
     runs-on: windows-latest
     timeout-minutes: 45
@@ -519,7 +525,7 @@ jobs:
   # Only runs manually (workflow_dispatch) to save CI cost (10× multiplier).
   build-macos:
     name: Build (macOS)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","macos"]'), inputs.platforms)
     needs: [check-wasm, preflight]
     runs-on: macos-latest
     timeout-minutes: 30
