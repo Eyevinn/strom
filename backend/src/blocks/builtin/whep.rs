@@ -11,6 +11,7 @@
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gst::gl_bridge;
+use crate::gst::ice_preflight;
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -37,6 +38,7 @@ impl BlockBuilder for WHEPOutputBuilder {
         ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         debug!("Building WHEP Output block instance: {}", instance_id);
+        ice_preflight::require_ice_elements("WHEP Output")?;
         build_whepserversink(instance_id, properties, ctx)
     }
 
@@ -213,6 +215,7 @@ impl BlockBuilder for WHEPInputBuilder {
         ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         debug!("Building WHEP Input block instance: {}", instance_id);
+        ice_preflight::require_ice_elements("WHEP Input")?;
 
         // Get implementation choice (default to stable whepsrc)
         let use_new = properties
