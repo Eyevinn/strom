@@ -169,7 +169,7 @@ is_gstreamer_installed() {
             if command -v brew >/dev/null 2>&1; then
                 local required_packages=(gstreamer gst-plugins-base gst-plugins-good)
                 if [ "$install_type" = "full" ]; then
-                    required_packages+=(gst-plugins-bad gst-plugins-ugly)
+                    required_packages+=(gst-plugins-bad gst-plugins-ugly libnice-gstreamer)
                 fi
                 for pkg in "${required_packages[@]}"; do
                     if ! brew list "$pkg" >/dev/null 2>&1; then
@@ -385,8 +385,12 @@ install_gstreamer() {
             if command -v brew >/dev/null 2>&1; then
                 local packages=(gstreamer gst-plugins-base gst-plugins-good)
 
+                # libnice-gstreamer provides the nicesrc/nicesink elements that
+                # webrtcbin needs for ICE. The plain libnice formula installs
+                # only the library, leaving webrtcbin without ICE, which aborts
+                # every WHIP/WHEP session. libnice-gstreamer depends on libnice.
                 if [ "$install_type" = "full" ]; then
-                    packages+=(gst-plugins-bad gst-plugins-ugly gst-libav libnice)
+                    packages+=(gst-plugins-bad gst-plugins-ugly gst-libav libnice-gstreamer)
                 fi
 
                 brew install "${packages[@]}"
