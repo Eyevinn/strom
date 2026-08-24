@@ -89,6 +89,17 @@ jobs:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav pkg-config cmake libclang-dev
           version: 1.5
 
+      # cache-apt-pkgs-action restores package files but does not run postinst,
+      # so update-alternatives links such as /usr/lib/*/libblas.so.3 never get
+      # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
+      # object file"), avenc_aac goes missing, and every test requiring it skips
+      # green. Reinstalling runs postinst; ldconfig then picks the links up.
+      - name: Repair alternatives for cached libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --reinstall libblas3 liblapack3
+          sudo ldconfig
+
       # save-if main: PR runs restore the main-branch cache (GHA cache scoping
       # falls back to the base branch) but don't save their own per-branch
       # copy — that copy doubled every rust-cache entry against the 10 GB
@@ -115,6 +126,9 @@ jobs:
 
       - name: Run tests on backend
         run: cargo test --package strom --features efp,nvidia
+        env:
+          # Turn a missing-element skip into a failure — see plugins_available().
+          STROM_REQUIRE_GST_PLUGINS: 1
 
       - name: Run tests on MCP server
         run: cargo test --package strom-mcp-server
@@ -291,6 +305,17 @@ jobs:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav pkg-config cmake libclang-dev
           version: 1.5
 
+      # cache-apt-pkgs-action restores package files but does not run postinst,
+      # so update-alternatives links such as /usr/lib/*/libblas.so.3 never get
+      # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
+      # object file"), avenc_aac goes missing, and every test requiring it skips
+      # green. Reinstalling runs postinst; ldconfig then picks the links up.
+      - name: Repair alternatives for cached libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --reinstall libblas3 liblapack3
+          sudo ldconfig
+
       - name: Download frontend dist
         uses: actions/download-artifact@v8
         with:
@@ -400,6 +425,17 @@ jobs:
         with:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav pkg-config cmake libclang-dev
           version: 1.5
+
+      # cache-apt-pkgs-action restores package files but does not run postinst,
+      # so update-alternatives links such as /usr/lib/*/libblas.so.3 never get
+      # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
+      # object file"), avenc_aac goes missing, and every test requiring it skips
+      # green. Reinstalling runs postinst; ldconfig then picks the links up.
+      - name: Repair alternatives for cached libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --reinstall libblas3 liblapack3
+          sudo ldconfig
 
       - name: Download frontend dist
         uses: actions/download-artifact@v8

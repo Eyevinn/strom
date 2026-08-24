@@ -37,10 +37,23 @@ const REQUIRED: &[&str] = &[
     "tsdemux",
 ];
 
+/// Skipping on a missing element passes green and guards nothing, so CI sets
+/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
 fn plugins_available() -> bool {
-    REQUIRED
+    let missing: Vec<&str> = REQUIRED
         .iter()
-        .all(|e| gst::ElementFactory::find(e).is_some())
+        .copied()
+        .filter(|e| gst::ElementFactory::find(e).is_none())
+        .collect();
+    if missing.is_empty() {
+        return true;
+    }
+    assert!(
+        std::env::var("STROM_REQUIRE_GST_PLUGINS").is_err(),
+        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
+        missing.join(", ")
+    );
+    false
 }
 
 fn container_available(container: &str) -> bool {
