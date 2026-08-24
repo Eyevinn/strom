@@ -12,6 +12,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use strom_types::block::StreamMode;
 use tokio::sync::mpsc;
@@ -32,6 +33,13 @@ pub struct WhipEndpointConfig {
     pub pipeline_weak: gst::glib::WeakRef<gst::Pipeline>,
     /// Whether to decode RTP to raw media (true) or pass through RTP (false)
     pub decode: bool,
+    /// Per-slot flag, set once the main pipeline's `decodebin` has exposed a
+    /// video pad for that slot — i.e. video is genuinely being decoded.
+    ///
+    /// A session asks the publisher for a keyframe until this flips, because
+    /// without the parameter sets that travel with a keyframe the depayloader
+    /// can never produce an access unit. See `gst::keyframe_request`.
+    pub video_decoding: Arc<Vec<AtomicBool>>,
     /// Jitterbuffer latency in milliseconds for the per-session webrtcbin.
     pub jitterbuffer_latency_ms: u32,
     /// Shared dynamic webrtcbin store for ICE policy tracking
