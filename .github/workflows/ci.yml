@@ -528,7 +528,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","macos"]'), inputs.platforms)
     needs: [check-wasm, preflight]
     runs-on: macos-latest
-    timeout-minutes: 30
+    # 30 was not enough: the job is workflow_dispatch-only, so it runs rarely
+    # and sccache's Rust cache is cold almost every time (measured 0.00% Rust
+    # hit rate on a fresh branch), which means clippy, the test build and the
+    # release build each compile the tree from scratch. Matches the Windows
+    # job, which is dispatch-only for the same reason and already sits at 45.
+    timeout-minutes: 45
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
