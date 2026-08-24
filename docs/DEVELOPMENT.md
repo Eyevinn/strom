@@ -24,8 +24,10 @@ Make sure you have the following installed:
    # Fedora
    sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel
 
-   # macOS
-   brew install gstreamer gst-plugins-base libnice-gstreamer
+   # macOS (libnice-gstreamer, not libnice — it provides the nicesrc/nicesink
+   # elements webrtcbin needs for ICE; without them WHIP/WHEP aborts the process)
+   brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
+     gst-plugins-ugly gst-libav libnice-gstreamer cairo graphviz
    ```
 
 3. **WebAssembly target** (for frontend)
