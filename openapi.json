@@ -717,6 +717,7 @@
           "flows"
         ],
         "summary": "Create a new flow.",
+        "description": "Creates a flow under the `id` supplied in the body, so a caller can pre-generate an id and then start the flow by it. `id` is a required field: to have the server assign one instead, send the nil uuid (`00000000-0000-0000-0000-000000000000`) and read the assigned id from the `flow.id` of the response. Reusing the id of an existing flow is a 409; use `POST /api/flows/{id}` to update that flow instead.",
         "operationId": "create_flow",
         "requestBody": {
           "content": {
@@ -735,6 +736,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FlowResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A flow with the supplied id already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
