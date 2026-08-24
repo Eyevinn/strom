@@ -15,6 +15,7 @@ use crate::blocks::{
     APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
 use crate::gst::ice_preflight;
+use crate::gst::keyframe_request;
 use crate::whip_session_manager::{SessionCleanupRequest, WhipEndpointConfig};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -238,6 +239,11 @@ fn build_whipserversrc(
     let mut slot_audio_appsrcs: Vec<gst_app::AppSrc> = Vec::new();
     let mut slot_video_appsrcs: Vec<gst_app::AppSrc> = Vec::new();
 
+    // One flag per slot, set when decodebin exposes that slot's video pad.
+    // A session stops asking the publisher for keyframes once its flag flips.
+    let video_decoding: Arc<Vec<AtomicBool>> =
+        Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect());
+
     for slot in 0..max_sessions {
         // Audio chain for this slot
         if mode.has_audio() {
@@ -392,9 +398,15 @@ fn build_whipserversrc(
 
                 // decodebin has dynamic pads — connect pad-added to link to videoconvert
                 let videoconvert_weak = videoconvert.downgrade();
+                let video_decoding_for_pad = video_decoding.clone();
                 decodebin.connect_pad_added(move |_dec, src_pad| {
                     if src_pad.direction() != gst::PadDirection::Src {
                         return;
+                    }
+                    // Video is decoding: whoever is asking for keyframes on
+                    // this slot can stop.
+                    if let Some(flag) = video_decoding_for_pad.get(slot) {
+                        flag.store(true, Ordering::Relaxed);
                     }
                     if let Some(vc) = videoconvert_weak.upgrade() {
                         let sink = vc.static_pad("sink").unwrap();
@@ -458,6 +470,7 @@ fn build_whipserversrc(
             ice_transport_policy: ctx.ice_transport_policy().to_string(),
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
+            video_decoding,
             jitterbuffer_latency_ms,
             dynamic_webrtcbin_store: ctx.dynamic_webrtcbin_store(),
             max_video_bitrate_kbps,
@@ -570,16 +583,12 @@ pub fn create_whipserversrc_for_session(
             // see comment in whep.rs build_whepsrc iterate_recurse for details.
             if element_name.starts_with("rtpbin") && element.has_property("drop-on-latency") {
                 element.set_property("drop-on-latency", true);
-                info!(
-                    "WHIP Input: Set drop-on-latency=true on {}",
-                    element_name
-                );
+                info!("WHIP Input: Set drop-on-latency=true on {}", element_name);
             }
 
             if element_name.starts_with("webrtcbin") {
                 if element.has_property("ice-transport-policy") {
-                    element
-                        .set_property_from_str("ice-transport-policy", &ice_transport_policy);
+                    element.set_property_from_str("ice-transport-policy", &ice_transport_policy);
                     info!(
                         "WHIP Input: Set ice-transport-policy={} on webrtcbin {}",
                         ice_transport_policy, element_name
@@ -631,10 +640,8 @@ pub fn create_whipserversrc_for_session(
                             .unwrap_or_else(|| "unknown".to_string())
                     };
 
-                    let is_dead = matches!(
-                        state_name.as_str(),
-                        "failed" | "disconnected" | "closed"
-                    );
+                    let is_dead =
+                        matches!(state_name.as_str(), "failed" | "disconnected" | "closed");
 
                     info!(
                         "WHIP Input: [SERVER] {} ice-connection-state = {}",
@@ -643,10 +650,7 @@ pub fn create_whipserversrc_for_session(
 
                     if is_dead && !cleanup_sent.swap(true, Ordering::SeqCst) {
                         let reason = format!("ICE {}", state_name);
-                        let _ = cleanup_tx.send(SessionCleanupRequest {
-                            port,
-                            reason,
-                        });
+                        let _ = cleanup_tx.send(SessionCleanupRequest { port, reason });
                     }
                 });
             }
@@ -667,47 +671,14 @@ pub fn create_whipserversrc_for_session(
                 }
             }
 
-            let element_klass = element
-                .factory()
-                .and_then(|f| f.metadata("klass").map(|s| s.to_string()))
-                .unwrap_or_default();
-            if element_klass.contains("Decoder") && element_klass.contains("Video") {
-                let decoder_name = element_name.to_string();
-                let decoder_weak = element.downgrade();
-                let fku_epoch = Instant::now();
-                let last_fku_ms = Arc::new(AtomicU64::new(0));
-                let block_id = block_id_for_callback.clone();
-
-                if let Some(sink_pad) = element.static_pad("sink") {
-                    sink_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
-                        if let Some(gst::PadProbeData::Buffer(ref buffer)) = info.data {
-                            if buffer.flags().contains(gst::BufferFlags::DISCONT) {
-                                let now_ms = fku_epoch.elapsed().as_millis() as u64;
-                                let last = last_fku_ms.load(Ordering::Relaxed);
-                                if now_ms.saturating_sub(last) >= 1000 {
-                                    last_fku_ms.store(now_ms, Ordering::Relaxed);
-                                    if let Some(decoder) = decoder_weak.upgrade() {
-                                        debug!(
-                                            "WHIP Input [{}]: Discontinuity on {} sink, requesting keyframe (PLI)",
-                                            block_id, decoder_name
-                                        );
-                                        let fku =
-                                            gst_video::UpstreamForceKeyUnitEvent::builder()
-                                                .all_headers(true)
-                                                .build();
-                                        decoder.send_event(fku);
-                                    }
-                                }
-                            }
-                        }
-                        gst::PadProbeReturn::Ok
-                    });
-                    info!(
-                        "WHIP Input: Installed keyframe recovery probe on {} sink pad",
-                        element_name
-                    );
-                }
-            }
+            // NOTE: a DISCONT-triggered keyframe request used to live here, on
+            // the decoder's sink pad. It never ran, and could not have worked:
+            // the decoder lives in the *main* pipeline, not in this session
+            // pipeline, so the branch was never reached — and an upstream
+            // force-key-unit sent from there dies at the main pipeline's
+            // `appsrc` instead of crossing into the WebRTC source. Keyframe
+            // requests are made from the session side instead, where they
+            // reach the publisher. See `gst::keyframe_request`.
             None
         });
     }
@@ -715,6 +686,13 @@ pub fn create_whipserversrc_for_session(
     // Get the slot's appsrc refs — these are the targets in the main pipeline
     let slot_audio_appsrc: Option<gst_app::AppSrc> = config.slot_audio_appsrcs.get(slot).cloned();
     let slot_video_appsrc: Option<gst_app::AppSrc> = config.slot_video_appsrcs.get(slot).cloned();
+
+    // Re-arm the slot: this session has to prove for itself that video decodes.
+    // A previous session on the same slot left the flag set.
+    let video_decoding = config.video_decoding.clone();
+    if let Some(flag) = video_decoding.get(slot) {
+        flag.store(false, Ordering::Relaxed);
+    }
 
     // Shared timestamp offset for A/V sync across audio and video appsrcs.
     // Computed from the first buffer on either stream:
@@ -862,6 +840,60 @@ pub fn create_whipserversrc_for_session(
                     "WHIP Input: Pad {} (stream {}) → appsink → slot {} appsrc ({})",
                     pad_name, stream_num, slot, media_type
                 );
+
+                if media_type == "video" {
+                    // A browser sends H.264 parameter sets only alongside a
+                    // keyframe. If this session's first keyframe never arrives,
+                    // the depayloader gets nothing but non-reference slices and
+                    // can never output an access unit — decodebin exposes no
+                    // pad and the flow's pipeline never leaves PAUSED, so WHEP
+                    // viewers get nothing while audio plays fine.
+                    //
+                    // Ask for one. The event has to be sent here, on the WebRTC
+                    // source's pad, because this is the only side of the
+                    // appsink/appsrc boundary from which it reaches the
+                    // publisher. It stops as soon as video decodes, so a
+                    // healthy session is normally never asked at all.
+                    let request_pad = pad.clone();
+                    let request_flag = video_decoding.clone();
+                    let request_slot = slot;
+                    if let Err(e) = std::thread::Builder::new()
+                        .name(format!("whip-keyframe-{}", request_slot))
+                        .spawn(move || {
+                            let policy = keyframe_request::KeyframeRequestPolicy::default();
+                            let Some(flag) = request_flag.get(request_slot) else {
+                                return;
+                            };
+                            let sent = keyframe_request::request_until_decoding(
+                                policy,
+                                flag,
+                                std::thread::sleep,
+                                |attempt| {
+                                    debug!(
+                                        "WHIP Input: video not decoding on slot {}, requesting keyframe (PLI) attempt {}/{}",
+                                        request_slot, attempt, policy.attempts
+                                    );
+                                    request_pad.send_event(
+                                        gst_video::UpstreamForceKeyUnitEvent::builder()
+                                            .all_headers(true)
+                                            .build(),
+                                    );
+                                },
+                            );
+                            if sent > 0 {
+                                info!(
+                                    "WHIP Input: requested a keyframe {} time(s) on slot {} (video had not started decoding)",
+                                    sent, request_slot
+                                );
+                            }
+                        })
+                    {
+                        warn!(
+                            "WHIP Input: could not spawn keyframe requester for slot {}: {}",
+                            slot, e
+                        );
+                    }
+                }
 
                 let ts_offset = shared_ts_offset.clone();
                 let main_pipeline_for_ts = main_pipeline_weak.clone();
