@@ -10,6 +10,7 @@
 //! Handles dynamic pad creation by linking new audio streams to a liveadder mixer.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::gst::gl_bridge;
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -1709,6 +1710,21 @@ fn build_whepserversink(
                 }
                 gst::PadProbeReturn::Ok
             });
+
+            // Consumer-side GPU-memory adaptation.
+            //
+            // whepserversink advertises video/x-raw(memory:GLMemory) on its
+            // video request pads, so GL frames negotiate all the way to the
+            // sink — and webrtcsink's encoder discovery then finds no encoder
+            // that can take them. Video goes missing while audio, on a
+            // non-GL path, keeps working. On macOS this is the normal case:
+            // decodebin autoplugs vtdec_hw, which outputs GL memory.
+            //
+            // The producer cannot decide this for us (a GL vision mixer
+            // feeding a GL consumer must stay on the GPU), and neither can
+            // this block at build time, since the upstream decoder is
+            // autoplugged. So the decision is made from the negotiated caps.
+            gl_bridge::install_gl_download_bridge(&queue_src_pad, &video_queue_id);
 
             // Video link: queue -> whepserversink (video_<slot> request pad)
             internal_links.push((

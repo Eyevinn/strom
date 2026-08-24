@@ -5,6 +5,7 @@ pub mod buffer_age_probe;
 pub(crate) mod control_bindings;
 pub(crate) mod crop;
 pub mod discovery;
+pub mod gl_bridge;
 pub mod pipeline;
 pub mod pipeline_monitor;
 pub mod shaders;
