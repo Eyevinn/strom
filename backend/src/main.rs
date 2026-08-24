@@ -420,6 +420,10 @@ fn run_with_gui(
         // This tests CUDA-GL interop to determine if autovideoconvert works
         strom::gpu::detect_gpu_capabilities();
 
+        // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
+        // without it, so say so at startup rather than at first flow start.
+        strom::gst::ice_preflight::log_ice_availability();
+
         // Start GLib main loop in background thread for bus watch callbacks
         start_glib_main_loop();
         info!("GLib main loop started in background thread");
@@ -574,6 +578,10 @@ async fn run_headless(
     // Detect GPU capabilities for video conversion mode selection
     // This tests CUDA-GL interop to determine if autovideoconvert works
     strom::gpu::detect_gpu_capabilities();
+
+    // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
+    // without it, so say so at startup rather than at first flow start.
+    strom::gst::ice_preflight::log_ice_availability();
 
     // Start GLib main loop in background thread for bus watch callbacks
     start_glib_main_loop();

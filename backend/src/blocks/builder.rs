@@ -39,6 +39,9 @@ pub enum BlockBuildError {
 
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
+
+    #[error("{0}")]
+    MissingPlugin(String),
 }
 
 /// Function type for connecting a block-specific bus message handler.

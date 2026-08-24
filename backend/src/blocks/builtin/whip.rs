@@ -14,6 +14,7 @@ use crate::blocks::{
     BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, APPSRC_MAX_BYTES_AUDIO,
     APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
+use crate::gst::ice_preflight;
 use crate::whip_session_manager::{SessionCleanupRequest, WhipEndpointConfig};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -43,6 +44,7 @@ impl BlockBuilder for WHIPOutputBuilder {
         ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         debug!("Building WHIP Output block instance: {}", instance_id);
+        ice_preflight::require_ice_elements("WHIP Output")?;
 
         // Get implementation choice (default to stable whipsink)
         let use_new = properties
@@ -72,6 +74,7 @@ impl BlockBuilder for WHIPInputBuilder {
         ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         debug!("Building WHIP Input block instance: {}", instance_id);
+        ice_preflight::require_ice_elements("WHIP Input")?;
         build_whipserversrc(instance_id, properties, ctx)
     }
 
