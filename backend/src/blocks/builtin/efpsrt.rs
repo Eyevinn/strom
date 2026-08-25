@@ -7,6 +7,7 @@
 //! - Dynamic parser insertion for video (h264parse/h265parse with config-interval=1)
 //! - Dynamic audio chain: supports raw audio (encodes to Opus) and encoded formats
 //! - Configurable inputs: 1 video input + 1-32 audio inputs (default: 1 audio)
+//! - Optional embedded-data inputs carried on EFP's `embed_%u` pads (default: 0)
 //! - SRT with auto-reconnect and configurable latency
 //! - Configurable MTU for EFP fragmentation
 //!
@@ -61,6 +62,15 @@ impl BlockBuilder for EfpSrtOutputBuilder {
             })
             .unwrap_or(1);
 
+        let num_data_tracks = properties
+            .get("num_data_tracks")
+            .and_then(|v| match v {
+                PropertyValue::UInt(u) => Some(*u as usize),
+                PropertyValue::Int(i) => Some(*i as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+
         let mut inputs = Vec::new();
 
         for i in 0..num_video_tracks {
@@ -87,6 +97,16 @@ impl BlockBuilder for EfpSrtOutputBuilder {
                 name: format!("audio_in_{}", i),
                 media_type: MediaType::Audio,
                 internal_element_id: format!("audio_input_{}", i),
+                internal_pad_name: "sink".to_string(),
+            });
+        }
+
+        for i in 0..num_data_tracks {
+            inputs.push(ExternalPad {
+                label: Some(format!("D{}", i)),
+                name: format!("data_in_{}", i),
+                media_type: MediaType::Generic,
+                internal_element_id: format!("data_input_{}", i),
                 internal_pad_name: "sink".to_string(),
             });
         }
@@ -173,6 +193,15 @@ impl BlockBuilder for EfpSrtOutputBuilder {
             })
             .unwrap_or(1);
 
+        let num_data_tracks = properties
+            .get("num_data_tracks")
+            .and_then(|v| match v {
+                PropertyValue::UInt(u) => Some(*u as usize),
+                PropertyValue::Int(i) => Some(*i as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+
         // Create efpmux
         let mux_id = format!("{}:efpmux", instance_id);
         let mux = gst::ElementFactory::make("efpmux")
@@ -218,9 +247,64 @@ impl BlockBuilder for EfpSrtOutputBuilder {
             );
         }
 
+        // Embedded-data inputs. Unlike video and audio these need no codec
+        // detection, so the embed pad is requested up front instead of from a
+        // caps probe. Addressing is caps-driven: efpmux takes `stream-id` and
+        // `data-type` from the caps on this pad, so the caller sends
+        // application/x-efp-embedded caps carrying both. Embedded data is
+        // prepended to the next frame of the media stream with the same
+        // `stream-id`, so data addressed to a stream that carries no media
+        // never leaves the muxer.
+        let mut data_elements = Vec::new();
+        for i in 0..num_data_tracks {
+            let data_input_id = format!("{}:data_input_{}", instance_id, i);
+            let data_input = gst::ElementFactory::make("identity")
+                .name(&data_input_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("data identity {}: {}", i, e))
+                })?;
+
+            let pad_template = mux.pad_template("embed_%u").ok_or_else(|| {
+                BlockBuildError::ElementCreation(
+                    "efpmux has no embed_%u pad template (requires gst-plugin-efp >= 0.3.0)"
+                        .to_string(),
+                )
+            })?;
+
+            // Name the pad explicitly: efpmux's default name is derived from the
+            // caps stream-id, which is still 0 at request time, so every track
+            // would ask for embed_0 and the second request would fail.
+            let embed_pad = mux
+                .request_pad(&pad_template, Some(&format!("embed_{}", i)), None)
+                .ok_or_else(|| {
+                    BlockBuildError::ElementCreation(format!(
+                        "failed to request embed pad {} from efpmux",
+                        i
+                    ))
+                })?;
+
+            let data_src = data_input.static_pad("src").ok_or_else(|| {
+                BlockBuildError::ElementCreation(format!("data identity {} has no src pad", i))
+            })?;
+
+            data_src.link(&embed_pad).map_err(|e| {
+                BlockBuildError::LinkError(format!("data input {} -> efpmux: {:?}", i, e))
+            })?;
+
+            info!(
+                "EFP data input {}: linked to efpmux ({})",
+                i,
+                embed_pad.name()
+            );
+
+            data_elements.push((data_input_id, data_input));
+        }
+
         let mut internal_links = vec![];
         let mux_weak = mux.downgrade();
         let mut elements = vec![(mux_id.clone(), mux), (sink_id.clone(), srtsink)];
+        elements.extend(data_elements);
 
         // Create video input chains with dynamic parser insertion
         if num_video_tracks > 0 {
@@ -549,8 +633,8 @@ impl BlockBuilder for EfpSrtOutputBuilder {
         ));
 
         info!(
-            "Created EFP/SRT block with {} video track(s) and {} audio chain(s)",
-            num_video_tracks, num_audio_tracks
+            "Created EFP/SRT block with {} video track(s), {} audio chain(s) and {} data track(s)",
+            num_video_tracks, num_audio_tracks, num_data_tracks
         );
 
         Ok(BlockBuildResult {
@@ -775,6 +859,20 @@ fn efpsrt_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "num_audio_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "num_data_tracks".to_string(),
+                label: "Number of Data Tracks".to_string(),
+                description: "Number of EFP embedded-data input tracks (default: 0). Each track maps to an efpmux 'embed_%u' pad. The connected source must send 'application/x-efp-embedded' caps carrying 'data-type' and 'stream-id'; data is delivered alongside the media stream with the matching stream-id.".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_data_tracks".to_string(),
                     transform: None,
                 },
                 live: false,

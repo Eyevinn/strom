@@ -1,7 +1,8 @@
 //! EFP over SRT input block builder.
 //!
 //! This block receives an SRT stream carrying EFP (Elastic Frame Protocol) and demuxes
-//! it into separate video and audio output pads.
+//! it into separate video and audio output pads, plus an optional embedded-data
+//! output carrying efpdemux's `embedded` pad (default: 0 data tracks).
 //!
 //! Pipeline structure (decode=true, default):
 //! ```text
@@ -32,6 +33,9 @@ use std::sync::Arc;
 use strom_types::{block::*, element::ElementPadRef, FlowId, PropertyValue, *};
 use tracing::{debug, error, warn};
 
+/// Caps name of `efpdemux`'s embedded-data src pad.
+const EFP_EMBEDDED_CAPS_NAME: &str = "application/x-efp-embedded";
+
 /// EFP/SRT Input block builder.
 pub struct EfpSrtInputBuilder;
 
@@ -57,6 +61,15 @@ impl BlockBuilder for EfpSrtInputBuilder {
                 _ => None,
             })
             .unwrap_or(1);
+
+        let num_data_tracks = properties
+            .get("num_data_tracks")
+            .and_then(|v| match v {
+                PropertyValue::UInt(u) => Some(*u as usize),
+                PropertyValue::Int(i) => Some(*i as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
 
         let mut outputs = Vec::new();
 
@@ -84,6 +97,16 @@ impl BlockBuilder for EfpSrtInputBuilder {
                 name: format!("audio_out_{}", i),
                 media_type: MediaType::Audio,
                 internal_element_id: format!("audio_output_{}", i),
+                internal_pad_name: "src".to_string(),
+            });
+        }
+
+        for i in 0..num_data_tracks {
+            outputs.push(ExternalPad {
+                label: Some(format!("D{}", i)),
+                name: format!("data_out_{}", i),
+                media_type: MediaType::Generic,
+                internal_element_id: format!("data_output_{}", i),
                 internal_pad_name: "src".to_string(),
             });
         }
@@ -179,6 +202,15 @@ impl BlockBuilder for EfpSrtInputBuilder {
                 _ => None,
             })
             .unwrap_or(1);
+
+        let num_data_tracks = properties
+            .get("num_data_tracks")
+            .and_then(|v| match v {
+                PropertyValue::UInt(u) => Some(*u as usize),
+                PropertyValue::Int(i) => Some(*i as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
 
         // Create srtsrc
         let src_id = format!("{}:srtsrc", instance_id);
@@ -294,6 +326,23 @@ impl BlockBuilder for EfpSrtInputBuilder {
             elements.push((element_id, identity));
         }
 
+        // Create embedded-data output identity elements. efpdemux exposes a
+        // single `embedded` src pad for all data types, so only the first of
+        // these is ever linked.
+        let mut data_guards = Vec::new();
+        for i in 0..num_data_tracks {
+            let element_id = format!("{}:data_output_{}", instance_id, i);
+            let identity = gst::ElementFactory::make("identity")
+                .name(&element_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("data identity {}: {}", i, e))
+                })?;
+            let guard = Arc::new(AtomicBool::new(false));
+            data_guards.push((identity.downgrade(), guard));
+            elements.push((element_id, identity));
+        }
+
         // Setup dynamic pad linking on efpdemux pad-added.
         // - decode mode: video via h264parse + decoder, audio via opusdec + audioconvert + audioresample.
         // - passthrough mode: video via h264parse, audio linked directly.
@@ -325,6 +374,10 @@ impl BlockBuilder for EfpSrtInputBuilder {
             let is_audio = caps_name
                 .as_ref()
                 .map(|n| n.starts_with("audio/"))
+                .unwrap_or(false);
+            let is_data = caps_name
+                .as_deref()
+                .map(|n| n == EFP_EMBEDDED_CAPS_NAME)
                 .unwrap_or(false);
 
             debug!(
@@ -424,6 +477,43 @@ impl BlockBuilder for EfpSrtInputBuilder {
                 }
                 warn!(
                     "EFPSRT Input {}: No available audio output for pad {}",
+                    instance_id_clone, pad_name
+                );
+            } else if is_data {
+                // Embedded data is opaque bytes — nothing to parse or decode in
+                // either mode, so it is always linked straight through.
+                for (weak_identity, guard) in &data_guards {
+                    if guard.swap(true, Ordering::SeqCst) {
+                        continue;
+                    }
+
+                    if let Some(identity) = weak_identity.upgrade() {
+                        let sink_pad = match identity.static_pad("sink") {
+                            Some(p) => p,
+                            None => {
+                                guard.store(false, Ordering::SeqCst);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = pad.link(&sink_pad) {
+                            error!(
+                                "EFPSRT Input {}: Failed to link embedded-data pad {}: {:?}",
+                                instance_id_clone, pad_name, e
+                            );
+                            guard.store(false, Ordering::SeqCst);
+                            continue;
+                        }
+                        debug!(
+                            "EFPSRT Input {}: Linked embedded-data pad {} -> {}",
+                            instance_id_clone,
+                            pad_name,
+                            identity.name()
+                        );
+                        return;
+                    }
+                }
+                warn!(
+                    "EFPSRT Input {}: No available data output for pad {}",
                     instance_id_clone, pad_name
                 );
             } else {
@@ -784,7 +874,22 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-            },            ExposedProperty {
+            },
+            ExposedProperty {
+                name: "num_data_tracks".to_string(),
+                label: "Number of Data Tracks".to_string(),
+                description: "Number of EFP embedded-data output tracks (default: 0). efpdemux exposes a single 'embedded' pad carrying every data type, so only the first track is ever linked.".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_data_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
                 description: "SRT URI (e.g., 'srt://:4000?mode=listener' or 'srt://192.0.2.1:4000?mode=caller')".to_string(),
