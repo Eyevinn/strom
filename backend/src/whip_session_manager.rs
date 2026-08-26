@@ -42,6 +42,9 @@ pub struct WhipEndpointConfig {
     pub video_decoding: Arc<Vec<AtomicBool>>,
     /// Jitterbuffer latency in milliseconds for the per-session webrtcbin.
     pub jitterbuffer_latency_ms: u32,
+    /// Whether whipserversrc should request retransmission (NACK) of lost
+    /// packets from the publisher.
+    pub do_retransmission: bool,
     /// Shared dynamic webrtcbin store for ICE policy tracking
     pub dynamic_webrtcbin_store: DynamicWebrtcbinStore,
     /// Maximum video bitrate hint for Chrome (kbps). Injected into the SDP
