@@ -969,8 +969,10 @@ impl BlockBuilder for RecorderBuilder {
 
 /// Whether a recorder input identity has something linked to its sink pad.
 ///
-/// Called after the flow has linked every block, so unlinked means the track will never
-/// carry data and must not be given a splitmuxsink pad.
+/// Runs after construction's linking pass, so this is exact for links resolved there —
+/// every link into a recorder today, since recorder inputs take encoded media and so are
+/// fed by encoder src pads. A link deferred to `pending_links` resolves after this and
+/// would read as unconnected, losing that track. Nothing enforces that none can be.
 fn input_is_connected(input: &gst::glib::WeakRef<gst::Element>) -> bool {
     input
         .upgrade()

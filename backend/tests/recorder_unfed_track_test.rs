@@ -13,8 +13,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use strom::blocks::builtin::recorder::RecorderBuilder;
-use strom::blocks::{BlockBuildContext, BlockBuilder};
+use strom::blocks::{BlockBuildContext, BlockBuilder, BlockRegistry};
 use strom::events::EventBroadcaster;
+use strom::gst::pipeline::PipelineManager;
 use strom_types::PropertyValue;
 
 use gstreamer as gst;
@@ -277,13 +278,24 @@ fn stream_kinds(path: &Path, container: &str) -> (bool, bool) {
         let _ = pad.link(&sink_pad);
     });
 
+    // no-more-pads means all streams are known. EOS would mean playing the file
+    // through, and does not reliably arrive for every recording these tests produce.
+    let all_pads_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let all_pads_seen_for_cb = std::sync::Arc::clone(&all_pads_seen);
+    demux.connect_no_more_pads(move |_| {
+        all_pads_seen_for_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
     pipeline
         .set_state(gst::State::Playing)
         .expect("demux plays");
     let bus = pipeline.bus().expect("demux bus");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
-        let Some(msg) = bus.timed_pop(gst::ClockTime::from_seconds(1)) else {
+        if all_pads_seen.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) else {
             continue;
         };
         match msg.view() {
@@ -418,4 +430,178 @@ fn both_tracks_fed_records_both_streams() {
             );
         }
     }
+}
+
+/// Drive a recorder through the real `PipelineManager` start path.
+///
+/// The tests above run the hook themselves, so they would still pass if `start()`
+/// stopped running it at the right moment. This one does not.
+///
+/// Measured by making each change and rerunning: moving the hook before the linking
+/// pass fails this deterministically; moving it after `set_state(Playing)` does not,
+/// because `set_state` returns before the encoders negotiate caps. Nothing guards
+/// that second direction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorder_records_when_driven_through_pipeline_start() {
+    gst::init().unwrap();
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements not installed");
+        return;
+    }
+    if !container_available("mp4") {
+        eprintln!("skipping: mp4mux not installed");
+        return;
+    }
+
+    let media_root = tempfile::tempdir().expect("tempdir");
+    let registry_file = tempfile::NamedTempFile::new().expect("registry file");
+    let registry = BlockRegistry::new(registry_file.path());
+
+    let mut props: HashMap<String, PropertyValue> = HashMap::new();
+    props.insert(
+        "container".to_string(),
+        PropertyValue::String("mp4".to_string()),
+    );
+    props.insert("num_video_tracks".to_string(), PropertyValue::UInt(1));
+    props.insert("num_audio_tracks".to_string(), PropertyValue::UInt(1));
+    props.insert(
+        "output_dir".to_string(),
+        PropertyValue::String("recordings".to_string()),
+    );
+    props.insert(
+        "filename_prefix".to_string(),
+        PropertyValue::String("viaflow".to_string()),
+    );
+
+    let mut flow = strom_types::Flow::new("recorder_start_path");
+
+    flow.elements.push(strom_types::Element {
+        id: "vsrc".to_string(),
+        element_type: "videotestsrc".to_string(),
+        properties: {
+            let mut p = HashMap::new();
+            p.insert("num-buffers".to_string(), PropertyValue::Int(30));
+            p
+        },
+        position: [100.0, 100.0].into(),
+        pad_properties: HashMap::new(),
+    });
+    flow.elements.push(strom_types::Element {
+        id: "venc".to_string(),
+        element_type: "x264enc".to_string(),
+        properties: {
+            let mut p = HashMap::new();
+            p.insert("key-int-max".to_string(), PropertyValue::UInt(10));
+            p
+        },
+        position: [250.0, 100.0].into(),
+        pad_properties: HashMap::new(),
+    });
+
+    flow.blocks.push(strom_types::BlockInstance {
+        id: "rec".to_string(),
+        block_definition_id: "builtin.recorder".to_string(),
+        name: None,
+        properties: props.clone(),
+        position: strom_types::block::Position { x: 400.0, y: 100.0 },
+        runtime_data: None,
+        // From the builder, so the links below do not depend on registry state.
+        computed_external_pads: RecorderBuilder.get_external_pads(&props),
+    });
+
+    // Both tracks connected: the configuration that loses the caps race if pads are late.
+    flow.elements.push(strom_types::Element {
+        id: "asrc".to_string(),
+        element_type: "audiotestsrc".to_string(),
+        properties: {
+            let mut p = HashMap::new();
+            p.insert("num-buffers".to_string(), PropertyValue::Int(50));
+            p
+        },
+        position: [100.0, 250.0].into(),
+        pad_properties: HashMap::new(),
+    });
+    flow.elements.push(strom_types::Element {
+        id: "aenc".to_string(),
+        element_type: "avenc_aac".to_string(),
+        properties: HashMap::new(),
+        position: [250.0, 250.0].into(),
+        pad_properties: HashMap::new(),
+    });
+
+    flow.links.push(strom_types::Link {
+        from: "vsrc:src".to_string(),
+        to: "venc:sink".to_string(),
+    });
+    flow.links.push(strom_types::Link {
+        from: "venc:src".to_string(),
+        to: "rec:video_in_0".to_string(),
+    });
+    flow.links.push(strom_types::Link {
+        from: "asrc:src".to_string(),
+        to: "aenc:sink".to_string(),
+    });
+    flow.links.push(strom_types::Link {
+        from: "aenc:src".to_string(),
+        to: "rec:audio_in_0".to_string(),
+    });
+
+    // The bus watch is a glib signal watch, so it only dispatches while a main loop
+    // runs. The real app has one; a test does not.
+    let main_loop = gst::glib::MainLoop::new(None, false);
+    let main_loop_thread = {
+        let ml = main_loop.clone();
+        std::thread::spawn(move || ml.run())
+    };
+
+    let events = EventBroadcaster::new(16);
+    let mut event_rx = events.subscribe();
+
+    let mut manager = PipelineManager::new(
+        &flow,
+        events,
+        &registry,
+        vec![],
+        "all".to_string(),
+        None,
+        media_root.path().to_path_buf(),
+        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+    )
+    .expect("PipelineManager builds");
+
+    manager.start().expect("pipeline starts");
+
+    // Both sources have num-buffers, so the flow ends on its own. splitmuxsink only
+    // finalizes the file on EOS, and an unfinalized mp4 has no moov to demux.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            match event_rx.recv().await {
+                Ok(strom_types::StromEvent::PipelineEos { .. }) => break,
+                Ok(_) => continue,
+                Err(e) => panic!("event stream ended before EOS: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("pipeline reached EOS within 30s — a splitmuxsink pad for a connected track was not requested in time");
+
+    // Shut down before reading the file back.
+    manager.stop().expect("pipeline stops");
+    main_loop.quit();
+    main_loop_thread.join().expect("main loop thread joins");
+
+    let dir = media_root.path().join("recordings");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("recordings directory exists")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    let recorded = files.into_iter().next();
+
+    let recorded = recorded.expect("splitmuxsink wrote no file at all");
+    let (has_video, has_audio) = stream_kinds(&recorded, "mp4");
+    assert!(has_video, "recording has no video stream");
+    assert!(has_audio, "recording has no audio stream");
 }
