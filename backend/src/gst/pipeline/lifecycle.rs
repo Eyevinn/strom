@@ -112,22 +112,24 @@ impl PipelineManager {
             self.flow_name, result, current_state, pending_state
         );
 
+        // `gst_element_get_state()` reports a still-running transition as
+        // `Ok(Async)`. `Err` is only ever GST_STATE_CHANGE_FAILURE, whatever
+        // the pending state says: a failure with `pending == Playing` is a
+        // pipeline that aborted the PAUSED -> PLAYING transition (an element
+        // posted a fatal error on the bus) and will never leave PAUSED on its
+        // own. Reporting that as "async in progress" starts a dead flow —
+        // every element that only serves traffic in PLAYING stays down, and
+        // whepserversink's signaller never opens its HTTP port, so all WHEP
+        // offers for the flow's whole lifetime fail with 502.
         if let Err(e) = result {
-            if pending_state == gst::State::VoidPending {
-                error!(
-                    "Pipeline '{}' failed to reach PLAYING state: {:?} (current: {:?})",
-                    self.flow_name, e, current_state
-                );
-                return Err(PipelineError::StateChange(format!(
-                    "State change failed: {:?} - current: {:?}",
-                    e, current_state
-                )));
-            }
-            // Async state change still in progress — not an error
-            info!(
-                "Pipeline '{}' state change still in progress (current: {:?}, pending: {:?})",
-                self.flow_name, current_state, pending_state
+            error!(
+                "Pipeline '{}' failed to reach PLAYING state: {:?} (current: {:?}, pending: {:?})",
+                self.flow_name, e, current_state, pending_state
             );
+            return Err(PipelineError::StateChange(format!(
+                "State change failed: {:?} - current: {:?}, pending: {:?}",
+                e, current_state, pending_state
+            )));
         }
 
         let actual_state = match current_state {

@@ -481,6 +481,9 @@ pub async fn whep_endpoint_proxy(
     let port = match state.whep_registry().get_port(&endpoint_id).await {
         Some(p) => p,
         None => {
+            // Not registered: the flow is stopped, never started, or the
+            // block's endpoint_id was changed since the player loaded.
+            tracing::warn!("WHEP offer for unregistered endpoint '{}'", endpoint_id);
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -588,11 +591,23 @@ pub async fn whep_endpoint_proxy(
 
             builder.body(Body::from(body_bytes)).unwrap()
         }
-        Err(e) => Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(Body::from(format!("Proxy error: {}", e)))
-            .unwrap(),
+        Err(e) => {
+            // The endpoint is in the registry but its whepserversink is not
+            // answering on the registered port — most often because the flow's
+            // pipeline never reached PLAYING, so the signaller never opened it.
+            // Without this the client sees a bare 502 and the log says nothing.
+            tracing::error!(
+                "WHEP offer proxy to {} for endpoint '{}' failed: {}",
+                target_url,
+                endpoint_id,
+                e
+            );
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::from(format!("Proxy error: {}", e)))
+                .unwrap()
+        }
     }
 }
 
@@ -618,6 +633,10 @@ pub async fn whep_resource_proxy_delete(
     let port = match state.whep_registry().get_port(&endpoint_id).await {
         Some(p) => p,
         None => {
+            tracing::warn!(
+                "WHEP resource DELETE for unregistered endpoint '{}'",
+                endpoint_id
+            );
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -641,11 +660,19 @@ pub async fn whep_resource_proxy_delete(
                 .body(Body::empty())
                 .unwrap()
         }
-        Err(e) => Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(Body::from(format!("Proxy error: {}", e)))
-            .unwrap(),
+        Err(e) => {
+            tracing::error!(
+                "WHEP resource DELETE proxy to {} for endpoint '{}' failed: {}",
+                target_url,
+                endpoint_id,
+                e
+            );
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::from(format!("Proxy error: {}", e)))
+                .unwrap()
+        }
     }
 }
 
@@ -696,6 +723,10 @@ pub async fn whep_resource_proxy_patch(
     let port = match state.whep_registry().get_port(&endpoint_id).await {
         Some(p) => p,
         None => {
+            tracing::warn!(
+                "WHEP trickle-ICE PATCH for unregistered endpoint '{}'",
+                endpoint_id
+            );
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -730,11 +761,19 @@ pub async fn whep_resource_proxy_patch(
                 .body(Body::empty())
                 .unwrap()
         }
-        Err(e) => Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-            .body(Body::from(format!("Proxy error: {}", e)))
-            .unwrap(),
+        Err(e) => {
+            tracing::error!(
+                "WHEP trickle-ICE PATCH proxy to {} for endpoint '{}' failed: {}",
+                target_url,
+                endpoint_id,
+                e
+            );
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::from(format!("Proxy error: {}", e)))
+                .unwrap()
+        }
     }
 }
 
