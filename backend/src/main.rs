@@ -344,7 +344,7 @@ fn main() -> anyhow::Result<()> {
             )
         } else {
             // Headless mode: Run HTTP server on main thread
-            run_headless(
+            run_headless_entry(
                 config,
                 args.no_auto_restart,
                 log_reload_handle,
@@ -356,7 +356,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(feature = "no-gui")]
     {
         // Always headless when no-gui feature is enabled
-        run_headless(
+        run_headless_entry(
             config,
             args.no_auto_restart,
             log_reload_handle,
@@ -549,6 +549,66 @@ fn run_with_gui(
     }
 
     Ok(())
+}
+
+/// Entry point for headless mode.
+///
+/// On macOS, CEF (the `cefsrc` element used for HTML overlays) needs a Cocoa run
+/// loop on the main thread. Without one, starting a flow containing `cefsrc`
+/// blocks forever in `gst_cef_src_change_state` waiting for browser
+/// initialisation that nothing ever services. `gst_macos_main` runs a CFRunLoop
+/// on the main thread and our server on a secondary thread. GUI mode does not
+/// need this -- winit's event loop already runs a Cocoa run loop on main.
+fn run_headless_entry(
+    config: Config,
+    no_auto_restart: bool,
+    log_reload_handle: strom::state::LogReloadHandle,
+    default_log_filter: String,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        gstreamer::macos_main(move || {
+            // `gst_macos_main` does not run this closure on the process main
+            // thread -- it takes that thread for the CFRunLoop and calls us on a
+            // thread it creates itself, which gets the raw pthread default stack
+            // (512 KB on macOS) rather than the main thread's 8 MB.
+            // `create_app_with_config` builds the OpenAPI spec, and utoipa's
+            // generated `openapi_spec()` is one deeply nested expression covering
+            // every `StromEvent` variant; it overflows that stack and kills the
+            // process with exit 132 and no panic message, before the HTTP server
+            // ever binds.
+            //
+            // Spawning a Rust thread is what fixes it, not the size below:
+            // `std::thread` defaults to a 2 MiB stack, and that is already
+            // enough today (measured -- it starts and binds normally without an
+            // explicit size). The 8 MB is headroom for the spec continuing to
+            // grow, so keep it, but do not remove the indirection: calling
+            // `run_headless` directly here dies with exit 132.
+            std::thread::Builder::new()
+                .name("strom-headless".into())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    run_headless(
+                        config,
+                        no_auto_restart,
+                        log_reload_handle,
+                        default_log_filter,
+                    )
+                })
+                .expect("failed to spawn headless thread")
+                .join()
+                .expect("headless thread panicked")
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_headless(
+            config,
+            no_auto_restart,
+            log_reload_handle,
+            default_log_filter,
+        )
+    }
 }
 
 #[tokio::main]
