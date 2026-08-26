@@ -41,11 +41,18 @@ const REQUIRED_ELEMENTS: &[&str] = &[
     "splitmuxsink",
 ];
 
+/// Skipping on a missing element passes green and guards nothing, so CI sets
+/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
 fn missing_element() -> Option<&'static str> {
-    REQUIRED_ELEMENTS
+    let missing = REQUIRED_ELEMENTS
         .iter()
         .copied()
-        .find(|e| gst::ElementFactory::find(e).is_none())
+        .find(|e| gst::ElementFactory::find(e).is_none())?;
+    assert!(
+        std::env::var("STROM_REQUIRE_GST_PLUGINS").is_err(),
+        "STROM_REQUIRE_GST_PLUGINS is set but this element is missing: {missing}"
+    );
+    Some(missing)
 }
 
 /// Run a pipeline to EOS, returning an error on bus error or if `RUN_TIMEOUT`

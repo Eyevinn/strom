@@ -94,6 +94,7 @@ jobs:
       # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
       # object file"), avenc_aac goes missing, and every test requiring it skips
       # green. Reinstalling runs postinst; ldconfig then picks the links up.
+      # Only needed here: the build jobs never load a plugin.
       - name: Repair alternatives for cached libraries
         run: |
           sudo apt-get update -qq
@@ -305,17 +306,6 @@ jobs:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav pkg-config cmake libclang-dev
           version: 1.5
 
-      # cache-apt-pkgs-action restores package files but does not run postinst,
-      # so update-alternatives links such as /usr/lib/*/libblas.so.3 never get
-      # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
-      # object file"), avenc_aac goes missing, and every test requiring it skips
-      # green. Reinstalling runs postinst; ldconfig then picks the links up.
-      - name: Repair alternatives for cached libraries
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --reinstall libblas3 liblapack3
-          sudo ldconfig
-
       - name: Download frontend dist
         uses: actions/download-artifact@v8
         with:
@@ -426,17 +416,6 @@ jobs:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav pkg-config cmake libclang-dev
           version: 1.5
 
-      # cache-apt-pkgs-action restores package files but does not run postinst,
-      # so update-alternatives links such as /usr/lib/*/libblas.so.3 never get
-      # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
-      # object file"), avenc_aac goes missing, and every test requiring it skips
-      # green. Reinstalling runs postinst; ldconfig then picks the links up.
-      - name: Repair alternatives for cached libraries
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --reinstall libblas3 liblapack3
-          sudo ldconfig
-
       - name: Download frontend dist
         uses: actions/download-artifact@v8
         with:
@@ -535,6 +514,9 @@ jobs:
         run: |
           cargo test --package strom --features nvidia
           cargo test --package strom-mcp-server
+        env:
+          # Turn a missing-element skip into a failure — see plugins_available().
+          STROM_REQUIRE_GST_PLUGINS: 1
 
       - name: Build
         run: |
@@ -607,6 +589,9 @@ jobs:
         run: |
           cargo test --package strom --features efp,nvidia
           cargo test --package strom-mcp-server
+        env:
+          # Turn a missing-element skip into a failure — see plugins_available().
+          STROM_REQUIRE_GST_PLUGINS: 1
 
       - name: Build
         run: |
