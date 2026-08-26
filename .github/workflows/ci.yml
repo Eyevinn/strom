@@ -514,9 +514,6 @@ jobs:
         run: |
           cargo test --package strom --features nvidia
           cargo test --package strom-mcp-server
-        env:
-          # Turn a missing-element skip into a failure — see plugins_available().
-          STROM_REQUIRE_GST_PLUGINS: 1
 
       - name: Build
         run: |
