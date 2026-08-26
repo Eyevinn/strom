@@ -231,7 +231,9 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("decodebin: {}", e)))?;
 
-            // Catch tsdemux when decodebin creates it internally, and set its properties.
+            // Catch elements decodebin creates internally:
+            //  - tsdemux: apply our latency / ignore-pcr settings
+            //  - parsers: shield them from the transient EOS a program change emits
             let instance_for_deep = instance_id.to_string();
             element.connect("deep-element-added", false, move |args| {
                 let added: gst::Element = args[2].get().unwrap();
@@ -246,6 +248,8 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                             "MPEGTSSRT Input {}: Set tsdemux latency={}ms, ignore-pcr={} (inside decodebin)",
                             instance_for_deep, tsdemux_latency, ignore_pcr
                         );
+                    } else if is_parser_factory(&f) {
+                        shield_parser_from_transient_eos(&added, &instance_for_deep);
                     }
                 }
                 None
@@ -469,6 +473,75 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             pad_properties: HashMap::new(),
         })
     }
+}
+
+/// Is this factory a parser (`h264parse`, `aacparse`, ...)?
+///
+/// Matched on the element metadata klass rather than a name list so any parser
+/// `decodebin` autoplugs for a future codec is covered too.
+fn is_parser_factory(factory: &gst::ElementFactory) -> bool {
+    factory
+        .metadata(gst::ELEMENT_METADATA_KLASS)
+        .is_some_and(|klass| klass.contains("Parser"))
+}
+
+/// Drop EOS on a parser that `decodebin` autoplugged inside this input.
+///
+/// An MPEG-TS feed may re-signal its PMT shortly after the first one. `tsdemux`
+/// then drains the previous program: it pushes EOS out of the pad it is about
+/// to remove and creates replacement pads for the new program. Measured on a
+/// live feed, the two programs were 38 ms apart:
+///
+/// ```text
+/// .689613  tsdemux:video_0_0041  done adding pad
+/// .723817  tsdemux               Draining previous program
+/// .725773  tsdemux:video_1_0041  done adding pad
+/// .727053  tsdemux:video_0_0041  Pushing out EOS
+/// .727283  h264parse251  error: No valid frames found before end of stream
+/// ```
+///
+/// 38 ms is less than one frame at 25 fps, so the parser on the short-lived pad
+/// has not seen a complete access unit and `GstBaseParse` turns that EOS into a
+/// **fatal** error. That error aborts the pipeline's PAUSED -> PLAYING
+/// transition even though the replacement pads are already up and the stream is
+/// fine — the flow is left stuck in PAUSED for good. Whether it happens at all
+/// depends on how much video landed inside that window, which is why it
+/// presents as a random "sometimes the production starts" failure.
+///
+/// A bus handler cannot help: the pipeline bin aborts the state change when the
+/// message reaches it, before any handler we can install runs. The EOS has to be
+/// stopped before the parser acts on it.
+///
+/// Dropping it outright is correct here rather than merely expedient. This input
+/// is a live SRT source that reconnects on its own (`auto-reconnect`,
+/// `keep-listening`), so an EOS never means the stream ended — teardown happens
+/// via the state change to NULL, not via EOS. `tsdemux` removes the pad straight
+/// after pushing EOS regardless of what downstream does with it, and `decodebin`
+/// tears the chain down from that pad removal, so nothing waits on the event.
+///
+/// The probe is EVENT_DOWNSTREAM, not BUFFER — it fires per event, off the hot
+/// path.
+fn shield_parser_from_transient_eos(parser: &gst::Element, instance_id: &str) {
+    let Some(sink_pad) = parser.static_pad("sink") else {
+        return;
+    };
+
+    let parser_name = parser.name().to_string();
+    let instance_id = instance_id.to_string();
+
+    sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        let Some(gst::PadProbeData::Event(ref event)) = info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if event.type_() != gst::EventType::Eos {
+            return gst::PadProbeReturn::Ok;
+        }
+        debug!(
+            "MPEGTSSRT Input {}: dropped EOS on {} (transient demuxer pad teardown)",
+            instance_id, parser_name
+        );
+        gst::PadProbeReturn::Drop
+    });
 }
 
 /// decodebin (raw) pad -> deinterlace -> identity
@@ -752,5 +825,162 @@ fn mpegtssrt_input_definition() -> BlockDefinition {
             height: Some(2.0),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Build `fakesrc ! video/x-h264 ! <parser> ! fakesink`.
+    ///
+    /// `fakesrc` pushes a single buffer of junk claiming to be byte-stream
+    /// H.264, then EOS. The parser has data but no complete access unit when
+    /// EOS arrives, which is exactly the condition `tsdemux` creates when it
+    /// drains a program and pushes EOS out of the pad it is removing. On EOS
+    /// `GstBaseParse` posts a fatal error, and because `fakesink` never
+    /// prerolls, the pipeline cannot complete PAUSED -> PLAYING.
+    fn build_parser_eos_pipeline(name: &str) -> (gst::Pipeline, gst::Element) {
+        let pipeline = gst::Pipeline::with_name(name);
+
+        let src = gst::ElementFactory::make("fakesrc")
+            .property("num-buffers", 1i32)
+            .property_from_str("sizetype", "fixed")
+            .property("sizemax", 200i32)
+            // Force push scheduling. In pull mode GstBaseParse runs its own
+            // loop and reports the same failure from gst_base_parse_loop()
+            // without ever receiving an EOS event, which is not the path this
+            // fix guards — production hits gst_base_parse_sink_event_default().
+            .property("can-activate-pull", false)
+            .build()
+            .expect("fakesrc");
+
+        let capsfilter = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-h264")
+                    .field("stream-format", "byte-stream")
+                    .field("alignment", "au")
+                    .build(),
+            )
+            .build()
+            .expect("capsfilter");
+
+        // h264parse ships in gstreamer1.0-plugins-bad, which CI installs.
+        let parser = gst::ElementFactory::make("h264parse")
+            .build()
+            .expect("h264parse");
+        let sink = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("fakesink");
+
+        pipeline
+            .add_many([&src, &capsfilter, &parser, &sink])
+            .unwrap();
+        gst::Element::link_many([&src, &capsfilter, &parser, &sink]).unwrap();
+
+        (pipeline, parser)
+    }
+
+    /// Run the pipeline to PLAYING and return the parser error it posted, if
+    /// any. Matched on the `gst_base_parse_sink_event_default` origin so an
+    /// unrelated failure cannot be mistaken for the one under test.
+    fn start_and_collect_parser_eos_error(pipeline: &gst::Pipeline) -> Option<String> {
+        let _ = pipeline.set_state(gst::State::Playing);
+
+        let bus = pipeline.bus().unwrap();
+        let error = bus
+            .timed_pop_filtered(
+                // The error, when it comes, arrives within milliseconds.
+                gst::ClockTime::from_seconds(2),
+                &[gst::MessageType::Error, gst::MessageType::AsyncDone],
+            )
+            .and_then(|msg| match msg.view() {
+                gst::MessageView::Error(e) => {
+                    let debug = e.debug().unwrap_or_default().to_string();
+                    assert!(
+                        debug.contains("gst_base_parse_sink_event_default"),
+                        "pipeline failed for an unrelated reason, so this test is \
+                         not exercising the EOS path: {} ({})",
+                        e.error(),
+                        debug
+                    );
+                    Some(e.error().to_string())
+                }
+                _ => None,
+            });
+
+        let _ = pipeline.set_state(gst::State::Null);
+        error
+    }
+
+    /// Control: without the shield the transient EOS is fatal. If this stops
+    /// failing, the guard below no longer proves anything.
+    #[test]
+    fn parser_eos_is_fatal_without_the_shield() {
+        gst::init().unwrap();
+        let (pipeline, _parser) = build_parser_eos_pipeline("unshielded");
+
+        assert!(
+            start_and_collect_parser_eos_error(&pipeline).is_some(),
+            "expected h264parse to post a fatal error on EOS without a complete \
+             access unit — the condition this fix exists for no longer reproduces"
+        );
+    }
+
+    /// The guard: with the shield applied the same EOS is dropped before the
+    /// parser acts on it, so no error reaches the bus and the pipeline is free
+    /// to complete its state change.
+    #[test]
+    fn shield_keeps_transient_parser_eos_from_failing_the_pipeline() {
+        gst::init().unwrap();
+        let (pipeline, parser) = build_parser_eos_pipeline("shielded");
+
+        shield_parser_from_transient_eos(&parser, "test-input");
+
+        assert_eq!(
+            start_and_collect_parser_eos_error(&pipeline),
+            None,
+            "h264parse still posted a fatal error on EOS — the shield did not \
+             drop the event, so a demuxer program change will keep aborting the \
+             flow's PAUSED -> PLAYING transition"
+        );
+    }
+
+    /// Tearing the pipeline down must still complete after the shield has
+    /// swallowed an EOS — dropping the event must not leave anything waiting
+    /// on it.
+    #[test]
+    fn shielded_pipeline_still_tears_down() {
+        gst::init().unwrap();
+        let (pipeline, parser) = build_parser_eos_pipeline("shielded-teardown");
+        shield_parser_from_transient_eos(&parser, "test-input");
+
+        let _ = pipeline.set_state(gst::State::Playing);
+        std::thread::sleep(Duration::from_millis(200));
+
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline failed to return to NULL after a dropped EOS");
+        let (_, current, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+        assert_eq!(current, gst::State::Null);
+    }
+
+    #[test]
+    fn is_parser_factory_matches_parsers_not_demuxers() {
+        gst::init().unwrap();
+
+        for name in ["h264parse", "aacparse"] {
+            let factory =
+                gst::ElementFactory::find(name).unwrap_or_else(|| panic!("{} missing", name));
+            assert!(is_parser_factory(&factory), "{} should match", name);
+        }
+
+        // The demuxer is handled by the other branch of deep-element-added and
+        // must not be shielded — it is the element that legitimately emits the
+        // EOS we drop further downstream.
+        let tsdemux = gst::ElementFactory::find("tsdemux").expect("tsdemux missing");
+        assert!(!is_parser_factory(&tsdemux), "tsdemux should not match");
     }
 }
