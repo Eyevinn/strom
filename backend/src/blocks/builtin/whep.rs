@@ -2359,7 +2359,7 @@ fn whep_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "do_retransmission".to_string(),
                 label: "Retransmission (RTX)".to_string(),
-                description: "Resend lost packets to viewers on request (NACK-based). Disable only to cap the outgoing bitrate — without it, packet loss forces a full keyframe request instead of a cheap resend.".to_string(),
+                description: "Resend lost packets to viewers on request (NACK-based). Without it, packet loss forces a full keyframe request instead of a cheap resend.".to_string(),
                 property_type: PropertyType::Bool,
                 default_value: Some(PropertyValue::Bool(true)),
                 mapping: PropertyMapping {

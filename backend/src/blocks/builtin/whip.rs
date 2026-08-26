@@ -1505,7 +1505,7 @@ fn whip_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "do_retransmission".to_string(),
                 label: "Retransmission (RTX)".to_string(),
-                description: "Request retransmission of lost packets from the publisher (NACK-based). Without it, any packet loss forces a full keyframe request instead of a cheap resend. Disabling it is an unconfirmed workaround for the intermittent GStreamer depayloader crash on this ingest path.".to_string(),
+                description: "Request retransmission of lost packets from the publisher (NACK-based). Without it, any packet loss forces a full keyframe request instead of a cheap resend.".to_string(),
                 property_type: PropertyType::Bool,
                 default_value: Some(PropertyValue::Bool(true)),
                 mapping: PropertyMapping {
