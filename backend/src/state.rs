@@ -937,7 +937,17 @@ impl AppState {
 
         // Start pipeline
         info!("Calling manager.start() (this may block)...");
-        let state = manager.start()?;
+        let state = match manager.start() {
+            Ok(state) => state,
+            Err(e) => {
+                // The manager is dropped here, which takes the pipeline to
+                // Null. Release the CPU allocation too, or a flow that fails
+                // to start leaks its cores until the process restarts.
+                error!("Failed to start flow {}: {}", id, e);
+                self.inner.affinity_manager.deallocate(id);
+                return Err(e);
+            }
+        };
         info!("manager.start() returned with state: {:?}", state);
 
         // Store pipeline manager and keep a reference for SDP generation
