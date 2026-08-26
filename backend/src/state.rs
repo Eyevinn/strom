@@ -911,7 +911,7 @@ impl AppState {
 
         // Create pipeline with event broadcaster and block registry
         info!("Creating PipelineManager (this may block)...");
-        let mut manager = PipelineManager::new(
+        let mut manager = match PipelineManager::new(
             &flow,
             self.inner.events.clone(),
             &self.inner.block_registry,
@@ -920,7 +920,17 @@ impl AppState {
             Some(self.inner.whip_registry.clone()),
             self.inner.media_path.clone(),
             local_devices,
-        )?;
+        ) {
+            Ok(manager) => manager,
+            Err(e) => {
+                // Any Media Player block built before the failing one has
+                // already put its state in the global registry, and only
+                // unregistering drops the Arc whose Drop takes that block's
+                // internal pipeline to NULL.
+                crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
+                return Err(e);
+            }
+        };
         info!("PipelineManager created successfully");
 
         // Set thread registry for CPU monitoring
@@ -935,15 +945,61 @@ impl AppState {
             manager.set_assigned_cpus(assigned_cpus);
         }
 
-        // Start pipeline
+        // Start pipeline.
+        //
+        // start() blocks: a synchronous set_state(Playing), and for a
+        // transition poisoned by a transient input error, seconds of re-driving
+        // on top. This is awaited straight from the HTTP handler and from the
+        // boot auto-restart loop, so run it on the blocking pool rather than
+        // parking a tokio worker for the duration.
         info!("Calling manager.start() (this may block)...");
-        let state = match manager.start() {
+        let (mut manager, start_result) = tokio::task::spawn_blocking(move || {
+            let result = manager.start();
+            (manager, result)
+        })
+        .await
+        .map_err(|e| PipelineError::StateChange(format!("start() task panicked: {}", e)))?;
+
+        let state = match start_result {
             Ok(state) => state,
             Err(e) => {
-                // The manager is dropped here, which takes the pipeline to
-                // Null. Release the CPU allocation too, or a flow that fails
-                // to start leaks its cores until the process restarts.
                 error!("Failed to start flow {}: {}", id, e);
+
+                // Dropping the manager is not enough. Drop only stops the
+                // thumbnail task and probes and sets NULL; stop() is what
+                // removes the bus watch, the thread-priority handler and the
+                // flow's threads from the CPU-monitor registry. Skipping it
+                // leaks one bus watch GSource per failed start and leaves dead
+                // TIDs in the registry, where a reused TID is then attributed
+                // to a flow that no longer exists.
+                //
+                // Unregistering the flow's Media Player instances first mirrors
+                // stop_flow(): the registry holds an Arc per instance whose
+                // Drop is the only thing that takes the block's *internal*
+                // pipeline to NULL, so without it a Media Player flow that
+                // fails to start leaves a decoding pipeline and its file
+                // descriptors running for the life of the process.
+                crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
+                let stop_result = tokio::task::spawn_blocking(move || {
+                    let result = manager.stop();
+                    drop(manager);
+                    result
+                })
+                .await;
+                match stop_result {
+                    Ok(Err(stop_err)) => warn!(
+                        "Cleanup after failed start of flow {} could not stop the pipeline: {}",
+                        id, stop_err
+                    ),
+                    Err(join_err) => warn!(
+                        "Cleanup after failed start of flow {} panicked: {}",
+                        id, join_err
+                    ),
+                    Ok(Ok(_)) => {}
+                }
+
+                // Release the CPU allocation too, or a flow that fails to start
+                // leaks its cores until the process restarts.
                 self.inner.affinity_manager.deallocate(id);
                 return Err(e);
             }
