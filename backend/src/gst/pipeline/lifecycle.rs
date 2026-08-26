@@ -2,8 +2,22 @@ use super::{PipelineError, PipelineManager};
 use crate::gst::thread_priority;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::time::Duration;
 use strom_types::PipelineState;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+/// How many times to re-drive a failed transition to PLAYING before giving up.
+/// One transient demuxer program change needs a single retry; the extra
+/// attempts cover a feed that churns twice. A genuinely broken pipeline just
+/// fails this many times and then reports the failure.
+const STATE_CHANGE_RETRIES: u32 = 3;
+
+/// How long to let the input settle before re-driving. Measured on a live feed,
+/// the input relinked its pads 1.4-2.1 s after the transient error.
+const STATE_CHANGE_RETRY_SETTLE: Duration = Duration::from_millis(750);
+
+/// How long to wait for the re-driven transition to report a verdict.
+const STATE_CHANGE_RETRY_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(2);
 
 impl PipelineManager {
     /// Start the pipeline (set to PLAYING state).
@@ -105,7 +119,7 @@ impl PipelineManager {
         // Query the actual state GStreamer has reached so far.
         // For Async pipelines this returns the current state (e.g. Paused)
         // without blocking. For NoPreroll/Success it returns the final state.
-        let (result, current_state, pending_state) =
+        let (mut result, mut current_state, mut pending_state) =
             self.pipeline.state(gst::ClockTime::from_mseconds(500));
         info!(
             "Pipeline '{}' state after start: result={:?}, current={:?}, pending={:?}",
@@ -115,16 +129,63 @@ impl PipelineManager {
         // `gst_element_get_state()` reports a still-running transition as
         // `Ok(Async)`. `Err` is only ever GST_STATE_CHANGE_FAILURE, whatever
         // the pending state says: a failure with `pending == Playing` is a
-        // pipeline that aborted the PAUSED -> PLAYING transition (an element
-        // posted a fatal error on the bus) and will never leave PAUSED on its
-        // own. Reporting that as "async in progress" starts a dead flow —
-        // every element that only serves traffic in PLAYING stays down, and
-        // whepserversink's signaller never opens its HTTP port, so all WHEP
-        // offers for the flow's whole lifetime fail with 502.
+        // pipeline that aborted its transition and will never leave its
+        // current state on its own.
+        //
+        // A live input can poison that transition transiently. An MPEG-TS feed
+        // that re-signals its PMT makes tsdemux drain the previous program: it
+        // pushes EOS out of the pad it is removing, and the parser decodebin
+        // autoplugged for that short-lived pad has no complete access unit yet,
+        // so GstBaseParse errors fatally. The element aborts its own state,
+        // which fails the whole pipeline's transition. Measured on a live feed
+        // the two programs were 38 ms apart — under one frame at 25 fps.
+        //
+        // The input recovers on its own a second or two later: decodebin drops
+        // the doomed chain and exposes the new program's pads. Only the
+        // pipeline's state stays poisoned. Re-driving the transition once the
+        // input has settled picks it up — verified: a failed state change
+        // re-driven after the failing condition clears returns Success, and
+        // does not need a detour via READY or a drained bus.
+        //
+        // This deliberately touches nothing in the data path. An earlier
+        // attempt dropped the EOS at the parser instead; that removed the error
+        // but stopped decodebin from ever exposing the replacement pads, and
+        // turned a loud failure into a silent hang.
+        for attempt in 1..=STATE_CHANGE_RETRIES {
+            if result.is_ok() {
+                break;
+            }
+            warn!(
+                "Pipeline '{}' failed its transition (current: {:?}, pending: {:?}) — \
+                 re-driving, attempt {}/{}. A transient input error during startup \
+                 (e.g. a demuxer program change) can do this.",
+                self.flow_name, current_state, pending_state, attempt, STATE_CHANGE_RETRIES
+            );
+
+            std::thread::sleep(STATE_CHANGE_RETRY_SETTLE);
+
+            let _ = self.pipeline.set_state(gst::State::Playing);
+            (result, current_state, pending_state) =
+                self.pipeline.state(STATE_CHANGE_RETRY_TIMEOUT);
+
+            if result.is_ok() {
+                info!(
+                    "Pipeline '{}' recovered on attempt {} (current: {:?}, pending: {:?})",
+                    self.flow_name, attempt, current_state, pending_state
+                );
+            }
+        }
+
+        // Still failing after the retries: the flow is genuinely dead. Say so
+        // rather than reporting it started — callers go on to register WHEP
+        // endpoints, and whepserversink's signaller never opens its HTTP port
+        // on a pipeline whose transition aborted, so every WHEP offer for the
+        // flow's whole lifetime would answer 502 against a "running" flow.
         if let Err(e) = result {
             error!(
-                "Pipeline '{}' failed to reach PLAYING state: {:?} (current: {:?}, pending: {:?})",
-                self.flow_name, e, current_state, pending_state
+                "Pipeline '{}' failed to reach PLAYING state after {} attempts: {:?} \
+                 (current: {:?}, pending: {:?})",
+                self.flow_name, STATE_CHANGE_RETRIES, e, current_state, pending_state
             );
             return Err(PipelineError::StateChange(format!(
                 "State change failed: {:?} - current: {:?}, pending: {:?}",

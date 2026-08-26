@@ -9,6 +9,11 @@
 //! register the flow's WHEP endpoints, but the pipeline never left PAUSED, so
 //! whepserversink's signaller never opened its HTTP port and every WHEP offer
 //! against that flow answered 502 for as long as it "ran".
+//!
+//! This guards the *persistent* case. `start()` also re-drives a transition
+//! that a transient startup error poisoned; that recovery is guarded by
+//! `pipeline_start_retry_test.rs`, which is why the bed here has to be a
+//! pipeline no retry can rescue.
 
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
@@ -17,13 +22,12 @@ use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, Link};
 use tempfile::NamedTempFile;
 
-/// Build `audiotestsrc → identity error-after=1 → fakesink`.
+/// Build `audiotestsrc → identity → fakesink state-error=paused-to-playing`.
 ///
-/// `identity` errors out on the very first buffer, which is pushed during
-/// preroll. The sink therefore never prerolls, the pipeline never leaves
-/// PAUSED, and the transition to PLAYING fails with PLAYING still pending —
-/// the same shape a live flow produces when a parser inside `decodebin` posts
-/// a fatal error while the pipeline is prerolling.
+/// The sink fails PAUSED -> PLAYING on every attempt, so the pipeline can
+/// never reach PLAYING however many times the transition is re-driven. That
+/// is the shape `start()` must report as a failure rather than as a started
+/// flow.
 ///
 /// Uses only core GStreamer elements plus `audiotestsrc` so it runs in CI.
 fn build_failing_flow(name: &str) -> Flow {
@@ -40,14 +44,7 @@ fn build_failing_flow(name: &str) -> Flow {
     flow.elements.push(strom_types::Element {
         id: "fail".to_string(),
         element_type: "identity".to_string(),
-        properties: {
-            let mut p = HashMap::new();
-            p.insert(
-                "error-after".to_string(),
-                strom_types::PropertyValue::Int(1),
-            );
-            p
-        },
+        properties: HashMap::new(),
         position: [250.0, 200.0].into(),
         pad_properties: HashMap::new(),
     });
@@ -55,7 +52,14 @@ fn build_failing_flow(name: &str) -> Flow {
     flow.elements.push(strom_types::Element {
         id: "sink".to_string(),
         element_type: "fakesink".to_string(),
-        properties: HashMap::new(),
+        properties: {
+            let mut p = HashMap::new();
+            p.insert(
+                "state-error".to_string(),
+                strom_types::PropertyValue::String("paused-to-playing".to_string()),
+            );
+            p
+        },
         position: [400.0, 200.0].into(),
         pad_properties: HashMap::new(),
     });
@@ -117,11 +121,8 @@ async fn test_start_succeeds_for_healthy_pipeline() {
     let media_path = std::env::temp_dir();
 
     let mut flow = build_failing_flow("start_success_test");
-    // Same topology, but identity passes buffers through instead of erroring.
-    flow.elements[1].properties.insert(
-        "error-after".to_string(),
-        strom_types::PropertyValue::Int(-1),
-    );
+    // Same topology, but the sink no longer refuses to go to PLAYING.
+    flow.elements[2].properties.clear();
 
     let mut manager = PipelineManager::new(
         &flow,
