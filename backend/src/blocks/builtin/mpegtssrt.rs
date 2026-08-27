@@ -38,6 +38,63 @@ use std::sync::Arc;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 
+/// Remove `streamheader` from the caps leaving `pad`.
+///
+/// `mpegtsmux` advertises the PAT/PMT it wrote first as `streamheader`, and
+/// `srtsink` replays those buffers to every caller that connects afterwards.
+/// That header is a snapshot taken when the muxer produced its first output,
+/// while the tables in the live stream keep moving: this block links its video
+/// and audio chains to the muxer only once caps arrive, so the first PMT can
+/// list video alone, and any later caps change bumps the table version again.
+///
+/// A caller connecting later therefore receives a program definition that
+/// disagrees with the data that follows it. Its demuxer builds a program from
+/// the header, sees the real tables a few packets later, and tears the program
+/// down again — pushing EOS into the parser that was autoplugged for the pad it
+/// is removing. With less than one frame buffered that parser's EOS error is
+/// fatal, which aborts the receiving pipeline's transition to PLAYING.
+///
+/// Measured against a sender that had been running for four weeks: every
+/// connect replayed a video-only PMT ahead of a live PMT carrying video and
+/// audio, byte-identical across connects. Completing the header is not enough —
+/// a second sender replayed a header listing both streams that still disagreed
+/// on version. Any frozen header eventually drifts, so send none.
+///
+/// Without it a caller waits for the next periodic PAT/PMT — 100 ms by
+/// default — and gets tables that match the stream.
+fn strip_stream_header(pad: &gst::Pad, label: &str) {
+    let label = label.to_string();
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = info.data.as_ref() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps_event) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+
+        let caps = caps_event.caps();
+        let has_header = caps
+            .structure(0)
+            .is_some_and(|s| s.has_field("streamheader"));
+        if !has_header {
+            return gst::PadProbeReturn::Ok;
+        }
+
+        let mut stripped = caps.copy();
+        if let Some(structure) = stripped.make_mut().structure_mut(0) {
+            structure.remove_field("streamheader");
+            info!(
+                "MPEGTSSRT {}: removed streamheader from muxer output caps \
+                 (late SRT callers read the live PAT/PMT instead of a frozen copy)",
+                label
+            );
+            info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&stripped)));
+        }
+
+        gst::PadProbeReturn::Ok
+    });
+}
+
 /// MPEG-TS/SRT Output block builder.
 pub struct MpegTsSrtOutputBuilder;
 
@@ -181,6 +238,16 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
         }
 
         info!("MPEG-TS muxer configured: alignment=7, pcr-interval=40ms");
+
+        // Keep srtsink from replaying a frozen PAT/PMT to every later caller.
+        if let Some(mux_src) = mux.static_pad("src") {
+            strip_stream_header(&mux_src, instance_id);
+        } else {
+            warn!(
+                "MPEGTSSRT {}: mpegtsmux has no src pad, cannot remove streamheader",
+                instance_id
+            );
+        }
 
         // Create srtsink
         let sink_id = format!("{}:srtsink", instance_id);
