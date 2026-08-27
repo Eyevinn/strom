@@ -10,6 +10,7 @@ pub mod ice_preflight;
 pub mod keyframe_request;
 pub mod pipeline;
 pub mod pipeline_monitor;
+pub mod rtp_hdrext;
 pub mod shaders;
 pub mod thread_priority;
 pub mod thumbnail;
