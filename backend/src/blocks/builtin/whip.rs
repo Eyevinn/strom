@@ -502,6 +502,32 @@ fn build_whipserversrc(
     })
 }
 
+/// How long a session may go without a buffer before the watchdog tears it down.
+const INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often the watchdog re-checks its stop flag while waiting.
+const WATCHDOG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Sleep until `deadline`, waking every `WATCHDOG_POLL` to re-check `stop`.
+///
+/// Returns true if `stop` was set (the caller should give up), false if the
+/// deadline was reached. The wait is sliced rather than one long sleep so a
+/// session's watchdog thread cannot outlive the session: a watchdog that fires
+/// after teardown asks the session manager to clean up a port it no longer knows,
+/// and the manager then marks that recycled port pending cleanup for nothing.
+fn wait_until_deadline_or_stop(stop: &AtomicBool, deadline: Instant) -> bool {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep(WATCHDOG_POLL.min(deadline - now));
+    }
+}
+
 /// Create a new whipserversrc element for a single WHIP client session.
 ///
 /// Each session runs in its own isolated GStreamer pipeline to avoid
@@ -512,10 +538,15 @@ fn build_whipserversrc(
 /// appsrc targets are the pre-built slot elements.
 ///
 /// Returns (element, session_pipeline, port) on success.
+/// `cleanup_sent` is owned by the caller so it can be handed to the session
+/// manager alongside the session: every teardown path sets it, which both
+/// suppresses duplicate cleanup requests and stops this session's inactivity
+/// watchdog thread.
 pub fn create_whipserversrc_for_session(
     config: &WhipEndpointConfig,
     slot: usize,
     cleanup_tx: tokio::sync::mpsc::UnboundedSender<SessionCleanupRequest>,
+    cleanup_sent: Arc<AtomicBool>,
 ) -> Result<(gst::Element, gst::Pipeline, u16), String> {
     // Allocate a free port
     let listener =
@@ -583,9 +614,8 @@ pub fn create_whipserversrc_for_session(
     let block_id_for_callback = config.instance_id.clone();
     let ice_transport_policy = config.ice_transport_policy.clone();
     let jitterbuffer_latency_ms = config.jitterbuffer_latency_ms;
-    // Flag to ensure only one cleanup request per session (shared across ICE callback,
-    // inactivity watchdog, etc.)
-    let cleanup_sent = Arc::new(AtomicBool::new(false));
+    // `cleanup_sent` ensures only one cleanup request per session (shared across the
+    // ICE callback, the inactivity watchdog and the session manager's teardown paths).
     let cleanup_sent_for_ice = cleanup_sent.clone();
     let cleanup_tx_for_ice = cleanup_tx.clone();
 
@@ -717,9 +747,14 @@ pub fn create_whipserversrc_for_session(
 
     // Inactivity watchdog: tracks when the last buffer arrived on any stream.
     // A background thread checks this and triggers cleanup if no data arrives
-    // for INACTIVITY_TIMEOUT_SECS (covers the case where ICE disconnect
+    // for INACTIVITY_TIMEOUT (covers the case where ICE disconnect
     // notification doesn't fire from the isolated session pipeline).
-    const INACTIVITY_TIMEOUT_SECS: u64 = 10;
+    //
+    // The wait is sliced rather than one long sleep so that `cleanup_sent` — set by
+    // the ICE callback and by every teardown path in the session manager — ends the
+    // thread promptly. A watchdog that outlived its session would send a cleanup
+    // request for a port the manager no longer knows, and the manager would then mark
+    // that (recycled) port pending cleanup for nothing.
     let last_buffer_epoch = Instant::now();
     let last_buffer_ms = Arc::new(AtomicU64::new(0));
     {
@@ -730,9 +765,10 @@ pub fn create_whipserversrc_for_session(
             .name(format!("whip-watchdog-{}", port))
             .spawn(move || {
                 loop {
-                    std::thread::sleep(std::time::Duration::from_secs(INACTIVITY_TIMEOUT_SECS));
-                    // Exit if another path (ICE callback, DELETE) already triggered cleanup
-                    if cleanup_sent_watchdog.load(Ordering::SeqCst) {
+                    let deadline = Instant::now() + INACTIVITY_TIMEOUT;
+                    if wait_until_deadline_or_stop(&cleanup_sent_watchdog, deadline) {
+                        // Another path (ICE callback, DELETE, flow stop) finished
+                        // with this session.
                         break;
                     }
                     let last = last_buffer_ms_watchdog.load(Ordering::Relaxed);
@@ -742,7 +778,7 @@ pub fn create_whipserversrc_for_session(
                     }
                     let elapsed_ms = last_buffer_epoch.elapsed().as_millis() as u64;
                     let idle_ms = elapsed_ms.saturating_sub(last);
-                    if idle_ms >= INACTIVITY_TIMEOUT_SECS * 1000 {
+                    if idle_ms >= INACTIVITY_TIMEOUT.as_millis() as u64 {
                         if !cleanup_sent_watchdog.swap(true, Ordering::SeqCst) {
                             info!(
                                 "WHIP Input: Inactivity timeout ({}s idle) on port {}, triggering cleanup",
@@ -1790,6 +1826,51 @@ mod tests {
             "do_retransmission",
             PropertyValue::Bool(false)
         )])));
+    }
+
+    /// The inactivity watchdog must stop as soon as a teardown path sets the
+    /// session's `cleanup_sent` flag, not when its next timeout would have been.
+    /// A watchdog that outlives its session sends a cleanup request for a port the
+    /// session manager no longer knows, which marks that recycled port poisoned.
+    #[test]
+    fn watchdog_wait_returns_as_soon_as_the_stop_flag_is_set() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let setter = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            setter.store(true, Ordering::SeqCst);
+        });
+
+        // A deadline far beyond the flag: a wait that ignores the flag fails here by
+        // running the full 30 s, rather than returning in a poll interval.
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let started = Instant::now();
+        let stopped = wait_until_deadline_or_stop(&stop, deadline);
+
+        assert!(
+            stopped,
+            "wait must report that it was stopped, not timed out"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "wait took {:?} — it is not polling the stop flag",
+            started.elapsed()
+        );
+    }
+
+    /// With no stop flag set the wait must still run to its deadline, otherwise the
+    /// watchdog would never reach its inactivity check.
+    #[test]
+    fn watchdog_wait_runs_to_the_deadline_when_not_stopped() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + std::time::Duration::from_millis(300);
+        let stopped = wait_until_deadline_or_stop(&stop, deadline);
+
+        assert!(!stopped, "wait must report a timeout, not a stop");
+        assert!(
+            Instant::now() >= deadline,
+            "wait returned before its deadline"
+        );
     }
 
     /// The block property must reach the `WhipEndpointConfig` handed to the

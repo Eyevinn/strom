@@ -11,9 +11,10 @@ use crate::blocks::DynamicWebrtcbinStore;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use strom_types::block::StreamMode;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -118,6 +119,28 @@ struct WhipSession {
     endpoint_id: String,
     /// The slot index assigned to this session
     slot: usize,
+    /// Set once the session is finished, by whichever path tears it down.
+    /// Stops the session's inactivity watchdog thread and suppresses duplicate
+    /// cleanup requests. Shared with the callbacks in `whip.rs`.
+    cleanup_sent: Arc<AtomicBool>,
+}
+
+/// A freshly created WHIP session, handed to `register_session`.
+pub struct NewWhipSession {
+    /// The resource_id assigned by the internal whipserversrc signaller
+    pub resource_id: String,
+    /// Internal port where this session's whipserversrc is listening
+    pub port: u16,
+    /// The whipserversrc element for this session
+    pub element: gst::Element,
+    /// The isolated pipeline for this session's whipserversrc
+    pub session_pipeline: gst::Pipeline,
+    /// The endpoint this session belongs to
+    pub endpoint_id: String,
+    /// The slot index assigned to this session
+    pub slot: usize,
+    /// Shared with the session's own callbacks; see `WhipSession::cleanup_sent`.
+    pub cleanup_sent: Arc<AtomicBool>,
 }
 
 /// Manages WHIP sessions across all endpoints.
@@ -132,10 +155,20 @@ pub struct WhipSessionManager {
     cleanup_tx: mpsc::UnboundedSender<SessionCleanupRequest>,
     /// Channel receiver — taken once when starting the cleanup task
     cleanup_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionCleanupRequest>>>,
-    /// Ports for sessions that died before register_session was called.
-    /// register_session checks this set and skips registration if the port is present.
-    pending_cleanup_ports: Mutex<HashSet<u16>>,
+    /// Ports for sessions that died before register_session was called, with the
+    /// time they were marked. register_session checks this map and skips
+    /// registration if the port is present and the mark has not expired.
+    ///
+    /// Marks expire after `PENDING_CLEANUP_TTL`: session ports come from the OS
+    /// ephemeral range and are recycled, so a mark that is never claimed must not
+    /// poison a later, unrelated session that happens to be given the same port.
+    pending_cleanup_ports: Mutex<HashMap<u16, Instant>>,
 }
+
+/// How long a pending-cleanup mark stays valid. The window it has to cover is the
+/// gap between a session dying and `register_session` running for it, which is
+/// sub-second in practice.
+const PENDING_CLEANUP_TTL: Duration = Duration::from_secs(30);
 
 impl WhipSessionManager {
     pub fn new() -> Self {
@@ -145,7 +178,7 @@ impl WhipSessionManager {
             sessions: RwLock::new(HashMap::new()),
             cleanup_tx,
             cleanup_rx: Mutex::new(Some(cleanup_rx)),
-            pending_cleanup_ports: Mutex::new(HashSet::new()),
+            pending_cleanup_ports: Mutex::new(HashMap::new()),
         }
     }
 
@@ -221,8 +254,11 @@ impl WhipSessionManager {
                 None => {
                     // Session not registered yet (ICE failed before register_session).
                     // Mark port as pending cleanup so register_session skips it.
+                    // The mark expires after PENDING_CLEANUP_TTL so it cannot poison
+                    // a later session that is handed the same recycled port.
                     let mut pending = manager.pending_cleanup_ports.lock().unwrap();
-                    pending.insert(req.port);
+                    pending.retain(|_, marked| marked.elapsed() < PENDING_CLEANUP_TTL);
+                    pending.insert(req.port, Instant::now());
                     warn!(
                         "WhipSessionManager: Session on port {} not found, marked for pending cleanup (reason: {})",
                         req.port, req.reason
@@ -254,19 +290,24 @@ impl WhipSessionManager {
     /// If the session's port is in the pending_cleanup_ports set (ICE failed before
     /// registration), the session is immediately torn down instead of being registered.
     /// Returns true if registered, false if immediately cleaned up.
-    pub fn register_session(
-        &self,
-        resource_id: String,
-        port: u16,
-        element: gst::Element,
-        session_pipeline: gst::Pipeline,
-        endpoint_id: String,
-        slot: usize,
-    ) -> bool {
+    pub fn register_session(&self, session: NewWhipSession) -> bool {
+        let NewWhipSession {
+            resource_id,
+            port,
+            element,
+            session_pipeline,
+            endpoint_id,
+            slot,
+            cleanup_sent,
+        } = session;
+
         // Check if this port was marked for cleanup before we could register it
         {
             let mut pending = self.pending_cleanup_ports.lock().unwrap();
-            if pending.remove(&port) {
+            pending.retain(|_, marked| marked.elapsed() < PENDING_CLEANUP_TTL);
+            if pending.remove(&port).is_some() {
+                // Nothing will tear this session down later, so stop its watchdog here.
+                cleanup_sent.store(true, Ordering::SeqCst);
                 warn!(
                     "WhipSessionManager: Session '{}' on port {} died before registration, tearing down immediately",
                     resource_id, port
@@ -297,6 +338,7 @@ impl WhipSessionManager {
                 session_pipeline,
                 endpoint_id,
                 slot,
+                cleanup_sent,
             },
         );
         true
@@ -322,9 +364,10 @@ impl WhipSessionManager {
         resource_id: &str,
     ) -> Option<(gst::Element, gst::Pipeline, String, u16, usize)> {
         let mut sessions = self.sessions.write().unwrap();
-        sessions
-            .remove(resource_id)
-            .map(|s| (s.element, s.session_pipeline, s.endpoint_id, s.port, s.slot))
+        sessions.remove(resource_id).map(|s| {
+            s.cleanup_sent.store(true, Ordering::SeqCst);
+            (s.element, s.session_pipeline, s.endpoint_id, s.port, s.slot)
+        })
     }
 
     /// Remove a session by its internal port (reverse lookup for auto-cleanup).
@@ -341,6 +384,7 @@ impl WhipSessionManager {
 
         if let Some(rid) = resource_id {
             sessions.remove(&rid).map(|s| {
+                s.cleanup_sent.store(true, Ordering::SeqCst);
                 (
                     rid,
                     s.element,
@@ -373,6 +417,7 @@ impl WhipSessionManager {
                     "WhipSessionManager: Removing session '{}' for endpoint '{}'",
                     resource_id, endpoint_id
                 );
+                session.cleanup_sent.store(true, Ordering::SeqCst);
                 result.push((session.session_pipeline, session.element));
             }
         }
@@ -439,5 +484,137 @@ impl WhipSessionManager {
 impl Default for WhipSessionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_session() -> (gst::Element, gst::Pipeline, Arc<AtomicBool>) {
+        let _ = gst::init();
+        let element = gst::ElementFactory::make("fakesrc")
+            .build()
+            .expect("fakesrc is part of gstreamer core");
+        let pipeline = gst::Pipeline::new();
+        (element, pipeline, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// A session's `cleanup_sent` flag is the only way to stop its inactivity
+    /// watchdog thread. Every path that removes a session must set it, or the
+    /// watchdog outlives the session and asks for cleanup of a port that is gone.
+    fn register(manager: &WhipSessionManager, resource_id: &str, port: u16) -> Arc<AtomicBool> {
+        let (element, pipeline, cleanup_sent) = dummy_session();
+        let registered = manager.register_session(NewWhipSession {
+            resource_id: resource_id.to_string(),
+            port,
+            element,
+            session_pipeline: pipeline,
+            endpoint_id: "endpoint".to_string(),
+            slot: 0,
+            cleanup_sent: cleanup_sent.clone(),
+        });
+        assert!(registered, "session should register");
+        assert!(
+            !cleanup_sent.load(Ordering::SeqCst),
+            "a freshly registered session is not finished"
+        );
+        cleanup_sent
+    }
+
+    #[test]
+    fn remove_session_stops_the_watchdog() {
+        let manager = WhipSessionManager::new();
+        let cleanup_sent = register(&manager, "resource-a", 40001);
+
+        assert!(manager.remove_session("resource-a").is_some());
+
+        assert!(
+            cleanup_sent.load(Ordering::SeqCst),
+            "remove_session (WHIP DELETE) must stop the session's watchdog"
+        );
+    }
+
+    #[test]
+    fn remove_session_by_port_stops_the_watchdog() {
+        let manager = WhipSessionManager::new();
+        let cleanup_sent = register(&manager, "resource-b", 40002);
+
+        assert!(manager.remove_session_by_port(40002).is_some());
+
+        assert!(
+            cleanup_sent.load(Ordering::SeqCst),
+            "auto-cleanup by port must stop the session's watchdog"
+        );
+    }
+
+    #[test]
+    fn remove_all_sessions_stops_the_watchdog() {
+        let manager = WhipSessionManager::new();
+        let cleanup_sent = register(&manager, "resource-c", 40003);
+
+        assert_eq!(manager.remove_all_sessions("endpoint").len(), 1);
+
+        assert!(
+            cleanup_sent.load(Ordering::SeqCst),
+            "flow stop must stop the session's watchdog"
+        );
+    }
+
+    /// A pending-cleanup mark that is never claimed must not survive: session ports
+    /// come from the OS ephemeral range and are recycled, so a stale mark would
+    /// destroy a later, unrelated session that is handed the same port.
+    #[test]
+    fn expired_pending_cleanup_mark_does_not_reject_a_recycled_port() {
+        let manager = WhipSessionManager::new();
+        {
+            let mut pending = manager.pending_cleanup_ports.lock().unwrap();
+            pending.insert(40004, Instant::now() - PENDING_CLEANUP_TTL * 2);
+        }
+
+        let (element, pipeline, cleanup_sent) = dummy_session();
+        let registered = manager.register_session(NewWhipSession {
+            resource_id: "resource-d".to_string(),
+            port: 40004,
+            element,
+            session_pipeline: pipeline,
+            endpoint_id: "endpoint".to_string(),
+            slot: 0,
+            cleanup_sent: cleanup_sent.clone(),
+        });
+
+        assert!(
+            registered,
+            "an expired pending-cleanup mark must not poison a recycled port"
+        );
+        assert!(!cleanup_sent.load(Ordering::SeqCst));
+    }
+
+    /// The mark must still do its job inside the TTL: a session that died before
+    /// registration is torn down rather than registered.
+    #[test]
+    fn fresh_pending_cleanup_mark_still_rejects_the_session() {
+        let manager = WhipSessionManager::new();
+        {
+            let mut pending = manager.pending_cleanup_ports.lock().unwrap();
+            pending.insert(40005, Instant::now());
+        }
+
+        let (element, pipeline, cleanup_sent) = dummy_session();
+        let registered = manager.register_session(NewWhipSession {
+            resource_id: "resource-e".to_string(),
+            port: 40005,
+            element,
+            session_pipeline: pipeline,
+            endpoint_id: "endpoint".to_string(),
+            slot: 0,
+            cleanup_sent: cleanup_sent.clone(),
+        });
+
+        assert!(!registered, "a fresh mark must still reject the session");
+        assert!(
+            cleanup_sent.load(Ordering::SeqCst),
+            "a rejected session's watchdog must be stopped too"
+        );
     }
 }
