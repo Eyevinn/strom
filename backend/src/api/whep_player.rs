@@ -483,7 +483,12 @@ pub async fn whep_endpoint_proxy(
         None => {
             // Not registered: the flow is stopped, never started, or the
             // block's endpoint_id was changed since the player loaded.
-            tracing::warn!("WHEP offer for unregistered endpoint '{}'", endpoint_id);
+            //
+            // debug!, not warn!: the WHEP router carries no auth middleware and
+            // endpoint_id is a percent-decoded path segment, so anyone who can
+            // reach the port would otherwise get a log line per request out of
+            // us. {:?} escapes the value — a decoded newline could forge a line.
+            tracing::debug!("WHEP offer for unregistered endpoint {:?}", endpoint_id);
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
@@ -633,8 +638,10 @@ pub async fn whep_resource_proxy_delete(
     let port = match state.whep_registry().get_port(&endpoint_id).await {
         Some(p) => p,
         None => {
-            tracing::warn!(
-                "WHEP resource DELETE for unregistered endpoint '{}'",
+            // debug! and {:?} for the same reason as the offer path above:
+            // unauthenticated route, attacker-supplied endpoint_id.
+            tracing::debug!(
+                "WHEP resource DELETE for unregistered endpoint {:?}",
                 endpoint_id
             );
             return Response::builder()
