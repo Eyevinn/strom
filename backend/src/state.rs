@@ -27,6 +27,18 @@ use tracing_subscriber::EnvFilter;
 /// Handle for reloading the log filter at runtime.
 pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
 
+/// The endpoint registrations a teardown is allowed to remove.
+///
+/// Only ever narrower than "everything the flow declares", and only for a
+/// caller that failed part-way through registering: an endpoint-id conflict
+/// means the id already belongs to another flow, so unregistering it would
+/// tear down that flow's endpoint instead of ours.
+#[derive(Default)]
+struct RegisteredEndpoints {
+    whep: Vec<String>,
+    whip: Vec<String>,
+}
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -911,7 +923,7 @@ impl AppState {
 
         // Create pipeline with event broadcaster and block registry
         info!("Creating PipelineManager (this may block)...");
-        let mut manager = PipelineManager::new(
+        let mut manager = match PipelineManager::new(
             &flow,
             self.inner.events.clone(),
             &self.inner.block_registry,
@@ -920,7 +932,16 @@ impl AppState {
             Some(self.inner.whip_registry.clone()),
             self.inner.media_path.clone(),
             local_devices,
-        )?;
+        ) {
+            Ok(manager) => manager,
+            Err(e) => {
+                // There is no pipeline to stop, but blocks built before the
+                // failing one may already have registered themselves.
+                error!("Failed to build pipeline for flow {}: {}", id, e);
+                let _ = self.teardown_flow(id, None, None).await;
+                return Err(e);
+            }
+        };
         info!("PipelineManager created successfully");
 
         // Set thread registry for CPU monitoring
@@ -940,11 +961,17 @@ impl AppState {
         let state = match manager.start() {
             Ok(state) => state,
             Err(e) => {
-                // The manager is dropped here, which takes the pipeline to
-                // Null. Release the CPU allocation too, or a flow that fails
-                // to start leaks its cores until the process restarts.
                 error!("Failed to start flow {}: {}", id, e);
-                self.inner.affinity_manager.deallocate(id);
+                // No endpoints are registered yet, so the flow owns none.
+                if let Err(teardown_err) = self
+                    .teardown_flow(id, Some(manager), Some(RegisteredEndpoints::default()))
+                    .await
+                {
+                    warn!(
+                        "Cleanup after failed start of flow {} could not stop the pipeline: {}",
+                        id, teardown_err
+                    );
+                }
                 return Err(e);
             }
         };
@@ -990,13 +1017,20 @@ impl AppState {
                     .await
                 {
                     error!("Endpoint conflict registering WHEP endpoint: {}", e);
-                    for (_, ep_id) in &endpoints {
-                        self.inner.whep_registry.unregister(ep_id).await;
-                    }
+                    // Only the ids we registered. The one that conflicted
+                    // belongs to another flow — unregistering it here would
+                    // take that flow's endpoint down instead of ours.
+                    let owned = RegisteredEndpoints {
+                        whep: endpoints.iter().map(|(_, ep)| ep.clone()).collect(),
+                        whip: Vec::new(),
+                    };
                     drop(pipelines_guard);
-                    let mut pipelines = self.inner.pipelines.write().await;
-                    if let Some(mut mgr) = pipelines.remove(id) {
-                        let _ = mgr.stop();
+                    let manager = self.inner.pipelines.write().await.remove(id);
+                    if let Err(teardown_err) = self.teardown_flow(id, manager, Some(owned)).await {
+                        warn!(
+                            "Cleanup after WHEP endpoint conflict on flow {} could not stop the pipeline: {}",
+                            id, teardown_err
+                        );
                     }
                     return Err(PipelineError::EndpointConflict(e));
                 }
@@ -1025,16 +1059,20 @@ impl AppState {
                     .await
                 {
                     error!("Endpoint conflict registering WHIP endpoint: {}", e);
-                    for (_, ep_id) in &endpoints {
-                        self.inner.whip_registry.unregister(ep_id).await;
-                    }
-                    for (_, ep_id) in &whep_endpoints {
-                        self.inner.whep_registry.unregister(ep_id).await;
-                    }
+                    // Every WHEP endpoint did register, so the flow owns all of
+                    // them; of the WHIP ones it owns only those it got in
+                    // before the conflict.
+                    let owned = RegisteredEndpoints {
+                        whep: whep_endpoints.iter().map(|(_, ep)| ep.clone()).collect(),
+                        whip: endpoints.iter().map(|(_, ep)| ep.clone()).collect(),
+                    };
                     drop(pipelines_guard);
-                    let mut pipelines = self.inner.pipelines.write().await;
-                    if let Some(mut mgr) = pipelines.remove(id) {
-                        let _ = mgr.stop();
+                    let manager = self.inner.pipelines.write().await.remove(id);
+                    if let Err(teardown_err) = self.teardown_flow(id, manager, Some(owned)).await {
+                        warn!(
+                            "Cleanup after WHIP endpoint conflict on flow {} could not stop the pipeline: {}",
+                            id, teardown_err
+                        );
                     }
                     return Err(PipelineError::EndpointConflict(e));
                 }
@@ -1319,6 +1357,159 @@ impl AppState {
     }
 
     /// Stop a flow (stop and remove its pipeline).
+    /// Release everything a flow's pipeline holds. The single way it is done.
+    ///
+    /// `start_flow()` can fail in four places and `stop_flow()` is a fifth
+    /// caller. Each has to release the same set of things, and each used to do
+    /// its own subset — so a flow that failed to start leaked a bus watch, its
+    /// Media Player pipelines, or its CPU allocation, depending on which line
+    /// it failed on. Anything that must be released when a flow goes away
+    /// belongs here, not at a call site.
+    ///
+    /// Order matters: endpoints stop accepting traffic before the pipeline they
+    /// point at goes to NULL.
+    ///
+    /// `endpoints` says which registrations this teardown owns. `None` means
+    /// every endpoint the manager declares, which is right whenever the flow
+    /// finished registering them. A caller that failed *during* registration
+    /// must pass the ids it actually registered: an endpoint-id conflict means
+    /// the id belongs to another flow, and unregistering it here would tear
+    /// down that flow's endpoint instead.
+    ///
+    /// Returns the state the pipeline reached, or the error `stop()` gave. The
+    /// rest of the teardown runs either way — a pipeline that refuses to stop
+    /// is exactly when leaking its cores and its registry entries hurts most.
+    async fn teardown_flow(
+        &self,
+        id: &FlowId,
+        manager: Option<PipelineManager>,
+        endpoints: Option<RegisteredEndpoints>,
+    ) -> Result<PipelineState, PipelineError> {
+        let Some(mut manager) = manager else {
+            // No pipeline was ever built. Blocks constructed before the failing
+            // one can still have registered themselves, and the CPU allocation
+            // may already be held; deallocate() ignores an id it does not know.
+            crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
+            self.inner.affinity_manager.deallocate(id);
+            return Ok(PipelineState::Null);
+        };
+
+        let owned = endpoints.unwrap_or_else(|| RegisteredEndpoints {
+            whep: manager
+                .whep_endpoints()
+                .iter()
+                .map(|e| e.endpoint_id.clone())
+                .collect(),
+            whip: manager
+                .whip_endpoints()
+                .iter()
+                .map(|e| e.endpoint_id.clone())
+                .collect(),
+        });
+
+        for endpoint_id in &owned.whep {
+            info!("Unregistering WHEP endpoint '{}'", endpoint_id);
+            self.inner.whep_registry.unregister(endpoint_id).await;
+        }
+
+        for endpoint_id in &owned.whip {
+            info!(
+                "Tearing down WHIP sessions and unregistering endpoint '{}'",
+                endpoint_id
+            );
+            let session_entries = self
+                .inner
+                .whip_session_manager
+                .remove_all_sessions(endpoint_id);
+            let count = session_entries.len();
+            if count > 0 {
+                // Session pipelines go to NULL on the blocking pool: that can
+                // take seconds and this is awaited from an HTTP handler.
+                let endpoint_id_log = endpoint_id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    for (pipeline, element) in session_entries {
+                        WhipSessionManager::teardown_session_pipeline(&pipeline);
+                        drop(element);
+                    }
+                    info!(
+                        "Torn down {} active WHIP session(s) for endpoint '{}'",
+                        count, endpoint_id_log
+                    );
+                })
+                .await;
+            }
+            self.inner
+                .whip_session_manager
+                .unregister_endpoint(endpoint_id);
+            self.inner.whip_registry.unregister(endpoint_id).await;
+        }
+
+        // The registry holds an Arc per Media Player instance, and that Arc's
+        // Drop is the only thing that takes the block's *internal* pipeline to
+        // NULL. Skip this and a Media Player flow leaves a decoding pipeline
+        // and its file descriptors running for the life of the process.
+        crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
+
+        // stop() — not just dropping the manager. Drop aborts the thumbnail
+        // task, stops probes and sets NULL; stop() is also what removes the bus
+        // watch, the thread-priority handler and the flow's threads from the
+        // CPU-monitor registry. Dropping alone leaks one bus watch GSource per
+        // teardown and leaves dead TIDs in the registry, where a reused TID is
+        // then attributed to a flow that no longer exists.
+        //
+        // On the blocking pool: stop() joins a thread around set_state(Null),
+        // which can take seconds, and this is awaited from an HTTP handler.
+        let stopped = tokio::task::spawn_blocking(move || {
+            let result = manager.stop();
+
+            // Weak refs taken before the drop. Anything still alive afterwards
+            // is held by a leaked strong reference — a signal handler closure,
+            // a probe — and its OS resources (sockets, threads) never come
+            // back. See the GStreamer reference rules in CLAUDE.md.
+            let pipeline_weak = manager.pipeline_weak();
+            let element_weak_refs = manager.element_weak_refs();
+            let flow_name = manager.flow_name().to_string();
+            drop(manager);
+
+            let leaked_elements: Vec<String> = if pipeline_weak.upgrade().is_some() {
+                element_weak_refs
+                    .iter()
+                    .filter(|(_, weak)| weak.upgrade().is_some())
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let pipeline_survived = pipeline_weak.upgrade().is_some();
+
+            (result, flow_name, pipeline_survived, leaked_elements)
+        })
+        .await;
+
+        // Release the cores before returning, whatever stop() said. A flow that
+        // fails to stop would otherwise hold them until the process restarts.
+        self.inner.affinity_manager.deallocate(id);
+
+        match stopped {
+            Ok((result, flow_name, pipeline_survived, leaked_elements)) => {
+                if pipeline_survived {
+                    error!(
+                        "Pipeline '{}': GStreamer pipeline still alive after drop — OS resources will leak",
+                        flow_name
+                    );
+                    for name in &leaked_elements {
+                        error!("Pipeline '{}': leaked element '{}'", flow_name, name);
+                    }
+                }
+                result
+            }
+            Err(join_err) => Err(PipelineError::StateChange(format!(
+                "Teardown task panicked: {}",
+                join_err
+            ))),
+        }
+    }
+
     pub async fn stop_flow(&self, id: &FlowId) -> Result<PipelineState, PipelineError> {
         info!("Stopping flow: {}", id);
 
@@ -1335,7 +1526,7 @@ impl AppState {
             pipelines.remove(id)
         };
 
-        let Some(mut manager) = manager else {
+        let Some(manager) = manager else {
             warn!("No active pipeline for flow: {}", id);
             // Clear persisted state so the flow no longer appears as running
             let mut flows = self.inner.flows.write().await;
@@ -1358,90 +1549,8 @@ impl AppState {
             return Ok(PipelineState::Null);
         };
 
-        // Unregister WHEP endpoints before stopping
-        for whep_info in manager.whep_endpoints() {
-            info!(
-                "Unregistering WHEP endpoint '{}' (block {})",
-                whep_info.endpoint_id, whep_info.block_id
-            );
-            self.inner
-                .whep_registry
-                .unregister(&whep_info.endpoint_id)
-                .await;
-        }
-
-        // Teardown all WHIP sessions and unregister endpoints before stopping
-        for whip_info in manager.whip_endpoints() {
-            info!(
-                "Tearing down WHIP sessions and unregistering endpoint '{}' (block {})",
-                whip_info.endpoint_id, whip_info.block_id
-            );
-            // Remove all active sessions for this endpoint
-            let session_entries = self
-                .inner
-                .whip_session_manager
-                .remove_all_sessions(&whip_info.endpoint_id);
-            let count = session_entries.len();
-            if count > 0 {
-                // Teardown session pipelines on a blocking thread to avoid
-                // blocking the tokio runtime (set_state(Null) can take seconds).
-                let endpoint_id_log = whip_info.endpoint_id.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    for (pipeline, element) in session_entries {
-                        WhipSessionManager::teardown_session_pipeline(&pipeline);
-                        drop(element);
-                    }
-                    info!(
-                        "Torn down {} active WHIP session(s) for endpoint '{}'",
-                        count, endpoint_id_log
-                    );
-                })
-                .await;
-            }
-            // Unregister the endpoint config from session manager
-            self.inner
-                .whip_session_manager
-                .unregister_endpoint(&whip_info.endpoint_id);
-            // Unregister from the registry
-            self.inner
-                .whip_registry
-                .unregister(&whip_info.endpoint_id)
-                .await;
-        }
-
-        // Unregister media player instances for this flow
-        crate::blocks::builtin::mediaplayer::MEDIA_PLAYER_REGISTRY.unregister_flow(id);
-
-        // Stop the pipeline
-        let state = manager.stop()?;
-
-        // Take weak refs to the pipeline and all its elements before dropping.
-        // After drop, all GStreamer objects should be finalized. Any that
-        // survive have a leaked strong reference (signal handler closure,
-        // probe, etc.) preventing cleanup of OS resources (sockets, threads).
-        let pipeline_weak = manager.pipeline_weak();
-        let element_weak_refs = manager.element_weak_refs();
-        let flow_name = manager.flow_name().to_string();
-
-        // Drop the manager — this releases all strong references to the
-        // pipeline and its elements, allowing GStreamer to finalize them.
-        drop(manager);
-
-        // Verify everything was actually finalized
-        if pipeline_weak.upgrade().is_some() {
-            error!(
-                "Pipeline '{}': GStreamer pipeline still alive after drop — OS resources will leak",
-                flow_name
-            );
-            for (name, weak) in &element_weak_refs {
-                if weak.upgrade().is_some() {
-                    error!("Pipeline '{}': leaked element '{}'", flow_name, name);
-                }
-            }
-        }
-
-        // Deallocate CPU core assignment
-        self.inner.affinity_manager.deallocate(id);
+        // Endpoints, Media Player registry, pipeline, leak check, CPU cores.
+        let state = self.teardown_flow(id, Some(manager), None).await?;
 
         // Clear runtime_data from all blocks (SDP is only valid while running)
         let flow = {
