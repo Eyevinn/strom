@@ -6618,6 +6618,7 @@ dependencies = [
  "gstreamer-controller",
  "gstreamer-gl",
  "gstreamer-net",
+ "gstreamer-rtp",
  "gstreamer-video",
  "hostname",
  "http-body-util",
