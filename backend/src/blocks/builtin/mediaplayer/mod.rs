@@ -98,6 +98,7 @@ mod tests {
             media_path: std::path::PathBuf::from("/media"),
             ts_offset: Arc::new(AtomicI64::new(i64::MIN)),
             main_pipeline: gst::glib::WeakRef::new(),
+            bus_watch: std::sync::Mutex::new(None),
         }
     }
 

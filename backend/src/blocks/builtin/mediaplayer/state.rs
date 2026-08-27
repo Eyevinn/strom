@@ -6,7 +6,7 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use strom_types::FlowId;
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -68,6 +68,15 @@ pub struct MediaPlayerState {
     pub ts_offset: Arc<AtomicI64>,
     /// Weak reference to the main pipeline (for computing running time in the bridge).
     pub main_pipeline: gst::glib::WeakRef<gst::Pipeline>,
+    /// Handler id of the signal watch on the internal pipeline's bus.
+    ///
+    /// The watch's closure owns an `Arc<MediaPlayerState>`, and the bus owns the
+    /// closure, and this state owns the pipeline the bus belongs to. That is a
+    /// cycle: while the handler stays connected, nothing can ever drop this
+    /// state, so [`Drop`] never runs and the internal pipeline keeps decoding —
+    /// holding its file descriptors — for the life of the process. Keeping the
+    /// id is what lets [`MediaPlayerState::shutdown`] break it.
+    pub bus_watch: Mutex<Option<gst::glib::SignalHandlerId>>,
 }
 
 impl MediaPlayerState {
@@ -386,8 +395,50 @@ impl MediaPlayerState {
             PlayerState::Playing
         }
     }
+
+    /// Release the internal pipeline and everything that keeps this state alive.
+    ///
+    /// Dropping the registry's `Arc` is not enough on its own: the signal watch
+    /// on the internal bus holds another one, so `Drop` never runs and the
+    /// pipeline decodes on, once per start, for the life of the process.
+    /// Disconnecting that handler is what makes the drop reachable.
+    ///
+    /// The pipeline is taken out of the lock before it is stopped, so the bus
+    /// callback — which reads the same lock — cannot be blocked by a
+    /// `set_state(Null)` that is itself waiting for the callback's thread.
+    pub fn shutdown(&self) {
+        let pipeline = match self.internal_pipeline.write() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+
+        // Only remove the watch this state added. An unconditional
+        // `remove_signal_watch()` on a bus that has none is a GStreamer
+        // CRITICAL, and removing someone else's would silence their handler.
+        let watch = match self.bus_watch.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let (Some(handler), Some(bus)) = (watch, pipeline.bus()) {
+            bus.disconnect(handler);
+            bus.remove_signal_watch();
+        }
+
+        debug!(
+            "Media Player {}: Stopping internal pipeline on shutdown",
+            self.block_id
+        );
+        let _ = pipeline.set_state(gst::State::Null);
+    }
 }
 
+/// Fallback for a state that was dropped without going through
+/// [`MediaPlayerState::shutdown`] — a build that failed before the block was
+/// registered, say. Teardown goes through the registry, which shuts the state
+/// down explicitly and leaves nothing for this to do.
 impl Drop for MediaPlayerState {
     fn drop(&mut self) {
         if let Ok(guard) = self.internal_pipeline.read() {
@@ -421,8 +472,11 @@ impl MediaPlayerRegistry {
     }
 
     pub fn unregister(&self, key: &MediaPlayerKey) {
-        if let Ok(mut players) = self.players.write() {
-            players.remove(key);
+        // Take the entry out under the lock, then shut it down without holding
+        // it: `shutdown()` stops a pipeline, which can block.
+        let removed = self.players.write().ok().and_then(|mut p| p.remove(key));
+        if let Some(state) = removed {
+            state.shutdown();
         }
     }
 
@@ -440,16 +494,30 @@ impl MediaPlayerRegistry {
 
     /// Remove all media player entries for a given flow.
     pub fn unregister_flow(&self, flow_id: &FlowId) {
-        if let Ok(mut players) = self.players.write() {
-            let before = players.len();
-            players.retain(|k, _| k.flow_id != *flow_id);
-            let removed = before - players.len();
-            if removed > 0 {
-                info!(
-                    "Unregistered {} media player(s) for flow {}",
-                    removed, flow_id
-                );
+        let removed: Vec<Arc<MediaPlayerState>> = match self.players.write() {
+            Ok(mut players) => {
+                let keys: Vec<MediaPlayerKey> = players
+                    .keys()
+                    .filter(|k| k.flow_id == *flow_id)
+                    .cloned()
+                    .collect();
+                keys.iter().filter_map(|k| players.remove(k)).collect()
             }
+            Err(_) => return,
+        };
+
+        if removed.is_empty() {
+            return;
+        }
+
+        info!(
+            "Unregistered {} media player(s) for flow {}",
+            removed.len(),
+            flow_id
+        );
+        // Outside the lock: `shutdown()` stops a pipeline, which can block.
+        for state in removed {
+            state.shutdown();
         }
     }
 }
