@@ -74,6 +74,18 @@ port = 8080
 # Env: STROM_STORAGE_BLOCKS_PATH=/custom/blocks.json
 # blocks_path = "/custom/path/blocks.json"
 
+# Directory for the CEF/Chromium profile used by HTML sources and DSK graphics
+# Each instance needs its own: Chromium keys its process singleton on this
+# directory, so instances sharing one cannot both run HTML sources
+# Default: a per-data-directory subdirectory of the OS cache directory
+#   - Linux: ~/.cache/strom/cef-<hash of data_dir>/
+# The profile is disposable — delete it to clear cached pages, cookies and
+# local storage
+# CLI: --cef-cache-path /path/to/cef-cache
+# Env: STROM_CEF_CACHE_PATH=/path/to/cef-cache
+# GST_CEF_CACHE_LOCATION overrides all of the above if it is set
+# cef_cache_path = "/var/cache/strom/cef"
+
 # ============================================================================
 # Logging Configuration
 # ============================================================================
