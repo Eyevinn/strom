@@ -17,15 +17,37 @@ if ! cargo fmt --all -- --check; then
 fi
 echo "✓ Formatting check passed"
 
-# Run clippy
+# Run clippy. The features matter: nvidia and efp are opt-in, so without them
+# the feature-gated code CI lints is never compiled here and the hook can pass
+# on code CI rejects. --workspace --all-targets covers strom-types,
+# strom-mcp-server and the frontend on the host target in the same pass, which
+# makes this a superset of the two clippy steps in the Linux CI job.
 echo "→ Running clippy linter..."
-if ! cargo clippy --workspace --all-targets -- -D warnings; then
+if ! cargo clippy --workspace --all-targets --features efp,nvidia -- -D warnings; then
     echo ""
     echo "❌ Clippy check failed!"
     echo "   Please fix the issues reported above."
     exit 1
 fi
 echo "✓ Clippy check passed"
+
+# The frontend compiles to WASM too, and cfg(target_arch = "wasm32") code is
+# invisible to the host pass above. CI lints it separately; that target costs
+# ~45s, so only pay it when the frontend actually changed.
+if git diff --cached --name-only --diff-filter=d | grep -q '^frontend/'; then
+    if rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+        echo "→ Running clippy on the frontend for wasm32..."
+        if ! cargo clippy --package strom-frontend --target wasm32-unknown-unknown --all-features -- -D warnings; then
+            echo ""
+            echo "❌ Clippy check failed for wasm32!"
+            echo "   Please fix the issues reported above."
+            exit 1
+        fi
+        echo "✓ Clippy check passed for wasm32"
+    else
+        echo "⏭ Skipping wasm32 clippy (target not installed — run: rustup target add wasm32-unknown-unknown)"
+    fi
+fi
 
 # Run tests (optional - can be slow, comment out if needed)
 # echo "→ Running tests..."
