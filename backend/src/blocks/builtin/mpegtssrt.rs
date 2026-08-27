@@ -81,26 +81,14 @@ fn strip_stream_header(pad: &gst::Pad, label: &str) {
         }
 
         let mut stripped = caps.copy();
-        match stripped
-            .get_mut()
-            .and_then(|caps| caps.structure_mut(0))
-            .map(|s| s.remove_field("streamheader"))
-        {
-            Some(()) => {
-                info!(
-                    "MPEGTSSRT {}: removed streamheader from muxer output caps \
-                     (late SRT callers read the live PAT/PMT instead of a frozen copy)",
-                    label
-                );
-                info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&stripped)));
-            }
-            None => {
-                warn!(
-                    "MPEGTSSRT {}: could not remove streamheader from muxer output caps; \
-                     late SRT callers may see a stale program definition",
-                    label
-                );
-            }
+        if let Some(structure) = stripped.make_mut().structure_mut(0) {
+            structure.remove_field("streamheader");
+            info!(
+                "MPEGTSSRT {}: removed streamheader from muxer output caps \
+                 (late SRT callers read the live PAT/PMT instead of a frozen copy)",
+                label
+            );
+            info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&stripped)));
         }
 
         gst::PadProbeReturn::Ok

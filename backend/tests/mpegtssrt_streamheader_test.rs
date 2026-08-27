@@ -240,9 +240,10 @@ fn caps_reaching_srtsink() -> CapsSeen {
         .set_state(gst::State::Playing)
         .expect("pipeline goes to PLAYING");
 
-    // Run long enough for the muxer to write its first tables — that is when it
-    // would attach the streamheader, so stopping before it does would let the
-    // test pass on a broken build.
+    // Collect until EOS — the test sources are finite, so this is ~3 s. What
+    // matters is not stopping before the muxer writes its first tables, since
+    // that is when it attaches the streamheader and a shorter run would let the
+    // test pass on a broken build. The 10 s is a deadline, not a run length.
     let bus = pipeline.bus().expect("pipeline has a bus");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut error = None;
@@ -250,7 +251,14 @@ fn caps_reaching_srtsink() -> CapsSeen {
         if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
             match msg.view() {
                 gst::MessageView::Error(err) => {
-                    error = Some(format!("{} ({:?})", err.error(), err.debug()));
+                    // Name the element: srt_port() races with the host, so a
+                    // failure to bind the listener must not read as the
+                    // regression this test guards.
+                    let src = err
+                        .src()
+                        .map(|o| o.name().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    error = Some(format!("{}: {} ({:?})", src, err.error(), err.debug()));
                     break;
                 }
                 gst::MessageView::Eos(_) => break,
