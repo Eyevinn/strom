@@ -16,6 +16,7 @@ use crate::blocks::{
 };
 use crate::gst::ice_preflight;
 use crate::gst::keyframe_request;
+use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{SessionCleanupRequest, WhipEndpointConfig};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -1033,6 +1034,11 @@ pub fn create_whipserversrc_for_session(
     session_pipeline
         .add(&whipserversrc)
         .map_err(|e| format!("Failed to add whipserversrc to session pipeline: {}", e))?;
+
+    // whipserversrc autoplugs RTP depayloaders inside its own bin, so this
+    // pipeline needs the same gstreamer#5057 workaround as the main one.
+    // Install while it is still NULL so no depayloader is missed.
+    rtp_hdrext::install(&session_pipeline);
 
     // Set session pipeline to PLAYING and wait
     session_pipeline
