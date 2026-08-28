@@ -407,8 +407,18 @@ pub fn setup_thread_priority_handler(
 
 /// Get the native thread ID of the current thread.
 ///
+/// The value is used as the key in [`ThreadRegistry`] and as the handle the
+/// system monitor samples CPU time with, so each platform returns whatever
+/// identifier its sampling API needs.
+///
 /// On Linux, this returns the TID from gettid() syscall, which is needed
 /// for /proc/{pid}/task/{tid}/stat access.
+///
+/// On macOS, this returns the mach thread port (`mach_port_t`), which is what
+/// `thread_info(THREAD_BASIC_INFO)` takes. It is deliberately not the
+/// `pthread_t`: the port is captured here, on the streaming thread itself, so
+/// the sampler never has to dereference a `pthread_t` whose thread may already
+/// have exited.
 fn get_current_thread_native_id() -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -419,8 +429,9 @@ fn get_current_thread_native_id() -> u64 {
 
     #[cfg(target_os = "macos")]
     {
-        use thread_priority::thread_native_id;
-        thread_native_id() as u64
+        // pthread_mach_thread_np() on the calling thread is documented as safe
+        // from any thread and returns the task-local port name for it.
+        unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) as u64 }
     }
 
     #[cfg(target_os = "windows")]
