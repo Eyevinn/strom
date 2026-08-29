@@ -345,6 +345,16 @@ fn get_num_cpus() -> usize {
 /// on macOS). Scaling the ratio by `num_cpus` normalises the result to
 /// per-core percentage: 100.0 is one fully saturated core, and the maximum on
 /// an N-core machine is N * 100.0.
+///
+/// This measures *occupancy*, not work completed. Both platforms' clocks charge
+/// a thread for time spent on a core without adjusting for how fast that core
+/// is, so on heterogeneous CPUs (Apple Silicon P/E cores, ARM big.LITTLE) two
+/// threads both reading 100.0 can differ several-fold in throughput — measured
+/// at 4.5x on an M2 between QOS_CLASS_USER_INTERACTIVE and QOS_CLASS_BACKGROUND.
+/// A thread moved onto a faster core finishes the same work sooner and so
+/// reports a *lower* percentage. Judging a core-placement change therefore
+/// needs a work-rate denominator (buffers or frames per unit of CPU time);
+/// this number alone will move the wrong way.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cpu_usage_percent(delta_thread: u64, delta_total: u64, num_cpus: usize) -> f32 {
     if delta_total == 0 {
