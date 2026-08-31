@@ -18,8 +18,9 @@ the bots behave.
 | `TRIAGE.md` | Triaging an issue. |
 | `FIX.md` | Turning an approved design into a draft PR. |
 | `SUMMARY.md` | Writing the run summary. Every run, last. |
-| `gates.sh` | Deciding whether any issue is eligible for implementation. |
-| `verify-citations.sh` | Before posting anything that cites code. |
+| `board.sh` | Reporting the state of the open board before implementing anything. |
+| `verify-citations.sh` | Before posting anything that cites code, or that has a length ceiling. |
+| `test-agent-scripts.sh` | After changing either script. |
 
 Read `PROTOCOL.md` plus the one file for the item in front of you — not all of them. The
 protocol is deliberately split so that a run only carries the rules it is about to apply.
@@ -37,13 +38,27 @@ useful if the runtime changes and safe to read in public.
   under the same account a human uses, and keying on the login makes the tooling discard that
   human's own decisions while reporting an empty queue. Both scripts and `PROTOCOL.md` say
   this; do not "simplify" it back to an author check.
-- **Both scripts exist because a prompt cannot do their job reliably.** `gates.sh` is boolean
-  logic over API data — deterministic, so it does not belong in a prompt competing for
-  attention. `verify-citations.sh` exists because models produce confident wrong line
-  numbers and are measurably poor at catching their own; asking more firmly does not fix it,
-  and a mechanical check does.
-- **The controlled vocabulary in `PROTOCOL.md` is load-bearing.** `gates.sh` and the run
-  summary read those tokens. A synonym is a bug, not a style choice.
+- **`board.sh` reports; it does not decide.** It answers only what has an unambiguous answer —
+  who replied after which triage, what the marker says, whether an open PR already claims the
+  issue — and hands every judgement to the reader. An earlier version made all of it
+  mechanical, including "which option was chosen" and "is the radius acceptable", and it would
+  have refused real work: on one issue the maintainer rejected both options the triage offered,
+  named a third, and explained that the triage's radius applied only to the two it proposed. No
+  token vocabulary expresses that. Three findings stay binding — no reply at all, a reply from
+  someone who may not decide, an issue an open PR already claims — because those are
+  unambiguous and being wrong is expensive.
+- **`verify-citations.sh` exists because models produce confident wrong line numbers** and are
+  measurably poor at catching their own; asking more firmly does not fix it, and a mechanical
+  check does. It also enforces the length ceilings, for the same reason.
+- **`test-agent-scripts.sh` is not optional.** Every severe defect in these two scripts was
+  invisible to careful reading: two separate code reviews read them and missed dead override
+  parsing, a radius check that passed a marker with no radius, and adjacent empty TSV fields
+  shifting a maintainer's decision into the wrong variable. All three fell out of *running*
+  them. Run the tests after any change; each one fails if its fix is reverted.
+- **The controlled vocabulary in `PROTOCOL.md` is load-bearing.** `board.sh` and the run
+  summary read those tokens. A synonym is a bug, not a style choice. But a marker's `radius=`
+  and `excluded=` describe the options the *triage* proposed — if a human chose a different
+  design, the implementation stage re-assesses both rather than inheriting them.
 - **`work=` selects the vocabulary, and most of the board is not `bug`.** Feature requests
   and extensions use the same two-commit evidence structure with `feat(`/`specify` instead of
   `fix(`/`reproduce`, and additive surface is not an excluded area — CLAUDE.md requires new
@@ -68,7 +83,7 @@ why each file leads with its hardest rules and why the protocol is split at all.
 
 ## Running the scripts by hand
 
-    REPO=Eyevinn/strom MAINTAINERS="alice bob" scripts/agent/gates.sh
+    REPO=Eyevinn/strom MAINTAINERS="alice bob" scripts/agent/board.sh
 
 `MAINTAINERS` is the one variable that must be right: it lists the logins whose `/agent-fix`
 reply may authorise work, and it defaults to a single login. If the deciding maintainer is not
@@ -82,12 +97,15 @@ empty. There is no `AGENT_LOGIN` — identity is by marker, not by account.
 
 Both need only `gh`, `git` and bash — no `jq`.
 
-They are bash, not zsh: `gates.sh` word-splits `$MAINTAINERS` nowhere and quotes everything,
-but if you extract a function to poke at it interactively, run it under `bash`, or a zsh shell
-will not split unquoted expansions and `is_maintainer` will look broken when it is not.
+They are bash, not zsh. If you extract a function to poke at it interactively, run it under
+`bash`; a zsh shell does not split unquoted expansions and some helpers will look broken when
+they are not. `BOARD_LIB_ONLY=1 . scripts/agent/board.sh` sources the helpers without running
+the report, which is how the tests reach them without touching the network.
 
 Both were exercised against live repository data before landing. `verify-citations.sh` found a
 real off-by-one in a shipped review (a call cited one line above where it is) and four
-citations to bare filenames matching 2-24 tracked files each. `gates.sh` was tested against
-the whole open board plus a reconstructed quoted-email reply, which is the case that could
-otherwise have armed the implementation stage with a design nobody chose.
+citations to bare filenames matching 2-24 tracked files each. `board.sh` was run against the
+whole open board, where it turned up a PR whose *body* merely quoted a branch name being
+reported as implementing an unrelated issue — this file's own PR, doing exactly that.
+
+    scripts/agent/test-agent-scripts.sh

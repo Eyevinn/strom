@@ -79,10 +79,11 @@ answers it. So:
 ## Marker backfill — cheap, and not a re-triage
 
 Triage comments written before the marker carried `verdict=` / `radius=` / `excluded=` /
-`ask=` are invisible to `gates.sh`, and because a standing v3 comment also suppresses
-re-triage, they would otherwise stay stuck forever. `gates.sh` names them:
+`ask=` leave `board.sh` unable to say anything useful about an issue, and because a standing
+v3 comment also suppresses re-triage they would otherwise stay that way. `board.sh` reports
+them as notes against the candidate:
 
-    #719   gate 1  marker predates the structured fields; needs a backfill (TRIAGE.md)
+    #719   notes: triage marker predates the structured fields
 
 For each one, post a short comment carrying **only** the marker, with a one-line note that it
 restates the standing triage rather than replacing it:
@@ -124,9 +125,19 @@ the issue has moved and nothing else will ever notice:
    design changed. If it did, publish a new proposal. If it did not, say so and restate the
    token to use.
 
-Put both above "anything genuinely new" in your priority order. `gates.sh` names the issues
+Put both above "anything genuinely new" in your priority order. `board.sh` names the issues
 in case 1 explicitly (`needs RE-TRIAGE, not a fix`) and lists case 2 under the
 "a human replied" heading, so you do not have to hunt for them.
+
+## Length
+
+**The triage comment body is at most 2500 characters.** Count before posting; the check is
+`scripts/agent/verify-citations.sh --max-chars 2500 <file>`.
+
+That is a ceiling, not a target. The design proposal is the part worth its length — it is the
+design record for work that has not been built yet. What has to go is the restatement: do not
+summarise the issue back at the reporter, do not repeat what your own standing comment already
+established, and do not pad the options with reasoning that does not change the choice.
 
 ## Labels
 
@@ -185,8 +196,8 @@ Confidence: HIGH
 - `verify-citations.sh` exits zero on your body. A marker backfill cites nothing by
   design, so check that one with `--allow-no-citations`.
 - The marker carries `verdict=`, `work=`, `radius=`, `excluded=` and `ask=`, using vocabulary
-  tokens. `gates.sh` reads them; a missing one makes the issue ineligible for implementation
-  until a human intervenes.
+  tokens. `board.sh` reports each missing one as a note the implementation stage has to
+  answer in its PR body, so an incomplete marker turns into work for the next reader.
 - `excluded=` names what the change would **break**, not what it touches. Adding a type to
   `strom-types` is `none` — CLAUDE.md requires it to go there.
 - The `Ask:` names its options and can be answered in one line.

@@ -21,7 +21,7 @@ rewrite it last, replacing the block between the markers:
 
     <!-- state:begin -->
     Last triage run: 2026-08-31T08:00Z, main@1c06c37, 4 items
-    Last fix run:    2026-08-31T10:00Z, no PR opened (all candidates: gate 2)
+    Last fix run:    2026-08-31T10:00Z, opened #729 for #661 (class B, CI pending)
     Open agent PRs:  #700 (class A, green), #730 (class B, CI pending)
     Awaiting an answer: #719 #703 #702 #694 #690 #674 #673
     <!-- state:end -->
@@ -61,7 +61,7 @@ is rendered from it, so the two can never disagree.
       "unfinished": [
         {"ref": "#700", "reason": "left by the 4-item cap"}
       ],
-      "queue": {"eligible": 0, "awaiting_answer": 7},
+      "queue": {"candidates": 6, "claimed": 1, "awaiting_reply": 8, "untriaged": 1},
       "notes": []
     }
     ```
@@ -84,10 +84,11 @@ Two things belong in `needs_human` **every run**, not just the run that discover
 otherwise they scroll away and the work stalls silently:
 
 - the dispatch command for every open `class=C` PR, which cannot reach class A without it;
-- every issue where a human replied but nothing machine-readable came of it — `gates.sh`
-  prints the exact reply that would arm each one, so copy that line verbatim.
+- every issue `board.sh` lists under "replied, but not by someone who may decide", and every
+  candidate you read as *not* a decision — with the sentence you based that on, so a human can
+  overrule you in one reply.
 
-`queue` comes straight off the last line of `gates.sh`. It is two integers and it is the
+`queue` comes straight off the last line of `board.sh`. It is four integers and it is the
 cheapest possible answer to "is this pipeline actually moving".
 
 ## Then render the human half

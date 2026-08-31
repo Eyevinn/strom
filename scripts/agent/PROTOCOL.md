@@ -115,6 +115,27 @@ a variant or a block is `none`; renaming or changing an existing `StromEvent` va
 endpoint's shape or a config key is `contract`. `ask=open` means a design question is waiting for a
 human; `ask=none` means no decision is needed.
 
+## Write once, then cite
+
+Two thirds of everything these tasks have written is run summaries — the bookkeeping layer —
+and the worst of them re-listed sixteen unchanged issues to say that nothing had changed. That
+is not context; it is duplication, and it is what made the log unreadable to a human and,
+once, to the agent itself.
+
+The durable half is different. A triage's reasoning, a PR's design record, a review's
+evidence: those are written once, on the artifact they describe, and they are worth their
+length. The repo deliberately keeps no internals docs, so that trail is the documentation.
+
+So the rule is not "be brief". It is:
+
+- **Explain fully, once, on the artifact it belongs to.**
+- **Never restate what a standing comment of yours already says — cite it.**
+- **Before writing a sentence into a summary, ask whether a later run would act differently
+  without it.** If not, it is decoration.
+
+The ceilings in `REVIEW.md`, `TRIAGE.md`, `FIX.md` and `SUMMARY.md` follow from that: tight
+where output repeats every run, generous where it explains something once.
+
 ## Do not redo settled work
 
 Never rebuild a claim row your own standing review already verdicted **at this same head
@@ -123,26 +144,28 @@ SHA**. Cite it — "CONFIRMED in my review of <date>" — and spend the budget o
 Re-verify from scratch only when the head SHA changed, or when something has since
 contradicted that row. New comments on a thread are not a re-review trigger.
 
-## The answer syntax
+## How a human answers a design proposal
 
-A design proposal stops for a human decision. That decision is only machine-readable in one
-form, and `gates.sh` accepts nothing else:
+A design proposal stops for a human decision. `/agent-fix` at the start of a line is a useful
+signal that a reply is meant as that decision, and triage should invite it — but it is a hint,
+not a syntax, and **the decision itself is prose that you read.**
 
-    /agent-fix <option-name>
+That is a deliberate reversal of an earlier design in which only a rigid token counted. It
+would have refused the best answer this project has received: on one issue the maintainer
+rejected both options the triage offered, named a third, explained that the triage's radius
+classification applied only to the two it had proposed, and said to go straight to a draft PR.
+No token vocabulary can express any of that. Reading prose is what you are for.
 
-Two optional flags let a maintainer authorise work the gates would otherwise refuse. Each
-must name the **exact** token from the triage marker, so an override is deliberate rather
-than a shrug:
+Two consequences follow, and both matter:
 
-    /agent-fix A --accept-radius SHARED
-    /agent-fix A --accept-excluded api,strom-types
+- **A human may choose something the triage did not offer.** Do not treat the proposal's
+  option list as exhaustive, and do not report a reply as invalid because it names no option.
+- **A marker's `radius=` and `excluded=` describe the options the triage proposed.** If the
+  human chose a different design, those fields are about something else and you must
+  re-assess both for the design actually chosen. Say so explicitly when you do.
 
-An override is authorisation, so the fix PR body must quote the line that granted it. That
-keeps the escape hatch visible in the artifact instead of buried in a run log.
-
-Anything else — "do option A", "confirming option 1", a thumbs-up — is a real decision that
-the tooling cannot read. It is surfaced for a human, never acted on. The gate is strict on
-purpose: a model that interprets approval is a model that can interpret its way into it.
+What is not yours to interpret: whether a reply exists at all, and whether it came from
+someone who may decide. `board.sh` answers both and never guesses at the rest.
 
 ## Identity, and why it is not the author
 

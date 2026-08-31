@@ -8,24 +8,33 @@
 # missing, the line is past end of file, a bare filename is ambiguous, or a quoted line does
 # not appear at the line cited.
 #
-#   scripts/agent/verify-citations.sh <file>        # check against HEAD
-#   scripts/agent/verify-citations.sh <file> <ref>  # check against a ref or SHA
-#   ... | scripts/agent/verify-citations.sh -       # read the body from stdin
+#   scripts/agent/verify-citations.sh <file>                  # check against HEAD
+#   scripts/agent/verify-citations.sh <file> <ref>            # check against a ref or SHA
+#   ... | scripts/agent/verify-citations.sh -                 # read the body from stdin
+#   scripts/agent/verify-citations.sh --max-chars 2500 <file> # also enforce a length ceiling
+#   scripts/agent/verify-citations.sh --allow-no-citations <file>  # for a marker backfill
 #
 # Exit 0 = every citation resolved. Exit 1 = at least one did not; the output says which.
 #
 set -uo pipefail
 
-allow_none=""
-if [ "${1:-}" = "--allow-no-citations" ]; then allow_none="yes"; shift; fi
+allow_none="" max_chars=""
+while :; do
+  case "${1:-}" in
+    --allow-no-citations) allow_none="yes"; shift ;;
+    --max-chars) max_chars="${2:-}"; shift 2 || { echo "--max-chars needs a number" >&2; exit 2; } ;;
+    *) break ;;
+  esac
+done
 
 body="${1:-}"
 ref="${2:-HEAD}"
 
 if [ -z "$body" ]; then
-  echo "usage: $0 [--allow-no-citations] <file-with-body|-> [git-ref]" >&2
+  echo "usage: $0 [--allow-no-citations] [--max-chars N] <file-with-body|-> [git-ref]" >&2
   exit 2
 fi
+case "$max_chars" in ''|*[!0-9]*) [ -z "$max_chars" ] || { echo "--max-chars needs a number" >&2; exit 2; } ;; esac
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -54,6 +63,21 @@ pass() { printf '  ok    %s\n' "$1"; }
 
 # Normalize for comparison: trim ends, collapse internal runs of whitespace.
 norm() { printf '%s' "$1" | tr '\t' ' ' | sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//'; }
+
+# The length check runs first: it is the cheapest, and a body over budget has to be cut
+# before its citations are worth checking.
+over=0
+if [ -n "$max_chars" ]; then
+  actual_chars="$(wc -c < "$tmp/body" | tr -d ' ')"
+  if [ "$actual_chars" -gt "$max_chars" ]; then
+    echo "LENGTH  $actual_chars characters, over the $max_chars ceiling by $((actual_chars - max_chars))"
+    echo "        Cut restatement first: anything the diff already says, anything a standing"
+    echo "        comment of yours already established. Never cut the verdict or the evidence."
+    over=1
+  else
+    echo "length  $actual_chars / $max_chars characters"
+  fi
+fi
 
 echo "Verifying citations against ${ref}"
 
@@ -144,6 +168,7 @@ echo
 if [ "$checked" -eq 0 ]; then
   if [ -n "$allow_none" ]; then
     echo "No CODE citations found; --allow-no-citations was passed, so this is fine."
+    [ "$over" -eq 0 ] || exit 1
     exit 0
   fi
   echo "No CODE citations found. If this body makes claims about how the code behaves,"
@@ -154,4 +179,4 @@ if [ "$checked" -eq 0 ]; then
 fi
 
 echo "$checked citation(s) checked, $failed failed."
-[ "$failed" -eq 0 ] || exit 1
+[ "$failed" -eq 0 ] && [ "$over" -eq 0 ] || exit 1

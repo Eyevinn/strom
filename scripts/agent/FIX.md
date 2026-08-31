@@ -41,49 +41,50 @@ For every open draft PR authored by you:
 
 ## Phase 2 — pick at most one issue
 
-Run the gate script rather than evaluating eligibility yourself:
+Run the board report first:
 
-    scripts/agent/gates.sh
+    scripts/agent/board.sh
 
-It prints one eligible issue, or `NONE`, plus the first gate that stopped each candidate.
-The gates it applies:
+It is a report, not a gate. It tells you, per issue, who replied after the triage, what the
+marker says, and whether an open PR already claims it — and it leaves the judgements to you.
 
-1. Carries a `protocol=v3 kind=triage` comment with `verdict=CONFIRMED` and an `Ask:`.
-2. A **maintainer** replied **after** that comment using the answer syntax from
-   `PROTOCOL.md`. Two things matter here and both have failed in practice: a comment is the
-   agent's by its marker, never by its author, and a reply from someone who may not decide —
-   an issue reporter, say — does not arm anything.
-3. `radius=LOCAL` in the triage marker, or the answer carries `--accept-radius <that token>`.
-4. `excluded=none` in the triage marker, or the answer carries
-   `--accept-excluded <those tokens>`. The excluded areas are workspace dependencies, crate
-   features and version floors; **breaking** changes to the API or WebSocket contract —
-   renaming or changing an existing `StromEvent` variant, endpoint shape or config key;
-   pipeline lifecycle, teardown and object references; BUFFER probes.
+**Three of its findings are binding**, because they are unambiguous and being wrong is
+expensive:
 
-   *Additive* work is not excluded. CLAUDE.md requires new API-visible and shared types to
-   live in `strom-types`, so treating an added type, variant or block as excluded would
-   demand an override for the one placement the repo mandates — and a gate that fires on
-   every feature is a rubber stamp, not a check. What is excluded is breaking or
-   lifetime-critical surface. A new endpoint still needs both `#[utoipa::path]` and its
-   `openapi.rs` registration; that is a repo rule to follow, not a gate to clear.
+1. An issue under `AWAITING A FIRST REPLY` has nothing to implement. The open question is the
+   point of the triage stage, and a PR is an answer to it.
+2. An issue under `REPLIED, BUT NOT BY SOMEONE WHO MAY DECIDE` is reported, never acted on.
+3. An issue under `DECIDED BUT ALREADY CLAIMED` is not duplicated. If the named PR plainly
+   does not implement it, say so in the summary rather than opening a second one.
 
-   These areas are excluded because they need a maintainer decision — so once that decision
-   exists and says so explicitly, the exclusion has done its job.
-5. No open PR already implements it.
+Everything under `CANDIDATES` is yours to weigh. Pick at most one — oldest decision first
+unless you can say why not — and **for every note the report prints against it, state your
+reading in the PR body.** Specifically:
 
-**When an override armed the issue, quote the authorising line in the PR body.** Gates 3 and
-4 exist to force a human decision; an override is that decision, and it belongs in the
-artifact rather than only in a run log.
+- If the reply carries no `/agent-fix` token, say whether you read it as a decision and quote
+  the sentence you are relying on. A reply can be a deferral ("debug this first") or
+  information rather than a go-ahead.
+- If it names no option, say which design you understood it to choose. A human may choose
+  something the triage never offered; that is normal and often the best answer.
+- If the marker records a non-`LOCAL` radius or an excluded area, **re-assess both for the
+  design actually chosen** rather than inheriting them. Those fields describe the options the
+  triage proposed, and a human who picked a different design has invalidated them. Give your
+  own assessment and your reasoning.
 
-Gate 5 reports *which* PR claimed the issue. A link keyword in a body can be a passing
-mention rather than an implementation, so if the named PR plainly does not implement this
-issue, say so in the summary instead of treating the issue as taken.
+If you cannot honestly say a reply is a decision, treat the issue as still waiting and say so.
+That, not a token check, is what keeps this stage from answering its own question.
 
-The script also prints the issues where a human replied but nothing machine-readable came of
-it, each with the exact reply that would arm it. Those are **not** eligible. Report them
-verbatim and leave them; do not decide on anyone's behalf, and do not interpret an
-approving-sounding sentence as an answer. That strictness is the point — a model that
-interprets approval is a model that can interpret its way into it.
+Excluded areas — where a proposal is the wrong response and a maintainer decision or hardware
+is the actual blocker: workspace dependencies, crate features and version floors; **breaking**
+changes to the API or WebSocket contract (renaming or changing an existing `StromEvent`
+variant, endpoint shape or config key); pipeline lifecycle, teardown and object references;
+BUFFER probes.
+
+*Additive* work is not excluded. CLAUDE.md requires new API-visible and shared types to live
+in `strom-types`, so treating an added type, variant or block as excluded would rule out the
+one placement the repo mandates. What is excluded is breaking or lifetime-critical surface. A
+new endpoint still needs both `#[utoipa::path]` and its `openapi.rs` registration — that is a
+repo rule to follow, not a gate to clear.
 
 If nothing qualifies, open no PR. Say so in the summary and stop. **A quiet run is a correct
 outcome and happens often.**
@@ -193,7 +194,13 @@ Required sections, in this order, omitting any with nothing to say:
 6. **Blast radius.** What else calls the changed symbol (grep and read at least one call
    site), and which configurations other than the reporter's change behaviour.
 
-Then comment once on the issue linking the PR and naming its class. Do not restate the body.
+**The PR body is at most 3500 characters**, checked with
+`scripts/agent/verify-citations.sh --max-chars 3500 <file>`. The Problem, Change and Evidence
+sections are the design record and are worth their length; what to cut is anything the diff
+already says.
+
+Then comment once on the issue linking the PR and naming its class. **Do not restate the
+body** — link it. That comment is read alongside the PR, not instead of it.
 
 ## Before you publish, confirm
 
