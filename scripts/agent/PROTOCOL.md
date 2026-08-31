@@ -106,6 +106,12 @@ exists; `feature` adds something new. Most of the board is not `bug`, so getting
 mislabels the work: an `enhancement` implemented under the `bug` vocabulary ships as
 `fix(scope): …` with a commit claiming to "reproduce" a defect that never existed.
 
+`class=` appears **only** on a `kind=fix` marker — a PR the implementation stage authored. It
+never appears on a review of somebody else's PR, and looking for it there produces a
+false finding: a run reported "five open PRs are missing `class=`" about five PRs it had
+merely reviewed. "Find the open class=C PRs" therefore means "the fix PRs you opened", which
+`gh pr list --author @me --draft` answers.
+
 `excluded=` lists the areas from `FIX.md`'s exclusion gate that the fix would **break or take
 a lifetime risk in**, comma-separated, or `none`. It is not a list of areas the diff merely
 touches, and the difference decides whether the gate is a real check or a rubber stamp:
