@@ -91,7 +91,7 @@ restates the standing triage rather than replacing it:
 
     To implement Option A, reply: /agent-fix A
 
-    <!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED radius=LOCAL excluded=none ask=open confidence=HIGH -->
+    <!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none ask=open confidence=HIGH -->
 
 That middle line matters more than it looks. Standing triages were written before the answer
 syntax existed, so nothing on those issues tells a maintainer the token exists — and a
@@ -176,7 +176,7 @@ implementation stage can act.
 
 Confidence: HIGH
 
-`<!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED radius=LOCAL excluded=none ask=open confidence=HIGH -->`
+`<!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none ask=open confidence=HIGH -->`
 
 ---
 

@@ -68,7 +68,12 @@ why each file leads with its hardest rules and why the protocol is split at all.
 
 ## Running the scripts by hand
 
-    REPO=Eyevinn/strom AGENT_LOGIN=<bot account> scripts/agent/gates.sh
+    REPO=Eyevinn/strom MAINTAINERS="alice bob" scripts/agent/gates.sh
+
+`MAINTAINERS` is the one variable that must be right: it lists the logins whose `/agent-fix`
+reply may authorise work, and it defaults to a single login. If the deciding maintainer is not
+in it, every armed issue is reported as "not a maintainer" and the queue looks correctly
+empty. There is no `AGENT_LOGIN` — identity is by marker, not by account.
 
     scripts/agent/verify-citations.sh /tmp/review-body.md            # against HEAD
     scripts/agent/verify-citations.sh /tmp/review-body.md pr721       # against a ref

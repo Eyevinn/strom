@@ -38,10 +38,12 @@ is_maintainer() {
 }
 
 # --- Gate 5 input: open PRs, fetched once ------------------------------------------------
+# No `|| :` fallback here on purpose. An empty PR list makes gate 5 pass for every issue,
+# so a transient API failure would have the stage open a duplicate PR. Fail loudly instead.
 gh pr list --repo "$REPO" --state open --limit 200 \
   --json number,body,headRefName \
   -q '.[] | "\(.number)\t\(.headRefName)\t\(.body | gsub("[\n\t]"; " "))"' \
-  > "$tmp/prs" 2>/dev/null || : > "$tmp/prs"
+  < /dev/null > "$tmp/prs" || { echo "cannot list open PRs; refusing to evaluate gate 5" >&2; exit 3; }
 
 pr_implements() {
   # Prints the PR number that claims this issue, if any.
@@ -49,10 +51,10 @@ pr_implements() {
   # keyword in anyone's body is a weaker signal and can be a passing mention, so the caller
   # reports which PR matched rather than trusting it silently.
   local n="$1" hit
-  hit="$(grep -E "(agent/fix-${n}-|strom-agent protocol=v3 kind=fix issue=${n}( |>))" "$tmp/prs" \
+  hit="$(grep -E -- "(agent/(fix|feat)-${n}-|strom-agent protocol=v3 kind=fix issue=${n}( |>))" "$tmp/prs" \
          | cut -f1 | head -1 || true)"
   [ -n "$hit" ] && { printf '%s' "$hit"; return 0; }
-  hit="$(grep -iE "(fixes|refs|closes|resolves)[[:space:]]+#${n}([^0-9]|$)" "$tmp/prs" \
+  hit="$(grep -iE -- "(fixes|refs|closes|resolves)[[:space:]]+#${n}([^0-9]|$)" "$tmp/prs" \
          | cut -f1 | head -1 || true)"
   [ -n "$hit" ] && { printf '%s' "$hit"; return 0; }
   return 1
@@ -87,13 +89,17 @@ while IFS=$'\t' read -r num title; do
   gh api "repos/$REPO/issues/$num/comments" --paginate -q '
     .[] | [ .created_at,
             .user.login,
-            (if (.body | contains("<!-- strom-agent")) then "A" else "-" end),
-            (if (.body | contains("protocol=v3 kind=triage")) then "T" else "-" end),
+            (if (.body | split("\n")
+                       | map(select(test("^[[:space:]]*<!-- strom-agent")))
+                       | length) > 0 then "A" else "-" end),
+            (if (.body | split("\n")
+                       | map(select(test("^[[:space:]]*<!-- strom-agent protocol=v3 kind=triage")))
+                       | length) > 0 then "T" else "-" end),
             ((.body | split("\n")
-                    | map(select(contains("strom-agent protocol=v3 kind=triage")))
+                    | map(select(test("^[[:space:]]*<!-- strom-agent protocol=v3 kind=triage")))
                     | last) // ""),
             (((.body | split("\n")
-                     | map(select(test("^[[:space:]]*/agent-fix[[:space:]]")))
+                     | map(select(test("^[[:space:]]*/agent-fix([[:space:]]|$)")))
                      | first) // "")
              | gsub("[\t]"; " "))
           ] | @tsv' < /dev/null > "$tmp/c" 2>/dev/null || : > "$tmp/c"
@@ -192,8 +198,11 @@ while IFS=$'\t' read -r num title; do
     continue
   fi
 
+  # The option name may not begin with '-', or `/agent-fix --accept-radius SHARED` would
+  # parse its own flag as the chosen option and arm the stage with no design decision.
   opt="$(printf '%s' "$answer_line" \
-         | grep -oE '/agent-fix[[:space:]]+[A-Za-z0-9_-]+' | head -1 | awk '{print $2}' || true)"
+         | grep -oE -- '/agent-fix[[:space:]]+[A-Za-z0-9_][A-Za-z0-9_-]*' \
+         | head -1 | awk '{print $2}' || true)"
 
   # A bare /agent-fix names no option, and a triage offers two by construction. Letting it
   # through would hand the design choice back to the model, which is the one thing this
@@ -209,12 +218,19 @@ while IFS=$'\t' read -r num title; do
   ovr_radius="$(answer_flag "$answer_line" --accept-radius)"
   ovr_excluded="$(answer_flag "$answer_line" --accept-excluded)"
 
+  # An absent field is unknown, not permission. Checking only "is it LOCAL" let a marker with
+  # no radius= at all through, because the override comparison then compared "" against "" —
+  # the exact rubber stamp these two gates exist to prevent.
+  if [ -z "$radius" ] || [ -z "$excluded" ]; then
+    stopped+=("#$num|3|marker states no radius/excluded; needs a re-triage before it can be armed")
+    continue
+  fi
   if [ "$radius" != "LOCAL" ] && [ "$ovr_radius" != "$radius" ]; then
-    stopped+=("#$num|3|radius is ${radius:-unset}; needs --accept-radius ${radius:-?}")
+    stopped+=("#$num|3|radius is $radius; needs --accept-radius $radius")
     continue
   fi
   if [ "$excluded" != "none" ] && [ "$ovr_excluded" != "$excluded" ]; then
-    stopped+=("#$num|4|excluded area(s) ${excluded:-unset}; needs --accept-excluded ${excluded:-?}")
+    stopped+=("#$num|4|excluded area(s) $excluded; needs --accept-excluded $excluded")
     continue
   fi
 
@@ -224,15 +240,17 @@ while IFS=$'\t' read -r num title; do
     continue
   fi
 
+  # $ovr is human-typed, so it goes last and is stripped of the delimiter: a '|' in it would
+  # otherwise shift every later field, and work= is what selects the commit vocabulary.
   ovr=""
-  [ -n "$ovr_radius$ovr_excluded" ] && ovr="$answer_line"
-  armed_list+=("$answer_ts|$num|$opt|$answer_by|$ovr|${work:-unset}")
+  [ -n "$ovr_radius$ovr_excluded" ] && ovr="${answer_line//|/ }"
+  armed_list+=("$answer_ts|$num|$opt|$answer_by|${work:-unset}|$ovr")
 done < "$tmp/issues"
 
 # First decided, first built — an older maintainer decision must not wait behind a newer one.
 eligible="" eligible_opt="" eligible_auth="" deferred=0
 if [ "${#armed_list[@]}" -gt 0 ]; then
-  while IFS='|' read -r a_ts a_num a_opt a_by a_ovr a_work; do
+  while IFS='|' read -r a_ts a_num a_opt a_by a_work a_ovr; do
     if [ -z "$eligible" ]; then
       eligible="$a_num"; eligible_opt="$a_opt"; eligible_auth="$a_by"; eligible_work="$a_work"
       [ -n "$a_ovr" ] && eligible_auth="$a_by (override: $a_ovr)"

@@ -31,7 +31,13 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # Read the body before changing directory — the path may be relative to where we were called.
-if [ "$body" = "-" ]; then cat > "$tmp/body"; else cat "$body" > "$tmp/body"; fi
+if [ "$body" = "-" ]; then
+  cat > "$tmp/body"
+else
+  # Without this check an unreadable path leaves an empty body, and with
+  # --allow-no-citations the script would then exit 0 having verified nothing at all.
+  cat "$body" > "$tmp/body" || { echo "cannot read '$body'" >&2; exit 2; }
+fi
 
 # Citations are written repo-root-relative, and `git ls-files` is scoped to the current
 # directory, so resolving a bare filename would silently depend on where this was invoked.
@@ -51,7 +57,9 @@ norm() { printf '%s' "$1" | tr '\t' ' ' | sed -e 's/  */ /g' -e 's/^ //' -e 's/ 
 
 echo "Verifying citations against ${ref}"
 
-while IFS= read -r line; do
+# `|| [ -n "$line" ]` so a body whose last line has no terminating newline is still read —
+# the same class of bug the line count below guards against.
+while IFS= read -r line || [ -n "$line" ]; do
   # Every `something.ext:NNN` or `something.ext:NNN-MMM` inside inline code.
   cites="$(printf '%s' "$line" \
     | grep -oE -- '`[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+:[0-9]+(-[0-9]+)?`' || true)"
@@ -97,10 +105,19 @@ while IFS= read -r line; do
 
     actual="$(git show "${ref}:${path}" 2>/dev/null | sed -n "${first}p")"
 
-    # If the same line quotes source text after the citation, it must appear at that line.
+    # Only the span IMMEDIATELY after the citation is a verbatim quote of that line. A later
+    # span on the same line is unrelated prose — often another citation — and comparing it
+    # against the cited line reports a correct citation as wrong, which then pushes the agent
+    # to "fix" a citation that was right.
     rest="${line#*"$cite"}"
-    quoted="$(printf '%s' "$rest" | grep -oE '`[^`]+`' | head -1 || true)"
-    quoted="${quoted//\`/}"
+    lead="${rest%%\`*}"                     # text between the citation and the next span
+    quoted=""
+    if [ "$rest" != "$lead" ] && [ "${#lead}" -le 6 ]; then
+      quoted="$(printf '%s' "$rest" | grep -oE -- '`[^`]+`' | head -1 || true)"
+      quoted="${quoted//\`/}"
+      # A span that is itself a `path:line` reference is a citation, not quoted source.
+      case "$quoted" in *.*:[0-9]*) quoted="" ;; esac
+    fi
 
     # A single-line citation is a verbatim claim about that line, so the quote must match.
     # A range citation points at a region; quoting a summary of it is legitimate prose, so a
