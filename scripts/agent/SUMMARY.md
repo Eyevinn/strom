@@ -83,7 +83,10 @@ exact command where there is one. If it is empty, that itself is the useful sign
 Two things belong in `needs_human` **every run**, not just the run that discovered them, because
 otherwise they scroll away and the work stalls silently:
 
-- the dispatch command for every open `class=C` PR, which cannot reach class A without it;
+- the dispatch command for every open `class=C` PR **that the implementation stage authored**
+  (`gh pr list --author @me --draft`), which cannot reach class A without it. A review you
+  posted on someone else's PR carries no `class=` and never will — do not report its absence
+  as a finding;
 - every issue `board.sh` lists under "replied, but not by someone who may decide", and every
   candidate you read as *not* a decision — with the sentence you based that on, so a human can
   overrule you in one reply.
