@@ -32,6 +32,21 @@ impl VideoConvertMode {
             VideoConvertMode::Software => "videoconvert",
         }
     }
+
+    /// Returns the element name for a stage that converts *and* scales.
+    ///
+    /// Use this instead of [`Self::element_name`] for a stage that needs
+    /// both: `videoconvertscale` does the two in a single walk of the frame.
+    ///
+    /// `autovideoconvert` covers both as well — it is
+    /// `Bin/Colorspace/Scale/Video/Converter` and autoplugs a scaler when the
+    /// caps ask for one.
+    pub fn convert_scale_element_name(&self) -> &'static str {
+        match self {
+            VideoConvertMode::GpuAccelerated => "autovideoconvert",
+            VideoConvertMode::Software => "videoconvertscale",
+        }
+    }
 }
 
 /// Global detected video convert mode, set once at startup.
@@ -474,8 +489,9 @@ fn sysctl_string(name: &str) -> Option<String> {
 ///
 /// `videoconvert` ships with `n-threads=1`, so a 1080p colour conversion runs
 /// on a single core however many the machine has. Every call site that builds a
-/// conversion element from [`VideoConvertMode::element_name`] routes through
-/// here, so the default is set in exactly one place.
+/// conversion element from [`VideoConvertMode::element_name`] or
+/// [`VideoConvertMode::convert_scale_element_name`] routes through here, so the
+/// default is set in exactly one place.
 ///
 /// This is macOS-only on purpose. The thread count above is an Apple-silicon
 /// heuristic. On Linux in particular a container's visible CPU count routinely
@@ -581,6 +597,33 @@ mod tests {
             "autovideoconvert"
         );
         assert_eq!(VideoConvertMode::Software.element_name(), "videoconvert");
+    }
+
+    /// The convert+scale variant must name elements that actually scale.
+    /// `videoconvert` here would silently drop the scaling half.
+    #[test]
+    fn convert_scale_element_name_scales() {
+        assert_eq!(
+            VideoConvertMode::Software.convert_scale_element_name(),
+            "videoconvertscale"
+        );
+        assert_eq!(
+            VideoConvertMode::GpuAccelerated.convert_scale_element_name(),
+            "autovideoconvert"
+        );
+
+        // autovideoconvert is only correct here because it autoplugs a scaler.
+        gst::init().expect("gst init");
+        let factory = gst::ElementFactory::find("autovideoconvert")
+            .expect("autovideoconvert is in gst-plugins-bad");
+        let klass = factory
+            .metadata(gst::ELEMENT_METADATA_KLASS)
+            .unwrap_or_default();
+        assert!(
+            klass.contains("Scale"),
+            "autovideoconvert does not advertise scaling (klass '{}'); the convert+scale call sites need a separate scaler",
+            klass
+        );
     }
 
     /// `configure_video_convert` must raise the thread count off the stock

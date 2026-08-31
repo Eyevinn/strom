@@ -6,7 +6,7 @@
 //! - Color format (pixel format) - enforced by caps
 //!
 //! All properties are optional. The block creates a fixed chain of elements:
-//! videoscale -> videoconvert -> capsfilter
+//! videoconvertscale -> capsfilter
 //!
 //! TEMPORARY: videorate element removed to avoid frame duplication issues.
 //!
@@ -98,21 +98,18 @@ impl BlockBuilder for VideoFormatBuilder {
         let caps_str = caps_fields.join(",");
         info!("VideoFormat block caps: {}", caps_str);
 
-        // Always create all elements for consistent external pad references
-        // Elements will just pass through if their respective properties aren't set
-        let scale_id = format!("{}:videoscale", instance_id);
-        // Use detected video convert mode (autovideoconvert if GPU interop works, videoconvert otherwise)
-        // Note: We always use "videoconvert" as the element ID for consistent external pad references,
-        // even when the actual GStreamer element is "autovideoconvert"
-        let convert_mode = video_convert_mode();
-        let convert_element_name = convert_mode.element_name();
-        let convert_id = format!("{}:videoconvert", instance_id);
+        // `videoconvertscale` converts and scales in a single walk of the frame.
+        //
+        // The element ID is "videoscale": the block's external input pad
+        // resolves through that name (see `external_pads` below), and saved
+        // flows resolve their links through it at build time, so renaming it
+        // breaks every saved flow that links into this block. The ID names the
+        // role, not the factory.
+        let convert_id = format!("{}:videoscale", instance_id);
         let capsfilter_id = format!("{}:capsfilter", instance_id);
 
-        let videoscale = gst::ElementFactory::make("videoscale")
-            .name(&scale_id)
-            .build()
-            .map_err(|e| BlockBuildError::ElementCreation(format!("videoscale: {}", e)))?;
+        // videoconvertscale on the CPU; autovideoconvert scales as well as converts.
+        let convert_element_name = video_convert_mode().convert_scale_element_name();
 
         // TEMPORARY: videorate removed to avoid frame duplication issues
         // let videorate = gst::ElementFactory::make("videorate")
@@ -120,13 +117,15 @@ impl BlockBuilder for VideoFormatBuilder {
         //     .build()
         //     .map_err(|e| BlockBuildError::ElementCreation(format!("videorate: {}", e)))?;
 
-        let videoconvert = gst::ElementFactory::make(convert_element_name)
+        let convert_scale = gst::ElementFactory::make(convert_element_name)
             .name(&convert_id)
             .build()
             .map_err(|e| {
                 BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
             })?;
-        gpu::configure_video_convert(&videoconvert);
+        // Raises `n-threads` off the stock default of 1, for both the
+        // converting and the scaling half.
+        gpu::configure_video_convert(&convert_scale);
 
         // capsfilter with caps (only constraints specified properties)
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {
@@ -139,26 +138,19 @@ impl BlockBuilder for VideoFormatBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter: {}", e)))?;
 
-        info!("VideoFormat block created (chain: videoscale -> {} -> capsfilter) [videorate TEMPORARILY REMOVED]", convert_element_name);
+        info!(
+            "VideoFormat block created (chain: {} -> capsfilter) [videorate TEMPORARILY REMOVED]",
+            convert_element_name
+        );
 
-        // Chain: videoscale -> videoconvert/autovideoconvert -> capsfilter (videorate temporarily removed)
-        let internal_links = vec![
-            (
-                ElementPadRef::pad(&scale_id, "src"),
-                ElementPadRef::pad(&convert_id, "sink"),
-            ),
-            (
-                ElementPadRef::pad(&convert_id, "src"),
-                ElementPadRef::pad(&capsfilter_id, "sink"),
-            ),
-        ];
+        // Chain: videoconvertscale/autovideoconvert -> capsfilter (videorate temporarily removed)
+        let internal_links = vec![(
+            ElementPadRef::pad(&convert_id, "src"),
+            ElementPadRef::pad(&capsfilter_id, "sink"),
+        )];
 
         Ok(BlockBuildResult {
-            elements: vec![
-                (scale_id, videoscale),
-                (convert_id, videoconvert),
-                (capsfilter_id, capsfilter),
-            ],
+            elements: vec![(convert_id, convert_scale), (capsfilter_id, capsfilter)],
             internal_links,
             bus_message_handler: None,
             pad_properties: HashMap::new(),
@@ -182,7 +174,7 @@ fn videoformat_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "resolution".to_string(),
                 label: "Resolution".to_string(),
-                description: "Video resolution - creates videoscale element. Leave empty to pass through.".to_string(),
+                description: "Video resolution - applied by the videoconvertscale element. Leave empty to pass through.".to_string(),
                 property_type: PropertyType::Enum {
                     values: common_video_resolution_enum_values(true), // include empty "-" option
                 },
@@ -214,7 +206,7 @@ fn videoformat_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "format".to_string(),
                 label: "Pixel Format".to_string(),
-                description: "Pixel format/color space - creates videoconvert element. Leave empty to pass through.".to_string(),
+                description: "Pixel format/color space - applied by the videoconvertscale element. Leave empty to pass through.".to_string(),
                 property_type: PropertyType::Enum {
                     values: common_video_pixel_format_enum_values(true),
                 },
@@ -251,5 +243,210 @@ fn videoformat_definition() -> BlockDefinition {
             height: Some(2.0),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::BlockBuildContext;
+    use gst::prelude::*;
+
+    fn init_gst() {
+        let _ = gst::init();
+        // video_convert_mode() panics until this has run.
+        crate::gpu::detect_gpu_capabilities();
+    }
+
+    fn props(pairs: &[(&str, &str)]) -> HashMap<String, PropertyValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), PropertyValue::String(v.to_string())))
+            .collect()
+    }
+
+    fn build(pairs: &[(&str, &str)]) -> BlockBuildResult {
+        init_gst();
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        VideoFormatBuilder
+            .build("vf0", &props(pairs), &ctx)
+            .expect("VideoFormat block must build")
+    }
+
+    /// Guards external pad stability. Saved flows store links as
+    /// `block_id:external_pad_name` and resolve them through the block
+    /// definition's `internal_element_id` at build time, so a definition that
+    /// names an element the builder does not produce silently breaks every
+    /// saved flow linking into this block.
+    ///
+    /// Renaming the conversion element without updating `external_pads` (or
+    /// vice versa) fails here.
+    #[test]
+    fn external_pads_resolve_to_built_elements() {
+        let result = build(&[("resolution", "1280x720"), ("format", "I420")]);
+        let built: Vec<&str> = result.elements.iter().map(|(id, _)| id.as_str()).collect();
+
+        let definition = videoformat_definition();
+        let pads = definition
+            .external_pads
+            .inputs
+            .iter()
+            .chain(definition.external_pads.outputs.iter());
+
+        for pad in pads {
+            let resolved = format!("vf0:{}", pad.internal_element_id);
+            assert!(
+                built.contains(&resolved.as_str()),
+                "external pad '{}' resolves to element '{}', which the builder does not create. \
+                 Built elements: {:?}",
+                pad.name,
+                resolved,
+                built
+            );
+        }
+    }
+
+    /// The block builds exactly one conversion element plus the capsfilter.
+    /// Splitting the conversion back into separate scale and convert elements
+    /// fails this test.
+    #[test]
+    fn builds_one_conversion_element_not_two() {
+        let result = build(&[("resolution", "1280x720"), ("format", "I420")]);
+
+        assert_eq!(
+            result.elements.len(),
+            2,
+            "expected one conversion element plus the capsfilter, got {:?}",
+            result
+                .elements
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result.internal_links.len(),
+            1,
+            "a two-element chain has exactly one internal link"
+        );
+
+        let factory = result.elements[0]
+            .1
+            .factory()
+            .expect("built element has a factory")
+            .name()
+            .to_string();
+        assert!(
+            factory == "videoconvertscale" || factory == "autovideoconvert",
+            "conversion element must convert and scale in one pass, got '{}'",
+            factory
+        );
+    }
+
+    /// The single element must actually do both jobs: reject 1080p RGBA in,
+    /// 720p I420 out unless one element performed both the scale and the
+    /// colorspace conversion.
+    #[test]
+    fn one_element_both_scales_and_converts() {
+        let result = build(&[("resolution", "1280x720"), ("format", "I420")]);
+
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("num-buffers", 2i32)
+            .property("is-live", false)
+            .build()
+            .expect("videotestsrc is in gst-plugins-base");
+        let in_caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                "video/x-raw,width=1920,height=1080,format=RGBA,framerate=30/1"
+                    .parse::<gst::Caps>()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+
+        let convert = &result.elements[0].1;
+        let capsfilter = &result.elements[1].1;
+        pipeline
+            .add_many([&src, &in_caps, convert, capsfilter, &sink])
+            .unwrap();
+        gst::Element::link_many([&src, &in_caps, convert, capsfilter, &sink])
+            .expect("the block's single element must link 1080p RGBA to 720p I420");
+
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let bus = pipeline.bus().unwrap();
+        let msg = bus.timed_pop_filtered(
+            gst::ClockTime::from_seconds(10),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+
+        let out_caps = capsfilter
+            .static_pad("src")
+            .unwrap()
+            .current_caps()
+            .expect("output caps must be negotiated");
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        match msg {
+            Some(m) if m.type_() == gst::MessageType::Error => {
+                panic!("pipeline error: {:?}", m)
+            }
+            None => panic!("pipeline did not reach EOS"),
+            _ => {}
+        }
+
+        let s = out_caps.structure(0).unwrap();
+        assert_eq!(s.get::<i32>("width").unwrap(), 1280);
+        assert_eq!(s.get::<i32>("height").unwrap(), 720);
+        assert_eq!(s.get::<String>("format").unwrap(), "I420");
+    }
+
+    /// The block leaves `method` unset and takes the element default. If the
+    /// two elements' defaults diverge, scaled output changes and the block
+    /// must pin `method` explicitly.
+    #[test]
+    fn scaling_method_default_matches_videoscale() {
+        init_gst();
+
+        let scale = gst::ElementFactory::make("videoscale").build().unwrap();
+        let convert_scale = gst::ElementFactory::make("videoconvertscale")
+            .build()
+            .unwrap();
+
+        let scale_method = scale.property_value("method");
+        let convert_scale_method = convert_scale.property_value("method");
+        assert_eq!(
+            format!("{:?}", scale_method),
+            format!("{:?}", convert_scale_method),
+            "videoscale and videoconvertscale disagree on the default scaling method; \
+             the block must pin `method` or the output change must be called out"
+        );
+    }
+
+    /// `configure_video_convert` must reach the conversion element, so that
+    /// both the converting and the scaling half are threaded.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn conversion_element_is_threaded() {
+        let result = build(&[("resolution", "1280x720"), ("format", "I420")]);
+        let convert = &result.elements[0].1;
+
+        assert!(
+            convert.has_property("n-threads"),
+            "the merged element must expose n-threads for configure_video_convert to reach"
+        );
+        assert_eq!(
+            convert.property::<u32>("n-threads"),
+            crate::gpu::video_convert_threads(),
+            "configure_video_convert did not reach the merged element"
+        );
+        assert!(
+            convert.property::<u32>("n-threads") > 1,
+            "n-threads left at the stock default of 1"
+        );
     }
 }
