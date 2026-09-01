@@ -1729,7 +1729,7 @@ impl AppState {
         ramp_ms_overrides: Option<HashMap<String, u32>>,
     ) -> Result<(HashMap<String, PropertyValue>, HashMap<String, String>), PipelineError> {
         // Resolve block instance → definition_id → BlockDefinition.
-        let definition_id = {
+        let (definition_id, stored_properties) = {
             let flows = self.inner.flows.read().await;
             let flow = flows.get(flow_id).ok_or_else(|| {
                 PipelineError::InvalidFlow(format!("Flow not found: {}", flow_id))
@@ -1737,7 +1737,7 @@ impl AppState {
             flow.blocks
                 .iter()
                 .find(|b| b.id == block_instance_id)
-                .map(|b| b.block_definition_id.clone())
+                .map(|b| (b.block_definition_id.clone(), b.properties.clone()))
                 .ok_or_else(|| {
                     PipelineError::InvalidFlow(format!(
                         "Block instance not found in flow: {}",
@@ -1753,6 +1753,23 @@ impl AppState {
             .ok_or_else(|| {
                 PipelineError::InvalidFlow(format!("Block definition not found: {}", definition_id))
             })?;
+
+        // Live Audio Router: its crosspoint fade lives on the block, not on any
+        // element, so resolve it here — a value sent in this same batch takes
+        // precedence over the stored one.
+        let router_fade_ms = (definition_id == crate::blocks::builtin::liveaudiorouter::BLOCK_ID)
+            .then(|| {
+                let mut props = stored_properties.clone();
+                if let Some(v) =
+                    properties.get(crate::blocks::builtin::liveaudiorouter::FADE_MS_PROPERTY)
+                {
+                    props.insert(
+                        crate::blocks::builtin::liveaudiorouter::FADE_MS_PROPERTY.to_string(),
+                        v.clone(),
+                    );
+                }
+                crate::blocks::builtin::liveaudiorouter::fade_ms(&props)
+            });
 
         let mut rejected: HashMap<String, String> = HashMap::new();
         let mut to_persist: Vec<(String, PropertyValue)> = Vec::new();
@@ -1780,6 +1797,16 @@ impl AppState {
                 continue;
             }
 
+            // The Live Audio Router's crosspoint fade has no element of its own —
+            // it is read when a routing change is applied, so persisting it is
+            // the whole write. Handled before the `_block` rejection below.
+            if router_fade_ms.is_some()
+                && name == crate::blocks::builtin::liveaudiorouter::FADE_MS_PROPERTY
+            {
+                to_persist.push((name, value));
+                continue;
+            }
+
             // The `_block` element_id marker is a virtual element for properties that
             // get baked into the block at build time — they have no underlying element
             // to write to live.
@@ -1797,7 +1824,13 @@ impl AppState {
             // Element IDs in block definitions are relative to the instance — prepend.
             let full_element_id = format!("{}:{}", block_instance_id, exposed.mapping.element_id);
 
-            let effective_ramp_ms = resolve_ramp_ms(&name, ramp_ms_overrides.as_ref(), ramp_ms);
+            let mut effective_ramp_ms = resolve_ramp_ms(&name, ramp_ms_overrides.as_ref(), ramp_ms);
+            // A routing change with no explicit ramp uses the block's own fade.
+            if effective_ramp_ms.is_none()
+                && name == crate::blocks::builtin::liveaudiorouter::ROUTING_MATRIX_PROPERTY
+            {
+                effective_ramp_ms = router_fade_ms;
+            }
 
             if let Err(e) = self
                 .update_element_property(
