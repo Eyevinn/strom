@@ -49,7 +49,7 @@ fn missing_element() -> Option<&'static str> {
         .copied()
         .find(|e| gst::ElementFactory::find(e).is_none())?;
     assert!(
-        std::env::var("STROM_REQUIRE_GST_PLUGINS").is_err(),
+        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
         "STROM_REQUIRE_GST_PLUGINS is set but this element is missing: {missing}"
     );
     Some(missing)

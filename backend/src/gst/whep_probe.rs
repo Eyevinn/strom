@@ -189,7 +189,8 @@ fn spawn_reporter(registry: Arc<WhepProbeRegistry>) -> tokio::task::JoinHandle<(
     let flow_id = registry.flow_id.clone();
 
     tokio::spawn(async move {
-        let dir = std::env::var("STROM_WHEP_PROBE_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        let dir =
+            strom_types::env::var_opt("STROM_WHEP_PROBE_DIR").unwrap_or_else(|| "/tmp".to_string());
         let path = format!("{}/strom-whep-probe-{}.log", dir, flow_id);
         let file = match std::fs::OpenOptions::new()
             .create(true)

@@ -6,7 +6,6 @@ use figment::{
     Figment,
 };
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::path::PathBuf;
 
 /// Configuration structure that matches the TOML file format.
@@ -152,6 +151,13 @@ pub struct Config {
     pub tls_key: Option<PathBuf>,
 }
 
+/// A blank path is not a path. Blank environment variables are gone before
+/// this runs (see `strom_types::env`), but a config file can carry
+/// `tls_cert = ""` just as easily.
+fn non_blank_path(path: Option<PathBuf>) -> Option<PathBuf> {
+    path.filter(|p| !p.to_string_lossy().trim().is_empty())
+}
+
 impl Config {
     /// Load configuration with full priority chain: CLI args > env vars > config files > defaults.
     ///
@@ -220,7 +226,7 @@ impl Config {
         // This needs special handling because:
         // - The split("_") above would turn ICE_SERVERS into ice.servers (wrong)
         // - Figment doesn't parse comma-separated values into arrays
-        if let Ok(ice_servers_str) = env::var("STROM_SERVER_ICE_SERVERS") {
+        if let Some(ice_servers_str) = strom_types::env::var_opt("STROM_SERVER_ICE_SERVERS") {
             let ice_servers: Vec<String> = ice_servers_str
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -233,10 +239,10 @@ impl Config {
 
         // 4c. Handle STROM_TLS_CERT / STROM_TLS_KEY specially
         // (underscore in field name breaks the split("_") env mapping)
-        if let Ok(cert) = env::var("STROM_TLS_CERT") {
+        if let Some(cert) = strom_types::env::var_opt("STROM_TLS_CERT") {
             figment = figment.merge(Serialized::default("server.tls_cert", PathBuf::from(cert)));
         }
-        if let Ok(key) = env::var("STROM_TLS_KEY") {
+        if let Some(key) = strom_types::env::var_opt("STROM_TLS_KEY") {
             figment = figment.merge(Serialized::default("server.tls_key", PathBuf::from(key)));
         }
 
@@ -271,10 +277,10 @@ impl Config {
 
         // Resolve data paths
         let path_config = PathConfig {
-            data_dir: config_file.storage.data_dir,
-            flows_path: config_file.storage.flows_path,
-            blocks_path: config_file.storage.blocks_path,
-            media_path: config_file.storage.media_path,
+            data_dir: non_blank_path(config_file.storage.data_dir),
+            flows_path: non_blank_path(config_file.storage.flows_path),
+            blocks_path: non_blank_path(config_file.storage.blocks_path),
+            media_path: non_blank_path(config_file.storage.media_path),
         };
         let data_paths = DataPaths::resolve(path_config)?;
 
@@ -283,15 +289,15 @@ impl Config {
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             media_path: data_paths.media_path,
-            database_url: config_file.storage.database_url,
-            log_file: config_file.logging.log_file,
-            log_level: config_file.logging.log_level,
+            database_url: strom_types::env::non_blank(config_file.storage.database_url),
+            log_file: non_blank_path(config_file.logging.log_file),
+            log_level: strom_types::env::non_blank(config_file.logging.log_level),
             ice_servers: normalize_ice_servers(config_file.server.ice_servers),
             ice_transport_policy: config_file.server.ice_transport_policy,
             sap_multicast_addresses: config_file.discovery.sap_multicast_addresses,
             cors_allowed_origins: config_file.server.cors_allowed_origins,
-            tls_cert: config_file.server.tls_cert,
-            tls_key: config_file.server.tls_key,
+            tls_cert: non_blank_path(config_file.server.tls_cert),
+            tls_key: non_blank_path(config_file.server.tls_key),
         })
     }
 
@@ -348,16 +354,15 @@ impl Config {
     /// This method is primarily for backward compatibility and tests.
     /// CLI applications should use `Config::new()` with parsed arguments.
     pub fn from_env() -> anyhow::Result<Self> {
-        let port = env::var("STROM_PORT")
-            .ok()
+        let port = strom_types::env::var_opt("STROM_PORT")
             .and_then(|p| p.parse().ok())
             .unwrap_or(strom_types::DEFAULT_PORT);
 
-        let data_dir = env::var("STROM_DATA_DIR").ok().map(PathBuf::from);
-        let flows_path = env::var("STROM_FLOWS_PATH").ok().map(PathBuf::from);
-        let blocks_path = env::var("STROM_BLOCKS_PATH").ok().map(PathBuf::from);
-        let media_path = env::var("STROM_MEDIA_PATH").ok().map(PathBuf::from);
-        let database_url = env::var("STROM_DATABASE_URL").ok();
+        let data_dir = strom_types::env::var_opt("STROM_DATA_DIR").map(PathBuf::from);
+        let flows_path = strom_types::env::var_opt("STROM_FLOWS_PATH").map(PathBuf::from);
+        let blocks_path = strom_types::env::var_opt("STROM_BLOCKS_PATH").map(PathBuf::from);
+        let media_path = strom_types::env::var_opt("STROM_MEDIA_PATH").map(PathBuf::from);
+        let database_url = strom_types::env::var_opt("STROM_DATABASE_URL");
 
         Self::new(
             port,
@@ -482,6 +487,88 @@ database_url = "postgresql://localhost/test"
             config.database_url,
             Some("postgresql://localhost/test".to_string())
         );
+    }
+
+    /// A blank value must not look configured. `Some("")` for the database URL
+    /// selected PostgreSQL storage and then failed to connect; blank TLS paths
+    /// turned on HTTPS with nothing to serve it with. The environment is
+    /// scrubbed in main, but a config file reaches the same fields.
+    #[test]
+    #[serial]
+    fn test_from_figment_ignores_blank_values() {
+        std::env::remove_var("STROM_SERVER_PORT");
+        std::env::remove_var("STROM_STORAGE_DATABASE_URL");
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_file = temp_dir.path().join(".strom.toml");
+
+        let config_content = r#"
+[server]
+tls_cert = ""
+tls_key = "   "
+
+[storage]
+database_url = ""
+data_dir = ""
+
+[logging]
+log_file = ""
+log_level = "   "
+"#;
+        fs::write(&config_file, config_content).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        let config = Config::from_figment(None, None, None, None, None, None, None, None).unwrap();
+
+        let _ = std::env::set_current_dir(original_dir);
+
+        assert_eq!(
+            config.database_url, None,
+            "a blank database URL must leave JSON file storage in place"
+        );
+        assert_eq!(config.tls_cert, None);
+        assert_eq!(config.tls_key, None);
+        assert!(
+            config.tls_paths().unwrap().is_none(),
+            "blank TLS paths must not enable HTTPS"
+        );
+        assert_eq!(
+            config.log_level, None,
+            "a blank log level would build an EnvFilter with no directives, silencing the process"
+        );
+        assert_eq!(config.log_file, None);
+        assert!(
+            config.flows_path.is_absolute(),
+            "a blank data dir must fall back to the default location, got {:?}",
+            config.flows_path
+        );
+    }
+
+    /// The same guard on the CLI layer. This is the shape the OSC failure
+    /// actually took: clap reads a set-but-empty `STROM_DATABASE_URL` as a real
+    /// value and hands `Some("")` straight to `from_figment`.
+    #[test]
+    #[serial]
+    fn test_from_figment_ignores_blank_cli_database_url() {
+        std::env::remove_var("STROM_STORAGE_DATABASE_URL");
+
+        let config = Config::from_figment(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(String::new()),
+            Some(PathBuf::new()),
+            Some(PathBuf::new()),
+        )
+        .unwrap();
+
+        assert_eq!(config.database_url, None);
+        assert_eq!(config.tls_cert, None);
+        assert_eq!(config.tls_key, None);
     }
 
     #[test]

@@ -218,10 +218,26 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Drop Strom variables that are set but blank, which orchestrators forward
+    // for settings nobody configured. This brackets dotenvy on both sides and
+    // has to stay in this window: before clap reads the environment, and before
+    // any thread exists (see strom_types::env).
+    //
+    // Before, because dotenvy declines to set any key that env::var reports as
+    // Ok -- and Ok("") counts as set. An exported blank would otherwise shadow
+    // a real value in .env and then be deleted, losing both. After, so blanks
+    // coming from .env itself are caught too. Logging is not up yet, so the
+    // names are reported further down.
+    let mut blank_env_vars = strom_types::env::remove_blank_owned_vars();
+
     // Load environment variables from a local .env file if present (e.g.
     // STROM_OSC_PAT). Real environment variables always take precedence, and a
     // missing .env is fine — this is a no-op in production deployments.
     let _ = dotenvy::dotenv();
+
+    blank_env_vars.extend(strom_types::env::remove_blank_owned_vars());
+    blank_env_vars.sort();
+    blank_env_vars.dedup();
 
     // Initialize process startup time before anything else
     strom::version::init_process_startup_time();
@@ -305,6 +321,24 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Failed to initialize logging: {}", e);
             std::process::exit(1);
         });
+
+    let (blank_credentials, blank_settings): (Vec<String>, Vec<String>) = blank_env_vars
+        .into_iter()
+        .partition(|key| strom_types::env::is_credential(key));
+    if !blank_settings.is_empty() {
+        info!(
+            "Ignored blank environment variables: {}",
+            blank_settings.join(", ")
+        );
+    }
+    if !blank_credentials.is_empty() {
+        warn!(
+            "Ignored blank credential environment variables: {} - these configure \
+             authentication, so unless another credential is set the instance \
+             accepts unauthenticated requests",
+            blank_credentials.join(", ")
+        );
+    }
 
     // Determine if GUI should be enabled
     #[cfg(not(feature = "no-gui"))]
