@@ -785,12 +785,21 @@ impl RoutingMatrixEditor {
                 Some(gain) => {
                     painter.circle_filled(centre, radius, visuals.fg_stroke.color);
                     if supports_gain {
-                        // Pointer from the centre to just past the rim.
+                        // Pointer from the centre to just past the rim, drawn
+                        // as a broad dark stroke with a thin light one on top.
+                        // Fixed black and white rather than theme colours: the
+                        // pointer sits on the dot's own fill, so it has to read
+                        // against that whatever the theme does to it.
                         let angle = routing::knob_angle(gain) as f32;
                         let dir = egui::vec2(angle.sin(), -angle.cos());
+                        let tip = centre + dir * (radius * 1.45);
                         painter.line_segment(
-                            [centre, centre + dir * (radius * 1.45)],
-                            egui::Stroke::new(1.6_f32, visuals.fg_stroke.color),
+                            [centre, tip],
+                            egui::Stroke::new(3.0_f32, Color32::BLACK),
+                        );
+                        painter.line_segment(
+                            [centre, tip],
+                            egui::Stroke::new(1.0_f32, Color32::WHITE),
                         );
                     }
                 }
@@ -798,6 +807,34 @@ impl RoutingMatrixEditor {
                     // The unconnected crosspoint, still visible so the grid is.
                     painter.circle_filled(centre, 1.5_f32, visuals.weak_bg_fill);
                 }
+            }
+        }
+
+        // While the knob is being turned, put the value under the pointer —
+        // the hover text is not shown during a drag, and a knob with no
+        // readout is guesswork. Painted on the tooltip layer so the grid's
+        // clip rect does not cut it off.
+        if dragged {
+            if let Some(gain) = gain {
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                    egui::Order::Tooltip,
+                    egui::Id::new(("crosspoint_drag_readout", crosspoint)),
+                ));
+                let galley = painter.layout_no_wrap(
+                    format!("{:.1} dB", routing::gain_to_db(gain)),
+                    egui::FontId::monospace(12.0),
+                    Color32::WHITE,
+                );
+                let box_rect = egui::Rect::from_center_size(
+                    egui::pos2(rect.center().x, rect.top() - 12.0),
+                    galley.size() + egui::vec2(10.0, 6.0),
+                );
+                painter.rect_filled(box_rect, 3.0, Color32::from_black_alpha(230));
+                painter.galley(
+                    box_rect.center() - galley.size() * 0.5,
+                    galley,
+                    Color32::WHITE,
+                );
             }
         }
 
