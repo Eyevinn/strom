@@ -815,3 +815,98 @@ fn the_crossbar_costs_no_thread_per_crosspoint() {
 /// `GST_PARAM_CONTROLLABLE` — a GStreamer-specific `GParamFlags` bit, which
 /// glib's `ParamFlags` does not name.
 const CONTROLLABLE_FLAG: u32 = 1 << 9;
+
+// ============================================================================
+// The block this one sits beside must keep working
+// ============================================================================
+
+/// `builtin.audiorouter` shares the routing-matrix format, the editor and the
+/// `make_audiomixer` helper with the new block. It is the block people already
+/// have in saved flows, so it has to keep routing audio exactly as before.
+#[test]
+fn the_original_audiorouter_still_routes_audio() {
+    require_elements();
+    let properties = props(&[
+        ("num_inputs", PropertyValue::UInt(2)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("input_1_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+        (
+            "routing_matrix",
+            // The list form, which is all this block understands.
+            PropertyValue::String(r#"{"i0c0":["o0c0"],"i1c0":["o0c1"]}"#.to_string()),
+        ),
+    ]);
+
+    let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+    let result = audiorouter::AudioRouterBuilder
+        .build("old", &properties, &ctx)
+        .expect("audiorouter build");
+
+    let pipeline = gst::Pipeline::new();
+    let mut elements: HashMap<String, gst::Element> = HashMap::new();
+    for (id, element) in &result.elements {
+        pipeline.add(element).expect("add element");
+        elements.insert(id.clone(), element.clone());
+    }
+    for (from, to) in &result.internal_links {
+        let src = &elements[&from.element_id];
+        let dst = &elements[&to.element_id];
+        match (&from.pad_name, &to.pad_name) {
+            (Some(sp), Some(dp)) => {
+                resolve_pad(src, sp)
+                    .link(&resolve_pad(dst, dp))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "link {}:{sp} -> {}:{dp}: {e:?}",
+                            from.element_id, to.element_id
+                        )
+                    });
+            }
+            _ => src.link(dst).expect("element link"),
+        }
+    }
+    let h = Harness { pipeline, elements };
+
+    feed(&h, "old", 0, &[(440.0, 0.5)]);
+    feed(&h, "old", 1, &[(1300.0, 0.25)]);
+    tap(&h, "old", 0);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(3));
+    assert!(
+        (peaks[0] - amplitude_db(0.5)).abs() < 1.5,
+        "output channel 0 must carry input 0 ({} dB), got {peaks:?}",
+        amplitude_db(0.5)
+    );
+    assert!(
+        (peaks[1] - amplitude_db(0.25)).abs() < 1.5,
+        "output channel 1 must carry input 1 ({} dB), got {peaks:?}",
+        amplitude_db(0.25)
+    );
+}
+
+/// The editor is shared, so the old block must still be shown checkboxes and a
+/// Save button rather than live gain controls.
+#[test]
+fn the_original_audiorouter_is_not_offered_live_routing_or_gains() {
+    let old = definition(audiorouter::get_blocks(), "builtin.audiorouter");
+    assert!(
+        !old.exposed_properties
+            .iter()
+            .find(|p| p.name == "routing_matrix")
+            .expect("routing_matrix")
+            .live,
+        "builtin.audiorouter's routing is topology; declaring it live would make \
+         the editor send writes the backend rejects"
+    );
+    assert!(
+        !old.exposed_properties
+            .iter()
+            .any(|p| p.name == "crosspoint_fade_ms"),
+        "the gain control is gated on this property, which the old block must not have"
+    );
+}

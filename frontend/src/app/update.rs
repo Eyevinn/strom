@@ -1728,6 +1728,7 @@ impl eframe::App for StromApp {
             let crate::audiorouter::RoutingUpdate {
                 json: routing_json,
                 persist,
+                live,
             } = update;
             tracing::debug!(
                 "Processing routing save for block {} in flow {}",
@@ -1768,14 +1769,21 @@ impl eframe::App for StromApp {
             // controls use, so dragging a crosspoint gain does not put one
             // request per frame on the wire. The filter also flushes the final
             // value, so the gain you let go of is the gain that lands.
+            // Only for a block whose routing_matrix is declared live.
+            // `builtin.audiorouter`'s routing is topology, so the backend would
+            // reject the write and the round-trip would be wasted.
             let updates = crate::properties::drain_live_updates(
                 &mut self.live_property_debounce,
-                vec![crate::properties::LivePropertyUpdate {
-                    flow_id,
-                    block_id: block_id.clone(),
-                    property_name: "routing_matrix".to_string(),
-                    value: strom_types::PropertyValue::String(routing_json.clone()),
-                }],
+                if live {
+                    vec![crate::properties::LivePropertyUpdate {
+                        flow_id,
+                        block_id: block_id.clone(),
+                        property_name: "routing_matrix".to_string(),
+                        value: strom_types::PropertyValue::String(routing_json.clone()),
+                    }]
+                } else {
+                    Vec::new()
+                },
             );
             if self
                 .live_property_debounce

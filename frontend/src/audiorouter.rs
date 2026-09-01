@@ -1,7 +1,7 @@
 //! Audio Router routing matrix editor.
 
 use egui::{Color32, ScrollArea, Ui};
-use std::collections::HashMap;
+use strom_types::routing::{self, Crosspoint, RoutingGains};
 use strom_types::{BlockDefinition, BlockInstance, FlowId, PropertyValue};
 
 /// Whether a block should get the routing matrix editor.
@@ -15,57 +15,6 @@ pub fn has_routing_matrix(definition: &BlockDefinition) -> bool {
         .any(|p| p.name == "routing_matrix")
 }
 
-/// Parse a routing matrix in either form.
-///
-/// `{"i0c0": ["o0c0"]}` opens crosspoints at unity — the form
-/// `builtin.audiorouter` writes. `{"i0c0": {"o0c0": 0.35}}` carries a gain per
-/// crosspoint. Accepting both matters: parsing the gain form as the list form
-/// silently yields an empty matrix, and saving that would wipe the routing.
-fn parse_routing(json: &str) -> HashMap<String, HashMap<String, f64>> {
-    let Ok(entries) = serde_json::from_str::<HashMap<String, serde_json::Value>>(json) else {
-        return HashMap::new();
-    };
-    entries
-        .into_iter()
-        .map(|(src, dests)| {
-            let gains = match dests {
-                serde_json::Value::Array(list) => list
-                    .into_iter()
-                    .filter_map(|d| d.as_str().map(|s| (s.to_string(), 1.0)))
-                    .collect(),
-                serde_json::Value::Object(map) => map
-                    .into_iter()
-                    .filter_map(|(d, g)| g.as_f64().map(|g| (d, g.clamp(0.0, 1.0))))
-                    .collect(),
-                _ => HashMap::new(),
-            };
-            (src, gains)
-        })
-        .filter(|(_, gains): &(String, HashMap<String, f64>)| !gains.is_empty())
-        .collect()
-}
-
-/// Serialise the routing back out, staying on the list form while every gain
-/// is unity so a block that only understands on/off keeps working.
-fn serialize_routing(routing: &HashMap<String, HashMap<String, f64>>) -> String {
-    let all_unity = routing
-        .values()
-        .all(|dests| dests.values().all(|g| (*g - 1.0).abs() < f64::EPSILON));
-
-    let value = if all_unity {
-        let plain: HashMap<&String, Vec<&String>> = routing
-            .iter()
-            .map(|(src, dests)| (src, dests.keys().collect()))
-            .collect();
-        serde_json::to_value(plain)
-    } else {
-        serde_json::to_value(routing)
-    };
-    value
-        .and_then(|v| serde_json::to_string(&v))
-        .unwrap_or_else(|_| "{}".to_string())
-}
-
 /// One routing change leaving the editor.
 pub struct RoutingUpdate {
     /// The routing matrix as JSON.
@@ -74,25 +23,10 @@ pub struct RoutingUpdate {
     /// mode: the block-property endpoint persists the value itself, and saving
     /// the whole flow on every drag would be a lot of write traffic.
     pub persist: bool,
-}
-
-/// Anything at or below this reads as fully closed on the dB control.
-const GAIN_FLOOR_DB: f64 = -60.0;
-
-fn gain_to_db(gain: f64) -> f64 {
-    if gain <= 0.0 {
-        GAIN_FLOOR_DB
-    } else {
-        (20.0 * gain.log10()).max(GAIN_FLOOR_DB)
-    }
-}
-
-fn db_to_gain(db: f64) -> f64 {
-    if db <= GAIN_FLOOR_DB {
-        0.0
-    } else {
-        (10.0_f64.powf(db / 20.0)).clamp(0.0, 1.0)
-    }
+    /// Whether this block's routing can be written to a running pipeline.
+    /// False for `builtin.audiorouter`, whose routing is topology: sending it
+    /// would be a wasted round-trip that the backend rejects.
+    pub live: bool,
 }
 
 /// Whether this block's routing can be changed on a running flow.
@@ -129,11 +63,9 @@ pub struct RoutingMatrixEditor {
     /// Whether the editor window is open
     pub open: bool,
     /// Current routing matrix (source -> destinations)
-    /// Crosspoint gains: source key -> destination key -> gain (0.0..=1.0).
-    /// A crosspoint that is absent is closed. `builtin.audiorouter` only knows
-    /// on/off, so this is serialised back as a plain list whenever every gain
-    /// is unity — old flows keep the exact JSON they had.
-    pub routing: HashMap<String, HashMap<String, f64>>,
+    /// Crosspoint gains. The wire format lives in `strom_types::routing`,
+    /// shared with the backend blocks that read the same JSON.
+    pub routing: RoutingGains,
     /// Whether the block's crosspoints carry a gain rather than just on/off.
     supports_gain: bool,
     /// Whether this block's routing can be changed on a running flow.
@@ -162,7 +94,7 @@ impl RoutingMatrixEditor {
             flow_id,
             block_id,
             open: true,
-            routing: HashMap::new(),
+            routing: RoutingGains::new(),
             supports_gain: false,
             live_capable: false,
             live_apply: true,
@@ -239,7 +171,11 @@ impl RoutingMatrixEditor {
 
         self.supports_gain = has_crosspoint_gain(definition);
         self.live_capable = has_live_routing(definition);
-        self.routing = parse_routing(&routing_json);
+        let (gains, skipped) = routing::parse_routing_gains(&routing_json);
+        for key in &skipped {
+            tracing::warn!("Routing matrix: unusable entry {key}");
+        }
+        self.routing = gains;
         tracing::debug!(
             "load_from_block: parsed {} routing entries",
             self.routing.len()
@@ -251,46 +187,35 @@ impl RoutingMatrixEditor {
             "load_from_block: after cleanup {} routing entries",
             self.routing.len()
         );
-        for (src, dests) in &self.routing {
-            tracing::debug!("  {} -> {:?}", src, dests);
+        for (crosspoint, gain) in &self.routing {
+            tracing::debug!(
+                "  {} -> {} @ {gain}",
+                crosspoint.source_key(),
+                crosspoint.destination_key()
+            );
         }
 
         self.dirty = false;
         self.selected_output = 0;
     }
 
-    /// Remove routing entries that reference non-existent inputs/outputs.
+    /// Drop crosspoints that reference channels the block does not have.
+    /// Keyed by `Crosspoint`, this is one bounds check rather than two key sets.
     fn cleanup_routing(&mut self) {
-        // Build set of valid source keys
-        let valid_src_keys: std::collections::HashSet<String> = (0..self.num_inputs)
-            .flat_map(|in_idx| {
-                (0..self.input_channels[in_idx]).map(move |in_ch| format!("i{}c{}", in_idx, in_ch))
-            })
-            .collect();
-
-        // Build set of valid destination keys
-        let valid_dest_keys: std::collections::HashSet<String> = (0..self.num_outputs)
-            .flat_map(|out_idx| {
-                (0..self.output_channels[out_idx])
-                    .map(move |out_ch| format!("o{}c{}", out_idx, out_ch))
-            })
-            .collect();
-
-        tracing::debug!("cleanup_routing: valid_src_keys = {:?}", valid_src_keys);
-        tracing::debug!("cleanup_routing: valid_dest_keys = {:?}", valid_dest_keys);
-
-        // Remove invalid source keys
-        let src_keys: Vec<String> = self.routing.keys().cloned().collect();
-        for src_key in src_keys {
-            if !valid_src_keys.contains(&src_key) {
-                self.routing.remove(&src_key);
-            } else if let Some(dests) = self.routing.get_mut(&src_key) {
-                // Remove invalid destination keys
-                dests.retain(|d, _| valid_dest_keys.contains(d));
-                if dests.is_empty() {
-                    self.routing.remove(&src_key);
-                }
-            }
+        let inputs = self.input_channels.clone();
+        let outputs = self.output_channels.clone();
+        let before = self.routing.len();
+        self.routing.retain(|c, _| {
+            inputs.get(c.in_stream).is_some_and(|ch| c.in_channel < *ch)
+                && outputs
+                    .get(c.out_stream)
+                    .is_some_and(|ch| c.out_channel < *ch)
+        });
+        if self.routing.len() != before {
+            tracing::debug!(
+                "cleanup_routing: dropped {} crosspoint(s) outside the configured channels",
+                before - self.routing.len()
+            );
         }
     }
 
@@ -322,7 +247,7 @@ impl RoutingMatrixEditor {
         let input_channels = self.input_channels.clone();
         let output_channels = self.output_channels.clone();
         let dirty = self.dirty;
-        let routing_before = serialize_routing(&self.routing);
+        let routing_before = routing::serialize_routing_gains(&self.routing);
         let supports_gain = self.supports_gain;
         let live_capable = self.live_capable;
         let mut live_apply = self.live_apply;
@@ -443,11 +368,12 @@ impl RoutingMatrixEditor {
                         .button(format!("{} Save", egui_phosphor::regular::FLOPPY_DISK))
                         .clicked()
                     {
-                        let json = serialize_routing(&self.routing);
+                        let json = routing::serialize_routing_gains(&self.routing);
                         tracing::debug!("Saving routing matrix: {}", json);
                         result = Some(RoutingUpdate {
                             json,
                             persist: true,
+                            live: live_capable,
                         });
                         self.dirty = false;
                     }
@@ -486,7 +412,7 @@ impl RoutingMatrixEditor {
         // Change is detected by value: the grid, the bulk buttons and the gain
         // drags all mutate `self.routing` through different paths, and one
         // comparison covers every one of them.
-        let after = serialize_routing(&self.routing);
+        let after = routing::serialize_routing_gains(&self.routing);
         if after != routing_before {
             self.live_pending = true;
             self.dirty = true;
@@ -497,6 +423,7 @@ impl RoutingMatrixEditor {
             result = Some(RoutingUpdate {
                 json: after,
                 persist: false,
+                live: true,
             });
         }
 
@@ -509,7 +436,7 @@ impl RoutingMatrixEditor {
     #[allow(clippy::too_many_arguments)]
     fn show_output_matrix(
         ui: &mut Ui,
-        routing: &mut HashMap<String, HashMap<String, f64>>,
+        routing: &mut RoutingGains,
         dirty: &mut bool,
         supports_gain: bool,
         num_inputs: usize,
@@ -556,7 +483,7 @@ impl RoutingMatrixEditor {
     #[allow(clippy::too_many_arguments)]
     fn show_matrix_normal(
         ui: &mut Ui,
-        routing: &mut HashMap<String, HashMap<String, f64>>,
+        routing: &mut RoutingGains,
         dirty: &mut bool,
         supports_gain: bool,
         num_inputs: usize,
@@ -600,17 +527,13 @@ impl RoutingMatrixEditor {
                     for in_ch in 0..in_ch_count {
                         ui.label(egui::RichText::new(format!("  {}", in_ch)).small());
 
-                        let src_key = format!("i{}c{}", in_idx, in_ch);
-
                         for out_ch in 0..out_ch_count {
-                            let dest_key = format!("o{}c{}", out_idx, out_ch);
                             Self::show_crosspoint_grid(
                                 ui,
                                 routing,
                                 dirty,
                                 supports_gain,
-                                &src_key,
-                                &dest_key,
+                                Crosspoint::new(in_idx, in_ch, out_idx, out_ch),
                                 checkbox_size,
                             );
                         }
@@ -630,7 +553,7 @@ impl RoutingMatrixEditor {
     #[allow(clippy::too_many_arguments)]
     fn show_matrix_flipped(
         ui: &mut Ui,
-        routing: &mut HashMap<String, HashMap<String, f64>>,
+        routing: &mut RoutingGains,
         dirty: &mut bool,
         supports_gain: bool,
         num_inputs: usize,
@@ -686,20 +609,16 @@ impl RoutingMatrixEditor {
                     // Row label
                     ui.label(egui::RichText::new(format!("Out {}", out_ch)).small());
 
-                    let dest_key = format!("o{}c{}", out_idx, out_ch);
-
                     // Checkboxes for each input channel
                     for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs)
                     {
                         for in_ch in 0..in_ch_count {
-                            let src_key = format!("i{}c{}", in_idx, in_ch);
                             Self::show_crosspoint_grid(
                                 ui,
                                 routing,
                                 dirty,
                                 supports_gain,
-                                &src_key,
-                                &dest_key,
+                                Crosspoint::new(in_idx, in_ch, out_idx, out_ch),
                                 checkbox_size,
                             );
                         }
@@ -723,14 +642,13 @@ impl RoutingMatrixEditor {
     #[allow(clippy::too_many_arguments)]
     fn show_crosspoint_grid(
         ui: &mut Ui,
-        routing: &mut HashMap<String, HashMap<String, f64>>,
+        routing: &mut RoutingGains,
         dirty: &mut bool,
         supports_gain: bool,
-        src_key: &str,
-        dest_key: &str,
+        crosspoint: Crosspoint,
         checkbox_size: f32,
     ) {
-        let current = routing.get(src_key).and_then(|d| d.get(dest_key)).copied();
+        let current = routing.get(&crosspoint).copied();
         let mut checked = current.is_some();
 
         ui.horizontal(|ui| {
@@ -741,15 +659,9 @@ impl RoutingMatrixEditor {
                     if ui.checkbox(&mut checked, "").changed() {
                         *dirty = true;
                         if checked {
-                            routing
-                                .entry(src_key.to_string())
-                                .or_default()
-                                .insert(dest_key.to_string(), 1.0);
-                        } else if let Some(dests) = routing.get_mut(src_key) {
-                            dests.remove(dest_key);
-                            if dests.is_empty() {
-                                routing.remove(src_key);
-                            }
+                            routing.insert(crosspoint, 1.0);
+                        } else {
+                            routing.remove(&crosspoint);
                         }
                     }
                 },
@@ -761,19 +673,17 @@ impl RoutingMatrixEditor {
 
             match current {
                 Some(gain) => {
-                    let mut db = gain_to_db(gain);
+                    let mut db = routing::gain_to_db(gain);
                     let response = ui.add(
                         egui::DragValue::new(&mut db)
                             .speed(0.25)
-                            .range(GAIN_FLOOR_DB..=0.0)
+                            .range(routing::GAIN_FLOOR_DB..=0.0)
                             .fixed_decimals(1)
                             .suffix(" dB"),
                     );
                     if response.changed() {
                         *dirty = true;
-                        if let Some(dests) = routing.get_mut(src_key) {
-                            dests.insert(dest_key.to_string(), db_to_gain(db));
-                        }
+                        routing.insert(crosspoint, routing::db_to_gain(db));
                     }
                     response.on_hover_text("Crosspoint gain. Drag to trim this route.");
                 }
@@ -785,57 +695,29 @@ impl RoutingMatrixEditor {
         });
     }
 
-    /// Set 1:1 diagonal routing.
+    /// Route input channels 1:1 onto every output, by global channel index.
     fn set_diagonal_routing(&mut self) {
         self.routing.clear();
-        let mut in_ch_global = 0;
+        let mut in_global = 0;
         for in_idx in 0..self.num_inputs {
             for in_ch in 0..self.input_channels[in_idx] {
-                let mut out_ch_global = 0;
+                let mut out_global = 0;
                 for out_idx in 0..self.num_outputs {
                     for out_ch in 0..self.output_channels[out_idx] {
-                        if in_ch_global == out_ch_global {
-                            let src_key = format!("i{}c{}", in_idx, in_ch);
-                            let dest_key = format!("o{}c{}", out_idx, out_ch);
-                            tracing::debug!("Diagonal routing: {} -> {}", src_key, dest_key);
+                        if in_global == out_global {
                             self.routing
-                                .entry(src_key)
-                                .or_default()
-                                .insert(dest_key, 1.0);
+                                .insert(Crosspoint::new(in_idx, in_ch, out_idx, out_ch), 1.0);
                         }
-                        out_ch_global += 1;
+                        out_global += 1;
                     }
                 }
-                in_ch_global += 1;
+                in_global += 1;
             }
-        }
-        tracing::debug!(
-            "Diagonal routing complete. Total entries: {}",
-            self.routing.len()
-        );
-        for (src, dests) in &self.routing {
-            tracing::debug!("  {} -> {:?}", src, dests);
         }
     }
 
-    /// Clear routing for a specific output only.
+    /// Close every crosspoint feeding one output stream.
     fn clear_output_routing(&mut self, out_idx: usize) {
-        let out_ch_count = self.output_channels[out_idx];
-
-        // Build list of dest_keys to remove
-        let dest_keys_to_remove: Vec<String> = (0..out_ch_count)
-            .map(|out_ch| format!("o{}c{}", out_idx, out_ch))
-            .collect();
-
-        // Remove these destinations from all source entries
-        let src_keys: Vec<String> = self.routing.keys().cloned().collect();
-        for src_key in src_keys {
-            if let Some(dests) = self.routing.get_mut(&src_key) {
-                dests.retain(|d, _| !dest_keys_to_remove.contains(d));
-                if dests.is_empty() {
-                    self.routing.remove(&src_key);
-                }
-            }
-        }
+        self.routing.retain(|c, _| c.out_stream != out_idx);
     }
 }

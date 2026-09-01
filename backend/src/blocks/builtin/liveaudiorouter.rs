@@ -39,6 +39,7 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockB
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
+use strom_types::routing::{self, Crosspoint, RoutingGains};
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, info, warn};
 
@@ -102,16 +103,13 @@ const CROSSPOINT_PREFIX: &str = ":xp_";
 /// the mixer's output channels.
 const MIX_MATRIX_KEY: &str = "GstAudioConverter.mix-matrix";
 
-/// One crosspoint of the crossbar: an input channel feeding an output channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Crosspoint {
-    pub in_stream: usize,
-    pub in_channel: usize,
-    pub out_stream: usize,
-    pub out_channel: usize,
+/// Element naming for a crosspoint. The wire format itself lives in
+/// `strom_types::routing`, shared with the graph editor.
+trait CrosspointElement {
+    fn volume_id(&self, instance_id: &str) -> String;
 }
 
-impl Crosspoint {
+impl CrosspointElement for Crosspoint {
     /// Element id of the `volume` element carrying this crosspoint's gain.
     fn volume_id(&self, instance_id: &str) -> String {
         format!(
@@ -130,82 +128,17 @@ impl Crosspoint {
 // Routing model
 // ============================================================================
 
-/// Gain per crosspoint. Absent means the crosspoint is closed (0.0).
-pub type RoutingGains = HashMap<Crosspoint, f64>;
-
-/// Parse the `routing_matrix` JSON into a gain per crosspoint.
+/// Parse a routing matrix, warning about anything unusable.
 ///
-/// Two forms are accepted, so routing written for `builtin.audiorouter` keeps
-/// working:
-///
-/// * `{"i0c0": ["o0c0", "o1c0"]}` — listed crosspoints open at unity.
-/// * `{"i0c0": {"o0c0": 1.0, "o1c0": 0.35}}` — explicit gain per crosspoint.
-///
-/// Unparsable keys are skipped with a warning rather than failing the whole
-/// update: a single bad key should not silently mute a live router.
-pub fn parse_routing_gains(json_str: &str) -> RoutingGains {
-    let mut gains = RoutingGains::new();
-    let trimmed = json_str.trim();
-    if trimmed.is_empty() || trimmed == "{}" {
-        return gains;
+/// The format lives in `strom_types::routing` because the graph editor reads
+/// and writes the same JSON; this wrapper only adds the logging.
+fn parse_routing_gains(json: &str) -> RoutingGains {
+    let (gains, skipped) = routing::parse_routing_gains(json);
+    for key in skipped {
+        warn!("Live Audio Router: unusable routing entry: {key}");
     }
-
-    let parsed: Result<HashMap<String, serde_json::Value>, _> = serde_json::from_str(trimmed);
-    let Ok(entries) = parsed else {
-        warn!("Live Audio Router: failed to parse routing matrix JSON: {json_str}");
-        return gains;
-    };
-
-    for (src_key, destinations) in entries {
-        let Some((in_stream, in_channel)) = parse_routing_key(&src_key, 'i') else {
-            warn!("Live Audio Router: invalid routing source key: {src_key}");
-            continue;
-        };
-
-        let mut insert = |dest_key: &str, gain: f64| {
-            let Some((out_stream, out_channel)) = parse_routing_key(dest_key, 'o') else {
-                warn!("Live Audio Router: invalid routing destination key: {dest_key}");
-                return;
-            };
-            gains.insert(
-                Crosspoint {
-                    in_stream,
-                    in_channel,
-                    out_stream,
-                    out_channel,
-                },
-                gain.clamp(0.0, MAX_CROSSPOINT_GAIN),
-            );
-        };
-
-        match destinations {
-            serde_json::Value::Array(list) => {
-                for dest in list {
-                    match dest.as_str() {
-                        Some(key) => insert(key, 1.0),
-                        None => warn!("Live Audio Router: non-string routing destination: {dest}"),
-                    }
-                }
-            }
-            serde_json::Value::Object(map) => {
-                for (dest_key, gain) in map {
-                    match gain.as_f64() {
-                        Some(g) => insert(&dest_key, g),
-                        None => warn!("Live Audio Router: non-numeric gain for {dest_key}: {gain}"),
-                    }
-                }
-            }
-            other => warn!("Live Audio Router: unusable routing entry for {src_key}: {other}"),
-        }
-    }
-
     gains
 }
-
-/// Ceiling on a crosspoint gain. The `volume` element accepts up to 10.0
-/// (+20 dB); a router has no business amplifying that hard, and summing
-/// several crosspoints already risks clipping, so cap at unity gain.
-const MAX_CROSSPOINT_GAIN: f64 = 1.0;
 
 /// The crosspoint an element id names, if it is a crosspoint of `instance_id`.
 ///
@@ -217,14 +150,14 @@ pub fn crosspoint_of(instance_id: &str, element_id: &str) -> Option<Crosspoint> 
         .strip_prefix(instance_id)?
         .strip_prefix(CROSSPOINT_PREFIX)?;
     let (input, output) = rest.split_once("_o")?;
-    let (in_stream, in_channel) = parse_routing_key(input, 'i')?;
-    let (out_stream, out_channel) = parse_routing_key(&format!("o{output}"), 'o')?;
-    Some(Crosspoint {
+    let (in_stream, in_channel) = routing::parse_routing_key(input, 'i')?;
+    let (out_stream, out_channel) = routing::parse_routing_key(&format!("o{output}"), 'o')?;
+    Some(Crosspoint::new(
         in_stream,
         in_channel,
         out_stream,
         out_channel,
-    })
+    ))
 }
 
 /// The gain to write to each crosspoint element of `instance_id`.
@@ -255,13 +188,6 @@ where
 /// The block instance a routing anchor element id belongs to.
 pub fn instance_from_anchor(element_id: &str) -> Option<&str> {
     element_id.strip_suffix(ROUTING_ANCHOR_SUFFIX)
-}
-
-/// Parse a routing key like `i0c1` or `o2c3` into (stream, channel).
-fn parse_routing_key(key: &str, prefix: char) -> Option<(usize, usize)> {
-    let rest = key.strip_prefix(prefix)?;
-    let (stream, channel) = rest.split_once('c')?;
-    Some((stream.parse().ok()?, channel.parse().ok()?))
 }
 
 // ============================================================================
@@ -911,48 +837,7 @@ mod tests {
     use super::*;
 
     fn xp(i: usize, c: usize, o: usize, d: usize) -> Crosspoint {
-        Crosspoint {
-            in_stream: i,
-            in_channel: c,
-            out_stream: o,
-            out_channel: d,
-        }
-    }
-
-    #[test]
-    fn the_array_form_opens_crosspoints_at_unity() {
-        let g = parse_routing_gains(r#"{"i0c0": ["o0c0", "o1c2"]}"#);
-        assert_eq!(g.get(&xp(0, 0, 0, 0)), Some(&1.0));
-        assert_eq!(g.get(&xp(0, 0, 1, 2)), Some(&1.0));
-        assert_eq!(g.len(), 2);
-    }
-
-    #[test]
-    fn the_object_form_carries_a_gain_per_crosspoint() {
-        let g = parse_routing_gains(r#"{"i1c1": {"o0c0": 0.35, "o0c1": 1.0}}"#);
-        assert_eq!(g.get(&xp(1, 1, 0, 0)), Some(&0.35));
-        assert_eq!(g.get(&xp(1, 1, 0, 1)), Some(&1.0));
-    }
-
-    #[test]
-    fn gains_are_capped_at_unity_so_a_router_never_amplifies() {
-        let g = parse_routing_gains(r#"{"i0c0": {"o0c0": 4.0, "o0c1": -1.0}}"#);
-        assert_eq!(g.get(&xp(0, 0, 0, 0)), Some(&1.0));
-        assert_eq!(g.get(&xp(0, 0, 0, 1)), Some(&0.0));
-    }
-
-    #[test]
-    fn an_unparsable_key_does_not_discard_the_rest_of_the_routing() {
-        let g = parse_routing_gains(r#"{"i0c0": ["o0c0"], "nonsense": ["o0c1"], "i0c1": ["zz"]}"#);
-        assert_eq!(g.get(&xp(0, 0, 0, 0)), Some(&1.0));
-        assert_eq!(g.len(), 1, "only the valid crosspoint survives: {g:?}");
-    }
-
-    #[test]
-    fn empty_routing_closes_everything() {
-        assert!(parse_routing_gains("{}").is_empty());
-        assert!(parse_routing_gains("").is_empty());
-        assert!(parse_routing_gains("not json").is_empty());
+        Crosspoint::new(i, c, o, d)
     }
 
     #[test]
@@ -966,7 +851,6 @@ mod tests {
     #[test]
     fn crosspoint_of_ignores_other_elements_and_other_instances() {
         assert_eq!(crosspoint_of("router", "router:mixer_0"), None);
-        assert_eq!(crosspoint_of("router", "router:xpq_i0c0_o0c0"), None);
         assert_eq!(crosspoint_of("router", "other:xp_i0c0_o0c0"), None);
     }
 
@@ -975,5 +859,33 @@ mod tests {
         assert_eq!(instance_from_anchor("router:mixer_0"), Some("router"));
         assert_eq!(instance_from_anchor("router:mixer_1"), None);
         assert_eq!(instance_from_anchor("router:xp_i0c0_o0c0"), None);
+    }
+
+    #[test]
+    fn an_unlisted_crosspoint_resolves_to_closed() {
+        let ids = [
+            "router:xp_i0c0_o0c0",
+            "router:xp_i0c0_o0c1",
+            "router:mixer_0",
+        ];
+        let targets = crosspoint_targets("router", r#"{"i0c0":["o0c0"]}"#, ids);
+        assert_eq!(targets.len(), 2, "only the crosspoints: {targets:?}");
+        assert_eq!(
+            targets
+                .iter()
+                .find(|(id, _)| id.ends_with("o0c0"))
+                .unwrap()
+                .1,
+            1.0
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .find(|(id, _)| id.ends_with("o0c1"))
+                .unwrap()
+                .1,
+            0.0,
+            "a crosspoint the routing does not mention must be closed"
+        );
     }
 }
