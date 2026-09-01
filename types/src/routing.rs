@@ -161,6 +161,37 @@ pub fn serialize_routing_gains(gains: &RoutingGains) -> String {
         .unwrap_or_else(|_| "{}".to_string())
 }
 
+/// The routing a block gets when its matrix has never been configured: input
+/// channels straight through to output channels, matched by their position in
+/// the concatenated channel space. This is the 1:1 diagonal the editor's
+/// button draws, so a router that has just been dropped in passes audio
+/// instead of sitting silent until someone configures it.
+///
+/// Only for a matrix that is *absent*. An empty matrix is a decision — an
+/// operator who closed every crosspoint must not have them reopened on the
+/// next restart.
+pub fn default_routing(input_channels: &[usize], output_channels: &[usize]) -> RoutingGains {
+    let inputs = input_channels
+        .iter()
+        .enumerate()
+        .flat_map(|(stream, count)| (0..*count).map(move |channel| (stream, channel)));
+    let outputs: Vec<(usize, usize)> = output_channels
+        .iter()
+        .enumerate()
+        .flat_map(|(stream, count)| (0..*count).map(move |channel| (stream, channel)))
+        .collect();
+
+    inputs
+        .zip(outputs)
+        .map(|((in_stream, in_channel), (out_stream, out_channel))| {
+            (
+                Crosspoint::new(in_stream, in_channel, out_stream, out_channel),
+                1.0,
+            )
+        })
+        .collect()
+}
+
 /// Parse a routing key like `i0c1` or `o2c3` into (stream, channel).
 pub fn parse_routing_key(key: &str, prefix: char) -> Option<(usize, usize)> {
     let rest = key.strip_prefix(prefix)?;
@@ -278,6 +309,30 @@ mod tests {
         let once = serialize_routing_gains(&gains);
         assert_eq!(once, serialize_routing_gains(&gains));
         assert_eq!(once, serialize_routing_gains(&parse_routing_gains(&once).0));
+    }
+
+    #[test]
+    fn the_default_routing_is_the_diagonal_across_the_channel_space() {
+        // Two stereo inputs into one 4-channel output: straight through.
+        let routing = default_routing(&[2, 2], &[4]);
+        assert_eq!(routing.len(), 4);
+        for (i, (stream, channel)) in [(0, 0), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
+            assert_eq!(
+                routing.get(&Crosspoint::new(stream, channel, 0, i)),
+                Some(&1.0),
+                "input {stream}c{channel} should feed output channel {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_routing_stops_at_the_shorter_side() {
+        // Four input channels, two output channels: the extra inputs are not
+        // routed anywhere rather than being folded onto an occupied output.
+        assert_eq!(default_routing(&[4], &[2]).len(), 2);
+        // And the other way round, the spare outputs stay silent.
+        assert_eq!(default_routing(&[2], &[4]).len(), 2);
+        assert!(default_routing(&[], &[2]).is_empty());
     }
 
     #[test]

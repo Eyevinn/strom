@@ -66,6 +66,11 @@ pub struct RoutingMatrixEditor {
     /// Crosspoint gains. The wire format lives in `strom_types::routing`,
     /// shared with the backend blocks that read the same JSON.
     pub routing: RoutingGains,
+    /// Input streams the operator has folded away, by index. A large router is
+    /// mostly rows you are not looking at; folding a stream hides its channel
+    /// rows and leaves the group header, so the view can be shrunk to the
+    /// streams in play without changing any routing.
+    folded_inputs: std::collections::HashSet<usize>,
     /// Whether the block's crosspoints carry a gain rather than just on/off.
     supports_gain: bool,
     /// Whether this block's routing can be changed on a running flow.
@@ -95,6 +100,7 @@ impl RoutingMatrixEditor {
             block_id,
             open: true,
             routing: RoutingGains::new(),
+            folded_inputs: std::collections::HashSet::new(),
             supports_gain: false,
             live_capable: false,
             live_apply: true,
@@ -171,11 +177,22 @@ impl RoutingMatrixEditor {
 
         self.supports_gain = has_crosspoint_gain(definition);
         self.live_capable = has_live_routing(definition);
-        let (gains, skipped) = routing::parse_routing_gains(&routing_json);
-        for key in &skipped {
-            tracing::warn!("Routing matrix: unusable entry {key}");
-        }
-        self.routing = gains;
+        // The same rule the builder uses: a matrix that was never configured
+        // gets the straight-through default, so the grid shows what the flow
+        // will actually run. Gated on live routing, so `builtin.audiorouter` —
+        // whose builder has no such default — keeps showing an empty grid.
+        self.routing = match block.properties.get("routing_matrix") {
+            None if self.live_capable => {
+                routing::default_routing(&self.input_channels, &self.output_channels)
+            }
+            _ => {
+                let (gains, skipped) = routing::parse_routing_gains(&routing_json);
+                for key in &skipped {
+                    tracing::warn!("Routing matrix: unusable entry {key}");
+                }
+                gains
+            }
+        };
         tracing::debug!(
             "load_from_block: parsed {} routing entries",
             self.routing.len()
@@ -249,6 +266,7 @@ impl RoutingMatrixEditor {
         let dirty = self.dirty;
         let routing_before = routing::serialize_routing_gains(&self.routing);
         let supports_gain = self.supports_gain;
+        let mut folded_inputs = self.folded_inputs.clone();
         let live_capable = self.live_capable;
         let mut live_apply = self.live_apply;
         let selected_output = self.selected_output;
@@ -328,6 +346,21 @@ impl RoutingMatrixEditor {
                             .on_hover_text(
                                 "Swap rows and columns: inputs become columns, outputs become rows",
                             );
+                        ui.add_space(8.0);
+                        if ui
+                            .small_button("Maximize")
+                            .on_hover_text("Show every input's channels")
+                            .clicked()
+                        {
+                            folded_inputs.clear();
+                        }
+                        if ui
+                            .small_button("Minimize")
+                            .on_hover_text("Fold every input down to its group header")
+                            .clicked()
+                        {
+                            folded_inputs.extend(0..num_inputs);
+                        }
                     });
                 });
 
@@ -345,6 +378,7 @@ impl RoutingMatrixEditor {
                             &mut self.routing,
                             &mut self.dirty,
                             supports_gain,
+                            &mut folded_inputs,
                             num_inputs,
                             selected_output,
                             &input_channels,
@@ -385,6 +419,7 @@ impl RoutingMatrixEditor {
 
         self.open = open;
         self.selected_output = new_selected_output;
+        self.folded_inputs = folded_inputs;
 
         self.live_apply = live_apply;
 
@@ -439,6 +474,7 @@ impl RoutingMatrixEditor {
         routing: &mut RoutingGains,
         dirty: &mut bool,
         supports_gain: bool,
+        folded_inputs: &mut std::collections::HashSet<usize>,
         num_inputs: usize,
         out_idx: usize,
         input_channels: &[usize],
@@ -455,6 +491,7 @@ impl RoutingMatrixEditor {
                 routing,
                 dirty,
                 supports_gain,
+                folded_inputs,
                 num_inputs,
                 out_idx,
                 input_channels,
@@ -469,6 +506,7 @@ impl RoutingMatrixEditor {
                 routing,
                 dirty,
                 supports_gain,
+                folded_inputs,
                 num_inputs,
                 out_idx,
                 input_channels,
@@ -486,22 +524,23 @@ impl RoutingMatrixEditor {
         routing: &mut RoutingGains,
         dirty: &mut bool,
         supports_gain: bool,
+        folded_inputs: &mut std::collections::HashSet<usize>,
         num_inputs: usize,
         out_idx: usize,
         input_channels: &[usize],
         out_ch_count: usize,
-        checkbox_size: f32,
+        cell_size: f32,
         _row_label_width: f32,
     ) {
         egui::Grid::new(format!("routing_matrix_normal_{}", out_idx))
-            .min_col_width(checkbox_size)
+            .min_col_width(cell_size)
             .spacing([2.0, 4.0])
             .show(ui, |ui| {
                 // Header row: empty corner + output channel numbers
                 ui.label(""); // Empty corner cell
                 for out_ch in 0..out_ch_count {
                     ui.allocate_ui_with_layout(
-                        egui::vec2(checkbox_size, 14.0),
+                        egui::vec2(cell_size, 14.0),
                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                         |ui| {
                             ui.label(egui::RichText::new(format!("{}", out_ch)).small().strong());
@@ -512,19 +551,41 @@ impl RoutingMatrixEditor {
 
                 // Data rows - grouped by input
                 for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
-                    // Input group header row
-                    ui.label(
-                        egui::RichText::new(format!("In {}", in_idx))
+                    // Input group header, which folds the stream away
+                    let folded = folded_inputs.contains(&in_idx);
+                    if ui
+                        .selectable_label(
+                            false,
+                            egui::RichText::new(format!(
+                                "{} In {}",
+                                if folded { "\u{25B8}" } else { "\u{25BE}" },
+                                in_idx
+                            ))
                             .small()
                             .strong(),
-                    );
+                        )
+                        .on_hover_text(if folded {
+                            "Show this input's channels"
+                        } else {
+                            "Hide this input's channels"
+                        })
+                        .clicked()
+                    {
+                        if folded {
+                            folded_inputs.remove(&in_idx);
+                        } else {
+                            folded_inputs.insert(in_idx);
+                        }
+                    }
                     for _ in 0..out_ch_count {
+                        // A folded stream still shows whether it is routed at
+                        // all, so nothing is hidden without a trace.
                         ui.label("");
                     }
                     ui.end_row();
 
                     // Channel rows
-                    for in_ch in 0..in_ch_count {
+                    for in_ch in 0..(if folded { 0 } else { in_ch_count }) {
                         ui.label(egui::RichText::new(format!("  {}", in_ch)).small());
 
                         for out_ch in 0..out_ch_count {
@@ -534,7 +595,7 @@ impl RoutingMatrixEditor {
                                 dirty,
                                 supports_gain,
                                 Crosspoint::new(in_idx, in_ch, out_idx, out_ch),
-                                checkbox_size,
+                                cell_size,
                             );
                         }
                         ui.end_row();
@@ -556,26 +617,47 @@ impl RoutingMatrixEditor {
         routing: &mut RoutingGains,
         dirty: &mut bool,
         supports_gain: bool,
+        folded_inputs: &mut std::collections::HashSet<usize>,
         num_inputs: usize,
         out_idx: usize,
         input_channels: &[usize],
         out_ch_count: usize,
-        checkbox_size: f32,
+        cell_size: f32,
         _row_label_width: f32,
     ) {
         egui::Grid::new(format!("routing_matrix_flipped_{}", out_idx))
-            .min_col_width(checkbox_size)
+            .min_col_width(cell_size)
             .spacing([2.0, 4.0])
             .show(ui, |ui| {
                 // Header row 1: Input group labels at start of each group
                 ui.label(""); // Empty corner cell
                 for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
-                    ui.label(
-                        egui::RichText::new(format!("In {}", in_idx))
+                    let folded = folded_inputs.contains(&in_idx);
+                    if ui
+                        .selectable_label(
+                            false,
+                            egui::RichText::new(format!(
+                                "{} In {}",
+                                if folded { "\u{25B8}" } else { "\u{25BE}" },
+                                in_idx
+                            ))
                             .small()
                             .strong(),
-                    );
-                    for _ in 1..in_ch_count {
+                        )
+                        .on_hover_text(if folded {
+                            "Show this input's channels"
+                        } else {
+                            "Hide this input's channels"
+                        })
+                        .clicked()
+                    {
+                        if folded {
+                            folded_inputs.remove(&in_idx);
+                        } else {
+                            folded_inputs.insert(in_idx);
+                        }
+                    }
+                    for _ in 1..(if folded { 1 } else { in_ch_count }) {
                         ui.label("");
                     }
                     // Separator column between input groups
@@ -585,12 +667,17 @@ impl RoutingMatrixEditor {
                 }
                 ui.end_row();
 
-                // Header row 2: Channel numbers
+                // Header row 2: Channel numbers, minus the folded streams
                 ui.label(""); // Empty corner cell
                 for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
-                    for in_ch in 0..in_ch_count {
+                    let visible = if folded_inputs.contains(&in_idx) {
+                        0
+                    } else {
+                        in_ch_count
+                    };
+                    for in_ch in 0..visible {
                         ui.allocate_ui_with_layout(
-                            egui::vec2(checkbox_size, 14.0),
+                            egui::vec2(cell_size, 14.0),
                             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                             |ui| {
                                 ui.label(egui::RichText::new(format!("{}", in_ch)).small());
@@ -609,17 +696,22 @@ impl RoutingMatrixEditor {
                     // Row label
                     ui.label(egui::RichText::new(format!("Out {}", out_ch)).small());
 
-                    // Checkboxes for each input channel
+                    // A dot for each input channel, minus the folded streams
                     for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs)
                     {
-                        for in_ch in 0..in_ch_count {
+                        let visible = if folded_inputs.contains(&in_idx) {
+                            0
+                        } else {
+                            in_ch_count
+                        };
+                        for in_ch in 0..visible {
                             Self::show_crosspoint_grid(
                                 ui,
                                 routing,
                                 dirty,
                                 supports_gain,
                                 Crosspoint::new(in_idx, in_ch, out_idx, out_ch),
-                                checkbox_size,
+                                cell_size,
                             );
                         }
                         // Separator column between input groups
@@ -632,65 +724,92 @@ impl RoutingMatrixEditor {
             });
     }
 
-    /// One crosspoint cell.
+    /// One crosspoint cell: a dot, not a checkbox.
     ///
-    /// The checkbox opens and closes the crosspoint. Where the block supports a
-    /// gain, an open crosspoint also gets a compact dB control — dB rather than
-    /// a raw coefficient because that is what the level meters next to it read
-    /// in. Toggling a crosspoint off and on again returns it to unity; the gain
-    /// is only remembered while it stays open.
-    #[allow(clippy::too_many_arguments)]
+    /// A dot grid is what a router looks like — a straight-through routing
+    /// reads as a line of dots on the diagonal, which a column of checkboxes
+    /// does not. Where the block supports a gain the dot shrinks as the
+    /// crosspoint is trimmed, and the exact value is set from its context
+    /// menu, so the grid stays square either way.
     fn show_crosspoint_grid(
         ui: &mut Ui,
         routing: &mut RoutingGains,
         dirty: &mut bool,
         supports_gain: bool,
         crosspoint: Crosspoint,
-        checkbox_size: f32,
+        cell_size: f32,
     ) {
-        let current = routing.get(&crosspoint).copied();
-        let mut checked = current.is_some();
+        let gain = routing.get(&crosspoint).copied();
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(cell_size, cell_size), egui::Sense::click());
 
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(checkbox_size, checkbox_size),
-                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                |ui| {
-                    if ui.checkbox(&mut checked, "").changed() {
-                        *dirty = true;
-                        if checked {
-                            routing.insert(crosspoint, 1.0);
-                        } else {
-                            routing.remove(&crosspoint);
-                        }
-                    }
-                },
-            );
-
-            if !supports_gain {
-                return;
+        if response.clicked() {
+            *dirty = true;
+            if gain.is_some() {
+                routing.remove(&crosspoint);
+            } else {
+                routing.insert(crosspoint, 1.0);
             }
+        }
 
-            match current {
+        if ui.is_rect_visible(rect) {
+            let visuals = ui.style().interact(&response);
+            let painter = ui.painter();
+            let full = (cell_size * 0.34).max(2.0);
+            match gain {
                 Some(gain) => {
-                    let mut db = routing::gain_to_db(gain);
-                    let response = ui.add(
-                        egui::DragValue::new(&mut db)
-                            .speed(0.25)
-                            .range(routing::GAIN_FLOOR_DB..=0.0)
-                            .fixed_decimals(1)
-                            .suffix(" dB"),
-                    );
-                    if response.changed() {
-                        *dirty = true;
-                        routing.insert(crosspoint, routing::db_to_gain(db));
-                    }
-                    response.on_hover_text("Crosspoint gain. Drag to trim this route.");
+                    // Radius follows the gain, so a trimmed crosspoint reads as
+                    // a smaller dot without a number in every cell.
+                    let radius = full * (0.45 + 0.55 * gain.clamp(0.0, 1.0)) as f32;
+                    painter.circle_filled(rect.center(), radius, visuals.fg_stroke.color);
                 }
                 None => {
-                    // Keep the columns aligned with the open crosspoints.
-                    ui.add_enabled(false, egui::Label::new(egui::RichText::new("  –  ").weak()));
+                    painter.circle_stroke(
+                        rect.center(),
+                        full * 0.55,
+                        egui::Stroke::new(1.0_f32, visuals.bg_stroke.color),
+                    );
                 }
+            }
+        }
+
+        let label = format!(
+            "{} -> {}",
+            crosspoint.source_key(),
+            crosspoint.destination_key()
+        );
+        let response = match gain {
+            Some(g) if supports_gain => response.on_hover_text(format!(
+                "{label}: {:.1} dB\nClick to disconnect, right-click to set the gain",
+                routing::gain_to_db(g)
+            )),
+            Some(_) => response.on_hover_text(format!("{label}\nClick to disconnect")),
+            None => response.on_hover_text(format!("{label}\nClick to connect")),
+        };
+
+        if !supports_gain || gain.is_none() {
+            return;
+        }
+        response.context_menu(|ui| {
+            ui.label(&label);
+            let mut db = routing::gain_to_db(routing[&crosspoint]);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut db)
+                        .speed(0.25)
+                        .range(routing::GAIN_FLOOR_DB..=0.0)
+                        .fixed_decimals(1)
+                        .suffix(" dB"),
+                )
+                .changed()
+            {
+                *dirty = true;
+                routing.insert(crosspoint, routing::db_to_gain(db));
+            }
+            if ui.button("Unity (0.0 dB)").clicked() {
+                *dirty = true;
+                routing.insert(crosspoint, 1.0);
+                ui.close();
             }
         });
     }

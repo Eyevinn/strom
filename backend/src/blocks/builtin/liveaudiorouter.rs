@@ -283,9 +283,25 @@ impl BlockBuilder for LiveAudioRouterBuilder {
         )
         .max(1);
 
+        // A matrix that has never been set gets the straight-through default,
+        // so a router that has just been dropped in passes audio. An empty
+        // matrix is a decision and is honoured as written — closing every
+        // crosspoint must survive a restart.
         let gains = match properties.get(ROUTING_MATRIX_PROPERTY) {
-            Some(PropertyValue::String(s)) => parse_routing_gains(s),
-            _ => RoutingGains::new(),
+            Some(PropertyValue::String(json)) => parse_routing_gains(json),
+            Some(other) => {
+                warn!("Live Audio Router: routing_matrix is not a string: {other:?}");
+                RoutingGains::new()
+            }
+            None => {
+                let default = routing::default_routing(&input_channels, &output_channels);
+                info!(
+                    "LiveAudioRouter '{}': no routing configured, defaulting to {} straight-through crosspoints",
+                    instance_id,
+                    default.len()
+                );
+                default
+            }
         };
 
         let mut elements: Vec<(String, gst::Element)> = Vec::new();

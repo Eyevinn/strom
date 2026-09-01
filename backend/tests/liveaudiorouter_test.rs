@@ -910,3 +910,86 @@ fn the_original_audiorouter_is_not_offered_live_routing_or_gains() {
         "the gain control is gated on this property, which the old block must not have"
     );
 }
+
+// ============================================================================
+// A router that has just been dropped in should pass audio
+// ============================================================================
+
+/// Which crosspoints a build opens, by (input stream, channel, output stream,
+/// channel), read back from the elements the builder produced.
+fn open_crosspoints(instance: &str, properties: &HashMap<String, PropertyValue>) -> Vec<String> {
+    require_elements();
+    let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+    let result = liveaudiorouter::LiveAudioRouterBuilder
+        .build(instance, properties, &ctx)
+        .expect("build");
+    let mut open: Vec<String> = result
+        .elements
+        .iter()
+        .filter(|(id, _)| id.contains(":xp_"))
+        .filter(|(_, e)| e.property::<f64>("volume") > 0.0)
+        .map(|(id, _)| id.clone())
+        .collect();
+    open.sort();
+    open
+}
+
+#[test]
+fn a_router_with_no_routing_configured_passes_audio_straight_through() {
+    // No routing_matrix property at all — a block that has just been added.
+    let fresh = props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(2)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+    ]);
+    assert_eq!(
+        open_crosspoints("live", &fresh),
+        vec![
+            "live:xp_i0c0_o0c0".to_string(),
+            "live:xp_i0c1_o0c1".to_string()
+        ],
+        "an unconfigured router should route straight through, not sit silent"
+    );
+}
+
+#[test]
+fn an_explicitly_empty_routing_is_honoured_rather_than_defaulted() {
+    // Closing every crosspoint is a decision, and it has to survive a restart.
+    let mut cleared = props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(2)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+    ]);
+    cleared.insert(
+        "routing_matrix".to_string(),
+        PropertyValue::String("{}".to_string()),
+    );
+    assert!(
+        open_crosspoints("live", &cleared).is_empty(),
+        "an empty routing must stay empty"
+    );
+}
+
+#[test]
+fn the_original_audiorouter_keeps_its_silent_default() {
+    // The default is deliberately not applied to `builtin.audiorouter`: an
+    // existing flow whose router was never configured must not start passing
+    // audio because of an upgrade.
+    require_elements();
+    let fresh = props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(2)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+    ]);
+    let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+    let result = audiorouter::AudioRouterBuilder
+        .build("old", &fresh, &ctx)
+        .expect("audiorouter build");
+    assert!(
+        !result.elements.iter().any(|(id, _)| id.contains(":xp_")),
+        "the old block has no crosspoint elements at all"
+    );
+}
