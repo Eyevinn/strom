@@ -481,7 +481,7 @@ impl RoutingMatrixEditor {
         out_ch_count: usize,
         flip: bool,
     ) {
-        const CHECKBOX_SIZE: f32 = 16.0;
+        const CELL_SIZE: f32 = 20.0;
         const ROW_LABEL_WIDTH: f32 = 50.0;
 
         if flip {
@@ -496,7 +496,7 @@ impl RoutingMatrixEditor {
                 out_idx,
                 input_channels,
                 out_ch_count,
-                CHECKBOX_SIZE,
+                CELL_SIZE,
                 ROW_LABEL_WIDTH,
             );
         } else {
@@ -511,7 +511,7 @@ impl RoutingMatrixEditor {
                 out_idx,
                 input_channels,
                 out_ch_count,
-                CHECKBOX_SIZE,
+                CELL_SIZE,
                 ROW_LABEL_WIDTH,
             );
         }
@@ -724,13 +724,16 @@ impl RoutingMatrixEditor {
             });
     }
 
-    /// One crosspoint cell: a dot, not a checkbox.
+    /// One crosspoint cell.
     ///
-    /// A dot grid is what a router looks like — a straight-through routing
-    /// reads as a line of dots on the diagonal, which a column of checkboxes
-    /// does not. Where the block supports a gain the dot shrinks as the
-    /// crosspoint is trimmed, and the exact value is set from its context
-    /// menu, so the grid stays square either way.
+    /// Every crosspoint shows a small dot whether or not it is connected, so
+    /// the lattice is always visible and a routing reads as a pattern against
+    /// it — a straight-through routing being a line of dots on the diagonal.
+    /// A connected crosspoint grows into a knob whose pointer shows the gain.
+    ///
+    /// Click connects and disconnects, drag turns the knob, and the context
+    /// menu sets an exact value. A block without gain support gets the dot and
+    /// the click, and nothing else.
     fn show_crosspoint_grid(
         ui: &mut Ui,
         routing: &mut RoutingGains,
@@ -740,10 +743,30 @@ impl RoutingMatrixEditor {
         cell_size: f32,
     ) {
         let gain = routing.get(&crosspoint).copied();
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(cell_size, cell_size), egui::Sense::click());
+        let sense = if supports_gain {
+            egui::Sense::click_and_drag()
+        } else {
+            egui::Sense::click()
+        };
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(cell_size, cell_size), sense);
 
-        if response.clicked() {
+        // Dragging turns the knob; a drag is not also a click, so the two do
+        // not fight. Vertical, because that is how every other fader in this
+        // application is dragged.
+        let dragged = supports_gain && gain.is_some() && response.dragged();
+        if dragged {
+            let delta = -response.drag_delta().y as f64;
+            if delta != 0.0 {
+                // Full travel over roughly one cell-height of drag would be
+                // unusably twitchy; 120 px for the whole range is close to how
+                // a DragValue behaves.
+                let step = delta * (-routing::GAIN_FLOOR_DB) / 120.0;
+                let db = (routing::gain_to_db(gain.unwrap_or(1.0)) + step)
+                    .clamp(routing::GAIN_FLOOR_DB, routing::MAX_CROSSPOINT_GAIN_DB);
+                *dirty = true;
+                routing.insert(crosspoint, routing::db_to_gain(db));
+            }
+        } else if response.clicked() {
             *dirty = true;
             if gain.is_some() {
                 routing.remove(&crosspoint);
@@ -752,23 +775,28 @@ impl RoutingMatrixEditor {
             }
         }
 
+        let gain = routing.get(&crosspoint).copied();
         if ui.is_rect_visible(rect) {
             let visuals = ui.style().interact(&response);
             let painter = ui.painter();
-            let full = (cell_size * 0.34).max(2.0);
+            let centre = rect.center();
+            let radius = (cell_size * 0.32).max(2.5);
             match gain {
                 Some(gain) => {
-                    // Radius follows the gain, so a trimmed crosspoint reads as
-                    // a smaller dot without a number in every cell.
-                    let radius = full * (0.45 + 0.55 * gain.clamp(0.0, 1.0)) as f32;
-                    painter.circle_filled(rect.center(), radius, visuals.fg_stroke.color);
+                    painter.circle_filled(centre, radius, visuals.fg_stroke.color);
+                    if supports_gain {
+                        // Pointer from the centre to just past the rim.
+                        let angle = routing::knob_angle(gain) as f32;
+                        let dir = egui::vec2(angle.sin(), -angle.cos());
+                        painter.line_segment(
+                            [centre, centre + dir * (radius * 1.45)],
+                            egui::Stroke::new(1.6_f32, visuals.fg_stroke.color),
+                        );
+                    }
                 }
                 None => {
-                    painter.circle_stroke(
-                        rect.center(),
-                        full * 0.55,
-                        egui::Stroke::new(1.0_f32, visuals.bg_stroke.color),
-                    );
+                    // The unconnected crosspoint, still visible so the grid is.
+                    painter.circle_filled(centre, 1.5_f32, visuals.weak_bg_fill);
                 }
             }
         }
@@ -780,7 +808,7 @@ impl RoutingMatrixEditor {
         );
         let response = match gain {
             Some(g) if supports_gain => response.on_hover_text(format!(
-                "{label}: {:.1} dB\nClick to disconnect, right-click to set the gain",
+                "{label}: {:.1} dB\nDrag to trim, click to disconnect, right-click for an exact value",
                 routing::gain_to_db(g)
             )),
             Some(_) => response.on_hover_text(format!("{label}\nClick to disconnect")),
@@ -797,7 +825,7 @@ impl RoutingMatrixEditor {
                 .add(
                     egui::DragValue::new(&mut db)
                         .speed(0.25)
-                        .range(routing::GAIN_FLOOR_DB..=0.0)
+                        .range(routing::GAIN_FLOOR_DB..=routing::MAX_CROSSPOINT_GAIN_DB)
                         .fixed_decimals(1)
                         .suffix(" dB"),
                 )

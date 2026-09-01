@@ -7,9 +7,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-/// Ceiling on a crosspoint gain. A router has no business amplifying, and
-/// summing several crosspoints onto one output already risks clipping.
+/// Ceiling on a crosspoint gain: unity. A crosspoint attenuates, it does not
+/// amplify.
+///
+/// The `volume` element carrying it would go to +20 dB, but boost belongs
+/// somewhere with a meter and a limiter in front of it — `builtin.audiogain`
+/// or the mixer block — not on a routing crosspoint. The output bus sums
+/// without headroom, so a boosted crosspoint plus fan-in clips with nothing
+/// to catch it. Attenuation is the useful half and cannot clip.
 pub const MAX_CROSSPOINT_GAIN: f64 = 1.0;
+
+/// Ceiling expressed in dB — `20 * log10(MAX_CROSSPOINT_GAIN)`.
+pub const MAX_CROSSPOINT_GAIN_DB: f64 = 0.0;
 
 /// Anything at or below this reads as fully closed.
 pub const GAIN_FLOOR_DB: f64 = -60.0;
@@ -205,8 +214,23 @@ pub fn gain_to_db(gain: f64) -> f64 {
     if gain <= 0.0 {
         GAIN_FLOOR_DB
     } else {
-        (20.0 * gain.log10()).max(GAIN_FLOOR_DB)
+        (20.0 * gain.log10()).clamp(GAIN_FLOOR_DB, MAX_CROSSPOINT_GAIN_DB)
     }
+}
+
+/// Sweep of a crosspoint knob either side of straight up, in radians.
+/// 150 degrees puts the ends of the travel at 7 and 5 o'clock.
+pub const KNOB_SWEEP_RADIANS: f64 = 150.0 * std::f64::consts::PI / 180.0;
+
+/// The knob angle for a gain, clockwise from straight up, in radians.
+///
+/// The travel runs 7 o'clock to 5 o'clock: fully anticlockwise is silent,
+/// fully clockwise is unity. A crosspoint attenuates and never amplifies, so
+/// unity sits at the top of the range rather than in the middle — the way a
+/// rotary attenuator reads.
+pub fn knob_angle(gain: f64) -> f64 {
+    let travel = (gain_to_db(gain) - GAIN_FLOOR_DB) / -GAIN_FLOOR_DB;
+    (travel.clamp(0.0, 1.0) * 2.0 - 1.0) * KNOB_SWEEP_RADIANS
 }
 
 /// A dB value back to a crosspoint gain.
@@ -214,7 +238,9 @@ pub fn db_to_gain(db: f64) -> f64 {
     if db <= GAIN_FLOOR_DB {
         0.0
     } else {
-        10.0_f64.powf(db / 20.0).clamp(0.0, MAX_CROSSPOINT_GAIN)
+        10.0_f64
+            .powf(db.min(MAX_CROSSPOINT_GAIN_DB) / 20.0)
+            .clamp(0.0, MAX_CROSSPOINT_GAIN)
     }
 }
 
@@ -243,10 +269,15 @@ mod tests {
     }
 
     #[test]
-    fn gains_are_capped_at_unity_so_a_router_never_amplifies() {
+    fn a_crosspoint_attenuates_but_never_amplifies() {
         let (gains, _) = parse_routing_gains(r#"{"i0c0": {"o0c0": 4.0, "o0c1": -1.0}}"#);
-        assert_eq!(gains.get(&xp(0, 0, 0, 0)), Some(&1.0));
+        assert_eq!(
+            gains.get(&xp(0, 0, 0, 0)),
+            Some(&1.0),
+            "boost belongs in a gain block, not on a routing crosspoint"
+        );
         assert_eq!(gains.get(&xp(0, 0, 0, 1)), Some(&0.0));
+        assert_eq!(gain_to_db(MAX_CROSSPOINT_GAIN), MAX_CROSSPOINT_GAIN_DB);
     }
 
     #[test]
@@ -333,6 +364,27 @@ mod tests {
         // And the other way round, the spare outputs stay silent.
         assert_eq!(default_routing(&[2], &[4]).len(), 2);
         assert!(default_routing(&[], &[2]).is_empty());
+    }
+
+    #[test]
+    fn the_knob_travel_runs_from_seven_oclock_to_five_oclock() {
+        let degrees = |gain: f64| knob_angle(gain).to_degrees();
+        // Silence is fully anticlockwise, unity fully clockwise, and the
+        // midpoint of the dB range points straight up.
+        assert!((degrees(0.0) + 150.0).abs() < 1e-6, "{}", degrees(0.0));
+        assert!((degrees(1.0) - 150.0).abs() < 1e-6, "{}", degrees(1.0));
+        assert!(
+            degrees(db_to_gain(GAIN_FLOOR_DB / 2.0)).abs() < 1e-6,
+            "{}",
+            degrees(db_to_gain(GAIN_FLOOR_DB / 2.0))
+        );
+        // ...and it is monotonic in between, so the pointer never doubles back.
+        let mut previous = f64::NEG_INFINITY;
+        for step in 0..=20 {
+            let angle = degrees(db_to_gain(GAIN_FLOOR_DB * (1.0 - step as f64 / 20.0)));
+            assert!(angle > previous, "not monotonic at step {step}");
+            previous = angle;
+        }
     }
 
     #[test]
