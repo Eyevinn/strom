@@ -223,6 +223,13 @@ fn main() -> anyhow::Result<()> {
     // missing .env is fine — this is a no-op in production deployments.
     let _ = dotenvy::dotenv();
 
+    // Drop Strom variables that are set but blank, which orchestrators forward
+    // for settings nobody configured. This has to happen here and nowhere else:
+    // after dotenvy, so blanks from `.env` are caught too, and before clap reads
+    // the environment or any thread exists (see strom_types::env). Logging is
+    // not up yet, so the names are reported further down.
+    let blank_env_vars = strom_types::env::remove_blank_owned_vars();
+
     // Initialize process startup time before anything else
     strom::version::init_process_startup_time();
 
@@ -305,6 +312,13 @@ fn main() -> anyhow::Result<()> {
             eprintln!("Failed to initialize logging: {}", e);
             std::process::exit(1);
         });
+
+    if !blank_env_vars.is_empty() {
+        info!(
+            "Ignored blank environment variables: {}",
+            blank_env_vars.join(", ")
+        );
+    }
 
     // Determine if GUI should be enabled
     #[cfg(not(feature = "no-gui"))]
