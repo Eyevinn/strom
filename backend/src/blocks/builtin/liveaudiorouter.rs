@@ -20,13 +20,21 @@
 //!   element, so a crosspoint is a level, not a checkbox.
 //!
 //! ```text
-//! audio_in_I → identity_in_I → deinterleave_in_I → tee_iIcC ─┐
-//!                                                            │  (one branch
-//!   tee_iIcC → xp_iIcC_oOcD (volume) → xpq_iIcC_oOcD (queue) ─┤   per crosspoint)
-//!                                                            │
-//!   → mixer_O (audiomixer, sink pad places the mono on channel D)
-//!   → caps_out_O → capssetter_out_O → queue_out_O → audio_out_O
+//! audio_in_I → identity_in_I → deinterleave_in_I → tee_iIcC
+//!
+//!   tee_iIcC → xp_iIcC_oOcD (volume)      one branch per crosspoint,
+//!            → mixer_O sink pad           the pad placing the mono
+//!                                         on output channel D
+//!
+//!   mixer_O → caps_out_O → capssetter_out_O → queue_out_O → audio_out_O
 //! ```
+//!
+//! There is no queue on a crosspoint branch. A tee branch normally needs one
+//! so it cannot block its siblings, but every branch here ends on a
+//! `GstAggregatorPad`, which queues the buffer and returns rather than waiting
+//! for the mix, and the bus never waits indefinitely on a pad. A queue per
+//! crosspoint would be a thread per crosspoint for decoupling that is already
+//! there; `queue_out_O` is where downstream is decoupled.
 //!
 //! Fan-out is one `tee` feeding several crosspoints; fan-in is several
 //! crosspoints landing on the same mixer. An unrouted output channel simply

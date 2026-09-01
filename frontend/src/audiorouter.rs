@@ -348,14 +348,17 @@ impl RoutingMatrixEditor {
                             );
                         ui.add_space(8.0);
                         if ui
-                            .small_button("Maximize")
+                            .small_button(format!(
+                                "{} Maximize",
+                                egui_phosphor::regular::ARROWS_OUT
+                            ))
                             .on_hover_text("Show every input's channels")
                             .clicked()
                         {
                             folded_inputs.clear();
                         }
                         if ui
-                            .small_button("Minimize")
+                            .small_button(format!("{} Minimize", egui_phosphor::regular::ARROWS_IN))
                             .on_hover_text("Fold every input down to its group header")
                             .clicked()
                         {
@@ -558,7 +561,11 @@ impl RoutingMatrixEditor {
                             false,
                             egui::RichText::new(format!(
                                 "{} In {}",
-                                if folded { "\u{25B8}" } else { "\u{25BE}" },
+                                if folded {
+                                    egui_phosphor::regular::CARET_RIGHT
+                                } else {
+                                    egui_phosphor::regular::CARET_DOWN
+                                },
                                 in_idx
                             ))
                             .small()
@@ -638,7 +645,11 @@ impl RoutingMatrixEditor {
                             false,
                             egui::RichText::new(format!(
                                 "{} In {}",
-                                if folded { "\u{25B8}" } else { "\u{25BE}" },
+                                if folded {
+                                    egui_phosphor::regular::CARET_RIGHT
+                                } else {
+                                    egui_phosphor::regular::CARET_DOWN
+                                },
                                 in_idx
                             ))
                             .small()
