@@ -10,6 +10,7 @@ use std::sync::Arc;
 pub use strom_types::api::AuthStatusResponse;
 pub use strom_types::auth::{LoginRequest, LoginResponse};
 use tower_sessions::Session;
+use tracing::warn;
 
 const SESSION_USER_KEY: &str = "user_authenticated";
 
@@ -30,12 +31,24 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn from_env() -> Self {
-        let admin_user = std::env::var("STROM_ADMIN_USER").ok();
-        let admin_password_hash = std::env::var("STROM_ADMIN_PASSWORD_HASH").ok();
-        let api_key = std::env::var("STROM_API_KEY").ok();
+        // A blank value is not a credential. Without this an empty
+        // STROM_API_KEY enables authentication and then accepts the empty
+        // bearer token, and an empty STROM_ADMIN_USER enables it with no
+        // working login at all. strom_types::env scrubs blanks in main, so
+        // this is the second layer for anything that arrives another way.
+        let admin_user = strom_types::env::var_opt("STROM_ADMIN_USER");
+        let admin_password_hash = strom_types::env::var_opt("STROM_ADMIN_PASSWORD_HASH");
+        let api_key = strom_types::env::var_opt("STROM_API_KEY");
 
         // Authentication is enabled if any method is configured
         let enabled = admin_user.is_some() || api_key.is_some();
+
+        if admin_user.is_some() && admin_password_hash.is_none() {
+            warn!(
+                "STROM_ADMIN_USER is set without STROM_ADMIN_PASSWORD_HASH - session login is \
+                 disabled. Generate a hash with 'strom hash-password'."
+            );
+        }
 
         Self {
             admin_user,
@@ -93,6 +106,14 @@ impl AuthConfig {
 
     /// Verify API key
     pub fn verify_api_key(&self, key: &str) -> bool {
+        // An empty presented token never authenticates, whatever is configured.
+        // `Authorization: Bearer ` and `?auth_token=` both yield an empty token
+        // after the prefix is stripped, so a blank configured key would
+        // otherwise match every unauthenticated request.
+        if key.is_empty() {
+            return false;
+        }
+
         if !self.has_api_key_auth() {
             return false;
         }
@@ -267,6 +288,7 @@ pub fn hash_password(password: &str) -> Result<String, bcrypt::BcryptError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_password_hashing() {
@@ -332,6 +354,58 @@ mod tests {
         };
 
         assert!(!config.verify_api_key("any-key"));
+    }
+
+    /// A blank configured key used to authenticate every request: the middleware
+    /// strips `Bearer ` and hands on an empty token, which compared equal.
+    #[test]
+    fn test_blank_api_key_never_authenticates() {
+        let config = AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: Some(String::new()),
+            native_gui_token: None,
+            enabled: true,
+        };
+
+        assert!(!config.verify_api_key(""));
+        assert!(!config.verify_api_key("anything"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_env_ignores_blank_credentials() {
+        let restore = [
+            ("STROM_ADMIN_USER", std::env::var("STROM_ADMIN_USER").ok()),
+            (
+                "STROM_ADMIN_PASSWORD_HASH",
+                std::env::var("STROM_ADMIN_PASSWORD_HASH").ok(),
+            ),
+            ("STROM_API_KEY", std::env::var("STROM_API_KEY").ok()),
+        ];
+
+        std::env::set_var("STROM_ADMIN_USER", "   ");
+        std::env::set_var("STROM_ADMIN_PASSWORD_HASH", "");
+        std::env::set_var("STROM_API_KEY", "");
+
+        let config = AuthConfig::from_env();
+
+        for (key, value) in restore {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert_eq!(config.admin_user, None);
+        assert_eq!(config.admin_password_hash, None);
+        assert_eq!(config.api_key, None);
+        assert!(
+            !config.enabled,
+            "blank credentials must not enable authentication"
+        );
+        assert!(!config.has_api_key_auth());
+        assert!(!config.has_session_auth());
     }
 
     #[test]
