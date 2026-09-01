@@ -134,6 +134,9 @@ jobs:
       - name: Run tests on MCP server
         run: cargo test --package strom-mcp-server
 
+      - name: Run tests on shared types
+        run: cargo test --package strom-types
+
   # WASM: clippy + build frontend
   check-wasm:
     name: Check & Build (WASM)
@@ -514,6 +517,7 @@ jobs:
         run: |
           cargo test --package strom --features nvidia
           cargo test --package strom-mcp-server
+          cargo test --package strom-types
 
       - name: Build
         run: |
@@ -591,6 +595,7 @@ jobs:
         run: |
           cargo test --package strom --features efp,nvidia
           cargo test --package strom-mcp-server
+          cargo test --package strom-types
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
           STROM_REQUIRE_GST_PLUGINS: 1

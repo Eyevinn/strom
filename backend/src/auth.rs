@@ -44,10 +44,19 @@ impl AuthConfig {
         let enabled = admin_user.is_some() || api_key.is_some();
 
         if admin_user.is_some() && admin_password_hash.is_none() {
-            warn!(
-                "STROM_ADMIN_USER is set without STROM_ADMIN_PASSWORD_HASH - session login is \
-                 disabled. Generate a hash with 'strom hash-password'."
-            );
+            if api_key.is_some() {
+                warn!(
+                    "STROM_ADMIN_USER is set without STROM_ADMIN_PASSWORD_HASH - session login \
+                     is impossible, only the API key works. Generate a hash with 'strom \
+                     hash-password'."
+                );
+            } else {
+                warn!(
+                    "STROM_ADMIN_USER is set without STROM_ADMIN_PASSWORD_HASH and no \
+                     STROM_API_KEY is set - authentication is enabled with no way to pass it, so \
+                     every request will be rejected. Generate a hash with 'strom hash-password'."
+                );
+            }
         }
 
         Self {

@@ -290,8 +290,8 @@ impl Config {
             blocks_path: data_paths.blocks_path,
             media_path: data_paths.media_path,
             database_url: strom_types::env::non_blank(config_file.storage.database_url),
-            log_file: config_file.logging.log_file,
-            log_level: config_file.logging.log_level,
+            log_file: non_blank_path(config_file.logging.log_file),
+            log_level: strom_types::env::non_blank(config_file.logging.log_level),
             ice_servers: normalize_ice_servers(config_file.server.ice_servers),
             ice_transport_policy: config_file.server.ice_transport_policy,
             sap_multicast_addresses: config_file.discovery.sap_multicast_addresses,
@@ -510,6 +510,10 @@ tls_key = "   "
 [storage]
 database_url = ""
 data_dir = ""
+
+[logging]
+log_file = ""
+log_level = "   "
 "#;
         fs::write(&config_file, config_content).unwrap();
 
@@ -530,6 +534,11 @@ data_dir = ""
             config.tls_paths().unwrap().is_none(),
             "blank TLS paths must not enable HTTPS"
         );
+        assert_eq!(
+            config.log_level, None,
+            "a blank log level would build an EnvFilter with no directives, silencing the process"
+        );
+        assert_eq!(config.log_file, None);
         assert!(
             config.flows_path.is_absolute(),
             "a blank data dir must fall back to the default location, got {:?}",

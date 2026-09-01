@@ -28,6 +28,18 @@ use std::ffi::OsString;
 /// Variable name prefixes owned by Strom.
 const OWNED_PREFIXES: &[&str] = &["STROM_"];
 
+/// Variables that switch authentication on.
+///
+/// Dropping one as blank leaves the instance with authentication disabled
+/// unless another method is configured, which deserves a warning rather than
+/// an info line: `lib.rs` already warns that all endpoints are public, and
+/// this is what connects that warning to its cause.
+const CREDENTIAL_NAMES: &[&str] = &[
+    "STROM_ADMIN_USER",
+    "STROM_ADMIN_PASSWORD_HASH",
+    "STROM_API_KEY",
+];
+
 /// Individually owned variable names that carry no Strom prefix.
 ///
 /// Deliberately narrow: `OSC_ACCESS_TOKEN` is the only variable from another
@@ -37,6 +49,11 @@ const OWNED_NAMES: &[&str] = &["OSC_ACCESS_TOKEN"];
 /// Returns true if `key` names a variable Strom owns and may therefore remove.
 fn is_owned(key: &str) -> bool {
     OWNED_PREFIXES.iter().any(|prefix| key.starts_with(prefix)) || OWNED_NAMES.contains(&key)
+}
+
+/// Returns true if `key` names a variable that configures authentication.
+pub fn is_credential(key: &str) -> bool {
+    CREDENTIAL_NAMES.contains(&key)
 }
 
 /// Reads an environment variable, treating a blank value as unset.
@@ -83,7 +100,8 @@ where
 /// coming from a local `.env` file are caught too, and before argument parsing
 /// or any thread, runtime, or GStreamer initialization.
 pub fn remove_blank_owned_vars() -> Vec<String> {
-    let keys = blank_owned_keys(std::env::vars_os());
+    let mut keys = blank_owned_keys(std::env::vars_os());
+    keys.sort();
     for key in &keys {
         std::env::remove_var(key);
     }
@@ -145,6 +163,15 @@ mod tests {
         let keys = blank_owned_keys(vars(&[("OSC_ACCESS_TOKEN", "")]));
 
         assert_eq!(keys, vec!["OSC_ACCESS_TOKEN"]);
+    }
+
+    #[test]
+    fn credential_variables_are_recognised() {
+        assert!(is_credential("STROM_API_KEY"));
+        assert!(is_credential("STROM_ADMIN_USER"));
+        assert!(is_credential("STROM_ADMIN_PASSWORD_HASH"));
+        assert!(!is_credential("STROM_DATABASE_URL"));
+        assert!(!is_credential("STROM_PORT"));
     }
 
     #[test]
