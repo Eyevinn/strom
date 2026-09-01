@@ -518,11 +518,11 @@ async fn main() -> Result<()> {
         .init();
 
     // Get Strom API URL from environment or use default
-    let api_url = std::env::var("STROM_API_URL")
-        .unwrap_or_else(|_| format!("http://localhost:{}", strom_types::DEFAULT_PORT));
+    let api_url = strom_types::env::var_opt("STROM_API_URL")
+        .unwrap_or_else(|| format!("http://localhost:{}", strom_types::DEFAULT_PORT));
 
     // Get optional API key for authentication
-    let api_key = std::env::var("STROM_API_KEY").ok();
+    let api_key = strom_types::env::var_opt("STROM_API_KEY");
 
     info!("Starting Strom MCP Server");
     info!("Connecting to Strom API at: {}", api_url);

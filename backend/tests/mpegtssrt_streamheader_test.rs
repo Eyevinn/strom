@@ -56,7 +56,7 @@ fn plugins_available() -> bool {
         return true;
     }
     assert!(
-        std::env::var("STROM_REQUIRE_GST_PLUGINS").is_err(),
+        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
         "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
         missing.join(", ")
     );
