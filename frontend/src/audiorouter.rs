@@ -4,6 +4,122 @@ use egui::{Color32, ScrollArea, Ui};
 use std::collections::HashMap;
 use strom_types::{BlockDefinition, BlockInstance, FlowId, PropertyValue};
 
+/// Whether a block should get the routing matrix editor.
+///
+/// Keyed on the `routing_matrix` property rather than on block ids, so a new
+/// router block does not have to touch the call sites that gate the editor.
+pub fn has_routing_matrix(definition: &BlockDefinition) -> bool {
+    definition
+        .exposed_properties
+        .iter()
+        .any(|p| p.name == "routing_matrix")
+}
+
+/// Parse a routing matrix in either form.
+///
+/// `{"i0c0": ["o0c0"]}` opens crosspoints at unity — the form
+/// `builtin.audiorouter` writes. `{"i0c0": {"o0c0": 0.35}}` carries a gain per
+/// crosspoint. Accepting both matters: parsing the gain form as the list form
+/// silently yields an empty matrix, and saving that would wipe the routing.
+fn parse_routing(json: &str) -> HashMap<String, HashMap<String, f64>> {
+    let Ok(entries) = serde_json::from_str::<HashMap<String, serde_json::Value>>(json) else {
+        return HashMap::new();
+    };
+    entries
+        .into_iter()
+        .map(|(src, dests)| {
+            let gains = match dests {
+                serde_json::Value::Array(list) => list
+                    .into_iter()
+                    .filter_map(|d| d.as_str().map(|s| (s.to_string(), 1.0)))
+                    .collect(),
+                serde_json::Value::Object(map) => map
+                    .into_iter()
+                    .filter_map(|(d, g)| g.as_f64().map(|g| (d, g.clamp(0.0, 1.0))))
+                    .collect(),
+                _ => HashMap::new(),
+            };
+            (src, gains)
+        })
+        .filter(|(_, gains): &(String, HashMap<String, f64>)| !gains.is_empty())
+        .collect()
+}
+
+/// Serialise the routing back out, staying on the list form while every gain
+/// is unity so a block that only understands on/off keeps working.
+fn serialize_routing(routing: &HashMap<String, HashMap<String, f64>>) -> String {
+    let all_unity = routing
+        .values()
+        .all(|dests| dests.values().all(|g| (*g - 1.0).abs() < f64::EPSILON));
+
+    let value = if all_unity {
+        let plain: HashMap<&String, Vec<&String>> = routing
+            .iter()
+            .map(|(src, dests)| (src, dests.keys().collect()))
+            .collect();
+        serde_json::to_value(plain)
+    } else {
+        serde_json::to_value(routing)
+    };
+    value
+        .and_then(|v| serde_json::to_string(&v))
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+/// One routing change leaving the editor.
+pub struct RoutingUpdate {
+    /// The routing matrix as JSON.
+    pub json: String,
+    /// Whether the caller should also write the flow to storage. False in live
+    /// mode: the block-property endpoint persists the value itself, and saving
+    /// the whole flow on every drag would be a lot of write traffic.
+    pub persist: bool,
+}
+
+/// Anything at or below this reads as fully closed on the dB control.
+const GAIN_FLOOR_DB: f64 = -60.0;
+
+fn gain_to_db(gain: f64) -> f64 {
+    if gain <= 0.0 {
+        GAIN_FLOOR_DB
+    } else {
+        (20.0 * gain.log10()).max(GAIN_FLOOR_DB)
+    }
+}
+
+fn db_to_gain(db: f64) -> f64 {
+    if db <= GAIN_FLOOR_DB {
+        0.0
+    } else {
+        (10.0_f64.powf(db / 20.0)).clamp(0.0, 1.0)
+    }
+}
+
+/// Whether this block's routing can be changed on a running flow.
+///
+/// Read off the property's own `live` flag rather than a block id, so
+/// `builtin.audiorouter` — whose routing is topology and needs a restart —
+/// simply never offers live mode.
+pub fn has_live_routing(definition: &BlockDefinition) -> bool {
+    definition
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "routing_matrix")
+        .map(|p| p.live)
+        .unwrap_or(false)
+}
+
+/// Whether a block's crosspoints carry a gain rather than just on/off.
+///
+/// Keyed on the fade property the gain-capable router exposes, not on a block
+/// id, for the same reason `has_routing_matrix` is.
+pub fn has_crosspoint_gain(definition: &BlockDefinition) -> bool {
+    definition
+        .exposed_properties
+        .iter()
+        .any(|p| p.name == "crosspoint_fade_ms")
+}
+
 /// Routing matrix editor for Audio Router blocks.
 pub struct RoutingMatrixEditor {
     /// Flow ID this editor is for
@@ -13,7 +129,20 @@ pub struct RoutingMatrixEditor {
     /// Whether the editor window is open
     pub open: bool,
     /// Current routing matrix (source -> destinations)
-    pub routing: HashMap<String, Vec<String>>,
+    /// Crosspoint gains: source key -> destination key -> gain (0.0..=1.0).
+    /// A crosspoint that is absent is closed. `builtin.audiorouter` only knows
+    /// on/off, so this is serialised back as a plain list whenever every gain
+    /// is unity — old flows keep the exact JSON they had.
+    pub routing: HashMap<String, HashMap<String, f64>>,
+    /// Whether the block's crosspoints carry a gain rather than just on/off.
+    supports_gain: bool,
+    /// Whether this block's routing can be changed on a running flow.
+    live_capable: bool,
+    /// Send every change straight to the running flow instead of waiting for
+    /// Save. The write persists as well, so in this mode Save is redundant.
+    live_apply: bool,
+    /// A change has been made that live mode has not sent yet.
+    live_pending: bool,
     /// Whether we need to save changes
     pub dirty: bool,
     /// Cached config
@@ -34,6 +163,10 @@ impl RoutingMatrixEditor {
             block_id,
             open: true,
             routing: HashMap::new(),
+            supports_gain: false,
+            live_capable: false,
+            live_apply: true,
+            live_pending: false,
             dirty: false,
             num_inputs: 2,
             num_outputs: 2,
@@ -104,7 +237,9 @@ impl RoutingMatrixEditor {
             self.output_channels
         );
 
-        self.routing = serde_json::from_str(&routing_json).unwrap_or_default();
+        self.supports_gain = has_crosspoint_gain(definition);
+        self.live_capable = has_live_routing(definition);
+        self.routing = parse_routing(&routing_json);
         tracing::debug!(
             "load_from_block: parsed {} routing entries",
             self.routing.len()
@@ -151,7 +286,7 @@ impl RoutingMatrixEditor {
                 self.routing.remove(&src_key);
             } else if let Some(dests) = self.routing.get_mut(&src_key) {
                 // Remove invalid destination keys
-                dests.retain(|d| valid_dest_keys.contains(d));
+                dests.retain(|d, _| valid_dest_keys.contains(d));
                 if dests.is_empty() {
                     self.routing.remove(&src_key);
                 }
@@ -161,7 +296,7 @@ impl RoutingMatrixEditor {
 
     /// Show the routing matrix editor window.
     /// Returns Some(routing_json) if the user clicked Save.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<String> {
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<RoutingUpdate> {
         if !self.open {
             return None;
         }
@@ -187,6 +322,10 @@ impl RoutingMatrixEditor {
         let input_channels = self.input_channels.clone();
         let output_channels = self.output_channels.clone();
         let dirty = self.dirty;
+        let routing_before = serialize_routing(&self.routing);
+        let supports_gain = self.supports_gain;
+        let live_capable = self.live_capable;
+        let mut live_apply = self.live_apply;
         let selected_output = self.selected_output;
 
         let mut open = self.open;
@@ -209,7 +348,15 @@ impl RoutingMatrixEditor {
                     ));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if dirty {
+                        if live_capable {
+                            ui.checkbox(&mut live_apply, "Live").on_hover_text(
+                                "Apply every change to the running flow as you make it, \
+                                     fading each crosspoint. The change is saved too, so \
+                                     Save is not needed.",
+                            );
+                            ui.add_space(8.0);
+                        }
+                        if dirty && !(live_capable && live_apply) {
                             ui.colored_label(Color32::from_rgb(255, 200, 100), "• Unsaved");
                             ui.add_space(8.0);
                         }
@@ -272,6 +419,7 @@ impl RoutingMatrixEditor {
                             ui,
                             &mut self.routing,
                             &mut self.dirty,
+                            supports_gain,
                             num_inputs,
                             selected_output,
                             &input_channels,
@@ -285,14 +433,22 @@ impl RoutingMatrixEditor {
 
                 // Save/Cancel buttons
                 ui.horizontal(|ui| {
-                    if ui
+                    if live_capable && live_apply {
+                        ui.label(
+                            egui::RichText::new("Changes apply and save as you make them")
+                                .weak()
+                                .small(),
+                        );
+                    } else if ui
                         .button(format!("{} Save", egui_phosphor::regular::FLOPPY_DISK))
                         .clicked()
                     {
-                        let json = serde_json::to_string(&self.routing)
-                            .unwrap_or_else(|_| "{}".to_string());
+                        let json = serialize_routing(&self.routing);
                         tracing::debug!("Saving routing matrix: {}", json);
-                        result = Some(json);
+                        result = Some(RoutingUpdate {
+                            json,
+                            persist: true,
+                        });
                         self.dirty = false;
                     }
                     if ui.button("Cancel").clicked() {
@@ -303,6 +459,8 @@ impl RoutingMatrixEditor {
 
         self.open = open;
         self.selected_output = new_selected_output;
+
+        self.live_apply = live_apply;
 
         // Apply deferred actions
         if set_diagonal {
@@ -321,6 +479,27 @@ impl RoutingMatrixEditor {
             self.open = false;
         }
 
+        // In live mode every change goes straight out. The write persists too
+        // (block properties persist by default), so Save has nothing left to
+        // do and `dirty` is cleared here rather than by a button.
+        //
+        // Change is detected by value: the grid, the bulk buttons and the gain
+        // drags all mutate `self.routing` through different paths, and one
+        // comparison covers every one of them.
+        let after = serialize_routing(&self.routing);
+        if after != routing_before {
+            self.live_pending = true;
+            self.dirty = true;
+        }
+        if self.live_capable && self.live_apply && self.live_pending {
+            self.live_pending = false;
+            self.dirty = false;
+            result = Some(RoutingUpdate {
+                json: after,
+                persist: false,
+            });
+        }
+
         result
     }
 
@@ -330,8 +509,9 @@ impl RoutingMatrixEditor {
     #[allow(clippy::too_many_arguments)]
     fn show_output_matrix(
         ui: &mut Ui,
-        routing: &mut HashMap<String, Vec<String>>,
+        routing: &mut HashMap<String, HashMap<String, f64>>,
         dirty: &mut bool,
+        supports_gain: bool,
         num_inputs: usize,
         out_idx: usize,
         input_channels: &[usize],
@@ -347,6 +527,7 @@ impl RoutingMatrixEditor {
                 ui,
                 routing,
                 dirty,
+                supports_gain,
                 num_inputs,
                 out_idx,
                 input_channels,
@@ -360,6 +541,7 @@ impl RoutingMatrixEditor {
                 ui,
                 routing,
                 dirty,
+                supports_gain,
                 num_inputs,
                 out_idx,
                 input_channels,
@@ -374,8 +556,9 @@ impl RoutingMatrixEditor {
     #[allow(clippy::too_many_arguments)]
     fn show_matrix_normal(
         ui: &mut Ui,
-        routing: &mut HashMap<String, Vec<String>>,
+        routing: &mut HashMap<String, HashMap<String, f64>>,
         dirty: &mut bool,
+        supports_gain: bool,
         num_inputs: usize,
         out_idx: usize,
         input_channels: &[usize],
@@ -421,10 +604,11 @@ impl RoutingMatrixEditor {
 
                         for out_ch in 0..out_ch_count {
                             let dest_key = format!("o{}c{}", out_idx, out_ch);
-                            Self::show_routing_checkbox_grid(
+                            Self::show_crosspoint_grid(
                                 ui,
                                 routing,
                                 dirty,
+                                supports_gain,
                                 &src_key,
                                 &dest_key,
                                 checkbox_size,
@@ -446,8 +630,9 @@ impl RoutingMatrixEditor {
     #[allow(clippy::too_many_arguments)]
     fn show_matrix_flipped(
         ui: &mut Ui,
-        routing: &mut HashMap<String, Vec<String>>,
+        routing: &mut HashMap<String, HashMap<String, f64>>,
         dirty: &mut bool,
+        supports_gain: bool,
         num_inputs: usize,
         out_idx: usize,
         input_channels: &[usize],
@@ -508,10 +693,11 @@ impl RoutingMatrixEditor {
                     {
                         for in_ch in 0..in_ch_count {
                             let src_key = format!("i{}c{}", in_idx, in_ch);
-                            Self::show_routing_checkbox_grid(
+                            Self::show_crosspoint_grid(
                                 ui,
                                 routing,
                                 dirty,
+                                supports_gain,
                                 &src_key,
                                 &dest_key,
                                 checkbox_size,
@@ -527,42 +713,76 @@ impl RoutingMatrixEditor {
             });
     }
 
-    /// Show routing checkbox for Grid layout (no push_id wrapper needed)
-    fn show_routing_checkbox_grid(
+    /// One crosspoint cell.
+    ///
+    /// The checkbox opens and closes the crosspoint. Where the block supports a
+    /// gain, an open crosspoint also gets a compact dB control — dB rather than
+    /// a raw coefficient because that is what the level meters next to it read
+    /// in. Toggling a crosspoint off and on again returns it to unity; the gain
+    /// is only remembered while it stays open.
+    #[allow(clippy::too_many_arguments)]
+    fn show_crosspoint_grid(
         ui: &mut Ui,
-        routing: &mut HashMap<String, Vec<String>>,
+        routing: &mut HashMap<String, HashMap<String, f64>>,
         dirty: &mut bool,
+        supports_gain: bool,
         src_key: &str,
         dest_key: &str,
         checkbox_size: f32,
     ) {
-        let is_routed = routing
-            .get(src_key)
-            .map(|dests| dests.contains(&dest_key.to_string()))
-            .unwrap_or(false);
+        let current = routing.get(src_key).and_then(|d| d.get(dest_key)).copied();
+        let mut checked = current.is_some();
 
-        let mut checked = is_routed;
-
-        ui.allocate_ui_with_layout(
-            egui::vec2(checkbox_size, checkbox_size),
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                if ui.checkbox(&mut checked, "").changed() {
-                    *dirty = true;
-                    if checked {
-                        routing
-                            .entry(src_key.to_string())
-                            .or_default()
-                            .push(dest_key.to_string());
-                    } else if let Some(dests) = routing.get_mut(src_key) {
-                        dests.retain(|d| d != dest_key);
-                        if dests.is_empty() {
-                            routing.remove(src_key);
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(checkbox_size, checkbox_size),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    if ui.checkbox(&mut checked, "").changed() {
+                        *dirty = true;
+                        if checked {
+                            routing
+                                .entry(src_key.to_string())
+                                .or_default()
+                                .insert(dest_key.to_string(), 1.0);
+                        } else if let Some(dests) = routing.get_mut(src_key) {
+                            dests.remove(dest_key);
+                            if dests.is_empty() {
+                                routing.remove(src_key);
+                            }
                         }
                     }
+                },
+            );
+
+            if !supports_gain {
+                return;
+            }
+
+            match current {
+                Some(gain) => {
+                    let mut db = gain_to_db(gain);
+                    let response = ui.add(
+                        egui::DragValue::new(&mut db)
+                            .speed(0.25)
+                            .range(GAIN_FLOOR_DB..=0.0)
+                            .fixed_decimals(1)
+                            .suffix(" dB"),
+                    );
+                    if response.changed() {
+                        *dirty = true;
+                        if let Some(dests) = routing.get_mut(src_key) {
+                            dests.insert(dest_key.to_string(), db_to_gain(db));
+                        }
+                    }
+                    response.on_hover_text("Crosspoint gain. Drag to trim this route.");
                 }
-            },
-        );
+                None => {
+                    // Keep the columns aligned with the open crosspoints.
+                    ui.add_enabled(false, egui::Label::new(egui::RichText::new("  –  ").weak()));
+                }
+            }
+        });
     }
 
     /// Set 1:1 diagonal routing.
@@ -578,7 +798,10 @@ impl RoutingMatrixEditor {
                             let src_key = format!("i{}c{}", in_idx, in_ch);
                             let dest_key = format!("o{}c{}", out_idx, out_ch);
                             tracing::debug!("Diagonal routing: {} -> {}", src_key, dest_key);
-                            self.routing.entry(src_key).or_default().push(dest_key);
+                            self.routing
+                                .entry(src_key)
+                                .or_default()
+                                .insert(dest_key, 1.0);
                         }
                         out_ch_global += 1;
                     }
@@ -608,7 +831,7 @@ impl RoutingMatrixEditor {
         let src_keys: Vec<String> = self.routing.keys().cloned().collect();
         for src_key in src_keys {
             if let Some(dests) = self.routing.get_mut(&src_key) {
-                dests.retain(|d| !dest_keys_to_remove.contains(d));
+                dests.retain(|d, _| !dest_keys_to_remove.contains(d));
                 if dests.is_empty() {
                     self.routing.remove(&src_key);
                 }
