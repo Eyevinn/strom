@@ -582,6 +582,9 @@ fn run_with_gui(
         error!("GUI error: {:?}", e);
     }
 
+    // Must run before library destructors; see `shutdown_overlay_timers`.
+    strom::blocks::builtin::vision_mixer::overlay::shutdown_overlay_timers();
+
     Ok(())
 }
 
@@ -763,7 +766,12 @@ async fn run_headless(
         handle_for_signal.graceful_shutdown(Some(Duration::from_secs(10)));
     });
 
-    serve_with_tls(addr, app, handle, tls_config).await?;
+    let serve_result = serve_with_tls(addr, app, handle, tls_config).await;
+
+    // Must run before library destructors; see `shutdown_overlay_timers`.
+    strom::blocks::builtin::vision_mixer::overlay::shutdown_overlay_timers();
+
+    serve_result?;
 
     Ok(())
 }
