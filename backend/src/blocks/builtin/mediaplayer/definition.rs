@@ -62,6 +62,97 @@ pub fn media_player_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
+                name: "stinger_source".to_string(),
+                label: "Stinger Clip Source".to_string(),
+                description: "Declare this player as a stinger clip source. Its clip is held on its first frame so a stinger fires without decode latency, and looping is disabled so it plays once per trigger. Leave off for graphics on a keyed input that should keep playing."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "stinger_source".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "stinger_cut_point_ms".to_string(),
+                label: "Stinger Cut Point (ms)".to_string(),
+                description: "How far into the clip the program source changes. Set it to the moment the clip fully covers the frame. 0 uses the halfway point."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "stinger_cut_point_ms".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "stinger_under_transition".to_string(),
+                label: "Stinger Beneath".to_string(),
+                description: "Transition running under the clip while it covers the frame. A cut suits a clip that covers completely; a clip that does not is a reason to mix or wipe instead."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "cut".to_string(),
+                            label: Some("Cut".to_string()),
+                        },
+                        EnumValue {
+                            value: "fade".to_string(),
+                            label: Some("Mix".to_string()),
+                        },
+                        EnumValue {
+                            value: "dip_to_black".to_string(),
+                            label: Some("Dip to Black".to_string()),
+                        },
+                        EnumValue {
+                            value: "wipe_left".to_string(),
+                            label: Some("Wipe Left".to_string()),
+                        },
+                        EnumValue {
+                            value: "wipe_right".to_string(),
+                            label: Some("Wipe Right".to_string()),
+                        },
+                        EnumValue {
+                            value: "wipe_up".to_string(),
+                            label: Some("Wipe Up".to_string()),
+                        },
+                        EnumValue {
+                            value: "wipe_down".to_string(),
+                            label: Some("Wipe Down".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("cut".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "stinger_under_transition".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "stinger_under_duration_ms".to_string(),
+                label: "Stinger Beneath Duration (ms)".to_string(),
+                description: "How long the transition beneath takes. Ignored for a cut, and shortened if it would outlast the clip."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "stinger_under_duration_ms".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "position_update_interval".to_string(),
                 label: "Position Update Interval (ms)".to_string(),
                 description: "How often to broadcast position updates (lower = more responsive)"

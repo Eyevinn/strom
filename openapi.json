@@ -9905,6 +9905,167 @@
           },
           {
             "type": "object",
+            "description": "A stinger started: a keyed clip is now playing over the program.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A stinger started: a keyed clip is now playing over the program.",
+                "required": [
+                  "flow_id",
+                  "block_instance_id",
+                  "source_block_id",
+                  "clip_ms",
+                  "cut_point_ms",
+                  "under_transition",
+                  "under_duration_ms",
+                  "armed"
+                ],
+                "properties": {
+                  "armed": {
+                    "type": "boolean",
+                    "description": "False when the clip was not parked on its first frame, so it starts\nlater than the sub-millisecond armed path."
+                  },
+                  "block_instance_id": {
+                    "type": "string"
+                  },
+                  "clip_ms": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Length of the clip, which is how long the stinger lasts.",
+                    "minimum": 0
+                  },
+                  "cut_point_ms": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "How far into the clip the transition beneath begins.",
+                    "minimum": 0
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "source_block_id": {
+                    "type": "string",
+                    "description": "Block supplying the keyed clip."
+                  },
+                  "under_duration_clamped_from": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "description": "Set when the requested duration had to be shortened to finish\nbefore the clip ended; carries what was originally asked for.",
+                    "minimum": 0
+                  },
+                  "under_duration_ms": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Duration actually applied to the transition beneath.",
+                    "minimum": 0
+                  },
+                  "under_transition": {
+                    "type": "string",
+                    "description": "The transition running beneath the clip."
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "StingerStarted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A stinger finished: its keyed input is hidden and the clip re-armed.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A stinger finished: its keyed input is hidden and the clip re-armed.",
+                "required": [
+                  "flow_id",
+                  "block_instance_id",
+                  "source_block_id"
+                ],
+                "properties": {
+                  "block_instance_id": {
+                    "type": "string"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "source_block_id": {
+                    "type": "string"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "StingerCompleted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A stinger clip could not play. The transition beneath ran on its own.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A stinger clip could not play. The transition beneath ran on its own.",
+                "required": [
+                  "flow_id",
+                  "block_instance_id",
+                  "source_block_id",
+                  "reason",
+                  "still_running"
+                ],
+                "properties": {
+                  "block_instance_id": {
+                    "type": "string"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "source_block_id": {
+                    "type": "string"
+                  },
+                  "still_running": {
+                    "type": "boolean",
+                    "description": "True when the clip is still on air and the mixer is still claimed,\nwhich is the case when only the transition beneath failed. A client\nmust not treat that as the end of the stinger."
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "StingerFailed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "Audio analyzer waveform and vectorscope data from appsink",
             "required": [
               "data",
@@ -10923,13 +11084,20 @@
           "duration_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Duration of the transition in milliseconds (ignored for \"cut\")",
+            "description": "Duration of the transition in milliseconds (ignored for \"cut\").\n\nIgnored for \"stinger\": a stinger lasts as long as its clip, and the\ntransition beneath is timed by the clip source block.",
             "minimum": 0
           },
           "from_input": {
             "type": "integer",
             "description": "Index of the currently active input (0-based)",
             "minimum": 0
+          },
+          "stinger_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stinger only: block id of the media player supplying the keyed clip.\nRequired when `transition_type` is \"stinger\", ignored otherwise. The\ncut point and the transition beneath come from that block."
           },
           "to_input": {
             "type": "integer",

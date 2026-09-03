@@ -11,6 +11,7 @@ pub mod keyframe_request;
 pub mod pipeline;
 pub mod pipeline_monitor;
 pub mod shaders;
+pub mod stinger;
 pub mod thread_priority;
 pub mod thumbnail;
 pub mod thumbnail_tap;

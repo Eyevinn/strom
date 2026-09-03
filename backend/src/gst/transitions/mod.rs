@@ -51,6 +51,14 @@ pub enum TransitionType {
     /// Full-frame master FX (glitch, flash, whip, ...) riding on a basic pad
     /// transition (GPU FX engine). Downgrades like [`Self::Wipe`].
     MasterFx(crate::gst::shaders::MasterFxKind),
+    /// Play a keyed clip over the program while another transition runs
+    /// beneath it.
+    ///
+    /// The clip binding, cut point and underlying transition travel in the
+    /// request rather than in this variant, which keeps `TransitionType`
+    /// `Copy` and keeps the underlying transition a plain `TransitionType`
+    /// the controller already knows how to run.
+    Stinger,
 }
 
 impl std::str::FromStr for TransitionType {
@@ -99,6 +107,7 @@ impl std::str::FromStr for TransitionType {
             "tv_roll" | "roll" => Ok(Self::MasterFx(MasterFxKind::Roll)),
             "negative_flash" | "negative" => Ok(Self::MasterFx(MasterFxKind::Negative)),
             "ripple" => Ok(Self::MasterFx(MasterFxKind::Ripple)),
+            "stinger" => Ok(Self::Stinger),
             _ => Err(format!("Unknown transition type: {}", s)),
         }
     }
@@ -120,6 +129,7 @@ impl std::fmt::Display for TransitionType {
             Self::DipToBlack => "dip_to_black",
             Self::Wipe(k) => k.name(),
             Self::MasterFx(k) => k.name(),
+            Self::Stinger => "stinger",
         })
     }
 }
@@ -141,6 +151,8 @@ pub enum TransitionError {
     ControlSourceError(String),
     #[error("GStreamer error: {0}")]
     GstError(String),
+    #[error("{0}")]
+    NotControllerRunnable(String),
 }
 
 /// Manages transitions for a compositor element.
@@ -301,6 +313,30 @@ mod tests {
             "dip".parse::<TransitionType>().ok(),
             Some(TransitionType::DipToBlack)
         );
+        assert_eq!(
+            "stinger".parse::<TransitionType>().ok(),
+            Some(TransitionType::Stinger)
+        );
         assert!("unknown".parse::<TransitionType>().is_err());
+    }
+
+    #[test]
+    fn test_transition_type_display_round_trips() {
+        // Every type's Display form must parse back to itself, or a client
+        // reading a transition event cannot replay what it saw.
+        for t in [
+            TransitionType::Cut,
+            TransitionType::Fade,
+            TransitionType::DipToBlack,
+            TransitionType::Wipe(WipeKind::Left),
+            TransitionType::MasterFx(MasterFxKind::Glitch),
+            TransitionType::Stinger,
+        ] {
+            assert_eq!(
+                t.to_string().parse::<TransitionType>().ok(),
+                Some(t),
+                "{t} did not round-trip through Display/FromStr"
+            );
+        }
     }
 }
