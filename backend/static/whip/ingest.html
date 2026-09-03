@@ -114,7 +114,12 @@
         let reconnectTimer = null;
         let activeEndpoint = null;
         const MAX_RECONNECT_ATTEMPTS = 15;
-        const RECONNECT_DELAY = 10000;
+        // Backoff between reconnect attempts, in ms; attempts past the list use the
+        // last value. The first retry is deliberately early: the server decides an
+        // abruptly dropped publisher is gone a couple of seconds after its media
+        // stops, and holds an arriving POST while it decides, so an early retry is
+        // answered rather than refused.
+        const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000];
 
         // Elements
         const endpointSelect = document.getElementById('endpointSelect');
@@ -285,12 +290,13 @@
                 return;
             }
             reconnectAttempt++;
-            log('Reconnecting in ' + (RECONNECT_DELAY / 1000) + 's (attempt ' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
-            setStatus('status', 'Reconnecting in ' + (RECONNECT_DELAY / 1000) + 's (attempt ' + reconnectAttempt + ')...', 'connecting');
+            const delay = RECONNECT_DELAYS[Math.min(reconnectAttempt, RECONNECT_DELAYS.length) - 1];
+            log('Reconnecting in ' + (delay / 1000) + 's (attempt ' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
+            setStatus('status', 'Reconnecting in ' + (delay / 1000) + 's (attempt ' + reconnectAttempt + ')...', 'connecting');
             reconnectTimer = setTimeout(() => {
                 reconnectTimer = null;
                 if (wantConnected) doReconnect();
-            }, RECONNECT_DELAY);
+            }, delay);
         }
 
         function cancelReconnect() {
@@ -567,7 +573,7 @@
                 onIceState: () => {},
             });
 
-            log('WHIP ingest client v10');
+            log('WHIP ingest client v11');
             whipClient.connect(stream);
         }
 

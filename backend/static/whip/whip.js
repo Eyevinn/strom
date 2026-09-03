@@ -1,5 +1,12 @@
 // WHIP Client - WebRTC-HTTP Ingestion Protocol client for browser-based sending.
 
+// How long ICE 'disconnected' is given to recover before the session is treated
+// as dead. It fires on a couple of missed consent checks and often recovers, so
+// tearing down at once costs a needless renegotiation; waiting too long is worse,
+// because the publisher keeps encoding into a dead transport and the server cannot
+// free the slot for the reconnect until this expires.
+const ICE_DISCONNECT_GRACE_MS = 4000;
+
 // Global debug mode flag - toggle via UI or setWhipDebugMode(true/false)
 let whipDebugMode = false;
 
@@ -224,8 +231,8 @@ class WhipClient {
                     }
                 } else if (state === 'disconnected') {
                     // ICE 'disconnected' is transient — it can recover to 'connected'.
-                    // Wait 10s before treating it as a real disconnect.
-                    this._logAlways('ICE disconnected (waiting 10s for recovery...)', 'warning');
+                    this._logAlways('ICE disconnected (waiting ' + (ICE_DISCONNECT_GRACE_MS / 1000) +
+                        's for recovery...)', 'warning');
                     if (!this._disconnectTimer) {
                         this._disconnectTimer = setTimeout(() => {
                             this._disconnectTimer = null;
@@ -237,7 +244,7 @@ class WhipClient {
                                     this.callbacks.onDisconnected();
                                 }
                             }
-                        }, 10000);
+                        }, ICE_DISCONNECT_GRACE_MS);
                     }
                 }
             };
