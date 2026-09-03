@@ -634,6 +634,7 @@ mod tests {
             }),
             is_paused: AtomicBool::new(false),
             loop_playlist: AtomicBool::new(false),
+            stinger_armed: AtomicBool::new(false),
             block_id: "test".to_string(),
             flow_id: uuid::Uuid::new_v4(),
             switching_file: AtomicBool::new(false),

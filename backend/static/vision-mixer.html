@@ -263,6 +263,7 @@
         }
         .type-btn:hover { border-color: #666; }
         .dir-row.hidden { display: none; }
+        .type-row.hidden { display: none; }
         .dir-btn { font-size: 13px; }
         /* Wipe shape / master FX pickers: grids so the many buttons keep a
            uniform, readable size instead of squeezing into one flex row. */
@@ -348,6 +349,26 @@
         }
 
         /* Duration row */
+        .stinger-label {
+            color: #888;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .stinger-summary {
+            color: #aaa;
+            font-size: 11px;
+            white-space: nowrap;
+            align-self: center;
+        }
+        .stinger-select {
+            background: #2a2a2a;
+            color: #ccc;
+            border: 1px solid #444;
+            border-radius: 3px;
+            padding: 3px 6px;
+            font-size: 12px;
+        }
         .duration-row {
             display: flex;
             align-items: center;
@@ -1176,6 +1197,7 @@
                 <button class="type-btn" data-type="slide" onclick="setTransitionType('slide')" title="Slide — new picture slides in over the old">SLIDE</button>
                 <button class="type-btn fx-only" data-type="wipe" onclick="setTransitionType('wipe')" title="Shader wipe (GPU FX engine)">WIPE</button>
                 <button class="type-btn fx-only" data-type="fx" onclick="setTransitionType('fx')" title="Master FX take (GPU FX engine)">FX</button>
+                <button class="type-btn" data-type="stinger" onclick="setTransitionType('stinger')" title="Stinger — a keyed clip covers the frame while the sources change beneath it">STINGER</button>
             </div>
             <div class="type-row dir-row hidden" id="dirRow" title="Direction of motion">
                 <button class="type-btn dir-btn active" data-dir="left" onclick="setTransitionDir('left')">&#8592;</button>
@@ -1219,6 +1241,11 @@
                 <button class="type-btn fxk-btn novelty" data-fx="negative_flash" onclick="setFxKind('negative_flash')" title="Frame inverts through the crossfade">NEG</button>
                 <button class="type-btn fxk-btn novelty" data-fx="ripple" onclick="setFxKind('ripple')" title="Water ring ripples both pictures through a crossfade">RIPPLE</button>
             </div>
+            <div class="type-row hidden" id="stingerRow" title="Stinger clip and the timing it declares">
+                <label class="stinger-label">Clip:</label>
+                <select class="stinger-select" id="stingerClip" onchange="setStingerClip(this.value)" title="A Media Player with Stinger Clip Source enabled, wired to a DSK input"></select>
+                <span class="stinger-summary" id="stingerSummary" title="Declared on the clip's block, not on the take">&#8212;</span>
+            </div>
             <div class="duration-row">
                 <label>Duration:</label>
                 <button class="duration-preset" onclick="setDuration(0.5)">0.5s</button>
@@ -1239,7 +1266,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.39-roll-punch-fix | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.43-stinger | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1336,6 +1363,11 @@
         let wipeShape = 'wipe_left';
         let fxKind = 'flash_dissolve';
         let transitionDurationMs = 1000;
+        // Stinger: only which clip. Cut point and the transition beneath are
+        // declared on the clip's own block, so a take names nothing else.
+        let stingerSource = '';
+        // Timing of each declared clip, for the summary beside the picker.
+        let stingerClips = {};
         function currentTransitionType() {
             if (transitionBase === 'push' || transitionBase === 'slide')
                 return transitionBase + '_' + transitionDir;
@@ -1441,23 +1473,37 @@
             currentPvwPip = fromPip;
             updateButtons();
 
-            apiPost('/transition', {
+            const body = {
                 from_input: fromPgm ?? 0,
                 to_input: fromPvw ?? 0,
                 transition_type: type,
                 duration_ms: durationMs
-            }).then(r => {
+            };
+            if (type === 'stinger') {
+                body.stinger_source = stingerSource;
+            }
+
+            apiPost('/transition', body).then(r => {
                 // Bus state is reconciled via the VisionMixerStateChanged WS event
                 // broadcast right after the take.
                 const actual = r.actual_transition_type;
-                const note = (actual && actual !== type.toLowerCase())
-                    ? ' (' + r.message + ' — downgraded to ' + actual + ')'
-                    : '';
-                setStatus(r.message + note);
+                // A stinger whose clip could not play comes back as the
+                // transition beneath. It is already over, and the failure is
+                // the useful message, so leave that on screen.
+                const downgraded = actual && actual !== type.toLowerCase();
+                if (!(type === 'stinger' && downgraded)) {
+                    setStatus(r.message + (downgraded
+                        ? ' (' + r.message + ' — downgraded to ' + actual + ')'
+                        : ''));
+                }
+                // A stinger runs for the length of its clip; StingerCompleted
+                // releases the button. The timeout is only a fallback for a
+                // dropped socket.
+                const busyMs = (type === 'stinger' && !downgraded) ? 15000 : durationMs;
                 setTimeout(() => {
                     transitioning = false;
                     document.getElementById('autoBtn').classList.remove('active');
-                }, durationMs);
+                }, busyMs);
             }).catch(e => {
                 // Revert swap on error
                 currentPgm = fromPgm;
@@ -1763,6 +1809,99 @@
                 .classList.toggle('hidden', base !== 'push' && base !== 'slide');
             document.getElementById('wipeRow').classList.toggle('hidden', base !== 'wipe');
             document.getElementById('fxRow').classList.toggle('hidden', base !== 'fx');
+            document.getElementById('stingerRow').classList.toggle('hidden', base !== 'stinger');
+        }
+
+        function setStingerClip(v) {
+            stingerSource = v;
+            renderStingerSummary();
+        }
+
+        const STINGER_UNDER_LABELS = {
+            cut: 'cut', fade: 'mix', dip_to_black: 'dip',
+            wipe_left: 'wipe \u2190', wipe_right: 'wipe \u2192',
+            wipe_up: 'wipe \u2191', wipe_down: 'wipe \u2193',
+        };
+
+        // What the operator needs before pressing AUTO: how long the mixer is
+        // committed for, and where under the clip the sources change.
+        function renderStingerSummary() {
+            const el = document.getElementById('stingerSummary');
+            const clip = stingerClips[stingerSource];
+            if (!clip) { el.textContent = '\u2014'; return; }
+            const secs = (ms) => (ms / 1000).toFixed(1) + 's';
+            // A clip that declares no cut point is cut at its halfway mark.
+            const cutMs = clip.cutMs || Math.round(clip.lengthMs / 2);
+            const under = STINGER_UNDER_LABELS[clip.under] || clip.under;
+            const beneath = (clip.under === 'cut')
+                ? 'cut beneath'
+                : under + ' ' + clip.underMs + 'ms beneath';
+            el.textContent = clip.lengthMs
+                ? secs(clip.lengthMs) + ', cut at ' + secs(cutMs) + ', ' + beneath
+                : 'clip length unknown, ' + beneath;
+        }
+
+        // The clip's length is only known to its running media player, so it
+        // comes from the player state rather than from the flow definition.
+        async function stingerClipLengthMs(blockId) {
+            try {
+                const resp = await fetch('/api/flows/' + FLOW_ID + '/blocks/' + encodeURIComponent(blockId) + '/player/state');
+                if (!resp.ok) return 0;
+                const st = await resp.json();
+                return Math.round((st.duration_ns || 0) / 1000000);
+            } catch (e) {
+                return 0;
+            }
+        }
+
+        // Offer only Media Players that declare themselves stinger clip sources.
+        // Wiring one to a DSK input is not enough: an undeclared player is left
+        // playing normally, so it is never held ready to fire.
+        async function loadStingerSources() {
+            const sel = document.getElementById('stingerClip');
+            try {
+                const resp = await fetch('/api/flows/' + FLOW_ID);
+                if (!resp.ok) throw new Error(resp.statusText);
+                const body = await resp.json();
+                const flow = body.flow || body;
+                const sources = (flow.blocks || []).filter(b =>
+                    b.block_definition_id === 'builtin.media_player' &&
+                    b.properties && b.properties.stinger_source === true);
+                sel.innerHTML = '';
+                if (!sources.length) {
+                    sel.innerHTML = '<option value="">no stinger clips</option>';
+                    stingerSource = '';
+                    stingerClips = {};
+                    renderStingerSummary();
+                    return;
+                }
+                stingerClips = {};
+                for (const b of sources) {
+                    const opt = document.createElement('option');
+                    opt.value = b.id;
+                    opt.textContent = b.name || b.id;
+                    sel.appendChild(opt);
+                    stingerClips[b.id] = {
+                        cutMs: b.properties.stinger_cut_point_ms || 0,
+                        under: b.properties.stinger_under_transition || 'cut',
+                        underMs: b.properties.stinger_under_duration_ms || 0,
+                        lengthMs: 0,
+                    };
+                }
+                stingerSource = sources[0].id;
+                renderStingerSummary();
+                for (const b of sources) {
+                    stingerClipLengthMs(b.id).then(ms => {
+                        if (stingerClips[b.id]) stingerClips[b.id].lengthMs = ms;
+                        renderStingerSummary();
+                    });
+                }
+            } catch (e) {
+                sel.innerHTML = '<option value="">unavailable</option>';
+                stingerSource = '';
+                stingerClips = {};
+                renderStingerSummary();
+            }
         }
 
         function setWipeShape(shape) {
@@ -3578,6 +3717,7 @@
                 updateDskButtons();
                 updateOverlayAlphaUi();
                 fetchFxState();
+                loadStingerSources();
                 setStatus('Reconnected - state synced');
             } catch (e) {
                 setStatus('Resync failed: ' + e.message);
@@ -3611,6 +3751,33 @@
                         if (d.flow_id === FLOW_ID && d.block_id === BLOCK_ID) {
                             dskEnabled[d.dsk - 1] = d.enabled;
                             updateDskButtons();
+                        }
+                    }
+                    if (event.type === 'StingerStarted' && event.data) {
+                        const d = event.data;
+                        if (d.flow_id === FLOW_ID && d.block_instance_id === BLOCK_ID) {
+                            const clamped = (d.under_duration_clamped_from != null)
+                                ? ' (beneath shortened from ' + d.under_duration_clamped_from + 'ms)'
+                                : '';
+                            const late = d.armed ? '' : ' [clip was not ready — late start]';
+                            setStatus('Stinger ' + d.source_block_id + ': ' + d.clip_ms
+                                + 'ms clip, cut at ' + d.cut_point_ms + 'ms, '
+                                + d.under_transition + ' beneath' + clamped + late);
+                        }
+                    }
+                    if ((event.type === 'StingerCompleted' || event.type === 'StingerFailed') && event.data) {
+                        const d = event.data;
+                        if (d.flow_id === FLOW_ID && d.block_instance_id === BLOCK_ID) {
+                            if (event.type === 'StingerFailed') {
+                                setStatus('Stinger failed: ' + d.reason);
+                            }
+                            // A failure that leaves the clip on air is not the
+                            // end of the take: the mixer is still claimed, so
+                            // releasing AUTO would only invite a refusal.
+                            if (!(event.type === 'StingerFailed' && d.still_running)) {
+                                transitioning = false;
+                                document.getElementById('autoBtn').classList.remove('active');
+                            }
                         }
                     }
                     if (event.type === 'VisionMixerFtbChanged' && event.data) {
@@ -3659,6 +3826,7 @@
             updateFtbButton();
             updateFxAvailabilityUi();
             fetchFxState();
+            loadStingerSources();
             connectMultiview();
             connectWebSocket();
             if (controlsMinimized) document.body.classList.add('minimized');

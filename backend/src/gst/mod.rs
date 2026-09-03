@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod pipeline_monitor;
 pub mod rtp_hdrext;
 pub mod shaders;
+pub mod stinger;
 pub mod thread_priority;
 pub mod thumbnail;
 pub mod thumbnail_tap;

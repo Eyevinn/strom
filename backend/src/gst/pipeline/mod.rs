@@ -140,6 +140,9 @@ pub enum PipelineError {
     #[error("Flow not found: {0}")]
     FlowNotFound(String),
 
+    #[error("{0}")]
+    Stinger(#[from] crate::gst::stinger::StingerError),
+
     #[error("Property {property} on element {element} cannot be changed in {state:?} state")]
     PropertyNotMutable {
         element: String,
