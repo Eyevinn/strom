@@ -14,6 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
+#[cfg(target_os = "macos")]
+use crate::thread_handle::ThreadHandle;
 use crate::thread_registry::ThreadRegistry;
 use strom_types::{GlRendererInfo, GpuStats, SystemStats, ThreadCpuStats, ThreadStats};
 
@@ -454,10 +456,10 @@ impl ThreadCpuSampler {
         let mut results = Vec::with_capacity(threads.len());
 
         for thread in threads {
-            let cpu_usage = if let Some(current) = Self::read_thread_cpu_time(pid, thread.thread_id)
-            {
+            let thread_id = thread.thread_id();
+            let cpu_usage = if let Some(current) = Self::read_thread_cpu_time(pid, thread_id) {
                 // Calculate delta
-                let prev = self.previous_times.get(&thread.thread_id);
+                let prev = self.previous_times.get(&thread_id);
                 let cpu_usage = if let Some(prev) = prev {
                     let delta_thread =
                         (current.utime + current.stime).saturating_sub(prev.utime + prev.stime);
@@ -471,7 +473,7 @@ impl ThreadCpuSampler {
                 };
 
                 // Store current values for next sample
-                self.previous_times.insert(thread.thread_id, current);
+                self.previous_times.insert(thread_id, current);
 
                 cpu_usage
             } else {
@@ -479,7 +481,7 @@ impl ThreadCpuSampler {
             };
 
             results.push(ThreadCpuStats {
-                thread_id: thread.thread_id,
+                thread_id,
                 cpu_usage,
                 element_name: thread.element_name.clone(),
                 flow_id: thread.flow_id,
@@ -493,7 +495,7 @@ impl ThreadCpuSampler {
 
         // Clean up old entries for threads that no longer exist
         let active_thread_ids: std::collections::HashSet<u64> =
-            threads.iter().map(|t| t.thread_id).collect();
+            threads.iter().map(|t| t.thread_id()).collect();
         self.previous_times
             .retain(|id, _| active_thread_ids.contains(id));
 
@@ -570,9 +572,10 @@ impl ThreadCpuSampler {
         let mut results = Vec::with_capacity(threads.len());
 
         for thread in threads {
-            let cpu_usage = match Self::read_thread_cpu_time(thread.thread_id) {
+            let thread_id = thread.thread_id();
+            let cpu_usage = match Self::read_thread_cpu_time(&thread.handle) {
                 Some(current) => {
-                    let cpu_usage = match self.previous_times.get(&thread.thread_id) {
+                    let cpu_usage = match self.previous_times.get(&thread_id) {
                         Some(prev) => {
                             let delta_thread = current.total_us.saturating_sub(prev.total_us);
                             cpu_usage_percent(delta_thread, delta_total, self.num_cpus)
@@ -581,22 +584,21 @@ impl ThreadCpuSampler {
                     };
 
                     // Store current values for next sample
-                    self.previous_times.insert(thread.thread_id, current);
+                    self.previous_times.insert(thread_id, current);
 
                     cpu_usage
                 }
                 None => {
-                    // The thread is gone (or was never a live mach port). Drop
-                    // any stored baseline: mach recycles port names, so keeping
-                    // it would produce a bogus spike if this name is handed to a
-                    // new thread before the registry entry is cleaned up.
-                    self.previous_times.remove(&thread.thread_id);
+                    // The thread has exited. Drop any stored baseline so the
+                    // entry starts clean if this name is registered again once
+                    // the handle has been released and the name reused.
+                    self.previous_times.remove(&thread_id);
                     0.0
                 }
             };
 
             results.push(ThreadCpuStats {
-                thread_id: thread.thread_id,
+                thread_id,
                 cpu_usage,
                 element_name: thread.element_name.clone(),
                 flow_id: thread.flow_id,
@@ -609,24 +611,29 @@ impl ThreadCpuSampler {
 
         // Clean up old entries for threads that no longer exist
         let active_thread_ids: std::collections::HashSet<u64> =
-            threads.iter().map(|t| t.thread_id).collect();
+            threads.iter().map(|t| t.thread_id()).collect();
         self.previous_times
             .retain(|id, _| active_thread_ids.contains(id));
 
         results
     }
 
-    /// Read cumulative user+system CPU time for a mach thread port.
+    /// Read cumulative user+system CPU time for a thread.
     ///
-    /// Returns `None` for a thread that has exited or a port name that was
-    /// never valid. mach reports this as `MACH_SEND_INVALID_DEST` rather than
-    /// `KERN_INVALID_ARGUMENT`, so any non-success return is treated the same
-    /// way: the thread is skipped for this sample. This is a normal race
-    /// against thread teardown and happens on every sampling tick until the
-    /// registry entry is removed, so it is deliberately not logged.
+    /// Takes a [`ThreadHandle`] rather than a port name, and that is the whole
+    /// safety argument: the handle holds a reference to the port, so the name
+    /// still refers to the thread it was captured from and cannot have been
+    /// recycled to some other — possibly guarded — port. Calling
+    /// `thread_info()` on a recycled name raises `EXC_GUARD` and kills the
+    /// process, with no error return to check.
+    ///
+    /// A thread that has exited keeps its name (the handle holds it) but no
+    /// longer answers, so mach returns a non-success code and the thread is
+    /// skipped for this sample. That happens on every tick between the thread
+    /// exiting and its registry entry being removed, so it is not logged.
     #[cfg(target_os = "macos")]
-    fn read_thread_cpu_time(mach_port: u64) -> Option<ThreadCpuTime> {
-        let port = libc::mach_port_t::try_from(mach_port).ok()?;
+    fn read_thread_cpu_time(handle: &ThreadHandle) -> Option<ThreadCpuTime> {
+        let port = handle.mach_port();
 
         let mut info = std::mem::MaybeUninit::<libc::thread_basic_info>::uninit();
         let mut count = libc::THREAD_BASIC_INFO_COUNT;
@@ -665,7 +672,7 @@ impl ThreadCpuSampler {
         threads
             .iter()
             .map(|thread| ThreadCpuStats {
-                thread_id: thread.thread_id,
+                thread_id: thread.thread_id(),
                 cpu_usage: 0.0, // Not available on this platform
                 element_name: thread.element_name.clone(),
                 flow_id: thread.flow_id,
@@ -719,18 +726,14 @@ mod tests {
         assert_eq!(cpu_usage_percent(1_000, 0, 8), 0.0);
     }
 
-    /// A thread that has exited, or an id that was never a live mach port,
-    /// must produce no sample rather than a bogus reading. mach reports this as
-    /// MACH_SEND_INVALID_DEST; MACH_PORT_NULL reproduces it deterministically.
+    /// A thread that has exited must produce no sample rather than a bogus
+    /// reading. Its handle keeps the port name allocated, so the call is safe
+    /// to make; mach just refuses to answer for a dead thread.
     #[cfg(target_os = "macos")]
     #[test]
-    fn invalid_mach_port_yields_no_sample() {
-        // MACH_PORT_NULL
-        assert!(ThreadCpuSampler::read_thread_cpu_time(0).is_none());
-        // A port name that cannot exist in this task's IPC space.
-        assert!(ThreadCpuSampler::read_thread_cpu_time(0x7fff_ffff).is_none());
-        // Wider than mach_port_t, so it cannot name a port at all.
-        assert!(ThreadCpuSampler::read_thread_cpu_time(u64::MAX).is_none());
+    fn an_exited_thread_yields_no_sample() {
+        let handle = std::thread::spawn(ThreadHandle::current).join().unwrap();
+        assert!(ThreadCpuSampler::read_thread_cpu_time(&handle).is_none());
     }
 
     /// A live thread's port must yield a cumulative time that advances as the
@@ -739,9 +742,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn live_mach_port_reports_advancing_cpu_time() {
-        let port = unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) } as u64;
+        let handle = ThreadHandle::current();
 
-        let before = ThreadCpuSampler::read_thread_cpu_time(port)
+        let before = ThreadCpuSampler::read_thread_cpu_time(&handle)
             .expect("the calling thread's own mach port must be readable");
 
         // Burn a measurable amount of CPU on this thread.
@@ -752,7 +755,7 @@ mod tests {
         }
         assert!(sink > 0);
 
-        let after = ThreadCpuSampler::read_thread_cpu_time(port)
+        let after = ThreadCpuSampler::read_thread_cpu_time(&handle)
             .expect("the calling thread's own mach port must be readable");
 
         assert!(
@@ -781,8 +784,13 @@ mod tests {
 
         let registry = ThreadRegistry::new();
         let flow_id = uuid::Uuid::new_v4();
-        let port = unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) } as u64;
-        registry.register(port, "test-thread".to_string(), flow_id, None, None);
+        registry.register(
+            ThreadHandle::current(),
+            "test-thread".to_string(),
+            flow_id,
+            None,
+            None,
+        );
 
         let mut sampler = ThreadCpuSampler::new();
 

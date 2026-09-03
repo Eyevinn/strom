@@ -3,6 +3,7 @@
 //! This module provides functionality to set thread priorities on GStreamer's
 //! internal streaming threads using the bus sync handler mechanism.
 
+use crate::thread_handle::ThreadHandle;
 use crate::thread_registry::ThreadRegistry;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -301,8 +302,11 @@ pub fn setup_thread_priority_handler(
 
             match status_type {
                 gst::StreamStatusType::Enter => {
-                    // Get the native thread ID
-                    let thread_id = get_current_thread_native_id();
+                    // Captured here, on the streaming thread itself, so the
+                    // handle owns whatever reference makes it safe to sample
+                    // after this thread exits.
+                    let handle = ThreadHandle::current();
+                    let thread_id = handle.id();
 
                     debug!(
                         "Thread {} entering streaming loop for element '{}' in pipeline '{}'",
@@ -370,11 +374,11 @@ pub fn setup_thread_priority_handler(
                         } else {
                             None
                         };
-                        registry.register(thread_id, owner.clone(), flow_id, block_id, actual_pinned_cpus);
+                        registry.register(handle, owner.clone(), flow_id, block_id, actual_pinned_cpus);
                     }
                 }
                 gst::StreamStatusType::Leave => {
-                    let thread_id = get_current_thread_native_id();
+                    let thread_id = ThreadHandle::current().id();
 
                     debug!(
                         "Thread {} leaving streaming loop for element '{}' in pipeline '{}'",
@@ -403,50 +407,6 @@ pub fn setup_thread_priority_handler(
     );
 
     state
-}
-
-/// Get the native thread ID of the current thread.
-///
-/// The value is used as the key in [`ThreadRegistry`] and as the handle the
-/// system monitor samples CPU time with, so each platform returns whatever
-/// identifier its sampling API needs.
-///
-/// On Linux, this returns the TID from gettid() syscall, which is needed
-/// for /proc/{pid}/task/{tid}/stat access.
-///
-/// On macOS, this returns the mach thread port (`mach_port_t`), which is what
-/// `thread_info(THREAD_BASIC_INFO)` takes. It is deliberately not the
-/// `pthread_t`: the port is captured here, on the streaming thread itself, so
-/// the sampler never has to dereference a `pthread_t` whose thread may already
-/// have exited.
-fn get_current_thread_native_id() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        // Use gettid() syscall to get the actual Linux TID
-        // This is different from pthread_t which is what thread_native_id() returns
-        unsafe { libc::syscall(libc::SYS_gettid) as u64 }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // pthread_mach_thread_np() on the calling thread is documented as safe
-        // from any thread and returns the task-local port name for it.
-        unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) as u64 }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // Use Windows API directly - GetCurrentThreadId returns DWORD (u32)
-        extern "system" {
-            fn GetCurrentThreadId() -> u32;
-        }
-        unsafe { GetCurrentThreadId() as u64 }
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        0
-    }
 }
 
 /// Set CPU affinity for a specific thread (Linux only).
@@ -596,7 +556,11 @@ impl SessionThreadConfig {
             let element_name = added.name().to_string();
 
             sink_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, _info| {
-                let thread_id = get_current_thread_native_id();
+                // Captured on the streaming thread itself. These threads never
+                // send a Leave message, so the handle lives until the flow's
+                // entries are dropped by unregister_flow.
+                let handle = ThreadHandle::current();
+                let thread_id = handle.id();
 
                 // Skip if this thread was already configured (multiple pads
                 // can share the same streaming thread).
@@ -655,7 +619,7 @@ impl SessionThreadConfig {
                         None
                     };
                     registry.register(
-                        thread_id,
+                        handle,
                         element_name.clone(),
                         flow_id,
                         block_id,
