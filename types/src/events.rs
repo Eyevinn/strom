@@ -255,6 +255,43 @@ pub enum StromEvent {
         transition_type: String,
         duration_ms: u64,
     },
+    /// A stinger started: a keyed clip is now playing over the program.
+    StingerStarted {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_instance_id: String,
+        /// Block supplying the keyed clip.
+        source_block_id: String,
+        /// Length of the clip, which is how long the stinger lasts.
+        clip_ms: u64,
+        /// How far into the clip the transition beneath begins.
+        cut_point_ms: u64,
+        /// The transition running beneath the clip.
+        under_transition: String,
+        /// Duration actually applied to the transition beneath.
+        under_duration_ms: u64,
+        /// Set when the requested duration had to be shortened to finish
+        /// before the clip ended; carries what was originally asked for.
+        under_duration_clamped_from: Option<u64>,
+        /// False when the clip was not parked on its first frame, so it starts
+        /// later than the sub-millisecond armed path.
+        armed: bool,
+    },
+    /// A stinger finished: its keyed input is hidden and the clip re-armed.
+    StingerCompleted {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_instance_id: String,
+        source_block_id: String,
+    },
+    /// A stinger clip could not play. The transition beneath ran on its own.
+    StingerFailed {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        block_instance_id: String,
+        source_block_id: String,
+        reason: String,
+    },
     /// Audio analyzer waveform and vectorscope data from appsink
     AudioAnalyzerData {
         #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
@@ -692,6 +729,60 @@ impl StromEvent {
                 format!(
                     "Transition {} triggered on {} in flow {}: {} -> {} ({}ms)",
                     transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
+                )
+            }
+            StromEvent::StingerStarted {
+                flow_id,
+                block_instance_id,
+                source_block_id,
+                clip_ms,
+                cut_point_ms,
+                under_transition,
+                under_duration_ms,
+                under_duration_clamped_from,
+                armed,
+            } => {
+                let clamped = match under_duration_clamped_from {
+                    Some(requested) => format!(
+                        " (shortened from {}ms so it ends before the clip)",
+                        requested
+                    ),
+                    None => String::new(),
+                };
+                format!(
+                    "Stinger started on {} in flow {}: clip {} ({}ms), cut at {}ms, \
+                     {} beneath for {}ms{}{}",
+                    block_instance_id,
+                    flow_id,
+                    source_block_id,
+                    clip_ms,
+                    cut_point_ms,
+                    under_transition,
+                    under_duration_ms,
+                    clamped,
+                    if *armed { "" } else { " [not armed]" }
+                )
+            }
+            StromEvent::StingerCompleted {
+                flow_id,
+                block_instance_id,
+                source_block_id,
+            } => {
+                format!(
+                    "Stinger complete on {} in flow {} (clip {} re-armed)",
+                    block_instance_id, flow_id, source_block_id
+                )
+            }
+            StromEvent::StingerFailed {
+                flow_id,
+                block_instance_id,
+                source_block_id,
+                reason,
+            } => {
+                format!(
+                    "Stinger clip {} on {} in flow {} could not play ({}); the \
+                     transition beneath ran on its own",
+                    source_block_id, block_instance_id, flow_id, reason
                 )
             }
             StromEvent::AudioAnalyzerData {

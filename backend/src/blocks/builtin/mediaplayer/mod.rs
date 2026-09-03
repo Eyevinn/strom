@@ -88,6 +88,7 @@ mod tests {
             }),
             is_paused: AtomicBool::new(false),
             loop_playlist: AtomicBool::new(true),
+            stinger_armed: AtomicBool::new(false),
             block_id: block_id.to_string(),
             flow_id,
             switching_file: AtomicBool::new(false),
@@ -214,7 +215,7 @@ mod tests {
         assert_eq!(def.id, "builtin.media_player");
         assert_eq!(def.category, "Inputs");
         assert!(def.built_in);
-        assert_eq!(def.exposed_properties.len(), 4);
+        assert_eq!(def.exposed_properties.len(), 5);
 
         let decode = def
             .exposed_properties
@@ -241,6 +242,19 @@ mod tests {
             .exposed_properties
             .iter()
             .any(|p| p.name == "loop_playlist"));
+
+        // Stinger use is opt-in: a player wired to a keyed input for a looping
+        // graphic must not be parked or unlooped, so this defaults to false.
+        let stinger = def
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == "stinger_source")
+            .expect("stinger_source property");
+        assert!(matches!(stinger.property_type, PropertyType::Bool));
+        assert!(matches!(
+            stinger.default_value,
+            Some(PropertyValue::Bool(false))
+        ));
 
         assert_eq!(def.external_pads.inputs.len(), 0);
         assert_eq!(def.external_pads.outputs.len(), 2);
