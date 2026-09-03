@@ -111,11 +111,35 @@ pub struct TriggerTransitionRequest {
     #[serde(default = "default_transition_type")]
     #[cfg_attr(feature = "validation", garde(length(min = 1, max = 50)))]
     pub transition_type: String,
-    /// Duration of the transition in milliseconds (ignored for "cut")
+    /// Duration of the transition in milliseconds (ignored for "cut").
+    ///
+    /// For "stinger" this is the duration of the transition running *beneath*
+    /// the clip, not the length of the clip itself — the clip's own duration
+    /// governs how long the stinger lasts.
     #[serde(default = "default_transition_duration")]
     #[cfg_attr(feature = "validation", garde(range(max = 60000)))]
     pub duration_ms: u64,
+    /// Stinger only: block id of the media player supplying the keyed clip.
+    /// Required when `transition_type` is "stinger", ignored otherwise.
+    #[serde(default)]
+    #[cfg_attr(feature = "validation", garde(length(max = 200)))]
+    pub stinger_source: Option<String>,
+    /// Stinger only: how far into the clip the underlying transition begins,
+    /// in milliseconds. Must be less than the clip's duration.
+    #[serde(default)]
+    #[cfg_attr(feature = "validation", garde(range(max = 600000)))]
+    pub stinger_cut_point_ms: Option<u64>,
+    /// Stinger only: the transition that runs beneath the clip while it covers
+    /// the frame. Defaults to "cut" when omitted.
+    #[serde(default)]
+    #[cfg_attr(feature = "validation", garde(length(min = 1, max = 50)))]
+    pub stinger_under_transition: Option<String>,
 }
+
+/// The transition that runs beneath a stinger when the request does not name
+/// one. A covering clip hides the change, so a cut is both the cheapest and
+/// the conventional choice.
+pub const DEFAULT_STINGER_UNDER_TRANSITION: &str = "cut";
 
 fn default_transition_type() -> String {
     "fade".to_string()
@@ -1357,4 +1381,45 @@ pub struct FadeToBlackResponse {
 pub struct MultiviewEndpointResponse {
     /// WHEP endpoint path (e.g. "/whep/my-endpoint"), empty if not connected.
     pub endpoint: String,
+}
+
+#[cfg(test)]
+mod transition_request_tests {
+    use super::*;
+
+    /// The stinger fields must not become required for the forty transition
+    /// types that predate them — an existing client sends none of them.
+    #[test]
+    fn request_without_stinger_fields_still_deserializes() {
+        let json = r#"{"from_input":0,"to_input":1,"transition_type":"fade","duration_ms":500}"#;
+        let req: TriggerTransitionRequest =
+            serde_json::from_str(json).expect("legacy request must still parse");
+        assert_eq!(req.transition_type, "fade");
+        assert_eq!(req.duration_ms, 500);
+        assert!(req.stinger_source.is_none());
+        assert!(req.stinger_cut_point_ms.is_none());
+        assert!(req.stinger_under_transition.is_none());
+    }
+
+    /// Only from_input/to_input are mandatory; everything else defaults.
+    #[test]
+    fn request_with_only_inputs_deserializes() {
+        let json = r#"{"from_input":0,"to_input":1}"#;
+        let req: TriggerTransitionRequest =
+            serde_json::from_str(json).expect("minimal request must parse");
+        assert_eq!(req.transition_type, default_transition_type());
+        assert_eq!(req.duration_ms, default_transition_duration());
+    }
+
+    #[test]
+    fn stinger_request_carries_its_fields() {
+        let json = r#"{"from_input":0,"to_input":1,"transition_type":"stinger",
+            "stinger_source":"mp1","stinger_cut_point_ms":400,
+            "stinger_under_transition":"wipe_left"}"#;
+        let req: TriggerTransitionRequest =
+            serde_json::from_str(json).expect("stinger request must parse");
+        assert_eq!(req.stinger_source.as_deref(), Some("mp1"));
+        assert_eq!(req.stinger_cut_point_ms, Some(400));
+        assert_eq!(req.stinger_under_transition.as_deref(), Some("wipe_left"));
+    }
 }

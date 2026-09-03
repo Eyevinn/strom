@@ -1611,26 +1611,44 @@ pub async fn trigger_transition(
         req.transition_type, block_id, flow_id, req.from_input, req.to_input, req.duration_ms
     );
 
-    let actual_transition_type = state
-        .trigger_transition(
-            &flow_id,
-            &block_id,
-            req.from_input,
-            req.to_input,
-            &req.transition_type,
-            req.duration_ms,
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to trigger transition: {}", e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::with_details(
-                    "Failed to trigger transition",
-                    e.to_string(),
-                )),
+    // A stinger needs its clip resolved, armed and timed, so it takes its own
+    // path; every other type goes straight to the pad-animation controller.
+    let result = if req.transition_type.eq_ignore_ascii_case("stinger") {
+        state
+            .trigger_stinger(
+                &flow_id,
+                &block_id,
+                req.from_input,
+                req.to_input,
+                req.stinger_source.as_deref(),
+                req.stinger_cut_point_ms,
+                req.stinger_under_transition.as_deref(),
+                req.duration_ms,
             )
-        })?;
+            .await
+    } else {
+        state
+            .trigger_transition(
+                &flow_id,
+                &block_id,
+                req.from_input,
+                req.to_input,
+                &req.transition_type,
+                req.duration_ms,
+            )
+            .await
+    };
+
+    let actual_transition_type = result.map_err(|e| {
+        error!("Failed to trigger transition: {}", e);
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_details(
+                "Failed to trigger transition",
+                e.to_string(),
+            )),
+        )
+    })?;
 
     Ok(Json(TransitionResponse {
         message: format!(

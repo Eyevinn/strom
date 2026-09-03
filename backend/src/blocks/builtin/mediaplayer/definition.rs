@@ -62,6 +62,21 @@ pub fn media_player_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
+                name: "stinger_source".to_string(),
+                label: "Stinger Clip Source".to_string(),
+                description: "Declare this player as a stinger clip source. Its clip is held on its first frame so a stinger fires without decode latency, and looping is disabled so it plays once per trigger. Leave off for graphics on a keyed input that should keep playing."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "stinger_source".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "position_update_interval".to_string(),
                 label: "Position Update Interval (ms)".to_string(),
                 description: "How often to broadcast position updates (lower = more responsive)"
