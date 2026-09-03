@@ -105,8 +105,8 @@ Under the JSON, at most **1200 characters**, in this order and nothing else:
     ## Done
     | # | Verdict | Radius | Conf | CI |
     |---|---|---|---|---|
-    | [#721](url) | Comment | GLOBAL | HIGH | linux green, mac/win skipped |
-    | [#725](url) | Approve | SHARED | HIGH | green, new tests ran |
+    | #721 | Comment | GLOBAL | HIGH | linux green, mac/win skipped |
+    | #725 | Approve | SHARED | HIGH | green, new tests ran |
 
     Skipped: #726 #723 #700 (drafts), #698 #696 (dep bumps).
     Left by cap: #700.
@@ -125,6 +125,38 @@ Finish by rewriting the `state:begin`/`state:end` block in the issue body.
 ## Reporting onward
 
 If the task definition gives you somewhere else to report, render that message from
-`needs_human` and the item lists — never from a second pass over the run. Keep it to five
-lines. Never put a credential, a remote URL or a raw log excerpt in it. If the run did
+`needs_human` and the item lists — never from a second pass over the run. If the run did
 nothing, say that in one line rather than staying silent.
+
+**Every reference is a full URL, and every item is its own line.** A bare `#721` autolinks
+only inside this repository's own issues and pull requests. Everywhere else it is four
+characters a reader has to go look up by hand, so a message that names six items costs six
+searches. Write `<https://github.com/Eyevinn/strom/issues/721|#721>` for a destination that
+takes that link form, `https://github.com/Eyevinn/strom/issues/721` where it does not, and
+`#721` only in the rendered half above, which is posted here. The `/issues/` path serves pull
+requests too, so one form covers both and you never have to know which an item is.
+
+One line per item, numbered under each heading. Do not merge two items into a sentence,
+and do not write the message as prose — a paragraph naming four pull requests and their
+verdicts is the shape this section exists to prevent.
+
+    *Agent triage* — 2026-08-31T08:00Z, main@1c06c37, 4 items
+
+    *Needs you*
+    1. <https://github.com/Eyevinn/strom/issues/721|#721> — platform builds never compiled the new FFI path
+       `gh workflow run ci.yml --ref wagenet/685-hdrext -f platforms=both`
+    2. <https://github.com/Eyevinn/strom/issues/700|#700> — draft, needs `/agent-fix` to reach class A
+
+    *Reviewed*
+    1. <https://github.com/Eyevinn/strom/issues/721|#721> — Comment, GLOBAL, HIGH
+    2. <https://github.com/Eyevinn/strom/issues/725|#725> — Approve, SHARED, HIGH
+
+    Skipped 5, left by cap 1. Queue: 6 candidates, 1 claimed, 8 awaiting reply, 1 untriaged.
+
+Cap the item lines at twelve. Past that, keep every `needs_human` line and collapse the rest
+into the trailing count — the onward message is a prompt to act, and the full record is in
+the summary comment.
+
+Links into this repository are required, not merely allowed. What must never appear: a
+credential or token, a service endpoint or instance hostname, a log excerpt, or a link to
+anything outside this repository.

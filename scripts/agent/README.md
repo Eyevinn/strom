@@ -71,6 +71,14 @@ useful if the runtime changes and safe to read in public.
   same commit.
 - **`SUMMARY.md` puts JSON before prose** so the human table cannot disagree with the record,
   and so a run's state survives without re-reading a long comment thread.
+- **Reference form is destination-dependent, and that asymmetry is deliberate.** `#738` is
+  right in the summary comment, which is posted in this repository and autolinks it. It is
+  wrong in the onward message, where nothing autolinks and a reader has to search for every
+  item by hand. Do not unify the two on the shorter form to remove the special case; the
+  special case is the whole point. `SUMMARY.md` also carried a blanket "never a remote URL"
+  rule that made bare refs the only option — it now bans the URLs that actually matter
+  (credentials, endpoints, anything outside this repository) and requires the ones that do
+  not.
 
 ## Changing the protocol
 
