@@ -109,6 +109,7 @@ pub(super) fn build_cpu_pipeline(
         // so that upstream GPU-memory sources (e.g. nvh264dec from efpsrt_input)
         // negotiate correctly against the CPU compositor backend.
         let videoconvert = elements::make_element(vc_factory, &vc_id_dsk)?;
+        gpu::configure_video_convert(&videoconvert);
 
         elems.push((q_id.clone(), queue));
         elems.push((vc_id_dsk.clone(), videoconvert));

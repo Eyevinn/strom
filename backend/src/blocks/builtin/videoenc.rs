@@ -17,7 +17,7 @@
 //! - capsfilter: Sets output caps for proper codec negotiation
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gpu::video_convert_mode;
+use crate::gpu::{self, video_convert_mode};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -129,6 +129,7 @@ impl BlockBuilder for VideoEncBuilder {
             .map_err(|e| {
                 BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
             })?;
+        gpu::configure_video_convert(&videoconvert);
 
         let encoder = gst::ElementFactory::make(&encoder_name)
             .name(&encoder_id)
