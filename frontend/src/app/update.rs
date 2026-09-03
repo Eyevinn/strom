@@ -1708,12 +1708,14 @@ impl eframe::App for StromApp {
         }
 
         // Show routing matrix editor if open
-        let mut routing_save_pending: Option<(strom_types::FlowId, String, String)> = None;
+        let mut routing_save_pending: Option<(
+            strom_types::FlowId,
+            String,
+            crate::audiorouter::RoutingUpdate,
+        )> = None;
         if let Some(ref mut editor) = self.routing_matrix_editor {
-            if let Some(routing_json) = editor.show(ui.ctx()) {
-                // Mark that we need to save
-                routing_save_pending =
-                    Some((editor.flow_id, editor.block_id.clone(), routing_json));
+            if let Some(update) = editor.show(ui.ctx()) {
+                routing_save_pending = Some((editor.flow_id, editor.block_id.clone(), update));
             }
 
             if !editor.open {
@@ -1722,7 +1724,12 @@ impl eframe::App for StromApp {
         }
 
         // Process routing save outside the borrow
-        if let Some((flow_id, block_id, routing_json)) = routing_save_pending {
+        if let Some((flow_id, block_id, update)) = routing_save_pending {
+            let crate::audiorouter::RoutingUpdate {
+                json: routing_json,
+                persist,
+                live,
+            } = update;
             tracing::debug!(
                 "Processing routing save for block {} in flow {}",
                 block_id,
@@ -1745,13 +1752,72 @@ impl eframe::App for StromApp {
                 if let Some(block) = flow.blocks.iter_mut().find(|b| b.id == block_id) {
                     block.properties.insert(
                         "routing_matrix".to_string(),
-                        strom_types::PropertyValue::String(routing_json),
+                        strom_types::PropertyValue::String(routing_json.clone()),
                     );
                 }
             }
 
-            // Save the flow
-            self.save_current_flow(ui.ctx());
+            // Apply it to the running pipeline as well. Saving the flow only
+            // persists it — `POST /api/flows/{id}` applies pad properties live
+            // but never block properties, so without this the new routing would
+            // not take effect until the flow was restarted (which tears down
+            // WHEP sessions and resets meters). `routing_matrix` is declared
+            // live, so the block-property endpoint fades every crosspoint that
+            // changed instead.
+            //
+            // Debounce through the same filter the property inspector's live
+            // controls use, so dragging a crosspoint gain does not put one
+            // request per frame on the wire. The filter also flushes the final
+            // value, so the gain you let go of is the gain that lands.
+            // Only for a block whose routing_matrix is declared live.
+            // `builtin.audiorouter`'s routing is topology, so the backend would
+            // reject the write and the round-trip would be wasted.
+            let updates = crate::properties::drain_live_updates(
+                &mut self.live_property_debounce,
+                if live {
+                    vec![crate::properties::LivePropertyUpdate {
+                        flow_id,
+                        block_id: block_id.clone(),
+                        property_name: "routing_matrix".to_string(),
+                        value: strom_types::PropertyValue::String(routing_json.clone()),
+                    }]
+                } else {
+                    Vec::new()
+                },
+            );
+            if self
+                .live_property_debounce
+                .values()
+                .any(|v| v.pending.is_some())
+            {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(
+                        crate::properties::LIVE_PROPERTY_DEBOUNCE_MS,
+                    ));
+            }
+            for update in updates {
+                let api = self.api.clone();
+                spawn_task(async move {
+                    if let Err(e) = api
+                        .update_block_property(
+                            &update.flow_id,
+                            &update.block_id,
+                            &update.property_name,
+                            update.value,
+                            None,
+                        )
+                        .await
+                    {
+                        tracing::warn!("Live routing update failed: {}", e);
+                    }
+                });
+            }
+
+            // Save mode also writes the flow to storage. Live mode does not:
+            // the block-property endpoint persists the value itself.
+            if persist {
+                self.save_current_flow(ui.ctx());
+            }
         }
 
         // Check for player action signals (from compact UI controls)

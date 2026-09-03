@@ -9,6 +9,73 @@ use strom_types::{PipelineState, PropertyValue};
 use tracing::{debug, info};
 
 impl PipelineManager {
+    /// Apply a Live Audio Router `routing_matrix` to a running pipeline.
+    ///
+    /// Every crosspoint of the instance is a `volume` element, so the write
+    /// fans out: crosspoints named in the JSON go to their gain, and every
+    /// other crosspoint of this instance goes to zero. Each write runs through
+    /// `set_property`, which routes a `volume` element through the ramp
+    /// manager — so a crosspoint opening or closing fades per sample instead
+    /// of stepping (a step is an audible click).
+    ///
+    /// The crosspoints are enumerated from the live element map rather than
+    /// from a build-time registry, so there is no global state to keep in step
+    /// with the pipeline or to leak when a flow is torn down.
+    ///
+    /// `ramp_ms` is passed straight through, so with no caller override every
+    /// crosspoint gets `DEFAULT_VOLUME_RAMP_MS` — the same short anti-click
+    /// fade the mixer block uses for its faders. A caller that wants a
+    /// broadcast-style transition can ask for a longer one.
+    fn apply_live_routing(
+        &self,
+        instance_id: &str,
+        value: &PropertyValue,
+        ramp_ms: Option<u32>,
+    ) -> Result<(), PipelineError> {
+        use crate::blocks::builtin::liveaudiorouter;
+
+        let PropertyValue::String(json) = value else {
+            return Err(PipelineError::InvalidProperty {
+                element: instance_id.to_string(),
+                property: liveaudiorouter::ROUTING_MATRIX_PROPERTY.to_string(),
+                reason: format!("expected a JSON string, got {value:?}"),
+            });
+        };
+
+        let targets = liveaudiorouter::crosspoint_targets(
+            instance_id,
+            json,
+            self.elements.keys().map(String::as_str),
+        );
+        let total = targets.len();
+        let open = targets.iter().filter(|(_, gain)| *gain > 0.0).count();
+
+        for (crosspoint_id, target) in targets {
+            let Some(element) = self.elements.get(crosspoint_id) else {
+                continue;
+            };
+            self.set_property(
+                element,
+                crosspoint_id,
+                "volume",
+                &PropertyValue::Float(target),
+                ramp_ms,
+            )?;
+        }
+
+        if total == 0 {
+            return Err(PipelineError::ElementNotFound(format!(
+                "{instance_id}: no Live Audio Router crosspoints in the running pipeline"
+            )));
+        }
+
+        debug!(
+            "Live Audio Router '{}': {} of {} crosspoints open",
+            instance_id, open, total
+        );
+        Ok(())
+    }
+
     /// Set a property on an element.
     ///
     /// `ramp_ms` is consulted only for routes that support smooth interpolation
@@ -240,6 +307,18 @@ impl PipelineManager {
         ) {
             let _ = self.pipeline.recalculate_latency();
             return Ok(());
+        }
+
+        // Live Audio Router: `routing_matrix` is one JSON string describing the
+        // gain of every crosspoint, and each crosspoint is its own `volume`
+        // element. One property write therefore fans out to many elements —
+        // handled here rather than by the single-element paths below.
+        if property_name == crate::blocks::builtin::liveaudiorouter::ROUTING_MATRIX_PROPERTY {
+            if let Some(instance_id) =
+                crate::blocks::builtin::liveaudiorouter::instance_from_anchor(element_id)
+            {
+                return self.apply_live_routing(instance_id, value, ramp_ms);
+            }
         }
 
         // Translate property name/value for elements that need conversion.
