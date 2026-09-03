@@ -265,6 +265,58 @@ impl PipelineManager {
         }
     }
 
+    /// Set whether a keyed input holds its last frame when its source stops
+    /// feeding it, or contributes nothing.
+    ///
+    /// Holding is the default and is right for an input meant to stay on
+    /// screen. A stinger's input must not hold: the frame its clip ended on
+    /// would be composited the moment the input is revealed for the next take,
+    /// before the new clip's first frame arrives.
+    pub fn set_dsk_hold_last_frame(
+        &self,
+        block_instance_id: &str,
+        dsk_index: usize,
+        num_inputs: usize,
+        hold: bool,
+    ) -> Result<(), PipelineError> {
+        let mixer_id = format!("{}:mixer", block_instance_id);
+        let mixer = self
+            .elements
+            .get(&mixer_id)
+            .ok_or_else(|| PipelineError::ElementNotFound(mixer_id.clone()))?;
+        let pad_name = format!("sink_{}", num_inputs + dsk_index);
+        let pad = find_pad(mixer, &pad_name).ok_or_else(|| PipelineError::PadNotFound {
+            element: mixer_id.clone(),
+            pad: pad_name.clone(),
+        })?;
+        // Holding is expressed as an unbounded repeat of the pad's last buffer.
+        if pad.has_property("max-last-buffer-repeat") {
+            pad.set_property("max-last-buffer-repeat", if hold { u64::MAX } else { 0u64 });
+        } else {
+            warn!(
+                "Vision mixer {}: keyed pad {} cannot be told whether to hold its last \
+                 frame, so a stinger there may flash the end of the previous clip",
+                block_instance_id, pad_name
+            );
+        }
+        Ok(())
+    }
+
+    /// The mixer element's output pad.
+    pub fn mixer_src_pad(&self, block_instance_id: &str) -> Option<gst::Pad> {
+        self.elements
+            .get(&format!("{}:mixer", block_instance_id))?
+            .static_pad("src")
+    }
+
+    /// Duration of one output frame, from the mixer's negotiated caps.
+    pub fn mixer_frame_duration_ns(&self, block_instance_id: &str) -> Option<u64> {
+        let mixer = self.elements.get(&format!("{}:mixer", block_instance_id))?;
+        let caps = mixer.static_pad("src")?.current_caps()?;
+        let fps = caps.structure(0)?.get::<gst::Fraction>("framerate").ok()?;
+        (fps.numer() > 0).then(|| 1_000_000_000u64 * fps.denom() as u64 / fps.numer() as u64)
+    }
+
     /// Set the multiview overlay alpha on a vision mixer block.
     pub fn set_overlay_alpha(
         &self,

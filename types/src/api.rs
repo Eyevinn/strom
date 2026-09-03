@@ -111,11 +111,25 @@ pub struct TriggerTransitionRequest {
     #[serde(default = "default_transition_type")]
     #[cfg_attr(feature = "validation", garde(length(min = 1, max = 50)))]
     pub transition_type: String,
-    /// Duration of the transition in milliseconds (ignored for "cut")
+    /// Duration of the transition in milliseconds (ignored for "cut").
+    ///
+    /// Ignored for "stinger": a stinger lasts as long as its clip, and the
+    /// transition beneath is timed by the clip source block.
     #[serde(default = "default_transition_duration")]
     #[cfg_attr(feature = "validation", garde(range(max = 60000)))]
     pub duration_ms: u64,
+    /// Stinger only: block id of the media player supplying the keyed clip.
+    /// Required when `transition_type` is "stinger", ignored otherwise. The
+    /// cut point and the transition beneath come from that block.
+    #[serde(default)]
+    #[cfg_attr(feature = "validation", garde(length(max = 200)))]
+    pub stinger_source: Option<String>,
 }
+
+/// The transition that runs beneath a stinger when its clip source does not
+/// declare one. A covering clip hides the change, so a cut is both the
+/// cheapest and the conventional choice.
+pub const DEFAULT_STINGER_UNDER_TRANSITION: &str = "cut";
 
 fn default_transition_type() -> String {
     "fade".to_string()
@@ -1357,4 +1371,42 @@ pub struct FadeToBlackResponse {
 pub struct MultiviewEndpointResponse {
     /// WHEP endpoint path (e.g. "/whep/my-endpoint"), empty if not connected.
     pub endpoint: String,
+}
+
+#[cfg(test)]
+mod transition_request_tests {
+    use super::*;
+
+    /// The stinger fields must not become required for the forty transition
+    /// types that predate them — an existing client sends none of them.
+    #[test]
+    fn request_without_stinger_fields_still_deserializes() {
+        let json = r#"{"from_input":0,"to_input":1,"transition_type":"fade","duration_ms":500}"#;
+        let req: TriggerTransitionRequest =
+            serde_json::from_str(json).expect("legacy request must still parse");
+        assert_eq!(req.transition_type, "fade");
+        assert_eq!(req.duration_ms, 500);
+        assert!(req.stinger_source.is_none());
+    }
+
+    /// Only from_input/to_input are mandatory; everything else defaults.
+    #[test]
+    fn request_with_only_inputs_deserializes() {
+        let json = r#"{"from_input":0,"to_input":1}"#;
+        let req: TriggerTransitionRequest =
+            serde_json::from_str(json).expect("minimal request must parse");
+        assert_eq!(req.transition_type, default_transition_type());
+        assert_eq!(req.duration_ms, default_transition_duration());
+    }
+
+    /// A stinger take names only its clip. Cut point and the transition
+    /// beneath are read from that clip's block, not sent per take.
+    #[test]
+    fn stinger_request_names_only_its_clip() {
+        let json = r#"{"from_input":0,"to_input":1,"transition_type":"stinger",
+            "stinger_source":"mp1"}"#;
+        let req: TriggerTransitionRequest =
+            serde_json::from_str(json).expect("stinger request must parse");
+        assert_eq!(req.stinger_source.as_deref(), Some("mp1"));
+    }
 }

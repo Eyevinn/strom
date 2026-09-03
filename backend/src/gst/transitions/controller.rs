@@ -153,6 +153,16 @@ impl TransitionController {
             TransitionType::Wipe(_) | TransitionType::MasterFx(_) => {
                 self.transition_fade(from_input, to_input, current_time, end_time)
             }
+            // A stinger is orchestrated above the controller: it plays a clip
+            // on a keyed pad and calls back in here with the transition that
+            // runs *underneath*. Reaching this arm means that orchestration
+            // passed the outer type through by mistake, which would leave the
+            // program mid-transition with no animation at all.
+            TransitionType::Stinger => Err(TransitionError::NotControllerRunnable(
+                "stinger must be run by the stinger orchestrator, which calls the \
+                 controller with the underlying transition type"
+                    .to_string(),
+            )),
         }
     }
 
