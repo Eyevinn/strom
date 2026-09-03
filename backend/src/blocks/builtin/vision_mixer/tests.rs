@@ -348,3 +348,99 @@ fn overlay_registries_round_trip() {
         "renderer must be cleaned (otherwise overlay-timer-* thread leaks)"
     );
 }
+
+/// `shutdown_overlay_timers` must wait until the timer thread has left cairo,
+/// not just signal it: a thread still painting while `exit()` frees pixman's
+/// globals is the `overlay-timer-*` SIGSEGV on graceful shutdown.
+#[test]
+fn shutdown_overlay_timers_joins_running_timer() {
+    use super::overlay::{
+        overlay_timers_running, register_overlay_renderer, register_overlay_state,
+        shutdown_overlay_timers, start_overlay_timer, unregister_overlay_renderer,
+        unregister_overlay_state, OverlayRenderer, VisionMixerOverlayState,
+    };
+    use gstreamer as gst;
+    use gstreamer::prelude::ElementExt;
+    use gstreamer_app as gst_app;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    gst::init().unwrap();
+
+    let block_id = "test-vm-overlay-timer-shutdown-block-id";
+
+    let lo = layout::compute_layout(1280, 720, 4, 0, ASPECT_16_9, false);
+    let state = Arc::new(VisionMixerOverlayState::new(
+        4,
+        0,
+        0,
+        1,
+        vec!["A".into(), "B".into(), "C".into(), "D".into()],
+        lo,
+        1920,
+        1080,
+        false,
+        super::overlay::PipInitialState::default(),
+    ));
+
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .field("width", 1280i32)
+        .field("height", 720i32)
+        .field("framerate", gst::Fraction::new(50, 1))
+        .build();
+    // Mirror production: leaky and non-blocking, so a render in flight cannot
+    // stall the join.
+    let appsrc = gst_app::AppSrc::builder()
+        .caps(&caps)
+        .format(gst::Format::Time)
+        .is_live(false)
+        .do_timestamp(true)
+        .max_buffers(2)
+        .leaky_type(gst_app::AppLeakyType::Upstream)
+        .build();
+    // The timer only enters its render loop once the appsrc reports PLAYING.
+    appsrc
+        .set_state(gst::State::Playing)
+        .expect("appsrc should reach PLAYING");
+
+    let renderer = Arc::new(Mutex::new(OverlayRenderer::new(
+        appsrc.clone(),
+        caps,
+        Arc::clone(&state),
+        1280,
+        720,
+    )));
+
+    register_overlay_state(block_id, Arc::clone(&state));
+    register_overlay_renderer(block_id, Arc::clone(&renderer));
+
+    let before = overlay_timers_running();
+    start_overlay_timer(block_id.to_string(), Arc::clone(&renderer), (50, 1));
+
+    // Wait for a real render, so shutdown interrupts a thread inside cairo
+    // rather than one waiting for PLAYING.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while appsrc.current_level_buffers() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        appsrc.current_level_buffers() > 0,
+        "overlay timer should have rendered and pushed a frame before shutdown"
+    );
+
+    shutdown_overlay_timers();
+
+    // No sleep, no retry: the thread must be gone once the call returns.
+    assert_eq!(
+        overlay_timers_running(),
+        before,
+        "shutdown_overlay_timers must join the timer thread, not just signal it"
+    );
+
+    let _ = appsrc.set_state(gst::State::Null);
+    unregister_overlay_state(block_id);
+    unregister_overlay_renderer(block_id);
+    // The flag is process-global and terminal; clear it for later tests.
+    super::overlay::reset_overlay_timers_shutdown_for_test();
+}
