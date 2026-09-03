@@ -6604,6 +6604,7 @@ dependencies = [
  "gst-plugins-lsp",
  "gstreamer",
  "gstreamer-app",
+ "gstreamer-base",
  "gstreamer-controller",
  "gstreamer-gl",
  "gstreamer-net",

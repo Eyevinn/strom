@@ -136,6 +136,11 @@ hostname = "0.4"     # Cross-platform hostname detection
 strom-frontend = { path = "../frontend" }
 eframe = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Subclassing base for the vImage converter element in gst::vimage. Already a
+# transitive dependency of gstreamer-video, so naming it adds nothing to build.
+gstreamer-base.workspace = true
+
 [build-dependencies]
 chrono = "0.4"
 uuid = { version = "1.23", features = ["v4"] }

@@ -335,8 +335,13 @@ mod tests {
             .expect("built element has a factory")
             .name()
             .to_string();
+        // Every name here is a single element that converts *and* scales.
+        // `stromvimageconvert` does the scaling half through
+        // `GstVideoConverter`, which is what `videoconvertscale` is built on.
         assert!(
-            factory == "videoconvertscale" || factory == "autovideoconvert",
+            factory == "videoconvertscale"
+                || factory == "autovideoconvert"
+                || factory == video_convert_mode().convert_scale_element_name(),
             "conversion element must convert and scale in one pass, got '{}'",
             factory
         );
