@@ -740,6 +740,16 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid flow name, or a link that names an unknown element, block or pad",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "409": {
             "description": "A flow with the supplied id already exists",
             "content": {
@@ -6714,11 +6724,11 @@
         "properties": {
           "from": {
             "type": "string",
-            "description": "Source element and pad (format: \"element_id\" or \"element_id:pad_name\")"
+            "description": "Source element and pad.\n\nAccepted forms:\n- `\"element_id:pad_name\"` - a named pad\n- `\"element_id\"` (or `\"element_id::\"`) - element-level link, GStreamer\n  picks compatible pads\n- `\"block_id:external_pad_name\"` - a block's external pad\n- `\"block_id\"` - resolved when the flow is stored to the block's only\n  output pad; a block with several output pads is rejected with 400"
           },
           "to": {
             "type": "string",
-            "description": "Destination element and pad (format: \"element_id\" or \"element_id:pad_name\")"
+            "description": "Destination element and pad. Same forms as `from`; a bare `\"block_id\"`\nresolves to the block's only input pad."
           }
         }
       },

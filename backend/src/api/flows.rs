@@ -26,49 +26,157 @@ use tracing::{debug, error, info, trace, warn};
 use crate::layout;
 use crate::state::AppState;
 
-/// Check if a pad reference is valid (exists on an element or block).
+/// Which end of a link an endpoint sits on.
 ///
-/// For elements, we just check if the element exists.
-/// For blocks with computed pads, we strictly validate against the valid_block_pads set.
-/// For blocks without computed pads, we trust the static pad definition and just check block existence.
-fn is_pad_valid(
-    pad_ref: &str,
-    valid_block_pads: &std::collections::HashSet<String>,
-    element_ids: &std::collections::HashSet<String>,
-    block_ids: &std::collections::HashSet<String>,
-    blocks_with_computed_pads: &std::collections::HashSet<String>,
-) -> bool {
-    // Parse the pad reference (format: "element_id:pad_name" or "block_id:pad_name")
-    let parts: Vec<&str> = pad_ref.split(':').collect();
-    if parts.len() < 2 {
-        return false;
-    }
+/// A bare node reference means "the element's own pad", so which pad that is
+/// depends on the side: the source end of a link needs an output pad, the
+/// destination end an input pad.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkSide {
+    From,
+    To,
+}
 
-    let node_id = parts[0];
-
-    // Check if it's an element by looking it up in element_ids
-    // (Don't rely on ID prefix - gst-launch imports use element_type as ID prefix like "videotestsrc_0")
-    if element_ids.contains(node_id) {
-        // For elements, we just check if the element exists
-        // The actual pad validation happens at pipeline build time
-        return true;
-    }
-
-    // Check if it's a block by looking it up in block_ids
-    // (Don't rely on ID prefix - could change in the future)
-    if block_ids.contains(node_id) {
-        // Only strictly validate blocks that have computed pads
-        if blocks_with_computed_pads.contains(node_id) {
-            // This block has dynamic pads - validate against computed external pads
-            return valid_block_pads.contains(pad_ref);
+impl LinkSide {
+    fn pad_kind(self) -> &'static str {
+        match self {
+            LinkSide::From => "output",
+            LinkSide::To => "input",
         }
-        // For blocks without computed pads, assume valid (uses static pad definition from block definition)
-        // The actual pad existence will be validated at pipeline build time
-        return true;
+    }
+}
+
+/// Why a link endpoint could not be used as sent.
+#[derive(Debug)]
+enum EndpointProblem {
+    /// The caller named something this flow does not contain, or a bare
+    /// reference that does not resolve to exactly one pad. A caller mistake:
+    /// the request is rejected rather than quietly trimmed.
+    Rejected(String),
+    /// The endpoint names a pad on a block whose current properties no longer
+    /// produce it (e.g. the track count was lowered). Expected drift, not a
+    /// caller mistake, so the link is pruned.
+    StaleBlockPad(String),
+}
+
+impl EndpointProblem {
+    fn message(&self) -> &str {
+        match self {
+            EndpointProblem::Rejected(m) | EndpointProblem::StaleBlockPad(m) => m,
+        }
+    }
+}
+
+/// The external pads a block instance exposes.
+struct BlockPads {
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    /// True when the pads were computed from the instance's properties. Only
+    /// then is the pad list authoritative enough to call a named pad stale;
+    /// blocks that fall back to their static definition are trusted and
+    /// validated at pipeline build time.
+    computed: bool,
+}
+
+impl BlockPads {
+    fn pads_on(&self, side: LinkSide) -> &[String] {
+        match side {
+            LinkSide::From => &self.outputs,
+            LinkSide::To => &self.inputs,
+        }
+    }
+}
+
+/// True for the two element-level spellings of a pad reference: a bare id, and
+/// the `"id::"` marker `ElementPadRef::to_string_format()` produces.
+fn is_element_only_ref(pad_ref: &str) -> bool {
+    !pad_ref.contains(':') || pad_ref.ends_with("::")
+}
+
+/// Resolve one end of a link against the nodes in the flow.
+///
+/// Returns the endpoint to store: `None` keeps what the caller sent, `Some`
+/// replaces it with a resolved form. A bare reference to an element stays bare,
+/// since GStreamer picks compatible pads when linking element to element. A
+/// bare reference to a block is rewritten to `block_id:pad_name`, because block
+/// expansion resolves external pads by name.
+fn resolve_link_endpoint(
+    pad_ref: &str,
+    side: LinkSide,
+    element_ids: &std::collections::HashSet<String>,
+    block_pads: &std::collections::HashMap<String, BlockPads>,
+) -> Result<Option<String>, EndpointProblem> {
+    // "element_id", "element_id::", "node_id:pad_name". The node id is the
+    // first segment; a block's internal element is not addressable from a flow
+    // link, so everything after the first colon is the pad name.
+    let (node_id, pad_name) = match pad_ref.strip_suffix("::") {
+        Some(node) => (node, None),
+        None => match pad_ref.split_once(':') {
+            Some((node, pad)) => (node, Some(pad)),
+            None => (pad_ref, None),
+        },
+    };
+
+    if node_id.is_empty() {
+        return Err(EndpointProblem::Rejected(format!(
+            "'{}' does not name an element or block",
+            pad_ref
+        )));
     }
 
-    // Unknown node type
-    false
+    if element_ids.contains(node_id) {
+        // Elements are checked for existence only; the pad itself is resolved
+        // when the pipeline is built, where request and dynamic pads are known.
+        return Ok(None);
+    }
+
+    let Some(pads) = block_pads.get(node_id) else {
+        return Err(EndpointProblem::Rejected(format!(
+            "'{}' does not name an element or block in this flow",
+            pad_ref
+        )));
+    };
+
+    let Some(pad_name) = pad_name else {
+        // Bare block reference - resolve it to the block's only pad on this side.
+        let candidates = pads.pads_on(side);
+        return match candidates {
+            [only] => Ok(Some(format!("{}:{}", node_id, only))),
+            [] => Err(EndpointProblem::Rejected(format!(
+                "block '{}' has no {} pad to link",
+                node_id,
+                side.pad_kind()
+            ))),
+            many => Err(EndpointProblem::Rejected(format!(
+                "block '{}' has {} {} pads ({}); name one, e.g. '{}:{}'",
+                node_id,
+                many.len(),
+                side.pad_kind(),
+                many.join(", "),
+                node_id,
+                many[0]
+            ))),
+        };
+    };
+
+    if !pads.computed {
+        // Static pad definition - trusted, validated at pipeline build time.
+        return Ok(None);
+    }
+
+    if pads
+        .inputs
+        .iter()
+        .chain(pads.outputs.iter())
+        .any(|name| name == pad_name)
+    {
+        return Ok(None);
+    }
+
+    Err(EndpointProblem::StaleBlockPad(format!(
+        "block '{}' no longer has a pad '{}'",
+        node_id, pad_name
+    )))
 }
 
 /// List all flows.
@@ -187,8 +295,13 @@ pub async fn get_flow(
 }
 
 /// Prepare a flow for storage: trim endpoint strings, compute pads,
-/// validate links, and apply auto-layout if needed.
-fn prepare_flow(flow: &mut Flow) {
+/// resolve links, and apply auto-layout if needed.
+///
+/// Returns `Err` with a caller-facing description of every link that could not
+/// be resolved. The flow is not fit to store in that case - a request that
+/// carries an unusable link is answered with 400 rather than persisted with the
+/// link missing.
+fn prepare_flow(flow: &mut Flow) -> Result<(), String> {
     // Trim endpoint string properties to avoid whitespace-related issues
     for block in &mut flow.blocks {
         let prop_name = match block.block_definition_id.as_str() {
@@ -223,61 +336,122 @@ fn prepare_flow(flow: &mut Flow) {
         }
     }
 
-    // Remove links that reference pads that no longer exist on blocks
-    let mut valid_block_pads = std::collections::HashSet::new();
-    let mut blocks_with_computed_pads = std::collections::HashSet::new();
-
+    // Resolve every link the caller sent. Links are only dropped when a block
+    // pad genuinely disappeared; anything else is reported back so the caller
+    // learns about it instead of getting a stored flow with links missing.
+    let mut block_pads: std::collections::HashMap<String, BlockPads> =
+        std::collections::HashMap::new();
     for block in &flow.blocks {
-        if let Some(ref external_pads) = block.computed_external_pads {
-            blocks_with_computed_pads.insert(block.id.clone());
-            for input in &external_pads.inputs {
-                valid_block_pads.insert(format!("{}:{}", block.id, input.name));
+        let pads = match &block.computed_external_pads {
+            Some(computed) => BlockPads {
+                inputs: computed.inputs.iter().map(|p| p.name.clone()).collect(),
+                outputs: computed.outputs.iter().map(|p| p.name.clone()).collect(),
+                computed: true,
+            },
+            None => BlockPads {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                computed: false,
+            },
+        };
+        block_pads.insert(block.id.clone(), pads);
+    }
+
+    // Blocks without computed pads expose the pads of their static definition.
+    // Those are only needed to resolve a bare block reference, so build the
+    // definition list only when the flow actually contains one.
+    if block_pads.values().any(|pads| !pads.computed)
+        && flow
+            .links
+            .iter()
+            .any(|link| is_element_only_ref(&link.from) || is_element_only_ref(&link.to))
+    {
+        let definitions = crate::blocks::builtin::get_all_builtin_blocks();
+        for block in &flow.blocks {
+            let Some(pads) = block_pads.get_mut(&block.id) else {
+                continue;
+            };
+            if pads.computed {
+                continue;
             }
-            for output in &external_pads.outputs {
-                valid_block_pads.insert(format!("{}:{}", block.id, output.name));
+            if let Some(definition) = definitions
+                .iter()
+                .find(|d| d.id == block.block_definition_id)
+            {
+                pads.inputs = definition
+                    .external_pads
+                    .inputs
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                pads.outputs = definition
+                    .external_pads
+                    .outputs
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
             }
         }
     }
 
     let element_ids: std::collections::HashSet<String> =
         flow.elements.iter().map(|e| e.id.clone()).collect();
-    let block_ids: std::collections::HashSet<String> =
-        flow.blocks.iter().map(|b| b.id.clone()).collect();
 
-    let initial_link_count = flow.links.len();
-    flow.links.retain(|link| {
-        let from_valid = is_pad_valid(
-            &link.from,
-            &valid_block_pads,
-            &element_ids,
-            &block_ids,
-            &blocks_with_computed_pads,
-        );
-        let to_valid = is_pad_valid(
-            &link.to,
-            &valid_block_pads,
-            &element_ids,
-            &block_ids,
-            &blocks_with_computed_pads,
-        );
+    let mut kept: Vec<strom_types::Link> = Vec::with_capacity(flow.links.len());
+    let mut rejected: Vec<String> = Vec::new();
+    let mut pruned = 0usize;
 
-        if !from_valid || !to_valid {
-            info!(
-                "Removing invalid link: {} -> {} (pad no longer exists)",
-                link.from, link.to
-            );
-            false
-        } else {
-            true
+    for link in std::mem::take(&mut flow.links) {
+        let from = resolve_link_endpoint(&link.from, LinkSide::From, &element_ids, &block_pads);
+        let to = resolve_link_endpoint(&link.to, LinkSide::To, &element_ids, &block_pads);
+
+        match (from, to) {
+            (Ok(from_resolved), Ok(to_resolved)) => {
+                kept.push(strom_types::Link {
+                    from: from_resolved.unwrap_or(link.from),
+                    to: to_resolved.unwrap_or(link.to),
+                });
+            }
+            (from, to) => {
+                let problems: Vec<EndpointProblem> =
+                    [from.err(), to.err()].into_iter().flatten().collect();
+                let detail = problems
+                    .iter()
+                    .map(|problem| problem.message())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+
+                if problems
+                    .iter()
+                    .any(|problem| matches!(problem, EndpointProblem::Rejected(_)))
+                {
+                    warn!(
+                        "Rejecting flow '{}': invalid link {} -> {} ({})",
+                        flow.name, link.from, link.to, detail
+                    );
+                    rejected.push(format!("'{}' -> '{}': {}", link.from, link.to, detail));
+                } else {
+                    warn!(
+                        "Pruning stale link {} -> {} from flow '{}': {}",
+                        link.from, link.to, flow.name, detail
+                    );
+                    pruned += 1;
+                }
+            }
         }
-    });
+    }
 
-    if flow.links.len() < initial_link_count {
+    flow.links = kept;
+
+    if pruned > 0 {
         info!(
-            "Removed {} invalid link(s) from flow '{}'",
-            initial_link_count - flow.links.len(),
-            flow.name
+            "Pruned {} stale link(s) from flow '{}' (block pads changed)",
+            pruned, flow.name
         );
+    }
+
+    if !rejected.is_empty() {
+        return Err(rejected.join(" | "));
     }
 
     // Apply auto-layout if needed
@@ -288,6 +462,8 @@ fn prepare_flow(flow: &mut Flow) {
         );
         layout::apply_auto_layout(flow);
     }
+
+    Ok(())
 }
 
 /// Create a new flow.
@@ -304,6 +480,7 @@ fn prepare_flow(flow: &mut Flow) {
     request_body = Flow,
     responses(
         (status = 201, description = "Flow created", body = FlowResponse),
+        (status = 400, description = "Invalid flow name, or a link that names an unknown element, block or pad", body = ErrorResponse),
         (status = 409, description = "A flow with the supplied id already exists", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
@@ -345,7 +522,15 @@ pub async fn create_flow(
     flow.properties.created_at = Some(now.clone());
     flow.properties.last_modified = Some(now);
 
-    prepare_flow(&mut flow);
+    if let Err(details) = prepare_flow(&mut flow) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_details(
+                "Flow contains link(s) that cannot be resolved",
+                details,
+            )),
+        ));
+    }
 
     info!("Creating flow: {} ({})", flow.name, flow.id);
 
@@ -416,7 +601,15 @@ pub async fn update_flow(
     info!("Updating flow: {} ({})", flow.name, flow.id);
     debug!("Update flow request body: {:?}", flow);
 
-    prepare_flow(&mut flow);
+    if let Err(details) = prepare_flow(&mut flow) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_details(
+                "Flow contains link(s) that cannot be resolved",
+                details,
+            )),
+        ));
+    }
 
     // Update last_modified timestamp (preserve created_at from old flow)
     flow.properties.last_modified = Some(Local::now().to_rfc3339());
@@ -2397,235 +2590,225 @@ pub async fn get_block_thumbnail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     // ========================================================================
-    // is_pad_valid() tests - prevent regression of gst-launch import bug
+    // resolve_link_endpoint() tests - these cover the gst-launch import bug
+    // (element ids that do not start with 'e') and the bare-reference form
+    // documented on `Link`.
     // ========================================================================
 
-    /// Helper to create element_ids set from a slice
+    /// Helper to create the element id set from a slice
     fn element_ids(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|s| s.to_string()).collect()
     }
 
-    /// Helper to create valid_block_pads set from a slice
-    fn block_pads(pads: &[&str]) -> HashSet<String> {
-        pads.iter().map(|s| s.to_string()).collect()
+    /// Helper to build a block whose pads were computed from its properties
+    fn computed_block(inputs: &[&str], outputs: &[&str]) -> BlockPads {
+        BlockPads {
+            inputs: inputs.iter().map(|s| s.to_string()).collect(),
+            outputs: outputs.iter().map(|s| s.to_string()).collect(),
+            computed: true,
+        }
     }
 
-    /// Helper to create blocks_with_computed_pads set from a slice
-    fn computed_blocks(ids: &[&str]) -> HashSet<String> {
-        ids.iter().map(|s| s.to_string()).collect()
+    /// Helper to build a block that falls back to its static pad definition
+    fn static_block(inputs: &[&str], outputs: &[&str]) -> BlockPads {
+        BlockPads {
+            inputs: inputs.iter().map(|s| s.to_string()).collect(),
+            outputs: outputs.iter().map(|s| s.to_string()).collect(),
+            computed: false,
+        }
     }
 
-    /// Helper to create block_ids set from a slice
-    fn block_ids_set(ids: &[&str]) -> HashSet<String> {
-        ids.iter().map(|s| s.to_string()).collect()
+    fn blocks(entries: Vec<(&str, BlockPads)>) -> HashMap<String, BlockPads> {
+        entries
+            .into_iter()
+            .map(|(id, pads)| (id.to_string(), pads))
+            .collect()
+    }
+
+    /// `Ok(None)` means "store what the caller sent".
+    fn assert_kept_as_sent(pad_ref: &str, side: LinkSide, elements: &HashSet<String>) {
+        let resolved = resolve_link_endpoint(pad_ref, side, elements, &HashMap::new());
+        match resolved {
+            Ok(None) => {}
+            Ok(Some(other)) => panic!("'{}' should be stored unchanged, got '{}'", pad_ref, other),
+            Err(problem) => panic!("'{}' should be accepted: {}", pad_ref, problem.message()),
+        }
     }
 
     #[test]
-    fn test_is_pad_valid_ui_created_element() {
+    fn ui_created_element_pads_are_accepted() {
         // UI-created elements have IDs starting with 'e' like "e1234abcd..."
         let elements = element_ids(&["e1234567890abcdef"]);
-        let blocks = block_pads(&[]);
-        let block_ids = block_ids_set(&[]);
-        let computed = computed_blocks(&[]);
 
-        assert!(
-            is_pad_valid(
-                "e1234567890abcdef:src",
-                &blocks,
-                &elements,
-                &block_ids,
-                &computed
-            ),
-            "UI-created element pads should be valid"
-        );
-        assert!(
-            is_pad_valid(
-                "e1234567890abcdef:sink",
-                &blocks,
-                &elements,
-                &block_ids,
-                &computed
-            ),
-            "UI-created element sink pads should be valid"
-        );
+        assert_kept_as_sent("e1234567890abcdef:src", LinkSide::From, &elements);
+        assert_kept_as_sent("e1234567890abcdef:sink", LinkSide::To, &elements);
     }
 
     #[test]
-    fn test_is_pad_valid_gst_launch_imported_element() {
+    fn gst_launch_imported_element_pads_are_accepted() {
         // gst-launch imported elements have IDs like "videotestsrc_0", "videoconvert_1"
-        // This was the bug - these were incorrectly rejected because they don't start with 'e'
+        // This was a bug once - these were rejected because they don't start with 'e'
         let elements = element_ids(&["videotestsrc_0", "videoconvert_1", "fakesink_2"]);
-        let blocks = block_pads(&[]);
-        let block_ids = block_ids_set(&[]);
-        let computed = computed_blocks(&[]);
 
-        assert!(
-            is_pad_valid(
-                "videotestsrc_0:src",
-                &blocks,
-                &elements,
-                &block_ids,
-                &computed
-            ),
-            "gst-launch imported element pads should be valid"
-        );
-        assert!(
-            is_pad_valid(
-                "videoconvert_1:sink",
-                &blocks,
-                &elements,
-                &block_ids,
-                &computed
-            ),
-            "gst-launch imported element sink pads should be valid"
-        );
-        assert!(
-            is_pad_valid("fakesink_2:sink", &blocks, &elements, &block_ids, &computed),
-            "gst-launch imported sink element pads should be valid"
-        );
+        assert_kept_as_sent("videotestsrc_0:src", LinkSide::From, &elements);
+        assert_kept_as_sent("videoconvert_1:sink", LinkSide::To, &elements);
+        assert_kept_as_sent("fakesink_2:sink", LinkSide::To, &elements);
     }
 
     #[test]
-    fn test_is_pad_valid_user_named_element() {
+    fn user_named_element_pads_are_accepted() {
         // Users can name elements anything, e.g., "mysource", "output"
         let elements = element_ids(&["mysource", "myfilter", "output"]);
-        let blocks = block_pads(&[]);
-        let block_ids = block_ids_set(&[]);
-        let computed = computed_blocks(&[]);
 
-        assert!(
-            is_pad_valid("mysource:src", &blocks, &elements, &block_ids, &computed),
-            "User-named element pads should be valid"
-        );
-        assert!(
-            is_pad_valid("output:sink", &blocks, &elements, &block_ids, &computed),
-            "User-named sink pads should be valid"
-        );
+        assert_kept_as_sent("mysource:src", LinkSide::From, &elements);
+        assert_kept_as_sent("output:sink", LinkSide::To, &elements);
     }
 
     #[test]
-    fn test_is_pad_valid_block_with_computed_pads() {
-        // Blocks have IDs starting with 'b' and computed external pads
+    fn bare_element_reference_is_accepted_and_left_alone() {
+        // The documented element-level form: GStreamer picks compatible pads
+        // when the pipeline is built, so there is nothing to resolve here.
+        let elements = element_ids(&["src0", "caps0"]);
+
+        assert_kept_as_sent("src0", LinkSide::From, &elements);
+        assert_kept_as_sent("caps0", LinkSide::To, &elements);
+        // The "::" spelling that ElementPadRef::to_string_format() produces.
+        assert_kept_as_sent("src0::", LinkSide::From, &elements);
+    }
+
+    #[test]
+    fn bare_block_reference_resolves_to_its_only_pad_on_that_side() {
         let elements = element_ids(&[]);
-        let blocks = block_pads(&[
-            "b1234:audio_in",
-            "b1234:audio_out",
-            "b5678:video_in",
-            "b5678:video_out",
-        ]);
-        let block_ids = block_ids_set(&["b1234", "b5678"]);
-        let computed = computed_blocks(&["b1234", "b5678"]);
+        let block_pads = blocks(vec![("b1234", computed_block(&["sink"], &["src"]))]);
 
-        assert!(
-            is_pad_valid("b1234:audio_in", &blocks, &elements, &block_ids, &computed),
-            "Block with computed pads - valid pad should work"
+        assert_eq!(
+            resolve_link_endpoint("b1234", LinkSide::From, &elements, &block_pads)
+                .expect("a block with one output resolves"),
+            Some("b1234:src".to_string()),
+            "a bare block on the source side resolves to its only output pad"
         );
-        assert!(
-            is_pad_valid("b5678:video_out", &blocks, &elements, &block_ids, &computed),
-            "Block with computed pads - valid output should work"
-        );
-        assert!(
-            !is_pad_valid(
-                "b1234:nonexistent",
-                &blocks,
-                &elements,
-                &block_ids,
-                &computed
-            ),
-            "Block with computed pads - invalid pad should fail"
+        assert_eq!(
+            resolve_link_endpoint("b1234", LinkSide::To, &elements, &block_pads)
+                .expect("a block with one input resolves"),
+            Some("b1234:sink".to_string()),
+            "a bare block on the destination side resolves to its only input pad"
         );
     }
 
     #[test]
-    fn test_is_pad_valid_block_without_computed_pads() {
-        // Blocks without computed pads use static definitions - assume valid
+    fn bare_block_reference_with_several_pads_is_rejected_by_name() {
         let elements = element_ids(&[]);
-        let blocks = block_pads(&[]);
-        let block_ids = block_ids_set(&["b9999"]); // b9999 exists but not in computed set
-        let computed = computed_blocks(&[]);
+        let block_pads = blocks(vec![(
+            "b1234",
+            computed_block(&["audio_0", "audio_1"], &["video"]),
+        )]);
 
+        let problem = resolve_link_endpoint("b1234", LinkSide::To, &elements, &block_pads)
+            .expect_err("an ambiguous bare reference must be rejected");
+        assert!(matches!(problem, EndpointProblem::Rejected(_)));
         assert!(
-            is_pad_valid("b9999:any_pad", &blocks, &elements, &block_ids, &computed),
-            "Block without computed pads should be assumed valid"
+            problem.message().contains("audio_0") && problem.message().contains("audio_1"),
+            "the error must name the candidate pads: {}",
+            problem.message()
         );
     }
 
     #[test]
-    fn test_is_pad_valid_nonexistent_element() {
+    fn bare_block_reference_uses_static_pads_when_none_were_computed() {
+        let elements = element_ids(&[]);
+        let block_pads = blocks(vec![("b9999", static_block(&["sink"], &["src"]))]);
+
+        assert_eq!(
+            resolve_link_endpoint("b9999", LinkSide::From, &elements, &block_pads).unwrap(),
+            Some("b9999:src".to_string())
+        );
+    }
+
+    #[test]
+    fn block_pad_that_was_computed_away_is_stale_not_a_caller_error() {
+        let elements = element_ids(&[]);
+        let block_pads = blocks(vec![(
+            "b1234",
+            computed_block(&["audio_in"], &["audio_out"]),
+        )]);
+
+        assert_kept_as_sent_with_blocks("b1234:audio_in", LinkSide::To, &elements, &block_pads);
+        assert_kept_as_sent_with_blocks("b1234:audio_out", LinkSide::From, &elements, &block_pads);
+
+        let problem =
+            resolve_link_endpoint("b1234:nonexistent", LinkSide::To, &elements, &block_pads)
+                .expect_err("a pad the block no longer has must be flagged");
+        assert!(
+            matches!(problem, EndpointProblem::StaleBlockPad(_)),
+            "a vanished block pad is drift, so the link is pruned rather than the request rejected"
+        );
+    }
+
+    #[test]
+    fn named_pad_on_a_block_without_computed_pads_is_trusted() {
+        let elements = element_ids(&[]);
+        let block_pads = blocks(vec![("b9999", static_block(&[], &[]))]);
+
+        assert_kept_as_sent_with_blocks("b9999:any_pad", LinkSide::To, &elements, &block_pads);
+    }
+
+    #[test]
+    fn unknown_node_is_a_caller_error() {
         let elements = element_ids(&["elem1"]);
-        let blocks = block_pads(&[]);
-        let block_ids = block_ids_set(&[]);
-        let computed = computed_blocks(&[]);
+        let block_pads = blocks(vec![("b456", computed_block(&["sink"], &["src"]))]);
 
-        assert!(
-            !is_pad_valid("nonexistent:src", &blocks, &elements, &block_ids, &computed),
-            "Non-existent element should be invalid"
-        );
+        for pad_ref in ["nonexistent:src", "nonexistent", ""] {
+            let problem = resolve_link_endpoint(pad_ref, LinkSide::From, &elements, &block_pads)
+                .expect_err("an unknown node must be rejected");
+            assert!(
+                matches!(problem, EndpointProblem::Rejected(_)),
+                "'{}' names nothing in the flow, so the request must fail",
+                pad_ref
+            );
+        }
     }
 
     #[test]
-    fn test_is_pad_valid_malformed_pad_ref() {
-        let elements = element_ids(&["elem1"]);
-        let blocks = block_pads(&[]);
-        let block_ids = block_ids_set(&[]);
-        let computed = computed_blocks(&[]);
-
-        assert!(
-            !is_pad_valid("no_colon", &blocks, &elements, &block_ids, &computed),
-            "Pad ref without colon should be invalid"
-        );
-        assert!(
-            !is_pad_valid("", &blocks, &elements, &block_ids, &computed),
-            "Empty pad ref should be invalid"
-        );
-    }
-
-    #[test]
-    fn test_is_pad_valid_mixed_elements_and_blocks() {
+    fn mixed_elements_and_blocks() {
         // Realistic scenario with both UI elements and blocks
         let elements = element_ids(&["e123", "videotestsrc_0"]);
-        let blocks = block_pads(&["b456:audio_in", "b456:audio_out"]);
-        let block_ids = block_ids_set(&["b456"]);
-        let computed = computed_blocks(&["b456"]);
+        let block_pads = blocks(vec![(
+            "b456",
+            computed_block(&["audio_in"], &["audio_out"]),
+        )]);
 
-        // Elements
-        assert!(is_pad_valid(
-            "e123:src", &blocks, &elements, &block_ids, &computed
-        ));
-        assert!(is_pad_valid(
+        assert_kept_as_sent_with_blocks("e123:src", LinkSide::From, &elements, &block_pads);
+        assert_kept_as_sent_with_blocks(
             "videotestsrc_0:src",
-            &blocks,
+            LinkSide::From,
             &elements,
-            &block_ids,
-            &computed
-        ));
+            &block_pads,
+        );
+        assert_kept_as_sent_with_blocks("b456:audio_in", LinkSide::To, &elements, &block_pads);
 
-        // Blocks
-        assert!(is_pad_valid(
-            "b456:audio_in",
-            &blocks,
-            &elements,
-            &block_ids,
-            &computed
+        assert!(matches!(
+            resolve_link_endpoint("b456:nonexistent", LinkSide::To, &elements, &block_pads),
+            Err(EndpointProblem::StaleBlockPad(_))
         ));
-        assert!(!is_pad_valid(
-            "b456:nonexistent",
-            &blocks,
-            &elements,
-            &block_ids,
-            &computed
+        assert!(matches!(
+            resolve_link_endpoint("unknown:src", LinkSide::From, &elements, &block_pads),
+            Err(EndpointProblem::Rejected(_))
         ));
+    }
 
-        // Invalid
-        assert!(!is_pad_valid(
-            "unknown:src",
-            &blocks,
-            &elements,
-            &block_ids,
-            &computed
-        ));
+    fn assert_kept_as_sent_with_blocks(
+        pad_ref: &str,
+        side: LinkSide,
+        elements: &HashSet<String>,
+        block_pads: &HashMap<String, BlockPads>,
+    ) {
+        match resolve_link_endpoint(pad_ref, side, elements, block_pads) {
+            Ok(None) => {}
+            Ok(Some(other)) => panic!("'{}' should be stored unchanged, got '{}'", pad_ref, other),
+            Err(problem) => panic!("'{}' should be accepted: {}", pad_ref, problem.message()),
+        }
     }
 }
