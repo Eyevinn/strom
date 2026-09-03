@@ -191,10 +191,12 @@ fn build_flow(block_id: &str, output_format: &str) -> Flow {
     flow
 }
 
-/// Mean luma of a horizontal band of an RGBA frame. White reads high, red
-/// mid, black low — enough to tell "background shows through" from "graphic
-/// painted opaquely".
-fn mean_luma(sample: &gstreamer::Sample, x0: usize, x1: usize) -> f64 {
+/// Fraction of red and of white pixels in a horizontal band of an RGBA frame.
+///
+/// Colour fractions rather than mean luma: an all-black startup frame is dark
+/// the way an opaque-keyed frame is dark, so a brightness threshold cannot
+/// tell "the graphic is up" from "nothing is composited yet".
+fn band_colors(sample: &gstreamer::Sample, x0: usize, x1: usize) -> (f64, f64) {
     use gstreamer_video::{VideoFormat, VideoFrameRef, VideoInfo};
     let caps = sample.caps().expect("caps");
     let info = VideoInfo::from_caps(caps).expect("video info from caps");
@@ -208,26 +210,30 @@ fn mean_luma(sample: &gstreamer::Sample, x0: usize, x1: usize) -> f64 {
     let h = info.height() as usize;
     let stride = info.stride()[0] as usize;
     let data = frame.plane_data(0).expect("plane 0");
-    let mut sum = 0u64;
-    let mut n = 0u64;
+    let (mut red, mut white, mut n) = (0u64, 0u64, 0u64);
     for y in (h / 4)..(3 * h / 4) {
         let row = &data[y * stride..];
         for x in x0..x1 {
             let o = x * 4;
-            let (r, g, b) = (row[o] as u64, row[o + 1] as u64, row[o + 2] as u64);
-            sum += (r * 299 + g * 587 + b * 114) / 1000;
+            let (r, g, b) = (row[o], row[o + 1], row[o + 2]);
+            if r > 150 && g < 80 && b < 80 {
+                red += 1;
+            } else if r > 200 && g > 200 && b > 200 {
+                white += 1;
+            }
             n += 1;
         }
     }
-    sum as f64 / n as f64
+    (red as f64 / n as f64, white as f64 / n as f64)
 }
 
 /// What one run of the flow observed.
 struct Measured {
-    /// Mean luma of the opaque (red) half of the keyed DSK graphic.
-    dsk_left: f64,
-    /// Mean luma of the transparent half — the program background must show.
-    dsk_right: f64,
+    /// Fraction of red pixels in the opaque half of the keyed DSK graphic.
+    dsk_left_red: f64,
+    /// Fraction of white pixels in the transparent half — the program
+    /// background must show through there.
+    dsk_right_white: f64,
     /// Fraction of near-white pixels in the multiview frame. The multiview
     /// overlay is a full-canvas keyed RGBA pad; if its alpha is dropped the
     /// multiview is the overlay's own black RGB and this goes to ~0.
@@ -325,7 +331,7 @@ fn run_flow(block_id: &str, output_format: &str) -> Measured {
     // alpha change takes effect a frame or two after set_dsk_enabled), then
     // measure that frame.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    let (dsk_left, dsk_right) = loop {
+    let (dsk_left_red, dsk_right_white) = loop {
         assert!(
             std::time::Instant::now() < deadline,
             "DSK graphic never appeared in PGM within 20s"
@@ -334,11 +340,12 @@ fn run_flow(block_id: &str, output_format: &str) -> Measured {
         else {
             continue;
         };
-        let left = mean_luma(&sample, W / 8, 3 * W / 8);
-        let right = mean_luma(&sample, 5 * W / 8, 7 * W / 8);
-        // The left half turning from white to red means the keyer is live.
-        if left < 150.0 {
-            break (left, right);
+        let (left_red, _) = band_colors(&sample, W / 8, 3 * W / 8);
+        let (_, right_white) = band_colors(&sample, 5 * W / 8, 7 * W / 8);
+        // Wait for the graphic's opaque half to actually be red: early frames
+        // are still black everywhere, and a keyed-opaque failure is black too.
+        if left_red > 0.8 {
+            break (left_red, right_white);
         }
     };
 
@@ -382,8 +389,8 @@ fn run_flow(block_id: &str, output_format: &str) -> Measured {
     manager.stop().expect("stop");
     drop(manager);
     Measured {
-        dsk_left,
-        dsk_right,
+        dsk_left_red,
+        dsk_right_white,
         mv_bright,
         pgm_format,
     }
@@ -396,23 +403,24 @@ fn run_flow(block_id: &str, output_format: &str) -> Measured {
 async fn keyed_pads_keep_alpha_with_alpha_less_output_format() {
     let m = run_flow("vmk_nv12", "NV12");
     eprintln!(
-        "NV12 output_format: dsk left {:.1}, dsk right {:.1}, mv bright {:.3}, pgm format {}",
-        m.dsk_left, m.dsk_right, m.mv_bright, m.pgm_format
+        "NV12 output_format: dsk left red {:.3}, dsk right white {:.3}, mv bright {:.3}, \
+         pgm format {}",
+        m.dsk_left_red, m.dsk_right_white, m.mv_bright, m.pgm_format
     );
     assert_eq!(
         m.pgm_format, "NV12",
         "output_format must still pin the mixer output"
     );
     assert!(
-        m.dsk_left < 150.0,
-        "opaque half of the DSK graphic should be red, luma {:.1}",
-        m.dsk_left
+        m.dsk_left_red > 0.8,
+        "opaque half of the DSK graphic should be red, {:.3} red",
+        m.dsk_left_red
     );
     assert!(
-        m.dsk_right > 180.0,
-        "transparent half of the DSK graphic must show the white background, luma {:.1} \
+        m.dsk_right_white > 0.8,
+        "transparent half of the DSK graphic must show the white background, {:.3} white \
          (alpha flattened before blending)",
-        m.dsk_right
+        m.dsk_right_white
     );
     assert!(
         m.mv_bright > 0.05,
@@ -427,18 +435,19 @@ async fn keyed_pads_keep_alpha_with_alpha_less_output_format() {
 async fn keyed_pads_keep_alpha_with_auto_output_format() {
     let m = run_flow("vmk_auto", "");
     eprintln!(
-        "auto output_format: dsk left {:.1}, dsk right {:.1}, mv bright {:.3}, pgm format {}",
-        m.dsk_left, m.dsk_right, m.mv_bright, m.pgm_format
+        "auto output_format: dsk left red {:.3}, dsk right white {:.3}, mv bright {:.3}, \
+         pgm format {}",
+        m.dsk_left_red, m.dsk_right_white, m.mv_bright, m.pgm_format
     );
     assert!(
-        m.dsk_left < 150.0,
-        "opaque half should be red, luma {:.1}",
-        m.dsk_left
+        m.dsk_left_red > 0.8,
+        "opaque half should be red, {:.3} red",
+        m.dsk_left_red
     );
     assert!(
-        m.dsk_right > 180.0,
-        "transparent half must show the white background, luma {:.1}",
-        m.dsk_right
+        m.dsk_right_white > 0.8,
+        "transparent half must show the white background, {:.3} white",
+        m.dsk_right_white
     );
     assert!(
         m.mv_bright > 0.05,
