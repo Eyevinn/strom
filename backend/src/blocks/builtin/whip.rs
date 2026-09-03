@@ -175,6 +175,28 @@ fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool 
 /// The actual whipserversrc elements are created dynamically per-session
 /// by `create_whipserversrc_for_session` when clients connect. Each session
 /// is assigned a slot and its appsink feeds the slot's appsrc.
+///
+/// A slot's `decodebin` starts with its state locked (see
+/// `prepare_idle_decodebin`); `WhipEndpointConfig::allocate_slot` unlocks it
+/// when a session claims the slot.
+/// Keep a slot with no publisher from holding the pipeline out of PLAYING.
+///
+/// A `decodebin` cannot complete READY->PAUSED until data arrives and it can
+/// typefind, and a pipeline with any child still ASYNC never completes its own
+/// transition. Two guards, for the two moments that bites:
+/// - Locked state keeps an idle slot out of the pipeline's state changes
+///   entirely: it sits in NULL and contributes nothing to the aggregated state.
+/// - `async-handling` makes the decodebin absorb its own ASYNC once unlocked,
+///   so a slot claimed by a session that then sends no media cannot pull a
+///   running pipeline back out of PLAYING.
+///
+/// Neither hides a real preroll failure: a decodebin that errors still posts
+/// its ERROR to the pipeline bus.
+fn prepare_idle_decodebin(decodebin: &gst::Element) {
+    decodebin.set_property("async-handling", true);
+    decodebin.set_locked_state(true);
+}
+
 fn build_whipserversrc(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
@@ -250,6 +272,9 @@ fn build_whipserversrc(
     let mut internal_links: Vec<(ElementPadRef, ElementPadRef)> = Vec::new();
     let mut slot_audio_appsrcs: Vec<gst_app::AppSrc> = Vec::new();
     let mut slot_video_appsrcs: Vec<gst_app::AppSrc> = Vec::new();
+    // Per-slot decodebins, locked until a session claims the slot. Weak refs:
+    // the pipeline owns them.
+    let mut slot_decodebins: Vec<Vec<gst::glib::WeakRef<gst::Element>>> = Vec::new();
 
     // One flag per slot, set when decodebin exposes that slot's video pad.
     // A session stops asking the publisher for keyframes once its flag flips.
@@ -257,6 +282,8 @@ fn build_whipserversrc(
         Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect());
 
     for slot in 0..max_sessions {
+        let mut decodebins_for_slot: Vec<gst::glib::WeakRef<gst::Element>> = Vec::new();
+
         // Audio chain for this slot
         if mode.has_audio() {
             let appsrc_id = format!("{}:appsrc_audio_{}", instance_id, slot);
@@ -292,6 +319,9 @@ fn build_whipserversrc(
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!("decodebin_audio_{}: {}", slot, e))
                     })?;
+
+                prepare_idle_decodebin(&decodebin);
+                decodebins_for_slot.push(decodebin.downgrade());
 
                 let audioconvert = gst::ElementFactory::make("audioconvert")
                     .name(&audioconvert_id)
@@ -395,6 +425,9 @@ fn build_whipserversrc(
                         BlockBuildError::ElementCreation(format!("decodebin_video_{}: {}", slot, e))
                     })?;
 
+                prepare_idle_decodebin(&decodebin);
+                decodebins_for_slot.push(decodebin.downgrade());
+
                 let videoconvert = gst::ElementFactory::make("videoconvert")
                     .name(&videoconvert_id)
                     .build()
@@ -455,6 +488,8 @@ fn build_whipserversrc(
             elements.push((appsrc_id, appsrc.upcast()));
             elements.push((video_out_tee_id, video_out_tee));
         }
+
+        slot_decodebins.push(decodebins_for_slot);
     }
 
     let stun_server = ctx.stun_server();
@@ -490,6 +525,7 @@ fn build_whipserversrc(
             max_sessions,
             slot_audio_appsrcs,
             slot_video_appsrcs,
+            slot_decodebins,
             slot_assignments,
         },
     );
