@@ -598,7 +598,7 @@ impl PropertyInspector {
             }
 
             // Edit Routing Matrix button for Audio Router blocks
-            if definition.id == "builtin.audiorouter"
+            if crate::audiorouter::has_routing_matrix(definition)
                 && ui.button(format!("{} Routing", egui_phosphor::regular::GRAPH)).clicked()
             {
                 crate::app::set_local_storage("open_routing_editor", &block.id);
@@ -805,7 +805,7 @@ impl PropertyInspector {
                 .show(ui, |ui| {
                     if !definition.exposed_properties.is_empty() {
                         // Special handling for Audio Router - show only relevant properties
-                        if definition.id == "builtin.audiorouter" {
+                        if crate::audiorouter::has_routing_matrix(definition) {
                             Self::show_audiorouter_properties(
                                 ui,
                                 block,

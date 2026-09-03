@@ -4,6 +4,17 @@ use egui::{Color32, ScrollArea, Ui};
 use std::collections::HashMap;
 use strom_types::{BlockDefinition, BlockInstance, FlowId, PropertyValue};
 
+/// Whether a block should get the routing matrix editor.
+///
+/// Keyed on the `routing_matrix` property rather than on block ids, so a new
+/// router block does not have to touch the call sites that gate the editor.
+pub fn has_routing_matrix(definition: &BlockDefinition) -> bool {
+    definition
+        .exposed_properties
+        .iter()
+        .any(|p| p.name == "routing_matrix")
+}
+
 /// Routing matrix editor for Audio Router blocks.
 pub struct RoutingMatrixEditor {
     /// Flow ID this editor is for

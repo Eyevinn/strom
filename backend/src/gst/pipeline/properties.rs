@@ -242,6 +242,18 @@ impl PipelineManager {
             return Ok(());
         }
 
+        // Live Audio Router: `routing_matrix` is a JSON string on the block but
+        // an array of arrays of doubles on `audiomixmatrix`, which
+        // `PropertyValue` cannot carry. Intercept and apply directly.
+        if crate::blocks::builtin::liveaudiorouter::try_apply_live_matrix(
+            element,
+            element_id,
+            property_name,
+            value,
+        ) {
+            return Ok(());
+        }
+
         // Translate property name/value for elements that need conversion.
         // Mixer lsp-rs elements use different property names than LV2 conventions.
         // AudioGain stores gain in dB but GStreamer volume element expects linear.
