@@ -12,7 +12,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use strom_types::block::StreamMode;
@@ -106,6 +106,64 @@ pub struct SessionCleanupRequest {
     pub reason: String,
 }
 
+/// Liveness of one WHIP session: when its last media buffer crossed the
+/// appsink→appsrc bridge into the main pipeline.
+///
+/// The counter is written from the appsink's `new_sample` callback, i.e. once
+/// per buffer, so it is a single relaxed store against an epoch taken at session
+/// start. It is read by the session's own inactivity watchdog and by
+/// `allocate_slot_or_take_over`, which needs to know whether an occupied slot
+/// still has a publisher behind it. The counter is an `Arc` of its own because
+/// the session's watchdog thread reads it directly.
+pub struct SessionActivity {
+    /// Session start. All timestamps are milliseconds from here.
+    epoch: Instant,
+    /// Milliseconds from `epoch` at which the last buffer arrived; 0 = none yet.
+    last_buffer_ms: Arc<AtomicU64>,
+}
+
+impl SessionActivity {
+    pub fn new(epoch: Instant, last_buffer_ms: Arc<AtomicU64>) -> Self {
+        Self {
+            epoch,
+            last_buffer_ms,
+        }
+    }
+
+    /// Stamp the arrival of a buffer. Called from the appsink callback, so this
+    /// is the per-buffer hot path: one `Instant::now()` and one relaxed store,
+    /// no lock and no allocation.
+    pub fn touch(&self) {
+        // 0 is reserved for "no buffer yet", so a buffer that lands inside the
+        // first millisecond of the session counts as 1.
+        self.last_buffer_ms.store(
+            (self.epoch.elapsed().as_millis() as u64).max(1),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// The raw counter: milliseconds from `epoch` at which the last buffer
+    /// arrived, 0 if none has. Only useful for comparing two readings — a value
+    /// that changes between them is a publisher that is still sending.
+    pub fn last_buffer(&self) -> u64 {
+        self.last_buffer_ms.load(Ordering::Relaxed)
+    }
+
+    /// Time since the last media buffer, or `None` if no buffer has arrived at
+    /// all — the session is still negotiating, or never produced media.
+    pub fn idle(&self) -> Option<Duration> {
+        let last = self.last_buffer_ms.load(Ordering::Relaxed);
+        if last == 0 {
+            return None;
+        }
+        Some(
+            self.epoch
+                .elapsed()
+                .saturating_sub(Duration::from_millis(last)),
+        )
+    }
+}
+
 /// An active WHIP session (one whipserversrc element per client).
 /// Each session runs in its own GStreamer pipeline to isolate NiceAgent instances.
 struct WhipSession {
@@ -123,6 +181,9 @@ struct WhipSession {
     /// Stops the session's inactivity watchdog thread and suppresses duplicate
     /// cleanup requests. Shared with the callbacks in `whip.rs`.
     cleanup_sent: Arc<AtomicBool>,
+    /// When this session last delivered media. Shared with the session's appsink
+    /// callbacks; see `SessionActivity`.
+    activity: Arc<SessionActivity>,
 }
 
 /// A freshly created WHIP session, handed to `register_session`.
@@ -141,6 +202,8 @@ pub struct NewWhipSession {
     pub slot: usize,
     /// Shared with the session's own callbacks; see `WhipSession::cleanup_sent`.
     pub cleanup_sent: Arc<AtomicBool>,
+    /// Shared with the session's appsink callbacks; see `SessionActivity`.
+    pub activity: Arc<SessionActivity>,
 }
 
 /// Manages WHIP sessions across all endpoints.
@@ -169,6 +232,40 @@ pub struct WhipSessionManager {
 /// gap between a session dying and `register_session` running for it, which is
 /// sub-second in practice.
 const PENDING_CLEANUP_TTL: Duration = Duration::from_secs(30);
+
+/// How long a session must have gone without media before a new client is
+/// allowed to take its slot.
+///
+/// A connected WebRTC publisher delivers audio every ~20 ms and video every
+/// ~33 ms, so two seconds of nothing means the transport is gone, not that the
+/// network had a bad moment. The threshold has to stay well under the session
+/// watchdog's own inactivity timeout, otherwise the watchdog frees the slot
+/// first and takeover buys nothing.
+const TAKEOVER_IDLE_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// How long a POST may be held while the sitting session is judged. Long enough
+/// for a dead session to cross `TAKEOVER_IDLE_THRESHOLD` with polls to spare; the
+/// reasoning is on `allocate_slot_or_take_over`.
+const TAKEOVER_WAIT: Duration = Duration::from_secs(3);
+
+/// How often the takeover wait re-reads the slots and the sitting session's
+/// buffer counter. A live publisher stamps that counter every audio packet
+/// (~20 ms) and every video frame (~33 ms), so one poll is plenty to catch it
+/// moving.
+const TAKEOVER_POLL: Duration = Duration::from_millis(100);
+
+/// The least-live session on an endpoint: the one a new client would displace.
+struct IdlestSession {
+    resource_id: String,
+    port: u16,
+    /// Time since its last media buffer, `None` if it has never delivered one.
+    idle: Option<Duration>,
+    /// Its raw buffer counter, for comparison against the previous poll.
+    last_buffer: u64,
+    /// Another path is already tearing it down, so its slot is about to free.
+    dying: bool,
+    cleanup_sent: Arc<AtomicBool>,
+}
 
 impl WhipSessionManager {
     pub fn new() -> Self {
@@ -299,6 +396,7 @@ impl WhipSessionManager {
             endpoint_id,
             slot,
             cleanup_sent,
+            activity,
         } = session;
 
         // Check if this port was marked for cleanup before we could register it
@@ -339,9 +437,114 @@ impl WhipSessionManager {
                 endpoint_id,
                 slot,
                 cleanup_sent,
+                activity,
             },
         );
         true
+    }
+
+    /// Allocate a slot for a new client, displacing a demonstrably dead session
+    /// if the endpoint is full.
+    ///
+    /// A publisher that dies without sending a WHIP DELETE — network loss, the
+    /// common case for a real participant — leaves its slot occupied until the
+    /// session's inactivity watchdog notices, and every reconnect in between is
+    /// refused with 503.
+    ///
+    /// When all slots are taken, this watches the sitting session for up to
+    /// `TAKEOVER_WAIT` instead of refusing outright. A session whose buffer
+    /// counter is still moving has a publisher behind it and is never touched:
+    /// the new client gets its 503 as soon as the counter is seen to move, which
+    /// is a poll interval, not a wait. A counter that stays frozen past
+    /// `TAKEOVER_IDLE_THRESHOLD` is a dead transport, and the session is handed
+    /// to the ordinary cleanup path so the new client can take the slot it
+    /// releases.
+    ///
+    /// Both cases start out looking identical — a reconnect that lands 300 ms
+    /// after the drop sees the same near-zero idle time as a healthy stream —
+    /// which is why the decision is made on the counter moving rather than on a
+    /// single reading of it.
+    pub async fn allocate_slot_or_take_over(
+        &self,
+        config: &WhipEndpointConfig,
+        resource_id: &str,
+    ) -> Option<usize> {
+        let deadline = Instant::now() + TAKEOVER_WAIT;
+        // The candidate's buffer counter as of the previous poll, so this poll
+        // can tell whether it moved.
+        let mut previous: Option<(String, u64)> = None;
+
+        loop {
+            if let Some(slot) = config.allocate_slot(resource_id) {
+                return Some(slot);
+            }
+
+            // Full. Nothing registered on this endpoint means the slots are held
+            // by sessions still being set up: there is nothing to displace.
+            let candidate = self.idlest_session(&config.endpoint_id)?;
+
+            if candidate.dying {
+                // Another path is already tearing it down. Wait for the slot it
+                // is about to release rather than asking for cleanup twice.
+            } else if candidate
+                .idle
+                .is_some_and(|idle| idle >= TAKEOVER_IDLE_THRESHOLD)
+            {
+                // Win the flag every other teardown path uses, so the session is
+                // cleaned up exactly once and its watchdog thread stops. The
+                // cleanup task is what releases the slot; the next poll takes it.
+                if !candidate.cleanup_sent.swap(true, Ordering::SeqCst) {
+                    let idle_ms = candidate.idle.unwrap_or_default().as_millis();
+                    warn!(
+                        "WhipSessionManager: Displacing session '{}' on port {} ({} ms without media) so a new client can take its slot on endpoint '{}'",
+                        candidate.resource_id, candidate.port, idle_ms, config.endpoint_id
+                    );
+                    let _ = self.cleanup_tx.send(SessionCleanupRequest {
+                        port: candidate.port,
+                        reason: format!(
+                            "displaced by a new client after {} ms without media",
+                            idle_ms
+                        ),
+                    });
+                }
+            } else if previous.as_ref().is_some_and(|(id, last)| {
+                *id == candidate.resource_id && *last != candidate.last_buffer
+            }) {
+                // Its counter moved while we watched: the publisher is still
+                // sending and the endpoint is genuinely full.
+                return None;
+            }
+
+            if Instant::now() + TAKEOVER_POLL >= deadline {
+                return None;
+            }
+            previous = Some((candidate.resource_id, candidate.last_buffer));
+            tokio::time::sleep(TAKEOVER_POLL).await;
+        }
+    }
+
+    /// The session on an endpoint that has gone longest without media — the one
+    /// a new client would displace. `None` if the endpoint has no registered
+    /// session at all.
+    ///
+    /// A session that has never delivered a buffer sorts last and is never
+    /// displaced: it may simply be slow to negotiate (ICE through a TURN relay),
+    /// and evicting it would let two clients take turns throwing each other off
+    /// before either ever sends media.
+    fn idlest_session(&self, endpoint_id: &str) -> Option<IdlestSession> {
+        let sessions = self.sessions.read().unwrap();
+        sessions
+            .iter()
+            .filter(|(_, s)| s.endpoint_id == endpoint_id)
+            .map(|(resource_id, s)| IdlestSession {
+                resource_id: resource_id.clone(),
+                port: s.port,
+                idle: s.activity.idle(),
+                last_buffer: s.activity.last_buffer(),
+                dying: s.cleanup_sent.load(Ordering::SeqCst),
+                cleanup_sent: s.cleanup_sent.clone(),
+            })
+            .max_by_key(|c| (c.dying, c.idle))
     }
 
     /// Look up the port for a session by resource_id.
@@ -500,10 +703,110 @@ mod tests {
         (element, pipeline, Arc::new(AtomicBool::new(false)))
     }
 
+    /// A publisher whose transport is gone: its last buffer arrived `idle` ago
+    /// and the counter has not moved since. `idle` of zero is the case that
+    /// matters — a client reconnecting the instant its publisher died looks, at
+    /// that moment, exactly like a healthy one.
+    fn dead_publisher(idle: Duration) -> Arc<SessionActivity> {
+        // The buffer landed 1 ms into the session, so the counter is non-zero
+        // (0 is reserved for "no buffer yet") and nothing has stamped it since.
+        let epoch = Instant::now() - idle - Duration::from_millis(1);
+        Arc::new(SessionActivity::new(epoch, Arc::new(AtomicU64::new(1))))
+    }
+
+    /// A publisher that is still sending: a thread stamps the counter every
+    /// 20 ms, the way the appsink callback does for every buffer that crosses
+    /// the bridge. The caller sets `stop` to end it.
+    fn live_publisher(stop: Arc<AtomicBool>) -> Arc<SessionActivity> {
+        let activity = Arc::new(SessionActivity::new(
+            Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        let ticking = activity.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                ticking.touch();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        activity
+    }
+
+    /// A session that is still negotiating: connected, but no media yet.
+    fn no_media_yet() -> Arc<SessionActivity> {
+        Arc::new(SessionActivity::new(
+            Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        ))
+    }
+
+    fn endpoint_config(max_sessions: usize) -> WhipEndpointConfig {
+        WhipEndpointConfig {
+            instance_id: "whip-input".to_string(),
+            endpoint_id: "endpoint".to_string(),
+            mode: StreamMode::AudioVideo,
+            stun_server: None,
+            turn_server: None,
+            ice_transport_policy: "all".to_string(),
+            pipeline_weak: Default::default(),
+            decode: true,
+            video_decoding: Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect()),
+            jitterbuffer_latency_ms: 200,
+            do_retransmission: true,
+            dynamic_webrtcbin_store: Arc::new(Mutex::new(HashMap::new())),
+            max_video_bitrate_kbps: 4000,
+            max_sessions,
+            slot_audio_appsrcs: Vec::new(),
+            slot_video_appsrcs: Vec::new(),
+            slot_assignments: Arc::new(RwLock::new(vec![None; max_sessions])),
+        }
+    }
+
+    /// A manager with one single-slot endpoint whose only slot is held by a
+    /// registered session with the given liveness — i.e. a full endpoint.
+    fn full_endpoint(
+        resource_id: &str,
+        port: u16,
+        activity: Arc<SessionActivity>,
+    ) -> (
+        Arc<WhipSessionManager>,
+        Arc<WhipEndpointConfig>,
+        Arc<AtomicBool>,
+    ) {
+        let manager = Arc::new(WhipSessionManager::new());
+        manager.start_cleanup_task();
+        manager.register_endpoint("endpoint".to_string(), endpoint_config(1));
+        let config = manager
+            .get_endpoint_config("endpoint")
+            .expect("endpoint was just registered");
+
+        assert_eq!(
+            config.allocate_slot(resource_id),
+            Some(0),
+            "the endpoint starts with its only slot free"
+        );
+        let cleanup_sent = register_with_activity(&manager, resource_id, port, activity);
+        assert_eq!(
+            config.allocate_slot("someone-else"),
+            None,
+            "the endpoint is now full"
+        );
+        (manager, config, cleanup_sent)
+    }
+
     /// A session's `cleanup_sent` flag is the only way to stop its inactivity
     /// watchdog thread. Every path that removes a session must set it, or the
     /// watchdog outlives the session and asks for cleanup of a port that is gone.
     fn register(manager: &WhipSessionManager, resource_id: &str, port: u16) -> Arc<AtomicBool> {
+        register_with_activity(manager, resource_id, port, dead_publisher(Duration::ZERO))
+    }
+
+    fn register_with_activity(
+        manager: &WhipSessionManager,
+        resource_id: &str,
+        port: u16,
+        activity: Arc<SessionActivity>,
+    ) -> Arc<AtomicBool> {
         let (element, pipeline, cleanup_sent) = dummy_session();
         let registered = manager.register_session(NewWhipSession {
             resource_id: resource_id.to_string(),
@@ -513,6 +816,7 @@ mod tests {
             endpoint_id: "endpoint".to_string(),
             slot: 0,
             cleanup_sent: cleanup_sent.clone(),
+            activity,
         });
         assert!(registered, "session should register");
         assert!(
@@ -581,6 +885,7 @@ mod tests {
             endpoint_id: "endpoint".to_string(),
             slot: 0,
             cleanup_sent: cleanup_sent.clone(),
+            activity: dead_publisher(Duration::ZERO),
         });
 
         assert!(
@@ -609,12 +914,127 @@ mod tests {
             endpoint_id: "endpoint".to_string(),
             slot: 0,
             cleanup_sent: cleanup_sent.clone(),
+            activity: dead_publisher(Duration::ZERO),
         });
 
         assert!(!registered, "a fresh mark must still reject the session");
         assert!(
             cleanup_sent.load(Ordering::SeqCst),
             "a rejected session's watchdog must be stopped too"
+        );
+    }
+
+    /// The bug this guards: a publisher that dies without sending a WHIP DELETE
+    /// (network loss) leaves its slot occupied, and the rejoining client is
+    /// refused with 503 until the inactivity watchdog reclaims the slot seconds
+    /// later. A session whose media has stopped must give its slot up instead.
+    #[tokio::test]
+    async fn a_dead_session_gives_its_slot_to_a_new_client() {
+        let (manager, config, cleanup_sent) = full_endpoint(
+            "dead-session",
+            40010,
+            dead_publisher(TAKEOVER_IDLE_THRESHOLD * 2),
+        );
+
+        let slot = manager
+            .allocate_slot_or_take_over(&config, "rejoining-client")
+            .await;
+
+        assert_eq!(
+            slot,
+            Some(0),
+            "the rejoining client must get the dead session's slot"
+        );
+        assert!(
+            cleanup_sent.load(Ordering::SeqCst),
+            "the displaced session's watchdog must be stopped"
+        );
+        assert!(
+            manager.get_session_port("dead-session").is_none(),
+            "the displaced session must be torn down by the ordinary cleanup path"
+        );
+        assert_eq!(
+            config.slot_assignments.read().unwrap()[0].as_deref(),
+            Some("rejoining-client"),
+            "the slot must be assigned to the new client, not left free"
+        );
+    }
+
+    /// The measured case, and the one a single reading of the idle time gets
+    /// wrong: the publisher is SIGKILLed and its client reconnects a few hundred
+    /// milliseconds later, while the dead session still looks freshly fed. It is
+    /// the counter staying frozen, not its value, that gives the session away.
+    #[tokio::test]
+    async fn a_session_that_died_moments_before_the_post_is_still_displaced() {
+        let (manager, config, cleanup_sent) =
+            full_endpoint("just-died", 40013, dead_publisher(Duration::ZERO));
+
+        let started = Instant::now();
+        let slot = manager
+            .allocate_slot_or_take_over(&config, "rejoining-client")
+            .await;
+
+        assert_eq!(
+            slot,
+            Some(0),
+            "a client reconnecting straight after the drop must still get the slot"
+        );
+        assert!(cleanup_sent.load(Ordering::SeqCst));
+        assert!(
+            started.elapsed() >= TAKEOVER_IDLE_THRESHOLD,
+            "the session must not be displaced before it has been quiet long enough"
+        );
+    }
+
+    /// The risk in takeover: a second participant must not be able to evict a
+    /// publisher that is streaming fine. Its buffer counter is moving, so that
+    /// client still gets 503, and gets it in a poll interval rather than after
+    /// the full takeover wait.
+    #[tokio::test]
+    async fn a_live_session_is_never_displaced() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (manager, config, cleanup_sent) =
+            full_endpoint("live-session", 40011, live_publisher(stop.clone()));
+
+        let started = Instant::now();
+        let slot = manager
+            .allocate_slot_or_take_over(&config, "second-client")
+            .await;
+        stop.store(true, Ordering::SeqCst);
+
+        assert_eq!(slot, None, "a second client must still be refused");
+        assert!(
+            !cleanup_sent.load(Ordering::SeqCst),
+            "a session that is delivering media must not be torn down"
+        );
+        assert!(
+            manager.get_session_port("live-session").is_some(),
+            "the live session must still be registered"
+        );
+        assert!(
+            started.elapsed() < TAKEOVER_IDLE_THRESHOLD,
+            "a live publisher must be recognised from its moving counter, not \
+             waited out: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A session that has not produced a buffer yet may just be slow to
+    /// negotiate (ICE through a TURN relay). Displacing it would let two clients
+    /// take turns evicting each other before either ever sends media.
+    #[tokio::test]
+    async fn a_session_that_has_not_delivered_media_yet_is_not_displaced() {
+        let (manager, config, cleanup_sent) = full_endpoint("negotiating", 40012, no_media_yet());
+
+        let slot = manager
+            .allocate_slot_or_take_over(&config, "second-client")
+            .await;
+
+        assert_eq!(slot, None, "a negotiating session must keep its slot");
+        assert!(!cleanup_sent.load(Ordering::SeqCst));
+        assert!(
+            manager.get_session_port("negotiating").is_some(),
+            "the negotiating session must still be registered"
         );
     }
 }

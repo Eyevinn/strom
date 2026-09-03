@@ -16,7 +16,7 @@ use crate::blocks::{
 };
 use crate::gst::ice_preflight;
 use crate::gst::keyframe_request;
-use crate::whip_session_manager::{SessionCleanupRequest, WhipEndpointConfig};
+use crate::whip_session_manager::{SessionActivity, SessionCleanupRequest, WhipEndpointConfig};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -528,6 +528,17 @@ fn wait_until_deadline_or_stop(stop: &AtomicBool, deadline: Instant) -> bool {
     }
 }
 
+/// A whipserversrc session that has been created and is playing, handed back to
+/// the HTTP handler so it can register the session with the manager.
+pub struct CreatedSession {
+    pub element: gst::Element,
+    pub session_pipeline: gst::Pipeline,
+    /// Internal port the session's whipserversrc is listening on.
+    pub port: u16,
+    /// Liveness handle, shared with the appsink callbacks that feed the slot.
+    pub activity: Arc<SessionActivity>,
+}
+
 /// Create a new whipserversrc element for a single WHIP client session.
 ///
 /// Each session runs in its own isolated GStreamer pipeline to avoid
@@ -537,7 +548,6 @@ fn wait_until_deadline_or_stop(stop: &AtomicBool, deadline: Instant) -> bool {
 /// Media is bridged to the main pipeline via appsink→appsrc, where the
 /// appsrc targets are the pre-built slot elements.
 ///
-/// Returns (element, session_pipeline, port) on success.
 /// `cleanup_sent` is owned by the caller so it can be handed to the session
 /// manager alongside the session: every teardown path sets it, which both
 /// suppresses duplicate cleanup requests and stops this session's inactivity
@@ -547,7 +557,7 @@ pub fn create_whipserversrc_for_session(
     slot: usize,
     cleanup_tx: tokio::sync::mpsc::UnboundedSender<SessionCleanupRequest>,
     cleanup_sent: Arc<AtomicBool>,
-) -> Result<(gst::Element, gst::Pipeline, u16), String> {
+) -> Result<CreatedSession, String> {
     // Allocate a free port
     let listener =
         TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Failed to find free port: {}", e))?;
@@ -757,6 +767,13 @@ pub fn create_whipserversrc_for_session(
     // that (recycled) port pending cleanup for nothing.
     let last_buffer_epoch = Instant::now();
     let last_buffer_ms = Arc::new(AtomicU64::new(0));
+    // Same two values, in the shape the session manager reads them: it has to be
+    // able to tell a slot with a live publisher behind it from one whose
+    // publisher went away without a WHIP DELETE.
+    let activity = Arc::new(SessionActivity::new(
+        last_buffer_epoch,
+        last_buffer_ms.clone(),
+    ));
     {
         let last_buffer_ms_watchdog = last_buffer_ms.clone();
         let cleanup_sent_watchdog = cleanup_sent.clone();
@@ -805,6 +822,7 @@ pub fn create_whipserversrc_for_session(
         let stream_counter = Arc::new(AtomicUsize::new(0));
         let audio_connected = Arc::new(AtomicBool::new(false));
         let video_connected = Arc::new(AtomicBool::new(false));
+        let activity_for_pads = activity.clone();
 
         whipserversrc.connect_pad_added(move |_src, pad| {
             let pad_name = pad.name();
@@ -949,17 +967,14 @@ pub fn create_whipserversrc_for_session(
                 let ts_offset = shared_ts_offset.clone();
                 let main_pipeline_for_ts = main_pipeline_weak.clone();
                 let media_for_log = media_type.to_string();
-                let last_buffer_ms_cb = last_buffer_ms.clone();
-                let last_buffer_epoch_cb = last_buffer_epoch;
+                let activity_cb = activity_for_pads.clone();
 
                 appsink.set_callbacks(
                     gst_app::AppSinkCallbacks::builder()
                         .new_sample(move |sink| {
-                            // Update inactivity watchdog
-                            last_buffer_ms_cb.store(
-                                last_buffer_epoch_cb.elapsed().as_millis() as u64,
-                                Ordering::Relaxed,
-                            );
+                            // Mark the session live: read by its inactivity
+                            // watchdog and by slot takeover
+                            activity_cb.touch();
 
                             let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                             let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
@@ -1054,7 +1069,12 @@ pub fn create_whipserversrc_for_session(
         slot
     );
 
-    Ok((whipserversrc, session_pipeline, port))
+    Ok(CreatedSession {
+        element: whipserversrc,
+        session_pipeline,
+        port,
+        activity,
+    })
 }
 
 // ============================================================================

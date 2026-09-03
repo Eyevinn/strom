@@ -7,7 +7,7 @@
 use crate::api::sdp_transform::{
     add_goog_remb, fix_video_bitrate_hints, strip_cvo_extension, strip_redundancy_codecs,
 };
-use crate::blocks::builtin::whip::create_whipserversrc_for_session;
+use crate::blocks::builtin::whip::{create_whipserversrc_for_session, CreatedSession};
 use crate::json_rejection::JsonBody;
 use crate::state::AppState;
 use crate::whip_session_manager::{NewWhipSession, WhipSessionManager};
@@ -132,11 +132,15 @@ pub async fn whip_post(
     // Allocate a slot for this session (pre-allocate with a temporary resource_id,
     // will be updated when we learn the real resource_id from the Location header)
     let temp_resource_id = uuid::Uuid::new_v4().to_string();
-    let slot = match config.allocate_slot(&temp_resource_id) {
+    let slot = match state
+        .whip_session_manager()
+        .allocate_slot_or_take_over(&config, &temp_resource_id)
+        .await
+    {
         Some(s) => s,
         None => {
             warn!(
-                "WHIP endpoint '{}': all {} slots occupied, rejecting client",
+                "WHIP endpoint '{}': all {} slots occupied by live sessions, rejecting client",
                 endpoint_id, config.max_sessions
             );
             return (
@@ -155,7 +159,12 @@ pub async fn whip_post(
     let cleanup_tx = state.whip_session_manager().cleanup_sender();
     let cleanup_sent = Arc::new(AtomicBool::new(false));
     let cleanup_sent_for_session = cleanup_sent.clone();
-    let (element, session_pipeline, port) = match tokio::task::spawn_blocking(move || {
+    let CreatedSession {
+        element,
+        session_pipeline,
+        port,
+        activity,
+    } = match tokio::task::spawn_blocking(move || {
         create_whipserversrc_for_session(
             &config_for_session,
             slot,
@@ -369,6 +378,7 @@ pub async fn whip_post(
                         endpoint_id: endpoint_id.clone(),
                         slot,
                         cleanup_sent,
+                        activity,
                     });
                 if !registered {
                     warn!(
