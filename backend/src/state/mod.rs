@@ -39,6 +39,8 @@ struct RegisteredEndpoints {
     whip: Vec<String>,
 }
 
+mod stinger;
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -68,6 +70,17 @@ struct AppStateInner {
     affinity_manager: AffinityManager,
     /// Thread CPU sampler for measuring per-thread CPU usage
     thread_cpu_sampler: parking_lot::Mutex<ThreadCpuSampler>,
+    /// Mixers with a stinger currently in flight, as (flow, mixer block id).
+    ///
+    /// A stinger owns a keyed pad and the program bus for the length of its
+    /// clip, so a second trigger is refused rather than queued — queuing would
+    /// need a depth policy and could put a stale stinger on air later.
+    /// Mixers with a stinger running, each holding the token of the take that
+    /// claimed it. A take carries its token so a stale one — from a flow that
+    /// has since been stopped and restarted — cannot act on the new pipeline
+    /// or release a claim that now belongs to somebody else.
+    stingers_in_flight: parking_lot::Mutex<std::collections::HashMap<(FlowId, String), u64>>,
+    next_stinger_token: std::sync::atomic::AtomicU64,
     /// Channel registry for inter-pipeline sharing
     channel_registry: ChannelRegistry,
     /// AES67 stream discovery service (SAP/mDNS)
@@ -134,6 +147,8 @@ impl AppState {
         let num_cores = affinity_manager.num_cores();
         Self {
             inner: Arc::new(AppStateInner {
+                stingers_in_flight: parking_lot::Mutex::new(std::collections::HashMap::new()),
+                next_stinger_token: std::sync::atomic::AtomicU64::new(0),
                 flows: RwLock::new(HashMap::new()),
                 storage: Arc::new(storage),
                 element_discovery: RwLock::new(ElementDiscovery::new()),
@@ -974,6 +989,10 @@ impl AppState {
         };
         info!("manager.start() returned with state: {:?}", state);
 
+        // Park declared stinger clips on their first frame and stop the keyed
+        // inputs they feed holding a stale one, now the pipeline is up.
+        crate::gst::stinger::prepare_declared_sources(*id, &flow, &manager);
+
         // Store pipeline manager and keep a reference for SDP generation
         let pipelines_guard = {
             let mut pipelines = self.inner.pipelines.write().await;
@@ -1523,6 +1542,14 @@ impl AppState {
         {
             let mut state = self.inner.mixer_solo_state.write().await;
             state.remove(id);
+        }
+
+        // Release this flow's stinger claims. Their tasks are still sleeping
+        // out the rest of their clips; dropping the claims is what tells them
+        // they have been superseded, so they leave the next pipeline alone.
+        {
+            let mut in_flight = self.inner.stingers_in_flight.lock();
+            in_flight.retain(|(flow_id, _), _| flow_id != id);
         }
 
         // Get and remove the pipeline

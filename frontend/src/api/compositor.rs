@@ -114,6 +114,10 @@ impl ApiClient {
             to_input,
             transition_type: transition_type.to_string(),
             duration_ms,
+            // Stingers are driven from the vision mixer operator page, not
+            // from this editor, which serves the first-generation compositor
+            // blocks — they have no keyed inputs to play a clip on.
+            stinger_source: None,
         };
 
         let response = self
