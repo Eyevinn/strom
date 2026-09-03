@@ -22,6 +22,11 @@ pub enum VideoConvertMode {
     GpuAccelerated,
     /// Use `videoconvert` - safe software fallback (interop broken or no GPU)
     Software,
+    /// Use `stromvimageconvert` - Accelerate/vImage on the format pairs it
+    /// covers, `GstVideoConverter` on the rest. macOS only, because the
+    /// element only exists there.
+    #[cfg(target_os = "macos")]
+    VImage,
 }
 
 impl VideoConvertMode {
@@ -30,6 +35,8 @@ impl VideoConvertMode {
         match self {
             VideoConvertMode::GpuAccelerated => "autovideoconvert",
             VideoConvertMode::Software => "videoconvert",
+            #[cfg(target_os = "macos")]
+            VideoConvertMode::VImage => crate::gst::vimage::ELEMENT_NAME,
         }
     }
 }
@@ -234,16 +241,41 @@ pub fn detect_gpu_capabilities() -> VideoConvertMode {
 /// Do not add an NVENC check here: NVENC never exists on a Mac, so the probe
 /// could only ever return one answer.
 ///
-/// `Software` is right for two reasons. `autovideoconvert` offers no GPU path
-/// for the frames these call sites see — given GL memory it picks
-/// `glcolorconvert`, but our blocks feed it system memory (the GL chains in
-/// this tree download at their boundary) and it then selects
-/// `videoconvertscale` on the CPU. And being a bin it exposes no `n-threads`,
-/// so it would forfeit the threading below, which is what moves the numbers.
+/// `autovideoconvert` is not a candidate. It offers no GPU path for the frames
+/// these call sites see — given GL memory it picks `glcolorconvert`, but our
+/// blocks feed it system memory (the GL chains in this tree download at their
+/// boundary) and it then selects `videoconvertscale` on the CPU. And being a
+/// bin it exposes no `n-threads`, so it would forfeit the threading that moved
+/// the numbers before vImage did.
+///
+/// That leaves `stromvimageconvert` against `videoconvert`. The vImage element
+/// wins where it has a path and is `GstVideoConverter` — the same code
+/// `videoconvert` runs — where it does not, so the only reasons to stay on
+/// `videoconvert` are the element failing to register or the
+/// `STROM_DISABLE_VIMAGE` escape hatch, which exists so the two can be
+/// benchmarked against each other from one binary.
 #[cfg(target_os = "macos")]
 fn detect_convert_mode() -> VideoConvertMode {
-    info!(
-        "macOS - using software video conversion with n-threads={} (autovideoconvert has no GPU path for system memory here)",
+    if std::env::var_os("STROM_DISABLE_VIMAGE").is_some() {
+        info!(
+            "macOS - STROM_DISABLE_VIMAGE set, using videoconvert with n-threads={}",
+            video_convert_threads()
+        );
+        return VideoConvertMode::Software;
+    }
+
+    if crate::gst::vimage::register() {
+        info!(
+            "macOS - using {} for video conversion (vImage where available, GstVideoConverter with n-threads={} otherwise)",
+            crate::gst::vimage::ELEMENT_NAME,
+            video_convert_threads()
+        );
+        return VideoConvertMode::VImage;
+    }
+
+    warn!(
+        "macOS - {} unavailable, falling back to videoconvert with n-threads={}",
+        crate::gst::vimage::ELEMENT_NAME,
         video_convert_threads()
     );
     VideoConvertMode::Software
@@ -486,8 +518,10 @@ fn sysctl_string(name: &str) -> Option<String> {
 pub fn configure_video_convert(element: &gst::Element) {
     #[cfg(target_os = "macos")]
     {
-        // Only plain `videoconvert` and `videoscale` carry the property;
-        // `autovideoconvert` is a bin with nothing to forward it to.
+        // `videoconvert`, `videoscale` and `stromvimageconvert` carry the
+        // property; `autovideoconvert` is a bin with nothing to forward it to.
+        // On `stromvimageconvert` it sizes the `GstVideoConverter` fallback —
+        // the vImage path runs Accelerate's own pool and ignores it.
         if element.has_property("n-threads") {
             element.set_property("n-threads", video_convert_threads());
         }
