@@ -6,6 +6,8 @@ Common questions are answered in the [FAQ](FAQ.md).
 ## Getting started & deployment
 
 - [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) — guided setup for running a local Strom instance (Docker, GPU, ICE, auth). Good first stop for operators.
+- [HARDWARE_REQUIREMENTS.md](HARDWARE_REQUIREMENTS.md) — CPU/GPU/RAM sizing. WIP: derived, not
+  measured — add your own field reports.
 - [DOCKER.md](DOCKER.md) — generic Docker deployment reference.
 - [DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md) — NVIDIA GPU acceleration (NVENC/NVDEC, CUDA-GL interop, container toolkit).
 - [AUTHENTICATION.md](AUTHENTICATION.md) — session login and API keys.

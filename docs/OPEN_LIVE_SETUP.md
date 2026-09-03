@@ -19,6 +19,9 @@ A Linux host (Ubuntu 22.04+ or equivalent) with:
 - An NVIDIA GPU — **highly preferred** for hardware-accelerated encode/decode and GPU compositing. Optional, but production deployments should plan for one; software fallbacks do not scale.
 - Optional: a Blackmagic DeckLink card for SDI I/O
 
+For sizing guidance — what drives CPU/GPU load and which GPU generations support what — see
+[HARDWARE_REQUIREMENTS.md](HARDWARE_REQUIREMENTS.md).
+
 ---
 
 ## 2. Pull and Run Strom
