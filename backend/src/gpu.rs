@@ -158,7 +158,8 @@ pub fn detect_gpu_capabilities() {
 
     #[cfg(target_os = "macos")]
     info!(
-        "macOS - video conversion uses videoconvert with n-threads={}",
+        "macOS - video conversion uses {} with n-threads={}",
+        video_convert_factory(),
         video_convert_threads()
     );
 
@@ -367,6 +368,36 @@ fn sysctl_string(name: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..end]).into_owned())
 }
 
+/// The element factory blocks use to convert raw video between pixel formats.
+///
+/// On macOS this is `stromvimageconvert` (Accelerate/vImage on the format pairs
+/// it covers, `GstVideoConverter` on the rest) unless it fails to register or
+/// `STROM_DISABLE_VIMAGE` is set, which exists so the two can be benchmarked
+/// against each other from one binary. Elsewhere it is `videoconvert`.
+pub fn video_convert_factory() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        static FACTORY: OnceLock<&'static str> = OnceLock::new();
+        FACTORY.get_or_init(|| {
+            if std::env::var_os("STROM_DISABLE_VIMAGE").is_some() {
+                "videoconvert"
+            } else if crate::gst::vimage::register() {
+                crate::gst::vimage::ELEMENT_NAME
+            } else {
+                warn!(
+                    "macOS - {} unavailable, falling back to videoconvert",
+                    crate::gst::vimage::ELEMENT_NAME
+                );
+                "videoconvert"
+            }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "videoconvert"
+    }
+}
+
 /// Apply tuning properties to a freshly created video conversion or scaling
 /// element.
 ///
@@ -382,7 +413,10 @@ fn sysctl_string(name: &str) -> Option<String> {
 pub fn configure_video_convert(element: &gst::Element) {
     #[cfg(target_os = "macos")]
     {
-        // Only plain `videoconvert` and `videoscale` carry the property.
+        // `videoconvert`, `videoscale` and `stromvimageconvert` carry the
+        // property; `autovideoconvert` is a bin with nothing to forward it to.
+        // On `stromvimageconvert` it sizes the `GstVideoConverter` fallback —
+        // the vImage path runs Accelerate's own pool and ignores it.
         if element.has_property("n-threads") {
             element.set_property("n-threads", video_convert_threads());
         }
