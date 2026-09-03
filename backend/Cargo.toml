@@ -55,6 +55,7 @@ gstreamer-app.workspace = true
 gio.workspace = true
 gstreamer-controller.workspace = true
 gstreamer-net.workspace = true
+gstreamer-rtp.workspace = true
 gstreamer-gl.workspace = true
 gstreamer-video.workspace = true
 gst-plugin-audiofx.workspace = true
