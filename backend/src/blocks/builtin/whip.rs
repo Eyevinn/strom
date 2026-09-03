@@ -16,14 +16,16 @@ use crate::blocks::{
 };
 use crate::gst::ice_preflight;
 use crate::gst::keyframe_request;
-use crate::whip_session_manager::{SessionActivity, SessionCleanupRequest, WhipEndpointConfig};
+use crate::whip_session_manager::{
+    ActivityStamp, SessionActivity, SessionCleanupRequest, WhipEndpointConfig,
+};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use std::collections::HashMap;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use strom_types::block::StreamMode;
@@ -165,6 +167,42 @@ fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool 
         .unwrap_or(true)
 }
 
+/// Stamp a slot's output activity for every buffer that reaches its tee.
+///
+/// The tee's sink pad is the far end of the slot's chain: with `decode=true`
+/// everything upstream of it — `decodebin`, the converter — has already run, and
+/// everything downstream is a flow consumer. A buffer here is media the flow can
+/// actually use, which is the thing the session's appsink cannot see. The appsink
+/// sits in the isolated session pipeline, upstream of all of this, so it stamps
+/// bytes arriving over the network and nothing more.
+///
+/// It is also where a stall shows up: a blocked consumer backs pressure up
+/// through the tee, and the probe simply stops firing while RTP keeps arriving.
+///
+/// BUFFER probes fire per buffer, so the callback is one clock read (`Instant`
+/// takes the vDSO fast path) and two relaxed atomic ops — no lock, no
+/// allocation, no formatting. See `ActivityStamp::touch`.
+fn stamp_slot_output(tee: &gst::Element, stamp: Arc<ActivityStamp>, slot: usize, media: &str) {
+    let Some(sink_pad) = tee.static_pad("sink") else {
+        // Cannot happen for a tee, but falling back to the session appsink's
+        // view of liveness is better than a panic in a block build.
+        warn!(
+            "WHIP Input: slot {} {} output tee has no sink pad, cannot track its liveness",
+            slot, media
+        );
+        return;
+    };
+    sink_pad.add_probe(
+        // BUFFER_LIST as well: nothing on this chain batches today, but an
+        // element that started to would silently stop the stamp otherwise.
+        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+        move |_pad, _info| {
+            stamp.touch();
+            gst::PadProbeReturn::Ok
+        },
+    );
+}
+
 /// Build WHIP Input per-slot output chains.
 ///
 /// At build time, per-slot chains are created in the main pipeline:
@@ -256,7 +294,16 @@ fn build_whipserversrc(
     let video_decoding: Arc<Vec<AtomicBool>> =
         Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect());
 
-    for slot in 0..max_sessions {
+    // One stamp per slot, written by a probe on that slot's output tees below.
+    // This is where a session's media becomes usable to the flow, so this is
+    // where its liveness is measured; see `SessionActivity`. All slots share an
+    // epoch — the stamps are only ever compared against their own readings.
+    let output_epoch = Instant::now();
+    let slot_output: Vec<Arc<ActivityStamp>> = (0..max_sessions)
+        .map(|_| Arc::new(ActivityStamp::new(output_epoch)))
+        .collect();
+
+    for (slot, output_stamp) in slot_output.iter().enumerate() {
         // Audio chain for this slot
         if mode.has_audio() {
             let appsrc_id = format!("{}:appsrc_audio_{}", instance_id, slot);
@@ -355,6 +402,8 @@ fn build_whipserversrc(
                 ));
             }
 
+            stamp_slot_output(&audio_out_tee, output_stamp.clone(), slot, "audio");
+
             slot_audio_appsrcs.push(appsrc.clone());
             elements.push((appsrc_id, appsrc.upcast()));
             elements.push((audio_out_tee_id, audio_out_tee));
@@ -451,6 +500,8 @@ fn build_whipserversrc(
                 ));
             }
 
+            stamp_slot_output(&video_out_tee, output_stamp.clone(), slot, "video");
+
             slot_video_appsrcs.push(appsrc.clone());
             elements.push((appsrc_id, appsrc.upcast()));
             elements.push((video_out_tee_id, video_out_tee));
@@ -490,6 +541,7 @@ fn build_whipserversrc(
             max_sessions,
             slot_audio_appsrcs,
             slot_video_appsrcs,
+            slot_output,
             slot_assignments,
         },
     );
@@ -755,27 +807,38 @@ pub fn create_whipserversrc_for_session(
     // i64::MIN means "not yet computed".
     let shared_ts_offset = Arc::new(AtomicI64::new(i64::MIN));
 
-    // Inactivity watchdog: tracks when the last buffer arrived on any stream.
-    // A background thread checks this and triggers cleanup if no data arrives
-    // for INACTIVITY_TIMEOUT (covers the case where ICE disconnect
-    // notification doesn't fire from the isolated session pipeline).
+    // Liveness for this session, in the shape the session manager reads it: it
+    // has to tell a slot that still has a publisher producing media behind it
+    // from one whose publisher went away without a WHIP DELETE, or whose media
+    // arrives but never comes out of the slot's chain.
+    let slot_output = match config.slot_output.get(slot) {
+        Some(stamp) => stamp.clone(),
+        None => {
+            // One stamp is built per slot, so this cannot happen. An orphan
+            // stamp nothing ever writes would read as "never produced media",
+            // so say so rather than let the session be reaped for it.
+            warn!(
+                "WHIP Input: no output stamp for slot {}, its liveness cannot be tracked",
+                slot
+            );
+            Arc::new(ActivityStamp::new(Instant::now()))
+        }
+    };
+    let activity = Arc::new(SessionActivity::new(Instant::now(), slot_output));
+
+    // Inactivity watchdog. A background thread triggers cleanup once the session
+    // has gone INACTIVITY_TIMEOUT without producing usable media — which covers
+    // both a transport that went away without the ICE disconnect notification
+    // reaching this isolated session pipeline, and a seat that keeps receiving
+    // RTP while nothing decodes out the other end. Neither is worth a slot.
     //
     // The wait is sliced rather than one long sleep so that `cleanup_sent` — set by
     // the ICE callback and by every teardown path in the session manager — ends the
     // thread promptly. A watchdog that outlived its session would send a cleanup
     // request for a port the manager no longer knows, and the manager would then mark
     // that (recycled) port pending cleanup for nothing.
-    let last_buffer_epoch = Instant::now();
-    let last_buffer_ms = Arc::new(AtomicU64::new(0));
-    // Same two values, in the shape the session manager reads them: it has to be
-    // able to tell a slot with a live publisher behind it from one whose
-    // publisher went away without a WHIP DELETE.
-    let activity = Arc::new(SessionActivity::new(
-        last_buffer_epoch,
-        last_buffer_ms.clone(),
-    ));
     {
-        let last_buffer_ms_watchdog = last_buffer_ms.clone();
+        let activity_watchdog = activity.clone();
         let cleanup_sent_watchdog = cleanup_sent.clone();
         let cleanup_tx_watchdog = cleanup_tx.clone();
         std::thread::Builder::new()
@@ -788,23 +851,21 @@ pub fn create_whipserversrc_for_session(
                         // with this session.
                         break;
                     }
-                    let last = last_buffer_ms_watchdog.load(Ordering::Relaxed);
-                    if last == 0 {
-                        // No buffer received yet — keep waiting (session might still be negotiating)
+                    // Nothing to judge yet: still negotiating, or inside the
+                    // grace a decoder gets before its first frame.
+                    let Some(idle) = activity_watchdog.idle() else {
                         continue;
-                    }
-                    let elapsed_ms = last_buffer_epoch.elapsed().as_millis() as u64;
-                    let idle_ms = elapsed_ms.saturating_sub(last);
-                    if idle_ms >= INACTIVITY_TIMEOUT.as_millis() as u64 {
+                    };
+                    if idle >= INACTIVITY_TIMEOUT {
+                        let idle_s = idle.as_secs();
                         if !cleanup_sent_watchdog.swap(true, Ordering::SeqCst) {
                             info!(
-                                "WHIP Input: Inactivity timeout ({}s idle) on port {}, triggering cleanup",
-                                idle_ms / 1000,
-                                port
+                                "WHIP Input: Inactivity timeout ({}s without usable media) on port {}, triggering cleanup",
+                                idle_s, port
                             );
                             let _ = cleanup_tx_watchdog.send(SessionCleanupRequest {
                                 port,
-                                reason: format!("inactivity ({}s idle)", idle_ms / 1000),
+                                reason: format!("inactivity ({}s without usable media)", idle_s),
                             });
                         }
                         break;
@@ -972,9 +1033,10 @@ pub fn create_whipserversrc_for_session(
                 appsink.set_callbacks(
                     gst_app::AppSinkCallbacks::builder()
                         .new_sample(move |sink| {
-                            // Mark the session live: read by its inactivity
-                            // watchdog and by slot takeover
-                            activity_cb.touch();
+                            // Media arriving from the publisher. Half of this
+                            // session's liveness; the other half is stamped on
+                            // the slot's output tee in the main pipeline.
+                            activity_cb.touch_ingress();
 
                             let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                             let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
@@ -1891,6 +1953,175 @@ mod tests {
             Instant::now() >= deadline,
             "wait returned before its deadline"
         );
+    }
+
+    /// Assemble a built block's elements into a pipeline the way the flow
+    /// builder does: add them all, then make the links the block asked for.
+    /// `decodebin`'s src pad is dynamic and is linked by the block's own
+    /// `pad-added` handler, so it is deliberately absent from `internal_links`.
+    fn assemble(result: &BlockBuildResult) -> gst::Pipeline {
+        let pipeline = gst::Pipeline::new();
+        for (_, element) in &result.elements {
+            pipeline.add(element).expect("add element");
+        }
+        let by_id: HashMap<&str, &gst::Element> = result
+            .elements
+            .iter()
+            .map(|(id, element)| (id.as_str(), element))
+            .collect();
+        for (from, to) in &result.internal_links {
+            let src = by_id[from.element_id.as_str()]
+                .static_pad(from.pad_name.as_deref().unwrap_or("src"))
+                .expect("source pad");
+            let sink = by_id[to.element_id.as_str()]
+                .static_pad(to.pad_name.as_deref().unwrap_or("sink"))
+                .expect("sink pad");
+            src.link(&sink).expect("internal link");
+        }
+        pipeline
+    }
+
+    fn i420_frame(index: u64) -> gst::Buffer {
+        let mut buffer = gst::Buffer::with_size(64 * 64 * 3 / 2).expect("allocate frame");
+        {
+            let buffer = buffer.get_mut().unwrap();
+            buffer.set_pts(gst::ClockTime::from_mseconds(index * 33));
+            buffer.set_duration(gst::ClockTime::from_mseconds(33));
+        }
+        buffer
+    }
+
+    /// Poll until `check` holds, up to five seconds. Buffers cross a pipeline on
+    /// its own streaming threads, so a test cannot read the result straight after
+    /// pushing.
+    fn wait_for(what: &str, check: impl Fn() -> bool) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if check() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("timed out waiting for {}", what);
+    }
+
+    /// The signal a WHIP slot is judged by has to mean "this session is producing
+    /// media the flow can use", so it is stamped at the end of the slot's chain,
+    /// past `decodebin` and the converter. The session's own appsink is upstream
+    /// of all of that, in a separate pipeline, and only ever sees bytes arrive.
+    ///
+    /// Both halves matter, so this checks both: media that gets through stamps
+    /// the slot, and media that arrives but cannot get through does not. The
+    /// second half is the seat that holds a slot for 45 minutes while receiving
+    /// RTP the whole time — here its tee is blocked by a stuck consumer, which is
+    /// what a stalled recorder branch does to it in a real flow.
+    #[test]
+    fn the_slot_stamp_follows_media_out_of_the_decode_chain_not_into_it() {
+        let _ = gst::init();
+
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = build_whipserversrc(
+            "whip-liveness-test",
+            &props(&[
+                ("mode", PropertyValue::String("video".to_string())),
+                ("decode", PropertyValue::Bool(true)),
+                ("max_sessions", PropertyValue::Int(1)),
+            ]),
+            &ctx,
+        )
+        .expect("build_whipserversrc failed");
+
+        let configs = ctx.take_whip_endpoint_configs();
+        let config = &configs[0].1;
+        let stamp = config.slot_output[0].clone();
+        let appsrc = config.slot_video_appsrcs[0].clone();
+        assert_eq!(
+            stamp.last(),
+            0,
+            "nothing has gone through the slot's chain yet"
+        );
+
+        let pipeline = assemble(&result);
+
+        // Somewhere for the slot's tee to push, and a pad this test can block to
+        // stall the chain.
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add(&sink).expect("add fakesink");
+        let tee = result
+            .elements
+            .iter()
+            .find(|(id, _)| id.ends_with(":video_out_tee_0"))
+            .map(|(_, element)| element.clone())
+            .expect("the block builds an output tee per slot");
+        let tee_src = tee.request_pad_simple("src_%u").expect("tee src pad");
+        tee_src
+            .link(&sink.static_pad("sink").unwrap())
+            .expect("link tee to fakesink");
+
+        appsrc.set_caps(Some(
+            &gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 64i32)
+                .field("height", 64i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        ));
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline to PLAYING");
+
+        for index in 0..30 {
+            appsrc.push_buffer(i420_frame(index)).expect("push frame");
+        }
+        wait_for("the slot's stamp to follow the first frames", || {
+            stamp.last() != 0
+        });
+
+        // Now stall the slot's consumer, the way a stuck recorder branch does:
+        // hold the streaming thread inside a probe until the test releases it.
+        // Returning from the callback would let the buffer straight through.
+        let release = Arc::new(AtomicBool::new(false));
+        let gate = release.clone();
+        let block = tee_src
+            .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, move |_, _| {
+                while !gate.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                gst::PadProbeReturn::Ok
+            })
+            .expect("block probe");
+        // One buffer still reaches the tee's sink pad — it is the one that runs
+        // into the block — and stamps the slot on its way. Let it, and read the
+        // stamp afterwards: everything behind it is stuck upstream.
+        for index in 30..60 {
+            appsrc.push_buffer(i420_frame(index)).expect("push frame");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let stalled_at = stamp.last();
+
+        for index in 60..150 {
+            appsrc.push_buffer(i420_frame(index)).expect("push frame");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        assert_eq!(
+            stamp.last(),
+            stalled_at,
+            "media kept arriving at the slot's appsrc while its chain was blocked; \
+             the stamp must not move for media that never gets through"
+        );
+
+        // Let the held streaming thread go before removing the probe: removing it
+        // waits for the callback to return.
+        release.store(true, Ordering::Relaxed);
+        tee_src.remove_probe(block);
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
     }
 
     /// The block property must reach the `WhipEndpointConfig` handed to the
