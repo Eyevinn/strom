@@ -82,9 +82,9 @@ useful if the runtime changes and safe to read in public.
 - **A task prompt must not restate a rule one of these files owns.** The prompt is the outer
   instruction, so a restated rule does not drift — it overrides, silently, and the file looks
   correct while every run ignores it. Both prompts capped the onward message at five lines and
-  banned it from carrying a remote URL long after `SUMMARY.md` required linked, one-line-per-item
-  output; runs went on posting the old shape, and it read as a protocol failure rather than a
-  stale prompt. A prompt carries the role, the constraints, the budget and the wiring. The
+  banned it from carrying a remote URL after `SUMMARY.md` required linked, one-line-per-item
+  output; the next two runs posted the old shape, and it read as a protocol failure rather than
+  a stale prompt. A prompt carries the role, the constraints, the budget and the wiring. The
   shape of anything posted lives here.
 
 ## Changing the protocol
