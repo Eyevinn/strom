@@ -79,11 +79,20 @@ useful if the runtime changes and safe to read in public.
   rule that made bare refs the only option — it now bans the URLs that actually matter
   (credentials, endpoints, anything outside this repository) and requires the ones that do
   not.
+- **A task prompt must not restate a rule one of these files owns.** The prompt is the outer
+  instruction, so a restated rule does not drift — it overrides, silently, and the file looks
+  correct while every run ignores it. Both prompts capped the onward message at five lines and
+  banned it from carrying a remote URL long after `SUMMARY.md` required linked, one-line-per-item
+  output; runs went on posting the old shape, and it read as a protocol failure rather than a
+  stale prompt. A prompt carries the role, the constraints, the budget and the wiring. The
+  shape of anything posted lives here.
 
 ## Changing the protocol
 
 Edit these files in a PR. The task definitions only need updating if the *dispatch* changes —
-which file to read when — not when a rule inside a file changes.
+which file to read when — not when a rule inside a file changes. That holds only while the
+prompts state no rule these files own; if one does, changing the file here is not enough, and
+the fix is to delete the rule from the prompt rather than to keep the two in step.
 
 Keep the instruction count per file low. Instruction-following degrades with the number of
 simultaneous constraints, and the earlier a rule sits the more reliably it is obeyed; that is
