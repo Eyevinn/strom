@@ -9,11 +9,15 @@
 //! ignores it on a non-reference stream. So the recorder ends the track rather
 //! than trying to keep it idling.
 //!
-//! The two tests are a pair: one asserts that a stopped track does not freeze the
-//! rest, the other that tracks which are still running are left alone. Ending
-//! every track on a timer would satisfy the first and destroy every recording.
-//! The first also pins down *which* track is ended: if the recorder ended the
-//! video track — the one still delivering — no video would reach the muxer either.
+//! The first two tests are a pair: one asserts that a stopped track does not
+//! freeze the rest, the other that tracks which are still running are left alone.
+//! Ending every track on a timer would satisfy the first and destroy every
+//! recording. The first also pins down *which* track is ended: if the recorder
+//! ended the video track — the one still delivering — no video would reach the
+//! muxer either.
+//!
+//! The third covers the case where the stopped track's branch will not carry the
+//! EOS at all, which is what a dropped WHIP seat leaves behind.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -323,5 +327,68 @@ fn tracks_that_keep_running_are_left_alone() {
         video_after - video_before >= 45,
         "the video track was ended while it was still delivering: {} buffers reached the muxer in 5 s",
         video_after - video_before
+    );
+}
+
+/// The same stall, with the stopped track's branch already coming apart — the
+/// state the recorder is actually in when a WHIP seat drops, since the stall and
+/// the teardown have the same cause. `gst_pad_push_event` refuses a sticky event
+/// on a pad that is unlinked, flushing, no longer activated, or whose peer is in
+/// any of those states, and answers all of them with the same bare `false`.
+///
+/// Unlinking is the one of those a test can arrange without racing a teardown.
+/// The recovery must still get the muxer out of its wait, and must not treat the
+/// refusal as though the track had ended.
+///
+/// Reverting the fix pins the counted video at zero twice over: the refused EOS
+/// leaves splitmuxsink waiting, and the track is marked retired anyway, so no
+/// later poll tries again.
+#[test]
+fn a_stalled_track_whose_branch_is_coming_apart_still_ends() {
+    gst::init().expect("gstreamer init");
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements missing");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let media_root = tmp.path();
+    let pipeline = gst::Pipeline::new();
+    let (video_in, audio_in, ctx) = add_recorder(&pipeline, "rec_torn", media_root);
+    feed_video(&pipeline, &video_in, -1);
+    feed_audio(&pipeline, &audio_in, 86); // ~2 s at 1024 samples / 44.1 kHz
+    run_setups(&ctx);
+
+    pipeline
+        .set_state(gst::State::Playing)
+        .expect("pipeline accepts PLAYING");
+    let _ = pipeline.state(gst::ClockTime::from_seconds(15));
+    let video_into_muxer = count_into_muxer(&pipeline, "rec_torn", "video");
+
+    // Audio has stopped by now and its parser was inserted on the first caps, so
+    // the branch is quiet and safe to take apart.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let audio_src = audio_in.static_pad("src").expect("audio identity src pad");
+    let parser_sink = audio_src.peer().expect("audio parser is linked");
+    audio_src.unlink(&parser_sink).expect("unlink audio branch");
+    assert!(
+        !audio_src.push_event(gst::event::Eos::new()),
+        "an unlinked src pad must refuse the EOS, or this test proves nothing"
+    );
+
+    // Past the stall timeout with room for a poll or two, then measure the window
+    // after it: this is about recovery, not about the stall.
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    let buffers_before = video_into_muxer.load(Ordering::Relaxed);
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let buffers_after = video_into_muxer.load(Ordering::Relaxed);
+    pipeline
+        .set_state(gst::State::Null)
+        .expect("pipeline to NULL");
+
+    assert!(
+        buffers_after - buffers_before >= 45,
+        "the recording stayed frozen on a track whose EOS was refused: {} video buffers reached the muxer in 5 s",
+        buffers_after - buffers_before
     );
 }
