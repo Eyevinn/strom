@@ -301,6 +301,19 @@ fn reuse_slot(first: &Session, second: &Session) {
         .set_state(gst::State::Playing)
         .expect("pipeline goes to PLAYING");
 
+    // A slot's decodebin may be built with its state locked so an idle slot
+    // cannot hold the pipeline out of PLAYING; claiming the slot is what
+    // releases it. Do what `WhipEndpointConfig::allocate_slot` does, or the
+    // chain under test sits in NULL and never sees a buffer. Harmless when the
+    // decodebin was not locked in the first place.
+    let decodebin = by_id
+        .get(&format!("{}:decodebin_audio_0", instance_id))
+        .expect("slot exposes decodebin_audio_0");
+    decodebin.set_locked_state(false);
+    decodebin
+        .sync_state_with_parent()
+        .expect("slot decodebin joins the pipeline state");
+
     let bus = pipeline.bus().expect("pipeline has a bus");
     let check_bus = |phase: &str| {
         while let Some(msg) = bus.pop() {
