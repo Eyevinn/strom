@@ -244,3 +244,87 @@ async fn test_delete_running_flow_releases_pipeline() {
         leaked
     );
 }
+
+/// Regression test for the WHIP session-teardown P0: an element removed from
+/// its parent bin while it is still above NULL is disposed without ever running
+/// its READY→NULL transition, leaking every socket, thread and fd it holds.
+///
+/// `whipserversrc` removes each session's internal bin from a thread of its own,
+/// so the removal races the session pipeline's descent — see
+/// `strom::gst::orphan_guard`. This stands the same shape up with core elements
+/// and replays the two halves of that race in a fixed order.
+#[test]
+fn test_removed_child_is_driven_to_null() {
+    use gstreamer::prelude::*;
+
+    gstreamer::init().unwrap();
+
+    let pipeline = gstreamer::Pipeline::new();
+    // Stand-ins for whipserversrc and the session bin it removes.
+    let parent = gstreamer::Bin::builder().name("parent").build();
+    let session = gstreamer::Bin::builder().name("session").build();
+
+    let src = gstreamer::ElementFactory::make("fakesrc")
+        .property("is-live", true)
+        .build()
+        .expect("fakesrc is part of gstreamer core");
+    let sink = gstreamer::ElementFactory::make("fakesink")
+        .build()
+        .expect("fakesink is part of gstreamer core");
+    session.add_many([&src, &sink]).unwrap();
+    src.link(&sink).unwrap();
+    parent.add(&session).unwrap();
+    pipeline.add(&parent).unwrap();
+
+    strom::gst::orphan_guard::install(&parent);
+
+    pipeline
+        .set_state(gstreamer::State::Playing)
+        .expect("pipeline should reach Playing");
+    let (result, current, _) = pipeline.state(gstreamer::ClockTime::from_seconds(5));
+    assert!(result.is_ok(), "pipeline state change failed");
+    assert_eq!(current, gstreamer::State::Playing);
+    assert_eq!(session.current_state(), gstreamer::State::Playing);
+
+    // A removal that lands before the parent's descent has reached the child.
+    parent.remove(&session).unwrap();
+    assert_eq!(
+        session.current_state(),
+        gstreamer::State::Null,
+        "removed bin left above NULL — its OS resources are leaked and GStreamer \
+         will fire 'Trying to dispose element ... instead of the NULL state'"
+    );
+
+    // The other half of the race: the parent's own descent reaches the child
+    // after it has gone to NULL. A bin is never skipped for being below the
+    // target state, so without the state lock this raises it back to PAUSED and
+    // reopens everything it holds. Re-adding makes that deterministic; in
+    // production the two threads simply overlap.
+    parent.add(&session).unwrap();
+    parent.set_state(gstreamer::State::Ready).unwrap();
+    assert_eq!(
+        session.current_state(),
+        gstreamer::State::Null,
+        "parent raised a removed bin back out of NULL"
+    );
+
+    let session_weak = session.downgrade();
+    let src_weak = src.downgrade();
+    drop(src);
+    drop(sink);
+
+    parent.remove(&session).unwrap();
+    pipeline.set_state(gstreamer::State::Null).unwrap();
+    drop(session);
+    drop(parent);
+    drop(pipeline);
+
+    assert!(
+        session_weak.upgrade().is_none(),
+        "removed bin still alive after drop"
+    );
+    assert!(
+        src_weak.upgrade().is_none(),
+        "element inside the removed bin still alive after drop"
+    );
+}
