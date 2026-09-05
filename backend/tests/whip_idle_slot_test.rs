@@ -30,6 +30,10 @@ const REQUIRED: &[&str] = &[
     "h264parse",
     "appsink",
     "fakesink",
+    // Not used by the test directly: `WHIPInputBuilder::build` refuses to build
+    // without ICE, so a host missing libnice fails every test here.
+    "nicesrc",
+    "nicesink",
 ];
 
 /// Skipping on a missing element passes green and guards nothing, so CI sets
