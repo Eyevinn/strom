@@ -16,6 +16,7 @@ use crate::blocks::{
 };
 use crate::gst::ice_preflight;
 use crate::gst::keyframe_request;
+use crate::gst::orphan_guard;
 use crate::whip_session_manager::{SessionCleanupRequest, WhipEndpointConfig};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -620,6 +621,11 @@ pub fn create_whipserversrc_for_session(
     let cleanup_tx_for_ice = cleanup_tx.clone();
 
     if let Ok(bin) = whipserversrc.clone().downcast::<gst::Bin>() {
+        // whipserversrc removes each session's internal bin from a thread of its
+        // own, which can land while this pipeline is on its way down and leave
+        // the bin orphaned above NULL with its WebRTC sockets still open.
+        orphan_guard::install(&bin);
+
         bin.connect("deep-element-added", false, move |values| {
             let element = values[2].get::<gst::Element>().unwrap();
             let element_name = element.name();

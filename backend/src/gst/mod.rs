@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod gl_bridge;
 pub mod ice_preflight;
 pub mod keyframe_request;
+pub mod orphan_guard;
 pub mod pipeline;
 pub mod pipeline_monitor;
 pub mod shaders;
