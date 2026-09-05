@@ -221,6 +221,30 @@ jobs:
           base: openapi-base.json
           revision: openapi-current.json
 
+  # The static pages under backend/static are served to browsers and never touched
+  # by cargo, so nothing else in this workflow would notice a break in them.
+  static-js:
+    name: Static JS Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # A parse gate over every served script. It is all the coverage three of
+      # them have - they are DOM-driven end to end and cannot be loaded outside a
+      # browser - so it catches a syntax error, nothing more.
+      - name: Syntax check
+        run: find backend/static -name '*.js' -not -path '*/tests/*' -print0 | xargs -0 -n1 node --check
+
+      # Expanded by the shell, not by node: a bare directory is read as a module
+      # path, and node's own glob handling is version-dependent.
+      - name: Unit tests
+        run: node --test backend/static/tests/*.test.js
+
   # Linux x86_64 build
   build-linux-x86_64:
     name: Build (Linux x86_64)
