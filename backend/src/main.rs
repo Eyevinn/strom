@@ -223,10 +223,26 @@ enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Drop Strom variables that are set but blank, which orchestrators forward
+    // for settings nobody configured. This brackets dotenvy on both sides and
+    // has to stay in this window: before clap reads the environment, and before
+    // any thread exists (see strom_types::env).
+    //
+    // Before, because dotenvy declines to set any key that env::var reports as
+    // Ok -- and Ok("") counts as set. An exported blank would otherwise shadow
+    // a real value in .env and then be deleted, losing both. After, so blanks
+    // coming from .env itself are caught too. Logging is not up yet, so the
+    // names are reported further down.
+    let mut blank_env_vars = strom_types::env::remove_blank_owned_vars();
+
     // Load environment variables from a local .env file if present (e.g.
     // STROM_OSC_PAT). Real environment variables always take precedence, and a
     // missing .env is fine — this is a no-op in production deployments.
     let _ = dotenvy::dotenv();
+
+    blank_env_vars.extend(strom_types::env::remove_blank_owned_vars());
+    blank_env_vars.sort();
+    blank_env_vars.dedup();
 
     // Initialize process startup time before anything else
     strom::version::init_process_startup_time();
@@ -312,6 +328,24 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         });
 
+    let (blank_credentials, blank_settings): (Vec<String>, Vec<String>) = blank_env_vars
+        .into_iter()
+        .partition(|key| strom_types::env::is_credential(key));
+    if !blank_settings.is_empty() {
+        info!(
+            "Ignored blank environment variables: {}",
+            blank_settings.join(", ")
+        );
+    }
+    if !blank_credentials.is_empty() {
+        warn!(
+            "Ignored blank credential environment variables: {} - these configure \
+             authentication, so unless another credential is set the instance \
+             accepts unauthenticated requests",
+            blank_credentials.join(", ")
+        );
+    }
+
     // Give CEF (the `cefsrc` element behind HTML sources and DSK graphics) a
     // per-instance cache directory. Native runs otherwise get Chromium's
     // default, which warns
@@ -385,7 +419,7 @@ fn main() -> anyhow::Result<()> {
             )
         } else {
             // Headless mode: Run HTTP server on main thread
-            run_headless(
+            run_headless_entry(
                 config,
                 args.no_auto_restart,
                 log_reload_handle,
@@ -397,7 +431,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(feature = "no-gui")]
     {
         // Always headless when no-gui feature is enabled
-        run_headless(
+        run_headless_entry(
             config,
             args.no_auto_restart,
             log_reload_handle,
@@ -460,6 +494,10 @@ fn run_with_gui(
         // Detect GPU capabilities for video conversion mode selection
         // This tests CUDA-GL interop to determine if autovideoconvert works
         strom::gpu::detect_gpu_capabilities();
+
+        // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
+        // without it, so say so at startup rather than at first flow start.
+        strom::gst::ice_preflight::log_ice_availability();
 
         // Start GLib main loop in background thread for bus watch callbacks
         start_glib_main_loop();
@@ -588,6 +626,66 @@ fn run_with_gui(
     Ok(())
 }
 
+/// Entry point for headless mode.
+///
+/// On macOS, CEF (the `cefsrc` element used for HTML overlays) needs a Cocoa run
+/// loop on the main thread. Without one, starting a flow containing `cefsrc`
+/// blocks forever in `gst_cef_src_change_state` waiting for browser
+/// initialisation that nothing ever services. `gst_macos_main` runs a CFRunLoop
+/// on the main thread and our server on a secondary thread. GUI mode does not
+/// need this -- winit's event loop already runs a Cocoa run loop on main.
+fn run_headless_entry(
+    config: Config,
+    no_auto_restart: bool,
+    log_reload_handle: strom::state::LogReloadHandle,
+    default_log_filter: String,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        gstreamer::macos_main(move || {
+            // `gst_macos_main` does not run this closure on the process main
+            // thread -- it takes that thread for the CFRunLoop and calls us on a
+            // thread it creates itself, which gets the raw pthread default stack
+            // (512 KB on macOS) rather than the main thread's 8 MB.
+            // `create_app_with_config` builds the OpenAPI spec, and utoipa's
+            // generated `openapi_spec()` is one deeply nested expression covering
+            // every `StromEvent` variant; it overflows that stack and kills the
+            // process with exit 132 and no panic message, before the HTTP server
+            // ever binds.
+            //
+            // Spawning a Rust thread is what fixes it, not the size below:
+            // `std::thread` defaults to a 2 MiB stack, and that is already
+            // enough today (measured -- it starts and binds normally without an
+            // explicit size). The 8 MB is headroom for the spec continuing to
+            // grow, so keep it, but do not remove the indirection: calling
+            // `run_headless` directly here dies with exit 132.
+            std::thread::Builder::new()
+                .name("strom-headless".into())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    run_headless(
+                        config,
+                        no_auto_restart,
+                        log_reload_handle,
+                        default_log_filter,
+                    )
+                })
+                .expect("failed to spawn headless thread")
+                .join()
+                .expect("headless thread panicked")
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_headless(
+            config,
+            no_auto_restart,
+            log_reload_handle,
+            default_log_filter,
+        )
+    }
+}
+
 #[tokio::main]
 async fn run_headless(
     config: Config,
@@ -615,6 +713,10 @@ async fn run_headless(
     // Detect GPU capabilities for video conversion mode selection
     // This tests CUDA-GL interop to determine if autovideoconvert works
     strom::gpu::detect_gpu_capabilities();
+
+    // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
+    // without it, so say so at startup rather than at first flow start.
+    strom::gst::ice_preflight::log_ice_availability();
 
     // Start GLib main loop in background thread for bus watch callbacks
     start_glib_main_loop();

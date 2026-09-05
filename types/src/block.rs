@@ -415,6 +415,11 @@ pub const DEFAULT_EFP_HOL_TIMEOUT: u32 = 5;
 /// downstream wakeups and context switches.
 pub const DEFAULT_AES67_INPUT_BUFFER_DURATION_MS: i64 = 20;
 
+/// Default RTP payload type for AES67 output.
+/// 96 is the first dynamic payload type (RFC 3551), which AES67 requires for
+/// L16/L24 streams that are not covered by a static payload type assignment.
+pub const DEFAULT_AES67_OUTPUT_PAYLOAD_TYPE: i64 = 96;
+
 /// Default Opus encoder complexity (0-10). GStreamer defaults to 10 (max CPU).
 /// 5 is a good balance between quality and CPU for real-time use cases.
 pub const DEFAULT_OPUS_COMPLEXITY: i32 = 5;

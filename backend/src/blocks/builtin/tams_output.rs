@@ -176,7 +176,7 @@ impl BlockBuilder for TamsOutputBuilder {
         info!("Building TAMS Output block instance: {}", instance_id);
 
         let gateway_url = prop_str(properties, "gateway_url")
-            .or_else(|| std::env::var("STROM_TAMS_GATEWAY_URL").ok())
+            .or_else(|| strom_types::env::var_opt("STROM_TAMS_GATEWAY_URL"))
             .ok_or_else(|| {
                 BlockBuildError::InvalidProperty(
                     "TAMS Output: gateway_url is required (or set STROM_TAMS_GATEWAY_URL)"
@@ -211,7 +211,7 @@ impl BlockBuilder for TamsOutputBuilder {
             }
             _ => {
                 let auth = match prop_str(properties, "api_token")
-                    .or_else(|| std::env::var("STROM_TAMS_API_TOKEN").ok())
+                    .or_else(|| strom_types::env::var_opt("STROM_TAMS_API_TOKEN"))
                 {
                     Some(t) => AuthMethod::Bearer(t),
                     None => AuthMethod::None,

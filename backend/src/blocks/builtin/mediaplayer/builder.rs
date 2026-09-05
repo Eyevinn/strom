@@ -201,6 +201,7 @@ fn build_media_player(
         media_path: media_path.clone(),
         ts_offset,
         main_pipeline: gst::glib::WeakRef::new(),
+        bus_watch: std::sync::Mutex::new(None),
     });
 
     // --- Resolve initial URI ---

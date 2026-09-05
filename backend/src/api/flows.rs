@@ -295,9 +295,16 @@ fn prepare_flow(flow: &mut Flow) {
     post,
     path = "/api/flows",
     tag = "flows",
+    description = "Creates a flow under the `id` supplied in the body, so a caller can \
+                   pre-generate an id and then start the flow by it. `id` is a required \
+                   field: to have the server assign one instead, send the nil uuid \
+                   (`00000000-0000-0000-0000-000000000000`) and read the assigned id from \
+                   the `flow.id` of the response. Reusing the id of an existing flow is a \
+                   409; use `POST /api/flows/{id}` to update that flow instead.",
     request_body = Flow,
     responses(
         (status = 201, description = "Flow created", body = FlowResponse),
+        (status = 409, description = "A flow with the supplied id already exists", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -318,8 +325,13 @@ pub async fn create_flow(
     info!("Received create flow request: name='{}'", flow.name);
     debug!("Create flow request body: {:?}", flow);
 
-    // Assign a new ID to avoid collisions with imported flows
-    flow.id = FlowId::new_v4();
+    // Honour the client-supplied id. The schema requires it, so silently replacing
+    // it left callers unable to POST a flow and then start it by the id they chose.
+    // `id` cannot be omitted — it is required, so leaving it out is a 422 — which is
+    // why the nil uuid is the documented way to ask the server to assign one.
+    if flow.id.is_nil() {
+        flow.id = FlowId::new_v4();
+    }
 
     // Clear runtime state
     flow.running = false;
@@ -337,14 +349,30 @@ pub async fn create_flow(
 
     info!("Creating flow: {} ({})", flow.name, flow.id);
 
-    if let Err(e) = state.upsert_flow(flow.clone()).await {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::with_details(
-                "Failed to save flow",
-                e.to_string(),
-            )),
-        ));
+    // Import and copy in the frontend already regenerate ids client-side
+    // (`regenerate_flow_ids`), so a clash here is a genuine one the caller needs to
+    // know about rather than something to paper over. The id is claimed inside the
+    // same write lock that checks it, so two concurrent creates supplying the same
+    // id cannot both pass and overwrite one another.
+    match state.insert_flow_if_absent(flow.clone()).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::new(
+                    "A flow with this id already exists; use POST /api/flows/{id} to update it",
+                )),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::with_details(
+                    "Failed to save flow",
+                    e.to_string(),
+                )),
+            ));
+        }
     }
 
     Ok((StatusCode::CREATED, Json(FlowResponse { flow })))

@@ -459,9 +459,13 @@ pub async fn create_app_with_config(
     let mcp_sessions = mcp::McpSessionManager::new();
 
     // Combine routers with auth config and MCP session manager extensions
+    // The API router carries its own fallback so that unmatched /api/* paths get a
+    // JSON 404 instead of inheriting the outer SPA fallback (which would answer 200
+    // with the frontend HTML).
     let api_router = Router::new()
         .merge(public_api_router)
         .merge(protected_api_router)
+        .fallback(api::not_found)
         .layer(Extension(auth_config.clone()))
         .layer(Extension(mcp_sessions));
 

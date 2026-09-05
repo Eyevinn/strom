@@ -89,6 +89,18 @@ jobs:
           packages: libunwind-dev libssl-dev libcairo2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav pkg-config cmake libclang-dev
           version: 1.5
 
+      # cache-apt-pkgs-action restores package files but does not run postinst,
+      # so update-alternatives links such as /usr/lib/*/libblas.so.3 never get
+      # created. gst-libav then fails to load ("libblas.so.3: cannot open shared
+      # object file"), avenc_aac goes missing, and every test requiring it skips
+      # green. Reinstalling runs postinst; ldconfig then picks the links up.
+      # Only needed here: the build jobs never load a plugin.
+      - name: Repair alternatives for cached libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --reinstall libblas3 liblapack3
+          sudo ldconfig
+
       # save-if main: PR runs restore the main-branch cache (GHA cache scoping
       # falls back to the base branch) but don't save their own per-branch
       # copy — that copy doubled every rust-cache entry against the 10 GB
@@ -115,9 +127,15 @@ jobs:
 
       - name: Run tests on backend
         run: cargo test --package strom --features efp,nvidia
+        env:
+          # Turn a missing-element skip into a failure — see plugins_available().
+          STROM_REQUIRE_GST_PLUGINS: 1
 
       - name: Run tests on MCP server
         run: cargo test --package strom-mcp-server
+
+      - name: Run tests on shared types
+        run: cargo test --package strom-types
 
   # WASM: clippy + build frontend
   check-wasm:
@@ -499,6 +517,7 @@ jobs:
         run: |
           cargo test --package strom --features nvidia
           cargo test --package strom-mcp-server
+          cargo test --package strom-types
 
       - name: Build
         run: |
@@ -528,7 +547,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","macos"]'), inputs.platforms)
     needs: [check-wasm, preflight]
     runs-on: macos-latest
-    timeout-minutes: 30
+    # 30 was not enough: the job is workflow_dispatch-only, so it runs rarely
+    # and sccache's Rust cache is cold almost every time (measured 0.00% Rust
+    # hit rate on a fresh branch), which means clippy, the test build and the
+    # release build each compile the tree from scratch. Matches the Windows
+    # job, which is dispatch-only for the same reason and already sits at 45.
+    timeout-minutes: 45
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
@@ -547,7 +571,7 @@ jobs:
 
       - name: Install GStreamer
         run: |
-          brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav
+          brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav libnice-gstreamer
           echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix gstreamer)/lib/pkgconfig:$(brew --prefix glib)/lib/pkgconfig" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$(brew --prefix)/lib" >> $GITHUB_ENV
 
@@ -571,6 +595,10 @@ jobs:
         run: |
           cargo test --package strom --features efp,nvidia
           cargo test --package strom-mcp-server
+          cargo test --package strom-types
+        env:
+          # Turn a missing-element skip into a failure — see plugins_available().
+          STROM_REQUIRE_GST_PLUGINS: 1
 
       - name: Build
         run: |

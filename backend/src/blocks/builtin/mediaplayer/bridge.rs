@@ -515,8 +515,9 @@ pub fn watch_internal_bus(
 
     let state_for_bus = Arc::clone(&state);
     let block_id_for_bus = block_id.clone();
+    let block_id_for_watch = block_id.clone();
 
-    bus.connect_message(None, move |_bus, msg| {
+    let handler = bus.connect_message(None, move |_bus, msg| {
         use gst::MessageView;
 
         match msg.view() {
@@ -583,4 +584,21 @@ pub fn watch_internal_bus(
             _ => {}
         }
     });
+
+    // The closure just took an `Arc` on the state that owns this pipeline, so
+    // the state can only ever be dropped if someone disconnects the handler.
+    // `shutdown()` is that someone, and this id is how it finds it. A second
+    // watch on the same bus would strand the first, so retire it here.
+    let previous = match state.bus_watch.lock() {
+        Ok(mut guard) => guard.replace(handler),
+        Err(poisoned) => poisoned.into_inner().replace(handler),
+    };
+    if let Some(previous) = previous {
+        warn!(
+            "Media Player {}: Replacing an existing internal bus watch",
+            block_id_for_watch
+        );
+        bus.disconnect(previous);
+        bus.remove_signal_watch();
+    }
 }

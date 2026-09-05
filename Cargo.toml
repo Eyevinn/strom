@@ -4,7 +4,7 @@ members = ["types", "backend", "frontend", "mcp-server"]
 default-members = ["backend"]
 
 [workspace.package]
-version = "0.6.6"
+version = "0.6.8"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Per Enstedt <per.enstedt@eyevinn.se>"]
@@ -26,12 +26,12 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 tower-http = { version = "0.7", features = ["fs", "cors", "trace"] }
 cairo-rs = { version = "0.22", features = ["v1_16"] }
-gstreamer = { version = "0.25", features = ["v1_20"] }
-gstreamer-app = { version = "0.25", features = ["v1_20"] }
-gstreamer-controller = { version = "0.25", features = ["v1_20"] }
-gstreamer-net = { version = "0.25", features = ["v1_20"] }
-gstreamer-gl = { version = "0.25", features = ["v1_20"] }
-gstreamer-video = { version = "0.25", features = ["v1_20"] }
+gstreamer = { version = "0.25", features = ["v1_22"] }
+gstreamer-app = { version = "0.25", features = ["v1_22"] }
+gstreamer-controller = { version = "0.25", features = ["v1_22"] }
+gstreamer-net = { version = "0.25", features = ["v1_22"] }
+gstreamer-gl = { version = "0.25", features = ["v1_22"] }
+gstreamer-video = { version = "0.25", features = ["v1_22"] }
 # gio 0.22 matches the glib 0.22 transitive that gstreamer 0.25 pulls in.
 # Used by the SRT stats parser to format peer GSocketAddress fields.
 gio = "0.22"

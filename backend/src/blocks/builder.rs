@@ -39,6 +39,9 @@ pub enum BlockBuildError {
 
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
+
+    #[error("{0}")]
+    MissingPlugin(String),
 }
 
 /// Function type for connecting a block-specific bus message handler.
@@ -324,6 +327,10 @@ impl BlockBuildContext {
     /// Use this to connect GLib signals on elements that need the event broadcaster
     /// (e.g., splitmuxsink's format-location signal for recording status).
     /// The GStreamer element(s) should be captured in the closure during build time.
+    ///
+    /// Runs after construction has linked every block and before the pipeline leaves
+    /// NULL. Recorder requests its splitmuxsink pads here and needs both halves of that
+    /// window; moving this call breaks it silently.
     pub fn register_element_setup(&self, setup: ElementSetupFn) {
         self.element_setups.borrow_mut().push(setup);
     }

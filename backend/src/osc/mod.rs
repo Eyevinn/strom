@@ -224,14 +224,12 @@ pub fn sat_provider() -> Arc<SatProvider> {
     static PROVIDER: OnceLock<Arc<SatProvider>> = OnceLock::new();
     PROVIDER
         .get_or_init(|| {
-            let pat = std::env::var("STROM_OSC_PAT")
-                .ok()
-                .or_else(|| std::env::var("OSC_ACCESS_TOKEN").ok())
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty());
-            let token_url = std::env::var("STROM_OSC_TOKEN_URL")
-                .ok()
-                .filter(|u| !u.is_empty());
+            // var_opt already rejects a blank value, so the trim here is only
+            // to strip padding from a real token.
+            let pat = strom_types::env::var_opt("STROM_OSC_PAT")
+                .or_else(|| strom_types::env::var_opt("OSC_ACCESS_TOKEN"))
+                .map(|p| p.trim().to_string());
+            let token_url = strom_types::env::var_opt("STROM_OSC_TOKEN_URL");
             Arc::new(
                 SatProvider::new(pat, token_url).expect("building OSC SAT provider (HTTP client)"),
             )

@@ -16,6 +16,7 @@ pub mod block;
 pub mod discovery;
 pub mod effects;
 pub mod element;
+pub mod env;
 pub mod events;
 pub mod flow;
 pub mod mediaplayer;
