@@ -77,6 +77,7 @@ struct StorageConfig {
     flows_path: Option<PathBuf>,
     blocks_path: Option<PathBuf>,
     media_path: Option<PathBuf>,
+    cef_cache_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -126,6 +127,8 @@ pub struct Config {
     pub blocks_path: PathBuf,
     /// Path to media files directory
     pub media_path: PathBuf,
+    /// Directory holding the CEF/Chromium profile used by `cefsrc`
+    pub cef_cache_path: PathBuf,
     /// PostgreSQL database URL (if set, PostgreSQL is used instead of JSON files)
     /// Format: postgresql://user:password@host/database_name
     pub database_url: Option<String>,
@@ -172,6 +175,7 @@ impl Config {
         flows_path: Option<PathBuf>,
         blocks_path: Option<PathBuf>,
         media_path: Option<PathBuf>,
+        cef_cache_path: Option<PathBuf>,
         database_url: Option<String>,
         tls_cert: Option<PathBuf>,
         tls_key: Option<PathBuf>,
@@ -268,6 +272,9 @@ impl Config {
         if let Some(ref mp) = media_path {
             figment = figment.merge(Serialized::default("storage.media_path", mp));
         }
+        if let Some(ref cp) = cef_cache_path {
+            figment = figment.merge(Serialized::default("storage.cef_cache_path", cp));
+        }
         if let Some(ref db) = database_url {
             figment = figment.merge(Serialized::default("storage.database_url", db));
         }
@@ -281,6 +288,7 @@ impl Config {
             flows_path: non_blank_path(config_file.storage.flows_path),
             blocks_path: non_blank_path(config_file.storage.blocks_path),
             media_path: non_blank_path(config_file.storage.media_path),
+            cef_cache_path: non_blank_path(config_file.storage.cef_cache_path),
         };
         let data_paths = DataPaths::resolve(path_config)?;
 
@@ -289,6 +297,7 @@ impl Config {
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             media_path: data_paths.media_path,
+            cef_cache_path: data_paths.cef_cache_path,
             database_url: strom_types::env::non_blank(config_file.storage.database_url),
             log_file: non_blank_path(config_file.logging.log_file),
             log_level: strom_types::env::non_blank(config_file.logging.log_level),
@@ -329,6 +338,7 @@ impl Config {
             flows_path,
             blocks_path,
             media_path,
+            cef_cache_path: None,
         };
         let data_paths = DataPaths::resolve(path_config)?;
 
@@ -337,6 +347,7 @@ impl Config {
             flows_path: data_paths.flows_path,
             blocks_path: data_paths.blocks_path,
             media_path: data_paths.media_path,
+            cef_cache_path: data_paths.cef_cache_path,
             database_url,
             log_file: None,
             log_level: None,
@@ -385,6 +396,7 @@ impl Default for Config {
                 flows_path: PathBuf::from("flows.json"),
                 blocks_path: PathBuf::from("blocks.json"),
                 media_path: PathBuf::from("media"),
+                cef_cache_path: PathBuf::from("cef-cache"),
                 database_url: None,
                 log_file: None,
                 log_level: None,
@@ -420,7 +432,8 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None, None, None, None).unwrap();
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
 
         // Restore (ignore errors)
         let _ = std::env::set_current_dir(original_dir);
@@ -440,6 +453,7 @@ mod tests {
             None,
             Some(flows.clone()),
             Some(blocks.clone()),
+            None,
             None,
             Some("postgresql://test".to_string()),
             None,
@@ -477,7 +491,8 @@ database_url = "postgresql://localhost/test"
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None, None, None, None).unwrap();
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
 
         // Restore original directory (ignore errors if it fails)
         let _ = std::env::set_current_dir(original_dir);
@@ -520,7 +535,8 @@ log_level = "   "
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None, None, None, None).unwrap();
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
 
         let _ = std::env::set_current_dir(original_dir);
 
@@ -560,6 +576,7 @@ log_level = "   "
             None,
             None,
             None,
+            None,
             Some(String::new()),
             Some(PathBuf::new()),
             Some(PathBuf::new()),
@@ -590,7 +607,8 @@ log_level = "   "
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None, None, None, None).unwrap();
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
 
         // Restore (restore dir before temp_dir is dropped, ignore errors)
         let _ = std::env::set_current_dir(&original_dir);
@@ -627,7 +645,8 @@ log_level = "   "
 
         // Pass CLI arg 9999
         let config =
-            Config::from_figment(Some(9999), None, None, None, None, None, None, None).unwrap();
+            Config::from_figment(Some(9999), None, None, None, None, None, None, None, None)
+                .unwrap();
 
         // Restore (restore dir before temp_dir is dropped, ignore errors)
         let _ = std::env::set_current_dir(&original_dir);
@@ -673,7 +692,8 @@ data_dir = "{}"
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        let config = Config::from_figment(None, None, None, None, None, None, None, None).unwrap();
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
 
         // Restore (ignore errors)
         let _ = std::env::set_current_dir(original_dir);
@@ -698,7 +718,8 @@ data_dir = "{}"
             "stun:stun.example.com:3478,turn:user:pass@turn.example.com:3478",
         );
 
-        let config = Config::from_figment(None, None, None, None, None, None, None, None).unwrap();
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
 
         // Restore
         let _ = std::env::set_current_dir(&original_dir);
