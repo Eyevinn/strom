@@ -75,9 +75,15 @@ maintainer is actually having.
    `pipeline_lifecycle_test.rs` for new GStreamer elements or closures, the openapi snapshot
    for API types.
 
-   macOS and Windows do not build on push or pull_request. Platform-specific code is
-   therefore `UNVERIFIED`, with the command for the maintainer:
-   `gh workflow run ci.yml --ref <branch> -f platforms=macos` (or `windows`, or `both`).
+   macOS and Windows build on every merge to main, but on a pull request only when it carries
+   the `ci:macos` or `ci:windows` label. Platform-specific code is `UNVERIFIED` until such a
+   run exists, and the remedy to ask the maintainer for is the label — not
+   `gh workflow run ci.yml --ref <branch>`, which cannot reach a fork's pull request at all
+   (dispatch takes a branch or tag in this repository; a fork PR's head is only
+   `refs/pull/<N>/head`). A green run on the author's own fork does not count either: it
+   builds their base, not this one. Where the platform-specific part is small, merging on
+   Linux-green and letting the main run cover it is a legitimate call — say so, rather than
+   leaving the row silently unverified.
 
 5. **Repo rules.** Check CLAUDE.md and quote any rule violated: BUFFER probe constraints,
    `WeakRef` instead of strong refs to pipeline/element/bin in closures, queue properties
