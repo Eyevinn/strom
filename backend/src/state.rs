@@ -875,10 +875,7 @@ impl AppState {
 
         let Some(mut flow) = flow else {
             error!("Flow not found: {}", id);
-            return Err(PipelineError::InvalidFlow(format!(
-                "Flow not found: {}",
-                id
-            )));
+            return Err(PipelineError::FlowNotFound(id.to_string()));
         };
 
         // Check if pipeline is already running

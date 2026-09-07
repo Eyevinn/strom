@@ -137,6 +137,9 @@ pub enum PipelineError {
     #[error("Invalid flow: {0}")]
     InvalidFlow(String),
 
+    #[error("Flow not found: {0}")]
+    FlowNotFound(String),
+
     #[error("Property {property} on element {element} cannot be changed in {state:?} state")]
     PropertyNotMutable {
         element: String,

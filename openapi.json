@@ -3155,6 +3155,16 @@
               }
             }
           },
+          "400": {
+            "description": "Flow definition rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Flow not found",
             "content": {
