@@ -5,10 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # `labeled` is what lets a maintainer ask for a macOS or Windows build on a
+    # pull request (see build-macos). Naming `types` at all replaces the default
+    # set, so the three defaults have to be listed again or pushes to a PR stop
+    # triggering CI.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       platforms:
-        description: "Which extra platform builds to run (they are off for push/PR because of cost)"
+        description: "Which extra platform builds to run on a branch (they run on main and on ci:macos / ci:windows PRs anyway)"
         type: choice
         default: both
         options: [both, macos, windows, none]
@@ -42,6 +47,14 @@ jobs:
   # build instead of failing CI. Exposes cache_ok consumed by every build job.
   preflight:
     name: sccache preflight
+    # A `labeled` event is only interesting when the label is one of the two
+    # that ask for a platform build. Skipping here takes every job that needs
+    # this one with it, and api-contract excludes `labeled` itself, so adding an
+    # unrelated label to a pull request costs nothing.
+    if: >-
+      github.event.action != 'labeled'
+      || contains(github.event.pull_request.labels.*.name, 'ci:macos')
+      || contains(github.event.pull_request.labels.*.name, 'ci:windows')
     runs-on: ubuntu-latest
     outputs:
       cache_ok: ${{ steps.probe.outputs.cache_ok }}
@@ -68,6 +81,10 @@ jobs:
   # Fast checks on Linux: fmt + clippy + test
   check-linux:
     name: Check (Linux)
+    # Labelling a PR must not re-run everything that already passed. Only the
+    # platform builds care about the label; `github.event.action` is unset for
+    # push and workflow_dispatch, so this is a no-op there.
+    if: github.event.action != 'labeled'
     needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -196,7 +213,8 @@ jobs:
   api-contract:
     name: API Contract Check
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # See check-linux for the `labeled` exclusion.
+    if: github.event_name == 'pull_request' && github.event.action != 'labeled'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -224,6 +242,8 @@ jobs:
   # Linux x86_64 build
   build-linux-x86_64:
     name: Build (Linux x86_64)
+    # See check-linux for the `labeled` exclusion.
+    if: github.event.action != 'labeled'
     needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -341,6 +361,8 @@ jobs:
   # Linux ARM64 build (build only - no native clippy/test)
   build-linux-arm64:
     name: Build (Linux ARM64)
+    # See check-linux for the `labeled` exclusion.
+    if: github.event.action != 'labeled'
     needs: [check-wasm, preflight]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -449,10 +471,17 @@ jobs:
           if-no-files-found: error
 
   # Windows: clippy + test + build
-  # Only runs manually (workflow_dispatch) to save CI cost (2× multiplier).
+  # Runs on every merge to main, on a pull request carrying the `ci:windows`
+  # label, and on demand. Not on every pull request: it is the slowest job in
+  # the workflow and most diffs contain no `target_os = "windows"` code.
   build-windows:
     name: Build (Windows)
-    if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","windows"]'), inputs.platforms)
+    if: >-
+      github.event_name == 'push'
+      || (github.event_name == 'pull_request'
+          && contains(github.event.pull_request.labels.*.name, 'ci:windows'))
+      || (github.event_name == 'workflow_dispatch'
+          && contains(fromJSON('["both","windows"]'), inputs.platforms))
     needs: [check-wasm, preflight]
     runs-on: windows-latest
     timeout-minutes: 45
@@ -500,10 +529,10 @@ jobs:
           name: frontend-dist
           path: backend/dist
 
-      # No rust-cache here: this job is workflow_dispatch-only, so a saved
-      # target/ (~1-2 GB against the 10 GB repo ceiling) is almost always
-      # stale or evicted by the next manual run. sccache via MinIO covers
-      # recompiles instead.
+      # No rust-cache here: this job runs seldom enough that a saved target/
+      # (~1-2 GB against the 10 GB repo ceiling) is almost always stale or
+      # evicted before the next run. sccache via MinIO covers recompiles
+      # instead, on the runs that have credentials for it.
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -541,17 +570,33 @@ jobs:
           if-no-files-found: error
 
   # macOS: clippy + test + build
-  # Only runs manually (workflow_dispatch) to save CI cost (10× multiplier).
+  #
+  # Runs on every merge to main, on a pull request carrying the `ci:macos`
+  # label, and on demand.
+  #
+  # Dispatch alone could not verify a fork's pull request, which is where most
+  # macOS code arrives: `workflow_dispatch` resolves `--ref` against a branch or
+  # tag in this repository, and a fork PR's head is reachable here only as
+  # `refs/pull/<N>/head`, which it does not accept. That left `#[cfg(target_os =
+  # "macos")]` code merged without any toolchain ever compiling it. The label is
+  # a maintainer's way to ask for the run before merge; `push` is the backstop
+  # that makes sure it happens at all.
   build-macos:
     name: Build (macOS)
-    if: github.event_name == 'workflow_dispatch' && contains(fromJSON('["both","macos"]'), inputs.platforms)
+    if: >-
+      github.event_name == 'push'
+      || (github.event_name == 'pull_request'
+          && contains(github.event.pull_request.labels.*.name, 'ci:macos'))
+      || (github.event_name == 'workflow_dispatch'
+          && contains(fromJSON('["both","macos"]'), inputs.platforms))
     needs: [check-wasm, preflight]
     runs-on: macos-latest
-    # 30 was not enough: the job is workflow_dispatch-only, so it runs rarely
-    # and sccache's Rust cache is cold almost every time (measured 0.00% Rust
-    # hit rate on a fresh branch), which means clippy, the test build and the
-    # release build each compile the tree from scratch. Matches the Windows
-    # job, which is dispatch-only for the same reason and already sits at 45.
+    # 30 was not enough: sccache's Rust cache is cold on a fresh branch
+    # (measured 0.00% Rust hit rate), which means clippy, the test build and the
+    # release build each compile the tree from scratch — 27 minutes observed.
+    # A fork's pull request has no sccache credentials at all, so it is always
+    # that number. Matches the Windows job, which sits at 45 for the same
+    # reason.
     timeout-minutes: 45
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
@@ -581,7 +626,7 @@ jobs:
           name: frontend-dist
           path: backend/dist
 
-      # No rust-cache here: workflow_dispatch-only, see the Windows job.
+      # No rust-cache here: see the Windows job.
       - name: Setup sccache
         if: needs.preflight.outputs.cache_ok == 'true'
         uses: mozilla-actions/sccache-action@v0.0.10
