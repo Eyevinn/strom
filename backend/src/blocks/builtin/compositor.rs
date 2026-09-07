@@ -462,20 +462,17 @@ fn build_software_compositor(
     let mixer_id = format!("{}:mixer", instance_id);
     let mixer = gst::ElementFactory::make("compositor")
         .name(&mixer_id)
+        .property("force-live", force_live)
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("compositor: {}", e)))?;
 
-    info!("CPU mixer created");
+    info!("CPU mixer created with force-live={}", force_live);
 
     // Set mixer properties
     // Note: compositor element uses different property names than glvideomixerelement
     if mixer.has_property("background") {
         mixer.set_property_from_str("background", background);
     }
-
-    // Note: compositor element has force-live as read-only (unlike glvideomixerelement)
-    // so we don't set it here - it defaults based on whether live sources are connected
-    let _ = force_live; // Acknowledge parameter even though we can't use it for CPU backend
 
     // Set latency properties
     set_mixer_latency_properties(&mixer, properties);
@@ -1210,5 +1207,65 @@ fn compositor_definition() -> BlockDefinition {
             height: Some(2.5),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a CPU compositor block with the given `force_live` value.
+    ///
+    /// `compositor_preference = "cpu"` pins the backend so the test exercises
+    /// `build_software_compositor` regardless of whether GL is available on the
+    /// host — otherwise `Auto` would pick the GL path on most dev machines.
+    fn build_cpu_compositor(force_live: bool) -> BlockBuildResult {
+        let _ = gst::init();
+
+        let mut properties = HashMap::new();
+        properties.insert(
+            "compositor_preference".to_string(),
+            PropertyValue::String("cpu".to_string()),
+        );
+        properties.insert("num_inputs".to_string(), PropertyValue::Int(2));
+        properties.insert("force_live".to_string(), PropertyValue::Bool(force_live));
+
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        CompositorBuilder
+            .build("test_comp", &properties, &ctx)
+            .expect("CPU compositor should build")
+    }
+
+    /// Read `force-live` off the mixer element in a build result.
+    fn mixer_force_live(result: &BlockBuildResult) -> bool {
+        let (_, mixer) = result
+            .elements
+            .iter()
+            .find(|(id, _)| id.as_str() == "test_comp:mixer")
+            .expect("build result must contain the mixer element");
+        mixer.property::<bool>("force-live")
+    }
+
+    /// `force-live` on `compositor` is construct-only: it must be passed to
+    /// `ElementFactory::make(...).property(...)`, not set afterwards. Setting it
+    /// after `build()` silently leaves the element at its `false` default, so
+    /// this asserts the property actually took.
+    #[test]
+    fn cpu_mixer_honours_force_live_true() {
+        let result = build_cpu_compositor(true);
+        assert!(
+            mixer_force_live(&result),
+            "CPU mixer must report force-live=true when the block is built with force_live true"
+        );
+    }
+
+    /// The counterpart: `force_live=false` must not be silently upgraded.
+    #[test]
+    fn cpu_mixer_honours_force_live_false() {
+        let result = build_cpu_compositor(false);
+        assert!(
+            !mixer_force_live(&result),
+            "CPU mixer must report force-live=false when the block is built with force_live false"
+        );
     }
 }
