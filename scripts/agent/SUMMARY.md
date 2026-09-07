@@ -128,6 +128,12 @@ If the task definition gives you somewhere else to report, render that message f
 `needs_human` and the item lists — never from a second pass over the run. If the run did
 nothing, say that in one line rather than staying silent.
 
+**This section owns that message's format.** If the task definition also states a line
+ceiling, or a rule about what a reference may look like, it is out of date: follow this
+section and record the conflict in the summary. One stated both — five lines, and never a
+remote URL — which left a single line of bare `#721` refs as the only legal output, and runs
+kept shipping exactly that after this file had already required otherwise.
+
 **Every reference is a full URL, and every item is its own line.** A bare `#721` autolinks
 only inside this repository's own issues and pull requests. Everywhere else it is four
 characters a reader has to go look up by hand, so a message that names six items costs six
