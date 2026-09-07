@@ -9,7 +9,6 @@ The MSI installer bundles:
 | Component | Description | Size (approx) |
 |-----------|-------------|---------------|
 | **strom.exe** | Main Strom application | ~15 MB |
-| **strom-mcp-server.exe** | MCP server for LLM integration | ~5 MB |
 | **GStreamer Runtime** | Multimedia framework (all plugins) | ~300 MB |
 | **Graphviz** | Graph visualization for debug graphs | ~30 MB |
 
@@ -41,15 +40,13 @@ Total installer size: **~350 MB**
    ```powershell
    # Or use pre-built binaries from a release
    cargo build --release --package strom
-   cargo build --release --package strom-mcp-server
    ```
 
 2. **Run the build script**:
    ```powershell
    cd installer/windows
    .\Build-Installer.ps1 -Version "0.3.10" `
-       -StromExe "..\..\target\release\strom.exe" `
-       -StromMcpServerExe "..\..\target\release\strom-mcp-server.exe"
+       -StromExe "..\..\target\release\strom.exe"
    ```
 
 3. **Find the MSI** in `installer/windows/output/`
@@ -58,10 +55,10 @@ Total installer size: **~350 MB**
 
 ```powershell
 # Full GStreamer (all plugins, larger bundle)
-.\Build-Installer.ps1 -Version "0.3.10" -StromExe "..." -StromMcpServerExe "..." -FullGStreamer
+.\Build-Installer.ps1 -Version "0.3.10" -StromExe "..." -FullGStreamer
 
 # Skip downloading dependencies (use existing bundles)
-.\Build-Installer.ps1 -Version "0.3.10" -StromExe "..." -StromMcpServerExe "..." -SkipDependencies
+.\Build-Installer.ps1 -Version "0.3.10" -StromExe "..." -SkipDependencies
 ```
 
 ## Automated Builds
@@ -92,9 +89,8 @@ When installed, Strom uses the following directory structure:
 
 ```
 C:\Program Files\Strom\
-├── bin\                     # Strom executables
-│   ├── strom.exe
-│   └── strom-mcp-server.exe
+├── bin\                     # Strom executable
+│   └── strom.exe
 ├── gstreamer\
 │   ├── bin\                 # GStreamer DLLs and tools
 │   └── lib\gstreamer-1.0\   # GStreamer plugins

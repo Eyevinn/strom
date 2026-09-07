@@ -20,16 +20,11 @@ cd ..
 echo "Building backend for ARM64..."
 cargo build --release --package strom --target aarch64-unknown-linux-gnu
 
-# Build MCP server for ARM64
-echo "Building MCP server for ARM64..."
-cargo build --release --package strom-mcp-server --target aarch64-unknown-linux-gnu
-
 echo ""
 echo "✓ Build complete!"
 echo ""
-echo "Binaries location (dynamically linked with glibc):"
+echo "Binary location (dynamically linked with glibc):"
 echo "  Backend:    target/aarch64-unknown-linux-gnu/release/strom"
-echo "  MCP Server: target/aarch64-unknown-linux-gnu/release/strom-mcp-server"
 echo ""
 echo "NOTE: These binaries use your build system's glibc version."
 echo "If you get 'version GLIBC_X.XX not found' errors on the target, use Zig instead:"
