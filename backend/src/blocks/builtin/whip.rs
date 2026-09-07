@@ -528,6 +528,41 @@ fn wait_until_deadline_or_stop(stop: &AtomicBool, deadline: Instant) -> bool {
     }
 }
 
+/// Block until the session has been idle for `timeout`, or until `stop` is set.
+///
+/// Returns `Some(idle_ms)` once the idle time crosses `timeout`, or `None` if a
+/// teardown path set `stop` first.
+///
+/// `last_buffer_ms` is the arrival time of the most recent buffer on any stream,
+/// as milliseconds since `epoch`; 0 means no buffer has arrived yet, in which case
+/// the session is still negotiating and the clock has not started.
+///
+/// Idle is re-evaluated on every `WATCHDOG_POLL` tick. The poll must stay finer than
+/// `timeout`: evaluating once per `timeout` puts detection anywhere between one and
+/// two full timeouts, since a drop landing just after a check goes unnoticed until
+/// the next one.
+fn wait_for_inactivity(
+    stop: &AtomicBool,
+    last_buffer_ms: &AtomicU64,
+    epoch: Instant,
+    timeout: std::time::Duration,
+) -> Option<u64> {
+    let timeout_ms = timeout.as_millis() as u64;
+    loop {
+        if wait_until_deadline_or_stop(stop, Instant::now() + WATCHDOG_POLL) {
+            return None;
+        }
+        let last = last_buffer_ms.load(Ordering::Relaxed);
+        if last == 0 {
+            continue;
+        }
+        let idle_ms = (epoch.elapsed().as_millis() as u64).saturating_sub(last);
+        if idle_ms >= timeout_ms {
+            return Some(idle_ms);
+        }
+    }
+}
+
 /// Create a new whipserversrc element for a single WHIP client session.
 ///
 /// Each session runs in its own isolated GStreamer pipeline to avoid
@@ -764,34 +799,25 @@ pub fn create_whipserversrc_for_session(
         std::thread::Builder::new()
             .name(format!("whip-watchdog-{}", port))
             .spawn(move || {
-                loop {
-                    let deadline = Instant::now() + INACTIVITY_TIMEOUT;
-                    if wait_until_deadline_or_stop(&cleanup_sent_watchdog, deadline) {
-                        // Another path (ICE callback, DELETE, flow stop) finished
-                        // with this session.
-                        break;
-                    }
-                    let last = last_buffer_ms_watchdog.load(Ordering::Relaxed);
-                    if last == 0 {
-                        // No buffer received yet — keep waiting (session might still be negotiating)
-                        continue;
-                    }
-                    let elapsed_ms = last_buffer_epoch.elapsed().as_millis() as u64;
-                    let idle_ms = elapsed_ms.saturating_sub(last);
-                    if idle_ms >= INACTIVITY_TIMEOUT.as_millis() as u64 {
-                        if !cleanup_sent_watchdog.swap(true, Ordering::SeqCst) {
-                            info!(
-                                "WHIP Input: Inactivity timeout ({}s idle) on port {}, triggering cleanup",
-                                idle_ms / 1000,
-                                port
-                            );
-                            let _ = cleanup_tx_watchdog.send(SessionCleanupRequest {
-                                port,
-                                reason: format!("inactivity ({}s idle)", idle_ms / 1000),
-                            });
-                        }
-                        break;
-                    }
+                // Returns None when another path (ICE callback, DELETE, flow stop)
+                // finished with this session first.
+                let Some(idle_ms) = wait_for_inactivity(
+                    &cleanup_sent_watchdog,
+                    &last_buffer_ms_watchdog,
+                    last_buffer_epoch,
+                    INACTIVITY_TIMEOUT,
+                ) else {
+                    return;
+                };
+                if !cleanup_sent_watchdog.swap(true, Ordering::SeqCst) {
+                    info!(
+                        "WHIP Input: Inactivity timeout ({}ms idle) on port {}, triggering cleanup",
+                        idle_ms, port
+                    );
+                    let _ = cleanup_tx_watchdog.send(SessionCleanupRequest {
+                        port,
+                        reason: format!("inactivity ({}ms idle)", idle_ms),
+                    });
                 }
             })
             .ok();
@@ -1870,6 +1896,78 @@ mod tests {
         assert!(
             Instant::now() >= deadline,
             "wait returned before its deadline"
+        );
+    }
+
+    /// A dead session must be detected one poll interval after the inactivity
+    /// threshold, not one whole extra timeout later.
+    ///
+    /// The last buffer here lands 150 ms after the epoch, so the threshold is crossed
+    /// at ~1150 ms — just *after* a once-per-timeout check at 1000 ms would have run,
+    /// and far enough past it that scheduler slop cannot blur the two. Evaluating once
+    /// per `timeout` instead of once per poll fails this test: it detects at ~2000 ms,
+    /// where polling detects at ~1250 ms.
+    #[test]
+    fn watchdog_detects_inactivity_within_one_poll_of_the_timeout() {
+        let timeout = std::time::Duration::from_millis(1000);
+        let stop = Arc::new(AtomicBool::new(false));
+        let epoch = Instant::now();
+        let last_buffer_ms = Arc::new(AtomicU64::new(150));
+
+        let started = Instant::now();
+        let idle_ms = wait_for_inactivity(&stop, &last_buffer_ms, epoch, timeout)
+            .expect("watchdog must report inactivity, not a stop");
+        let detection = started.elapsed();
+
+        // Slack over the expected 1250 ms covers scheduler jitter but stays well
+        // clear of the 2000 ms the once-per-timeout evaluation would take.
+        assert!(
+            detection < std::time::Duration::from_millis(1600),
+            "inactivity took {:?} to detect with a {:?} timeout — idle is being \
+             evaluated once per timeout, not once per poll",
+            detection,
+            timeout
+        );
+        assert!(
+            idle_ms < 2 * timeout.as_millis() as u64,
+            "reported idle time was {} ms for a {:?} timeout — the check is too coarse",
+            idle_ms,
+            timeout
+        );
+    }
+
+    /// The inactivity wait must abandon a session the moment a teardown path claims
+    /// it, even though the session never went idle.
+    #[test]
+    fn watchdog_inactivity_wait_gives_up_when_stopped() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let epoch = Instant::now();
+        // Still negotiating: no buffer has arrived, so the idle clock never starts
+        // and only the stop flag can end the wait.
+        let last_buffer_ms = Arc::new(AtomicU64::new(0));
+
+        let setter = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            setter.store(true, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        let result = wait_for_inactivity(
+            &stop,
+            &last_buffer_ms,
+            epoch,
+            std::time::Duration::from_secs(30),
+        );
+
+        assert!(
+            result.is_none(),
+            "a stopped wait must not report inactivity"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "wait took {:?} — it is not polling the stop flag",
+            started.elapsed()
         );
     }
 
