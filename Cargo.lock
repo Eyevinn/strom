@@ -6618,6 +6618,7 @@ dependencies = [
  "network-interface",
  "notify",
  "nvml-wrapper",
+ "objc2-foundation 0.3.2",
  "parking_lot",
  "reqwest 0.13.4",
  "rust-embed",

@@ -31,6 +31,7 @@ pub mod gst;
 pub mod gui;
 pub mod json_rejection;
 pub mod layout;
+pub mod macos_app_nap;
 pub mod mcp;
 pub mod network;
 pub mod openapi;
