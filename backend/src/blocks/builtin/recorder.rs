@@ -21,6 +21,10 @@
 //! pipeline start for connected tracks only — not for every configured track, and not
 //! lazily from the pad probes.
 //!
+//! The sink itself stays locked until a track's caps arrive, so a recorder whose input
+//! never carries data cannot hold the pipeline out of PLAYING (see
+//! `prepare_idle_recording_sink`).
+//!
 //! Output files are written to: {media_path}/{output_dir}/{filename_prefix}_%05d.{ext}
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
@@ -51,6 +55,29 @@ const DEFAULT_NUM_AUDIO_TRACKS: usize = 1;
 
 /// Element ID suffix for splitmuxsink, used by the API to look it up via PipelineManager.
 pub const SPLITMUXSINK_SUFFIX: &str = "splitmuxsink";
+
+/// Keep a recorder with nothing to record out of the pipeline's state changes.
+///
+/// A sink only completes READY->PAUSED once it has prerolled a buffer, so a
+/// recorder whose input never carries data holds the whole pipeline short of
+/// PLAYING — and a flow where only some inputs are live has recorders in
+/// exactly that position. Locked, the sink sits in NULL and writes no file
+/// until `activate_recording_sink` brings it in on a track's first caps.
+fn prepare_idle_recording_sink(splitmuxsink: &gst::Element) {
+    splitmuxsink.set_locked_state(true);
+}
+
+/// Bring the recording sink into the running pipeline, from the caps probe of a
+/// track that is about to be linked to it. Idempotent across tracks.
+fn activate_recording_sink(splitmuxsink: &gst::Element, instance_id: &str) {
+    splitmuxsink.set_locked_state(false);
+    if let Err(e) = splitmuxsink.sync_state_with_parent() {
+        error!(
+            "Recorder {}: failed to sync splitmuxsink with pipeline state: {}",
+            instance_id, e
+        );
+    }
+}
 
 impl BlockBuilder for RecorderBuilder {
     fn get_external_pads(
@@ -325,6 +352,8 @@ impl BlockBuilder for RecorderBuilder {
             .build()
             .map_err(|e| BlockBuildError::ElementCreation(format!("splitmuxsink: {}", e)))?;
 
+        prepare_idle_recording_sink(&splitmuxsink);
+
         splitmuxsink.set_property("location", &location);
         splitmuxsink.set_property("muxer", &mux);
 
@@ -577,6 +606,8 @@ impl BlockBuilder for RecorderBuilder {
                         give_pad_back();
                         return gst::PadProbeReturn::Ok;
                     }
+                    activate_recording_sink(&splitmuxsink, &instance_id_clone);
+
                     if let Err(e) = queue_src.link(&sink_pad) {
                         error!("Recorder {}: failed to link video queue to splitmuxsink: {:?}", instance_id_clone, e);
                         give_pad_back();
@@ -798,6 +829,8 @@ impl BlockBuilder for RecorderBuilder {
                         give_pad_back();
                         return gst::PadProbeReturn::Ok;
                     }
+                    activate_recording_sink(&splitmuxsink, &instance_id_clone);
+
                     if let Err(e) = queue_src.link(&sink_pad) {
                         error!("Recorder {}: failed to link audio queue to splitmuxsink: {:?}", instance_id_clone, e);
                         give_pad_back();
