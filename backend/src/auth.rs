@@ -14,6 +14,15 @@ use tracing::warn;
 
 const SESSION_USER_KEY: &str = "user_authenticated";
 
+/// Whether this cookie session has completed a successful login.
+///
+/// Route handlers outside the `auth_middleware` chain (the MCP endpoint, which
+/// needs its own error shape) use this to accept the same session cookie the
+/// middleware would have accepted.
+pub async fn session_is_authenticated(session: &Session) -> bool {
+    matches!(session.get::<bool>(SESSION_USER_KEY).await, Ok(Some(true)))
+}
+
 /// Authentication configuration loaded from environment variables
 #[derive(Clone, Debug)]
 pub struct AuthConfig {
@@ -144,7 +153,7 @@ pub async fn auth_middleware(
     }
 
     // Check session authentication
-    if let Ok(Some(true)) = session.get::<bool>(SESSION_USER_KEY).await {
+    if session_is_authenticated(&session).await {
         return Ok(next.run(request).await);
     }
 
@@ -265,12 +274,7 @@ pub async fn auth_status_handler(
         true
     } else {
         // Check if authenticated via session
-        session
-            .get::<bool>(SESSION_USER_KEY)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(false)
+        session_is_authenticated(&session).await
     };
 
     let mut methods = Vec::new();

@@ -146,7 +146,8 @@ curl -N http://localhost:8080/api/mcp \
   -H "Mcp-Session-Id: <session-id>"
 ```
 
-Events include:
+The stream carries flow lifecycle and pipeline problems, and nothing else:
+
 - `notifications/strom/flowCreated`
 - `notifications/strom/flowUpdated`
 - `notifications/strom/flowDeleted`
@@ -154,6 +155,9 @@ Events include:
 - `notifications/strom/flowStopped`
 - `notifications/strom/pipelineError`
 - `notifications/strom/pipelineWarning`
+
+Per-frame and per-second telemetry (meters, loudness, spectrum, QoS, latency, player
+position) is deliberately not forwarded here — use `WS /api/ws` for that.
 
 ### Terminate Session
 
@@ -181,9 +185,12 @@ curl -X DELETE http://localhost:8080/api/mcp \
 
 ## Security
 
-- **Origin validation**: browser-style cross-origin requests are rejected (DNS rebinding
-  protection).
-- **Session isolation**: each session has independent state.
-- **API key authentication**: when authentication is enabled on the server, requests must
-  include either an `X-API-Key: <key>` header (recommended) or
-  `Authorization: Bearer <key>`. See [AUTHENTICATION.md](AUTHENTICATION.md).
+- **Authentication**: when authentication is enabled on the server, the endpoint accepts the
+  same credentials as the rest of the API — `X-API-Key: <key>` (recommended for MCP clients),
+  `Authorization: Bearer <key>`, or the browser's login session cookie. See
+  [AUTHENTICATION.md](AUTHENTICATION.md).
+- **Origin validation**: requests carrying a browser `Origin` that is neither this host nor
+  localhost are rejected (DNS rebinding protection). Non-browser clients send no `Origin` and
+  are unaffected.
+- **Session isolation**: each session has independent state. Idle sessions are collected
+  automatically, so a client that never sends `DELETE` costs nothing permanently.

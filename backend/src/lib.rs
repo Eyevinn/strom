@@ -455,8 +455,10 @@ pub async fn create_app_with_config(
             get(|| async { serve_embedded_asset::<assets::WhipAssets>("whip.css", "text/css") }),
         );
 
-    // Create MCP session manager
+    // Create MCP session manager. Clients are not required to DELETE their
+    // session and generally do not, so the sweep is what reclaims them.
     let mcp_sessions = mcp::McpSessionManager::new();
+    mcp_sessions.start_cleanup_task();
 
     // Combine routers with auth config and MCP session manager extensions
     // The API router carries its own fallback so that unmatched /api/* paths get a
