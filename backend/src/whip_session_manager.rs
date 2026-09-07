@@ -57,6 +57,11 @@ pub struct WhipEndpointConfig {
     pub slot_audio_appsrcs: Vec<gst_app::AppSrc>,
     /// Per-slot video appsrc elements (main pipeline side, created at build time)
     pub slot_video_appsrcs: Vec<gst_app::AppSrc>,
+    /// Per-slot `decodebin` elements (main pipeline side, created at build
+    /// time), indexed by slot. Locked while the slot has no publisher so it
+    /// cannot hold the pipeline short of PLAYING; `allocate_slot` unlocks them.
+    /// Empty when the endpoint runs with `decode=false`.
+    pub slot_decodebins: Vec<Vec<gst::glib::WeakRef<gst::Element>>>,
     /// Slot assignments: slot index → Option<resource_id>
     /// Protected by RwLock for concurrent access from HTTP handlers.
     pub slot_assignments: Arc<RwLock<Vec<Option<String>>>>,
@@ -66,18 +71,61 @@ impl WhipEndpointConfig {
     /// Allocate a free slot for a new session.
     /// Returns the slot index, or None if all slots are occupied.
     pub fn allocate_slot(&self, resource_id: &str) -> Option<usize> {
-        let mut slots = self.slot_assignments.write().unwrap();
-        for (i, slot) in slots.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(resource_id.to_string());
-                info!(
-                    "WhipEndpointConfig: Allocated slot {} for session '{}'",
-                    i, resource_id
+        let allocated = {
+            let mut slots = self.slot_assignments.write().unwrap();
+            let mut allocated = None;
+            for (i, slot) in slots.iter_mut().enumerate() {
+                if slot.is_none() {
+                    *slot = Some(resource_id.to_string());
+                    info!(
+                        "WhipEndpointConfig: Allocated slot {} for session '{}'",
+                        i, resource_id
+                    );
+                    allocated = Some(i);
+                    break;
+                }
+            }
+            allocated
+        };
+
+        // A publisher is on its way, so the slot's decode chain can join the
+        // pipeline's state changes. The SDP exchange is well ahead of the first
+        // RTP packet: ICE and DTLS still have to complete before media arrives.
+        if let Some(slot) = allocated {
+            self.activate_slot_decoders(slot);
+        }
+        allocated
+    }
+
+    /// Bring a slot's `decodebin` elements into the running pipeline.
+    ///
+    /// They are built with their state locked (see `prepare_idle_decodebin` in
+    /// the WHIP block builder). Idempotent: a slot reused by a later session
+    /// re-syncs a decodebin that is already running.
+    fn activate_slot_decoders(&self, slot: usize) {
+        let Some(decodebins) = self.slot_decodebins.get(slot) else {
+            return;
+        };
+        for weak in decodebins {
+            let Some(decodebin) = weak.upgrade() else {
+                // Pipeline already torn down.
+                continue;
+            };
+            decodebin.set_locked_state(false);
+            if let Err(e) = decodebin.sync_state_with_parent() {
+                warn!(
+                    "WhipEndpointConfig: Failed to sync {} with pipeline state: {}",
+                    decodebin.name(),
+                    e
                 );
-                return Some(i);
+            } else {
+                debug!(
+                    "WhipEndpointConfig: Activated {} for slot {}",
+                    decodebin.name(),
+                    slot
+                );
             }
         }
-        None
     }
 
     /// Release a slot when a session disconnects.
