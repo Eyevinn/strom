@@ -276,6 +276,16 @@ impl PipelineManager {
             })?;
 
             debug!("Successfully linked: {} -> {}", link.from, link.to);
+        } else if let Some(sink_pad_name) = to_pad {
+            // Source is element-level, destination names a pad: let GStreamer
+            // pick a compatible source pad but honour the sink pad the caller
+            // asked for. link() would ignore it and pick both ends itself.
+            src.link_pads(None::<&str>, sink, Some(sink_pad_name))
+                .map_err(|e| {
+                    PipelineError::LinkError(link.from.clone(), format!("{} - {}", link.to, e))
+                })?;
+
+            debug!("Successfully linked: {} -> {}", link.from, link.to);
         } else {
             // Simple link without pad names - check if sink is an aggregator
             let element_type_name = sink
