@@ -25,6 +25,7 @@ pub mod mpegtssrt;
 pub mod mpegtssrt_input;
 pub mod ndi;
 pub mod recorder;
+pub mod rtmp;
 pub mod spectrum;
 pub mod tams_output;
 pub mod thumbnail;
@@ -138,8 +139,10 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
     // Add WHEP blocks
     blocks.extend(whep::get_blocks());
 
+    // Add RTMP blocks
+    blocks.extend(rtmp::get_blocks());
+
     // Future: Add more protocols here
-    // blocks.extend(rtmp::get_blocks());
     // blocks.extend(hls::get_blocks());
 
     blocks
@@ -176,6 +179,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.ndi_input" => Some(Arc::new(ndi::NDIInputBuilder)),
         "builtin.ndi_output" => Some(Arc::new(ndi::NDIOutputBuilder)),
         "builtin.recorder" => Some(Arc::new(recorder::RecorderBuilder)),
+        "builtin.rtmp_output" => Some(Arc::new(rtmp::RtmpOutputBuilder)),
         "builtin.spectrum" => Some(Arc::new(spectrum::SpectrumBuilder)),
         "builtin.tams_output" => Some(Arc::new(tams_output::TamsOutputBuilder)),
         "builtin.thumbnail" => Some(Arc::new(thumbnail::ThumbnailBuilder)),
