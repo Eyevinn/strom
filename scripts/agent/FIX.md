@@ -6,8 +6,7 @@ You never decide the design yourself, and you never merge.
 
 A PR from you is only worth its review time if it is either **mechanically checkable** — a
 test that fails without the fix and passes with it — or **honestly labelled as an unverified
-proposal** with the exact experiment that would falsify it. A PR that looks verified and is
-not is the one unrecoverable failure of this stage.
+proposal** with the exact experiment that would falsify it.
 
 ## Phase 1 — follow up on what you opened earlier
 
@@ -27,17 +26,14 @@ For every open draft PR authored by you:
    diff, or set the body's verdict to `BLOCKED` and say what you could not resolve.
 4. If the PR is older than 14 days with no human comment, close it with a one-line comment
    saying it is being closed as an unverified proposal that went stale and that the issue
-   remains open. Stale proposals that look like work in progress cost more than they are
-   worth.
+   remains open.
 
-   **Exception — never close a PR that is only waiting for a dispatch.** macOS and Windows do
-   not build on push or `pull_request`, and this stage may not fire a workflow run. So for a
-   platform-specific fix the *only* route to class A runs through a human typing
-   `gh workflow run ci.yml --ref <branch> -f platforms=windows`. Closing that work as stale
-   destroys a correct PR for being blocked on someone else. Such a PR is `class=C`
-   (`blocked-on-dispatch`, see below): instead of closing it, re-post the dispatch command as
-   a comment and carry it in every run summary while the PR stays open. CI-configuration
-   fixes are usually this shape — their whole guard *is* the dispatch log, not a Rust test.
+   **Exception — never close a PR that is only waiting for a dispatch.** For a
+   platform-specific fix the only route to class A runs through a human asking for the
+   platform build, and this stage may not fire one. Such a PR is `class=C`: instead of closing
+   it, re-post the command as a comment and carry it in every run summary while the PR stays
+   open. CI-configuration fixes are usually this shape — their whole guard *is* the dispatch
+   log, not a Rust test.
 
 ## Phase 2 — pick at most one issue
 
@@ -161,16 +157,13 @@ class B applies for want of a device rather than for want of time.
 - **Class B — proposal, not verified.** The evidence has not arrived yet, or cannot be
   produced here at all (no device, browser, GPU or network).
 - **Class C — blocked on a dispatch.** The evidence exists and is one human command away:
-  the covering check is a macOS or Windows build that this repo runs only on
-  `workflow_dispatch`. Distinct from B because "no evidence yet" and "evidence that needs a
-  human to fire it" call for different things from the reader, and because C is exempt from
-  the 14-day stale closure. State the exact dispatch command in the body.
+  the covering check is a macOS or Windows build this repo does not run on a pull request by
+  default. C is exempt from the 14-day stale closure. State the exact command in the body.
 
 **A newly opened PR is therefore almost always class B**, because you open it before CI can
 have concluded — or class C, when the covering check is a platform build only a human can
-fire. That is not a defect in the work — it is the honest state of the evidence, and
-Phase 1 of a later run promotes it. Never reason "the mechanism is obviously right, so this is
-A": certainty is not evidence.
+fire. Phase 1 of a later run promotes it. Never reason "the mechanism is obviously right, so
+this is A": certainty is not evidence.
 
 Required sections, in this order, omitting any with nothing to say:
 

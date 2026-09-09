@@ -167,6 +167,67 @@ which is exactly when it gets "simplified" away.
 - **`ROLE_REVIEW.md` already states what the reviewer is for**, so `REVIEW.md` no longer
   repeats it. A run reads the role file first; saying it twice spends the same budget twice.
 
+### Reasoning moved out of `PROTOCOL.md`
+
+- **A pull request that edits `scripts/agent/` would be handing the reviewer its own
+  instructions**, from inside the diff it is judging, before it has judged it. The repository
+  is public and invites outside contributions, which is why the pinned copy exists and why the
+  scripts run from it while resolving against the checked-out tree.
+- **A wrong citation is worse than none:** it makes the whole review impossible to spot-check,
+  and a model cannot reliably catch its own bad citations — that is what the script is for.
+- **A token from the wrong vocabulary row corrupts the log**, because the run summary and the
+  markers carry those values verbatim.
+- **`work=` mislabelled ships a PR that misdescribes itself:** an `enhancement` implemented
+  under the `bug` vocabulary lands as `fix(scope): …` with a commit claiming to "reproduce" a
+  defect that never existed.
+- **Looking for `class=` on a review produces a false finding.** A run once reported "five open
+  PRs are missing `class=`" about five PRs it had merely reviewed; `class=` exists only on a
+  fix PR the implementation stage authored.
+- **`excluded=` meaning "would break" rather than "touches"** is what keeps the gate a real
+  check. CLAUDE.md *requires* new shared types to live in `strom-types`, so scoring an
+  additive type as excluded would demand an override for the one placement the repo mandates.
+- **Two thirds of everything these tasks have written is run summaries**, and the worst of them
+  re-listed sixteen unchanged issues to say nothing had changed. That is what made the log
+  unreadable to a human and, once, to the agent itself — hence "write once, then cite".
+
+### Reasoning moved out of `TRIAGE.md`
+
+- **Calling a large additive change `SHARED` for its size** locks it out of implementation for
+  the wrong reason. Radius scores what a change modifies; size belongs in the scope proposal.
+- **Nothing else in the protocol cuts a feature into slices**, so an unproposed cut means the
+  maintainer writes it by hand or the implementation stage tries to build all of it at once.
+- **The backfill's invitation line exists because standing triages predate the answer syntax.**
+  Nothing on those issues tells a maintainer the token exists, and a decision typed any other
+  way cannot be read — and the backfill is the only comment those issues will ever get.
+- **A standing v3 comment suppresses re-triage, which is why two cases override it.** Live
+  example: an issue triaged `NEEDS_INFO` received a detailed research follow-up ninety minutes
+  later, and four consecutive runs then reported "all open issues already carry a current v3
+  comment" without ever reading it.
+- **`TRIAGE.md` had a ceiling and no target**, the same defect `FIX.md` had (see above). Its
+  worked example measures 2019 characters, so that is now the stated target. `REVIEW.md` said
+  its example was 1500 characters when it measures 1893; corrected, because a target nobody
+  can hit is not a target.
+
+### Reasoning moved out of `SUMMARY.md`
+
+- **An unpaginated comment fetch returns the thirty oldest comments**, which once made a run
+  report a months-old comment as the previous run and invent a gap in the log.
+- **A field invented to fill a column** has already put three different radii in this log for
+  one PR. That is why an undetermined field is `null`.
+- **A bare `#721` is four characters a reader has to look up by hand** anywhere outside this
+  repository's own issues and pull requests, so a message naming six items costs six searches.
+- **A task prompt once capped the onward message at five lines and banned remote URLs**, which
+  left a single line of bare refs as the only legal output; runs kept shipping exactly that
+  after this file had already required otherwise.
+
+### Reasoning moved out of `FIX.md`
+
+- **A PR that looks verified and is not** is the one unrecoverable failure of that stage.
+- **Closing a dispatch-blocked PR as stale destroys a correct PR for being blocked on someone
+  else**, which is why class C is exempt from the 14-day closure.
+- **Class B and class C are distinct** because "no evidence yet" and "evidence that needs a
+  human to fire it" call for different things from the reader.
+
 ## Changing the protocol
 
 Edit these files in a PR. The task definitions only need updating if the *boundary* or the
