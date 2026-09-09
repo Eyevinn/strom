@@ -47,6 +47,16 @@ useful if the runtime changes and safe to read in public.
   token vocabulary expresses that. Three findings stay binding — no reply at all, a reply from
   someone who may not decide, an issue an open PR already claims — because those are
   unambiguous and being wrong is expensive.
+- **The protocol is read from `origin/main`, because a checked-out tree is untrusted input.**
+  `REVIEW.md` has the agent check out the pull request it is reviewing, and the protocol is
+  read per item — so before this rule, the files telling the reviewer what it may do were
+  read out of the diff being reviewed. On a public repository that invites outside
+  contributions, and with a token that can write contents and pull requests, that is a
+  permission boundary anyone who can open a pull request could edit; nothing had to be merged
+  for the next scheduled run to read it. The fix is one copy taken from the pinned branch at
+  the start of a run. Do not "simplify" it back to reading `scripts/agent/` in place, and do
+  not let a stub prompt point at a path in the working tree.
+
 - **`verify-citations.sh` exists because models produce confident wrong line numbers** and are
   measurably poor at catching their own; asking more firmly does not fix it, and a mechanical
   check does. It also enforces the length ceilings, for the same reason.
