@@ -66,6 +66,16 @@ useful if the runtime changes and safe to read in public.
   rubber stamp.
 - **`excluded=` means "would break", not "touches".** That distinction is what keeps gate 4 a
   real check.
+- **A draft is held, not skipped, and the hold is said exactly once.** Those are two separate
+  corrections to the same rule. Silently skipping a draft told its author nothing, so a
+  contributor who had opened one had no way to know whether it was queued, ignored or waiting
+  on them; and the shape that fixes that — a comment — is also the shape that turns into a
+  nag, because these tasks run twice a weekday and would otherwise re-post it on every new
+  commit. Hence a `kind=draft-hold` marker and "one per pull request, ever": the standing
+  comment is the memory. Do not "improve" the hold into a review that opens with a caveat,
+  and do not make it repeat when the head SHA moves — a moving head SHA is what a draft *is*.
+  Being asked is the only trigger for a real review, and then it is a full one, because a
+  half review of a draft is the outcome both halves of this rule exist to avoid.
 - **The worked examples are the format spec.** They exist because rules describing a shape
   drift and an example does not. If you change the required shape, change the example in the
   same commit.
