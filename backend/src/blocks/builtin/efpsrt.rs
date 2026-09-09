@@ -36,6 +36,20 @@ use std::sync::Arc;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 
+/// Read a track-count property, returning `None` when it is absent, not a
+/// number, or negative, so the caller applies its own default.
+///
+/// `usize::try_from` rather than `as usize`: every track count feeds a
+/// `for i in 0..n` loop that allocates an element per iteration, and a negative
+/// `Int` cast with `as` becomes `usize::MAX`.
+pub fn track_count(properties: &HashMap<String, PropertyValue>, name: &str) -> Option<usize> {
+    properties.get(name).and_then(|v| match v {
+        PropertyValue::UInt(u) => usize::try_from(*u).ok(),
+        PropertyValue::Int(i) => usize::try_from(*i).ok(),
+        _ => None,
+    })
+}
+
 /// EFP/SRT Output block builder.
 pub struct EfpSrtOutputBuilder;
 
@@ -44,32 +58,11 @@ impl BlockBuilder for EfpSrtOutputBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
-        let num_video_tracks = properties
-            .get("num_video_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_video_tracks = track_count(properties, "num_video_tracks").unwrap_or(1);
 
-        let num_audio_tracks = properties
-            .get("num_audio_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_audio_tracks = track_count(properties, "num_audio_tracks").unwrap_or(1);
 
-        let num_data_tracks = properties
-            .get("num_data_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let num_data_tracks = track_count(properties, "num_data_tracks").unwrap_or(0);
 
         let mut inputs = Vec::new();
 
@@ -175,32 +168,11 @@ impl BlockBuilder for EfpSrtOutputBuilder {
             })
             .unwrap_or(DEFAULT_EFP_MTU);
 
-        let num_video_tracks = properties
-            .get("num_video_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_video_tracks = track_count(properties, "num_video_tracks").unwrap_or(1);
 
-        let num_audio_tracks = properties
-            .get("num_audio_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_audio_tracks = track_count(properties, "num_audio_tracks").unwrap_or(1);
 
-        let num_data_tracks = properties
-            .get("num_data_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let num_data_tracks = track_count(properties, "num_data_tracks").unwrap_or(0);
 
         // Create efpmux
         let mux_id = format!("{}:efpmux", instance_id);
@@ -867,7 +839,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "num_data_tracks".to_string(),
                 label: "Number of Data Tracks".to_string(),
-                description: "Number of EFP embedded-data input tracks (default: 0). Each track maps to an efpmux 'embed_%u' pad. The connected source must send 'application/x-efp-embedded' caps carrying 'data-type' and 'stream-id'; data is delivered alongside the media stream with the matching stream-id.".to_string(),
+                description: "Number of EFP embedded-data input tracks (default: 0). Each track maps to an efpmux 'embed_%u' pad. The connected source must send 'application/x-efp-embedded' caps carrying 'data-type' and 'stream-id'. Both fields default to 0 when omitted rather than failing, and stream-id 0 is reserved: data addressed to it, or to any stream-id that carries no media, is buffered by the muxer and never sent. Media stream-ids are allocated from 1 in pad order, so the video track is 1 and audio tracks follow.".to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(0)),
                 mapping: PropertyMapping {

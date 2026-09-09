@@ -231,3 +231,68 @@ fn input_block_builds_no_data_output_by_default() {
         "num_data_tracks defaults to 0, so no data output element must be created"
     );
 }
+
+#[test]
+fn input_block_rejects_more_data_tracks_than_the_demuxer_can_reach() {
+    init();
+    require_elements(&["efpdemux", "srtsrc", "identity"]);
+
+    let props = properties(&[
+        ("num_video_tracks", 0),
+        ("num_audio_tracks", 0),
+        ("num_data_tracks", 2),
+    ]);
+    // `BlockBuildResult` is not `Debug`, so unwrap the error by hand.
+    let message = match EfpSrtInputBuilder.build("blk", &props, &context()) {
+        Ok(_) => panic!("efpdemux has one embedded pad, so two data tracks must not build"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        message.contains("num_data_tracks"),
+        "the error must name the property the operator set, got: {}",
+        message
+    );
+}
+
+#[test]
+fn input_block_never_advertises_an_unreachable_data_output() {
+    init();
+
+    let props = properties(&[("num_data_tracks", 2)]);
+    let pads = EfpSrtInputBuilder
+        .get_external_pads(&props)
+        .expect("efpsrt_input should report external pads");
+
+    let data_pads = pads
+        .outputs
+        .iter()
+        .filter(|pad| pad.name.starts_with("data_out_"))
+        .map(|pad| pad.name.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        data_pads,
+        vec!["data_out_0".to_string()],
+        "a data output the demuxer can never feed must not appear in the flow graph"
+    );
+}
+
+/// Guards the `usize::try_from` conversion. Read with `as usize`, a negative
+/// `Int` becomes `usize::MAX` and drives the pad loops, so this asserts the
+/// value is discarded and the default applies instead.
+#[test]
+fn a_negative_track_count_falls_back_to_the_default() {
+    init();
+
+    for name in ["num_video_tracks", "num_audio_tracks", "num_data_tracks"] {
+        let props: HashMap<String, PropertyValue> =
+            [(name.to_string(), PropertyValue::Int(-1))].into();
+
+        assert_eq!(
+            strom::blocks::builtin::efpsrt::track_count(&props, name),
+            None,
+            "a negative {} must be discarded, not wrapped to usize::MAX",
+            name
+        );
+    }
+}

@@ -23,6 +23,7 @@
 //! No videoconvert is inserted in the decoded video path to preserve GPU memory
 //! (e.g. CUDAMemory from nvh264dec) for downstream elements.
 
+use crate::blocks::builtin::efpsrt::track_count;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::events::EventBroadcaster;
 use gstreamer as gst;
@@ -36,6 +37,16 @@ use tracing::{debug, error, warn};
 /// Caps name of `efpdemux`'s embedded-data src pad.
 const EFP_EMBEDDED_CAPS_NAME: &str = "application/x-efp-embedded";
 
+/// Data tracks this block can actually reach.
+///
+/// `efpdemux` caches a single `embedded` src pad and returns it for every data
+/// type, so a second data track would publish an output pad that can never
+/// carry a buffer. `build` rejects anything above this rather than clamping
+/// silently: a flow configured for two tracks behaving as one is the same
+/// surprise in a quieter voice. Raising the limit is the compatible direction,
+/// so this can be relaxed once `efpdemux` demultiplexes by stream ID.
+const MAX_DATA_TRACKS: usize = 1;
+
 /// EFP/SRT Input block builder.
 pub struct EfpSrtInputBuilder;
 
@@ -44,32 +55,11 @@ impl BlockBuilder for EfpSrtInputBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
-        let num_video_tracks = properties
-            .get("num_video_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_video_tracks = track_count(properties, "num_video_tracks").unwrap_or(1);
 
-        let num_audio_tracks = properties
-            .get("num_audio_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_audio_tracks = track_count(properties, "num_audio_tracks").unwrap_or(1);
 
-        let num_data_tracks = properties
-            .get("num_data_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let num_data_tracks = track_count(properties, "num_data_tracks").unwrap_or(0);
 
         let mut outputs = Vec::new();
 
@@ -101,7 +91,10 @@ impl BlockBuilder for EfpSrtInputBuilder {
             });
         }
 
-        for i in 0..num_data_tracks {
+        // Never advertise a data output the demuxer cannot feed. This signature
+        // cannot report an error, so an over-configured block shows only the
+        // pads that work here and is rejected in `build`.
+        for i in 0..num_data_tracks.min(MAX_DATA_TRACKS) {
             outputs.push(ExternalPad {
                 label: Some(format!("D{}", i)),
                 name: format!("data_out_{}", i),
@@ -185,32 +178,21 @@ impl BlockBuilder for EfpSrtInputBuilder {
             )));
         }
 
-        let num_video_tracks = properties
-            .get("num_video_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_video_tracks = track_count(properties, "num_video_tracks").unwrap_or(1);
 
-        let num_audio_tracks = properties
-            .get("num_audio_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_audio_tracks = track_count(properties, "num_audio_tracks").unwrap_or(1);
 
-        let num_data_tracks = properties
-            .get("num_data_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(0);
+        let num_data_tracks = track_count(properties, "num_data_tracks").unwrap_or(0);
+
+        if num_data_tracks > MAX_DATA_TRACKS {
+            return Err(BlockBuildError::InvalidConfiguration(format!(
+                "num_data_tracks is {}, but the EFP demuxer exposes a single embedded-data \
+                 pad shared by every data type, so at most {} data track can be received. \
+                 Split the streams across separate EFP inputs, or address several data types \
+                 over the one track.",
+                num_data_tracks, MAX_DATA_TRACKS
+            )));
+        }
 
         // Create srtsrc
         let src_id = format!("{}:srtsrc", instance_id);
@@ -326,9 +308,9 @@ impl BlockBuilder for EfpSrtInputBuilder {
             elements.push((element_id, identity));
         }
 
-        // Create embedded-data output identity elements. efpdemux exposes a
-        // single `embedded` src pad for all data types, so only the first of
-        // these is ever linked.
+        // Create embedded-data output identity elements. Capped at
+        // MAX_DATA_TRACKS above, so this builds at most one; the loop is kept
+        // so it needs no reshaping when efpdemux can demultiplex by stream ID.
         let mut data_guards = Vec::new();
         for i in 0..num_data_tracks {
             let element_id = format!("{}:data_output_{}", instance_id, i);
@@ -878,7 +860,7 @@ fn efpsrt_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "num_data_tracks".to_string(),
                 label: "Number of Data Tracks".to_string(),
-                description: "Number of EFP embedded-data output tracks (default: 0). efpdemux exposes a single 'embedded' pad carrying every data type, so only the first track is ever linked.".to_string(),
+                description: "Number of EFP embedded-data output tracks: 0 or 1 (default: 0). efpdemux exposes a single 'embedded' pad carrying every data type, so a value above 1 is rejected rather than silently reduced.".to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(0)),
                 mapping: PropertyMapping {
