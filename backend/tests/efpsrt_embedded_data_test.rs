@@ -103,8 +103,17 @@ fn output_block_exposes_a_data_input_per_data_track() {
     }
 }
 
+/// The embed pad must be requested here, but the link to it must be *reported*
+/// rather than made.
+///
+/// An earlier version of this test asserted the src pad's peer directly, and
+/// passed while the channel carried nothing: the builder linked the pads itself,
+/// and `gst_bin_add` drops any link whose peer is outside the bin, so the
+/// pipeline builder's own "add every element, then link" order silently undid
+/// it. `efpsrt_data_roundtrip_test` is what actually proves bytes flow; this
+/// asserts the shape that lets them.
 #[test]
-fn output_block_requests_and_links_an_embed_pad_per_data_track() {
+fn output_block_reports_an_embed_pad_link_per_data_track() {
     init();
     require_elements(&["efpmux", "srtsink", "identity"]);
 
@@ -131,22 +140,36 @@ fn output_block_requests_and_links_an_embed_pad_per_data_track() {
 
     for i in 0..2 {
         let id = format!("blk:data_input_{}", i);
-        let identity = element(&result, &id)
-            .unwrap_or_else(|| panic!("block should contain a '{}' element", id));
-
-        let src = identity
-            .static_pad("src")
-            .unwrap_or_else(|| panic!("'{}' should have a src pad", id));
-        let peer = src
-            .peer()
-            .unwrap_or_else(|| panic!("'{}' src pad should be linked to efpmux", id));
-
         assert!(
-            pads.iter().any(|pad| pad == &peer),
-            "'{}' should link to an '{}' pad, but links to '{}'",
+            element(&result, &id).is_some(),
+            "block should contain a '{}' element",
+            id
+        );
+
+        let link = result
+            .internal_links
+            .iter()
+            .find(|(from, _)| from.element_id == id && from.pad_name.as_deref() == Some("src"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "'{}' src should be reported as an internal link, got {:?}",
+                    id,
+                    result
+                        .internal_links
+                        .iter()
+                        .map(|(f, t)| format!("{:?} -> {:?}", f, t))
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert_eq!(link.1.element_id, "blk:efpmux");
+        let pad_name = link.1.pad_name.as_deref().expect("link names a pad");
+        assert!(
+            pads.iter().any(|pad| pad.name() == pad_name),
+            "'{}' should link to an '{}' pad, but names '{}'",
             id,
             EMBED_TEMPLATE,
-            peer.name()
+            pad_name
         );
     }
 }

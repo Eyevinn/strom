@@ -228,6 +228,7 @@ impl BlockBuilder for EfpSrtOutputBuilder {
         // `stream-id`, so data addressed to a stream that carries no media
         // never leaves the muxer.
         let mut data_elements = Vec::new();
+        let mut data_links = Vec::new();
         for i in 0..num_data_tracks {
             let data_input_id = format!("{}:data_input_{}", instance_id, i);
             let data_input = gst::ElementFactory::make("identity")
@@ -256,16 +257,19 @@ impl BlockBuilder for EfpSrtOutputBuilder {
                     ))
                 })?;
 
-            let data_src = data_input.static_pad("src").ok_or_else(|| {
-                BlockBuildError::ElementCreation(format!("data identity {} has no src pad", i))
-            })?;
-
-            data_src.link(&embed_pad).map_err(|e| {
-                BlockBuildError::LinkError(format!("data input {} -> efpmux: {:?}", i, e))
-            })?;
+            // Report the link instead of making it here. `gst_bin_add` drops any
+            // link whose peer is outside the bin, and the pipeline builder adds
+            // every element this returns before it links anything, so a link
+            // made now is silently gone by the time data flows. The video and
+            // audio chains do not hit this because they link from caps probes,
+            // by which time everything is already in the pipeline.
+            data_links.push((
+                ElementPadRef::pad(&data_input_id, "src"),
+                ElementPadRef::pad(&mux_id, embed_pad.name().as_str()),
+            ));
 
             info!(
-                "EFP data input {}: linked to efpmux ({})",
+                "EFP data input {}: will link to efpmux ({})",
                 i,
                 embed_pad.name()
             );
@@ -273,7 +277,7 @@ impl BlockBuilder for EfpSrtOutputBuilder {
             data_elements.push((data_input_id, data_input));
         }
 
-        let mut internal_links = vec![];
+        let mut internal_links = data_links;
         let mux_weak = mux.downgrade();
         let mut elements = vec![(mux_id.clone(), mux), (sink_id.clone(), srtsink)];
         elements.extend(data_elements);
