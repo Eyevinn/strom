@@ -206,6 +206,15 @@ impl GraphEditor {
         // Reset the QoS marker clicked flag at the start of each frame
         self.qos_marker_clicked.set(false);
 
+        // Blocks that get the routing matrix editor, resolved once per frame so
+        // the node closure below does not need to borrow the definition map.
+        let routing_editor_blocks: std::collections::HashSet<String> = self
+            .block_definition_map
+            .values()
+            .filter(|d| crate::audiorouter::has_routing_matrix(d))
+            .map(|d| d.id.clone())
+            .collect();
+
         ui.push_id("graph_editor", |ui| {
             let (response, painter) =
                 ui.allocate_painter(ui.available_size_before_wrap(), Sense::click_and_drag());
@@ -499,7 +508,7 @@ impl GraphEditor {
 
                 // Handle double-click to open routing matrix for Audio Router blocks
                 if node_response.double_clicked()
-                    && block.block_definition_id == "builtin.audiorouter"
+                    && routing_editor_blocks.contains(&block.block_definition_id)
                 {
                     set_local_storage("open_routing_editor", &block.id);
                 }

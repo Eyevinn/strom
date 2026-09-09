@@ -15,6 +15,7 @@ pub mod efpsrt;
 pub mod efpsrt_input;
 pub mod inter;
 pub mod latency;
+pub mod liveaudiorouter;
 pub mod loudness;
 pub mod mediaplayer;
 pub mod meter;
@@ -55,6 +56,9 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
 
     // Add AudioRouter blocks
     blocks.extend(audiorouter::get_blocks());
+
+    // Add Live AudioRouter blocks
+    blocks.extend(liveaudiorouter::get_blocks());
 
     // Add Compositor blocks (unified CPU/GPU)
     blocks.extend(compositor::get_blocks());
@@ -146,6 +150,7 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.audioformat" => Some(Arc::new(audioformat::AudioFormatBuilder)),
         "builtin.audiogain" => Some(Arc::new(audiogain::AudioGainBuilder)),
         "builtin.audiorouter" => Some(Arc::new(audiorouter::AudioRouterBuilder)),
+        "builtin.liveaudiorouter" => Some(Arc::new(liveaudiorouter::LiveAudioRouterBuilder)),
         "builtin.compositor" => Some(Arc::new(compositor::CompositorBuilder)),
         "builtin.decklink_input" => Some(Arc::new(decklink::DeckLinkInputBuilder)),
         "builtin.decklink_output" => Some(Arc::new(decklink::DeckLinkOutputBuilder)),

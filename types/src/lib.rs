@@ -22,6 +22,7 @@ pub mod flow;
 pub mod mediaplayer;
 pub mod mixer;
 pub mod network;
+pub mod routing;
 pub mod state;
 pub mod stats;
 pub mod system_monitor;
