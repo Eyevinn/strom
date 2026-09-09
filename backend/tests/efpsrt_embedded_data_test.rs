@@ -103,8 +103,17 @@ fn output_block_exposes_a_data_input_per_data_track() {
     }
 }
 
+/// The embed pad must be requested here, but the link to it must be *reported*
+/// rather than made.
+///
+/// An earlier version of this test asserted the src pad's peer directly, and
+/// passed while the channel carried nothing: the builder linked the pads itself,
+/// and `gst_bin_add` drops any link whose peer is outside the bin, so the
+/// pipeline builder's own "add every element, then link" order silently undid
+/// it. `efpsrt_data_roundtrip_test` is what actually proves bytes flow; this
+/// asserts the shape that lets them.
 #[test]
-fn output_block_requests_and_links_an_embed_pad_per_data_track() {
+fn output_block_reports_an_embed_pad_link_per_data_track() {
     init();
     require_elements(&["efpmux", "srtsink", "identity"]);
 
@@ -131,22 +140,36 @@ fn output_block_requests_and_links_an_embed_pad_per_data_track() {
 
     for i in 0..2 {
         let id = format!("blk:data_input_{}", i);
-        let identity = element(&result, &id)
-            .unwrap_or_else(|| panic!("block should contain a '{}' element", id));
-
-        let src = identity
-            .static_pad("src")
-            .unwrap_or_else(|| panic!("'{}' should have a src pad", id));
-        let peer = src
-            .peer()
-            .unwrap_or_else(|| panic!("'{}' src pad should be linked to efpmux", id));
-
         assert!(
-            pads.iter().any(|pad| pad == &peer),
-            "'{}' should link to an '{}' pad, but links to '{}'",
+            element(&result, &id).is_some(),
+            "block should contain a '{}' element",
+            id
+        );
+
+        let link = result
+            .internal_links
+            .iter()
+            .find(|(from, _)| from.element_id == id && from.pad_name.as_deref() == Some("src"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "'{}' src should be reported as an internal link, got {:?}",
+                    id,
+                    result
+                        .internal_links
+                        .iter()
+                        .map(|(f, t)| format!("{:?} -> {:?}", f, t))
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert_eq!(link.1.element_id, "blk:efpmux");
+        let pad_name = link.1.pad_name.as_deref().expect("link names a pad");
+        assert!(
+            pads.iter().any(|pad| pad.name() == pad_name),
+            "'{}' should link to an '{}' pad, but names '{}'",
             id,
             EMBED_TEMPLATE,
-            peer.name()
+            pad_name
         );
     }
 }
@@ -232,33 +255,41 @@ fn input_block_builds_no_data_output_by_default() {
     );
 }
 
+/// gst-plugin-efp v0.4.0 gives each EFP stream its own `embedded_<stream-id>`
+/// src pad, so several data tracks can now be received. Until v0.3.0 the
+/// demuxer cached one `embedded` pad for every stream and this block rejected
+/// anything above one rather than publish outputs that could never carry a
+/// buffer.
 #[test]
-fn input_block_rejects_more_data_tracks_than_the_demuxer_can_reach() {
+fn input_block_builds_a_data_output_per_track_beyond_the_first() {
     init();
     require_elements(&["efpdemux", "srtsrc", "identity"]);
 
     let props = properties(&[
         ("num_video_tracks", 0),
         ("num_audio_tracks", 0),
-        ("num_data_tracks", 2),
+        ("num_data_tracks", 3),
     ]);
-    // `BlockBuildResult` is not `Debug`, so unwrap the error by hand.
-    let message = match EfpSrtInputBuilder.build("blk", &props, &context()) {
-        Ok(_) => panic!("efpdemux has one embedded pad, so two data tracks must not build"),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        message.contains("num_data_tracks"),
-        "the error must name the property the operator set, got: {}",
-        message
-    );
+    let result = EfpSrtInputBuilder
+        .build("blk", &props, &context())
+        .expect("several data tracks must build against a demuxer that fans out per stream");
+
+    for i in 0..3 {
+        let id = format!("blk:data_output_{}", i);
+        assert!(
+            element(&result, &id).is_some(),
+            "block should contain a '{}' element, got {:?}",
+            id,
+            result.elements.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
-fn input_block_never_advertises_an_unreachable_data_output() {
+fn input_block_advertises_every_data_output_it_builds() {
     init();
 
-    let props = properties(&[("num_data_tracks", 2)]);
+    let props = properties(&[("num_data_tracks", 3)]);
     let pads = EfpSrtInputBuilder
         .get_external_pads(&props)
         .expect("efpsrt_input should report external pads");
@@ -272,8 +303,12 @@ fn input_block_never_advertises_an_unreachable_data_output() {
 
     assert_eq!(
         data_pads,
-        vec!["data_out_0".to_string()],
-        "a data output the demuxer can never feed must not appear in the flow graph"
+        vec![
+            "data_out_0".to_string(),
+            "data_out_1".to_string(),
+            "data_out_2".to_string()
+        ],
+        "the flow graph must show every data output the block builds"
     );
 }
 
@@ -293,6 +328,83 @@ fn a_negative_track_count_falls_back_to_the_default() {
             None,
             "a negative {} must be discarded, not wrapped to usize::MAX",
             name
+        );
+    }
+}
+
+/// Build the input block with `data_stream_ids` set, returning the error text.
+fn data_stream_ids_error(num_data_tracks: u64, ids: &str) -> String {
+    let mut props = properties(&[
+        ("num_video_tracks", 0),
+        ("num_audio_tracks", 0),
+        ("num_data_tracks", num_data_tracks),
+    ]);
+    props.insert(
+        "data_stream_ids".to_string(),
+        PropertyValue::String(ids.to_string()),
+    );
+    // `BlockBuildResult` is not `Debug`, so unwrap the error by hand.
+    match EfpSrtInputBuilder.build("blk", &props, &context()) {
+        Ok(_) => panic!("data_stream_ids '{}' should not build", ids),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// A misconfigured routing list fails at build rather than quietly leaving a
+/// track fed by whatever arrives first, which is the surprise the property
+/// exists to remove.
+#[test]
+fn input_block_rejects_a_bad_data_stream_ids_list() {
+    init();
+    require_elements(&["efpdemux", "srtsrc", "identity"]);
+
+    for (ids, tracks, expected) in [
+        ("1", 2u64, "num_data_tracks"),
+        ("1,2,3", 2, "num_data_tracks"),
+        ("0", 1, "reserved"),
+        ("1,1", 2, "twice"),
+        ("audio", 1, "not an EFP stream ID"),
+        ("300", 1, "not an EFP stream ID"),
+    ] {
+        let message = data_stream_ids_error(tracks, ids);
+        assert!(
+            message.contains(expected),
+            "'{}' with {} track(s) should mention '{}', got: {}",
+            ids,
+            tracks,
+            expected,
+            message
+        );
+    }
+}
+
+/// Leaving the property empty keeps the arrival-order behaviour every existing
+/// flow has, so the routing addition is opt-in.
+#[test]
+fn input_block_builds_with_an_empty_data_stream_ids_list() {
+    init();
+    require_elements(&["efpdemux", "srtsrc", "identity"]);
+
+    let mut props = properties(&[
+        ("num_video_tracks", 0),
+        ("num_audio_tracks", 0),
+        ("num_data_tracks", 2),
+    ]);
+    props.insert(
+        "data_stream_ids".to_string(),
+        PropertyValue::String(String::new()),
+    );
+
+    let result = EfpSrtInputBuilder
+        .build("blk", &props, &context())
+        .expect("an empty data_stream_ids must keep arrival-order filling");
+
+    for i in 0..2 {
+        let id = format!("blk:data_output_{}", i);
+        assert!(
+            element(&result, &id).is_some(),
+            "expected a '{}' element",
+            id
         );
     }
 }
