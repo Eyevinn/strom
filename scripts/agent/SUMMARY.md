@@ -2,9 +2,8 @@
 
 Read `PROTOCOL.md` first.
 
-The summary is the only durable trace of a run. It is also the thing a human reads most
-often, and the thing that has drifted most — so its format is fixed here rather than
-described.
+The summary is the only durable trace of a run, and the thing a human reads most often. Its
+format is fixed here rather than described.
 
 Post it as one comment on the issue titled **"Agent triage log"**. Create that issue once if
 it is missing, with a body explaining it is the log for these scheduled tasks. Create nothing
@@ -12,9 +11,8 @@ else.
 
 ## Read state from the issue body, not the comments
 
-That thread is long. **`gh api repos/Eyevinn/strom/issues/<N>/comments` without `--paginate`
-returns the thirty OLDEST comments**, which has already caused a run to report a months-old
-comment as the previous run and invent a gap in the log. Never read state that way.
+**`gh api repos/Eyevinn/strom/issues/<N>/comments` without `--paginate` returns the thirty
+OLDEST comments.** Never read state that way.
 
 State lives in the issue **body**, which this task owns and rewrites. Read it first, and
 rewrite it last, replacing the block between the markers:
@@ -70,15 +68,11 @@ is rendered from it, so the two can never disagree.
 ### Three rules that make the log trustworthy
 
 1. **An item gets an entry only if you posted something about it this run.** Everything else
-   goes in `skipped` as one `{ref, reason}` line. Never a row per untouched item — a summary
-   that enumerates sixteen issues to say nothing changed is why nobody reads it.
-   A draft you held is the one exception, and it stays in `skipped` on the run that posts its
-   draft-hold note: the note is not a verdict, so there is nothing for the table to show. It
-   never belongs in `needs_human` either — a draft is the author's next move, not the
-   maintainer's, and the whole point of holding is to stop it competing for attention.
+   goes in `skipped` as one `{ref, reason}` line — never a row per untouched item. A draft you
+   held is the one exception: it stays in `skipped` even on the run that posts its draft-hold
+   note, and it never belongs in `needs_human`, because a draft is the author's next move.
 2. **Every value is copied from what you actually posted this run.** Never restate a standing
-   verdict's attributes from memory. If you did not determine a field, it is `null` — a field
-   invented to fill a column has already put three different radii in this log for one PR.
+   verdict's attributes from memory. If you did not determine a field, it is `null`.
 3. **Vocabulary fields take vocabulary tokens** (`PROTOCOL.md`). `verdict`, `radius`,
    `confidence`, `class` are validated by tooling; a token from the wrong row is a bug.
 
@@ -135,21 +129,17 @@ nothing, say that in one line rather than staying silent.
 
 **This section owns that message's format.** If the task definition also states a line
 ceiling, or a rule about what a reference may look like, it is out of date: follow this
-section and record the conflict in the summary. One stated both — five lines, and never a
-remote URL — which left a single line of bare `#721` refs as the only legal output, and runs
-kept shipping exactly that after this file had already required otherwise.
+section and record the conflict in the summary.
 
 **Every reference is a full URL, and every item is its own line.** A bare `#721` autolinks
-only inside this repository's own issues and pull requests. Everywhere else it is four
-characters a reader has to go look up by hand, so a message that names six items costs six
-searches. Write `<https://github.com/Eyevinn/strom/issues/721|#721>` for a destination that
-takes that link form, `https://github.com/Eyevinn/strom/issues/721` where it does not, and
-`#721` only in the rendered half above, which is posted here. The `/issues/` path serves pull
-requests too, so one form covers both and you never have to know which an item is.
+only inside this repository's own issues and pull requests. Write
+`<https://github.com/Eyevinn/strom/issues/721|#721>` for a destination that takes that link
+form, `https://github.com/Eyevinn/strom/issues/721` where it does not, and `#721` only in the
+rendered half above, which is posted here. The `/issues/` path serves pull requests too, so
+one form covers both.
 
-One line per item, numbered under each heading. Do not merge two items into a sentence,
-and do not write the message as prose — a paragraph naming four pull requests and their
-verdicts is the shape this section exists to prevent.
+One line per item, numbered under each heading. Never merge two items into a sentence, and
+never write the message as prose.
 
     *Agent triage* — 2026-08-31T08:00Z, main@1c06c37, 4 items
 

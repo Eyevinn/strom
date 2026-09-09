@@ -165,7 +165,7 @@ verdict or the requested changes. A gap you found and then excused is a finding 
 
 ## Worked example
 
-Match this shape. It is 1500 characters; most reviews should land near it.
+Match this shape. It is 1900 characters; most reviews should land near it.
 
 ---
 
