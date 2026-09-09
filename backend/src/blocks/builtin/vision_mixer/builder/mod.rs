@@ -169,6 +169,7 @@ impl BlockBuilder for VisionMixerBuilder {
 
         let p = PipelineParams {
             instance_id,
+            flow_id: properties::parse_flow_id(props),
             num_inputs,
             num_dsk_inputs,
             num_pips,
@@ -205,6 +206,9 @@ impl BlockBuilder for VisionMixerBuilder {
 /// Shared parameters for pipeline construction.
 pub(super) struct PipelineParams<'a> {
     pub(super) instance_id: &'a str,
+    /// Owning flow, used to key the overlay registries so flow teardown can
+    /// clear them — see `overlay::unregister_flow`.
+    pub(super) flow_id: strom_types::FlowId,
     pub(super) num_inputs: usize,
     pub(super) num_dsk_inputs: usize,
     pub(super) num_pips: usize,
@@ -344,7 +348,7 @@ pub(super) fn setup_overlay_renderer(
     ));
 
     // Register the overlay state so the API layer can access it
-    overlay::register_overlay_state(p.instance_id, Arc::clone(&overlay_state));
+    overlay::register_overlay_state(p.flow_id, p.instance_id, Arc::clone(&overlay_state));
 
     let renderer = Arc::new(Mutex::new(OverlayRenderer::new(
         appsrc.clone(),
@@ -355,7 +359,7 @@ pub(super) fn setup_overlay_renderer(
     )));
 
     let block_id = p.instance_id.to_string();
-    overlay::register_overlay_renderer(&block_id, Arc::clone(&renderer));
+    overlay::register_overlay_renderer(p.flow_id, &block_id, Arc::clone(&renderer));
 
     let block_id_for_timer = block_id.clone();
     let renderer_for_timer = Arc::clone(&renderer);

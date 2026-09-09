@@ -5,7 +5,23 @@ use strom_types::vision_mixer::{
     Source, DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, DEFAULT_NUM_PIPS, DEFAULT_SHOW_VU_METERS,
     MAX_DSK_INPUTS, MAX_NUM_INPUTS, MAX_NUM_PIPS, MIN_NUM_INPUTS,
 };
+use strom_types::FlowId;
 use strom_types::PropertyValue;
+
+/// Parse the owning flow id, injected as `_flow_id` by block expansion.
+///
+/// The overlay registries are keyed by it so flow teardown can find every
+/// registration this build made. Falls back to nil for the unit tests that
+/// build the block directly, without going through block expansion.
+pub fn parse_flow_id(properties: &HashMap<String, PropertyValue>) -> FlowId {
+    properties
+        .get("_flow_id")
+        .and_then(|v| match v {
+            PropertyValue::String(s) => FlowId::parse_str(s).ok(),
+            _ => None,
+        })
+        .unwrap_or_else(FlowId::nil)
+}
 
 /// Parse the number of DSK inputs from block properties (0-2).
 pub fn parse_num_dsk_inputs(properties: &HashMap<String, PropertyValue>) -> usize {
