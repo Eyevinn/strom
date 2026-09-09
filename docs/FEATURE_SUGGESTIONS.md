@@ -47,6 +47,10 @@ interests you, open a GitHub issue or discussion.
 
 ## Platform & reach
 
+- **Publish straight to the big live platforms** — try Strom's RTMP output against YouTube
+  Live and Twitch ingest and write down what it takes. Both accept H.264 + AAC over RTMP or
+  RTMPS, and both want an audio track present, so a mix should be able to reach a stream key
+  with no separate encoder in between. Worth measuring rather than assuming.
 - **Kubernetes operator** — deploy flows as pods with resource limits and auto-scaling.
 - **Block marketplace** — browse and install community-contributed blocks.
 - **Mobile companion** — monitor status, start/stop flows, and receive alerts from a phone.
