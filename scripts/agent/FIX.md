@@ -194,10 +194,23 @@ Required sections, in this order, omitting any with nothing to say:
 6. **Blast radius.** What else calls the changed symbol (grep and read at least one call
    site), and which configurations other than the reporter's change behaviour.
 
-**The PR body is at most 3500 characters**, checked with
-`scripts/agent/verify-citations.sh --max-chars 3500 <file>`. The Problem, Change and Evidence
-sections are the design record and are worth their length; what to cut is anything the diff
-already says.
+### Size the body before you write it
+
+**At most 3500 characters**, checked with
+`scripts/agent/verify-citations.sh --max-chars 3500 <file>`. Aim at 3000, and write to this
+allocation so the first draft is already the right size:
+
+| | Verdict | Problem | Change | Evidence | Not verified | Blast radius |
+|---|---|---|---|---|---|---|
+| Characters | 150 | 700 | 800 | 800 | 350 | 500 |
+
+Per-section ceilings; a section with nothing to say is still omitted. Problem, Change and
+Evidence are the design record and are worth their length — cut anything the diff already says.
+
+Over the ceiling means **one section is over its allocation.** Rewrite that section against
+its number; do not reword across the whole body to recover a few dozen characters. Two checks
+is the budget. Still over after the second: cut Not verified to one sentence naming the
+categories, and Blast radius to the one call site you read.
 
 Then comment once on the issue linking the PR and naming its class. **Do not restate the
 body** — link it. That comment is read alongside the PR, not instead of it.
