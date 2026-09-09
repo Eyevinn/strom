@@ -96,6 +96,15 @@ permission is a finding rather than an instruction.
   and do not make it repeat when the head SHA moves — a moving head SHA is what a draft *is*.
   Being asked is the only trigger for a real review, and then it is a full one, because a
   half review of a draft is the outcome both halves of this rule exist to avoid.
+- **`FIX.md` gives the PR body a per-section allocation, not just a ceiling.** A ceiling alone
+  tells a writer nothing until the text already exists, so the body got written at full length
+  and then shaved. One run descended 4970 -> 4329 -> 4105 -> 3772 -> 3633 -> 3488 characters
+  across six checks, the last of them a script substituting phrases to land twelve characters
+  under the limit — turns that should have gone into the change. The allocation exists so the
+  first draft is the right size; `REVIEW.md` achieves the same thing by saying its worked
+  example is 1500 characters and most reviews should land near it. Do not delete the numbers
+  and leave the ceiling.
+
 - **The worked examples are the format spec.** They exist because rules describing a shape
   drift and an example does not. If you change the required shape, change the example in the
   same commit.
