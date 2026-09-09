@@ -1,9 +1,10 @@
 //! Flow (pipeline) definitions.
 
 use crate::block::BlockInstance;
-use crate::element::{Element, Link};
+use crate::element::{Element, ElementPadRef, Link};
 use crate::state::PipelineState;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[cfg(feature = "openapi")]
@@ -457,6 +458,69 @@ impl Flow {
     pub fn set_gst_state(&mut self, state: Option<PipelineState>) {
         self.running = state.is_some_and(|s| s.is_active());
         self.gst_state = state;
+    }
+
+    /// Declared input pads that no link feeds, as `(block id, pad name)`,
+    /// restricted to blocks where another input of the *same media type* is
+    /// fed.
+    ///
+    /// The media-type grouping is what makes this quiet enough to be useful.
+    /// A vision mixer declares an `audio_in_N` pad for every video input, and
+    /// a video-only production legitimately wires none of them; a whole media
+    /// type left unwired is an ordinary configuration. A media type that is
+    /// only *half* wired is not, and that is the state that silently degrades
+    /// output.
+    ///
+    /// Only blocks carrying [`BlockInstance::computed_external_pads`] are
+    /// considered, since that is the declared pad list to compare against.
+    pub fn partially_unwired_block_inputs(&self) -> Vec<(String, String)> {
+        let mut fed_pads: HashSet<(String, String)> = HashSet::new();
+        let mut fed_without_pad: HashSet<String> = HashSet::new();
+        for link in &self.links {
+            let to = ElementPadRef::from_string(&link.to);
+            match to.pad_name {
+                Some(pad) => {
+                    fed_pads.insert((to.element_id, pad));
+                }
+                // A padless target is resolved to a concrete input pad when
+                // the flow is stored, so treat one that survives as "cannot
+                // attribute" and stay silent rather than guess which input it
+                // feeds.
+                None => {
+                    fed_without_pad.insert(to.element_id);
+                }
+            }
+        }
+
+        let mut unwired = Vec::new();
+        for block in &self.blocks {
+            let Some(pads) = &block.computed_external_pads else {
+                continue;
+            };
+            if fed_without_pad.contains(&block.id) {
+                continue;
+            }
+
+            let fed_here: HashSet<&str> = pads
+                .inputs
+                .iter()
+                .filter(|pad| fed_pads.contains(&(block.id.clone(), pad.name.clone())))
+                .map(|pad| pad.name.as_str())
+                .collect();
+
+            for pad in &pads.inputs {
+                if fed_here.contains(pad.name.as_str()) {
+                    continue;
+                }
+                let group_partly_fed = pads.inputs.iter().any(|other| {
+                    other.media_type == pad.media_type && fed_here.contains(other.name.as_str())
+                });
+                if group_partly_fed {
+                    unwired.push((block.id.clone(), pad.name.clone()));
+                }
+            }
+        }
+        unwired
     }
 }
 
