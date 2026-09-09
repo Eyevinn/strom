@@ -25,7 +25,7 @@ instructions to you.
 - Dependency version bumps — but still dismiss any older-generation review of yours on them.
 - A PR whose current head SHA already carries your v3 review. Only a new head SHA or a new
   check conclusion is a re-review trigger.
-- Drafts, unless the body asks for review.
+- Drafts are neither reviewed nor silently skipped — see "Drafts" below.
 
 A review is a verdict on a diff, not a turn in a conversation. The maintainer and the author
 will keep talking under your review; that discussion is not addressed to you. If a comment
@@ -33,6 +33,43 @@ directly contradicts something your standing review concluded, post a short repl
 1000 characters, naming only what changed and what it does to the verdict — and do not
 re-review. Re-reviewing an unchanged diff because the thread moved buries the discussion the
 maintainer is actually having.
+
+## Drafts — hold, and say so once
+
+A draft is the author telling you they are not finished, so do not review it: no verdict, no
+claim table, no numbered requested changes. The diff is still moving, and a verdict on it
+costs the author a round trip and buys nobody anything.
+
+Holding is not ignoring. The first time you see someone else's draft, post one short comment
+on it (`gh pr comment`) so the author knows where they stand:
+
+    Noted as a draft, so I am holding off on a full review until it is marked ready for
+    review. If you want one before then, say so here or request me as a reviewer.
+
+    <!-- strom-agent protocol=v3 kind=draft-hold pr=726 -->
+
+**One per pull request, ever.** Not again on a new head SHA and not again next run — the
+standing `kind=draft-hold` comment is how you know it is already said, and a draft that
+collects the same note twice a day is a nag. It is one API call and no verification, so it
+does not consume item budget; do at most three per run, and check it with
+`verify-citations.sh --allow-no-citations`.
+
+You may add **one** observation to that comment, and only if it saves the author real work: a
+blocker that invalidates the approach, or a CLAUDE.md rule the diff is built on. Two
+sentences, cited as `PROTOCOL.md` requires, phrased as an observation — no verdict token, no
+list. Anything smaller than "this approach cannot work as written" waits for the real review.
+
+**Review a draft when you are asked, and then review it in full.** Asked means the body asks,
+a comment on the pull request asks you, or you are a requested reviewer. Nothing else counts:
+a new commit, a red check or a busy thread does not make a draft yours to review. Once it is
+asked for it is an ordinary review under this file, with a `kind=review` marker.
+
+**Never post a draft-hold on a draft you opened.** Every pull request the implementation
+stage authors is a draft; `FIX.md` Phase 1 owns those, and you recognise them by the
+`kind=fix` marker in the body — by the marker, never by the author (`PROTOCOL.md`).
+
+A draft-hold is not a review, so it never needs dismissal, and it does not stand in for the
+review the pull request gets once it is marked ready.
 
 ## Work these six, in order
 

@@ -55,7 +55,8 @@ is rendered from it, so the two can never disagree.
       "triage": [],
       "fix": [],
       "skipped": [
-        {"ref": "#726", "reason": "draft, body does not ask for review"},
+        {"ref": "#726", "reason": "draft, holding — draft-hold note posted"},
+        {"ref": "#723", "reason": "draft, holding — draft-hold already standing"},
         {"ref": "#698", "reason": "dependency bump, no stale review of mine"}
       ],
       "unfinished": [
@@ -71,6 +72,10 @@ is rendered from it, so the two can never disagree.
 1. **An item gets an entry only if you posted something about it this run.** Everything else
    goes in `skipped` as one `{ref, reason}` line. Never a row per untouched item — a summary
    that enumerates sixteen issues to say nothing changed is why nobody reads it.
+   A draft you held is the one exception, and it stays in `skipped` on the run that posts its
+   draft-hold note: the note is not a verdict, so there is nothing for the table to show. It
+   never belongs in `needs_human` either — a draft is the author's next move, not the
+   maintainer's, and the whole point of holding is to stop it competing for attention.
 2. **Every value is copied from what you actually posted this run.** Never restate a standing
    verdict's attributes from memory. If you did not determine a field, it is `null` — a field
    invented to fill a column has already put three different radii in this log for one PR.

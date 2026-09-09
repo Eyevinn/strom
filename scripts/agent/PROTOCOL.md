@@ -115,12 +115,13 @@ Any risk you have not traced in the code gets the literal prefix `SPECULATIVE (n
 
 ## Markers
 
-Every posted review, triage comment and fix PR body ends with a marker. The keys are read by
-tooling, so spell them exactly and put them on one line.
+Every posted review, triage comment, draft-hold note and fix PR body ends with a marker. The
+keys are read by tooling, so spell them exactly and put them on one line.
 
     <!-- strom-agent protocol=v3 kind=review pr=721 head=<full-sha> verdict=Comment radius=GLOBAL confidence=HIGH -->
     <!-- strom-agent protocol=v3 kind=triage issue=719 base=<sha> verdict=CONFIRMED work=bug radius=LOCAL excluded=none ask=open confidence=HIGH -->
     <!-- strom-agent protocol=v3 kind=fix issue=719 pr=730 class=B -->
+    <!-- strom-agent protocol=v3 kind=draft-hold pr=726 -->
 
 `protocol=v3` is the generation gate and must not change — anything without it counts as an
 older generation and gets redone. The other keys are additive; a reader that finds one
@@ -146,6 +147,10 @@ as excluded would demand an override for the one placement the repo mandates. Ad
 a variant or a block is `none`; renaming or changing an existing `StromEvent` variant, an
 endpoint's shape or a config key is `contract`. `ask=open` means a design question is waiting for a
 human; `ask=none` means no decision is needed.
+
+`kind=draft-hold` is the one marker that carries no verdict, because holding is not a
+judgement on the diff. It records that a draft was seen and deliberately left alone, so that
+a later run says it once rather than every run (`REVIEW.md`).
 
 ## Write once, then cite
 
