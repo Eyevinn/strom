@@ -331,3 +331,80 @@ fn a_negative_track_count_falls_back_to_the_default() {
         );
     }
 }
+
+/// Build the input block with `data_stream_ids` set, returning the error text.
+fn data_stream_ids_error(num_data_tracks: u64, ids: &str) -> String {
+    let mut props = properties(&[
+        ("num_video_tracks", 0),
+        ("num_audio_tracks", 0),
+        ("num_data_tracks", num_data_tracks),
+    ]);
+    props.insert(
+        "data_stream_ids".to_string(),
+        PropertyValue::String(ids.to_string()),
+    );
+    // `BlockBuildResult` is not `Debug`, so unwrap the error by hand.
+    match EfpSrtInputBuilder.build("blk", &props, &context()) {
+        Ok(_) => panic!("data_stream_ids '{}' should not build", ids),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// A misconfigured routing list fails at build rather than quietly leaving a
+/// track fed by whatever arrives first, which is the surprise the property
+/// exists to remove.
+#[test]
+fn input_block_rejects_a_bad_data_stream_ids_list() {
+    init();
+    require_elements(&["efpdemux", "srtsrc", "identity"]);
+
+    for (ids, tracks, expected) in [
+        ("1", 2u64, "num_data_tracks"),
+        ("1,2,3", 2, "num_data_tracks"),
+        ("0", 1, "reserved"),
+        ("1,1", 2, "twice"),
+        ("audio", 1, "not an EFP stream ID"),
+        ("300", 1, "not an EFP stream ID"),
+    ] {
+        let message = data_stream_ids_error(tracks, ids);
+        assert!(
+            message.contains(expected),
+            "'{}' with {} track(s) should mention '{}', got: {}",
+            ids,
+            tracks,
+            expected,
+            message
+        );
+    }
+}
+
+/// Leaving the property empty keeps the arrival-order behaviour every existing
+/// flow has, so the routing addition is opt-in.
+#[test]
+fn input_block_builds_with_an_empty_data_stream_ids_list() {
+    init();
+    require_elements(&["efpdemux", "srtsrc", "identity"]);
+
+    let mut props = properties(&[
+        ("num_video_tracks", 0),
+        ("num_audio_tracks", 0),
+        ("num_data_tracks", 2),
+    ]);
+    props.insert(
+        "data_stream_ids".to_string(),
+        PropertyValue::String(String::new()),
+    );
+
+    let result = EfpSrtInputBuilder
+        .build("blk", &props, &context())
+        .expect("an empty data_stream_ids must keep arrival-order filling");
+
+    for i in 0..2 {
+        let id = format!("blk:data_output_{}", i);
+        assert!(
+            element(&result, &id).is_some(),
+            "expected a '{}' element",
+            id
+        );
+    }
+}

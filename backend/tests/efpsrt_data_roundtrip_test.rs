@@ -349,3 +349,184 @@ fn embedded_data_survives_the_trip_between_the_blocks() {
         MEDIA_STREAM_ID
     );
 }
+
+/// `data_stream_ids` pins each data track to a sender stream, so `data_out_0`
+/// means the same thing on every run.
+///
+/// Two media streams each carry their own embedded data, and the list is
+/// deliberately reversed — track 0 is pinned to stream 2 — so arrival order
+/// cannot produce this result by luck.
+#[test]
+fn data_stream_ids_pins_each_track_to_its_sender_stream() {
+    init();
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements are missing");
+        return;
+    }
+
+    let port = srt_port();
+    let ctx = || BlockBuildContext::new(Vec::new(), "all".to_string());
+
+    // Two media tracks, so efpmux allocates streams 1 and 2. Which audio track
+    // gets which ID depends on the order their caps probes fire, and the
+    // assertion below deliberately does not care: it is about how the receiver
+    // routes streams to outputs, not about how the sender numbers them.
+    let out = EfpSrtOutputBuilder
+        .build(
+            "tx",
+            &props(&[
+                ("num_video_tracks", PropertyValue::UInt(0)),
+                ("num_audio_tracks", PropertyValue::UInt(2)),
+                ("num_data_tracks", PropertyValue::UInt(2)),
+                (
+                    "srt_uri",
+                    PropertyValue::String(format!("srt://127.0.0.1:{}?mode=listener", port)),
+                ),
+                ("wait_for_connection", PropertyValue::Bool(false)),
+            ]),
+            &ctx(),
+        )
+        .expect("efpsrt_output builds");
+
+    let tx = gst::Pipeline::with_name("tx2");
+    install(&tx, &out);
+
+    for i in 0..2 {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .property_from_str("wave", "silence")
+            .build()
+            .unwrap();
+        tx.add(&src).unwrap();
+        src.link(element(&out, &format!("tx:audio_input_{}", i)))
+            .expect("audio source feeds the block");
+    }
+
+    let mut data_srcs = Vec::new();
+    for (i, stream_id) in [1i32, 2i32].into_iter().enumerate() {
+        let caps = gst::Caps::builder("application/x-efp-embedded")
+            .field("data-type", DATA_TYPE)
+            .field("stream-id", stream_id)
+            .build();
+        let src = gst::ElementFactory::make("appsrc")
+            .property("caps", &caps)
+            .property("format", gst::Format::Time)
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        tx.add(&src).unwrap();
+        src.link(element(&out, &format!("tx:data_input_{}", i)))
+            .expect("data source feeds the block");
+        data_srcs.push((src.dynamic_cast::<gst_app::AppSrc>().unwrap(), stream_id));
+    }
+
+    // Reversed on purpose: data_out_0 must carry stream 2, data_out_1 stream 1.
+    let inp = EfpSrtInputBuilder
+        .build(
+            "rx",
+            &props(&[
+                ("num_video_tracks", PropertyValue::UInt(0)),
+                ("num_audio_tracks", PropertyValue::UInt(2)),
+                ("num_data_tracks", PropertyValue::UInt(2)),
+                ("data_stream_ids", PropertyValue::String("2,1".to_string())),
+                (
+                    "srt_uri",
+                    PropertyValue::String(format!("srt://127.0.0.1:{}?mode=caller", port)),
+                ),
+                ("decode", PropertyValue::Bool(false)),
+            ]),
+            &ctx(),
+        )
+        .expect("efpsrt_input builds");
+
+    let rx = gst::Pipeline::with_name("rx2");
+    install(&rx, &inp);
+
+    let seen: Arc<Mutex<Vec<(usize, i32)>>> = Arc::new(Mutex::new(Vec::new()));
+    for track in 0..2usize {
+        let out_element = element(&inp, &format!("rx:data_output_{}", track));
+        let seen_probe = Arc::clone(&seen);
+        out_element.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::BUFFER,
+            move |pad, _info| {
+                if let Some(caps) = pad.current_caps() {
+                    if let Some(s) = caps.structure(0) {
+                        if let Ok(id) = s.get::<i32>("stream-id") {
+                            let mut seen = seen_probe.lock().unwrap();
+                            if !seen.iter().any(|(t, _)| *t == track) {
+                                seen.push((track, id));
+                            }
+                        }
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .unwrap();
+        rx.add(&sink).unwrap();
+        out_element.link(&sink).expect("data output feeds a sink");
+    }
+    for id in ["rx:audio_output_0", "rx:audio_output_1"] {
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .unwrap();
+        rx.add(&sink).unwrap();
+        element(&inp, id)
+            .link(&sink)
+            .expect("media output feeds a sink");
+    }
+
+    tx.set_state(gst::State::Playing).expect("tx plays");
+    rx.set_state(gst::State::Playing).expect("rx plays");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_pusher = Arc::clone(&stop);
+    let pusher = std::thread::spawn(move || {
+        for i in 0..200u64 {
+            if stop_pusher.load(Ordering::SeqCst) {
+                break;
+            }
+            for (src, stream_id) in &data_srcs {
+                let mut b =
+                    gst::Buffer::from_slice(format!("data-for-stream-{stream_id}").into_bytes());
+                b.get_mut()
+                    .unwrap()
+                    .set_pts(gst::ClockTime::from_mseconds(i * 20));
+                if src.push_buffer(b).is_err() {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline {
+        drain_errors(&tx, "tx");
+        drain_errors(&rx, "rx");
+        if seen.lock().unwrap().len() == 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    stop.store(true, Ordering::SeqCst);
+    let _ = pusher.join();
+    rx.set_state(gst::State::Null).unwrap();
+    tx.set_state(gst::State::Null).unwrap();
+
+    let mut got = seen.lock().unwrap().clone();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![(0usize, 2i32), (1usize, 1i32)],
+        "data_stream_ids=\"2,1\" must put stream 2 on data_out_0 and stream 1 on data_out_1"
+    );
+}
