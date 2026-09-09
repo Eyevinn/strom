@@ -134,6 +134,39 @@ permission is a finding rather than an instruction.
   a stale prompt. A prompt carries the role, the constraints, the budget and the wiring. The
   shape of anything posted lives here.
 
+## Rules in the protocol files, reasoning here
+
+Each file an agent reads carries **rules and worked examples**. The reasoning behind a rule
+lives in this file, which is not in any read path — the role files dispatch to `PROTOCOL.md`,
+`REVIEW.md`, `TRIAGE.md`, `FIX.md` and `SUMMARY.md`, never here.
+
+That is not a concession to human readers at the model's expense. It is the same constraint
+in both directions: instruction-following degrades with the number of simultaneous rules, so
+a war story sitting beside a rule competes with it; and a protocol nobody can read is a
+protocol nobody can review, which defeats the whole reason these files are in the repo.
+
+Deleting the reasoning is the one thing not to do. Every rule in here was paid for by a run
+that got it wrong, and a rule stripped of its reason looks arbitrary to the next editor —
+which is exactly when it gets "simplified" away.
+
+### Reasoning moved out of `REVIEW.md`
+
+- **Reading `main` while reviewing a branch** is a common and invisible error. That is why the
+  checkout command is spelled out rather than assumed.
+- **Re-reviewing an unchanged diff because the thread moved** buries the discussion the
+  maintainer is actually having. Hence a short reply instead, and a re-review only on a new
+  head SHA or a new check conclusion.
+- **A verdict on a moving diff** costs the author a round trip and buys nobody anything, which
+  is the case for holding a draft rather than reviewing it.
+- **The label is the remedy for a missing platform build, not a dispatch.** `workflow_dispatch`
+  takes a branch or tag in this repository, and a fork pull request's head is only
+  `refs/pull/<N>/head`, so a dispatch cannot reach it at all. A green run on the author's own
+  fork builds their base, not this one.
+- **A 10 000-character review of a 30-line diff** means the maintainer now has two things to
+  read instead of one. That is what the ceilings are for.
+- **`ROLE_REVIEW.md` already states what the reviewer is for**, so `REVIEW.md` no longer
+  repeats it. A run reads the role file first; saying it twice spends the same budget twice.
+
 ## Changing the protocol
 
 Edit these files in a PR. The task definitions only need updating if the *boundary* or the
