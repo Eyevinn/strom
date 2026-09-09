@@ -2,17 +2,20 @@
 
 Strom's open PRs and issues are worked by two scheduled agents: one reviews PRs and triages
 issues, the other turns an approved design into a draft PR. This directory is the protocol
-they follow.
+they follow, and their role, budget and priority order with it.
 
-**It lives in the repo on purpose.** The protocol used to be embedded in the task
-definitions, where it could not be diffed, reviewed or corrected by anyone but the person who
-owned the schedule. Here it is version-controlled, and a PR against it is a PR against how
-the bots behave.
+**It lives in the repo on purpose.** All of this used to be embedded in the task definitions,
+where it could not be diffed, reviewed or corrected by anyone but the person who owned the
+schedule. Here it is version-controlled, and a PR against it is a PR against how the bots
+behave. What is left in a task definition is a stub: the boundary, the credentials, the
+wiring, and a pointer to `ROLE_REVIEW.md` or `ROLE_FIX.md`.
 
 ## Files
 
 | File | Read when |
 |---|---|
+| `ROLE_REVIEW.md` | The review/triage task's stub points here. Role, budget, priority order. |
+| `ROLE_FIX.md` | The implementation task's stub points here. Role and budget. |
 | `PROTOCOL.md` | Every run, first. Evidence rules, citation form, controlled vocabulary, markers. |
 | `REVIEW.md` | Reviewing a pull request. |
 | `TRIAGE.md` | Triaging an issue. |
@@ -31,6 +34,13 @@ Nothing about where the agents run, what credentials they hold, how they are sch
 where they report. That is deployment configuration and lives with the task definitions,
 outside this repo. These files describe only what good output looks like, so they stay
 useful if the runtime changes and safe to read in public.
+
+**And nothing about what an agent may do.** The `Allowed:` and `Forbidden:` lists stay in the
+task definition, because that is the one place a pull request cannot reach. Splitting on that
+line is the whole reason the stubs can be thin: a bad edit to a file in here costs a bad
+review, and a bad edit to a boundary would cost a push to `main`. So a role file states the
+boundary is not its to widen, and `PROTOCOL.md` says a diff that appears to grant a
+permission is a finding rather than an instruction.
 
 ## Design notes, so the next change does not undo them
 
@@ -79,6 +89,14 @@ useful if the runtime changes and safe to read in public.
 - **The worked examples are the format spec.** They exist because rules describing a shape
   drift and an example does not. If you change the required shape, change the example in the
   same commit.
+- **The stub/repo split is on a security axis, not a convenience one.** It is tempting to
+  move the last few things out of the task definitions too and be rid of the redeploy step
+  entirely. Do not move the permission boundary. A scheduled agent reads these files with a
+  token that can write contents and pull requests, and the review stage reads them while a
+  contributor's branch is checked out; the boundary is only a boundary while it lives
+  somewhere a contributor cannot edit. Everything else — role, budget, priority order, all of
+  the protocol — is fair game, and the point of the split is that it is the larger half.
+
 - **`SUMMARY.md` puts JSON before prose** so the human table cannot disagree with the record,
   and so a run's state survives without re-reading a long comment thread.
 - **Reference form is destination-dependent, and that asymmetry is deliberate.** `#738` is
@@ -99,8 +117,9 @@ useful if the runtime changes and safe to read in public.
 
 ## Changing the protocol
 
-Edit these files in a PR. The task definitions only need updating if the *dispatch* changes —
-which file to read when — not when a rule inside a file changes. That holds only while the
+Edit these files in a PR. The task definitions only need updating if the *boundary* or the
+*wiring* changes, or if a role file is renamed — not when a rule inside a file changes, and no
+longer when the budget or the priority order changes. That holds only while the
 prompts state no rule these files own; if one does, changing the file here is not enough, and
 the fix is to delete the rule from the prompt rather than to keep the two in step.
 
