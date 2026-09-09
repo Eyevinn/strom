@@ -31,11 +31,37 @@
 //! outputs raw audio, so encoding inside this block is what makes it usable
 //! downstream of mixing at all.
 //!
-//! And an aggregator's sink pad requested at build time for an input that never
-//! carries data means `flvmux` never aggregates and nothing reaches the sink. So
-//! a pad is requested only when its input proves it has data, which is the same
-//! reason `builtin.mpegtssrt_output` links on caps and says so at its own
-//! `internal_links`.
+//! And an aggregator's sink pad requested for an input that never carries data
+//! means `flvmux` never aggregates and nothing reaches the sink, so an
+//! unconnected input must not get one.
+//!
+//! # Why the muxer's pads are reserved before the pipeline starts
+//!
+//! The mux sink pads are *reserved* in `register_element_setup` and only
+//! *linked* from the caps probes. Those answer two different questions — which
+//! inputs exist, and what codec each one carries — and the answers arrive at
+//! different times.
+//!
+//! Requesting the pad from the probe as well loses a race. `flvmux` writes the
+//! FLV header once, from the pads it holds when the first buffer arrives.
+//! Request the `audio` pad after video has begun streaming and the pad is
+//! granted, the link succeeds and the audio tags are written — but the header
+//! already reads `TypeFlags=0x01`, no audio. A player that configures its
+//! decoders from the header plays silent video, and nothing returns an error
+//! anywhere: measured on GStreamer 1.28.6 with this block's own topology,
+//! `TypeFlags=0x05` with both pads present before the first buffer against
+//! `0x01` with the audio pad requested afterwards.
+//!
+//! `builtin.mpegtssrt_output` gets away with requesting on caps because
+//! `mpegtsmux` re-emits PAT and PMT continuously, so a late pad is still
+//! announced downstream. FLV has one header and no second chance.
+//! `builtin.recorder` documents the same race for `splitmuxsink` and reserves
+//! up front for exactly this reason.
+//!
+//! The setup hook runs after the flow has linked every block and before the
+//! pipeline leaves NULL, so connectivity is known and the muxer has not
+//! started. A connected input whose codec is then refused hands its reserved
+//! pad back, so a refusal cannot stall the stream that is still good.
 //!
 //! # Video is expected to arrive encoded
 //!
@@ -50,9 +76,9 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// The RTMP sink element. One element, no fallback.
 ///
@@ -111,7 +137,7 @@ impl BlockBuilder for RtmpOutputBuilder {
         &self,
         instance_id: &str,
         properties: &HashMap<String, PropertyValue>,
-        _ctx: &BlockBuildContext,
+        ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         info!("Building RTMP Output block instance: {}", instance_id);
         require_rtmp_sink()?;
@@ -166,6 +192,12 @@ impl BlockBuilder for RtmpOutputBuilder {
 
         let mux_weak = mux.downgrade();
 
+        // The mux sink pad reserved for each input by the setup hook below, by
+        // name. Empty means the input was not connected when the flow was built,
+        // so it has no pad. See the module docs.
+        let video_pad_cell: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+        let audio_pad_cell: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+
         // Video input. An identity, with the parser inserted and linked once the
         // caps arrive; see the module docs for why nothing is linked statically.
         let video_input_id = format!("{}:rtmp_video_input", instance_id);
@@ -176,6 +208,7 @@ impl BlockBuilder for RtmpOutputBuilder {
 
         if let Some(src_pad) = video_input.static_pad("src") {
             let mux_weak_clone = mux_weak.clone();
+            let pad_cell = Arc::clone(&video_pad_cell);
             let instance = instance_id.to_string();
             let inserted = Arc::new(AtomicBool::new(false));
             src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
@@ -195,10 +228,15 @@ impl BlockBuilder for RtmpOutputBuilder {
                 let caps_name = structure.name().to_string();
                 debug!("RTMP {}: video caps detected: {}", instance, caps_name);
 
+                let Some(mux_sink) = reserved_pad(&mux, &pad_cell, "video", &instance) else {
+                    return gst::PadProbeReturn::Ok;
+                };
+
                 let result = video_plan(&caps_name)
-                    .and_then(|()| build_video_chain(&bin, &mux, pad, &instance));
+                    .and_then(|()| build_video_chain(&bin, pad, &mux_sink, &instance));
                 if let Err(e) = result {
                     error!("RTMP {}: {}", instance, e);
+                    release_reserved_pad(&mux, &mux_sink, &instance);
                 }
                 gst::PadProbeReturn::Ok
             });
@@ -214,6 +252,7 @@ impl BlockBuilder for RtmpOutputBuilder {
 
         if let Some(src_pad) = audio_input.static_pad("src") {
             let mux_weak_clone = mux_weak.clone();
+            let pad_cell = Arc::clone(&audio_pad_cell);
             let instance = instance_id.to_string();
             let inserted = Arc::new(AtomicBool::new(false));
             src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
@@ -233,22 +272,74 @@ impl BlockBuilder for RtmpOutputBuilder {
                 let caps_name = structure.name().to_string();
                 debug!("RTMP {}: audio caps detected: {}", instance, caps_name);
 
+                let Some(mux_sink) = reserved_pad(&mux, &pad_cell, "audio", &instance) else {
+                    return gst::PadProbeReturn::Ok;
+                };
+
                 let mpegversion = structure.get::<i32>("mpegversion").unwrap_or(4);
                 let layer = structure.get::<i32>("layer").unwrap_or(3);
                 let result =
                     audio_plan(&caps_name, mpegversion, layer).and_then(|plan| match plan {
-                        AudioPlan::Encode => build_raw_audio_chain(&bin, &mux, pad, &instance),
-                        AudioPlan::Parse => build_aac_audio_chain(&bin, &mux, pad, &instance),
+                        AudioPlan::Encode => build_raw_audio_chain(&bin, pad, &mux_sink, &instance),
+                        AudioPlan::Parse => build_aac_audio_chain(&bin, pad, &mux_sink, &instance),
                     });
                 if let Err(e) = result {
                     error!("RTMP {}: {}", instance, e);
+                    release_reserved_pad(&mux, &mux_sink, &instance);
                 }
                 gst::PadProbeReturn::Ok
             });
         }
 
-        // Only the mux to sink link is static. Both mux sink pads are requested
-        // from inside the probes, once their input has proved it has data.
+        // Reserve the muxer's sink pads for the inputs the flow actually
+        // connected, before the pipeline leaves NULL. See the module docs: FLV
+        // has one header, written from the pads the muxer holds when the first
+        // buffer arrives, so a pad requested later carries data that the header
+        // does not declare.
+        {
+            let mux_weak_setup = mux_weak.clone();
+            let video_input_weak = video_input.downgrade();
+            let audio_input_weak = audio_input.downgrade();
+            let video_cell = Arc::clone(&video_pad_cell);
+            let audio_cell = Arc::clone(&audio_pad_cell);
+            let block_id = instance_id.to_string();
+            ctx.register_element_setup(Box::new(move |_flow_id, _events| {
+                let Some(mux) = mux_weak_setup.upgrade() else {
+                    return;
+                };
+                for (media, input, cell) in [
+                    ("video", &video_input_weak, &video_cell),
+                    ("audio", &audio_input_weak, &audio_cell),
+                ] {
+                    if !input_is_connected(input) {
+                        info!(
+                            "RTMP {}: {} input is not connected - reserving no flvmux pad for it",
+                            block_id, media
+                        );
+                        continue;
+                    }
+                    match mux.request_pad_simple(media) {
+                        Some(pad) => {
+                            debug!(
+                                "RTMP {}: reserved flvmux pad {} for the {} input",
+                                block_id,
+                                pad.name(),
+                                media
+                            );
+                            let _ = cell.set(pad.name().to_string());
+                        }
+                        None => error!(
+                            "RTMP {}: flvmux refused a '{}' pad - that stream will not be published",
+                            block_id, media
+                        ),
+                    }
+                }
+            }));
+        }
+
+        // Only the mux to sink link is static. The mux sink pads are reserved by
+        // the hook above and linked from inside the probes, once their input has
+        // proved what codec it carries.
         let internal_links = vec![(
             ElementPadRef::pad(&mux_id, "src"),
             ElementPadRef::pad(&sink_id, "sink"),
@@ -360,13 +451,65 @@ fn bin_and_mux(
     }
 }
 
-/// Request one of flvmux's fixed-name sink pads.
+/// Whether an input identity has something linked to its sink pad.
 ///
-/// `flvmux` names them `video` and `audio` rather than following a `%u`
-/// template, so they are requested by name.
-fn request_mux_pad(mux: &gst::Element, name: &str) -> Result<gst::Pad, String> {
-    mux.request_pad_simple(name)
-        .ok_or_else(|| format!("flvmux refused a '{}' pad", name))
+/// Read from the element setup hook, which runs after construction's linking
+/// pass, so this is exact for links resolved there — every link into this block
+/// today. A link deferred to `pending_links` resolves afterwards and would read
+/// as unconnected, costing that stream its pad. Same exposure as
+/// `builtin.recorder`.
+fn input_is_connected(input: &gst::glib::WeakRef<gst::Element>) -> bool {
+    input
+        .upgrade()
+        .and_then(|e| e.static_pad("sink"))
+        .map(|p| p.is_linked())
+        .unwrap_or(false)
+}
+
+/// The mux sink pad reserved for this input before the pipeline started.
+///
+/// An empty cell means the input was not linked when the flow was built, so no
+/// pad was reserved for it. That it is carrying data anyway means something
+/// linked it after construction: there is no pad to give it, and requesting one
+/// now would write tags the FLV header does not declare. Say so instead.
+fn reserved_pad(
+    mux: &gst::Element,
+    cell: &OnceLock<String>,
+    media: &str,
+    instance_id: &str,
+) -> Option<gst::Pad> {
+    let Some(name) = cell.get() else {
+        warn!(
+            "RTMP {}: {} input is carrying data but no flvmux pad was reserved for it, \
+             because it was not linked when the flow was built. It will not be published",
+            instance_id, media
+        );
+        return None;
+    };
+    match mux.static_pad(name) {
+        Some(pad) => Some(pad),
+        None => {
+            error!(
+                "RTMP {}: reserved flvmux pad {} no longer exists",
+                instance_id, name
+            );
+            None
+        }
+    }
+}
+
+/// Hand a reserved pad back after refusing the codec its input carries.
+///
+/// `flvmux` is an aggregator: a pad that never carries data stops it
+/// aggregating, so a refusal that kept its pad would take the other stream down
+/// with it.
+fn release_reserved_pad(mux: &gst::Element, pad: &gst::Pad, instance_id: &str) {
+    let name = pad.name();
+    mux.release_request_pad(pad);
+    debug!(
+        "RTMP {}: released flvmux pad {} after refusing what its input carries",
+        instance_id, name
+    );
 }
 
 /// Video: `h264parse` into the muxer.
@@ -376,8 +519,8 @@ fn request_mux_pad(mux: &gst::Element, name: &str) -> Result<gst::Pad, String> {
 /// broken to every late joiner and the fault reads as a network problem.
 fn build_video_chain(
     bin: &gst::Bin,
-    mux: &gst::Element,
     identity_src_pad: &gst::Pad,
+    mux_sink: &gst::Pad,
     instance_id: &str,
 ) -> Result<(), String> {
     let parser_name = format!("{}:rtmp_h264parse", instance_id);
@@ -394,13 +537,12 @@ fn build_video_chain(
 
     let parser_sink = parser.static_pad("sink").ok_or("parser has no sink pad")?;
     let parser_src = parser.static_pad("src").ok_or("parser has no src pad")?;
-    let mux_sink = request_mux_pad(mux, "video")?;
 
     identity_src_pad
         .link(&parser_sink)
         .map_err(|e| format!("link identity -> h264parse: {:?}", e))?;
     parser_src
-        .link(&mux_sink)
+        .link(mux_sink)
         .map_err(|e| format!("link h264parse -> flvmux: {:?}", e))?;
 
     info!(
@@ -414,8 +556,8 @@ fn build_video_chain(
 /// Audio, raw in: convert, resample, encode to AAC, parse, into the muxer.
 fn build_raw_audio_chain(
     bin: &gst::Bin,
-    mux: &gst::Element,
     identity_src_pad: &gst::Pad,
+    mux_sink: &gst::Pad,
     instance_id: &str,
 ) -> Result<(), String> {
     let convert_name = format!("{}:rtmp_audio_convert", instance_id);
@@ -452,7 +594,6 @@ fn build_raw_audio_chain(
         .static_pad("sink")
         .ok_or("audioconvert has no sink pad")?;
     let parser_src = parser.static_pad("src").ok_or("parser has no src pad")?;
-    let mux_sink = request_mux_pad(mux, "audio")?;
 
     identity_src_pad
         .link(&convert_sink)
@@ -467,7 +608,7 @@ fn build_raw_audio_chain(
         .link(&parser)
         .map_err(|e| format!("link avenc_aac -> aacparse: {}", e))?;
     parser_src
-        .link(&mux_sink)
+        .link(mux_sink)
         .map_err(|e| format!("link aacparse -> flvmux: {:?}", e))?;
 
     info!(
@@ -482,8 +623,8 @@ fn build_raw_audio_chain(
 /// Audio, AAC in: parse only, into the muxer.
 fn build_aac_audio_chain(
     bin: &gst::Bin,
-    mux: &gst::Element,
     identity_src_pad: &gst::Pad,
+    mux_sink: &gst::Pad,
     instance_id: &str,
 ) -> Result<(), String> {
     let parser_name = format!("{}:rtmp_aacparse", instance_id);
@@ -499,13 +640,12 @@ fn build_aac_audio_chain(
 
     let parser_sink = parser.static_pad("sink").ok_or("parser has no sink pad")?;
     let parser_src = parser.static_pad("src").ok_or("parser has no src pad")?;
-    let mux_sink = request_mux_pad(mux, "audio")?;
 
     identity_src_pad
         .link(&parser_sink)
         .map_err(|e| format!("link identity -> aacparse: {:?}", e))?;
     parser_src
-        .link(&mux_sink)
+        .link(mux_sink)
         .map_err(|e| format!("link aacparse -> flvmux: {:?}", e))?;
 
     info!(

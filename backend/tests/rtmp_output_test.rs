@@ -19,10 +19,12 @@
 //! branch logic can be tested without a pipeline.
 //!
 //! **What is not covered here, stated rather than implied:** the element
-//! construction and pad linking those decisions lead to. Exercising it needs a
-//! flow in PLAYING with a reachable RTMP server, which is an integration
-//! concern rather than a unit one. So a chain that builds the wrong element or
-//! links the wrong pad would pass this suite.
+//! construction and pad linking those decisions lead to. A chain that builds
+//! the wrong element or links the wrong pad passes this suite — deleting both
+//! probe bodies leaves every test below green. `rtmp_output_pipeline_test.rs`
+//! covers that half, by driving this builder in a real pipeline; it needs no
+//! RTMP server, because the probes fire on the caps event and preroll is enough
+//! to produce one.
 
 use std::collections::HashMap;
 use strom::blocks::builtin::rtmp::{
