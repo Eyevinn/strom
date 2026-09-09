@@ -47,10 +47,14 @@ interests you, open a GitHub issue or discussion.
 
 ## Platform & reach
 
-- **Publish straight to the big live platforms** — try Strom's RTMP output against YouTube
-  Live and Twitch ingest and write down what it takes. Both accept H.264 + AAC over RTMP or
-  RTMPS, and both want an audio track present, so a mix should be able to reach a stream key
-  with no separate encoder in between. Worth measuring rather than assuming.
+- **Publish straight to the big live platforms** — take Strom's RTMP output to YouTube Live
+  and Twitch and write down what an operator has to set. The transport side is there: the
+  sink speaks `rtmp` and `rtmps`, and it keeps the query string Twitch's
+  `?bandwidthtest=true` rides on, so a test broadcast can be verified in Twitch Inspector
+  without going live. The encoder side is where the work is — the Video Encoder block's
+  default profile lets the encoder negotiate freely, and against `x264enc` that lands on
+  High 4:4:4 Predictive 10-bit, which neither platform accepts. Pinning `profile=high` gives
+  8-bit 4:2:0. Both platforms also want an audio track and roughly 2-second keyframes.
 - **Kubernetes operator** — deploy flows as pods with resource limits and auto-scaling.
 - **Block marketplace** — browse and install community-contributed blocks.
 - **Mobile companion** — monitor status, start/stop flows, and receive alerts from a phone.
