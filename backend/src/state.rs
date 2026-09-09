@@ -1382,6 +1382,14 @@ impl AppState {
         manager: Option<PipelineManager>,
         endpoints: Option<RegisteredEndpoints>,
     ) -> Result<PipelineState, PipelineError> {
+        // Before anything else, and on every path including the one below where
+        // no pipeline was built: the vision mixer's overlay timer thread has no
+        // exit condition other than this unregistration, so a teardown that
+        // skips it leaves a thread rendering at full framerate for the life of
+        // the process. Doing it first also means the thread is not pushing into
+        // an appsrc while the pipeline is being taken to NULL below.
+        crate::blocks::builtin::vision_mixer::overlay::unregister_flow(id);
+
         let Some(mut manager) = manager else {
             // No pipeline was ever built. Blocks constructed before the failing
             // one can still have registered themselves, and the CPU allocation
@@ -1608,19 +1616,6 @@ impl AppState {
                         .discovery
                         .remove_announcement(*id, &block.id)
                         .await;
-                }
-
-                // Clean up vision mixer overlay state
-                if block.block_definition_id == "builtin.vision_mixer" {
-                    crate::blocks::builtin::vision_mixer::overlay::unregister_overlay_state(
-                        &block.id,
-                    );
-                    // Without this, the overlay-timer-* thread keeps polling the
-                    // renderer registry, holds a strong AppSrc ref, and prevents
-                    // the pipeline (and its NiceAgent) from finalizing.
-                    crate::blocks::builtin::vision_mixer::overlay::unregister_overlay_renderer(
-                        &block.id,
-                    );
                 }
             }
         }

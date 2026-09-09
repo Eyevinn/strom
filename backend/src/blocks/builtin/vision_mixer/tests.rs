@@ -5,6 +5,21 @@ use super::properties;
 use std::collections::HashMap;
 use strom_types::PropertyValue;
 
+/// The overlay timer registry, its running count and its shutdown flag are all
+/// process-global, and cargo runs tests in the same process in parallel. Every
+/// test that starts a real timer thread takes this first: otherwise one test's
+/// `shutdown_overlay_timers` stops another's thread, and each sees a baseline
+/// count that includes the other's.
+static OVERLAY_TIMER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`OVERLAY_TIMER_TEST_LOCK`], ignoring poisoning: a panic in one timer
+/// test should fail that test, not turn every later one into a poison error.
+fn overlay_timer_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    OVERLAY_TIMER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn test_parse_num_inputs_default() {
     let props = HashMap::new();
@@ -274,17 +289,19 @@ fn test_parse_initial_pgm_clamped() {
     assert_eq!(properties::parse_initial_pgm(&props, 4), 3); // max index = 3
 }
 
-/// `overlay_states` and `overlay_renderers` share the same lifecycle:
-/// they are populated together in `build_overlay` and must be cleared
-/// together by the cleanup branch in `state.rs::stop_flow`. If you add
-/// another per-block registry in this module, mirror its unregister call
-/// in that branch and extend this test.
+/// `overlay_states` and `overlay_renderers` share the same lifecycle: they are
+/// populated together in `build_overlay` and must be cleared together by
+/// `unregister_flow`, which `state.rs::teardown_flow` calls on every teardown
+/// path. If you add another per-block registry in this module, clear it in
+/// `unregister_flow` too and extend this test.
+///
+/// Two flows are registered so the sweep is checked for aim as well as reach:
+/// clearing one flow must not touch another flow's overlay.
 #[test]
 fn overlay_registries_round_trip() {
     use super::overlay::{
         get_overlay_renderer, get_overlay_state, register_overlay_renderer, register_overlay_state,
-        unregister_overlay_renderer, unregister_overlay_state, OverlayRenderer,
-        VisionMixerOverlayState,
+        unregister_flow, OverlayRenderer, VisionMixerOverlayState,
     };
     use gstreamer as gst;
     use gstreamer_app as gst_app;
@@ -292,7 +309,10 @@ fn overlay_registries_round_trip() {
 
     gst::init().unwrap();
 
+    let flow_id = strom_types::FlowId::new_v4();
+    let other_flow_id = strom_types::FlowId::new_v4();
     let block_id = "test-vm-overlay-cleanup-block-id";
+    let other_block_id = "test-vm-overlay-cleanup-other-flow-block-id";
 
     let lo = layout::compute_layout(1280, 720, 4, 0, ASPECT_16_9, false);
     let state = Arc::new(VisionMixerOverlayState::new(
@@ -324,8 +344,10 @@ fn overlay_registries_round_trip() {
         720,
     )));
 
-    register_overlay_state(block_id, Arc::clone(&state));
-    register_overlay_renderer(block_id, Arc::clone(&renderer));
+    register_overlay_state(flow_id, block_id, Arc::clone(&state));
+    register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
+    register_overlay_state(other_flow_id, other_block_id, Arc::clone(&state));
+    register_overlay_renderer(other_flow_id, other_block_id, Arc::clone(&renderer));
 
     assert!(
         get_overlay_state(block_id).is_some(),
@@ -336,8 +358,7 @@ fn overlay_registries_round_trip() {
         "renderer should be registered"
     );
 
-    unregister_overlay_state(block_id);
-    unregister_overlay_renderer(block_id);
+    unregister_flow(&flow_id);
 
     assert!(
         get_overlay_state(block_id).is_none(),
@@ -347,6 +368,13 @@ fn overlay_registries_round_trip() {
         get_overlay_renderer(block_id).is_none(),
         "renderer must be cleaned (otherwise overlay-timer-* thread leaks)"
     );
+    assert!(
+        get_overlay_state(other_block_id).is_some()
+            && get_overlay_renderer(other_block_id).is_some(),
+        "tearing down one flow must not clear another flow's overlay"
+    );
+
+    unregister_flow(&other_flow_id);
 }
 
 /// `shutdown_overlay_timers` must wait until the timer thread has left cairo,
@@ -356,17 +384,19 @@ fn overlay_registries_round_trip() {
 fn shutdown_overlay_timers_joins_running_timer() {
     use super::overlay::{
         overlay_timers_running, register_overlay_renderer, register_overlay_state,
-        shutdown_overlay_timers, start_overlay_timer, unregister_overlay_renderer,
-        unregister_overlay_state, OverlayRenderer, VisionMixerOverlayState,
+        shutdown_overlay_timers, start_overlay_timer, unregister_flow, OverlayRenderer,
+        VisionMixerOverlayState,
     };
     use gstreamer as gst;
-    use gstreamer::prelude::ElementExt;
+    use gstreamer::prelude::{ElementExt, GstBinExt};
     use gstreamer_app as gst_app;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    let _serialized = overlay_timer_test_guard();
     gst::init().unwrap();
 
+    let flow_id = strom_types::FlowId::new_v4();
     let block_id = "test-vm-overlay-timer-shutdown-block-id";
 
     let lo = layout::compute_layout(1280, 720, 4, 0, ASPECT_16_9, false);
@@ -399,6 +429,11 @@ fn shutdown_overlay_timers_joins_running_timer() {
         .max_buffers(2)
         .leaky_type(gst_app::AppLeakyType::Upstream)
         .build();
+    // Parented like production: the timer treats an appsrc with no parent as a
+    // torn-down pipeline and exits, so a bare appsrc would never reach cairo.
+    // The bin stays NULL, leaving the appsrc's own state to the line below.
+    let bin = gst::Bin::new();
+    bin.add(&appsrc).expect("appsrc should add to bin");
     // The timer only enters its render loop once the appsrc reports PLAYING.
     appsrc
         .set_state(gst::State::Playing)
@@ -412,8 +447,8 @@ fn shutdown_overlay_timers_joins_running_timer() {
         720,
     )));
 
-    register_overlay_state(block_id, Arc::clone(&state));
-    register_overlay_renderer(block_id, Arc::clone(&renderer));
+    register_overlay_state(flow_id, block_id, Arc::clone(&state));
+    register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
 
     let before = overlay_timers_running();
     start_overlay_timer(block_id.to_string(), Arc::clone(&renderer), (50, 1));
@@ -439,8 +474,108 @@ fn shutdown_overlay_timers_joins_running_timer() {
     );
 
     let _ = appsrc.set_state(gst::State::Null);
-    unregister_overlay_state(block_id);
-    unregister_overlay_renderer(block_id);
+    drop(bin);
+    unregister_flow(&flow_id);
     // The flag is process-global and terminal; clear it for later tests.
     super::overlay::reset_overlay_timers_shutdown_for_test();
+}
+
+/// The timer's backstop: a teardown path that never unregisters the renderer
+/// must still cost only a thread exit, not a core burning for the life of the
+/// process. The registry is deliberately left populated here — the only signal
+/// the thread gets is its appsrc losing its parent, which is what a finalizing
+/// pipeline does to its children.
+#[test]
+fn overlay_timer_exits_when_its_appsrc_is_orphaned() {
+    use super::overlay::{
+        overlay_timers_running, register_overlay_renderer, register_overlay_state,
+        start_overlay_timer, unregister_flow, OverlayRenderer, VisionMixerOverlayState,
+    };
+    use gstreamer as gst;
+    use gstreamer::prelude::{ElementExt, GstBinExt};
+    use gstreamer_app as gst_app;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let _serialized = overlay_timer_test_guard();
+    gst::init().unwrap();
+
+    let flow_id = strom_types::FlowId::new_v4();
+    let block_id = "test-vm-overlay-timer-orphan-block-id";
+
+    let lo = layout::compute_layout(1280, 720, 4, 0, ASPECT_16_9, false);
+    let state = Arc::new(VisionMixerOverlayState::new(
+        4,
+        0,
+        0,
+        1,
+        vec!["A".into(), "B".into(), "C".into(), "D".into()],
+        lo,
+        1920,
+        1080,
+        false,
+        super::overlay::PipInitialState::default(),
+    ));
+
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "BGRA")
+        .field("width", 1280i32)
+        .field("height", 720i32)
+        .field("framerate", gst::Fraction::new(50, 1))
+        .build();
+    let appsrc = gst_app::AppSrc::builder()
+        .caps(&caps)
+        .format(gst::Format::Time)
+        .is_live(false)
+        .do_timestamp(true)
+        .max_buffers(2)
+        .leaky_type(gst_app::AppLeakyType::Upstream)
+        .build();
+    let bin = gst::Bin::new();
+    bin.add(&appsrc).expect("appsrc should add to bin");
+    appsrc
+        .set_state(gst::State::Playing)
+        .expect("appsrc should reach PLAYING");
+
+    let renderer = Arc::new(Mutex::new(OverlayRenderer::new(
+        appsrc.clone(),
+        caps,
+        Arc::clone(&state),
+        1280,
+        720,
+    )));
+
+    register_overlay_state(flow_id, block_id, Arc::clone(&state));
+    register_overlay_renderer(flow_id, block_id, Arc::clone(&renderer));
+
+    let before = overlay_timers_running();
+    start_overlay_timer(block_id.to_string(), Arc::clone(&renderer), (50, 1));
+
+    // Let it reach the push loop first, so the exit is the backstop firing and
+    // not the thread still waiting for PLAYING.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while appsrc.current_level_buffers() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        appsrc.current_level_buffers() > 0,
+        "overlay timer should be in its push loop before the appsrc is orphaned"
+    );
+
+    // What a finalizing pipeline does to its children — but with the renderer
+    // still registered, as a missed unregistration would leave it.
+    bin.remove(&appsrc).expect("appsrc should leave the bin");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while overlay_timers_running() > before && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        overlay_timers_running(),
+        before,
+        "an orphaned appsrc must stop the timer even with the renderer still registered"
+    );
+
+    let _ = appsrc.set_state(gst::State::Null);
+    unregister_flow(&flow_id);
 }
