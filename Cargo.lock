@@ -1605,16 +1605,16 @@ dependencies = [
 
 [[package]]
 name = "efp"
-version = "0.3.0"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.3.0#fbb24bbfe3d05463d9f8ccec9fb8949e40b96812"
+version = "0.4.0"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.4.0#d6fd3bdb05195a48fffab2f38ed88ec4037f373c"
 dependencies = [
  "efp-sys",
 ]
 
 [[package]]
 name = "efp-sys"
-version = "0.3.0"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.3.0#fbb24bbfe3d05463d9f8ccec9fb8949e40b96812"
+version = "0.4.0"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.4.0#d6fd3bdb05195a48fffab2f38ed88ec4037f373c"
 dependencies = [
  "bindgen",
  "cmake",
@@ -2592,8 +2592,8 @@ dependencies = [
 
 [[package]]
 name = "gst-plugin-efp"
-version = "0.3.0"
-source = "git+https://github.com/Eyevinn/efp?tag=v0.3.0#fbb24bbfe3d05463d9f8ccec9fb8949e40b96812"
+version = "0.4.0"
+source = "git+https://github.com/Eyevinn/efp?tag=v0.4.0#d6fd3bdb05195a48fffab2f38ed88ec4037f373c"
 dependencies = [
  "efp",
  "glib",

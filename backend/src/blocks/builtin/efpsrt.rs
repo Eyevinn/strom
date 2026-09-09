@@ -839,7 +839,7 @@ fn efpsrt_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "num_data_tracks".to_string(),
                 label: "Number of Data Tracks".to_string(),
-                description: "Number of EFP embedded-data input tracks (default: 0). Each track maps to an efpmux 'embed_%u' pad. The connected source must send 'application/x-efp-embedded' caps carrying 'data-type' and 'stream-id'. Both fields default to 0 when omitted rather than failing, and stream-id 0 is reserved: data addressed to it, or to any stream-id that carries no media, is buffered by the muxer and never sent. Media stream-ids are allocated from 1 in pad order, so the video track is 1 and audio tracks follow.".to_string(),
+                description: "Number of EFP embedded-data input tracks (default: 0). Each track maps to an efpmux 'embed_%u' pad. The connected source must send 'application/x-efp-embedded' caps carrying both 'data-type' and 'stream-id'; caps missing either are rejected. Data rides out on the next frame of the media stream with the matching stream-id, and data addressed to a stream that carries no media is dropped. Media stream-ids are allocated from 1 in pad order, so the video track is 1 and audio tracks follow.".to_string(),
                 property_type: PropertyType::UInt,
                 default_value: Some(PropertyValue::UInt(0)),
                 mapping: PropertyMapping {

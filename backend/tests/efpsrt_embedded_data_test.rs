@@ -232,33 +232,41 @@ fn input_block_builds_no_data_output_by_default() {
     );
 }
 
+/// gst-plugin-efp v0.4.0 gives each EFP stream its own `embedded_<stream-id>`
+/// src pad, so several data tracks can now be received. Until v0.3.0 the
+/// demuxer cached one `embedded` pad for every stream and this block rejected
+/// anything above one rather than publish outputs that could never carry a
+/// buffer.
 #[test]
-fn input_block_rejects_more_data_tracks_than_the_demuxer_can_reach() {
+fn input_block_builds_a_data_output_per_track_beyond_the_first() {
     init();
     require_elements(&["efpdemux", "srtsrc", "identity"]);
 
     let props = properties(&[
         ("num_video_tracks", 0),
         ("num_audio_tracks", 0),
-        ("num_data_tracks", 2),
+        ("num_data_tracks", 3),
     ]);
-    // `BlockBuildResult` is not `Debug`, so unwrap the error by hand.
-    let message = match EfpSrtInputBuilder.build("blk", &props, &context()) {
-        Ok(_) => panic!("efpdemux has one embedded pad, so two data tracks must not build"),
-        Err(e) => e.to_string(),
-    };
-    assert!(
-        message.contains("num_data_tracks"),
-        "the error must name the property the operator set, got: {}",
-        message
-    );
+    let result = EfpSrtInputBuilder
+        .build("blk", &props, &context())
+        .expect("several data tracks must build against a demuxer that fans out per stream");
+
+    for i in 0..3 {
+        let id = format!("blk:data_output_{}", i);
+        assert!(
+            element(&result, &id).is_some(),
+            "block should contain a '{}' element, got {:?}",
+            id,
+            result.elements.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
-fn input_block_never_advertises_an_unreachable_data_output() {
+fn input_block_advertises_every_data_output_it_builds() {
     init();
 
-    let props = properties(&[("num_data_tracks", 2)]);
+    let props = properties(&[("num_data_tracks", 3)]);
     let pads = EfpSrtInputBuilder
         .get_external_pads(&props)
         .expect("efpsrt_input should report external pads");
@@ -272,8 +280,12 @@ fn input_block_never_advertises_an_unreachable_data_output() {
 
     assert_eq!(
         data_pads,
-        vec!["data_out_0".to_string()],
-        "a data output the demuxer can never feed must not appear in the flow graph"
+        vec![
+            "data_out_0".to_string(),
+            "data_out_1".to_string(),
+            "data_out_2".to_string()
+        ],
+        "the flow graph must show every data output the block builds"
     );
 }
 
