@@ -1,11 +1,12 @@
 //! Media player runtime state, global registry, and lifecycle methods.
 
 use super::normalize_uri;
+use crate::gst::pipeline_bridge;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use strom_types::FlowId;
 use tracing::{debug, error, info};
@@ -62,10 +63,11 @@ pub struct MediaPlayerState {
     pub sync: bool,
     /// Configured media files directory (for resolving relative playlist paths)
     pub media_path: std::path::PathBuf,
-    /// Shared timestamp offset (ns) for the appsink→appsrc bridge.
-    /// Computed once from the first buffer: `main_running_time - buffer_pts`.
-    /// Set to `i64::MIN` to signal "needs recomputation" (on startup, file switch, resume).
-    pub ts_offset: Arc<AtomicI64>,
+    /// Timestamp rebasing for the appsink→appsrc bridge, shared by the audio
+    /// and video streams so they keep their relative timing, and shared as code
+    /// with the WHIP block. Also what stops an unstamped buffer reaching the
+    /// main pipeline; see [`crate::gst::pipeline_bridge`].
+    pub bridge: Arc<pipeline_bridge::SessionBridge>,
     /// Weak reference to the main pipeline (for computing running time in the bridge).
     pub main_pipeline: gst::glib::WeakRef<gst::Pipeline>,
     /// Handler id of the signal watch on the internal pipeline's bus.
@@ -236,7 +238,7 @@ impl MediaPlayerState {
         // and the bridge recomputes the offset from the first buffer
         self.video_linked.store(false, Ordering::SeqCst);
         self.audio_linked.store(false, Ordering::SeqCst);
-        self.ts_offset.store(i64::MIN, Ordering::SeqCst);
+        self.bridge.reset_offset();
 
         // Set the new URI on source element
         source_element.set_property("uri", &uri);
@@ -263,7 +265,7 @@ impl MediaPlayerState {
             .ok_or("Internal pipeline not created")?;
         // Reset timestamp offset so the bridge recomputes from the first buffer
         // after resume — prevents accumulated drift from pause duration.
-        self.ts_offset.store(i64::MIN, Ordering::SeqCst);
+        self.bridge.reset_offset();
         pipeline.set_state(gst::State::Playing).map_err(|e| {
             error!("Failed to resume playback: {:?}", e);
             "Failed to resume playback".to_string()
@@ -317,7 +319,7 @@ impl MediaPlayerState {
 
         // Reset timestamp offset so the bridge recomputes from the first buffer
         // after the seek — the file PTS jumps but main pipeline running time doesn't.
-        self.ts_offset.store(i64::MIN, Ordering::SeqCst);
+        self.bridge.reset_offset();
 
         let seek_result = source.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,

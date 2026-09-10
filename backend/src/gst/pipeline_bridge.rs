@@ -1,10 +1,12 @@
-//! The WHIP session → flow pipeline bridge: what crosses it, and with what timestamps.
+//! The session → flow pipeline bridge: what crosses it, and with what timestamps.
 //!
-//! Each WHIP publisher gets its own *session* pipeline, isolated from the flow's
-//! main pipeline so that a publisher connecting or dropping cannot restart the
-//! flow. Media crosses the boundary through an `appsink`/`appsrc` pair: the
-//! session pipeline's appsink hands each sample to this module, which pushes it
-//! into the slot's appsrc in the main pipeline.
+//! Two blocks run media in a *session* pipeline of their own, isolated from the
+//! flow's main pipeline: a WHIP publisher, so that a publisher connecting or
+//! dropping cannot restart the flow, and the Media Player, so that a file
+//! switch or a seek stays local to the player. Both cross the boundary through
+//! an `appsink`/`appsrc` pair: the session pipeline's appsink hands each sample
+//! to this module, which pushes it into the block's appsrc in the main
+//! pipeline.
 //!
 //! Two things have to happen at that boundary.
 //!
@@ -13,7 +15,10 @@
 //! The bridge computes one offset per session — `main_running_time - pts`, from
 //! the first buffer that carries a PTS — and adds it to every buffer on both
 //! streams. One offset shared between audio and video, not one each, or the two
-//! would drift apart from each other after the shift.
+//! would drift apart from each other after the shift. Audio and video arrive on
+//! their own streaming threads, so "once per session" is a `compare_exchange`:
+//! whichever stream gets there first sets the offset and the other reads it
+//! back, rather than both computing against clocks read milliseconds apart.
 //!
 //! **A buffer with no PTS has to stop here.** `qtmux` cannot place an
 //! untimestamped buffer in a track and answers with `GST_FLOW_ERROR`:
@@ -37,6 +42,13 @@
 //! dropped frame on a live source is the ordinary recoverable failure — the
 //! receiver already tolerates loss, and [`crate::gst::keyframe_request`]
 //! recovers a decoder that lost part of its GOP.
+//!
+//! **What is not covered.** [`shift`] clamps a shifted timestamp at zero, so a
+//! stream whose PTS base sits far behind the offset-setting stream's pins its
+//! first buffers at 0 — equal timestamps, which is the muxer's third complaint
+//! after missing and backwards ones. Pre-existing, and it needs a policy for
+//! what a stream that starts *before* the session's time origin should be
+//! worth; not decided here.
 
 use gstreamer as gst;
 use gstreamer_app as gst_app;
@@ -59,6 +71,11 @@ pub enum Forwarded {
     /// Not pushed: the buffer had no PTS. `dropped` is the running total for
     /// this session.
     DroppedUnstamped { dropped: u64 },
+    /// The appsrc refused the sample — normally `Flushing`, while the main
+    /// pipeline is still coming up. The media is lost; the next buffer tries
+    /// again. If this buffer was also the one that established the session
+    /// offset, the offset is kept even though the buffer did not cross.
+    PushFailed(gst::FlowError),
 }
 
 /// Per-session bridge state, shared by the audio and video appsink callbacks.
@@ -87,6 +104,14 @@ impl SessionBridge {
         self.dropped_unstamped.load(Ordering::Relaxed)
     }
 
+    /// Forget the session offset, so the next buffer with a PTS computes a new
+    /// one. The Media Player calls this whenever the relationship between file
+    /// time and main-pipeline running time breaks: a file switch, a seek, or a
+    /// resume after a pause. The drop count is a lifetime total and survives.
+    pub fn reset_offset(&self) {
+        self.offset_ns.store(OFFSET_UNSET, Ordering::Relaxed);
+    }
+
     /// Push one sample from the session pipeline into the main pipeline.
     ///
     /// Runs once per buffer on the appsink's streaming thread: atomics only, no
@@ -94,7 +119,8 @@ impl SessionBridge {
     ///
     /// `main_running_time` is consulted only while the offset is still unset —
     /// the caller uses it to upgrade its weak pipeline reference and read the
-    /// clock, work not worth doing on every buffer.
+    /// clock, work not worth doing on every buffer. It may be called and its
+    /// answer discarded, if the other stream set the offset first.
     ///
     /// Returns `None` if the sample carried no buffer; the caller decides what
     /// that means for the appsink.
@@ -116,15 +142,31 @@ impl SessionBridge {
         let mut just_computed = false;
         if offset_ns == OFFSET_UNSET {
             if let Some(running) = main_running_time() {
-                offset_ns = running.nseconds() as i64 - pts.nseconds() as i64;
-                self.offset_ns.store(offset_ns, Ordering::Relaxed);
-                just_computed = true;
+                let candidate = running.nseconds() as i64 - pts.nseconds() as i64;
+                // Audio and video reach this on their own streaming threads and
+                // can both have read OFFSET_UNSET above. Exactly one may win:
+                // two offsets computed from clocks read milliseconds apart is
+                // the A/V drift this shared offset exists to prevent.
+                match self.offset_ns.compare_exchange(
+                    OFFSET_UNSET,
+                    candidate,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        offset_ns = candidate;
+                        just_computed = true;
+                    }
+                    Err(winner) => offset_ns = winner,
+                }
             }
         }
 
         if offset_ns == OFFSET_UNSET {
-            let _ = appsrc.push_sample(sample);
-            return Some(Forwarded::Unadjusted);
+            return Some(match appsrc.push_sample(sample) {
+                Ok(_) => Forwarded::Unadjusted,
+                Err(e) => Forwarded::PushFailed(e),
+            });
         }
 
         let mut adjusted = buffer.copy();
@@ -132,14 +174,17 @@ impl SessionBridge {
             let Some(buf_ref) = adjusted.get_mut() else {
                 // A fresh copy is always writable. If that ever stops being
                 // true, forward the original rather than lose media.
-                let _ = appsrc.push_sample(sample);
-                return Some(Forwarded::Unadjusted);
+                return Some(match appsrc.push_sample(sample) {
+                    Ok(_) => Forwarded::Unadjusted,
+                    Err(e) => Forwarded::PushFailed(e),
+                });
             };
             buf_ref.set_pts(shift(pts, offset_ns));
-            // DTS is in the session's time base too. It is normally unset here
-            // (WebRTC H.264 has no B-frames), so this is usually a no-op — but
-            // leaving a session-base DTS beside a main-base PTS would be the
-            // muxer's other way to reject the buffer.
+            // DTS is in the session's time base too. It is unset on WHIP
+            // traffic (WebRTC H.264 carries no B-frames) and set on a file the
+            // Media Player passes through encoded. Leaving a session-base DTS
+            // beside a main-base PTS is the muxer's other way to reject the
+            // buffer.
             if let Some(dts) = buffer.dts() {
                 buf_ref.set_dts(shift(dts, offset_ns));
             }
@@ -151,7 +196,9 @@ impl SessionBridge {
         if let Some(caps) = &caps {
             builder = builder.caps(caps);
         }
-        let _ = appsrc.push_sample(&builder.build());
+        if let Err(e) = appsrc.push_sample(&builder.build()) {
+            return Some(Forwarded::PushFailed(e));
+        }
 
         Some(if just_computed {
             Forwarded::OffsetComputed(offset_ns)
@@ -347,6 +394,10 @@ mod tests {
     /// The offset is shared so audio and video keep their relative timing. Both
     /// streams push through one `SessionBridge`; the second must reuse the
     /// offset the first computed rather than recomputing against a later clock.
+    ///
+    /// One thread, so this covers only the case where one stream's first buffer
+    /// clearly precedes the other's. The concurrent case is
+    /// [`two_streams_racing_for_the_offset_still_get_one`].
     #[test]
     fn both_streams_share_one_offset() {
         let h = Harness::new();
@@ -367,6 +418,76 @@ mod tests {
             h.next_pts(),
             Some(at(10)),
             "same input time, same output time"
+        );
+    }
+
+    /// Audio and video run on their own streaming threads, so both can find the
+    /// offset unset and read the clock before either has stored anything. The
+    /// barrier inside the clock closure forces that interleaving instead of
+    /// hoping for it: both threads are past the `OFFSET_UNSET` load and inside
+    /// `main_running_time` before either returns.
+    ///
+    /// With a plain store both callers report `OffsetComputed` and the two
+    /// buffers leave shifted by clocks read milliseconds apart — the A/V drift
+    /// the shared offset exists to prevent. With the `compare_exchange` exactly
+    /// one wins and both buffers get the winner's offset.
+    #[test]
+    fn two_streams_racing_for_the_offset_still_get_one() {
+        use std::sync::{Arc, Barrier};
+
+        let h = Harness::new();
+        let bridge = Arc::new(SessionBridge::new());
+        let gate = Arc::new(Barrier::new(2));
+
+        // Same input PTS on both streams, different clock readings: if the two
+        // computed their own offsets, the outputs would differ by a second.
+        let outcomes: Vec<_> = [10u64, 11u64]
+            .into_iter()
+            .map(|clock_secs| {
+                let bridge = Arc::clone(&bridge);
+                let gate = Arc::clone(&gate);
+                let src = h.src.clone();
+                std::thread::spawn(move || {
+                    bridge.forward(&sample(at(1), None), &src, || {
+                        gate.wait();
+                        Some(gst::ClockTime::from_seconds(clock_secs))
+                    })
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().expect("thread"))
+            .collect();
+
+        let computed: Vec<_> = outcomes
+            .iter()
+            .filter_map(|o| match o {
+                Some(Forwarded::OffsetComputed(offset)) => Some(*offset),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            computed.len(),
+            1,
+            "exactly one stream may establish the offset, got {:?}",
+            outcomes
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| matches!(o, Some(Forwarded::Restamped)))
+                .count(),
+            1,
+            "the loser reuses the winner's offset, got {:?}",
+            outcomes
+        );
+
+        let winner = gst::ClockTime::from_nseconds(computed[0] as u64 + SEC);
+        assert_eq!(h.next_pts(), Some(Some(winner)));
+        assert_eq!(
+            h.next_pts(),
+            Some(Some(winner)),
+            "both buffers shifted by the same offset"
         );
     }
 

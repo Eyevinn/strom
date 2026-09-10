@@ -16,7 +16,7 @@ use crate::blocks::{
 };
 use crate::gst::ice_preflight;
 use crate::gst::keyframe_request;
-use crate::gst::whip_bridge::{self, SessionBridge};
+use crate::gst::pipeline_bridge::{self, SessionBridge};
 use crate::whip_session_manager::{SessionCleanupRequest, WhipEndpointConfig};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -1034,7 +1034,7 @@ pub fn create_whipserversrc_for_session(
                                 .ok_or(gst::FlowError::Error)?;
 
                             match outcome {
-                                whip_bridge::Forwarded::OffsetComputed(offset) => {
+                                pipeline_bridge::Forwarded::OffsetComputed(offset) => {
                                     info!(
                                         "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
                                         offset / 1_000_000,
@@ -1042,16 +1042,17 @@ pub fn create_whipserversrc_for_session(
                                         slot
                                     );
                                 }
-                                whip_bridge::Forwarded::DroppedUnstamped { dropped } => {
-                                    if whip_bridge::should_log_drop(dropped) {
+                                pipeline_bridge::Forwarded::DroppedUnstamped { dropped } => {
+                                    if pipeline_bridge::should_log_drop(dropped) {
                                         warn!(
                                             "WHIP Input: dropped {} buffer(s) with no PTS on the {} stream (slot {}); forwarding one fails the downstream muxer and takes the whole flow with it",
                                             dropped, media_for_log, slot
                                         );
                                     }
                                 }
-                                whip_bridge::Forwarded::Restamped
-                                | whip_bridge::Forwarded::Unadjusted => {}
+                                pipeline_bridge::Forwarded::Restamped
+                                | pipeline_bridge::Forwarded::Unadjusted
+                                | pipeline_bridge::Forwarded::PushFailed(_) => {}
                             }
 
                             Ok(gst::FlowSuccess::Ok)

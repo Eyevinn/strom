@@ -7,6 +7,7 @@
 use super::state::MediaPlayerState;
 use crate::blocks::BlockBuildError;
 use crate::events::EventBroadcaster;
+use crate::gst::pipeline_bridge;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -321,10 +322,9 @@ pub fn create_passthrough_pipeline(
 
 /// Link a dynamic pad through clocksync → appsink, with appsink bridging to the given appsrc.
 ///
-/// The bridge computes a timestamp offset from the first buffer:
-///   `offset = main_running_time - buffer_pts`
-/// and applies it to all subsequent buffers so PTS aligns with the main pipeline clock.
-/// The offset is shared (via `ts_offset`) between audio and video streams for A/V sync.
+/// Rebasing and the unstamped-buffer drop live in [`crate::gst::pipeline_bridge`],
+/// shared with the WHIP block's session bridge; this function is the plumbing
+/// around it.
 #[allow(clippy::too_many_arguments)]
 fn link_pad_through_clocksync(
     pipeline: &gst::Pipeline,
@@ -376,7 +376,7 @@ fn link_pad_through_clocksync(
     // Set up bridge callback: appsink → appsrc with timestamp offset
     let appsrc_weak = appsrc.downgrade();
     let media_type_owned = media_type.to_string();
-    let ts_offset = Arc::clone(&state.ts_offset);
+    let bridge = Arc::clone(&state.bridge);
     let main_pipeline_weak = state.main_pipeline.clone();
     let pushed_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
@@ -395,81 +395,50 @@ fn link_pad_through_clocksync(
                     }
                 };
 
-                let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                let pts = buffer.pts();
+                let outcome = bridge
+                    .forward(&sample, &appsrc, || {
+                        let main_pipe = main_pipeline_weak.upgrade()?;
+                        let clock = main_pipe.clock()?;
+                        let base_time = main_pipe.base_time()?;
+                        Some(clock.time().saturating_sub(base_time))
+                    })
+                    .ok_or(gst::FlowError::Error)?;
 
-                // Compute or reuse timestamp offset
-                let offset_ns = {
-                    let current = ts_offset.load(Ordering::Relaxed);
-                    if current != i64::MIN {
-                        current
-                    } else if let (Some(pts_val), Some(main_pipe)) =
-                        (pts, main_pipeline_weak.upgrade())
-                    {
-                        let clock = main_pipe.clock();
-                        let base_time = main_pipe.base_time();
-                        if let (Some(clock), Some(base_time)) = (clock, base_time) {
-                            let running = clock.time().saturating_sub(base_time);
-                            let offset = running.nseconds() as i64 - pts_val.nseconds() as i64;
-                            ts_offset.store(offset, Ordering::Relaxed);
-                            offset
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
+                // A refused push (typically FLUSHING while the main pipeline is
+                // still starting) must not kill the appsink: drop the sample and
+                // let the next one retry once the appsrc is ready.
+                match outcome {
+                    pipeline_bridge::Forwarded::OffsetComputed(offset) => {
+                        pushed_count.fetch_add(1, Ordering::Relaxed);
+                        info!(
+                            "Media Player bridge: {} delivered its first sample, computed shared ts-offset={}ms",
+                            media_type_owned,
+                            offset / 1_000_000
+                        );
                     }
-                };
-
-                // Build the sample to push, applying timestamp offset if needed
-                let push_result = if offset_ns != 0 {
-                    if let Some(pts_val) = pts {
-                        let adjusted = (pts_val.nseconds() as i64 + offset_ns).max(0) as u64;
-                        let mut new_buf = buffer.copy();
-                        {
-                            let buf_ref = new_buf.get_mut().unwrap();
-                            buf_ref.set_pts(gst::ClockTime::from_nseconds(adjusted));
-                            if let Some(dts) = buffer.dts() {
-                                let adj_dts = (dts.nseconds() as i64 + offset_ns).max(0) as u64;
-                                buf_ref.set_dts(gst::ClockTime::from_nseconds(adj_dts));
-                            }
-                        }
-                        let owned_caps = sample.caps().map(|c| c.to_owned());
-                        let mut builder = gst::Sample::builder().buffer(&new_buf);
-                        if let Some(ref caps) = owned_caps {
-                            builder = builder.caps(caps);
-                        }
-                        appsrc.push_sample(&builder.build())
-                    } else {
-                        appsrc.push_sample(&sample)
-                    }
-                } else {
-                    appsrc.push_sample(&sample)
-                };
-
-                // Don't kill the appsink on transient errors (e.g. FLUSHING while
-                // the main pipeline is still starting). Drop the sample and retry
-                // on the next one — the appsrc will accept data once it's ready.
-                match push_result {
-                    Ok(_) => {
-                        if pushed_count.fetch_add(1, Ordering::Relaxed) == 0 {
-                            info!(
-                                "Media Player bridge: {} first sample delivered, pts={:?}",
-                                media_type_owned, pts
+                    pipeline_bridge::Forwarded::DroppedUnstamped { dropped } => {
+                        if pipeline_bridge::should_log_drop(dropped) {
+                            warn!(
+                                "Media Player bridge: dropped {} buffer(s) with no PTS on the {} stream; forwarding one fails the downstream muxer and takes the whole flow with it",
+                                dropped, media_type_owned
                             );
                         }
-                        Ok(gst::FlowSuccess::Ok)
                     }
-                    Err(e) => {
+                    pipeline_bridge::Forwarded::PushFailed(e) => {
                         if pushed_count.load(Ordering::Relaxed) == 0 {
                             debug!(
                                 "Media Player bridge: {} push_sample failed ({:?}), waiting for appsrc",
                                 media_type_owned, e
                             );
                         }
-                        Ok(gst::FlowSuccess::Ok)
+                    }
+                    pipeline_bridge::Forwarded::Restamped
+                    | pipeline_bridge::Forwarded::Unadjusted => {
+                        pushed_count.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+
+                Ok(gst::FlowSuccess::Ok)
             })
             .build(),
     );
