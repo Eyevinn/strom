@@ -163,6 +163,10 @@ fn test_build_produces_the_full_chain() {
 
     // Only run where an AAC encoder actually exists.
     if select_encoder(Codec::Aac).is_err() {
+        assert!(
+            strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
+            "STROM_REQUIRE_GST_PLUGINS is set but no AAC encoder is available"
+        );
         eprintln!("skipping: no AAC encoder available");
         return;
     }

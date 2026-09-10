@@ -376,7 +376,7 @@ fn audioenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "sample_rate".to_string(),
                 label: "Sample Rate".to_string(),
-                description: "Output sample rate. \"Match source\" passes upstream's rate through, which Opus rejects unless it is one of 8/12/16/24/48 kHz.".to_string(),
+                description: "Output sample rate. \"Match source\" pins no rate, letting the resampler settle on one the encoder accepts. Opus encodes only at 8/12/16/24/48 kHz, so pinning 44.1 or 32 kHz with Opus is rejected at build time.".to_string(),
                 property_type: PropertyType::Enum {
                     values: vec![
                         EnumValue { value: "48000".to_string(), label: Some("48 kHz".to_string()) },
