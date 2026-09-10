@@ -1030,13 +1030,15 @@ pub fn create_whipserversrc_for_session(
                 let main_pipeline_for_ts = main_pipeline_weak.clone();
                 let media_for_log = media_type.to_string();
                 let activity_cb = activity_for_pads.clone();
+                // Resolved here, not per buffer: the pad's media type is fixed.
+                let pad_is_audio = media_type == "audio";
 
                 appsink.set_callbacks(
                     gst_app::AppSinkCallbacks::builder()
                         .new_sample(move |sink| {
                             // Mark the session live: read by its inactivity
                             // watchdog and by slot takeover
-                            activity_cb.touch();
+                            activity_cb.touch(pad_is_audio);
 
                             let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                             let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;

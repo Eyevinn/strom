@@ -157,17 +157,22 @@ pub struct SessionCleanupRequest {
 /// Liveness of one WHIP session: when its last media buffer crossed the
 /// appsink→appsrc bridge into the main pipeline.
 ///
-/// The counter is written from the appsink's `new_sample` callback, i.e. once
-/// per buffer, so it is a single relaxed store against an epoch taken at session
-/// start. It is read by the session's own inactivity watchdog and by
+/// The counters are written from the appsink's `new_sample` callback, i.e. once
+/// per buffer, so a stamp is a single relaxed store against an epoch taken at
+/// session start. They are read by the session's own inactivity watchdog and by
 /// `allocate_slot_or_take_over`, which needs to know whether an occupied slot
-/// still has a publisher behind it. The counter is an `Arc` of its own because
-/// the session's watchdog thread reads it directly.
+/// still has a publisher behind it. `last_buffer_ms` is an `Arc` of its own
+/// because the session's watchdog thread reads it directly.
 pub struct SessionActivity {
     /// Session start. All timestamps are milliseconds from here.
     epoch: Instant,
-    /// Milliseconds from `epoch` at which the last buffer arrived; 0 = none yet.
+    /// Milliseconds from `epoch` at which the last buffer arrived on any
+    /// stream; 0 = none yet.
     last_buffer_ms: Arc<AtomicU64>,
+    /// The same, counting audio buffers only. Non-zero means this session
+    /// negotiated an audio stream and it produced something, which is what
+    /// makes `TAKEOVER_IDLE_THRESHOLD` a sound bound; see `has_delivered_audio`.
+    last_audio_ms: AtomicU64,
 }
 
 impl SessionActivity {
@@ -175,19 +180,50 @@ impl SessionActivity {
         Self {
             epoch,
             last_buffer_ms,
+            last_audio_ms: AtomicU64::new(0),
         }
     }
 
     /// Stamp the arrival of a buffer. Called from the appsink callback, so this
-    /// is the per-buffer hot path: one `Instant::now()` and one relaxed store,
-    /// no lock and no allocation.
-    pub fn touch(&self) {
+    /// is the per-buffer hot path: one `Instant::now()` and one or two relaxed
+    /// stores, no lock and no allocation.
+    pub fn touch(&self, is_audio: bool) {
         // 0 is reserved for "no buffer yet", so a buffer that lands inside the
         // first millisecond of the session counts as 1.
-        self.last_buffer_ms.store(
-            (self.epoch.elapsed().as_millis() as u64).max(1),
-            Ordering::Relaxed,
-        );
+        let now_ms = (self.epoch.elapsed().as_millis() as u64).max(1);
+        self.last_buffer_ms.store(now_ms, Ordering::Relaxed);
+        if is_audio {
+            self.last_audio_ms.store(now_ms, Ordering::Relaxed);
+        }
+    }
+
+    /// Assemble a session whose counters a test has already positioned in time.
+    #[cfg(test)]
+    pub fn from_counters(
+        epoch: Instant,
+        last_buffer_ms: Arc<AtomicU64>,
+        last_audio_ms: u64,
+    ) -> Self {
+        Self {
+            epoch,
+            last_buffer_ms,
+            last_audio_ms: AtomicU64::new(last_audio_ms),
+        }
+    }
+
+    /// Whether this session has ever delivered an audio buffer.
+    ///
+    /// Only an audio-bearing session can be judged dead on a couple of seconds
+    /// of silence, because only audio has a cadence tight enough for a gap that
+    /// short to mean anything: ~20 ms per packet, against a video stream whose
+    /// interval is whatever the publisher's encoder decided to emit. A
+    /// video-only publisher of static content — a screen share of a window
+    /// nobody is touching — legitimately goes seconds between frames on a
+    /// perfectly healthy transport, and is indistinguishable from a dead one by
+    /// any media-based signal. Such a session is left to the inactivity
+    /// watchdog; see `allocate_slot_or_take_over`.
+    pub fn has_delivered_audio(&self) -> bool {
+        self.last_audio_ms.load(Ordering::Relaxed) != 0
     }
 
     /// The raw counter: milliseconds from `epoch` at which the last buffer
@@ -312,6 +348,8 @@ struct IdlestSession {
     last_buffer: u64,
     /// Another path is already tearing it down, so its slot is about to free.
     dying: bool,
+    /// Whether it has ever delivered audio; see `SessionActivity::has_delivered_audio`.
+    has_audio: bool,
     cleanup_sent: Arc<AtomicBool>,
 }
 
@@ -512,6 +550,14 @@ impl WhipSessionManager {
     /// after the drop sees the same near-zero idle time as a healthy stream —
     /// which is why the decision is made on the counter moving rather than on a
     /// single reading of it.
+    ///
+    /// Only a session that has delivered audio is ever displaced. Audio is what
+    /// makes `TAKEOVER_IDLE_THRESHOLD` mean anything; a video-only session can
+    /// sit that long between frames while its publisher is healthy, so it is
+    /// left to the inactivity watchdog and the new client gets a 503. The
+    /// residual case is a session whose audio stopped for good — a muted or
+    /// failed microphone — while its video continues at gaps wider than the
+    /// threshold: that one can still be displaced.
     pub async fn allocate_slot_or_take_over(
         &self,
         config: &WhipEndpointConfig,
@@ -534,9 +580,10 @@ impl WhipSessionManager {
             if candidate.dying {
                 // Another path is already tearing it down. Wait for the slot it
                 // is about to release rather than asking for cleanup twice.
-            } else if candidate
-                .idle
-                .is_some_and(|idle| idle >= TAKEOVER_IDLE_THRESHOLD)
+            } else if candidate.has_audio
+                && candidate
+                    .idle
+                    .is_some_and(|idle| idle >= TAKEOVER_IDLE_THRESHOLD)
             {
                 // Win the flag every other teardown path uses, so the session is
                 // cleaned up exactly once and its watchdog thread stops. The
@@ -590,6 +637,7 @@ impl WhipSessionManager {
                 idle: s.activity.idle(),
                 last_buffer: s.activity.last_buffer(),
                 dying: s.cleanup_sent.load(Ordering::SeqCst),
+                has_audio: s.activity.has_delivered_audio(),
                 cleanup_sent: s.cleanup_sent.clone(),
             })
             .max_by_key(|c| (c.dying, c.idle))
@@ -755,10 +803,24 @@ mod tests {
     /// and the counter has not moved since. `idle` of zero is the case that
     /// matters — a client reconnecting the instant its publisher died looks, at
     /// that moment, exactly like a healthy one.
+    ///
+    /// It carries audio, so it is in displacement range at all.
     fn dead_publisher(idle: Duration) -> Arc<SessionActivity> {
         // The buffer landed 1 ms into the session, so the counter is non-zero
         // (0 is reserved for "no buffer yet") and nothing has stamped it since.
         let epoch = Instant::now() - idle - Duration::from_millis(1);
+        Arc::new(SessionActivity::from_counters(
+            epoch,
+            Arc::new(AtomicU64::new(1)),
+            1,
+        ))
+    }
+
+    /// A healthy video-only publisher of static content, mid-gap: its last frame
+    /// arrived `gap` ago and the next one is not due yet. Never delivered audio,
+    /// so nothing about it can be judged on a two-second silence.
+    fn sparse_video_publisher(gap: Duration) -> Arc<SessionActivity> {
+        let epoch = Instant::now() - gap - Duration::from_millis(1);
         Arc::new(SessionActivity::new(epoch, Arc::new(AtomicU64::new(1))))
     }
 
@@ -773,7 +835,7 @@ mod tests {
         let ticking = activity.clone();
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
-                ticking.touch();
+                ticking.touch(true);
                 std::thread::sleep(Duration::from_millis(20));
             }
         });
@@ -1084,6 +1146,36 @@ mod tests {
         assert!(
             manager.get_session_port("negotiating").is_some(),
             "the negotiating session must still be registered"
+        );
+    }
+
+    /// A video-only publisher of static content goes seconds between frames on a
+    /// healthy transport, so its frozen counter says nothing about whether it is
+    /// still there. Measured on the rig: a 0.2 fps video-only seat was displaced
+    /// at 3100 ms without media while its publisher was still sending.
+    #[tokio::test]
+    async fn a_sparse_video_only_session_is_not_displaced() {
+        let (manager, config, cleanup_sent) = full_endpoint(
+            "screenshare",
+            40013,
+            sparse_video_publisher(TAKEOVER_IDLE_THRESHOLD * 2),
+        );
+
+        let slot = manager
+            .allocate_slot_or_take_over(&config, "second-client")
+            .await;
+
+        assert_eq!(
+            slot, None,
+            "a video-only session must keep its slot however wide its frame gap"
+        );
+        assert!(
+            !cleanup_sent.load(Ordering::SeqCst),
+            "a healthy publisher must not be torn down"
+        );
+        assert!(
+            manager.get_session_port("screenshare").is_some(),
+            "the video-only session must still be registered"
         );
     }
 }
