@@ -22,17 +22,7 @@
 //!
 //! Strom's abrupt-drop teardown runs into it because both are woken by the same
 //! `notify::ice-connection-state` emission, and `webrtcsrc`'s handler is
-//! connected first. From a GST_DEBUG trace of the collision — A is
-//! `webrtcsrc`'s finalizer, B is `teardown_session_pipeline`:
-//!
-//! ```text
-//! A  <bin0> completed state change to NULL       session bin down, sockets closed
-//! B  <bin0> current NULL, desired next PAUSED    7 us later: the pipeline's
-//! B  <bin0> completed state change to PAUSED     PLAYING->PAUSED step raises it
-//!                                                back up, reopening everything
-//! A  gst_bin_remove(whipserversrc, bin0)         removed, in PAUSED
-//! B  <whipserversrc> children READY->NULL: iterator done, no children
-//! ```
+//! connected first, so the removal lands in the middle of the pipeline's descent.
 //!
 //! A plain child at NULL is left alone by a downward transition, but
 //! `gst_bin_element_set_state` recurses into a `GstBin` unconditionally ("always
