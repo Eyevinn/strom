@@ -549,7 +549,7 @@ impl ThreadCpuSampler {
     /// `thread_info(THREAD_BASIC_INFO)`.
     ///
     /// Thread IDs in the registry are mach thread ports, captured on the
-    /// streaming thread itself (see `get_current_thread_native_id`).
+    /// streaming thread itself (see `ThreadHandle::current`).
     #[cfg(target_os = "macos")]
     fn sample_macos(
         &mut self,
