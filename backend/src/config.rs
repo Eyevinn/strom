@@ -87,6 +87,26 @@ struct LoggingConfig {
     /// Log level (trace, debug, info, warn, error)
     /// If not set, uses RUST_LOG environment variable or defaults to "info"
     log_level: Option<String>,
+    /// Stdout log format ("compact" or "json"). Raw string so blank values fall back to the
+    /// default instead of a deserialize error (same pattern as `log_file` / `log_level`).
+    stdout_log_format: Option<String>,
+    /// Emit selected StromEvent lifecycle/error events as structured tracing logs.
+    #[serde(default)]
+    structured_events: bool,
+    /// Include high-frequency events (meters, stats, ...) in structured event logs.
+    #[serde(default)]
+    include_high_frequency_events: bool,
+}
+
+/// Stdout log output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Human-readable, single-line-per-event output (current default behavior).
+    #[default]
+    Compact,
+    /// Structured JSON output, one object per line, suitable for log collectors.
+    Json,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +156,12 @@ pub struct Config {
     pub log_file: Option<PathBuf>,
     /// Log level (if set, overrides RUST_LOG environment variable)
     pub log_level: Option<String>,
+    /// Stdout log format: compact (human-readable) or JSON (structured)
+    pub stdout_log_format: LogFormat,
+    /// Emit selected StromEvent lifecycle/error events as structured tracing logs
+    pub structured_events: bool,
+    /// Include high-frequency events (meters, stats, ...) in structured event logs
+    pub include_high_frequency_events: bool,
     /// ICE servers for WebRTC NAT traversal (STUN/TURN)
     /// Format: stun:host:port or turn:user:pass@host:port
     pub ice_servers: Vec<String>,
@@ -159,6 +185,25 @@ pub struct Config {
 /// `tls_cert = ""` just as easily.
 fn non_blank_path(path: Option<PathBuf>) -> Option<PathBuf> {
     path.filter(|p| !p.to_string_lossy().trim().is_empty())
+}
+
+/// Parse the raw `logging.stdout_log_format` config value. A blank or absent value falls back to
+/// the default (`compact`) rather than a deserialize error — matching the blank-value
+/// handling already applied to `log_file` and `log_level`. Anything other than `"compact"`
+/// or `"json"` (case-insensitive) is rejected with a clear error instead of silently
+/// defaulting, so a typo doesn't go unnoticed.
+fn parse_stdout_log_format(value: Option<String>) -> anyhow::Result<LogFormat> {
+    let normalized = strom_types::env::non_blank(value).map(|s| s.to_lowercase());
+    match normalized.as_deref() {
+        None => Ok(LogFormat::default()),
+        Some("compact") => Ok(LogFormat::Compact),
+        Some("json") => Ok(LogFormat::Json),
+        Some(other) => {
+            anyhow::bail!(
+                "invalid logging.stdout_log_format '{other}': expected \"compact\" or \"json\""
+            )
+        }
+    }
 }
 
 impl Config {
@@ -250,6 +295,31 @@ impl Config {
             figment = figment.merge(Serialized::default("server.tls_key", PathBuf::from(key)));
         }
 
+        // 4d. Handle STROM_LOGGING_STDOUT_LOG_FORMAT / STROM_LOGGING_STRUCTURED_EVENTS /
+        // STROM_LOGGING_INCLUDE_HIGH_FREQUENCY_EVENTS specially, for the same
+        // reason as 4c: underscores in the field names break the split("_")
+        // env mapping above.
+        if let Some(format) = strom_types::env::var_opt("STROM_LOGGING_STDOUT_LOG_FORMAT") {
+            figment = figment.merge(Serialized::default(
+                "logging.stdout_log_format",
+                format.to_lowercase(),
+            ));
+        }
+        if let Some(val) = strom_types::env::var_opt("STROM_LOGGING_STRUCTURED_EVENTS") {
+            if let Ok(enabled) = val.parse::<bool>() {
+                figment = figment.merge(Serialized::default("logging.structured_events", enabled));
+            }
+        }
+        if let Some(val) = strom_types::env::var_opt("STROM_LOGGING_INCLUDE_HIGH_FREQUENCY_EVENTS")
+        {
+            if let Ok(enabled) = val.parse::<bool>() {
+                figment = figment.merge(Serialized::default(
+                    "logging.include_high_frequency_events",
+                    enabled,
+                ));
+            }
+        }
+
         // 5. Merge CLI arguments (highest priority)
         if let Some(ref cert) = tls_cert {
             figment = figment.merge(Serialized::default("server.tls_cert", cert));
@@ -301,6 +371,9 @@ impl Config {
             database_url: strom_types::env::non_blank(config_file.storage.database_url),
             log_file: non_blank_path(config_file.logging.log_file),
             log_level: strom_types::env::non_blank(config_file.logging.log_level),
+            stdout_log_format: parse_stdout_log_format(config_file.logging.stdout_log_format)?,
+            structured_events: config_file.logging.structured_events,
+            include_high_frequency_events: config_file.logging.include_high_frequency_events,
             ice_servers: normalize_ice_servers(config_file.server.ice_servers),
             ice_transport_policy: config_file.server.ice_transport_policy,
             sap_multicast_addresses: config_file.discovery.sap_multicast_addresses,
@@ -351,6 +424,9 @@ impl Config {
             database_url,
             log_file: None,
             log_level: None,
+            stdout_log_format: LogFormat::default(),
+            structured_events: false,
+            include_high_frequency_events: false,
             ice_servers: default_ice_servers(),
             ice_transport_policy: default_ice_transport_policy(),
             sap_multicast_addresses: default_sap_multicast_addresses(),
@@ -400,6 +476,9 @@ impl Default for Config {
                 database_url: None,
                 log_file: None,
                 log_level: None,
+                stdout_log_format: LogFormat::default(),
+                structured_events: false,
+                include_high_frequency_events: false,
                 ice_servers: default_ice_servers(),
                 ice_transport_policy: default_ice_transport_policy(),
                 sap_multicast_addresses: default_sap_multicast_addresses(),
@@ -440,6 +519,91 @@ mod tests {
 
         assert_eq!(config.port, strom_types::DEFAULT_PORT);
         assert!(config.database_url.is_none());
+        assert_eq!(config.stdout_log_format, LogFormat::Compact);
+        assert!(!config.structured_events);
+        assert!(!config.include_high_frequency_events);
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_figment_parses_json_stdout_log_format() {
+        std::env::remove_var("STROM_LOGGING_STDOUT_LOG_FORMAT");
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_file = temp_dir.path().join(".strom.toml");
+        fs::write(&config_file, "[logging]\nstdout_log_format = \"json\"\n").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
+
+        let _ = std::env::set_current_dir(original_dir);
+
+        assert_eq!(config.stdout_log_format, LogFormat::Json);
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_figment_stdout_log_format_env_var() {
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        std::env::set_var("STROM_LOGGING_STDOUT_LOG_FORMAT", "json");
+
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
+
+        let _ = std::env::set_current_dir(&original_dir);
+        std::env::remove_var("STROM_LOGGING_STDOUT_LOG_FORMAT");
+
+        assert_eq!(config.stdout_log_format, LogFormat::Json);
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_figment_rejects_invalid_stdout_log_format() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_file = temp_dir.path().join(".strom.toml");
+        fs::write(&config_file, "[logging]\nstdout_log_format = \"yaml\"\n").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+
+        let _ = std::env::set_current_dir(&original_dir);
+
+        assert!(
+            result.is_err(),
+            "an unrecognized stdout_log_format must be a clear error, not a silent fallback"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_from_figment_parses_structured_events() {
+        std::env::remove_var("STROM_LOGGING_STRUCTURED_EVENTS");
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_file = temp_dir.path().join(".strom.toml");
+        fs::write(&config_file, "[logging]\nstructured_events = true\n").unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
+
+        let _ = std::env::set_current_dir(original_dir);
+
+        assert!(config.structured_events);
+        assert!(
+            !config.include_high_frequency_events,
+            "include_high_frequency_events must default to false independently"
+        );
     }
 
     #[test]
@@ -529,6 +693,7 @@ data_dir = ""
 [logging]
 log_file = ""
 log_level = "   "
+stdout_log_format = ""
 "#;
         fs::write(&config_file, config_content).unwrap();
 
@@ -555,6 +720,11 @@ log_level = "   "
             "a blank log level would build an EnvFilter with no directives, silencing the process"
         );
         assert_eq!(config.log_file, None);
+        assert_eq!(
+            config.stdout_log_format,
+            LogFormat::Compact,
+            "a blank stdout_log_format must fall back to the default instead of failing to parse"
+        );
         assert!(
             config.flows_path.is_absolute(),
             "a blank data dir must fall back to the default location, got {:?}",

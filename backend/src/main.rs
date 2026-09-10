@@ -10,13 +10,22 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, reload, util::SubscriberInit
 
 use strom_types::flow::GStreamerClockType;
 
-use strom::{auth, config::Config, create_app_with_config, state::AppState};
+use strom::{
+    auth,
+    config::{Config, LogFormat},
+    create_app_with_config,
+    state::AppState,
+};
 
-/// Initialize logging with optional file output and configurable log level.
+/// Initialize logging with optional file output, configurable log level, and stdout format.
 /// Returns the reload handle and the initial filter string for runtime changes.
+///
+/// `stdout_log_format` only affects stdout; the file layer always stays human-readable.
+/// The reload filter is global and gates all layers (see `.strom.toml.example`).
 fn init_logging(
     log_file: Option<&PathBuf>,
     log_level: Option<&String>,
+    stdout_log_format: LogFormat,
 ) -> anyhow::Result<(strom::state::LogReloadHandle, String)> {
     use time::UtcOffset;
     use tracing_subscriber::fmt::time::OffsetTime;
@@ -57,39 +66,79 @@ fn init_logging(
                 .unwrap_or(std::ffi::OsStr::new("strom.log")),
         );
 
-        // Create layers: stdout + file with local time
-        let stdout_layer = fmt::layer()
-            .with_target(false)
-            .with_timer(timer.clone())
-            .compact()
-            .with_writer(std::io::stdout);
+        // File layer always stays compact. Built in each arm because the stdout
+        // layer's type differs between compact and JSON.
+        match stdout_log_format {
+            LogFormat::Compact => {
+                let stdout_layer = fmt::layer()
+                    .with_target(false)
+                    .with_timer(timer.clone())
+                    .compact()
+                    .with_writer(std::io::stdout);
 
-        let file_layer = fmt::layer()
-            .with_target(true)
-            .with_timer(timer)
-            .with_ansi(false)
-            .with_writer(file_appender);
+                let file_layer = fmt::layer()
+                    .with_target(true)
+                    .with_timer(timer)
+                    .with_ansi(false)
+                    .with_writer(file_appender);
 
-        // Combine layers
-        tracing_subscriber::registry()
-            .with(reload_filter)
-            .with(stdout_layer)
-            .with(file_layer)
-            .init();
+                tracing_subscriber::registry()
+                    .with(reload_filter)
+                    .with(stdout_layer)
+                    .with(file_layer)
+                    .init();
+            }
+            LogFormat::Json => {
+                let stdout_layer = fmt::layer()
+                    .with_target(true)
+                    .with_timer(timer.clone())
+                    .json()
+                    .flatten_event(true)
+                    .with_writer(std::io::stdout);
+
+                let file_layer = fmt::layer()
+                    .with_target(true)
+                    .with_timer(timer)
+                    .with_ansi(false)
+                    .with_writer(file_appender);
+
+                tracing_subscriber::registry()
+                    .with(reload_filter)
+                    .with(stdout_layer)
+                    .with(file_layer)
+                    .init();
+            }
+        }
 
         eprintln!("Logging to file: {}", log_path.display());
     } else {
-        // Stdout only with local time
-        let stdout_layer = fmt::layer()
-            .with_target(false)
-            .with_timer(timer)
-            .compact()
-            .with_writer(std::io::stdout);
+        match stdout_log_format {
+            LogFormat::Compact => {
+                let stdout_layer = fmt::layer()
+                    .with_target(false)
+                    .with_timer(timer)
+                    .compact()
+                    .with_writer(std::io::stdout);
 
-        tracing_subscriber::registry()
-            .with(reload_filter)
-            .with(stdout_layer)
-            .init();
+                tracing_subscriber::registry()
+                    .with(reload_filter)
+                    .with(stdout_layer)
+                    .init();
+            }
+            LogFormat::Json => {
+                let stdout_layer = fmt::layer()
+                    .with_target(true)
+                    .with_timer(timer)
+                    .json()
+                    .flatten_event(true)
+                    .with_writer(std::io::stdout);
+
+                tracing_subscriber::registry()
+                    .with(reload_filter)
+                    .with(stdout_layer)
+                    .init();
+            }
+        }
     }
 
     Ok((reload_handle, default_filter_str))
@@ -321,12 +370,16 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
-    // Initialize logging with optional file output and log level
-    let (log_reload_handle, default_log_filter) =
-        init_logging(config.log_file.as_ref(), config.log_level.as_ref()).unwrap_or_else(|e| {
-            eprintln!("Failed to initialize logging: {}", e);
-            std::process::exit(1);
-        });
+    // Initialize logging with optional file output, log level, and stdout format
+    let (log_reload_handle, default_log_filter) = init_logging(
+        config.log_file.as_ref(),
+        config.log_level.as_ref(),
+        config.stdout_log_format,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to initialize logging: {}", e);
+        std::process::exit(1);
+    });
 
     let (blank_credentials, blank_settings): (Vec<String>, Vec<String>) = blank_env_vars
         .into_iter()
@@ -517,6 +570,8 @@ fn run_with_gui(
                 config.ice_servers.clone(),
                 config.ice_transport_policy.clone(),
                 config.sap_multicast_addresses.clone(),
+                config.structured_events,
+                config.include_high_frequency_events,
             )
             .await
             .expect("Failed to initialize PostgreSQL storage")
@@ -529,6 +584,8 @@ fn run_with_gui(
                 config.ice_servers.clone(),
                 config.ice_transport_policy.clone(),
                 config.sap_multicast_addresses.clone(),
+                config.structured_events,
+                config.include_high_frequency_events,
             )
         };
         state
@@ -742,6 +799,8 @@ async fn run_headless(
             config.ice_servers.clone(),
             config.ice_transport_policy.clone(),
             config.sap_multicast_addresses.clone(),
+            config.structured_events,
+            config.include_high_frequency_events,
         )
         .await?
     } else {
@@ -753,6 +812,8 @@ async fn run_headless(
             config.ice_servers.clone(),
             config.ice_transport_policy.clone(),
             config.sap_multicast_addresses.clone(),
+            config.structured_events,
+            config.include_high_frequency_events,
         )
     };
     state.load_from_storage().await?;

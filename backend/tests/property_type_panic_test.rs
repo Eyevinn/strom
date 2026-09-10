@@ -83,7 +83,7 @@ fn build(flow: &Flow) -> Result<PipelineManager, PipelineError> {
 
     PipelineManager::new(
         flow,
-        EventBroadcaster::new(10),
+        EventBroadcaster::with_capacity(10),
         &registry,
         vec![],
         "all".to_string(),

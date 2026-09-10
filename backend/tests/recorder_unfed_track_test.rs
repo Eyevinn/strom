@@ -172,7 +172,7 @@ fn run_recorder(container: &str, feed: Feed, media_root: &Path) -> Vec<PathBuf> 
     // The pipeline manager runs these after linking, before PLAYING. The hook is what
     // decides which tracks are connected, so skipping it would exercise nothing.
     for setup in ctx.take_element_setups() {
-        setup(uuid::Uuid::new_v4(), EventBroadcaster::new(16));
+        setup(uuid::Uuid::new_v4(), EventBroadcaster::with_capacity(16));
     }
 
     pipeline
@@ -554,7 +554,7 @@ async fn recorder_records_when_driven_through_pipeline_start() {
         std::thread::spawn(move || ml.run())
     };
 
-    let events = EventBroadcaster::new(16);
+    let events = EventBroadcaster::with_capacity(16);
     let mut event_rx = events.subscribe();
 
     let mut manager = PipelineManager::new(

@@ -113,6 +113,8 @@ async fn failed_start_unregisters_the_flows_media_players() {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     );
 
     let flow = build_flow_that_cannot_start("failed_start_teardown");
@@ -173,6 +175,8 @@ async fn teardown_releases_the_media_players_internal_pipeline() {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     );
 
     let flow = build_flow_that_starts("teardown_releases_internal_pipeline");

@@ -210,7 +210,7 @@ fn caps_reaching_srtsink() -> CapsSeen {
     for setup in ctx.take_element_setups() {
         setup(
             uuid::Uuid::new_v4(),
-            strom::events::EventBroadcaster::new(16),
+            strom::events::EventBroadcaster::with_capacity(16),
         );
     }
 

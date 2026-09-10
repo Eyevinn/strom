@@ -316,60 +316,63 @@ fn create_sse_stream(
     let strom_stream = BroadcastStream::new(strom_rx).filter_map(move |result| {
         match result {
             Ok(event) => {
-                // Convert Strom events to MCP notifications
-                let notification = match &event {
-                    strom_types::StromEvent::FlowCreated { flow_id } => Some(json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/strom/flowCreated",
-                        "params": { "flow_id": flow_id.to_string() }
-                    })),
-                    strom_types::StromEvent::FlowUpdated { flow_id } => Some(json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/strom/flowUpdated",
-                        "params": { "flow_id": flow_id.to_string() }
-                    })),
-                    strom_types::StromEvent::FlowDeleted { flow_id } => Some(json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/strom/flowDeleted",
-                        "params": { "flow_id": flow_id.to_string() }
-                    })),
-                    strom_types::StromEvent::FlowStarted { flow_id } => Some(json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/strom/flowStarted",
-                        "params": { "flow_id": flow_id.to_string() }
-                    })),
-                    strom_types::StromEvent::FlowStopped { flow_id } => Some(json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/strom/flowStopped",
-                        "params": { "flow_id": flow_id.to_string() }
-                    })),
-                    strom_types::StromEvent::PipelineError { flow_id, error, .. } => Some(json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/strom/pipelineError",
-                        "params": { "flow_id": flow_id.to_string(), "error": error }
-                    })),
-                    strom_types::StromEvent::PipelineWarning {
-                        flow_id, warning, ..
-                    } => Some(json!({
-                        "jsonrpc": "2.0",
-                        "method": "notifications/strom/pipelineWarning",
-                        "params": { "flow_id": flow_id.to_string(), "warning": warning }
-                    })),
-                    // Skip high-frequency events to avoid overwhelming the client
-                    strom_types::StromEvent::SystemStats(_) => None,
-                    strom_types::StromEvent::MeterData { .. } => None,
-                    strom_types::StromEvent::Ping => None,
-                    // Include other events
-                    _ => {
-                        // Generic serialization for other events
-                        if let Ok(json_str) = serde_json::to_string(&event) {
+                // Convert Strom events to MCP notifications, skipping high-frequency ones and Ping.
+                let notification = if event.is_high_frequency()
+                    || matches!(event, strom_types::StromEvent::Ping)
+                {
+                    None
+                } else {
+                    match &event {
+                        strom_types::StromEvent::FlowCreated { flow_id } => Some(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/strom/flowCreated",
+                            "params": { "flow_id": flow_id.to_string() }
+                        })),
+                        strom_types::StromEvent::FlowUpdated { flow_id } => Some(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/strom/flowUpdated",
+                            "params": { "flow_id": flow_id.to_string() }
+                        })),
+                        strom_types::StromEvent::FlowDeleted { flow_id } => Some(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/strom/flowDeleted",
+                            "params": { "flow_id": flow_id.to_string() }
+                        })),
+                        strom_types::StromEvent::FlowStarted { flow_id } => Some(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/strom/flowStarted",
+                            "params": { "flow_id": flow_id.to_string() }
+                        })),
+                        strom_types::StromEvent::FlowStopped { flow_id } => Some(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/strom/flowStopped",
+                            "params": { "flow_id": flow_id.to_string() }
+                        })),
+                        strom_types::StromEvent::PipelineError { flow_id, error, .. } => {
                             Some(json!({
                                 "jsonrpc": "2.0",
-                                "method": "notifications/strom/event",
-                                "params": { "event": json_str }
+                                "method": "notifications/strom/pipelineError",
+                                "params": { "flow_id": flow_id.to_string(), "error": error }
                             }))
-                        } else {
-                            None
+                        }
+                        strom_types::StromEvent::PipelineWarning {
+                            flow_id, warning, ..
+                        } => Some(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/strom/pipelineWarning",
+                            "params": { "flow_id": flow_id.to_string(), "warning": warning }
+                        })),
+                        // Include other (non-high-frequency) events via generic serialization
+                        _ => {
+                            if let Ok(json_str) = serde_json::to_string(&event) {
+                                Some(json!({
+                                    "jsonrpc": "2.0",
+                                    "method": "notifications/strom/event",
+                                    "params": { "event": json_str }
+                                }))
+                            } else {
+                                None
+                            }
                         }
                     }
                 };
