@@ -90,6 +90,8 @@ impl PipelineManager {
             cached_state: std::sync::Arc::new(std::sync::RwLock::new(PipelineState::Null)),
             qos_aggregator: QoSAggregator::new(),
             qos_broadcast_task: None,
+            block_health: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+            block_health_task: None,
             ptp_clock: None,
             ptp_stats: std::sync::Arc::new(std::sync::RwLock::new(None)),
             ntp_clock: None,
