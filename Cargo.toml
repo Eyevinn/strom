@@ -41,7 +41,7 @@ gst-plugin-audiofx = "0.15"
 gst-plugin-inter = "0.15"
 gst-plugin-rtp = "0.15"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time", "json"] }
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 tracing-appender = "0.2.5"
 utoipa = { version = "5.5", features = ["axum_extras", "uuid"] }

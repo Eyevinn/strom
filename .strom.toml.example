@@ -91,8 +91,8 @@ port = 8080
 # ============================================================================
 [logging]
 # Path to log file (if set, logs will be written to file in addition to stdout)
-# File logs include timestamps and module targets (no ANSI colors)
-# Console logs remain compact for readability
+# File logs include timestamps and module targets (no ANSI colors) and always stay
+# compact, regardless of stdout_log_format below.
 # Env: STROM_LOGGING_LOG_FILE=strom.log
 # log_file = "strom.log"
 # log_file = "/var/log/strom/strom.log"
@@ -112,3 +112,36 @@ port = 8080
 # 1. RUST_LOG environment variable (highest)
 # 2. log_level in this config file
 # 3. Default: "info"
+#
+# Note: this filter is global — it gates stdout, the log file, and structured
+# event logs (see structured_events below) alike. Lowering it at runtime (e.g.
+# to "warn", via RUST_LOG or PUT /api/log-level) silences structured event
+# logs along with everything else; there is no independent filter for them.
+
+# Stdout log output format. Only affects stdout: the log file (if log_file is set above)
+# always stays compact/human-readable.
+# "compact" keeps the current human-readable format.
+# "json" emits structured JSON logs suitable for log collectors (e.g. Kubernetes
+# log collection, OpenTelemetry-compatible collectors).
+# Default: "compact"
+# Env: STROM_LOGGING_STDOUT_LOG_FORMAT=json
+# stdout_log_format = "compact"
+
+# Emit selected Strom lifecycle/error events (flow created/started/stopped,
+# pipeline errors, ...) as structured tracing log records, in addition to the
+# normal log output. Useful for observability pipelines that group logs by
+# fields such as strom.flow.id. Disabled by default to preserve existing log
+# volume and behavior.
+# Default: false
+# Env: STROM_LOGGING_STRUCTURED_EVENTS=true
+# structured_events = false
+
+# Include high-frequency events (audio meters, QoS stats, media player
+# position, ...) in structured event logs. Note: system/thread/PTP stats are
+# sent directly per WebSocket connection rather than through the internal
+# event broadcaster, so they are not affected by this setting regardless of
+# its value. Disabled by default to avoid excessive log volume; only takes
+# effect when structured_events is also enabled.
+# Default: false
+# Env: STROM_LOGGING_INCLUDE_HIGH_FREQUENCY_EVENTS=true
+# include_high_frequency_events = false
