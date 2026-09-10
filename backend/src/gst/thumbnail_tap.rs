@@ -285,11 +285,18 @@ impl ThumbnailTap {
             .build()
             .map_err(|e| ThumbnailError::FrameMapping(format!("capsfilter: {}", e)))?;
 
+        // `async` off: the branch joins a pipeline that is already running, and
+        // a sink still wanting a preroll answers that state change with ASYNC,
+        // taking the pipeline back to PAUSED until a frame arrives. Activation
+        // is allowed during that wait, and a branch attached inside one never
+        // completes its own state change: it takes a single buffer, then blocks
+        // its streaming thread.
         let appsink = gst_app::AppSink::builder()
             .name(format!("{}_thumb_sink", prefix))
             .max_buffers(1)
             .drop(true)
             .sync(false)
+            .async_(false)
             .build();
 
         // Set up appsink callback — pad probe on queue src limits fps,
