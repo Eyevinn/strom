@@ -175,6 +175,12 @@ pub struct PipelineManager {
     pad_properties: HashMap<String, HashMap<String, HashMap<String, PropertyValue>>>,
     /// Block-specific bus message handler IDs (allows blocks to register their own bus message handlers)
     block_message_handlers: Vec<gst::glib::SignalHandlerId>,
+    /// Number of `add_signal_watch()` calls made on the flow bus, counted at
+    /// the call site. `remove_signal_watch()` is ref-counted and one call past
+    /// the matching add is a GStreamer CRITICAL, so the removes are driven by
+    /// this rather than by the handler count — a block may register a message
+    /// handler without taking a watch of its own.
+    bus_signal_watches: usize,
     /// Bus message handler connection functions from blocks (called when pipeline starts)
     block_message_connect_fns: Vec<crate::blocks::BusMessageConnectFn>,
     /// Element signal setup functions from blocks (called when pipeline starts)

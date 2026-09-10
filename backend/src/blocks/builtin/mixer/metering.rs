@@ -29,7 +29,8 @@ pub(super) fn connect_mixer_meter_handler(
         flow_id, instance_id
     );
 
-    bus.add_signal_watch();
+    // No add_signal_watch() here: setup_bus_watch takes the single watch this
+    // bus needs, and matches it with exactly one remove on teardown.
 
     let level_prefix = format!("{}:level_", instance_id);
     let main_level_id = format!("{}:main_level", instance_id);
