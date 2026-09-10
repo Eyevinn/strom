@@ -37,6 +37,7 @@ pub mod network;
 pub mod openapi;
 pub mod osc;
 pub mod paths;
+pub mod port_lease;
 pub mod ptp_monitor;
 pub mod rtsp_server;
 pub mod server_hardening;
@@ -119,6 +120,17 @@ pub async fn create_app_with_config(
     let protected_api_router = Router::new()
         .route("/flows", get(api::flows::list_flows))
         .route("/flows", post(api::flows::create_flow))
+        .route("/port-leases", get(api::port_leases::list_port_leases))
+        .route("/port-leases", post(api::port_leases::create_port_lease))
+        .route("/port-leases/{id}", get(api::port_leases::get_port_lease))
+        .route(
+            "/port-leases/{id}",
+            delete(api::port_leases::delete_port_lease),
+        )
+        .route(
+            "/port-leases/{id}/renew",
+            post(api::port_leases::renew_port_lease),
+        )
         .route("/flows/{id}", get(api::flows::get_flow))
         .route("/flows/{id}", post(api::flows::update_flow))
         .route("/flows/{id}", put(api::flows::update_flow_put))

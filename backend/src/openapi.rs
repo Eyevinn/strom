@@ -37,6 +37,7 @@ use strom_types::mediaplayer::{
 use strom_types::network::{
     Ipv4AddressInfo, Ipv6AddressInfo, NetworkInterfaceInfo, NetworkInterfacesResponse,
 };
+use strom_types::port_lease::{PortLease, PortLeaseRequest, RenewPortLeaseRequest};
 use strom_types::stats::{BlockStats, StatMetadata, StatValue, Statistic};
 use strom_types::whep::{IceServer, IceServersResponse, WhepStreamInfo, WhepStreamsResponse};
 use utoipa::openapi::schema::{Discriminator, Schema};
@@ -97,6 +98,11 @@ use utoipa::OpenApi;
         crate::api::gst_launch::parse_gst_launch,
         crate::api::gst_launch::export_gst_launch,
         crate::api::network::list_interfaces,
+        crate::api::port_leases::list_port_leases,
+        crate::api::port_leases::create_port_lease,
+        crate::api::port_leases::get_port_lease,
+        crate::api::port_leases::renew_port_lease,
+        crate::api::port_leases::delete_port_lease,
         crate::api::version::get_version,
         crate::api::system_clock::get_system_clock,
         crate::api::logging::get_log_level,
@@ -164,6 +170,9 @@ use utoipa::OpenApi;
     ),
     components(
         schemas(
+            PortLease,
+            PortLeaseRequest,
+            RenewPortLeaseRequest,
             FlowResponse,
             FlowListResponse,
             FlowProperties,
@@ -306,6 +315,7 @@ use utoipa::OpenApi;
         (name = "blocks", description = "Reusable block management endpoints"),
         (name = "gst-launch", description = "gst-launch-1.0 import/export endpoints"),
         (name = "Network", description = "Network interface discovery endpoints"),
+        (name = "port-leases", description = "UDP port blocks reserved for external orchestrators"),
         (name = "System", description = "System information endpoints"),
         (name = "Media", description = "Media file management endpoints"),
         (name = "auth", description = "Authentication endpoints"),

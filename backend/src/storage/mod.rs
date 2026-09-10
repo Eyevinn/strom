@@ -8,7 +8,7 @@ pub use postgres_storage::PostgresStorage;
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use strom_types::{Flow, FlowId};
+use strom_types::{Flow, FlowId, PortLease};
 use tracing::info;
 
 /// Migrate a flow to handle deprecated blocks.
@@ -63,4 +63,10 @@ pub trait Storage: Send + Sync {
         flows.remove(id).ok_or(StorageError::NotFound(*id))?;
         self.save_all(&flows).await
     }
+
+    /// Load every persisted port lease, expired ones included.
+    async fn load_port_leases(&self) -> Result<Vec<PortLease>>;
+
+    /// Replace the persisted port leases with `leases`.
+    async fn save_port_leases(&self, leases: &[PortLease]) -> Result<()>;
 }

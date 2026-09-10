@@ -5,6 +5,7 @@ use crate::blocks::BlockRegistry;
 use crate::discovery::DiscoveryService;
 use crate::events::EventBroadcaster;
 use crate::gst::{ElementDiscovery, PipelineError, PipelineManager};
+use crate::port_lease::{srt_listener_port, Acquired, PortLeaseError, PortLeaseTable};
 use crate::ptp_monitor::PtpMonitor;
 use crate::sharing::ChannelRegistry;
 use crate::storage::{JsonFileStorage, Storage};
@@ -13,16 +14,17 @@ use crate::thread_registry::ThreadRegistry;
 use crate::whep_registry::WhepRegistry;
 use crate::whip_registry::WhipRegistry;
 use crate::whip_session_manager::WhipSessionManager;
-use chrono::Local;
-use std::collections::{HashMap, HashSet};
+use chrono::{Local, Utc};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use strom_types::element::{ElementInfo, PropertyValue};
-use strom_types::{Flow, FlowId, PipelineState, StromEvent};
+use strom_types::{Flow, FlowId, PipelineState, PortLease, PortRange, StromEvent};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::reload;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 /// Handle for reloading the log filter at runtime.
 pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
@@ -105,6 +107,9 @@ struct AppStateInner {
     /// per-flow entry is cleared on `stop_flow`; a fresh start sees an empty
     /// set, which matches the build-time element defaults (gates closed).
     mixer_solo_state: RwLock<HashMap<FlowId, HashMap<String, HashSet<String>>>>,
+    /// Port leases handed to orchestrators. Guarded by one lock so an
+    /// allocation and its persistence cannot interleave with another.
+    port_leases: RwLock<PortLeaseTable>,
 }
 
 /// Pick the ramp_ms that should apply to a single property in a batched
@@ -160,8 +165,101 @@ impl AppState {
                 gst_debug_filter: parking_lot::Mutex::new(String::new()),
                 default_gst_debug_filter: parking_lot::Mutex::new(String::new()),
                 mixer_solo_state: RwLock::new(HashMap::new()),
+                port_leases: RwLock::new(PortLeaseTable::new(PortRange::default())),
             }),
         }
+    }
+
+    /// Set the pool the port lease API allocates from. Called once from main
+    /// after the configuration is loaded; existing leases are kept.
+    pub async fn set_port_lease_range(&self, range: PortRange) {
+        self.inner.port_leases.write().await.set_pool(range);
+        info!("Port lease pool set to {}", range);
+    }
+
+    /// The pool the port lease API allocates from.
+    pub async fn port_lease_range(&self) -> PortRange {
+        self.inner.port_leases.read().await.pool()
+    }
+
+    /// Ports any known flow binds as an SRT listener, whether or not it runs.
+    ///
+    /// A stopped flow binds its port the moment it starts, so the definition,
+    /// not the pipeline state, is what a lease must steer clear of.
+    pub async fn bound_srt_listener_ports(&self) -> BTreeSet<u16> {
+        let flows = self.inner.flows.read().await;
+        flows
+            .values()
+            .flat_map(|flow| flow.blocks.iter())
+            .filter_map(|block| match block.properties.get("srt_uri") {
+                Some(PropertyValue::String(uri)) => srt_listener_port(uri),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Grant or renew the lease for `client_id`.
+    pub async fn acquire_port_lease(
+        &self,
+        client_id: &str,
+        size: u16,
+        ttl_secs: Option<u64>,
+    ) -> anyhow::Result<Result<(PortLease, Acquired), PortLeaseError>> {
+        let bound = self.bound_srt_listener_ports().await;
+        let mut table = self.inner.port_leases.write().await;
+        let outcome = table.acquire(client_id, size, ttl_secs, &bound, Utc::now());
+        if let Ok((lease, how)) = &outcome {
+            info!(
+                "Port lease {} for '{}': {}-{} ({:?})",
+                lease.id, lease.client_id, lease.first_port, lease.last_port, how
+            );
+            self.inner
+                .storage
+                .save_port_leases(&table.snapshot())
+                .await?;
+        }
+        Ok(outcome)
+    }
+
+    /// Extend a lease.
+    pub async fn renew_port_lease(
+        &self,
+        id: Uuid,
+        ttl_secs: Option<u64>,
+    ) -> anyhow::Result<Result<PortLease, PortLeaseError>> {
+        let mut table = self.inner.port_leases.write().await;
+        let outcome = table.renew(id, ttl_secs, Utc::now());
+        if outcome.is_ok() {
+            self.inner
+                .storage
+                .save_port_leases(&table.snapshot())
+                .await?;
+        }
+        Ok(outcome)
+    }
+
+    /// Give a lease back.
+    pub async fn release_port_lease(&self, id: Uuid) -> anyhow::Result<Result<(), PortLeaseError>> {
+        let mut table = self.inner.port_leases.write().await;
+        let outcome = table.release(id, Utc::now());
+        if outcome.is_ok() {
+            info!("Port lease {} released", id);
+            self.inner
+                .storage
+                .save_port_leases(&table.snapshot())
+                .await?;
+        }
+        Ok(outcome)
+    }
+
+    /// Every live lease.
+    pub async fn list_port_leases(&self) -> Vec<PortLease> {
+        self.inner.port_leases.read().await.list(Utc::now())
+    }
+
+    /// One live lease.
+    pub async fn get_port_lease(&self, id: Uuid) -> Option<PortLease> {
+        self.inner.port_leases.read().await.get(id, Utc::now())
     }
 
     /// Set the log reload handle and default filter (called once from main after init_logging).
@@ -415,6 +513,16 @@ impl AppState {
 
     /// Load flows from storage into memory.
     pub async fn load_from_storage(&self) -> anyhow::Result<()> {
+        match self.inner.storage.load_port_leases().await {
+            Ok(leases) => {
+                if !leases.is_empty() {
+                    info!("Loaded {} port leases from storage", leases.len());
+                }
+                self.inner.port_leases.write().await.load(&leases);
+            }
+            Err(e) => warn!("Failed to load port leases from storage: {}", e),
+        }
+
         info!("Loading flows from storage...");
         match self.inner.storage.load_all().await {
             Ok(mut flows) => {

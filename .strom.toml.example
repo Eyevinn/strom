@@ -87,6 +87,19 @@ port = 8080
 # cef_cache_path = "/var/cache/strom/cef"
 
 # ============================================================================
+# Port Leases
+# ============================================================================
+[ports]
+# UDP ports the port lease API (POST /api/port-leases) may hand out. External
+# orchestrators such as Open Live reserve a block each for their SRT listener
+# inputs, so several of them can share this Strom without colliding. Open the
+# whole range inbound on the firewall. Ports a flow already listens on are never
+# handed out, whether or not they lie in this range.
+# Default: 47100-47999
+# Env: STROM_PORT_LEASE_RANGE=47100-47999
+# lease_range = "47100-47999"
+
+# ============================================================================
 # Logging Configuration
 # ============================================================================
 [logging]

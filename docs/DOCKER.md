@@ -46,6 +46,7 @@ full list and the CLI equivalents):
 | `STROM_DATABASE_URL` | PostgreSQL connection string (optional) — see [POSTGRESQL.md](POSTGRESQL.md) |
 | `STROM_ADMIN_USER` / `STROM_ADMIN_PASSWORD_HASH` / `STROM_API_KEY` | Authentication — see [AUTHENTICATION.md](AUTHENTICATION.md) |
 | `STROM_SERVER_ICE_SERVERS` | STUN/TURN servers for WebRTC |
+| `STROM_PORT_LEASE_RANGE` | UDP ports the port lease API hands to orchestrators (default `47100-47999`) — see [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) |
 | `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
 | `RUST_LOG` | Logging level (default `info`) |
 

@@ -4158,6 +4158,262 @@
         }
       }
     },
+    "/api/port-leases": {
+      "get": {
+        "tags": [
+          "port-leases"
+        ],
+        "summary": "List live port leases.",
+        "operationId": "list_port_leases",
+        "responses": {
+          "200": {
+            "description": "Every lease that has not expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PortLease"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "port-leases"
+        ],
+        "summary": "Request a block of ports.",
+        "description": "Reserves `size` consecutive UDP ports from the server's lease pool for `client_id`. The call is idempotent per client: a client that already holds a lease gets it back, renewed, with a 200 instead of a 201, and a changed `size` resizes the block in place when the neighbouring ports are free. Ports an existing flow listens on are never handed out, even when no lease covers them. The lease lapses `ttl_secs` after the last request or renewal (default 600).",
+        "operationId": "create_port_lease",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortLeaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The client's existing lease, renewed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortLease"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "A new lease was granted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortLease"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid client_id, size or ttl_secs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No block of that size is free in the pool",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Lease could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/port-leases/{id}": {
+      "get": {
+        "tags": [
+          "port-leases"
+        ],
+        "summary": "Get one port lease.",
+        "operationId": "get_port_lease",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Lease id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The lease",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortLease"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live lease with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "port-leases"
+        ],
+        "summary": "Release a port lease.",
+        "operationId": "delete_port_lease",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Lease id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Lease released"
+          },
+          "404": {
+            "description": "No live lease with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Lease could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/port-leases/{id}/renew": {
+      "post": {
+        "tags": [
+          "port-leases"
+        ],
+        "summary": "Extend a port lease.",
+        "description": "Moves the lease's expiry to now plus `ttl_secs` (default 600). A lease that has already lapsed is gone: re-request it with the same `client_id` through `POST /api/port-leases` instead.",
+        "operationId": "renew_port_lease",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Lease id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional new lifetime",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenewPortLeaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The renewed lease",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortLease"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid ttl_secs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live lease with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Lease could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sources": {
       "get": {
         "tags": [
@@ -7385,6 +7641,78 @@
           }
         }
       },
+      "PortLease": {
+        "type": "object",
+        "description": "A block of ports reserved for one client.",
+        "required": [
+          "id",
+          "client_id",
+          "first_port",
+          "last_port",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "The client's stable name. One lease per client; asking again returns it."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "When the lease was first granted (RFC 3339, UTC)."
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "When the lease lapses unless renewed (RFC 3339, UTC)."
+          },
+          "first_port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lowest leased port.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Lease identifier, used to renew and release it."
+          },
+          "last_port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Highest leased port, inclusive.",
+            "minimum": 0
+          }
+        }
+      },
+      "PortLeaseRequest": {
+        "type": "object",
+        "description": "Ask for a block of ports.",
+        "required": [
+          "client_id",
+          "size"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "Stable name of the requesting client, such as an instance hostname.\nA repeat request under the same name renews and returns the existing\nlease instead of allocating a second one."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of consecutive ports wanted.",
+            "minimum": 0
+          },
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Lifetime in seconds. Defaults to `DEFAULT_PORT_LEASE_TTL_SECS`.",
+            "minimum": 0
+          }
+        }
+      },
       "Position": {
         "type": "object",
         "description": "Position in the visual editor",
@@ -7761,6 +8089,21 @@
           "old_path": {
             "type": "string",
             "description": "Current path (relative to media root)"
+          }
+        }
+      },
+      "RenewPortLeaseRequest": {
+        "type": "object",
+        "description": "Extend a lease's lifetime.",
+        "properties": {
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "New lifetime in seconds, counted from now. Defaults to\n`DEFAULT_PORT_LEASE_TTL_SECS`.",
+            "minimum": 0
           }
         }
       },
@@ -11817,6 +12160,10 @@
     {
       "name": "Network",
       "description": "Network interface discovery endpoints"
+    },
+    {
+      "name": "port-leases",
+      "description": "UDP port blocks reserved for external orchestrators"
     },
     {
       "name": "System",

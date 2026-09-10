@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use strom_types::{Flow, FlowId};
+use strom_types::{Flow, FlowId, PortLease};
 use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -26,19 +26,38 @@ impl Default for StorageFormat {
     }
 }
 
+/// On-disk format of the port lease file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct LeaseFileFormat {
+    version: u32,
+    leases: Vec<PortLease>,
+}
+
 /// Storage backend that persists flows to a JSON file.
+///
+/// Port leases live in a `port_leases.json` beside the flows file, so a data
+/// directory keeps holding one file per kind of thing.
 pub struct JsonFileStorage {
     path: PathBuf,
+    leases_path: PathBuf,
     cache: RwLock<Option<HashMap<FlowId, Flow>>>,
 }
 
 impl JsonFileStorage {
     /// Create a new JSON file storage.
     pub fn new(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        let leases_path = path.with_file_name("port_leases.json");
         Self {
-            path: path.as_ref().to_path_buf(),
+            path,
+            leases_path,
             cache: RwLock::new(None),
         }
+    }
+
+    /// Where port leases are written.
+    pub fn leases_path(&self) -> &Path {
+        &self.leases_path
     }
 
     /// Load flows from file, using cache if available.
@@ -143,6 +162,45 @@ impl Storage for JsonFileStorage {
         let mut flows = self.load_all().await?;
         flows.insert(flow.id, flow.clone());
         self.save_all(&flows).await
+    }
+
+    async fn load_port_leases(&self) -> Result<Vec<PortLease>> {
+        if !self.leases_path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents = fs::read_to_string(&self.leases_path).await?;
+        if contents.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let file: LeaseFileFormat = serde_json::from_str(&contents)?;
+        debug!(
+            "Loaded {} port leases from {:?}",
+            file.leases.len(),
+            self.leases_path
+        );
+        Ok(file.leases)
+    }
+
+    async fn save_port_leases(&self, leases: &[PortLease]) -> Result<()> {
+        let file = LeaseFileFormat {
+            version: 1,
+            leases: leases.to_vec(),
+        };
+        let json = serde_json::to_string_pretty(&file)?;
+        if let Some(parent) = self.leases_path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).await?;
+            }
+        }
+        let temp_path = self.leases_path.with_extension("tmp");
+        fs::write(&temp_path, json).await?;
+        fs::rename(&temp_path, &self.leases_path).await?;
+        debug!(
+            "Wrote {} port leases to {:?}",
+            leases.len(),
+            self.leases_path
+        );
+        Ok(())
     }
 
     async fn delete_flow(&self, id: &FlowId) -> Result<()> {

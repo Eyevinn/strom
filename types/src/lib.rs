@@ -22,6 +22,7 @@ pub mod flow;
 pub mod mediaplayer;
 pub mod mixer;
 pub mod network;
+pub mod port_lease;
 pub mod routing;
 pub mod state;
 pub mod stats;
@@ -51,6 +52,7 @@ pub use flow::{CpuAffinity, Flow, FlowId, ThreadPriority, ThreadPriorityStatus};
 pub use network::{
     Ipv4AddressInfo, Ipv6AddressInfo, NetworkInterfaceInfo, NetworkInterfacesResponse,
 };
+pub use port_lease::{PortLease, PortLeaseRequest, PortRange, RenewPortLeaseRequest};
 pub use state::PipelineState;
 pub use stats::{
     BlockStats, BlockStatsResponse, FlowStats, FlowStatsAvailability, RtpJitterbufferStats,

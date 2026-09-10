@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
 use std::collections::HashMap;
-use strom_types::{Flow, FlowId};
+use strom_types::{Flow, FlowId, PortLease};
 use tracing::{debug, info, warn};
 
 /// Storage backend that persists flows to PostgreSQL.
@@ -86,6 +86,19 @@ impl PostgresStorage {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS port_leases (
+                id UUID PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                data JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         info!("Database migrations completed");
         Ok(())
     }
@@ -98,6 +111,52 @@ impl PostgresStorage {
 
 #[async_trait]
 impl Storage for PostgresStorage {
+    async fn load_port_leases(&self) -> Result<Vec<PortLease>> {
+        let rows = sqlx::query("SELECT data FROM port_leases")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
+        let mut leases = Vec::with_capacity(rows.len());
+        for row in rows {
+            let data: serde_json::Value = row.get("data");
+            leases.push(serde_json::from_value(data)?);
+        }
+        debug!("Loaded {} port leases from PostgreSQL", leases.len());
+        Ok(leases)
+    }
+
+    async fn save_port_leases(&self, leases: &[PortLease]) -> Result<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
+        sqlx::query("DELETE FROM port_leases")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
+        for lease in leases {
+            let data = serde_json::to_value(lease)?;
+            sqlx::query(
+                r#"
+                INSERT INTO port_leases (id, client_id, data, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                "#,
+            )
+            .bind(lease.id)
+            .bind(&lease.client_id)
+            .bind(&data)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Io(std::io::Error::other(e)))?;
+        debug!("Saved {} port leases to PostgreSQL", leases.len());
+        Ok(())
+    }
+
     async fn load_all(&self) -> Result<HashMap<FlowId, Flow>> {
         debug!("Loading all flows from PostgreSQL");
 

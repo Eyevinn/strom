@@ -531,6 +531,7 @@ fn run_with_gui(
                 config.sap_multicast_addresses.clone(),
             )
         };
+        state.set_port_lease_range(config.port_lease_range).await;
         state
             .load_from_storage()
             .await
@@ -755,6 +756,7 @@ async fn run_headless(
             config.sap_multicast_addresses.clone(),
         )
     };
+    state.set_port_lease_range(config.port_lease_range).await;
     state.load_from_storage().await?;
 
     // Store the log reload handle so log levels can be changed at runtime

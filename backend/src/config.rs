@@ -19,6 +19,16 @@ struct ConfigFile {
     logging: LoggingConfig,
     #[serde(default)]
     discovery: DiscoveryConfig,
+    #[serde(default)]
+    ports: PortsConfig,
+}
+
+/// `[ports]` section: the pool the port lease API hands blocks out of.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PortsConfig {
+    /// Written `first-last`, e.g. `47100-47999`. Defaults to
+    /// `strom_types::PortRange::default()`.
+    lease_range: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -152,6 +162,18 @@ pub struct Config {
     pub tls_cert: Option<PathBuf>,
     /// Path to TLS private key file (PEM format). Enables HTTPS when paired with tls_cert.
     pub tls_key: Option<PathBuf>,
+    /// UDP ports the port lease API may hand out to orchestrators such as Open Live.
+    pub port_lease_range: strom_types::PortRange,
+}
+
+/// Parse the `[ports] lease_range` setting, falling back to the default pool.
+fn port_lease_range(value: Option<String>) -> anyhow::Result<strom_types::PortRange> {
+    match strom_types::env::non_blank(value) {
+        Some(s) => s
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid ports.lease_range: {e}")),
+        None => Ok(strom_types::PortRange::default()),
+    }
 }
 
 /// A blank path is not a path. Blank environment variables are gone before
@@ -201,6 +223,7 @@ impl Config {
             storage: StorageConfig::default(),
             logging: LoggingConfig::default(),
             discovery: DiscoveryConfig::default(),
+            ports: PortsConfig::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -248,6 +271,11 @@ impl Config {
         }
         if let Some(key) = strom_types::env::var_opt("STROM_TLS_KEY") {
             figment = figment.merge(Serialized::default("server.tls_key", PathBuf::from(key)));
+        }
+
+        // 4d. Handle STROM_PORT_LEASE_RANGE specially (same underscore problem)
+        if let Some(range) = strom_types::env::var_opt("STROM_PORT_LEASE_RANGE") {
+            figment = figment.merge(Serialized::default("ports.lease_range", range));
         }
 
         // 5. Merge CLI arguments (highest priority)
@@ -307,6 +335,7 @@ impl Config {
             cors_allowed_origins: config_file.server.cors_allowed_origins,
             tls_cert: non_blank_path(config_file.server.tls_cert),
             tls_key: non_blank_path(config_file.server.tls_key),
+            port_lease_range: port_lease_range(config_file.ports.lease_range)?,
         })
     }
 
@@ -357,6 +386,7 @@ impl Config {
             cors_allowed_origins: Vec::new(),
             tls_cert: None,
             tls_key: None,
+            port_lease_range: strom_types::PortRange::default(),
         })
     }
 
@@ -406,6 +436,7 @@ impl Default for Config {
                 cors_allowed_origins: Vec::new(),
                 tls_cert: None,
                 tls_key: None,
+                port_lease_range: strom_types::PortRange::default(),
             }
         })
     }
