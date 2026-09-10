@@ -11,6 +11,14 @@
 //! `GstBaseSrc` is the exception: it posts a flow error before pausing, so
 //! source-side failures already reach the bus handler.
 //!
+//! Scope: the scan reaches the flow pipeline's own elements and the bins beneath
+//! them, and nothing else. Blocks that run an isolated `gst::Pipeline` of their
+//! own - WHIP ingest sessions, a Media Player's decode chain - are siblings of
+//! that pipeline rather than children of it, so `iterate_recurse` never enters
+//! them. An `Ok` here therefore means "no stalled pad task among this flow
+//! pipeline's elements", not "this flow is passing data". Sinks that live in the
+//! flow pipeline, `whepserversink` included, are covered.
+//!
 //! A paused task on an element that is itself `PLAYING` is always wrong, so
 //! that is the signal used here. `gst_pad_get_task_state()` returns `Stopped`
 //! both for a pad whose task was stopped and for a pad that never had one, so
@@ -42,8 +50,9 @@ fn first_stalled_pad(element: &gst::Element) -> Option<StalledPad> {
 /// Find the first paused pad task on `element` itself.
 ///
 /// Two kinds of legitimately paused task are excluded. An element held below
-/// `PLAYING` - a WebRTC session bin mid-setup, say - pauses its tasks as part of
-/// that transition. And a pad that has seen EOS is finished by definition:
+/// `PLAYING` - a webrtcbin added for a newly connected WHEP consumer, say -
+/// pauses its tasks as part of that transition. And a pad that has seen EOS is
+/// finished by definition:
 /// `gst_base_src_loop` pauses its task on the way out for *every* reason
 /// including end of stream, and the element stays `PLAYING` afterwards, so a
 /// finite source that has played out would otherwise be reported as failed
