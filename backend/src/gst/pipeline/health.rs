@@ -29,10 +29,17 @@
 //! with `allow-not-linked=true` - what every block output bus ends in - absorbs
 //! the `not-linked` that would otherwise surface upstream. The flow reaches
 //! `PLAYING` carrying nothing on that branch.
+//!
+//! Neither scan can see a chain that is linked and simply never pushed to: its
+//! elements sit idle and `PLAYING` with no task to pause. Only the block that
+//! owns it knows, so a block may report on itself through `BlockLiveness`, and
+//! the scan folds that verdict in.
 
+use crate::blocks::BlockLiveness;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use strom_types::flow::{BlockHealth, BlockHealthStatus};
 use strom_types::Link;
 
@@ -135,11 +142,16 @@ fn unformed_link(elements: &HashMap<String, gst::Element>, link: &Link) -> bool 
 /// `pending_links` are the links construction could not make, carried from the
 /// `PipelineManager` unchanged.
 ///
+/// `reporters` are blocks that judge their own liveness; see `BlockLiveness`.
+/// A reporter for a block with no element left in the pipeline is skipped, so
+/// its verdict cannot outlive the elements it describes.
+///
 /// Call only while the pipeline is playing; a paused task is expected in any
 /// other pipeline state.
 pub(crate) fn scan_block_health(
     elements: &HashMap<String, gst::Element>,
     pending_links: &[Link],
+    reporters: &[(String, Arc<dyn BlockLiveness>)],
 ) -> Vec<BlockHealth> {
     let mut by_block: BTreeMap<&str, BlockHealth> = BTreeMap::new();
 
@@ -189,6 +201,21 @@ pub(crate) fn scan_block_health(
         ));
     }
 
+    // A block that reports on itself. Checked last, after both scans above,
+    // which name the more specific failure when more than one fires.
+    for (block_id, reporter) in reporters {
+        let Some(entry) = by_block.get_mut(block_id.as_str()) else {
+            continue;
+        };
+        if entry.status.is_failed() {
+            continue;
+        }
+        if let Some(detail) = reporter.failure() {
+            entry.status = BlockHealthStatus::Failed;
+            entry.detail = Some(detail);
+        }
+    }
+
     by_block.into_values().collect()
 }
 
@@ -223,6 +250,7 @@ impl super::PipelineManager {
         // Construction is the only writer of pending_links, and it has finished
         // by the time this task starts.
         let pending_links = self.pending_links.clone();
+        let reporters = self.block_liveness.clone();
         let cached_state = self.cached_state.clone();
         let block_health = self.block_health.clone();
         let events = self.events.clone();
@@ -254,7 +282,7 @@ impl super::PipelineManager {
                     continue;
                 }
 
-                let mut snapshot = scan_block_health(&elements, &pending_links);
+                let mut snapshot = scan_block_health(&elements, &pending_links, &reporters);
 
                 // A block is only reported once it has looked stalled on
                 // CONFIRMATIONS_BEFORE_FAILED scans in a row. Downgrade the
@@ -378,13 +406,13 @@ mod tests {
         let (elements, link) = unlinkable_pair();
 
         assert!(
-            scan_block_health(&elements, &[])
+            scan_block_health(&elements, &[], &[])
                 .iter()
                 .all(|h| h.status == BlockHealthStatus::Ok),
             "nothing is stalled, so the pad-task scan must find nothing"
         );
 
-        let detail = failure_detail(&scan_block_health(&elements, &[link]), "vconv")
+        let detail = failure_detail(&scan_block_health(&elements, &[link], &[]), "vconv")
             .expect("the unformed link must fail the block owning its source");
         assert!(
             detail.contains("vconv:src -> aconv:sink"),
@@ -413,7 +441,7 @@ mod tests {
         }];
 
         assert!(
-            scan_block_health(&elements, &pending)
+            scan_block_health(&elements, &pending, &[])
                 .iter()
                 .all(|h| h.status == BlockHealthStatus::Ok),
             "a source pad that has not appeared yet is not a failure"
@@ -434,10 +462,60 @@ mod tests {
             .expect("videoconvert should link to fakesink");
 
         assert!(
-            scan_block_health(&elements, &[link])
+            scan_block_health(&elements, &[link], &[])
                 .iter()
                 .all(|h| h.status == BlockHealthStatus::Ok),
             "a linked source pad means the deferred link resolved"
+        );
+    }
+
+    /// A block that judges its own liveness has to reach the snapshot. Nothing
+    /// else can report it: a chain that is never pushed to stalls no pad task,
+    /// so the scan itself has nothing to find, and the pipeline stays `Playing`
+    /// throughout.
+    #[test]
+    fn a_blocks_own_failure_report_reaches_its_health() {
+        let _ = gst::init();
+
+        struct HalfDead;
+        impl BlockLiveness for HalfDead {
+            fn failure(&self) -> Option<String> {
+                Some("slot 0 has produced no audio for 12.0 s".to_string())
+            }
+        }
+
+        let sink = gst::ElementFactory::make("fakesink")
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        let elements: HashMap<String, gst::Element> =
+            HashMap::from([("whip:sink".to_string(), sink)]);
+
+        let healthy = scan_block_health(&elements, &[], &[]);
+        assert_eq!(healthy.len(), 1);
+        assert_eq!(healthy[0].status, BlockHealthStatus::Ok);
+
+        let reporters: Vec<(String, Arc<dyn BlockLiveness>)> =
+            vec![("whip".to_string(), Arc::new(HalfDead))];
+        let reported = scan_block_health(&elements, &[], &reporters);
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].block_id, "whip");
+        assert_eq!(reported[0].status, BlockHealthStatus::Failed);
+        assert_eq!(
+            reported[0].detail.as_deref(),
+            Some("slot 0 has produced no audio for 12.0 s")
+        );
+
+        // A verdict about a block with nothing left in the pipeline must not
+        // conjure an entry for it.
+        let orphan: Vec<(String, Arc<dyn BlockLiveness>)> =
+            vec![("gone".to_string(), Arc::new(HalfDead))];
+        let scanned = scan_block_health(&elements, &[], &orphan);
+        assert_eq!(
+            scanned
+                .iter()
+                .map(|h| h.block_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["whip"]
         );
     }
 

@@ -219,6 +219,8 @@ pub struct PipelineManager {
     whip_endpoints: Vec<crate::blocks::WhipEndpointInfo>,
     /// WHIP endpoint configs for session manager (collected from block expansion)
     whip_endpoint_configs: Vec<(String, crate::whip_session_manager::WhipEndpointConfig)>,
+    /// Per-block liveness reporters, polled alongside the stalled-pad-task scan
+    block_liveness: Vec<(String, std::sync::Arc<dyn crate::blocks::BlockLiveness>)>,
     /// Dynamically created webrtcbins (from webrtcsink/whepserversink consumer-added callbacks).
     /// Maps block_id to list of (consumer_id, webrtcbin) pairs.
     dynamic_webrtcbins: crate::blocks::DynamicWebrtcbinStore,

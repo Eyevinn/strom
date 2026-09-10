@@ -62,10 +62,10 @@ pub struct WhipEndpointConfig {
     /// cannot hold the pipeline short of PLAYING; `allocate_slot` unlocks them.
     /// Empty when the endpoint runs with `decode=false`.
     pub slot_decodebins: Vec<Vec<gst::glib::WeakRef<gst::Element>>>,
-    /// Per-slot stamp of the media coming out of that slot's chain, written by
-    /// a pad probe on its output tee. The session sitting in a slot borrows its
-    /// stamp; see `SessionActivity`.
-    pub slot_output: Vec<Arc<ActivityStamp>>,
+    /// Per-slot record of the media coming out of that slot's chain, one stamp
+    /// per medium, written by a pad probe on each output tee. The session
+    /// sitting in a slot borrows it; see `SessionActivity`.
+    pub slot_output: Vec<Arc<SlotOutput>>,
     /// Slot assignments: slot index → Option<resource_id>
     /// Protected by RwLock for concurrent access from HTTP handlers.
     pub slot_assignments: Arc<RwLock<Vec<Option<String>>>>,
@@ -250,10 +250,118 @@ impl ActivityStamp {
     }
 }
 
+/// One of the two kinds of media a WHIP slot carries.
+///
+/// A slot in `StreamMode::AudioVideo` has an independent chain per medium —
+/// its own appsrc, its own `decodebin`, its own output tee — so the two fail
+/// independently and have to be tracked independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Medium {
+    Audio,
+    Video,
+}
+
+impl Medium {
+    fn other(self) -> Self {
+        match self {
+            Medium::Audio => Medium::Video,
+            Medium::Video => Medium::Audio,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Medium::Audio => "audio",
+            Medium::Video => "video",
+        }
+    }
+}
+
+/// What has actually come out of one slot's chain, one stamp per medium.
+///
+/// Built once per slot at flow build time and shared with the session sitting
+/// in that slot; the stamps are written by a `BUFFER` probe on each medium's
+/// output tee (see `stamp_slot_output` in the WHIP block).
+///
+/// Per medium, because a slot's audio and video are separate chains all the way
+/// from the publisher's RTP session to the flow's consumers. One stamp for both
+/// cannot express a seat whose audio has stopped while its video keeps moving.
+pub struct SlotOutput {
+    audio: ActivityStamp,
+    video: ActivityStamp,
+}
+
+impl SlotOutput {
+    /// Both media share `epoch`, so their raw `last()` readings are comparable.
+    pub fn new(epoch: Instant) -> Self {
+        Self {
+            audio: ActivityStamp::new(epoch),
+            video: ActivityStamp::new(epoch),
+        }
+    }
+
+    /// Assemble from stamps a test has already positioned in time.
+    #[cfg(test)]
+    pub fn from_stamps(audio: ActivityStamp, video: ActivityStamp) -> Self {
+        Self { audio, video }
+    }
+
+    pub fn stamp(&self, medium: Medium) -> &ActivityStamp {
+        match medium {
+            Medium::Audio => &self.audio,
+            Medium::Video => &self.video,
+        }
+    }
+
+    /// Stamp a buffer leaving the slot. Per-buffer hot path; see
+    /// `ActivityStamp::touch`.
+    pub fn touch(&self, medium: Medium) {
+        self.stamp(medium).touch();
+    }
+
+    /// Forget everything seen so far, both media. Used when a new session claims
+    /// a slot whose output chain outlives individual sessions.
+    pub fn reset(&self) {
+        self.audio.reset();
+        self.video.reset();
+    }
+
+    /// Time since either medium last produced, `None` if neither ever has. This
+    /// is the slot-level reading: the slot is producing something as long as one
+    /// of its chains moves.
+    fn since_last(&self) -> Option<Duration> {
+        newest(self.audio.since_last(), self.video.since_last())
+    }
+
+    /// A counter that changes whenever either medium produces a buffer, for
+    /// comparing two readings a poll apart. Both stamps only ever increase, so
+    /// their sum changes if and only if one of them did; it is not a time and
+    /// means nothing on its own.
+    fn counter(&self) -> u64 {
+        self.audio.last().wrapping_add(self.video.last())
+    }
+}
+
+/// The more recent of two idle times, ignoring a medium that never produced.
+fn newest(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (some, None) | (None, some) => some,
+    }
+}
+
+/// The older of two idle times, ignoring a medium that never produced.
+fn oldest(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (some, None) | (None, some) => some,
+    }
+}
+
 /// Liveness of one WHIP session, in the only terms that matter to the slot it
 /// occupies: is it still producing media the flow can use?
 ///
-/// Two stamps decide it, because arriving bytes are not the same thing as usable
+/// Two legs decide it, because arriving bytes are not the same thing as usable
 /// media:
 ///
 /// - `ingress` is stamped by the session pipeline's appsink, once per buffer
@@ -263,35 +371,36 @@ impl ActivityStamp {
 ///   pipeline, downstream of the slot's `decodebin`. It says frames are coming
 ///   out the far end and reaching the flow's consumers.
 ///
-/// A third, `ingress_audio`, does not measure liveness at all — it only records
-/// whether this session ever carried audio, which is what decides how short a
-/// silence may be held against it; see `has_delivered_audio`.
-///
 /// A seat can sit at the first without the second indefinitely — a decoder that
 /// never gets the keyframe it needs, or a downstream consumer that blocks and
 /// backs pressure up through the slot's tee — and by `ingress` alone it looks
 /// perfectly healthy while producing nothing.
 ///
+/// Both legs are per medium. The session-level readings below deliberately fold
+/// them back together — a session is alive while *any* of its media moves, and
+/// reaping one whose audio stopped would take its working video with it. The
+/// per-medium failure is reported instead, by `WhipSlotLiveness`.
+///
 /// Read by the session's inactivity watchdog and by
 /// `allocate_slot_or_take_over`.
 pub struct SessionActivity {
-    ingress: ActivityStamp,
-    /// The same arrivals, counting audio buffers only. Shares `ingress`'s epoch.
-    /// Non-zero means this session negotiated an audio stream and it produced
+    /// Ingress, split by the pad the appsink callback is installed on. A session
+    /// that has stamped `ingress_audio` has an audio stream that produced
     /// something, which is what makes `TAKEOVER_IDLE_THRESHOLD` a sound bound;
     /// see `has_delivered_audio`.
     ingress_audio: ActivityStamp,
+    ingress_video: ActivityStamp,
     /// Shared with the slot, not owned by the session: the slot's output chain
     /// is built once, at flow build time, and outlives the sessions that pass
     /// through it. `SessionActivity::new` resets it so one session never
     /// inherits its predecessor's liveness.
-    output: Arc<ActivityStamp>,
+    output: Arc<SlotOutput>,
 }
 
 impl SessionActivity {
     /// `epoch` is session start; `output` is the stamp belonging to the slot
     /// this session was assigned.
-    pub fn new(epoch: Instant, output: Arc<ActivityStamp>) -> Self {
+    pub fn new(epoch: Instant, output: Arc<SlotOutput>) -> Self {
         // This session has to prove for itself that its media comes out of the
         // slot's chain. Buffers left in flight from the previous occupant can
         // still stamp it for a moment afterwards, which only ever makes the new
@@ -299,33 +408,24 @@ impl SessionActivity {
         // corrects itself as soon as the chain drains.
         output.reset();
         Self {
-            ingress: ActivityStamp::new(epoch),
             ingress_audio: ActivityStamp::new(epoch),
+            ingress_video: ActivityStamp::new(epoch),
             output,
         }
     }
 
     /// Assemble a session from stamps a test has already positioned in time.
-    /// Skips the reset `new` does, which would wipe them.
+    /// Skips the reset `new` does, which would wipe them. An untouched
+    /// `ingress_audio` makes it a video-only session.
     #[cfg(test)]
-    pub fn from_stamps(ingress: ActivityStamp, output: Arc<ActivityStamp>) -> Self {
-        // Carries audio, so it is in displacement range at all.
-        let ingress_audio = ActivityStamp::new(Instant::now());
-        ingress_audio.touch();
+    pub fn from_stamps(
+        ingress_audio: ActivityStamp,
+        ingress_video: ActivityStamp,
+        output: Arc<SlotOutput>,
+    ) -> Self {
         Self {
-            ingress,
             ingress_audio,
-            output,
-        }
-    }
-
-    /// Assemble a session that has never carried audio, so nothing about it can
-    /// be judged on a short silence; see `has_delivered_audio`.
-    #[cfg(test)]
-    pub fn video_only_from_stamps(ingress: ActivityStamp, output: Arc<ActivityStamp>) -> Self {
-        Self {
-            ingress,
-            ingress_audio: ActivityStamp::new(Instant::now()),
+            ingress_video,
             output,
         }
     }
@@ -333,9 +433,10 @@ impl SessionActivity {
     /// Stamp the arrival of a buffer from the publisher. Called from the
     /// appsink callback, so this is the per-buffer hot path.
     pub fn touch_ingress(&self, is_audio: bool) {
-        self.ingress.touch();
         if is_audio {
             self.ingress_audio.touch();
+        } else {
+            self.ingress_video.touch();
         }
     }
 
@@ -351,9 +452,9 @@ impl SessionActivity {
     /// any media-based signal. Such a session is left to the inactivity
     /// watchdog; see `allocate_slot_or_take_over`.
     ///
-    /// Read on the arriving side, not the slot's output: the output stamp is
-    /// shared by the slot's audio and video tees and cannot tell them apart,
-    /// and the question is what the publisher negotiated.
+    /// Read on the arriving side, not the slot's output: the question is what
+    /// the publisher negotiated, and a slot's audio chain can be silent for
+    /// reasons that have nothing to do with whether the session offered audio.
     pub fn has_delivered_audio(&self) -> bool {
         self.ingress_audio.last() != 0
     }
@@ -361,7 +462,7 @@ impl SessionActivity {
     /// The slot's output counter, for comparing two readings a poll apart. A
     /// value that changed is a session that is genuinely still producing.
     pub fn last_usable(&self) -> u64 {
-        self.output.last()
+        self.output.counter()
     }
 
     /// Time since this session last produced usable media, or `None` if it must
@@ -374,11 +475,15 @@ impl SessionActivity {
     /// `DECODE_GRACE` ago and the decoder may still be waiting for the keyframe
     /// that carries H.264's parameter sets.
     ///
-    /// Otherwise it is the staler of the two stamps: a session is usable only
+    /// Otherwise it is the staler of the two legs: a session is usable only
     /// while both move, and a publisher going away freezes `ingress` first while
     /// a stall below the decoder freezes `output` first.
+    ///
+    /// Within a leg the media are folded together on the *newest* of them, so
+    /// this stays a whole-session reading: one dead medium does not cost a
+    /// session its slot. `WhipSlotLiveness` reports that case instead.
     pub fn idle(&self) -> Option<Duration> {
-        let ingress_idle = self.ingress.since_last()?;
+        let ingress_idle = self.ingress_since_last()?;
 
         let output_idle = match self.output.since_last() {
             Some(idle) => idle,
@@ -386,10 +491,227 @@ impl SessionActivity {
             // Inside the grace that is just preroll; past it, this is the
             // failure the output stamp exists to catch, and the session has
             // been useless since the grace ran out.
-            None => self.ingress.since_first()?.checked_sub(DECODE_GRACE)?,
+            None => self.ingress_since_first()?.checked_sub(DECODE_GRACE)?,
         };
 
         Some(ingress_idle.max(output_idle))
+    }
+
+    /// Time since either medium last arrived from the publisher.
+    fn ingress_since_last(&self) -> Option<Duration> {
+        newest(
+            self.ingress_audio.since_last(),
+            self.ingress_video.since_last(),
+        )
+    }
+
+    /// Time since the first buffer of either medium arrived.
+    fn ingress_since_first(&self) -> Option<Duration> {
+        oldest(
+            self.ingress_audio.since_first(),
+            self.ingress_video.since_first(),
+        )
+    }
+}
+
+/// How long a medium may be silent before its slot is reported as half dead.
+///
+/// The two media get different budgets because their cadences are not
+/// comparable. A connected publisher sends audio every ~20 ms even while its
+/// microphone is muted — WebRTC keeps the RTP stream running and fills it with
+/// silence — so a couple of seconds of nothing is already a broken chain. Video
+/// has no such floor: a screen share of a window nobody is touching
+/// legitimately goes many seconds between frames, so judging it that fast would
+/// report a healthy seat.
+#[derive(Debug, Clone, Copy)]
+pub struct StallThresholds {
+    /// Audio that produced and then stopped.
+    pub audio: Duration,
+    /// Video that produced and then stopped.
+    pub video: Duration,
+    /// A medium that has never produced at all, measured from the other
+    /// medium's first buffer. Generous, because the two chains do not start
+    /// together: `decodebin` autoplugs each of them separately, and video waits
+    /// for a keyframe that audio has no equivalent of.
+    pub absent: Duration,
+}
+
+impl Default for StallThresholds {
+    fn default() -> Self {
+        Self {
+            audio: Duration::from_secs(2),
+            video: Duration::from_secs(10),
+            absent: Duration::from_secs(10),
+        }
+    }
+}
+
+impl StallThresholds {
+    fn stopped(&self, medium: Medium) -> Duration {
+        match medium {
+            Medium::Audio => self.audio,
+            Medium::Video => self.video,
+        }
+    }
+}
+
+/// One medium of one occupied slot that is producing nothing while the slot's
+/// other medium keeps going.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotMediumStall {
+    pub slot: usize,
+    /// The medium that has stopped.
+    pub medium: Medium,
+    /// Time since it last produced, `None` if it never has.
+    pub silent_for: Option<Duration>,
+}
+
+impl std::fmt::Display for SlotMediumStall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.silent_for {
+            Some(silent) => write!(
+                f,
+                "slot {} has produced no {} for {:.1} s while its {} is still flowing",
+                self.slot,
+                self.medium.as_str(),
+                silent.as_secs_f32(),
+                self.medium.other().as_str()
+            ),
+            None => write!(
+                f,
+                "slot {} has produced no {} at all while its {} is flowing",
+                self.slot,
+                self.medium.as_str(),
+                self.medium.other().as_str()
+            ),
+        }
+    }
+}
+
+/// Per-medium liveness of one WHIP Input block's slots, for the flow's block
+/// health scan.
+///
+/// The scan itself looks for paused pad tasks, which is how a *stalled* branch
+/// shows up. A slot medium that carries nothing does not stall anything: its
+/// appsrc is simply never pushed to, every element downstream sits idle and
+/// `PLAYING`, and the pad-task scan has nothing to find. The only evidence is
+/// that buffers stopped arriving at the slot's output tee, which is what
+/// `SlotOutput` records.
+///
+/// Reports a medium only while the slot's *other* medium is producing. A slot
+/// that has gone quiet altogether is a publisher that left, which is the
+/// inactivity watchdog's job and would otherwise be reported twice.
+pub struct WhipSlotLiveness {
+    endpoint_id: String,
+    mode: StreamMode,
+    slots: Vec<Arc<SlotOutput>>,
+    /// Shared with `WhipEndpointConfig`: an unoccupied slot produces nothing by
+    /// definition and is never reported.
+    assignments: Arc<RwLock<Vec<Option<String>>>>,
+}
+
+impl WhipSlotLiveness {
+    pub fn new(
+        endpoint_id: String,
+        mode: StreamMode,
+        slots: Vec<Arc<SlotOutput>>,
+        assignments: Arc<RwLock<Vec<Option<String>>>>,
+    ) -> Self {
+        Self {
+            endpoint_id,
+            mode,
+            slots,
+            assignments,
+        }
+    }
+
+    /// Every occupied slot medium that has stopped producing while its
+    /// counterpart has not.
+    ///
+    /// Thresholds are a parameter so a test can drive the real decision without
+    /// waiting out the production budgets; `BlockLiveness::failure` uses
+    /// `StallThresholds::default`.
+    pub fn stalls(&self, thresholds: StallThresholds) -> Vec<SlotMediumStall> {
+        // Only `StreamMode::AudioVideo` can be half dead: with one medium there
+        // is no counterpart to compare against, and a slot that stops entirely
+        // belongs to the watchdog.
+        if !self.mode.has_audio() || !self.mode.has_video() {
+            return Vec::new();
+        }
+
+        let occupied = self.assignments.read().unwrap();
+        let mut stalls = Vec::new();
+
+        for (slot, output) in self.slots.iter().enumerate() {
+            if !occupied.get(slot).is_some_and(|s| s.is_some()) {
+                continue;
+            }
+            for medium in [Medium::Audio, Medium::Video] {
+                let counterpart = output.stamp(medium.other());
+                // The counterpart has to be producing right now for this to be
+                // a half-dead seat rather than a dead one.
+                let Some(counterpart_idle) = counterpart.since_last() else {
+                    continue;
+                };
+                if counterpart_idle >= thresholds.stopped(medium.other()) {
+                    continue;
+                }
+
+                let stamp = output.stamp(medium);
+                match stamp.since_last() {
+                    // Silent for its own budget, and silent for that budget
+                    // *longer* than the counterpart. Without the second half, a
+                    // seat whose two media stop together reads as half dead for
+                    // the difference between their budgets: audio crosses two
+                    // seconds while video is still nine from crossing ten. On
+                    // the rig that mislabelled a seat whose transport had gone
+                    // for the 5.6 s before the watchdog reaped it.
+                    Some(silent) if silent >= counterpart_idle + thresholds.stopped(medium) => {
+                        stalls.push(SlotMediumStall {
+                            slot,
+                            medium,
+                            silent_for: Some(silent),
+                        });
+                    }
+                    Some(_) => {}
+                    // Never produced. Judged from how long the counterpart has
+                    // been running, so a slot whose media start a moment apart
+                    // is not reported for the gap between them.
+                    None => {
+                        if counterpart
+                            .since_first()
+                            .is_some_and(|running| running >= thresholds.absent)
+                        {
+                            stalls.push(SlotMediumStall {
+                                slot,
+                                medium,
+                                silent_for: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        stalls
+    }
+}
+
+impl crate::blocks::BlockLiveness for WhipSlotLiveness {
+    fn failure(&self) -> Option<String> {
+        let stalls = self.stalls(StallThresholds::default());
+        if stalls.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "WHIP endpoint '{}': {}",
+            self.endpoint_id,
+            stalls
+                .iter()
+                .map(|stall| stall.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
     }
 }
 
@@ -961,6 +1283,14 @@ mod tests {
     /// usable in that time is genuinely broken rather than still starting up.
     const RUNNING_FOR: Duration = Duration::from_secs(60);
 
+    /// A slot whose two media have both been producing for `RUNNING_FOR`.
+    fn running_output() -> SlotOutput {
+        SlotOutput::from_stamps(
+            ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
+            ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
+        )
+    }
+
     /// Tick `stamp` every 20 ms until `stop` is set — the rate the session
     /// appsink and the slot's output probe stamp a running publisher at.
     fn tick_until_stopped(stop: Arc<AtomicBool>, stamp: impl Fn() + Send + 'static) {
@@ -979,8 +1309,29 @@ mod tests {
     fn dead_publisher(idle: Duration) -> Arc<SessionActivity> {
         let ran_for = RUNNING_FOR + idle;
         Arc::new(SessionActivity::from_stamps(
+            // It carried audio while it lived, so it is in displacement range
+            // at all.
             ActivityStamp::backdated(ran_for, idle),
-            Arc::new(ActivityStamp::backdated(ran_for, idle)),
+            ActivityStamp::backdated(ran_for, idle),
+            Arc::new(SlotOutput::from_stamps(
+                ActivityStamp::backdated(ran_for, idle),
+                ActivityStamp::backdated(ran_for, idle),
+            )),
+        ))
+    }
+
+    /// A healthy video-only publisher of static content, mid-gap: its last frame
+    /// arrived `gap` ago and the next one is not due yet. Never delivered audio,
+    /// so nothing about it can be judged on a two-second silence.
+    fn sparse_video_publisher(gap: Duration) -> Arc<SessionActivity> {
+        let ran_for = RUNNING_FOR + gap;
+        Arc::new(SessionActivity::from_stamps(
+            ActivityStamp::new(Instant::now()),
+            ActivityStamp::backdated(ran_for, gap),
+            Arc::new(SlotOutput::from_stamps(
+                ActivityStamp::new(Instant::now()),
+                ActivityStamp::backdated(ran_for, gap),
+            )),
         ))
     }
 
@@ -988,27 +1339,16 @@ mod tests {
     /// slot: both stamps tick, the way the appsink callback and the tee probe do
     /// for a running session. The caller sets `stop` to end it.
     fn live_publisher(stop: Arc<AtomicBool>) -> Arc<SessionActivity> {
-        let output = Arc::new(ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO));
+        let output = Arc::new(running_output());
         let activity = Arc::new(SessionActivity::from_stamps(
+            ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
             ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
             output.clone(),
         ));
         let ingress = activity.clone();
         tick_until_stopped(stop.clone(), move || ingress.touch_ingress(true));
-        tick_until_stopped(stop, move || output.touch());
+        tick_until_stopped(stop, move || output.touch(Medium::Audio));
         activity
-    }
-
-    /// A healthy video-only publisher of static content, mid-gap: its last frame
-    /// arrived `gap` ago, came out of its slot, and the next one is not due yet.
-    /// Never carried audio, so nothing about it can be judged on a two-second
-    /// silence.
-    fn sparse_video_publisher(gap: Duration) -> Arc<SessionActivity> {
-        let ran_for = RUNNING_FOR + gap;
-        Arc::new(SessionActivity::video_only_from_stamps(
-            ActivityStamp::backdated(ran_for, gap),
-            Arc::new(ActivityStamp::backdated(ran_for, gap)),
-        ))
     }
 
     /// The bug: RTP keeps arriving and has done for a minute, but nothing has
@@ -1018,7 +1358,8 @@ mod tests {
     fn receiving_but_never_usable(stop: Arc<AtomicBool>) -> Arc<SessionActivity> {
         let activity = Arc::new(SessionActivity::from_stamps(
             ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
-            Arc::new(ActivityStamp::new(Instant::now())),
+            ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
+            Arc::new(SlotOutput::new(Instant::now())),
         ));
         let ingress = activity.clone();
         tick_until_stopped(stop, move || ingress.touch_ingress(true));
@@ -1030,7 +1371,11 @@ mod tests {
     fn receiving_but_stalled(stop: Arc<AtomicBool>, stalled_for: Duration) -> Arc<SessionActivity> {
         let activity = Arc::new(SessionActivity::from_stamps(
             ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
-            Arc::new(ActivityStamp::backdated(RUNNING_FOR, stalled_for)),
+            ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
+            Arc::new(SlotOutput::from_stamps(
+                ActivityStamp::backdated(RUNNING_FOR, stalled_for),
+                ActivityStamp::backdated(RUNNING_FOR, stalled_for),
+            )),
         ));
         let ingress = activity.clone();
         tick_until_stopped(stop, move || ingress.touch_ingress(true));
@@ -1042,7 +1387,8 @@ mod tests {
     fn still_prerolling(stop: Arc<AtomicBool>) -> Arc<SessionActivity> {
         let activity = Arc::new(SessionActivity::from_stamps(
             ActivityStamp::backdated(Duration::from_millis(200), Duration::ZERO),
-            Arc::new(ActivityStamp::new(Instant::now())),
+            ActivityStamp::backdated(Duration::from_millis(200), Duration::ZERO),
+            Arc::new(SlotOutput::new(Instant::now())),
         ));
         let ingress = activity.clone();
         tick_until_stopped(stop, move || ingress.touch_ingress(true));
@@ -1053,7 +1399,7 @@ mod tests {
     fn no_media_yet() -> Arc<SessionActivity> {
         Arc::new(SessionActivity::new(
             Instant::now(),
-            Arc::new(ActivityStamp::new(Instant::now())),
+            Arc::new(SlotOutput::new(Instant::now())),
         ))
     }
 
@@ -1077,7 +1423,7 @@ mod tests {
             slot_video_appsrcs: Vec::new(),
             slot_decodebins: vec![Vec::new(); max_sessions],
             slot_output: (0..max_sessions)
-                .map(|_| Arc::new(ActivityStamp::new(Instant::now())))
+                .map(|_| Arc::new(SlotOutput::new(Instant::now())))
                 .collect(),
             slot_assignments: Arc::new(RwLock::new(vec![None; max_sessions])),
         }
@@ -1423,17 +1769,17 @@ mod tests {
     /// moment its own media starts arriving, and the next client evicts it.
     #[test]
     fn a_new_session_does_not_inherit_the_slots_previous_liveness() {
-        let slot_output = Arc::new(ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO));
+        let slot_output = Arc::new(running_output());
         assert!(
-            slot_output.last() != 0,
-            "the previous occupant left the slot's stamp set"
+            slot_output.counter() != 0,
+            "the previous occupant left the slot's stamps set"
         );
 
         let session = SessionActivity::new(Instant::now(), slot_output.clone());
         session.touch_ingress(true);
 
         assert_eq!(
-            slot_output.last(),
+            slot_output.counter(),
             0,
             "claiming a slot must clear what the previous session left on it"
         );
@@ -1490,6 +1836,67 @@ mod tests {
         assert!(
             manager.get_session_port("screenshare").is_some(),
             "the video-only session must still be registered"
+        );
+    }
+
+    /// A commentator whose microphone stopped `silent_for` ago while their
+    /// camera keeps sending: half dead, and reported as such by
+    /// `WhipSlotLiveness`. The video half ticks like any live publisher.
+    fn dead_audio_publisher(stop: Arc<AtomicBool>, silent_for: Duration) -> Arc<SessionActivity> {
+        let ran_for = RUNNING_FOR + silent_for;
+        let output = Arc::new(SlotOutput::from_stamps(
+            ActivityStamp::backdated(ran_for, silent_for),
+            ActivityStamp::backdated(ran_for, Duration::ZERO),
+        ));
+        let activity = Arc::new(SessionActivity::from_stamps(
+            ActivityStamp::backdated(ran_for, silent_for),
+            ActivityStamp::backdated(ran_for, Duration::ZERO),
+            output.clone(),
+        ));
+        let ingress = activity.clone();
+        tick_until_stopped(stop.clone(), move || ingress.touch_ingress(false));
+        tick_until_stopped(stop, move || output.touch(Medium::Video));
+        activity
+    }
+
+    /// One dead medium must not cost a session its slot.
+    ///
+    /// The reap paths judge a session on its *newest* medium on purpose. A
+    /// publisher that stops sending audio has not gone away: taking its slot
+    /// would drop the video it is still delivering, and a client that
+    /// renegotiates away its microphone would be thrown off and reconnect in a
+    /// loop. The half-dead state is reported instead, by `WhipSlotLiveness`;
+    /// what an operator does about it is their call, not the reaper's.
+    #[tokio::test]
+    async fn a_session_whose_audio_died_keeps_its_slot() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let activity = dead_audio_publisher(stop.clone(), Duration::from_secs(600));
+
+        assert!(
+            activity
+                .idle()
+                .is_some_and(|idle| idle < TAKEOVER_IDLE_THRESHOLD),
+            "its video is current, so the session is not idle: {:?}",
+            activity.idle()
+        );
+
+        let (manager, config, cleanup_sent) = full_endpoint("commentator", 40014, activity);
+        let slot = manager
+            .allocate_slot_or_take_over(&config, "second-client")
+            .await;
+        stop.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            slot, None,
+            "a publisher still delivering video must keep its slot"
+        );
+        assert!(
+            !cleanup_sent.load(Ordering::SeqCst),
+            "a half-dead seat must not be torn down"
+        );
+        assert!(
+            manager.get_session_port("commentator").is_some(),
+            "the session must still be registered"
         );
     }
 }
