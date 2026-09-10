@@ -38,7 +38,7 @@ use gstreamer::glib::translate::ToGlibPtr;
 use gstreamer::prelude::*;
 use std::ffi::c_void;
 use std::sync::OnceLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const SETTER: &str = "gst_rtp_base_depayload_set_aggregate_hdrext_enabled";
 const GETTER: &str = "gst_rtp_base_depayload_is_aggregate_hdrext_enabled";
@@ -64,36 +64,60 @@ fn lookup(name: &str) -> Option<*mut c_void> {
 
 #[cfg(windows)]
 fn lookup(name: &str) -> Option<*mut c_void> {
-    const FROM_ADDRESS: u32 = 0x0000_0004;
-    const UNCHANGED_REFCOUNT: u32 = 0x0000_0002;
-
+    #[link(name = "kernel32")]
     extern "system" {
-        fn GetModuleHandleExA(flags: u32, name: *const i8, module: *mut *mut c_void) -> i32;
+        fn GetCurrentProcess() -> *mut c_void;
+        fn K32EnumProcessModules(
+            process: *mut c_void,
+            modules: *mut *mut c_void,
+            cb: u32,
+            needed: *mut u32,
+        ) -> i32;
         fn GetProcAddress(module: *mut c_void, name: *const i8) -> *mut c_void;
     }
 
-    let cname = std::ffi::CString::new(name).ok()?;
-    // Anchor on a symbol we already link from the same DLL rather than
-    // hardcoding its filename, which varies between GStreamer builds.
-    let anchor = gstreamer_rtp::ffi::gst_rtp_base_depayload_get_type as *const c_void;
-    let mut module: *mut c_void = std::ptr::null_mut();
+    const PTR: usize = std::mem::size_of::<*mut c_void>();
 
-    // SAFETY: `anchor` is the address of a function in the loaded RTP DLL, and
-    // `module` is a valid out-pointer. UNCHANGED_REFCOUNT means we take no
-    // reference, so there is nothing to release. `GetProcAddress` reads the
-    // module's export table and returns a plain address or NULL.
-    unsafe {
-        if GetModuleHandleExA(
-            FROM_ADDRESS | UNCHANGED_REFCOUNT,
-            anchor as *const i8,
-            &mut module,
-        ) == 0
-        {
+    let cname = std::ffi::CString::new(name).ok()?;
+
+    // Every loaded module is asked for the export. GetModuleHandleEx with
+    // FROM_ADDRESS cannot narrow this down first: under MSVC the address of an
+    // imported function is the import thunk in *this* module, so the handle
+    // comes back as the executable. Nor can a filename - the DLL is
+    // `gstrtp-1.0-0.dll` on MSVC and `libgstrtp-1.0-0.dll` on MinGW.
+    let mut modules: Vec<*mut c_void> = vec![std::ptr::null_mut(); 256];
+    loop {
+        let mut needed: u32 = 0;
+        // SAFETY: `modules` is a live buffer whose byte length is passed
+        // alongside it, and `needed` is a valid out-pointer. The handles
+        // written back are borrowed, not referenced - nothing to release.
+        let ok = unsafe {
+            K32EnumProcessModules(
+                GetCurrentProcess(),
+                modules.as_mut_ptr(),
+                (modules.len() * PTR) as u32,
+                &mut needed,
+            )
+        };
+        if ok == 0 {
             return None;
         }
-        let addr = GetProcAddress(module, cname.as_ptr());
-        (!addr.is_null()).then_some(addr)
+        let count = needed as usize / PTR;
+        if count <= modules.len() {
+            modules.truncate(count);
+            break;
+        }
+        // The module list grew between sizing and filling; retry with room.
+        modules.resize(count, std::ptr::null_mut());
     }
+
+    modules.into_iter().find_map(|module| {
+        // SAFETY: `module` is a handle EnumProcessModules just returned, and
+        // `cname` is a valid NUL-terminated string for the duration of the
+        // call. GetProcAddress only reads the module's export table.
+        let addr = unsafe { GetProcAddress(module, cname.as_ptr()) };
+        (!addr.is_null()).then_some(addr)
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -105,11 +129,20 @@ fn setter() -> Option<SetAggregateFn> {
     static SYM: OnceLock<Option<usize>> = OnceLock::new();
     let addr = SYM.get_or_init(|| {
         let found = lookup(SETTER).map(|p| p as usize);
+        let (major, minor, ..) = gst::version();
         match found {
             Some(_) => debug!("{SETTER} resolved; hdrext aggregation will be disabled"),
-            None => info!(
-                "{SETTER} not found (GStreamer < 1.24) - header extension aggregation \
-                 does not exist on this version, nothing to disable"
+            // Below 1.24 there is nothing to disable. At or above it, the
+            // lookup failing means the gstreamer#5057 workaround is inactive
+            // and a corrupt RTP stream can still abort the process.
+            None if (major, minor) < (1, 24) => info!(
+                "{SETTER} not found on GStreamer {major}.{minor} - header extension \
+                 aggregation does not exist below 1.24, nothing to disable"
+            ),
+            None => warn!(
+                "{SETTER} not found on GStreamer {major}.{minor}, which has header \
+                 extension aggregation - the gstreamer#5057 workaround is INACTIVE \
+                 and a corrupt RTP stream can abort the process"
             ),
         }
         found
