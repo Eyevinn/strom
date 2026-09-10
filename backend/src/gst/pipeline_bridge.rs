@@ -219,36 +219,71 @@ pub fn should_log_drop(dropped: u64) -> bool {
     dropped == 1 || dropped.is_multiple_of(100)
 }
 
+/// Rig shared by this module's own tests and by the call-site tests in
+/// `whip.rs` and `mediaplayer/bridge.rs`. Those two have to keep calling
+/// [`SessionBridge::forward`], and nothing in this module can enforce that, so
+/// each caller needs a test of its own driving a real appsink callback.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use gstreamer::prelude::*;
 
-    const CAPS: &str = "application/x-strom-bridge-test";
-    const SEC: u64 = gst::ClockTime::SECOND.nseconds();
+    pub(crate) const CAPS: &str = "application/x-strom-bridge-test";
+    pub(crate) const SEC: u64 = gst::ClockTime::SECOND.nseconds();
+
+    pub(crate) fn caps() -> gst::Caps {
+        gst::Caps::builder(CAPS).build()
+    }
+
+    /// One buffer wrapped as a sample, stamped however the test wants.
+    pub(crate) fn sample(pts: Option<gst::ClockTime>, dts: Option<gst::ClockTime>) -> gst::Sample {
+        let mut buffer = gst::Buffer::with_size(4).expect("buffer");
+        {
+            let b = buffer.get_mut().unwrap();
+            b.set_pts(pts);
+            b.set_dts(dts);
+        }
+        gst::Sample::builder().buffer(&buffer).caps(&caps()).build()
+    }
+
+    pub(crate) fn at(secs: u64) -> Option<gst::ClockTime> {
+        Some(gst::ClockTime::from_seconds(secs))
+    }
 
     /// A real `appsrc ! appsink` pair standing in for the main pipeline's slot:
     /// what comes out of `sink` is exactly what the bridge let across.
-    struct Harness {
+    pub(crate) struct Harness {
         pipeline: gst::Pipeline,
-        src: gst_app::AppSrc,
-        sink: gst_app::AppSink,
+        pub(crate) src: gst_app::AppSrc,
+        pub(crate) sink: gst_app::AppSink,
     }
 
     impl Harness {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let _ = gst::init();
             let src = gst_app::AppSrc::builder()
                 .format(gst::Format::Time)
-                .caps(&gst::Caps::builder(CAPS).build())
+                .caps(&caps())
                 .build();
-            let sink = gst_app::AppSink::builder().sync(false).build();
+            // `async(false)`, so the pipeline reaches PLAYING without waiting
+            // for a first buffer to preroll on. A caller that reads this
+            // pipeline's running time to compute its offset gets `None` until
+            // PLAYING is reached and a base time is set, which would push the
+            // offset onto whichever buffer happened to arrive after that.
+            let sink = gst_app::AppSink::builder()
+                .sync(false)
+                .async_(false)
+                .build();
             let pipeline = gst::Pipeline::new();
             pipeline
                 .add_many([src.upcast_ref::<gst::Element>(), sink.upcast_ref()])
                 .expect("add");
             src.link(&sink).expect("link");
             pipeline.set_state(gst::State::Playing).expect("playing");
+            pipeline
+                .state(gst::ClockTime::from_seconds(2))
+                .0
+                .expect("reach PLAYING");
             Self {
                 pipeline,
                 src,
@@ -257,10 +292,16 @@ mod tests {
         }
 
         /// PTS of the next buffer to arrive, or `None` if none does.
-        fn next_pts(&self) -> Option<Option<gst::ClockTime>> {
+        pub(crate) fn next_pts(&self) -> Option<Option<gst::ClockTime>> {
             self.sink
                 .try_pull_sample(gst::ClockTime::from_mseconds(500))
                 .map(|s| s.buffer().expect("sample has a buffer").pts())
+        }
+
+        /// The pipeline behind `src`, for a caller that reads its running time
+        /// to compute the session offset.
+        pub(crate) fn pipeline_weak(&self) -> gst::glib::WeakRef<gst::Pipeline> {
+            self.pipeline.downgrade()
         }
     }
 
@@ -270,22 +311,55 @@ mod tests {
         }
     }
 
-    fn sample(pts: Option<gst::ClockTime>, dts: Option<gst::ClockTime>) -> gst::Sample {
-        let mut buffer = gst::Buffer::with_size(4).expect("buffer");
-        {
-            let b = buffer.get_mut().unwrap();
-            b.set_pts(pts);
-            b.set_dts(dts);
-        }
-        gst::Sample::builder()
-            .buffer(&buffer)
-            .caps(&gst::Caps::builder(CAPS).build())
-            .build()
+    /// Stands in for a session pipeline: an `appsrc` the test pushes into,
+    /// waiting for the caller to wire the appsink under test onto the other end
+    /// and then call [`SessionPipeline::start`].
+    pub(crate) struct SessionPipeline {
+        pub(crate) pipeline: gst::Pipeline,
+        pub(crate) src: gst_app::AppSrc,
     }
 
-    fn at(secs: u64) -> Option<gst::ClockTime> {
-        Some(gst::ClockTime::from_seconds(secs))
+    impl SessionPipeline {
+        pub(crate) fn new() -> Self {
+            let _ = gst::init();
+            let src = gst_app::AppSrc::builder()
+                .format(gst::Format::Time)
+                .caps(&caps())
+                .build();
+            let pipeline = gst::Pipeline::new();
+            pipeline
+                .add(src.upcast_ref::<gst::Element>())
+                .expect("add appsrc");
+            Self { pipeline, src }
+        }
+
+        pub(crate) fn start(&self) {
+            self.pipeline
+                .set_state(gst::State::Playing)
+                .expect("playing");
+        }
+
+        /// The pad the element under test links to.
+        pub(crate) fn src_pad(&self) -> gst::Pad {
+            self.src.static_pad("src").expect("appsrc has a src pad")
+        }
+
+        pub(crate) fn push(&self, pts: Option<gst::ClockTime>) {
+            self.src.push_sample(&sample(pts, None)).expect("push");
+        }
     }
+
+    impl Drop for SessionPipeline {
+        fn drop(&mut self) {
+            let _ = self.pipeline.set_state(gst::State::Null);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
 
     /// The regression this module exists for. A buffer with no PTS must not
     /// reach the main pipeline: downstream of that appsrc sits a recorder whose

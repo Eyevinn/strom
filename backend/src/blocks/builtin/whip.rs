@@ -600,6 +600,74 @@ fn wait_for_inactivity(
     }
 }
 
+/// Wire one session stream's appsink into its slot's appsrc in the main
+/// pipeline.
+///
+/// A function rather than an inline closure so a test can drive the callback:
+/// the guard that matters is here, not in [`pipeline_bridge`]. A bare
+/// `appsrc.push_sample(&sample)` in this body re-opens the cascade an unstamped
+/// buffer starts and fails nothing in that module's tests.
+#[allow(clippy::too_many_arguments)]
+fn install_slot_bridge(
+    appsink: &gst_app::AppSink,
+    appsrc: gst_app::AppSrc,
+    bridge: Arc<SessionBridge>,
+    main_pipeline_weak: gst::glib::WeakRef<gst::Pipeline>,
+    media_type: &str,
+    slot: usize,
+    last_buffer_ms: Arc<AtomicU64>,
+    last_buffer_epoch: Instant,
+) {
+    let media_for_log = media_type.to_string();
+
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                // Update inactivity watchdog
+                last_buffer_ms.store(
+                    last_buffer_epoch.elapsed().as_millis() as u64,
+                    Ordering::Relaxed,
+                );
+
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+
+                let outcome = bridge
+                    .forward(&sample, &appsrc, || {
+                        let main_pipeline = main_pipeline_weak.upgrade()?;
+                        let clock = main_pipeline.clock()?;
+                        let base_time = main_pipeline.base_time()?;
+                        Some(clock.time().saturating_sub(base_time))
+                    })
+                    .ok_or(gst::FlowError::Error)?;
+
+                match outcome {
+                    pipeline_bridge::Forwarded::OffsetComputed(offset) => {
+                        info!(
+                            "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
+                            offset / 1_000_000,
+                            media_for_log,
+                            slot
+                        );
+                    }
+                    pipeline_bridge::Forwarded::DroppedUnstamped { dropped } => {
+                        if pipeline_bridge::should_log_drop(dropped) {
+                            warn!(
+                                "WHIP Input: dropped {} buffer(s) with no PTS on the {} stream (slot {}); forwarding one fails the downstream muxer and takes the whole flow with it",
+                                dropped, media_for_log, slot
+                            );
+                        }
+                    }
+                    pipeline_bridge::Forwarded::Restamped
+                    | pipeline_bridge::Forwarded::Unadjusted
+                    | pipeline_bridge::Forwarded::PushFailed(_) => {}
+                }
+
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+}
+
 /// Create a new whipserversrc element for a single WHIP client session.
 ///
 /// Each session runs in its own isolated GStreamer pipeline to avoid
@@ -1007,57 +1075,15 @@ pub fn create_whipserversrc_for_session(
                     }
                 }
 
-                let bridge = session_bridge.clone();
-                let main_pipeline_for_ts = main_pipeline_weak.clone();
-                let media_for_log = media_type.to_string();
-                let last_buffer_ms_cb = last_buffer_ms.clone();
-                let last_buffer_epoch_cb = last_buffer_epoch;
-
-                appsink.set_callbacks(
-                    gst_app::AppSinkCallbacks::builder()
-                        .new_sample(move |sink| {
-                            // Update inactivity watchdog
-                            last_buffer_ms_cb.store(
-                                last_buffer_epoch_cb.elapsed().as_millis() as u64,
-                                Ordering::Relaxed,
-                            );
-
-                            let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-
-                            let outcome = bridge
-                                .forward(&sample, &appsrc, || {
-                                    let main_pipeline = main_pipeline_for_ts.upgrade()?;
-                                    let clock = main_pipeline.clock()?;
-                                    let base_time = main_pipeline.base_time()?;
-                                    Some(clock.time().saturating_sub(base_time))
-                                })
-                                .ok_or(gst::FlowError::Error)?;
-
-                            match outcome {
-                                pipeline_bridge::Forwarded::OffsetComputed(offset) => {
-                                    info!(
-                                        "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
-                                        offset / 1_000_000,
-                                        media_for_log,
-                                        slot
-                                    );
-                                }
-                                pipeline_bridge::Forwarded::DroppedUnstamped { dropped } => {
-                                    if pipeline_bridge::should_log_drop(dropped) {
-                                        warn!(
-                                            "WHIP Input: dropped {} buffer(s) with no PTS on the {} stream (slot {}); forwarding one fails the downstream muxer and takes the whole flow with it",
-                                            dropped, media_for_log, slot
-                                        );
-                                    }
-                                }
-                                pipeline_bridge::Forwarded::Restamped
-                                | pipeline_bridge::Forwarded::Unadjusted
-                                | pipeline_bridge::Forwarded::PushFailed(_) => {}
-                            }
-
-                            Ok(gst::FlowSuccess::Ok)
-                        })
-                        .build(),
+                install_slot_bridge(
+                    &appsink,
+                    appsrc,
+                    session_bridge.clone(),
+                    main_pipeline_weak.clone(),
+                    media_type,
+                    slot,
+                    last_buffer_ms.clone(),
+                    last_buffer_epoch,
                 );
             } else {
                 info!(
@@ -1811,6 +1837,64 @@ fn setup_incoming_rtp_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gst::pipeline_bridge::test_support::{at, Harness, SessionPipeline};
+
+    /// The wiring guard for this block. [`pipeline_bridge`] can only promise
+    /// that [`SessionBridge::forward`] drops an unstamped buffer; it cannot
+    /// promise this block still calls it. So drive the real appsink callback:
+    /// three buffers into a session pipeline, the middle one with no PTS, and
+    /// only the two stamped ones may reach the slot's appsrc.
+    ///
+    /// Forwarding that buffer is what makes `qtmux` answer `Buffer has no PTS`
+    /// with `GST_FLOW_ERROR`, which tears down the whole flow — every seat, not
+    /// just this one.
+    #[test]
+    fn an_unstamped_buffer_never_reaches_the_slot_appsrc() {
+        let slot_pipeline = Harness::new();
+        let session = SessionPipeline::new();
+
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        session
+            .pipeline
+            .add(appsink.upcast_ref::<gst::Element>())
+            .expect("add appsink");
+        session
+            .src
+            .link(&appsink)
+            .expect("link session appsrc to appsink");
+
+        install_slot_bridge(
+            &appsink,
+            slot_pipeline.src.clone(),
+            Arc::new(SessionBridge::new()),
+            slot_pipeline.pipeline_weak(),
+            "video",
+            0,
+            Arc::new(AtomicU64::new(0)),
+            Instant::now(),
+        );
+
+        session.start();
+        session.push(at(1));
+        session.push(None);
+        session.push(at(3));
+
+        let first = slot_pipeline.next_pts().expect("first buffer crossed");
+        assert!(first.is_some(), "a stamped buffer must keep its stamp");
+        let second = slot_pipeline
+            .next_pts()
+            .expect("the third buffer crossed too");
+        assert!(
+            second.is_some(),
+            "the unstamped buffer must not be here — the third one is next"
+        );
+        assert!(second > first, "and it must follow the first");
+        assert_eq!(
+            slot_pipeline.next_pts(),
+            None,
+            "nothing else should have crossed"
+        );
+    }
 
     fn props(entries: &[(&str, PropertyValue)]) -> HashMap<String, PropertyValue> {
         entries
