@@ -5,35 +5,56 @@ use strom_types::StromEvent;
 use tokio::sync::broadcast;
 use tracing::{debug, trace};
 
+use crate::event_logging::log_strom_event;
+
 /// Event broadcaster for WebSocket connections.
 #[derive(Clone)]
 pub struct EventBroadcaster {
     /// Broadcast channel for events
     sender: Arc<broadcast::Sender<StromEvent>>,
+    /// Emit selected events as structured tracing log records (see `LoggingConfig`).
+    structured_events: bool,
+    /// Include high-frequency events in structured event logs (only if `structured_events`).
+    include_high_frequency_events: bool,
 }
 
 impl EventBroadcaster {
-    /// Create a new event broadcaster with a buffer size.
-    pub fn new(buffer_size: usize) -> Self {
+    /// Create a new event broadcaster with a buffer size and structured-logging config.
+    pub fn new(
+        buffer_size: usize,
+        structured_events: bool,
+        include_high_frequency_events: bool,
+    ) -> Self {
         let (sender, _) = broadcast::channel(buffer_size);
         Self {
             sender: Arc::new(sender),
+            structured_events,
+            include_high_frequency_events,
         }
+    }
+
+    /// Create a broadcaster with the given buffer size and structured logging disabled.
+    pub fn with_capacity(buffer_size: usize) -> Self {
+        Self::new(buffer_size, false, false)
     }
 
     /// Broadcast an event to all connected WebSocket clients.
     pub fn broadcast(&self, event: StromEvent) {
         // Use trace for high-frequency events, debug for others
-        match &event {
-            StromEvent::MeterData { .. }
-            | StromEvent::LoudnessData { .. }
-            | StromEvent::BufferAgeProbe { .. } => {
-                trace!("Broadcasting event: {}", event.description());
-            }
-            _ => {
-                debug!("Broadcasting event: {}", event.description());
-            }
+        if event.is_high_frequency() {
+            trace!("Broadcasting event: {}", event.description());
+        } else {
+            debug!("Broadcasting event: {}", event.description());
         }
+
+        // Emitted inline (not from a subscribe() task) so a lagging/dropped broadcast
+        // receiver can never silently drop a structured log record.
+        if self.structured_events
+            && (self.include_high_frequency_events || !event.is_high_frequency())
+        {
+            log_strom_event(&event);
+        }
+
         // broadcast::send returns the number of receivers
         // We don't care about the result since clients may or may not be connected
         let _ = self.sender.send(event);
@@ -52,7 +73,7 @@ impl EventBroadcaster {
 
 impl Default for EventBroadcaster {
     fn default() -> Self {
-        Self::new(100) // Default buffer of 100 events
+        Self::new(100, false, false) // Default buffer of 100 events, structured logging off
     }
 }
 
@@ -64,13 +85,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcaster_creation() {
-        let broadcaster = EventBroadcaster::new(10);
+        let broadcaster = EventBroadcaster::with_capacity(10);
         assert_eq!(broadcaster.subscriber_count(), 0);
     }
 
     #[tokio::test]
     async fn test_broadcast_event() {
-        let broadcaster = EventBroadcaster::new(10);
+        let broadcaster = EventBroadcaster::with_capacity(10);
         let flow_id = FlowId::from(Uuid::new_v4());
 
         // Subscribe before broadcasting
