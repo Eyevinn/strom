@@ -399,16 +399,19 @@ fn run_flow(block_id: &str, output_format: &str) -> Measured {
 /// With an alpha-less `output_format`, a keyed DSK graphic and the multiview
 /// overlay must keep their per-pixel alpha — and PGM must still come out in
 /// the requested format.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn keyed_pads_keep_alpha_with_alpha_less_output_format() {
-    let m = run_flow("vmk_nv12", "NV12");
+///
+/// `blend` is the space `alpha_blend_format` substitutes for this
+/// `output_format`; it has to be one `compositor` will blend in, and one that
+/// converts to the requested format on the way out.
+fn assert_keyed_alpha_survives(block_id: &str, output_format: &str, blend: &str) {
+    let m = run_flow(block_id, output_format);
     eprintln!(
-        "NV12 output_format: dsk left red {:.3}, dsk right white {:.3}, mv bright {:.3}, \
-         pgm format {}",
-        m.dsk_left_red, m.dsk_right_white, m.mv_bright, m.pgm_format
+        "{} output_format (blends in {}): dsk left red {:.3}, dsk right white {:.3}, \
+         mv bright {:.3}, pgm format {}",
+        output_format, blend, m.dsk_left_red, m.dsk_right_white, m.mv_bright, m.pgm_format
     );
     assert_eq!(
-        m.pgm_format, "NV12",
+        m.pgm_format, output_format,
         "output_format must still pin the mixer output"
     );
     assert!(
@@ -428,6 +431,28 @@ async fn keyed_pads_keep_alpha_with_alpha_less_output_format() {
          transparent areas were composited opaquely",
         m.mv_bright
     );
+}
+
+/// One test per branch of `alpha_blend_format`, so a format that loses its key
+/// is named by the failure rather than hidden behind the first one to break.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keyed_pads_keep_alpha_with_nv12_output_format() {
+    assert_keyed_alpha_survives("vmk_nv12", "NV12", "A420");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keyed_pads_keep_alpha_with_yuy2_output_format() {
+    assert_keyed_alpha_survives("vmk_yuy2", "YUY2", "A422");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keyed_pads_keep_alpha_with_v210_output_format() {
+    assert_keyed_alpha_survives("vmk_v210", "v210", "A422_10LE");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keyed_pads_keep_alpha_with_rgb_output_format() {
+    assert_keyed_alpha_survives("vmk_rgb", "RGB", "RGBA");
 }
 
 /// Baseline: the same flow with `output_format=Auto`, which was never broken.
