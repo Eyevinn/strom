@@ -49,14 +49,21 @@ fn first_stalled_pad(element: &gst::Element) -> Option<StalledPad> {
 
 /// Find the first paused pad task on `element` itself.
 ///
-/// Two kinds of legitimately paused task are excluded. An element held below
-/// `PLAYING` - a webrtcbin added for a newly connected WHEP consumer, say -
-/// pauses its tasks as part of that transition. And a pad that has seen EOS is
-/// finished by definition:
-/// `gst_base_src_loop` pauses its task on the way out for *every* reason
-/// including end of stream, and the element stays `PLAYING` afterwards, so a
-/// finite source that has played out would otherwise be reported as failed
-/// forever. The stall this looks for pushes no EOS.
+/// Three kinds of legitimately paused task are excluded.
+///
+/// An element held below `PLAYING` - a webrtcbin added for a newly connected
+/// WHEP consumer, say - pauses its tasks as part of that transition.
+///
+/// A pad that has seen EOS is finished by definition: `gst_base_src_loop` pauses
+/// its task on the way out for *every* reason including end of stream, and the
+/// element stays `PLAYING` afterwards, so a finite source that has played out
+/// would otherwise be reported as failed forever. The stall this looks for
+/// pushes no EOS.
+///
+/// An unlinked pad has no branch to report on. A `queue` feeding a block output
+/// that the flow leaves unconnected gets `not-linked` from its loop and parks
+/// the task there permanently - the vision mixer's `multiview_out` does exactly
+/// this whenever a flow uses only the program output.
 fn stalled_pad_on(element: &gst::Element) -> Option<StalledPad> {
     if element.current_state() != gst::State::Playing {
         return None;
@@ -67,6 +74,7 @@ fn stalled_pad_on(element: &gst::Element) -> Option<StalledPad> {
         .find(|pad| {
             pad.task_state() == gst::TaskState::Paused
                 && !pad.pad_flags().contains(gst::PadFlags::EOS)
+                && pad.peer().is_some()
         })
         .map(|pad| StalledPad {
             element: element.name().to_string(),
@@ -309,6 +317,46 @@ mod tests {
         flow
     }
 
+    /// videotestsrc -> tee, with one tee branch queued and left unconnected.
+    ///
+    /// Mirrors a block output the flow does not wire up - the vision mixer's
+    /// `multiview_out` is exactly this - where the queue's loop takes
+    /// `not-linked` and parks its task for good.
+    fn unwired_output_flow() -> Flow {
+        let mut flow = Flow::new("unwired output health test");
+        flow.elements = vec![
+            element(
+                "src",
+                "videotestsrc",
+                &[("is-live", PropertyValue::Bool(true))],
+            ),
+            element("split", "tee", &[]),
+            element("q_used", "queue", &[]),
+            element("sink", "fakesink", &[("sync", PropertyValue::Bool(false))]),
+            // Fed by the tee, going nowhere.
+            element("q_dangling", "queue", &[]),
+        ];
+        flow.links = vec![
+            Link {
+                from: "src".to_string(),
+                to: "split".to_string(),
+            },
+            Link {
+                from: "split".to_string(),
+                to: "q_used".to_string(),
+            },
+            Link {
+                from: "q_used".to_string(),
+                to: "sink".to_string(),
+            },
+            Link {
+                from: "split".to_string(),
+                to: "q_dangling".to_string(),
+            },
+        ];
+        flow
+    }
+
     /// videotestsrc with a fixed buffer count -> fakesink. Runs to EOS.
     fn finite_source_flow() -> Flow {
         let mut flow = Flow::new("eos health test");
@@ -336,6 +384,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         condition()
+    }
+
+    /// A `queue` whose source pad is left unconnected takes `not-linked` from its
+    /// loop and parks the task while the element stays `PLAYING`. Blocks expose
+    /// optional outputs built this way, so reporting it would mark most flows
+    /// using them permanently failed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unwired_output_branch_is_not_reported_as_failed() {
+        gst::init().unwrap();
+
+        let mut manager = PipelineManager::new(
+            &unwired_output_flow(),
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("pipeline should build");
+
+        manager.start().expect("pipeline should start");
+        assert!(
+            wait_for(
+                || manager.get_state() == strom_types::PipelineState::Playing,
+                Duration::from_secs(10)
+            ),
+            "pipeline never reached Playing"
+        );
+
+        let went_failed = wait_for(
+            || {
+                manager
+                    .get_block_health()
+                    .iter()
+                    .any(|h| h.status == BlockHealthStatus::Failed)
+            },
+            HEALTH_POLL_INTERVAL * (CONFIRMATIONS_BEFORE_FAILED + 3),
+        );
+        assert!(
+            !went_failed,
+            "an unwired output branch must not read as failed: {:?}",
+            manager.get_block_health()
+        );
+
+        manager.stop().expect("pipeline should stop");
     }
 
     /// `gst_base_src_loop` pauses its pad task on the way out for every reason,
