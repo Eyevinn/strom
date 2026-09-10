@@ -41,9 +41,13 @@ fn first_stalled_pad(element: &gst::Element) -> Option<StalledPad> {
 
 /// Find the first paused pad task on `element` itself.
 ///
-/// Only elements that are themselves playing are considered. A sub-bin held in
-/// `PAUSED` inside a playing pipeline - a WebRTC session bin mid-setup, say -
-/// has paused pad tasks legitimately.
+/// Two kinds of legitimately paused task are excluded. An element held below
+/// `PLAYING` - a WebRTC session bin mid-setup, say - pauses its tasks as part of
+/// that transition. And a pad that has seen EOS is finished by definition:
+/// `gst_base_src_loop` pauses its task on the way out for *every* reason
+/// including end of stream, and the element stays `PLAYING` afterwards, so a
+/// finite source that has played out would otherwise be reported as failed
+/// forever. The stall this looks for pushes no EOS.
 fn stalled_pad_on(element: &gst::Element) -> Option<StalledPad> {
     if element.current_state() != gst::State::Playing {
         return None;
@@ -51,7 +55,10 @@ fn stalled_pad_on(element: &gst::Element) -> Option<StalledPad> {
     element
         .pads()
         .into_iter()
-        .find(|pad| pad.task_state() == gst::TaskState::Paused)
+        .find(|pad| {
+            pad.task_state() == gst::TaskState::Paused
+                && !pad.pad_flags().contains(gst::PadFlags::EOS)
+        })
         .map(|pad| StalledPad {
             element: element.name().to_string(),
             pad: pad.name().to_string(),
@@ -90,7 +97,7 @@ pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec
         if let Some(stalled) = first_stalled_pad(element) {
             entry.status = BlockHealthStatus::Failed;
             entry.detail = Some(format!(
-                "pad task stopped on {}:{} - this branch is not passing data",
+                "pad task paused on {}:{} - this branch is not passing data",
                 stalled.element, stalled.pad
             ));
         }
@@ -101,6 +108,13 @@ pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec
 
 /// How often the running pipeline is scanned for stalled pad tasks.
 const HEALTH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Consecutive scans a block must look stalled before it is reported.
+///
+/// Pad tasks are briefly paused for legitimate reasons - a flushing seek, a
+/// dynamic bin being linked in - so a single sample is not enough to call a
+/// block failed. Costs one extra poll interval of detection latency.
+const CONFIRMATIONS_BEFORE_FAILED: u32 = 2;
 
 impl super::PipelineManager {
     /// Current per-block health. Empty until the health task has run once.
@@ -129,6 +143,7 @@ impl super::PipelineManager {
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(HEALTH_POLL_INTERVAL);
             let mut failed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut strikes: HashMap<String, u32> = HashMap::new();
 
             loop {
                 interval.tick().await;
@@ -136,9 +151,8 @@ impl super::PipelineManager {
                 // Only meaningful while playing - a paused task is expected in
                 // every other state, including during startup and shutdown.
                 if *cached_state.read().unwrap() != strom_types::PipelineState::Playing {
-                    if !failed.is_empty() {
-                        failed.clear();
-                    }
+                    failed.clear();
+                    strikes.clear();
                     block_health.write().unwrap().clear();
                     continue;
                 }
@@ -151,7 +165,29 @@ impl super::PipelineManager {
                     continue;
                 }
 
-                let snapshot = scan_block_health(&elements);
+                let mut snapshot = scan_block_health(&elements);
+
+                // A block is only reported once it has looked stalled on
+                // CONFIRMATIONS_BEFORE_FAILED scans in a row. Downgrade the
+                // unconfirmed ones before anything observes the snapshot.
+                for health in &mut snapshot {
+                    if health.status.is_failed() {
+                        let count = strikes.entry(health.block_id.clone()).or_insert(0);
+                        *count += 1;
+                        if *count < CONFIRMATIONS_BEFORE_FAILED {
+                            health.status = BlockHealthStatus::Ok;
+                            health.detail = None;
+                        }
+                    } else {
+                        strikes.remove(&health.block_id);
+                    }
+                }
+
+                // Blocks whose elements have gone away drop out of the scan
+                // entirely; forget them rather than leaving a stale entry that
+                // no later iteration can clear.
+                failed.retain(|block_id| snapshot.iter().any(|h| &h.block_id == block_id));
+                strikes.retain(|block_id, _| snapshot.iter().any(|h| &h.block_id == block_id));
 
                 for health in &snapshot {
                     let was_failed = failed.contains(&health.block_id);
@@ -264,6 +300,24 @@ mod tests {
         flow
     }
 
+    /// videotestsrc with a fixed buffer count -> fakesink. Runs to EOS.
+    fn finite_source_flow() -> Flow {
+        let mut flow = Flow::new("eos health test");
+        flow.elements = vec![
+            element(
+                "src",
+                "videotestsrc",
+                &[("num-buffers", PropertyValue::Int(5))],
+            ),
+            element("sink", "fakesink", &[("sync", PropertyValue::Bool(false))]),
+        ];
+        flow.links = vec![Link {
+            from: "src".to_string(),
+            to: "sink".to_string(),
+        }];
+        flow
+    }
+
     fn wait_for(condition: impl Fn() -> bool, timeout: Duration) -> bool {
         let start = Instant::now();
         while start.elapsed() < timeout {
@@ -273,6 +327,64 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         condition()
+    }
+
+    /// `gst_base_src_loop` pauses its pad task on the way out for every reason,
+    /// end of stream included, and leaves the element in `PLAYING`. Playing a
+    /// finite source to completion must not read as a failure.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_source_that_reaches_eos_is_not_reported_as_failed() {
+        gst::init().unwrap();
+
+        let mut manager = PipelineManager::new(
+            &finite_source_flow(),
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("pipeline should build");
+
+        manager.start().expect("pipeline should start");
+
+        // Let the source play out and the scan run several times over the
+        // drained pipeline.
+        assert!(
+            wait_for(
+                || manager
+                    .elements
+                    .get("src")
+                    .map(|e| e.static_pad("src").unwrap().pad_flags())
+                    .is_some_and(|f| f.contains(gst::PadFlags::EOS)),
+                Duration::from_secs(15)
+            ),
+            "source never reached EOS"
+        );
+        // Watch across several scans - long enough that a block would clear the
+        // confirmation threshold - and assert it never flips to failed.
+        let went_failed = wait_for(
+            || {
+                manager
+                    .get_block_health()
+                    .iter()
+                    .any(|h| h.status == BlockHealthStatus::Failed)
+            },
+            HEALTH_POLL_INTERVAL * (CONFIRMATIONS_BEFORE_FAILED + 3),
+        );
+        assert!(
+            !went_failed,
+            "a drained finite source must not read as failed: {:?}",
+            manager.get_block_health()
+        );
+        assert!(
+            !manager.get_block_health().is_empty(),
+            "health scan never produced a snapshot"
+        );
+
+        manager.stop().expect("pipeline should stop");
     }
 
     #[tokio::test(flavor = "multi_thread")]
