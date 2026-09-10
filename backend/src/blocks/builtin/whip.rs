@@ -165,6 +165,21 @@ fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool 
         .unwrap_or(true)
 }
 
+/// Parse drop_on_latency from properties (default: true).
+///
+/// True works around a GStreamer rtpjitterbuffer bug (see the comment in
+/// `whep.rs` `build_whepsrc` iterate_recurse). False keeps late packets for a
+/// downstream WebRTC endpoint that buffers adaptively, and reinstates the stall.
+fn parse_drop_on_latency(properties: &HashMap<String, PropertyValue>) -> bool {
+    properties
+        .get("drop_on_latency")
+        .and_then(|v| match v {
+            PropertyValue::Bool(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
 /// Keep a slot with no publisher from holding the pipeline out of PLAYING.
 ///
 /// A `decodebin` cannot complete READY->PAUSED until data arrives and it can
@@ -237,6 +252,7 @@ fn build_whipserversrc(
     // even though the packets arrived fine over the network.
     let jitterbuffer_latency_ms = parse_jitterbuffer_latency_ms(properties);
     let do_retransmission = parse_do_retransmission(properties);
+    let drop_on_latency = parse_drop_on_latency(properties);
 
     let max_video_bitrate_kbps = properties
         .get("max_video_bitrate")
@@ -496,8 +512,8 @@ fn build_whipserversrc(
     let turn_server = ctx.turn_server();
 
     info!(
-        "WHIP Input configured: endpoint_id='{}', stun={:?}, turn={:?}, mode={:?}, decode={}, do_retransmission={}, max_sessions={} (whipserversrc created per-session)",
-        endpoint_id, stun_server, turn_server, mode, decode, do_retransmission, max_sessions
+        "WHIP Input configured: endpoint_id='{}', stun={:?}, turn={:?}, mode={:?}, decode={}, do_retransmission={}, drop_on_latency={}, max_sessions={} (whipserversrc created per-session)",
+        endpoint_id, stun_server, turn_server, mode, decode, do_retransmission, drop_on_latency, max_sessions
     );
 
     // Register WHIP endpoint with the build context (port=0 placeholder, sessions get their own ports)
@@ -520,6 +536,7 @@ fn build_whipserversrc(
             video_decoding,
             jitterbuffer_latency_ms,
             do_retransmission,
+            drop_on_latency,
             dynamic_webrtcbin_store: ctx.dynamic_webrtcbin_store(),
             max_video_bitrate_kbps,
             max_sessions,
@@ -685,6 +702,7 @@ pub fn create_whipserversrc_for_session(
     let block_id_for_callback = config.instance_id.clone();
     let ice_transport_policy = config.ice_transport_policy.clone();
     let jitterbuffer_latency_ms = config.jitterbuffer_latency_ms;
+    let drop_on_latency = config.drop_on_latency;
     // `cleanup_sent` ensures only one cleanup request per session (shared across the
     // ICE callback, the inactivity watchdog and the session manager's teardown paths).
     let cleanup_sent_for_ice = cleanup_sent.clone();
@@ -697,9 +715,14 @@ pub fn create_whipserversrc_for_session(
 
             // Workaround for GStreamer rtpjitterbuffer packet_spacing bug:
             // see comment in whep.rs build_whepsrc iterate_recurse for details.
+            // Configurable because the workaround costs late packets a
+            // downstream WebRTC endpoint could still have used.
             if element_name.starts_with("rtpbin") && element.has_property("drop-on-latency") {
-                element.set_property("drop-on-latency", true);
-                info!("WHIP Input: Set drop-on-latency=true on {}", element_name);
+                element.set_property("drop-on-latency", drop_on_latency);
+                info!(
+                    "WHIP Input: Set drop-on-latency={} on {}",
+                    drop_on_latency, element_name
+                );
             }
 
             if element_name.starts_with("webrtcbin") {
@@ -1650,6 +1673,20 @@ fn whip_input_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
+                name: "drop_on_latency".to_string(),
+                label: "Drop On Latency".to_string(),
+                description: "Drop queued packets that exceed the jitterbuffer latency instead of holding them. On by default: it works around a jitterbuffer bug that otherwise stalls the stream for the length of a mute gap. Turn it off when a downstream WebRTC endpoint has its own adaptive buffer and should decide what is too late.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "drop_on_latency".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "max_video_bitrate".to_string(),
                 label: "Max Video Bitrate (kbps)".to_string(),
                 description: "Maximum video bitrate hint sent to the browser via SDP. The browser's encoder will ramp up to this value.".to_string(),
@@ -1883,6 +1920,19 @@ mod tests {
     }
 
     #[test]
+    fn drop_on_latency_defaults_to_true() {
+        assert!(parse_drop_on_latency(&props(&[])));
+    }
+
+    #[test]
+    fn drop_on_latency_respects_explicit_false() {
+        assert!(!parse_drop_on_latency(&props(&[(
+            "drop_on_latency",
+            PropertyValue::Bool(false)
+        )])));
+    }
+
+    #[test]
     fn do_retransmission_respects_explicit_false() {
         assert!(!parse_do_retransmission(&props(&[(
             "do_retransmission",
@@ -2026,6 +2076,27 @@ mod tests {
             let configs = ctx.take_whip_endpoint_configs();
             assert_eq!(configs.len(), 1, "expected exactly one endpoint config");
             assert_eq!(configs[0].1.do_retransmission, expected);
+        }
+    }
+
+    /// Same contract for `drop_on_latency`: hardcoding the rtpbin workaround
+    /// back to a literal `true` fails the `false` case.
+    #[test]
+    fn drop_on_latency_reaches_whip_endpoint_config() {
+        let _ = gst::init();
+
+        for expected in [true, false] {
+            let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+            build_whipserversrc(
+                "whip-drop-on-latency-test",
+                &props(&[("drop_on_latency", PropertyValue::Bool(expected))]),
+                &ctx,
+            )
+            .expect("build_whipserversrc failed");
+
+            let configs = ctx.take_whip_endpoint_configs();
+            assert_eq!(configs.len(), 1, "expected exactly one endpoint config");
+            assert_eq!(configs[0].1.drop_on_latency, expected);
         }
     }
 }
