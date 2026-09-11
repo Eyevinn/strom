@@ -21,6 +21,9 @@ under review.
 - Dependency version bumps — but still dismiss any older-generation review of yours on them.
 - A PR whose current head SHA already carries your v3 review. Only a new head SHA or a new
   check conclusion is a re-review trigger.
+- A PR the implementation stage opened — the `kind=fix` marker in the body, never the author
+  name. These now open ready for review, so nothing else marks them off; `FIX.md` Phase 1
+  follows them, and a stage reviewing its own diff under its own protocol finds nothing.
 - Drafts are neither reviewed nor silently skipped — see "Drafts" below.
 
 A review is a verdict on a diff, not a turn in a conversation. The maintainer and the author
@@ -55,9 +58,10 @@ a comment asks you, or you are a requested reviewer. A new commit, a red check o
 thread is not being asked. Once asked, it is an ordinary review under this file with a
 `kind=review` marker.
 
-**Never post a draft-hold on a draft you opened.** Every implementation-stage PR is a draft;
-`FIX.md` Phase 1 owns those, and you know them by the `kind=fix` marker in the body — by the
-marker, never by the author.
+**Never post a draft-hold on a PR the implementation stage opened.** Those open ready for
+review, not as drafts, and `FIX.md` Phase 1 owns them; you know them by the `kind=fix` marker
+in the body — by the marker, never by the author. One that is somehow a draft is Phase 1's
+problem, not yours.
 
 A draft-hold is not a review: it never needs dismissal, and it does not stand in for the
 review the PR gets once it is marked ready.

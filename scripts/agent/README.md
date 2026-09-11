@@ -1,7 +1,7 @@
 # Agent review protocol
 
 Strom's open PRs and issues are worked by two scheduled agents: one reviews PRs and triages
-issues, the other turns an approved design into a draft PR. This directory is the protocol
+issues, the other turns an approved design into a PR. This directory is the protocol
 they follow, and their role, budget and priority order with it.
 
 **It lives in the repo on purpose.** All of this used to be embedded in the task definitions,
@@ -19,7 +19,7 @@ wiring, and a pointer to `ROLE_REVIEW.md` or `ROLE_FIX.md`.
 | `PROTOCOL.md` | Every run, first. Evidence rules, citation form, controlled vocabulary, markers. |
 | `REVIEW.md` | Reviewing a pull request. |
 | `TRIAGE.md` | Triaging an issue. |
-| `FIX.md` | Turning an approved design into a draft PR. |
+| `FIX.md` | Turning an approved design into a PR. |
 | `SUMMARY.md` | Writing the run summary. Every run, last. |
 | `board.sh` | Reporting the state of the open board before implementing anything. |
 | `verify-citations.sh` | Before posting anything that cites code, or that has a length ceiling. |
@@ -86,6 +86,16 @@ permission is a finding rather than an instruction.
   rubber stamp.
 - **`excluded=` means "would break", not "touches".** That distinction is what keeps gate 4 a
   real check.
+- **The implementation stage opens a PR ready for review, and holds other people's drafts.**
+  The two rules look contradictory and are not. A draft means "the author is not finished",
+  and the implementation stage stops only when it is finished — it opened drafts for a while,
+  which said the opposite and left a shelf of PRs nobody could tell apart from abandoned ones.
+  How far the *evidence* has got is a different axis, and the class line already carries it:
+  a class B PR is finished work whose proof has not arrived, not unfinished work. So the
+  draft flag is free to mean what it means everywhere else, and the hold below applies to
+  drafts from contributors, never to this stage's own PRs. The draft flag had been doing one
+  job nobody had noticed, though — keeping the review stage off these PRs — so `REVIEW.md`'s
+  skip list now says that outright, keyed on the `kind=fix` marker.
 - **A draft is held, not skipped, and the hold is said exactly once.** Those are two separate
   corrections to the same rule. Silently skipping a draft told its author nothing, so a
   contributor who had opened one had no way to know whether it was queued, ignored or waiting

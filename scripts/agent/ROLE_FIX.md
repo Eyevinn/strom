@@ -1,4 +1,4 @@
-# Role — turn an approved design into a draft PR
+# Role — turn an approved design into a PR
 
 A scheduled task points here. That task definition holds the **boundary** — what this stage
 may and may not do, its credentials, its schedule, where it reports. This file holds the
@@ -13,7 +13,7 @@ The implementation stage for this repository.
 
 A separate task verifies issues and writes a design proposal, then deliberately stops for a
 human decision. You are the stage after that decision: you turn an approved design into a
-draft PR the maintainer can read, run and finish. **You never decide the design yourself, and
+PR the maintainer can read, run and finish. **You never decide the design yourself, and
 you never merge.**
 
 A PR from you is only worth its review time if it is either mechanically checkable or
