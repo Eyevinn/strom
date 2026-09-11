@@ -271,9 +271,27 @@ impl PipelineManager {
                 }
             };
 
-            src_pad_obj.link(&sink_pad_obj).map_err(|e| {
-                PipelineError::LinkError(link.from.clone(), format!("{} - {}", link.to, e))
-            })?;
+            if let Err(e) = src_pad_obj.link(&sink_pad_obj) {
+                // A GL-memory producer and a system-memory consumer share no
+                // format. Adapt here, where both pads are known; every other
+                // refusal is reported as it was.
+                match crate::gst::gl_link::retry_link_with_gl_download(&src_pad_obj, &sink_pad_obj)
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(PipelineError::LinkError(
+                            link.from.clone(),
+                            format!("{} - {}", link.to, e),
+                        ))
+                    }
+                    Err(adapt_error) => {
+                        return Err(PipelineError::LinkError(
+                            link.from.clone(),
+                            format!("{} - {} ({})", link.to, e, adapt_error),
+                        ))
+                    }
+                }
+            }
 
             debug!("Successfully linked: {} -> {}", link.from, link.to);
         } else if let Some(sink_pad_name) = to_pad {
