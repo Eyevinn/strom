@@ -11526,6 +11526,18 @@
             },
             "description": "Current per-input video effects (length = configured `num_inputs`).\nEmpty when the FX engine is unavailable."
           },
+          "input_media_age_ms": {
+            "type": "array",
+            "items": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Milliseconds since each input last delivered a frame to the mixer\n(length = configured `num_inputs`). `None` for an input that has never\ndelivered one. A value that keeps growing marks a frozen input: the\ncompositor repeats its last frame, so a source that stopped looks the\nsame on air as one that is motionless."
+          },
           "input_resolutions": {
             "type": "array",
             "items": {

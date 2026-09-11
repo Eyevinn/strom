@@ -579,3 +579,62 @@ fn overlay_timer_exits_when_its_appsrc_is_orphaned() {
     let _ = appsrc.set_state(gst::State::Null);
     unregister_flow(&flow_id);
 }
+
+/// An input that has never delivered a buffer reads as `None`; once it has,
+/// the age is measured from that buffer and keeps growing while the input
+/// stays silent. This is what separates a frozen participant from a
+/// motionless one, which the picture alone cannot do.
+#[test]
+fn input_media_age_tracks_buffer_arrival() {
+    use super::layout;
+    use super::overlay::VisionMixerOverlayState;
+
+    let lo = layout::compute_layout(1280, 720, 3, 0, ASPECT_16_9, false);
+    let state = VisionMixerOverlayState::new(
+        3,
+        0,
+        0,
+        1,
+        vec!["A".into(), "B".into(), "C".into()],
+        lo,
+        1920,
+        1080,
+        false,
+        super::overlay::PipInitialState::default(),
+    );
+
+    // Nothing has arrived yet on any input.
+    for i in 0..3 {
+        assert_eq!(state.input_media_age_ms(i), None, "input {}", i);
+    }
+
+    state.note_input_buffer(1);
+    let age = state
+        .input_media_age_ms(1)
+        .expect("input 1 has delivered a buffer");
+    assert!(age < 1000, "fresh buffer should read as young, got {}", age);
+
+    // Its silent neighbours are still untouched.
+    assert_eq!(state.input_media_age_ms(0), None);
+    assert_eq!(state.input_media_age_ms(2), None);
+
+    // The age grows while the input stays silent.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let later = state
+        .input_media_age_ms(1)
+        .expect("input 1 has delivered a buffer");
+    assert!(
+        later >= age + 20,
+        "age should grow while silent: {} -> {}",
+        age,
+        later
+    );
+
+    // A fresh buffer resets it.
+    state.note_input_buffer(1);
+    assert!(state.input_media_age_ms(1).unwrap() < later);
+
+    // Out-of-range inputs have no slot rather than panicking.
+    assert_eq!(state.input_media_age_ms(9), None);
+    state.note_input_buffer(9);
+}

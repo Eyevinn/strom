@@ -1297,6 +1297,13 @@ pub struct VisionMixerState {
     /// Current master (PGM) video effect.
     #[serde(default)]
     pub master_effect: crate::effects::VideoEffect,
+    /// Milliseconds since each input last delivered a frame to the mixer
+    /// (length = configured `num_inputs`). `None` for an input that has never
+    /// delivered one. A value that keeps growing marks a frozen input: the
+    /// compositor repeats its last frame, so a source that stopped looks the
+    /// same on air as one that is motionless.
+    #[serde(default)]
+    pub input_media_age_ms: Vec<Option<u64>>,
 }
 
 /// Request to set the multiview overlay alpha on a vision mixer block.
