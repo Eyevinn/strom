@@ -278,20 +278,27 @@ impl<'a> PipelineParams<'a> {
     /// Build PGM output caps for the GL-memory passthrough path.
     /// Constrains framerate/resolution without forcing a download to system memory.
     pub(super) fn pgm_caps_glmem(&self) -> gst::Caps {
-        let s = format!(
-            "video/x-raw(memory:GLMemory),width={},height={},framerate={}/{},pixel-aspect-ratio=1/1",
-            self.pgm_w, self.pgm_h, self.pgm_framerate.0, self.pgm_framerate.1
-        );
-        s.parse().expect("valid GL memory caps for PGM")
+        self.raw_caps_glmem(self.pgm_w, self.pgm_h, self.pgm_framerate)
+    }
+
+    /// GL-memory caps: constrains framerate/resolution, and `output_format`
+    /// when set, without forcing a download to system memory.
+    fn raw_caps_glmem(&self, w: u32, h: u32, framerate: (i32, i32)) -> gst::Caps {
+        let mut builder = gst::Caps::builder("video/x-raw")
+            .features(["memory:GLMemory"])
+            .field("width", w as i32)
+            .field("height", h as i32)
+            .field("framerate", gst::Fraction::new(framerate.0, framerate.1))
+            .field("pixel-aspect-ratio", gst::Fraction::new(1, 1));
+        if let Some(fmt) = self.output_format.as_deref() {
+            builder = builder.field("format", fmt);
+        }
+        builder.build()
     }
 
     /// Build multiview output caps for the GL-memory passthrough path.
     pub(super) fn mv_caps_glmem(&self) -> gst::Caps {
-        let s = format!(
-            "video/x-raw(memory:GLMemory),width={},height={},framerate={}/{},pixel-aspect-ratio=1/1",
-            self.mv_w, self.mv_h, self.mv_framerate.0, self.mv_framerate.1
-        );
-        s.parse().expect("valid GL memory caps for MV")
+        self.raw_caps_glmem(self.mv_w, self.mv_h, self.mv_framerate)
     }
 }
 

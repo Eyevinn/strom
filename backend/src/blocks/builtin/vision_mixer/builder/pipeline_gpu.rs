@@ -10,6 +10,45 @@ use super::super::{elements, layout};
 use super::{audio_meter, pad_layout, setup_overlay_renderer, PipelineParams};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult};
 
+/// Insert a `glcolorconvert` ahead of an output branch's format pin when
+/// `output_format` is set, and return the element/pad the branch links from.
+///
+/// `gldownload` moves GL memory to system memory and leaves the pixel format
+/// alone, and `glvideomixerelement` is RGBA-only, so a format pin with nothing
+/// converting in front of it has no common format with its peer and never
+/// links — the branch then carries no video at all while the flow still
+/// reports Playing. Converting on the GPU is also the cheaper place to do it:
+/// RGBA to NV12 halves the bytes that cross the bus.
+///
+/// Feeding from the branch's own pad (not the mixer's) keeps the conversion
+/// off the PGM feed into the multiview compositor, which needs RGBA.
+fn output_convert_source(
+    p: &PipelineParams,
+    name: &str,
+    from_id: &str,
+    from_pad: &str,
+    elems: &mut Vec<(String, gst::Element)>,
+    links: &mut Vec<(ElementPadRef, ElementPadRef)>,
+) -> Result<(String, String), BlockBuildError> {
+    let Some(format) = p.output_format.as_deref() else {
+        return Ok((from_id.to_string(), from_pad.to_string()));
+    };
+    let cc_id = p.id(name);
+    elems.push((
+        cc_id.clone(),
+        elements::make_element("glcolorconvert", &cc_id)?,
+    ));
+    links.push((
+        ElementPadRef::pad(from_id, from_pad),
+        ElementPadRef::pad(&cc_id, "sink"),
+    ));
+    info!(
+        "Vision mixer {}: converting to {} in GL at {}",
+        p.instance_id, format, name
+    );
+    Ok((cc_id, "src".to_string()))
+}
+
 pub(super) fn build_gpu_pipeline(
     p: &PipelineParams,
     ctx: &BlockBuildContext,
@@ -51,10 +90,16 @@ pub(super) fn build_gpu_pipeline(
 
     // --- Distribution output chain ---
     // queue_post_dist decouples the compositor from downstream processing.
-    // With gl_download=true:  mixer → queue_post_dist → tee_pgm → gldownload → capsfilter → queue_dist_out
-    // With gl_download=false: mixer → queue_post_dist → tee_pgm → capsfilter(GLMemory) → queue_dist_out
+    // With gl_download=true:  mixer → queue_post_dist → tee_pgm → [glcolorconvert] → gldownload → capsfilter → queue_dist_out
+    // With gl_download=false: mixer → queue_post_dist → tee_pgm → [glcolorconvert] → capsfilter(GLMemory) → queue_dist_out
     // The capsfilter on the false path enforces pgm_framerate/resolution while
     // keeping memory in GL — without it, the framerate property is silently ignored.
+    //
+    // The capsfilters carry output_format (see pgm_caps/pgm_caps_glmem), which
+    // only negotiates because of the bracketed glcolorconvert — see
+    // `output_convert_source`. Keyed alpha needs no special handling here:
+    // glvideomixerelement is RGBA-only on both pad templates, so the blend is
+    // always RGBA and no format pin can reach back into it.
     let q_post_dist_id = p.id("queue_post_dist");
     let queue_post_dist = elements::make_queue(&q_post_dist_id)?;
     let tee_pgm_id = p.id("tee_pgm");
@@ -99,6 +144,14 @@ pub(super) fn build_gpu_pipeline(
         ElementPadRef::pad(&q_post_dist_id, "src"),
         ElementPadRef::pad(&tee_pgm_id, "sink"),
     ));
+    let (dist_src_id, dist_src_pad) = output_convert_source(
+        p,
+        "glcolorconvert_dist_out",
+        &tee_pgm_id,
+        "src_0",
+        &mut elems,
+        &mut links,
+    )?;
     if p.gl_download {
         let dl_dist_id = p.id("gldownload_dist");
         let gldownload_dist = elements::make_element("gldownload", "gldownload_dist")?;
@@ -112,7 +165,7 @@ pub(super) fn build_gpu_pipeline(
         elems.push((dl_dist_id.clone(), gldownload_dist));
         elems.push((cf_dist_id.clone(), capsfilter_dist));
         links.push((
-            ElementPadRef::pad(&tee_pgm_id, "src_0"),
+            ElementPadRef::pad(&dist_src_id, &dist_src_pad),
             ElementPadRef::pad(&dl_dist_id, "sink"),
         ));
         links.push((
@@ -135,7 +188,7 @@ pub(super) fn build_gpu_pipeline(
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter_dist: {}", e)))?;
         elems.push((cf_dist_id.clone(), capsfilter_dist));
         links.push((
-            ElementPadRef::pad(&tee_pgm_id, "src_0"),
+            ElementPadRef::pad(&dist_src_id, &dist_src_pad),
             ElementPadRef::pad(&cf_dist_id, "sink"),
         ));
         links.push((
@@ -196,6 +249,14 @@ pub(super) fn build_gpu_pipeline(
         ElementPadRef::pad(&mv_comp_id, "src"),
         ElementPadRef::pad(&q_post_mv_id, "sink"),
     ));
+    let (mv_src_id, mv_src_pad) = output_convert_source(
+        p,
+        "glcolorconvert_mv_out",
+        &q_post_mv_id,
+        "src",
+        &mut elems,
+        &mut links,
+    )?;
     if p.gl_download {
         let dl_id = p.id("gldownload_mv");
         let gldownload_mv = elements::make_element("gldownload", "gldownload_mv")?;
@@ -209,7 +270,7 @@ pub(super) fn build_gpu_pipeline(
         elems.push((dl_id.clone(), gldownload_mv));
         elems.push((cf_mv_id.clone(), capsfilter_mv));
         links.push((
-            ElementPadRef::pad(&q_post_mv_id, "src"),
+            ElementPadRef::pad(&mv_src_id, &mv_src_pad),
             ElementPadRef::pad(&dl_id, "sink"),
         ));
         links.push((
@@ -231,7 +292,7 @@ pub(super) fn build_gpu_pipeline(
             .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter_mv: {}", e)))?;
         elems.push((cf_mv_id.clone(), capsfilter_mv));
         links.push((
-            ElementPadRef::pad(&q_post_mv_id, "src"),
+            ElementPadRef::pad(&mv_src_id, &mv_src_pad),
             ElementPadRef::pad(&cf_mv_id, "sink"),
         ));
         links.push((
