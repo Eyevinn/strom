@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 
+include!("build_version.rs");
+
 fn main() {
     // Set version and build information
     set_version_info();
@@ -35,6 +37,12 @@ fn main() {
     // Rerun if .git/HEAD changes (new commits)
     println!("cargo:rerun-if-changed=../.git/HEAD");
     println!("cargo:rerun-if-changed=../.git/refs");
+    // Rerun if the included version-field helper changes
+    println!("cargo:rerun-if-changed=build_version.rs");
+    // Rerun if the Docker build args carrying git provenance change
+    println!("cargo:rerun-if-env-changed=GIT_HASH");
+    println!("cargo:rerun-if-env-changed=GIT_TAG");
+    println!("cargo:rerun-if-env-changed=GIT_BRANCH");
     // Rerun if Windows icon changes
     println!("cargo:rerun-if-changed=strom.ico");
 
@@ -60,53 +68,23 @@ fn main() {
 
 /// Set version and build information as environment variables
 fn set_version_info() {
-    // Get git commit hash (short)
-    let git_hash = Command::new("git")
-        .args(["rev-parse", "--short=8", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
-        })
-        .map(|s| s.trim().to_string())
+    // Docker builds carry no repository: `.dockerignore` excludes `.git/` so the layer cache
+    // is not invalidated on every commit. The publish workflow passes these in as build args
+    // instead, and they take precedence over the shell-out that cannot succeed there.
+    let git_hash = version_field_from_env("GIT_HASH")
+        .or_else(|| git_value(&["rev-parse", "--short=8", "HEAD"]))
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Get git tag (if on a tagged commit)
-    let git_tag = Command::new("git")
-        .args(["describe", "--tags", "--exact-match"])
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
-        })
-        .map(|s| s.trim().to_string())
+    let git_tag = version_field_from_env("GIT_TAG")
+        .or_else(|| git_value(&["describe", "--tags", "--exact-match"]))
         .unwrap_or_default();
+
+    let git_branch = version_field_from_env("GIT_BRANCH")
+        .or_else(|| git_value(&["rev-parse", "--abbrev-ref", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_string());
 
     // Get build timestamp (ISO 8601 format)
     let build_timestamp = chrono::Utc::now().to_rfc3339();
-
-    // Get git branch
-    let git_branch = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
-        })
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
 
     // Check if working directory is dirty
     let git_dirty = Command::new("git")
@@ -139,6 +117,23 @@ fn set_version_info() {
         },
         git_hash
     );
+}
+
+/// Run `git` with `args` and return its trimmed output, or `None` if it did not succeed.
+fn git_value(args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Compute a hash of all frontend source files
