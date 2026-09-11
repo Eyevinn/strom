@@ -27,6 +27,7 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use strom_types::flow::{BlockHealth, BlockHealthStatus};
 
 /// A pad whose task has been paused while the pipeline is playing.
@@ -101,7 +102,7 @@ fn owning_block(element_id: &str) -> &str {
 /// other pipeline state.
 pub(crate) fn scan_block_health(
     elements: &HashMap<String, gst::Element>,
-    diagnostics: &crate::gst::BlockDiagnostics,
+    diagnostics: &[Arc<dyn crate::gst::BlockDiagnostic>],
 ) -> Vec<BlockHealth> {
     let mut by_block: BTreeMap<&str, BlockHealth> = BTreeMap::new();
 
