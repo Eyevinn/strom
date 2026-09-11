@@ -484,7 +484,11 @@ jobs:
           && contains(fromJSON('["both","windows"]'), inputs.platforms))
     needs: [check-wasm, preflight]
     runs-on: windows-latest
-    timeout-minutes: 45
+    # 45 was never a margin: this job measured 43m18s and 42m02s on earlier
+    # heads and was cut off at 45m06s in `Build MCP server`, with every other
+    # step green. A fork's pull request has no sccache credentials, so clippy,
+    # the test build and the release build each compile the tree from cold.
+    timeout-minutes: 60
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
@@ -603,8 +607,8 @@ jobs:
     # (measured 0.00% Rust hit rate), which means clippy, the test build and the
     # release build each compile the tree from scratch — 27 minutes observed.
     # A fork's pull request has no sccache credentials at all, so it is always
-    # that number. Matches the Windows job, which sits at 45 for the same
-    # reason.
+    # that number. The Windows job compiles the same tree more slowly and sits
+    # at 60 for the same reason.
     timeout-minutes: 45
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
