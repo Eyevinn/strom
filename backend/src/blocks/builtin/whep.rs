@@ -10,8 +10,9 @@
 //! Handles dynamic pad creation by linking new audio streams to a liveadder mixer.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gst::gl_bridge;
+use crate::gpu::video_convert_mode;
 use crate::gst::ice_preflight;
+use crate::gst::video_input_bridge;
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -1577,6 +1578,11 @@ fn build_whepserversink(
     // the first queue's caps probe drives it — all video inputs must share the
     // same codec.
     if has_video {
+        // Resolved here rather than inside the probe: this is where the rest of
+        // the project picks its converter, and a panic on a streaming thread
+        // would take the pipeline with it.
+        let convert_factory = video_convert_mode().element_name();
+
         // Shared latch: only the first input that sees a caps event sets video-caps.
         let video_caps_set = Arc::new(AtomicBool::new(false));
 
@@ -1729,7 +1735,8 @@ fn build_whepserversink(
                 gst::PadProbeReturn::Ok
             });
 
-            // Consumer-side GPU-memory adaptation.
+            // Consumer-side input adaptation: download GL memory, and convert
+            // to a format the encoders take natively.
             //
             // whepserversink advertises video/x-raw(memory:GLMemory) on its
             // video request pads, so GL frames negotiate all the way to the
@@ -1738,11 +1745,20 @@ fn build_whepserversink(
             // non-GL path, keeps working. On macOS this is the normal case:
             // decodebin autoplugs vtdec_hw, which outputs GL memory.
             //
-            // The producer cannot decide this for us (a GL vision mixer
+            // webrtcsink then builds one encoding chain per consumer, each
+            // with its own videoconvert, so whatever format arrives here is
+            // converted once per viewer. Converting once, before the sink fans
+            // the stream out, leaves those converters in passthrough.
+            //
+            // The producer cannot decide either for us (a GL vision mixer
             // feeding a GL consumer must stay on the GPU), and neither can
             // this block at build time, since the upstream decoder is
-            // autoplugged. So the decision is made from the negotiated caps.
-            gl_bridge::install_gl_download_bridge(&queue_src_pad, &video_queue_id);
+            // autoplugged. So both decisions are made from the negotiated caps.
+            video_input_bridge::install_video_input_bridge(
+                &queue_src_pad,
+                &video_queue_id,
+                convert_factory,
+            );
 
             // Video link: queue -> whepserversink (video_<slot> request pad)
             internal_links.push((
@@ -2425,12 +2441,15 @@ fn whep_output_definition() -> BlockDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     /// `whepserversink` comes from the `gst-plugin-webrtc` crate, which is only
     /// registered by the binary. Tests must register it themselves.
     fn init_gst() {
         let _ = gst::init();
         let _ = gstrswebrtc::plugin_register_static();
+        // The video path picks its converter from the detected mode.
+        crate::gpu::detect_gpu_capabilities();
     }
 
     /// Build a property map. `legacy_mode` populates the old "mode" enum
@@ -2729,5 +2748,88 @@ mod tests {
             .expect("expected pads");
         assert!(video_pad_names(&pads).is_empty());
         assert_eq!(audio_pad_names(&pads), vec!["audio_in"]);
+    }
+
+    /// The block must convert a video input the encoders cannot take before
+    /// `whepserversink` fans it out, or every consumer converts it again.
+    #[test]
+    fn video_input_is_converted_before_the_sink() {
+        init_gst();
+
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = build_whepserversink(
+            "whep-convert-test",
+            &raw_props(&[
+                ("num_audio_tracks", PropertyValue::UInt(0)),
+                ("num_video_tracks", PropertyValue::UInt(1)),
+            ]),
+            &ctx,
+        )
+        .expect("build_whepserversink failed");
+
+        let elements: HashMap<String, gst::Element> = result.elements.iter().cloned().collect();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .expect("videotestsrc");
+        let filter = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("format", "RGBA")
+                    .field("width", 320i32)
+                    .field("height", 240i32)
+                    .field("framerate", gst::Fraction::new(30, 1))
+                    .build(),
+            )
+            .build()
+            .expect("capsfilter");
+        pipeline.add_many([&src, &filter]).expect("add");
+        for (_, element) in &result.elements {
+            pipeline.add(element).expect("add block element");
+        }
+
+        let queue = elements
+            .get("whep-convert-test:video_queue")
+            .expect("video_queue");
+        src.link(&filter).expect("link src");
+        filter.link(queue).expect("link into the block");
+        let sink_pad = elements
+            .get("whep-convert-test:whepserversink")
+            .expect("whepserversink")
+            .request_pad_simple("video_0")
+            .expect("video_0 pad");
+        queue
+            .static_pad("src")
+            .expect("queue src")
+            .link(&sink_pad)
+            .expect("link queue to sink");
+
+        pipeline.set_state(gst::State::Playing).expect("play");
+
+        let bus = pipeline.bus().expect("bus");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut negotiated = String::new();
+        while Instant::now() < deadline {
+            if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) {
+                if let gst::MessageView::Error(e) = msg.view() {
+                    panic!("pipeline error: {} ({:?})", e.error(), e.debug());
+                }
+            }
+            if let Some(format) = sink_pad
+                .current_caps()
+                .and_then(|c| c.structure(0).and_then(|s| s.get::<String>("format").ok()))
+            {
+                negotiated = format;
+                break;
+            }
+        }
+
+        pipeline.set_state(gst::State::Null).expect("null");
+        assert_eq!(
+            negotiated, "NV12",
+            "the block should convert RGBA before whepserversink fans it out"
+        );
     }
 }
