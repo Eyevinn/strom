@@ -37,6 +37,19 @@ fn elem(id: &str, ty: &str, props: Vec<(&str, PV)>) -> strom_types::Element {
     }
 }
 
+/// The GPU backend cannot be built without this factory, so a silent skip here
+/// would let the guard pass green while testing nothing. The GL plugin ships in
+/// `gstreamer1.0-plugins-base`, which CI installs, so its absence is a CI
+/// regression. Only the end-to-end test below needs a GL *context*, which
+/// headless runners do not have.
+fn require_gl_plugin() {
+    assert!(
+        gstreamer::ElementFactory::find("glvideomixerelement").is_some(),
+        "glvideomixerelement is missing, so the GPU backend cannot be built and this \
+         guard would test nothing. Install the GStreamer GL plugin."
+    );
+}
+
 /// Probe whether this environment can actually render through GL. The GL
 /// plugins being installed is not enough: on headless runners the elements
 /// exist but no context can be created. Same probe as `vision_mixer_fx_test`.
@@ -210,20 +223,14 @@ fn assert_output_chain_pins_format(gl_download: bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gpu_output_format_links_with_gl_download() {
     gstreamer::init().unwrap();
-    if gstreamer::ElementFactory::find("glvideomixerelement").is_none() {
-        eprintln!("SKIP: no GL plugin, GPU backend unavailable");
-        return;
-    }
+    require_gl_plugin();
     assert_output_chain_pins_format(true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gpu_output_format_links_without_gl_download() {
     gstreamer::init().unwrap();
-    if gstreamer::ElementFactory::find("glvideomixerelement").is_none() {
-        eprintln!("SKIP: no GL plugin, GPU backend unavailable");
-        return;
-    }
+    require_gl_plugin();
     assert_output_chain_pins_format(false);
 }
 
