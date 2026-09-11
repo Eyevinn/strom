@@ -129,17 +129,37 @@ struct WatchedTrack {
 /// Without it the branch answers upstream with a flow error, and a WHIP seat's
 /// encoder — which feeds the vision mixer through the same tee — stops with it.
 ///
-/// A BUFFER probe is the hottest path in the pipeline, so this is one relaxed
-/// atomic load and nothing else.
+/// It has to be the identity's **sink** pad. `end_stalled_track` retires a track by
+/// pushing EOS out of the src pad, and `gst_pad_push` answers `GST_FLOW_EOS` from
+/// that sticky flag before it dispatches any probe — so a drop probe on the src pad
+/// stops running at the one moment it is needed.
+///
+/// Events have to be dropped as well as buffers, and that is what makes this a
+/// correctness matter rather than a tidiness one. An encoder upstream of the block
+/// emits a sticky TAG event every so often. Forwarding one into a pad that already
+/// carries EOS fails, `push_sticky` turns that refusal into `GST_FLOW_ERROR`, and
+/// the error travels back to the seat's source, which pauses its streaming task and
+/// never restarts. A buffer probe alone lets those events straight through.
+///
+/// Flush events are deliberately not covered: they carry pad state that has to
+/// reach the branch even after it has left the recording.
+///
+/// These are the hottest paths in the pipeline, so this is one relaxed atomic load
+/// and nothing else.
 fn add_retired_input_probe(pad: &gst::Pad, activity: &Arc<TrackActivity>) {
     let activity = Arc::clone(activity);
-    pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
-        if activity.retired.load(Ordering::Relaxed) {
-            gst::PadProbeReturn::Drop
-        } else {
-            gst::PadProbeReturn::Ok
-        }
-    });
+    pad.add_probe(
+        gst::PadProbeType::BUFFER
+            | gst::PadProbeType::BUFFER_LIST
+            | gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_pad, _info| {
+            if activity.retired.load(Ordering::Relaxed) {
+                gst::PadProbeReturn::Drop
+            } else {
+                gst::PadProbeReturn::Ok
+            }
+        },
+    );
 }
 
 /// Record what the muxer takes from this track: when, and how far it carried the
@@ -696,6 +716,9 @@ impl BlockBuilder for RecorderBuilder {
             let src_pad = video_input.static_pad("src").ok_or_else(|| {
                 BlockBuildError::ElementCreation("video identity has no src pad".to_string())
             })?;
+            let sink_pad_for_drops = video_input.static_pad("sink").ok_or_else(|| {
+                BlockBuildError::ElementCreation("video identity has no sink pad".to_string())
+            })?;
 
             let activity = Arc::new(TrackActivity {
                 last_muxed_ms: AtomicU64::new(0),
@@ -703,7 +726,7 @@ impl BlockBuilder for RecorderBuilder {
                 running_time_offset_ns: AtomicI64::new(0),
                 retired: AtomicBool::new(false),
             });
-            add_retired_input_probe(&src_pad, &activity);
+            add_retired_input_probe(&sink_pad_for_drops, &activity);
             let probe_activity = Arc::clone(&activity);
             video_activities.push(activity);
 
@@ -934,6 +957,9 @@ impl BlockBuilder for RecorderBuilder {
             let src_pad = audio_input.static_pad("src").ok_or_else(|| {
                 BlockBuildError::ElementCreation(format!("audio_{} identity has no src pad", i))
             })?;
+            let sink_pad_for_drops = audio_input.static_pad("sink").ok_or_else(|| {
+                BlockBuildError::ElementCreation(format!("audio_{} identity has no sink pad", i))
+            })?;
 
             let activity = Arc::new(TrackActivity {
                 last_muxed_ms: AtomicU64::new(0),
@@ -941,7 +967,7 @@ impl BlockBuilder for RecorderBuilder {
                 running_time_offset_ns: AtomicI64::new(0),
                 retired: AtomicBool::new(false),
             });
-            add_retired_input_probe(&src_pad, &activity);
+            add_retired_input_probe(&sink_pad_for_drops, &activity);
             let probe_activity = Arc::clone(&activity);
             audio_activities.push(activity);
 
@@ -1561,5 +1587,90 @@ fn recorder_definition() -> BlockDefinition {
             height: Some(2.5),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn idle_activity() -> TrackActivity {
+        TrackActivity {
+            last_muxed_ms: AtomicU64::new(0),
+            last_muxed_running_ms: AtomicU64::new(0),
+            running_time_offset_ns: AtomicI64::new(0),
+            retired: AtomicBool::new(false),
+        }
+    }
+
+    /// Ending a track must not take the rest of the seat with it.
+    ///
+    /// A WHIP seat's media leaves one tee for the recorder, the vision mixer, the
+    /// audio mixer and the return router. A retired branch that answers upstream
+    /// with a flow error stops the encoder feeding it, and the seat then goes
+    /// silent for the whole flow until it is restarted. It has to swallow what
+    /// arrives and answer OK instead.
+    ///
+    /// Both halves matter. Move the drop probe back to the identity's src pad and
+    /// the buffer case fails, because `gst_pad_push` reads the EOS flag before it
+    /// dispatches probes. Narrow the probe to buffers alone and the event case
+    /// fails, which is the half that bites in a real flow: an encoder upstream
+    /// emits a sticky TAG event every so often, and `push_sticky` reports a
+    /// refused one to the caller as `GST_FLOW_ERROR`.
+    #[test]
+    fn a_retired_track_still_answers_ok_upstream() {
+        gst::init().expect("gstreamer init");
+        let pipeline = gst::Pipeline::new();
+        let input = gst::ElementFactory::make("identity")
+            .build()
+            .expect("identity is part of gstreamer core");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add_many([&input, &sink]).expect("add elements");
+        input.link(&sink).expect("link identity to fakesink");
+
+        let sink_pad = input.static_pad("sink").expect("identity has a sink pad");
+        let activity = Arc::new(idle_activity());
+        add_retired_input_probe(&sink_pad, &activity);
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+
+        let push = || sink_pad.chain(gst::Buffer::with_size(16).expect("allocate buffer"));
+        assert_eq!(
+            push(),
+            Ok(gst::FlowSuccess::Ok),
+            "the branch takes buffers while the track is live"
+        );
+
+        end_stalled_track(&input, &activity);
+        assert!(
+            activity.retired.load(Ordering::SeqCst),
+            "the watchdog ended the track"
+        );
+
+        assert_eq!(
+            push(),
+            Ok(gst::FlowSuccess::Ok),
+            "a retired branch has to keep answering OK, or it stops whatever feeds the tee it hangs off"
+        );
+
+        let tags = gst::TagList::new();
+        assert!(
+            sink_pad.send_event(gst::event::Tag::new(tags)),
+            "a retired branch has to take events too, not just buffers"
+        );
+        assert_eq!(
+            push(),
+            Ok(gst::FlowSuccess::Ok),
+            "a sticky event refused by the retired branch turns the next push into a flow error"
+        );
+
+        let _ = pipeline.set_state(gst::State::Null);
     }
 }
