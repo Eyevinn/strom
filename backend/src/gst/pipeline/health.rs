@@ -23,11 +23,18 @@
 //! that is the signal used here. `gst_pad_get_task_state()` returns `Stopped`
 //! both for a pad whose task was stopped and for a pad that never had one, so
 //! `Stopped` cannot be told apart from the common case and is not reported.
+//!
+//! A branch that never started is the other thing reported here, and the scan
+//! above cannot see it: with no link there is no pad task to pause, and a tee
+//! with `allow-not-linked=true` - what every block output bus ends in - absorbs
+//! the `not-linked` that would otherwise surface upstream. The flow reaches
+//! `PLAYING` carrying nothing on that branch.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use strom_types::flow::{BlockHealth, BlockHealthStatus};
+use strom_types::Link;
 
 /// A pad whose task has been paused while the pipeline is playing.
 struct StalledPad {
@@ -91,11 +98,49 @@ fn owning_block(element_id: &str) -> &str {
     element_id.split(':').next().unwrap_or(element_id)
 }
 
+/// Whether a deferred link has missed its only chance to form.
+///
+/// `pending_links` holds every link `try_link_elements` refused, and the only
+/// thing that retries one is the `pad-added` handler on its source element. A
+/// pad that is already there will not be added again, so a deferred link whose
+/// named source pad exists and has no peer is unformed for the life of the
+/// pipeline, not merely slow.
+///
+/// The converse is deliberately not reported. A source pad that does not exist
+/// yet - `decodebin` before it has typefound, a `whipserversrc` before a
+/// publisher arrives - is the case the deferral was built for, and the handler
+/// will link it when it appears.
+///
+/// Two links are outside what this can judge, and both read as formed. One
+/// whose source pad appeared under a different name than the link asked for
+/// (`src` matching `src_0`) is linked through the handler's pattern match, and
+/// one whose unlinked dynamic pad picked up an auto-tee has a peer that is not
+/// the declared destination.
+fn unformed_link(elements: &HashMap<String, gst::Element>, link: &Link) -> bool {
+    let (from_ref, _) = link.to_pad_refs();
+    let Some(element) = elements.get(&from_ref.element_id) else {
+        return false;
+    };
+    // An element-level link names no pad; GStreamer would have used the
+    // element's own `src` pad, so that is what is checked.
+    let pad_name = from_ref.pad_name.as_deref().unwrap_or("src");
+    let Some(pad) = element.static_pad(pad_name) else {
+        return false;
+    };
+    pad.direction() == gst::PadDirection::Src && pad.peer().is_none()
+}
+
 /// Report health for every block with at least one element in `elements`.
+///
+/// `pending_links` are the links construction could not make, carried from the
+/// `PipelineManager` unchanged.
 ///
 /// Call only while the pipeline is playing; a paused task is expected in any
 /// other pipeline state.
-pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec<BlockHealth> {
+pub(crate) fn scan_block_health(
+    elements: &HashMap<String, gst::Element>,
+    pending_links: &[Link],
+) -> Vec<BlockHealth> {
     let mut by_block: BTreeMap<&str, BlockHealth> = BTreeMap::new();
 
     for (element_id, element) in elements {
@@ -118,6 +163,24 @@ pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec
                 stalled.element, stalled.pad
             ));
         }
+    }
+
+    // Reported against the block owning the source element, which is where the
+    // branch dies, and allowed to overwrite a stall found above: a task parked
+    // behind a link that never formed is the symptom, and the link is the cause.
+    for link in pending_links {
+        if !unformed_link(elements, link) {
+            continue;
+        }
+        let (from_ref, _) = link.to_pad_refs();
+        let Some(entry) = by_block.get_mut(owning_block(&from_ref.element_id)) else {
+            continue;
+        };
+        entry.status = BlockHealthStatus::Failed;
+        entry.detail = Some(format!(
+            "link {} -> {} never formed - this branch has carried no data since the flow started",
+            link.from, link.to
+        ));
     }
 
     by_block.into_values().collect()
@@ -151,6 +214,9 @@ impl super::PipelineManager {
             .map(|(id, element)| (id.clone(), element.downgrade()))
             .collect();
 
+        // Construction is the only writer of pending_links, and it has finished
+        // by the time this task starts.
+        let pending_links = self.pending_links.clone();
         let cached_state = self.cached_state.clone();
         let block_health = self.block_health.clone();
         let events = self.events.clone();
@@ -182,7 +248,7 @@ impl super::PipelineManager {
                     continue;
                 }
 
-                let mut snapshot = scan_block_health(&elements);
+                let mut snapshot = scan_block_health(&elements, &pending_links);
 
                 // A block is only reported once it has looked stalled on
                 // CONFIRMATIONS_BEFORE_FAILED scans in a row. Downgrade the
@@ -212,7 +278,7 @@ impl super::PipelineManager {
                         (true, false) => {
                             failed.insert(health.block_id.clone());
                             tracing::error!(
-                                "Block '{}' in flow '{}' has stopped: {}. The pipeline still reports Playing",
+                                "Block '{}' in flow '{}' is not passing data: {}. The pipeline still reports Playing",
                                 health.block_id,
                                 flow_name,
                                 health.detail.as_deref().unwrap_or("no detail")
@@ -266,6 +332,108 @@ mod tests {
     use crate::gst::pipeline::PipelineManager;
     use std::time::{Duration, Instant};
     use strom_types::{Element, Flow, Link, PropertyValue};
+
+    /// `videoconvert:src` and `audioconvert:sink` have no format in common, so
+    /// a link between them is refused, now and on every retry.
+    fn unlinkable_pair() -> (HashMap<String, gst::Element>, Link) {
+        gst::init().unwrap();
+        let elements: HashMap<String, gst::Element> = [
+            ("vconv", "videoconvert"),
+            ("aconv", "audioconvert"),
+            ("holder", "fakesink"),
+        ]
+        .into_iter()
+        .map(|(id, factory)| {
+            (
+                id.to_string(),
+                gst::ElementFactory::make(factory)
+                    .name(id)
+                    .build()
+                    .expect("element should build"),
+            )
+        })
+        .collect();
+        let link = Link {
+            from: "vconv:src".to_string(),
+            to: "aconv:sink".to_string(),
+        };
+        (elements, link)
+    }
+
+    fn failure_detail(health: &[BlockHealth], block_id: &str) -> Option<String> {
+        health
+            .iter()
+            .find(|h| h.block_id == block_id && h.status == BlockHealthStatus::Failed)
+            .and_then(|h| h.detail.clone())
+    }
+
+    #[test]
+    fn a_deferred_link_that_never_formed_fails_its_block() {
+        let (elements, link) = unlinkable_pair();
+
+        assert!(
+            scan_block_health(&elements, &[])
+                .iter()
+                .all(|h| h.status == BlockHealthStatus::Ok),
+            "nothing is stalled, so the pad-task scan must find nothing"
+        );
+
+        let detail = failure_detail(&scan_block_health(&elements, &[link]), "vconv")
+            .expect("the unformed link must fail the block owning its source");
+        assert!(
+            detail.contains("vconv:src -> aconv:sink"),
+            "the detail must name the link: {}",
+            detail
+        );
+    }
+
+    /// The deferral exists for a source pad that is not there yet. Reporting one
+    /// would mark every `decodebin` failed for as long as it takes to typefind.
+    #[test]
+    fn a_deferred_link_waiting_on_a_dynamic_pad_is_not_reported() {
+        gst::init().unwrap();
+        let elements: HashMap<String, gst::Element> = [(
+            "dec".to_string(),
+            gst::ElementFactory::make("decodebin")
+                .name("dec")
+                .build()
+                .expect("decodebin should build"),
+        )]
+        .into_iter()
+        .collect();
+        let pending = [Link {
+            from: "dec:src_0".to_string(),
+            to: "sink:sink".to_string(),
+        }];
+
+        assert!(
+            scan_block_health(&elements, &pending)
+                .iter()
+                .all(|h| h.status == BlockHealthStatus::Ok),
+            "a source pad that has not appeared yet is not a failure"
+        );
+    }
+
+    /// A link the `pad-added` handler resolved is still in `pending_links`, so a
+    /// linked source pad has to read as healthy.
+    #[test]
+    fn a_deferred_link_that_did_form_is_not_reported() {
+        let (elements, link) = unlinkable_pair();
+        let vconv = elements.get("vconv").unwrap();
+        let holder = elements.get("holder").unwrap();
+        vconv
+            .static_pad("src")
+            .unwrap()
+            .link(&holder.static_pad("sink").unwrap())
+            .expect("videoconvert should link to fakesink");
+
+        assert!(
+            scan_block_health(&elements, &[link])
+                .iter()
+                .all(|h| h.status == BlockHealthStatus::Ok),
+            "a linked source pad means the deferred link resolved"
+        );
+    }
 
     #[test]
     fn block_elements_are_attributed_to_their_block() {
@@ -352,6 +520,38 @@ mod tests {
             Link {
                 from: "split".to_string(),
                 to: "q_dangling".to_string(),
+            },
+        ];
+        flow
+    }
+
+    /// A live chain that keeps the pipeline running, plus a declared link between
+    /// two elements with no format in common.
+    ///
+    /// Nothing feeds the unlinkable pair, so no pad task parks and the pad-task
+    /// scan has nothing to find - the same blind spot a real flow presents when
+    /// a block's `allow-not-linked` output tee absorbs the `not-linked` from
+    /// below an unformed link.
+    fn unformed_link_flow() -> Flow {
+        let mut flow = Flow::new("unformed link health test");
+        flow.elements = vec![
+            element(
+                "src",
+                "videotestsrc",
+                &[("is-live", PropertyValue::Bool(true))],
+            ),
+            element("sink", "fakesink", &[("sync", PropertyValue::Bool(false))]),
+            element("vconv", "videoconvert", &[]),
+            element("aconv", "audioconvert", &[]),
+        ];
+        flow.links = vec![
+            Link {
+                from: "src".to_string(),
+                to: "sink".to_string(),
+            },
+            Link {
+                from: "vconv:src".to_string(),
+                to: "aconv:sink".to_string(),
             },
         ];
         flow
@@ -487,6 +687,65 @@ mod tests {
             !manager.get_block_health().is_empty(),
             "health scan never produced a snapshot"
         );
+
+        manager.stop().expect("pipeline should stop");
+    }
+
+    /// A link that construction could not make and nothing retried. The branch
+    /// below it carries no data, and with no pad task to pause there is nothing
+    /// for the stalled-pad scan to find.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_link_that_never_formed_is_reported_on_a_playing_pipeline() {
+        gst::init().unwrap();
+
+        let mut manager = PipelineManager::new(
+            &unformed_link_flow(),
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("pipeline should build");
+
+        manager.start().expect("pipeline should start");
+        assert!(
+            wait_for(
+                || manager.get_state() == strom_types::PipelineState::Playing,
+                Duration::from_secs(10)
+            ),
+            "pipeline never reached Playing"
+        );
+
+        assert!(
+            wait_for(
+                || failure_detail(&manager.get_block_health(), "vconv").is_some(),
+                HEALTH_POLL_INTERVAL * (CONFIRMATIONS_BEFORE_FAILED + 4),
+            ),
+            "the unformed link was not reported: {:?}",
+            manager.get_block_health()
+        );
+
+        let health = manager.get_block_health();
+        let detail = failure_detail(&health, "vconv").unwrap();
+        assert!(
+            detail.contains("vconv:src -> aconv:sink"),
+            "the detail must name the link: {}",
+            detail
+        );
+        // Nothing is stalled: the pad-task scan contributes no failure here, so
+        // removing the unformed-link check leaves this flow reading healthy.
+        assert!(
+            health
+                .iter()
+                .filter(|h| h.status == BlockHealthStatus::Failed)
+                .all(|h| h.block_id == "vconv"),
+            "only the block owning the unformed link should fail: {:?}",
+            health
+        );
+        assert_eq!(manager.get_state(), strom_types::PipelineState::Playing);
 
         manager.stop().expect("pipeline should stop");
     }
