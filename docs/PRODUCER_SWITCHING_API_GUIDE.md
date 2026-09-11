@@ -183,13 +183,16 @@ So the choice between editing on air and preview-then-take is editorial, not tec
 | anything → anything | `cut` (or `duration_ms: 0`) | One-frame switch. Verified: last frame of the old look, next frame the new look, nothing between. |
 | input → input | `fade` | A true dissolve. Frames mid-transition show both pictures blended. |
 | PiP → PiP, **no shared sources** | `fade` | A true dissolve between the two compositions. |
-| PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-box to that source full frame reads as a zoom-in, with the other tiles covered as the box grows. |
+| PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-box to that source full frame reads as a zoom-in, with the other tiles covered as the box grows. Reported back as `actual_transition_type: "morph"`. |
 | either bus is a PiP | `slide_*` | Silently downgraded to `fade`. The server logs the downgrade; the HTTP response reports the transition that actually ran in `actual_transition_type`. |
 
 The engine animates pads, not pictures: a source present in both the outgoing and
 incoming composition is treated as *moving*, and only sources exclusive to one side
 cross-fade. If you want a genuine dissolve out of a multi-box layout, take to a
 composition that shares no inputs with it, or use a cut.
+
+`actual_transition_type` in the take response always names what ran — `cut`, `fade`,
+or `morph` — so a control surface can label the move without replaying this table.
 
 ---
 
@@ -211,19 +214,28 @@ obviously absent before you start.
 **The tile freezes on its last frame and stays there indefinitely.** It does not go black,
 it is not removed, and the composition does not re-flow. A compositor pad repeats its last
 buffer for as long as the mixer runs, so this is the general behaviour for any input that
-stops, not a property of one ingest type. Measured on a WHIP contributor, the freeze
-followed the publisher's death within about two seconds — the measurement cannot separate
-the jitter buffer from the mixer's own output latency, so treat it as immediate. The frozen
-frame was still on air minutes later, long after the ingest session had been reaped for
-inactivity.
+stops, not a property of one ingest type. Measured on a WHIP contributor, the last frame
+arrives about a quarter of a second after the publisher dies, which is the jitter buffer
+draining, and then the picture stops. The frozen frame was still on air minutes later, long
+after the ingest session had been reaped for inactivity.
 
 This is the most dangerous failure in the set, because a frozen tile looks exactly like a
-static one. Two consequences for a live show:
+static one. **Do not use the program picture to decide whether a source is alive.** Use
+`input_media_age_ms` from `GET .../state`, which reports milliseconds since each input last
+delivered a frame to the mixer:
 
-- Do not trust the program picture to tell you a source is gone. Watch the ingest session
-  state or the per-input block health instead.
-- The recovery is automatic: when the source resumes, its tile picks up in place with no
-  operator action and no layout change.
+```jsonc
+"input_media_age_ms": [ 24, 24, 7727, 24, null ]
+//                       ^live ^live  ^^^^ frozen 7.7s   ^never delivered
+```
+
+A live 30 fps source sits in the tens of milliseconds. Anything past a second or so is a
+source that has stopped, and `null` is one that has never delivered a frame at all. The
+counter is stamped from the mixer's own input pads, so it covers every kind of input, and
+it measures what actually determines the picture.
+
+Recovery is automatic: when the source resumes, its tile picks up in place with no
+operator action and no layout change, and the age drops back to single-frame values.
 
 If you need it gone from the picture, you must remove it from the zone yourself — which is
 a live edit and animates as described in §3.
@@ -270,6 +282,8 @@ Two things make verification reliable:
    one unless the picture itself is moving. Burning a running timecode into each feed turns
    "is this input alive?" into something you can read off a single frame. Two tiles reading
    the same time and one reading an older time is the whole diagnosis.
+   `input_media_age_ms` answers the same question without a capture, and the two agree;
+   the burned clock is what proves the field is telling the truth.
 2. **Tap the program output to a file** rather than capturing it over the network. Adding a
    video encoder plus a recorder block fed from the mixer's PGM output gives frame-accurate
    material with no transport in the way, and the recorder's split endpoint closes a
