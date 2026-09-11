@@ -1,6 +1,7 @@
 //! Events for real-time updates across clients.
 
 use crate::element::PropertyValue;
+use crate::flow::BlockHealthStatus;
 use crate::system_monitor::SystemStats;
 use crate::thread_stats::ThreadStats;
 use crate::FlowId;
@@ -182,6 +183,19 @@ pub enum StromEvent {
         source_flow_id: FlowId,
         output_name: String,
         connected: bool,
+    },
+    /// A block's element chain stopped passing data, or resumed.
+    ///
+    /// Emitted only on a change of status, not on every health poll.
+    BlockHealthChanged {
+        #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
+        flow_id: FlowId,
+        /// Block instance ID, or element ID for a standalone element
+        block_id: String,
+        /// Whether the block is passing data or has stopped
+        status: BlockHealthStatus,
+        /// Element and pad whose task stopped; None when the block recovered
+        detail: Option<String>,
     },
     /// Quality of Service statistics (aggregated buffer drop info)
     QoSStats {
@@ -541,6 +555,22 @@ impl StromEvent {
             StromEvent::ThreadStats(stats) => {
                 format!("Thread stats: {} active threads", stats.threads.len())
             }
+            StromEvent::BlockHealthChanged {
+                flow_id,
+                block_id,
+                status,
+                detail,
+            } => match status {
+                BlockHealthStatus::Failed => format!(
+                    "Block {} in flow {} stopped passing data: {}",
+                    block_id,
+                    flow_id,
+                    detail.as_deref().unwrap_or("no detail")
+                ),
+                BlockHealthStatus::Ok => {
+                    format!("Block {} in flow {} resumed", block_id, flow_id)
+                }
+            },
             StromEvent::QoSStats {
                 flow_id,
                 block_id,
