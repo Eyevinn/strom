@@ -20,6 +20,7 @@
 //! Distribution output: `dist_comp → capsfilter_dist → [pgm_out]`
 //! Multiview output: `mv_comp → gldownload_mv → videoconvert_pre_cairo → cairooverlay → capsfilter_mv → [multiview_out]`
 
+pub(crate) mod activity;
 mod builder;
 mod definition;
 mod elements;

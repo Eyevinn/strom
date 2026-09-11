@@ -579,12 +579,19 @@ pub(super) fn build_cpu_pipeline(
         let block_id = p.instance_id.to_string();
         let num_inputs = p.num_inputs;
         let num_pips = p.num_pips;
+        let activity_state = std::sync::Arc::clone(&overlay_state);
         ctx.register_element_setup(Box::new(move |_flow_id, _events| {
             let (Some(mixer), Some(mv_comp)) = (dist_weak.upgrade(), mv_weak.upgrade()) else {
                 return;
             };
             super::super::geometry::install_caps_probes(
                 &block_id, &mixer, &mv_comp, num_inputs, num_pips,
+            );
+            super::super::activity::install_input_activity_probes(
+                &block_id,
+                &mixer,
+                &activity_state,
+                num_inputs,
             );
         }));
     }
