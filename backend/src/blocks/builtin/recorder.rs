@@ -258,21 +258,28 @@ fn add_muxer_intake_probe(pad: &gst::Pad, activity: &Arc<TrackActivity>, epoch: 
 /// into, so its stream lock is free. The block's input stays the first choice
 /// because it lets the parser drain its last frame on the way past.
 ///
-/// The track is marked retired only once the EOS has landed. Marking it before the
-/// attempt takes it off the watchdog whether or not it worked, and one refusal then
-/// freezes the recording for good.
+/// The track is closed before the EOS goes in, and reopened if nothing took it.
+/// Both halves are needed. A `queue` sits between the block's input and the muxer,
+/// so `push_event` returns once that queue has the event rather than once the muxer
+/// does, and anything arriving before the track is closed is queued *behind* the
+/// EOS; the muxer answers post-EOS data with a flow error, which on a WHIP seat
+/// reaches a tee shared with the mixers and the return router and stops its source.
+/// Leaving the track closed after a refusal would take it off the watchdog whether
+/// or not the EOS worked, and one refusal would then freeze the recording for good.
 fn end_stalled_track(
     input: &gst::Element,
     muxer_pad: Option<&gst::Pad>,
     activity: &TrackActivity,
 ) -> bool {
+    activity.retired.store(true, Ordering::SeqCst);
+
     let delivered = input
         .static_pad("src")
         .is_some_and(|pad| pad.push_event(gst::event::Eos::new()))
         || muxer_pad.is_some_and(|pad| pad.send_event(gst::event::Eos::new()));
 
-    if delivered {
-        activity.retired.store(true, Ordering::SeqCst);
+    if !delivered {
+        activity.retired.store(false, Ordering::SeqCst);
     }
     delivered
 }
@@ -1828,6 +1835,62 @@ mod tests {
             !activity.retired.load(Ordering::SeqCst),
             "the track was retired on an EOS that was never delivered, so the watchdog will not try again"
         );
+    }
+
+    /// The branch is shut before its EOS goes in.
+    ///
+    /// `push_event` returns once the queue between the block's input and the muxer
+    /// has the event, not once the muxer does. A buffer arriving before the track is
+    /// closed is queued behind that EOS and reaches the muxer after it, and the muxer
+    /// answers post-EOS data with a flow error — which on a WHIP seat stops the
+    /// source feeding the tee.
+    ///
+    /// Retire after the push instead of before and this fails.
+    #[test]
+    fn a_track_is_closed_before_its_eos_is_pushed() {
+        gst::init().expect("gstreamer init");
+        let pipeline = gst::Pipeline::new();
+        let input = gst::ElementFactory::make("identity")
+            .build()
+            .expect("identity is part of gstreamer core");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add_many([&input, &sink]).expect("add elements");
+        input.link(&sink).expect("link identity to fakesink");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+
+        let activity = Arc::new(idle_activity());
+        let closed_when_eos_passed = Arc::new(AtomicBool::new(false));
+
+        let watcher = Arc::clone(&activity);
+        let observed = Arc::clone(&closed_when_eos_passed);
+        input
+            .static_pad("src")
+            .expect("identity has a src pad")
+            .add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+                if let Some(gst::PadProbeData::Event(event)) = &info.data {
+                    if event.type_() == gst::EventType::Eos {
+                        observed.store(watcher.retired.load(Ordering::SeqCst), Ordering::SeqCst);
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+
+        assert!(
+            end_stalled_track(&input, None, &activity),
+            "a linked, playing branch takes the EOS"
+        );
+        assert!(
+            closed_when_eos_passed.load(Ordering::SeqCst),
+            "the track was still taking data when its EOS went past, so anything arriving lands behind it"
+        );
+
+        let _ = pipeline.set_state(gst::State::Null);
     }
 
     /// The counterpart: on a live branch the EOS lands, and only then does the
