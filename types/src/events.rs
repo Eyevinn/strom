@@ -982,8 +982,9 @@ impl StromEvent {
         }
     }
 
-    /// Whether this event fires often enough (roughly more than once per second during normal
-    /// operation) that logging or forwarding it by default would flood output.
+    /// Whether this event is chatty enough that logging or forwarding it by default would
+    /// flood output — either because a single instance fires many times per second, or
+    /// because it fans out per connection, element, or flow even at a modest tick rate.
     ///
     /// Single source of truth for this classification — do not hand-maintain a second list
     /// elsewhere. Deliberately has no wildcard arm: adding a variant forces a decision here.
