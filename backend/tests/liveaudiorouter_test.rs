@@ -1009,6 +1009,13 @@ fn the_original_audiorouter_keeps_its_silent_default() {
 // output and measure what leaves the output pad.
 // ============================================================================
 
+/// Tones for the four seats of a fan-in test, one per input. Four different
+/// frequencies, because each `audiotestsrc` starts its sine at its own first
+/// buffer: four copies of one tone sum at whatever relative phase the machine
+/// hands out. Spread frequencies sweep through alignment hundreds of times a
+/// second, so the loudest moment in a window lands near the coherent sum.
+const FAN_IN_TONES: [f64; 4] = [440.0, 557.0, 691.0, 823.0];
+
 /// Four inputs, each a sine at `amplitude`, all routed onto output 0 channel 0.
 /// Four times 0.5 is 2.0, so the bus is 6 dB over full scale by construction.
 fn four_into_one(instance: &str, amplitude: f64, extra: &[(&str, PropertyValue)]) -> Harness {
@@ -1030,77 +1037,73 @@ fn four_into_one(instance: &str, amplitude: f64, extra: &[(&str, PropertyValue)]
     pairs.extend(extra.iter().cloned());
 
     let h = assemble(instance, &props(&pairs));
-    for input in 0..4 {
-        feed(&h, instance, input, &[(440.0, amplitude)]);
+    for (input, freq) in FAN_IN_TONES.iter().enumerate() {
+        feed(&h, instance, input, &[(*freq, amplitude)]);
     }
     h
 }
 
-#[test]
-fn a_fan_in_overload_leaves_the_output_over_full_scale_when_nothing_catches_it() {
-    let h = four_into_one("headroom_none", 0.5, &[]);
-    tap(&h, "headroom_none", 0);
+/// Loudest peak on output 0 of a four-into-one router with these settings.
+fn fan_in_peak(instance: &str, extra: &[(&str, PropertyValue)]) -> f64 {
+    let h = four_into_one(instance, 0.5, extra);
+    tap(&h, instance, 0);
     h.pipeline
         .set_state(gst::State::Playing)
         .expect("set Playing");
+    observe_peaks(&h.pipeline, 1, Duration::from_secs(3))[0]
+}
 
-    let peaks = observe_peaks(&h.pipeline, 1, Duration::from_secs(3));
+#[test]
+fn a_fan_in_overload_leaves_the_output_over_full_scale_when_nothing_catches_it() {
+    let peak = fan_in_peak("headroom_none", &[]);
 
     // Two things at once: the exposure is real, and the bus carries it in
     // float. Were the sum happening in a fixed-point format it would saturate
-    // inside `audiomixer` and this would read 0.0 dB, not the sum.
+    // inside `audiomixer` and this would read 0.0 dB, not the sum. The bound is
+    // well under the +6 dBFS of a perfectly coherent sum, which no machine owes
+    // this test.
     assert!(
-        peaks[0] > 4.0,
-        "four unity crosspoints summing 0.5 amplitude must leave the output around \
-         +6 dBFS with no trim and no limiter, got {peaks:?} dBFS"
+        peak > 2.0,
+        "four unity crosspoints summing 0.5 amplitude must leave the output clear of \
+         full scale with no trim and no limiter, got {peak} dBFS"
     );
 }
 
 #[test]
 fn the_output_limiter_holds_a_fan_in_overload_below_full_scale() {
-    let h = four_into_one(
+    let peak = fan_in_peak(
         "headroom_limited",
-        0.5,
         &[("output_limiter_enabled", PropertyValue::Bool(true))],
     );
-    tap(&h, "headroom_limited", 0);
-    h.pipeline
-        .set_state(gst::State::Playing)
-        .expect("set Playing");
-
-    let peaks = observe_peaks(&h.pipeline, 1, Duration::from_secs(3));
 
     assert!(
-        peaks[0] <= 0.0,
+        peak <= 0.0,
         "the output limiter must keep the same overload at or below full scale, \
-         got {peaks:?} dBFS"
+         got {peak} dBFS"
     );
     // A limiter, not a mute: what it holds down it must still pass.
     assert!(
-        peaks[0] > -6.0,
+        peak > -6.0,
         "the limiter must hold the bus just under full scale, not attenuate it away, \
-         got {peaks:?} dBFS"
+         got {peak} dBFS"
     );
 }
 
 #[test]
 fn the_output_trim_attenuates_every_output_bus() {
-    let h = four_into_one(
+    // Measured against the same router without the trim rather than against an
+    // absolute level, so what is asserted is what the trim does and not what
+    // four live sources happened to sum to on this machine.
+    let untrimmed = fan_in_peak("headroom_untrimmed", &[]);
+    let trimmed = fan_in_peak(
         "headroom_trimmed",
-        0.5,
         &[("output_headroom", PropertyValue::Float(-12.0))],
     );
-    tap(&h, "headroom_trimmed", 0);
-    h.pipeline
-        .set_state(gst::State::Playing)
-        .expect("set Playing");
 
-    let peaks = observe_peaks(&h.pipeline, 1, Duration::from_secs(3));
-
-    // +6 dBFS of sum, trimmed 12 dB, is -6 dBFS.
     assert!(
-        (peaks[0] - -6.0).abs() < 1.5,
-        "a -12 dB output trim must bring the +6 dBFS sum to about -6 dBFS, got {peaks:?} dBFS"
+        ((untrimmed - trimmed) - 12.0).abs() < 1.5,
+        "a -12 dB output trim must take 12 dB off the bus: untrimmed {untrimmed} dBFS, \
+         trimmed {trimmed} dBFS"
     );
 }
 
