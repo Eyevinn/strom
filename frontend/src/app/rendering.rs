@@ -11,6 +11,9 @@ use super::{FocusTarget, ThemePreference};
 
 /// Colour for a block that has stopped passing data.
 const FAILED_BLOCK_COLOR: Color32 = Color32::from_rgb(220, 60, 60);
+/// Colour for a block that still passes data without everything it was
+/// configured to produce.
+const DEGRADED_BLOCK_COLOR: Color32 = Color32::from_rgb(220, 160, 40);
 impl StromApp {
     /// Render the top toolbar.
     pub(super) fn render_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -770,9 +773,12 @@ impl StromApp {
                                 // still reports Playing, so it must not read as
                                 // healthy here.
                                 let failed_blocks: Vec<_> = flow.failed_blocks().collect();
+                                let degraded_blocks: Vec<_> = flow.degraded_blocks().collect();
                                 let state_icon = if flow.running { "▶" } else { "■" };
                                 let state_color = if !failed_blocks.is_empty() {
                                     FAILED_BLOCK_COLOR
+                                } else if !degraded_blocks.is_empty() {
+                                    DEGRADED_BLOCK_COLOR
                                 } else if flow.running {
                                     Color32::from_rgb(0, 200, 0)
                                 } else {
@@ -790,6 +796,27 @@ impl StromApp {
                                             );
                                             ui.separator();
                                             for health in &failed_blocks {
+                                                ui.label(format!(
+                                                    "{}: {}",
+                                                    health.block_id,
+                                                    health
+                                                        .detail
+                                                        .as_deref()
+                                                        .unwrap_or("no detail")
+                                                ));
+                                            }
+                                        });
+                                }
+
+                                if !degraded_blocks.is_empty() {
+                                    child_ui
+                                        .colored_label(DEGRADED_BLOCK_COLOR, "⚠")
+                                        .on_hover_ui(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Running degraded").strong(),
+                                            );
+                                            ui.separator();
+                                            for health in &degraded_blocks {
                                                 ui.label(format!(
                                                     "{}: {}",
                                                     health.block_id,
@@ -931,6 +958,9 @@ impl StromApp {
                                     ui.add_space(5.0);
                                     let state_text = if flow.has_failed_block() {
                                         "Failed"
+                                    } else if flow.running && flow.degraded_blocks().next().is_some()
+                                    {
+                                        "Running (degraded)"
                                     } else if flow.running {
                                         "Running"
                                     } else {
@@ -942,6 +972,16 @@ impl StromApp {
                                             FAILED_BLOCK_COLOR,
                                             format!(
                                                 "{} stopped: {}",
+                                                health.block_id,
+                                                health.detail.as_deref().unwrap_or("no detail")
+                                            ),
+                                        );
+                                    }
+                                    for health in flow.degraded_blocks() {
+                                        ui.colored_label(
+                                            DEGRADED_BLOCK_COLOR,
+                                            format!(
+                                                "{} degraded: {}",
                                                 health.block_id,
                                                 health.detail.as_deref().unwrap_or("no detail")
                                             ),

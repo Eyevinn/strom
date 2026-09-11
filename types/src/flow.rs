@@ -471,6 +471,13 @@ impl Flow {
         self.block_health.iter().filter(|h| h.status.is_failed())
     }
 
+    /// Blocks that are passing data without everything they were configured to
+    /// produce. Separate from [`failed_blocks`](Self::failed_blocks): a
+    /// degraded block still works, so it must not make the flow read as broken.
+    pub fn degraded_blocks(&self) -> impl Iterator<Item = &BlockHealth> {
+        self.block_health.iter().filter(|h| h.status.is_degraded())
+    }
+
     /// Whether any block in this flow has failed.
     ///
     /// `running` only reports that the pipeline reached `Playing`; it stays
@@ -490,8 +497,13 @@ impl Flow {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum BlockHealthStatus {
-    /// No stopped pad task was found in this block's element chain.
+    /// No stopped pad task was found in this block's element chain, and the
+    /// block reports nothing missing.
     Ok,
+    /// The block is passing data, but not everything it was configured to
+    /// produce. A WHEP output that asked for four video codecs and got three
+    /// still serves every viewer that can decode one of the three.
+    Degraded,
     /// A pad task in this block's element chain has stopped. The block is not
     /// passing data, regardless of what the pipeline state says.
     Failed,
@@ -501,6 +513,12 @@ impl BlockHealthStatus {
     /// Whether this status means the block has failed.
     pub fn is_failed(&self) -> bool {
         matches!(self, BlockHealthStatus::Failed)
+    }
+
+    /// Whether this status means the block works but is missing something it
+    /// was configured to produce.
+    pub fn is_degraded(&self) -> bool {
+        matches!(self, BlockHealthStatus::Degraded)
     }
 }
 
@@ -512,8 +530,8 @@ pub struct BlockHealth {
     pub block_id: String,
     /// Whether the block's element chain is running or has stopped.
     pub status: BlockHealthStatus,
-    /// Human-readable detail naming the element and pad whose task stopped.
-    /// `None` when the block is healthy.
+    /// Human-readable detail: the element and pad whose task stopped, or what
+    /// the block is missing. `None` when the block is healthy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }

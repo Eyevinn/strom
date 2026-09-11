@@ -2,7 +2,7 @@
 
 use crate::discovery::device::GstDeviceMap;
 use crate::events::EventBroadcaster;
-use crate::gst::SessionThreadConfig;
+use crate::gst::{BlockDiagnostic, BlockDiagnostics, SessionThreadConfig};
 use crate::whip_registry::WhipRegistry;
 use crate::whip_session_manager::WhipEndpointConfig;
 use gstreamer as gst;
@@ -115,6 +115,8 @@ pub struct BlockBuildContext {
     whip_registry: Option<WhipRegistry>,
     /// Element signal setup functions queued for connection at pipeline start
     element_setups: RefCell<Vec<ElementSetupFn>>,
+    /// Self-reported degradation checks queued for the block health scan
+    block_diagnostics: RefCell<BlockDiagnostics>,
     /// Thread priority config for dynamically created session pipelines (WHEP/WebRTC)
     session_thread_config: SessionThreadConfig,
     /// Live `gst::Device` map shared with the long-running `DeviceDiscovery`.
@@ -136,6 +138,7 @@ impl BlockBuildContext {
             dynamic_webrtcbins: Arc::new(Mutex::new(HashMap::new())),
             whip_registry: None,
             element_setups: RefCell::new(Vec::new()),
+            block_diagnostics: RefCell::new(Vec::new()),
             session_thread_config: SessionThreadConfig::new(),
             local_devices: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -159,6 +162,7 @@ impl BlockBuildContext {
             dynamic_webrtcbins,
             whip_registry,
             element_setups: RefCell::new(Vec::new()),
+            block_diagnostics: RefCell::new(Vec::new()),
             session_thread_config,
             local_devices,
         }
@@ -340,6 +344,19 @@ impl BlockBuildContext {
     /// Called after block expansion to process the setups.
     pub fn take_element_setups(&self) -> Vec<ElementSetupFn> {
         self.element_setups.borrow_mut().drain(..).collect()
+    }
+
+    /// Register a degradation check the block health scan should poll.
+    ///
+    /// For failures the scan cannot see for itself, which means failures with
+    /// no stalled pad task in the flow pipeline behind them.
+    pub fn register_block_diagnostic(&self, diagnostic: Arc<dyn BlockDiagnostic>) {
+        self.block_diagnostics.borrow_mut().push(diagnostic);
+    }
+
+    /// Take all queued degradation checks.
+    pub fn take_block_diagnostics(&self) -> BlockDiagnostics {
+        self.block_diagnostics.borrow_mut().drain(..).collect()
     }
 }
 

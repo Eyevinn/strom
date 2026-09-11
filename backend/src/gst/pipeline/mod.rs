@@ -200,6 +200,8 @@ pub struct PipelineManager {
     block_health: std::sync::Arc<std::sync::RwLock<Vec<strom_types::flow::BlockHealth>>>,
     /// Handle for the periodic block health scan task
     block_health_task: Option<tokio::task::JoinHandle<()>>,
+    /// Degradation checks blocks report for themselves, polled by that scan
+    block_diagnostics: crate::gst::BlockDiagnostics,
     /// PTP clock reference (stored for querying grandmaster/master info)
     ptp_clock: Option<gst_net::PtpClock>,
     /// PTP statistics (updated by statistics callback)

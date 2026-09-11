@@ -1,5 +1,6 @@
 //! GStreamer integration.
 
+pub mod block_diagnostics;
 mod block_expansion;
 pub mod buffer_age_probe;
 pub(crate) mod control_bindings;
@@ -20,6 +21,7 @@ pub mod video_frame;
 pub mod volume_ramp;
 pub mod whep_probe;
 
+pub use block_diagnostics::{BlockDiagnostic, BlockDiagnostics};
 pub use discovery::ElementDiscovery;
 pub use pipeline::{PipelineError, PipelineManager};
 pub use thread_priority::{

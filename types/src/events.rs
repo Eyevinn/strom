@@ -567,6 +567,12 @@ impl StromEvent {
                     flow_id,
                     detail.as_deref().unwrap_or("no detail")
                 ),
+                BlockHealthStatus::Degraded => format!(
+                    "Block {} in flow {} is degraded: {}",
+                    block_id,
+                    flow_id,
+                    detail.as_deref().unwrap_or("no detail")
+                ),
                 BlockHealthStatus::Ok => {
                     format!("Block {} in flow {} resumed", block_id, flow_id)
                 }

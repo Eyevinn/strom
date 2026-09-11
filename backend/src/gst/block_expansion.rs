@@ -5,7 +5,7 @@ use crate::blocks::{
     BlockBuildContext, BusMessageConnectFn, DynamicWebrtcbinStore, ElementSetupFn,
     WhepEndpointInfo, WhipEndpointInfo,
 };
-use crate::gst::SessionThreadConfig;
+use crate::gst::{BlockDiagnostics, SessionThreadConfig};
 use crate::whip_registry::WhipRegistry;
 use crate::whip_session_manager::WhipEndpointConfig;
 use gstreamer as gst;
@@ -35,6 +35,8 @@ pub struct ExpandedPipeline {
     pub whip_endpoints: Vec<WhipEndpointInfo>,
     /// WHIP endpoint configs for session manager registration
     pub whip_endpoint_configs: Vec<(String, WhipEndpointConfig)>,
+    /// Degradation checks blocks reported for the block health scan
+    pub block_diagnostics: BlockDiagnostics,
 }
 
 /// Expand block instances into GStreamer elements using BlockBuilder trait.
@@ -202,6 +204,15 @@ pub async fn expand_blocks(
         }
     }
 
+    // Collect degradation checks blocks want the health scan to poll
+    let block_diagnostics = ctx.take_block_diagnostics();
+    if !block_diagnostics.is_empty() {
+        debug!(
+            "Collected {} block diagnostic(s) for the health scan",
+            block_diagnostics.len()
+        );
+    }
+
     // Collect WHIP endpoint configs for session manager
     let whip_endpoint_configs = ctx.take_whip_endpoint_configs();
     if !whip_endpoint_configs.is_empty() {
@@ -231,6 +242,7 @@ pub async fn expand_blocks(
         whep_endpoints,
         whip_endpoints,
         whip_endpoint_configs,
+        block_diagnostics,
     })
 }
 

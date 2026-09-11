@@ -92,6 +92,7 @@ impl PipelineManager {
             qos_broadcast_task: None,
             block_health: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
             block_health_task: None,
+            block_diagnostics: Vec::new(),
             ptp_clock: None,
             ptp_stats: std::sync::Arc::new(std::sync::RwLock::new(None)),
             ntp_clock: None,
@@ -235,6 +236,7 @@ impl PipelineManager {
         }
         manager.whip_endpoints = expanded.whip_endpoints;
         manager.whip_endpoint_configs = expanded.whip_endpoint_configs;
+        manager.block_diagnostics = expanded.block_diagnostics;
 
         // Analyze links and auto-insert tee elements where needed
         let all_links = expanded.links;

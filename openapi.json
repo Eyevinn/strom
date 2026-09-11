@@ -4924,7 +4924,7 @@
               "string",
               "null"
             ],
-            "description": "Human-readable detail naming the element and pad whose task stopped.\n`None` when the block is healthy."
+            "description": "Human-readable detail: the element and pad whose task stopped, or what\nthe block is missing. `None` when the block is healthy."
           },
           "status": {
             "$ref": "#/components/schemas/BlockHealthStatus",
@@ -4937,6 +4937,7 @@
         "description": "Health of a single block's element chain while the flow is running.\n\nPausing a pad task is not a state change: the pipeline and every element in\nit stay `PLAYING` while that branch stops passing data, so the failure does\nnot show up in the flow's `gst_state`.",
         "enum": [
           "ok",
+          "degraded",
           "failed"
         ]
       },

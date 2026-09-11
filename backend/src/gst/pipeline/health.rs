@@ -91,11 +91,18 @@ fn owning_block(element_id: &str) -> &str {
     element_id.split(':').next().unwrap_or(element_id)
 }
 
-/// Report health for every block with at least one element in `elements`.
+/// Report health for every block with at least one element in `elements`, plus
+/// every block that supplied a diagnostic.
+///
+/// A stalled pad task outranks a block's own report: a block that has stopped
+/// passing data altogether is failed, whatever else it is missing.
 ///
 /// Call only while the pipeline is playing; a paused task is expected in any
 /// other pipeline state.
-pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec<BlockHealth> {
+pub(crate) fn scan_block_health(
+    elements: &HashMap<String, gst::Element>,
+    diagnostics: &crate::gst::BlockDiagnostics,
+) -> Vec<BlockHealth> {
     let mut by_block: BTreeMap<&str, BlockHealth> = BTreeMap::new();
 
     for (element_id, element) in elements {
@@ -118,6 +125,24 @@ pub(crate) fn scan_block_health(elements: &HashMap<String, gst::Element>) -> Vec
                 stalled.element, stalled.pad
             ));
         }
+    }
+
+    for diagnostic in diagnostics {
+        let Some(detail) = diagnostic.degraded() else {
+            continue;
+        };
+        let entry = by_block
+            .entry(diagnostic.block_id())
+            .or_insert_with(|| BlockHealth {
+                block_id: diagnostic.block_id().to_string(),
+                status: BlockHealthStatus::Ok,
+                detail: None,
+            });
+        if entry.status.is_failed() {
+            continue;
+        }
+        entry.status = BlockHealthStatus::Degraded;
+        entry.detail = Some(detail);
     }
 
     by_block.into_values().collect()
@@ -156,10 +181,12 @@ impl super::PipelineManager {
         let events = self.events.clone();
         let flow_id = self.flow_id;
         let flow_name = self.flow_name.clone();
+        let diagnostics = self.block_diagnostics.clone();
 
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(HEALTH_POLL_INTERVAL);
-            let mut failed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Last status broadcast per block, so only changes are reported.
+            let mut reported: HashMap<String, BlockHealthStatus> = HashMap::new();
             let mut strikes: HashMap<String, u32> = HashMap::new();
 
             loop {
@@ -168,7 +195,7 @@ impl super::PipelineManager {
                 // Only meaningful while playing - a paused task is expected in
                 // every other state, including during startup and shutdown.
                 if *cached_state.read().unwrap() != strom_types::PipelineState::Playing {
-                    failed.clear();
+                    reported.clear();
                     strikes.clear();
                     block_health.write().unwrap().clear();
                     continue;
@@ -182,11 +209,13 @@ impl super::PipelineManager {
                     continue;
                 }
 
-                let mut snapshot = scan_block_health(&elements);
+                let mut snapshot = scan_block_health(&elements, &diagnostics);
 
-                // A block is only reported once it has looked stalled on
+                // A block is only reported failed once it has looked stalled on
                 // CONFIRMATIONS_BEFORE_FAILED scans in a row. Downgrade the
                 // unconfirmed ones before anything observes the snapshot.
+                // Degraded needs no confirmation: the diagnostics that produce
+                // it wait for their own subject to settle before saying so.
                 for health in &mut snapshot {
                     if health.status.is_failed() {
                         let count = strikes.entry(health.block_id.clone()).or_insert(0);
@@ -203,43 +232,46 @@ impl super::PipelineManager {
                 // Blocks whose elements have gone away drop out of the scan
                 // entirely; forget them rather than leaving a stale entry that
                 // no later iteration can clear.
-                failed.retain(|block_id| snapshot.iter().any(|h| &h.block_id == block_id));
+                reported.retain(|block_id, _| snapshot.iter().any(|h| &h.block_id == block_id));
                 strikes.retain(|block_id, _| snapshot.iter().any(|h| &h.block_id == block_id));
 
                 for health in &snapshot {
-                    let was_failed = failed.contains(&health.block_id);
-                    match (health.status.is_failed(), was_failed) {
-                        (true, false) => {
-                            failed.insert(health.block_id.clone());
-                            tracing::error!(
-                                "Block '{}' in flow '{}' has stopped: {}. The pipeline still reports Playing",
-                                health.block_id,
-                                flow_name,
-                                health.detail.as_deref().unwrap_or("no detail")
-                            );
-                            events.broadcast(strom_types::StromEvent::BlockHealthChanged {
-                                flow_id,
-                                block_id: health.block_id.clone(),
-                                status: health.status,
-                                detail: health.detail.clone(),
-                            });
-                        }
-                        (false, true) => {
-                            failed.remove(&health.block_id);
-                            tracing::info!(
-                                "Block '{}' in flow '{}' resumed passing data",
-                                health.block_id,
-                                flow_name
-                            );
-                            events.broadcast(strom_types::StromEvent::BlockHealthChanged {
-                                flow_id,
-                                block_id: health.block_id.clone(),
-                                status: health.status,
-                                detail: None,
-                            });
-                        }
-                        _ => {}
+                    let was = reported
+                        .get(&health.block_id)
+                        .copied()
+                        .unwrap_or(BlockHealthStatus::Ok);
+                    if was == health.status {
+                        continue;
                     }
+                    reported.insert(health.block_id.clone(), health.status);
+
+                    let detail = health.detail.as_deref().unwrap_or("no detail");
+                    match health.status {
+                        BlockHealthStatus::Failed => tracing::error!(
+                            "Block '{}' in flow '{}' has stopped: {}. The pipeline still reports Playing",
+                            health.block_id,
+                            flow_name,
+                            detail
+                        ),
+                        BlockHealthStatus::Degraded => tracing::warn!(
+                            "Block '{}' in flow '{}' is degraded: {}. The pipeline still reports Playing",
+                            health.block_id,
+                            flow_name,
+                            detail
+                        ),
+                        BlockHealthStatus::Ok => tracing::info!(
+                            "Block '{}' in flow '{}' is healthy again",
+                            health.block_id,
+                            flow_name
+                        ),
+                    }
+
+                    events.broadcast(strom_types::StromEvent::BlockHealthChanged {
+                        flow_id,
+                        block_id: health.block_id.clone(),
+                        status: health.status,
+                        detail: health.detail.clone(),
+                    });
                 }
 
                 *block_health.write().unwrap() = snapshot;

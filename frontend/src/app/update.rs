@@ -410,6 +410,12 @@ impl eframe::App for StromApp {
                                     flow_id,
                                     detail.as_deref().unwrap_or("no detail")
                                 ),
+                                strom_types::BlockHealthStatus::Degraded => tracing::warn!(
+                                    "Block {} in flow {} is degraded: {}",
+                                    block_id,
+                                    flow_id,
+                                    detail.as_deref().unwrap_or("no detail")
+                                ),
                                 strom_types::BlockHealthStatus::Ok => {
                                     tracing::info!("Block {} in flow {} resumed", block_id, flow_id)
                                 }

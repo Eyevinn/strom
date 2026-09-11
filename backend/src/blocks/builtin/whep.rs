@@ -24,6 +24,10 @@ use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+pub mod codec_report;
+
+use codec_report::CodecDiscoveryReport;
+
 /// WHEP Input block builder.
 pub struct WHEPInputBuilder;
 
@@ -1130,6 +1134,14 @@ fn build_whepserversink(
         whepserversink.set_property("video-caps", gst::Caps::new_empty());
     }
 
+    // Watch which of the requested video codecs survive whepserversink's codec
+    // discovery. A codec that fails is dropped from the offer with nothing on
+    // the bus and no change of state, so without this the block looks healthy
+    // while viewers silently fall back to a codec nobody chose.
+    let codec_report = CodecDiscoveryReport::new(instance_id.to_string());
+    codec_report.attach(&whepserversink);
+    ctx.register_block_diagnostic(codec_report.clone());
+
     // Install thread priority on session pipelines via pad probes.
     //
     // consumer-pipeline-created fires BEFORE webrtcsink sets its bus sync handler,
@@ -1602,6 +1614,7 @@ fn build_whepserversink(
             let whepserversink_weak = whepserversink.downgrade();
             let video_caps_set_clone = video_caps_set.clone();
             let instance_id_owned = instance_id.to_string();
+            let codec_report_probe = codec_report.clone();
 
             let video_queue_sink = video_queue.static_pad("sink").expect("queue has sink pad");
             video_queue_sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
@@ -1682,10 +1695,17 @@ fn build_whepserversink(
                                     }
                                 };
 
-                                if let Some(caps) = video_caps {
-                                    if let Some(whepserversink) = whepserversink_weak.upgrade() {
+                                if let Some(whepserversink) = whepserversink_weak.upgrade() {
+                                    if let Some(caps) = video_caps {
                                         whepserversink.set_property("video-caps", &caps);
                                     }
+                                    // Read the property back rather than using
+                                    // the value above: an unrecognised input
+                                    // codec leaves the element's own default in
+                                    // place, and that is what discovery tries.
+                                    codec_report_probe.set_requested(
+                                        &whepserversink.property::<gst::Caps>("video-caps"),
+                                    );
                                 }
                             }
                         }
