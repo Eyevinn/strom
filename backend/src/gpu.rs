@@ -1,10 +1,13 @@
 //! GPU capability detection and video conversion mode selection.
 //!
-//! This module detects at startup whether GPU-accelerated video conversion
-//! with CUDA-GL interop is supported. On systems where it works (native Linux
-//! with X11 and NVIDIA drivers), we use `autovideoconvert` for better performance.
-//! On systems where it fails (WSL, headless/GBM, broken interop), we fall back
-//! to software `videoconvert`.
+//! The conversion mode is decided once at startup, per platform:
+//!
+//! * On CUDA platforms (Linux/Windows with NVIDIA) `autovideoconvert` gives a
+//!   real GPU path, but only where GL-CUDA interop actually works. NVENC's
+//!   presence is the gate for attempting that test, and the interop test is
+//!   the gate for using it. Where either fails we use software `videoconvert`.
+//! * On macOS there is no CUDA question to ask, so we do not ask it. See
+//!   `detect_convert_mode` for why macOS uses threaded software conversion.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -46,6 +49,7 @@ pub fn video_convert_mode() -> VideoConvertMode {
 }
 
 /// Check if running inside WSL (Windows Subsystem for Linux).
+#[cfg(not(target_os = "macos"))]
 fn is_wsl() -> bool {
     // Check WSL environment variable
     if std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSL_INTEROP").is_ok() {
@@ -215,23 +219,49 @@ fn detect_gl_renderer() -> Option<GlRendererInfo> {
 
 /// Detect GPU capabilities and set the global video conversion mode.
 /// This should be called once at startup after GStreamer is initialized.
-///
-/// Detection strategy:
-/// 1. If running on WSL, skip GPU test (CUDA-GL interop is known broken)
-/// 2. If cudadownload element is unavailable, use software mode
-/// 3. Test GL→CUDA interop with a fast pipeline (no nvenc initialization)
 pub fn detect_gpu_capabilities() -> VideoConvertMode {
     // Probe GL renderer info early (best-effort, independent of CUDA-GL interop)
     let gl_info = detect_gl_renderer();
     let _ = GL_RENDERER_INFO.set(gl_info);
 
+    let mode = detect_convert_mode();
+    let _ = VIDEO_CONVERT_MODE.set(mode);
+    mode
+}
+
+/// Decide the conversion mode on macOS.
+///
+/// Do not add an NVENC check here: NVENC never exists on a Mac, so the probe
+/// could only ever return one answer.
+///
+/// `Software` is right for two reasons. `autovideoconvert` offers no GPU path
+/// for the frames these call sites see — given GL memory it picks
+/// `glcolorconvert`, but our blocks feed it system memory (the GL chains in
+/// this tree download at their boundary) and it then selects
+/// `videoconvertscale` on the CPU. And being a bin it exposes no `n-threads`,
+/// so it would forfeit the threading below, which is what moves the numbers.
+#[cfg(target_os = "macos")]
+fn detect_convert_mode() -> VideoConvertMode {
+    info!(
+        "macOS - using software video conversion with n-threads={} (autovideoconvert has no GPU path for system memory here)",
+        video_convert_threads()
+    );
+    VideoConvertMode::Software
+}
+
+/// Decide the conversion mode on CUDA-capable platforms (Linux, Windows).
+///
+/// Detection strategy, unchanged:
+/// 1. If running on WSL, skip GPU test (CUDA-GL interop is known broken)
+/// 2. If NVENC is unavailable there is no CUDA stack to test, use software mode
+/// 3. Test GL→CUDA interop with a fast pipeline (no nvenc initialization)
+#[cfg(not(target_os = "macos"))]
+fn detect_convert_mode() -> VideoConvertMode {
     // Fast path: WSL has broken CUDA-GL interop, skip expensive test
     if is_wsl() {
         info!("WSL detected - using software video conversion (CUDA-GL interop unsupported)");
         // deprioritize_nv_decoders();
-        let mode = VideoConvertMode::Software;
-        let _ = VIDEO_CONVERT_MODE.set(mode);
-        return mode;
+        return VideoConvertMode::Software;
     }
 
     // Check if nvh264enc is available (required for GPU-accelerated encoding)
@@ -242,14 +272,12 @@ pub fn detect_gpu_capabilities() -> VideoConvertMode {
 
     if !has_nvenc {
         info!("NVENC not available - using software video conversion");
-        let mode = VideoConvertMode::Software;
-        let _ = VIDEO_CONVERT_MODE.set(mode);
-        return mode;
+        return VideoConvertMode::Software;
     }
 
     debug!("Testing CUDA-GL interop (this may take a moment on first run)...");
 
-    let mode = match test_cuda_gl_interop() {
+    match test_cuda_gl_interop() {
         Ok(()) => {
             info!("CUDA-GL interop works - using GPU-accelerated video conversion");
             VideoConvertMode::GpuAccelerated
@@ -261,15 +289,217 @@ pub fn detect_gpu_capabilities() -> VideoConvertMode {
             );
             VideoConvertMode::Software
         }
-    };
+    }
+}
 
-    let _ = VIDEO_CONVERT_MODE.set(mode);
-    mode
+/// Sanity bound on the detected core count, not a performance policy: it sits
+/// above anything Apple silicon reports, and clamping is logged rather than
+/// silent. Deliberately loose, because the errors are asymmetric — overshooting
+/// the pool measured 1-2%, undershooting up to 24%.
+#[cfg(target_os = "macos")]
+const MAX_CONVERT_THREADS: u32 = 32;
+
+/// Sanity bound for the `STROM_VIDEOCONVERT_THREADS` override, so a typo cannot
+/// ask for thousands of threads.
+#[cfg(target_os = "macos")]
+const MAX_OVERRIDE_THREADS: u32 = 64;
+
+/// The override is only an escape hatch if it can exceed the sanity bound.
+#[cfg(target_os = "macos")]
+const _: () = assert!(MAX_OVERRIDE_THREADS > MAX_CONVERT_THREADS);
+
+/// Number of worker threads to give a software `videoconvert`.
+///
+/// The stock `n-threads=1` converts a whole frame on one core; a pool sized to
+/// the machine measured 24% faster end to end at 1080p on a 4+4 M2.
+///
+/// The pool counts every performance tier macOS reports except the efficiency
+/// one — 4 on an M2, 36 on an M5 Ultra. `videoconvert` cuts a frame into equal
+/// stripes and cannot emit until the slowest finishes, so an efficiency core
+/// becomes the straggler the whole frame waits on. Apple draws the same line,
+/// describing performance cores as joining the super cores for demanding
+/// multithreaded work while efficiency cores handle background tasks. Super and
+/// performance cores do still differ, so a wide machine is worth measuring with
+/// `STROM_VIDEOCONVERT_THREADS`.
+///
+/// Intel Macs report no tiers and fall back to the total logical CPU count,
+/// which is correct there since all cores are equivalent.
+#[cfg(target_os = "macos")]
+pub fn video_convert_threads() -> u32 {
+    static THREADS: OnceLock<u32> = OnceLock::new();
+    *THREADS.get_or_init(|| {
+        let detected = performance_core_count().unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(1)
+        });
+        let raw = std::env::var("STROM_VIDEOCONVERT_THREADS").ok();
+        resolve_thread_count(raw.as_deref(), detected)
+    })
+}
+
+/// Apply the override and the ceiling to a detected core count.
+///
+/// Split out from [`video_convert_threads`] so the parsing and clamping can be
+/// tested without the process-wide `OnceLock` or the environment, and so the
+/// behaviour on machines wider than this one is pinned by a test rather than
+/// left to inference.
+#[cfg(target_os = "macos")]
+fn resolve_thread_count(override_raw: Option<&str>, detected: u32) -> u32 {
+    if let Some(raw) = override_raw {
+        match raw.trim().parse::<u32>() {
+            // The override deliberately bypasses MAX_CONVERT_THREADS so a
+            // wider machine can be measured past the sanity bound without a
+            // rebuild.
+            Ok(n) if (1..=MAX_OVERRIDE_THREADS).contains(&n) => return n,
+            _ => warn!(
+                "ignoring STROM_VIDEOCONVERT_THREADS={:?} - expected an integer in 1..={}",
+                raw, MAX_OVERRIDE_THREADS
+            ),
+        }
+    }
+    if detected > MAX_CONVERT_THREADS {
+        warn!(
+            "detected {} fast cores, capping the videoconvert pool at {} - set STROM_VIDEOCONVERT_THREADS to override",
+            detected, MAX_CONVERT_THREADS
+        );
+    }
+    detected.clamp(1, MAX_CONVERT_THREADS)
+}
+
+/// Count the logical CPUs in every performance tier that is not an efficiency
+/// tier.
+///
+/// macOS numbers its core tiers fastest-first and names each. A part can have
+/// more than one fast tier — an M5 Ultra is 12 super cores plus 24 performance
+/// cores — so tier 0 alone would be 12 there and discard 24 fast cores.
+///
+/// Matching the tier to *exclude* is the durable form: "Efficiency" is stable
+/// while the fast tiers gain names. A rename fails open — efficiency
+/// cores get counted, costing the 1-2% that overshooting costs rather than most
+/// of the machine.
+///
+/// Returns `None` on Intel Macs, where these keys are absent.
+#[cfg(target_os = "macos")]
+fn performance_core_count() -> Option<u32> {
+    let levels = sysctl_u32("hw.nperflevels")?;
+    let tiers: Vec<(String, u32)> = (0..levels)
+        .map(|i| {
+            (
+                sysctl_string(&format!("hw.perflevel{}.name", i)).unwrap_or_default(),
+                sysctl_u32(&format!("hw.perflevel{}.logicalcpu", i)).unwrap_or(0),
+            )
+        })
+        .collect();
+
+    debug!("CPU performance tiers: {:?}", tiers);
+    let n = fast_cores_from_tiers(&tiers);
+    (n > 0).then_some(n)
+}
+
+/// Sum the tiers that are not efficiency tiers.
+///
+/// Split from the syscalls so the tier policy can be tested against machines
+/// that are not to hand.
+#[cfg(target_os = "macos")]
+fn fast_cores_from_tiers(tiers: &[(String, u32)]) -> u32 {
+    tiers
+        .iter()
+        .filter(|(name, _)| !name.to_ascii_lowercase().contains("efficiency"))
+        .map(|(_, count)| count)
+        .sum()
+}
+
+/// Read an integer sysctl by name.
+#[cfg(target_os = "macos")]
+fn sysctl_u32(name: &str) -> Option<u32> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut value: i32 = 0;
+    let mut size = std::mem::size_of::<i32>();
+    // SAFETY: `value` and `size` describe the same object, and `cname` is a
+    // NUL-terminated C string that outlives the call.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            cname.as_ptr(),
+            &mut value as *mut i32 as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && value > 0).then_some(value as u32)
+}
+
+/// Read a string sysctl by name.
+#[cfg(target_os = "macos")]
+fn sysctl_string(name: &str) -> Option<String> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut size: usize = 0;
+
+    // SAFETY: a null data pointer asks sysctlbyname for the size only.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            cname.as_ptr(),
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size == 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u8; size];
+    // SAFETY: `buf` has `size` bytes and `size` is updated with what was written.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            cname.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+
+    buf.truncate(size.min(buf.len()));
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
+/// Apply tuning properties to a freshly created video conversion element.
+///
+/// `videoconvert` ships with `n-threads=1`, so a 1080p colour conversion runs
+/// on a single core however many the machine has. Every call site that builds a
+/// conversion element from [`VideoConvertMode::element_name`] routes through
+/// here, so the default is set in exactly one place.
+///
+/// This is macOS-only on purpose. The thread count above is an Apple-silicon
+/// heuristic. On Linux in particular a container's visible CPU count routinely
+/// overstates its cgroup quota, so picking a pool size there without measuring
+/// risks oversubscribing shared hosts. Elsewhere this is a no-op.
+pub fn configure_video_convert(element: &gst::Element) {
+    #[cfg(target_os = "macos")]
+    {
+        // Only plain `videoconvert` carries the property; `autovideoconvert` is
+        // a bin with nothing to forward it to.
+        if element.has_property("n-threads") {
+            element.set_property("n-threads", video_convert_threads());
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = element;
+    }
 }
 
 /// Test if true zero-copy GL-CUDA interop works with nvh264enc.
 /// Runs gst-launch-1.0 with GST_DEBUG to capture interop warnings.
 /// Returns Ok if zero-copy works, Err if fallback copy is used.
+#[cfg(not(target_os = "macos"))]
 fn test_cuda_gl_interop() -> Result<(), String> {
     use std::process::Command;
 
@@ -351,5 +581,213 @@ mod tests {
             "autovideoconvert"
         );
         assert_eq!(VideoConvertMode::Software.element_name(), "videoconvert");
+    }
+
+    /// `configure_video_convert` must raise the thread count off the stock
+    /// default of 1. Dropping the property, or a call site's use of this
+    /// helper, leaves `n-threads` at 1 and fails this test.
+    ///
+    /// macOS-only because the helper is deliberately a no-op elsewhere.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn configure_video_convert_sets_thread_count() {
+        gst::init().expect("gst init");
+
+        let convert = gst::ElementFactory::make("videoconvert")
+            .build()
+            .expect("videoconvert is in gst-plugins-base and must be present");
+
+        assert_eq!(
+            convert.property::<u32>("n-threads"),
+            1,
+            "upstream default changed; the premise of this fix needs rechecking"
+        );
+
+        configure_video_convert(&convert);
+
+        assert_eq!(
+            convert.property::<u32>("n-threads"),
+            video_convert_threads()
+        );
+        assert!(
+            video_convert_threads() > 1,
+            "every Mac this runs on is multi-core; a pool of 1 means detection failed"
+        );
+    }
+
+    /// The macOS choice of `Software` rests on `autovideoconvert` being a bin
+    /// that cannot forward a thread count to the converter it picks. If a
+    /// future GStreamer grows such a property, that trade-off is worth
+    /// re-measuring rather than silently keeping.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn autovideoconvert_cannot_be_threaded() {
+        gst::init().expect("gst init");
+
+        let auto = gst::ElementFactory::make("autovideoconvert")
+            .build()
+            .expect("autovideoconvert is in gst-plugins-base and must be present");
+
+        assert!(
+            !auto.has_property("n-threads"),
+            "autovideoconvert now exposes n-threads - re-measure Software vs GpuAccelerated on macOS"
+        );
+    }
+
+    /// The pool size must stay inside the documented bounds whichever branch
+    /// of `video_convert_threads` supplies it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn video_convert_threads_is_bounded() {
+        let n = video_convert_threads();
+        assert!(
+            (1..=MAX_OVERRIDE_THREADS).contains(&n),
+            "thread count out of range: {}",
+            n
+        );
+    }
+
+    /// Pins what happens on machines wider than this one, which cannot
+    /// exercise these paths itself.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn thread_count_scales_with_cores() {
+        // The detected count is used as-is across the whole real Apple silicon
+        // range: M2 4, M3 Pro 6, M2 Max 8, M4 Pro 10, M3/M4 Max 12, M3 Ultra 24.
+        for cores in [4, 6, 8, 10, 12, 16, 24] {
+            assert_eq!(
+                resolve_thread_count(None, cores),
+                cores,
+                "a {}-P-core machine should use its cores, not a capped value",
+                cores
+            );
+        }
+
+        // The bound is a sanity check on the syscall, not a policy: it only
+        // engages past anything Apple silicon reports. An old Intel Mac Pro
+        // falling back to 56 logical CPUs is the realistic case that hits it.
+        assert_eq!(resolve_thread_count(None, 56), MAX_CONVERT_THREADS);
+        assert_eq!(resolve_thread_count(None, u32::MAX), MAX_CONVERT_THREADS);
+
+        // A nonsense detection still yields a usable pool.
+        assert_eq!(resolve_thread_count(None, 0), 1);
+    }
+
+    /// Pins the tier policy against real Apple silicon layouts, none of which
+    /// beyond this machine are to hand.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fast_cores_counts_every_non_efficiency_tier() {
+        let m2 = [("Performance".into(), 4), ("Efficiency".into(), 4)];
+        assert_eq!(fast_cores_from_tiers(&m2), 4);
+
+        // M4: fewer performance cores than efficiency cores.
+        let m4 = [("Performance".into(), 4), ("Efficiency".into(), 6)];
+        assert_eq!(fast_cores_from_tiers(&m4), 4);
+
+        // M5 Ultra: 36 cores as 12 super + 24 performance, no efficiency tier.
+        // Taking level 0 alone would yield 12 and throw away 24 fast cores.
+        let m5_ultra = [("Super".into(), 12), ("Performance".into(), 24)];
+        assert_eq!(fast_cores_from_tiers(&m5_ultra), 36);
+
+        // M6: 2 super + 4 performance + 6 efficiency. All three tiers coexist,
+        // so "performance" is a tier in its own right and not efficiency
+        // renamed; only the efficiency tier is dropped.
+        let m6 = [
+            ("Super".into(), 2),
+            ("Performance".into(), 4),
+            ("Efficiency".into(), 6),
+        ];
+        assert_eq!(fast_cores_from_tiers(&m6), 6);
+    }
+
+    /// If Apple renames the efficiency tier the match fails open, including
+    /// those cores rather than discarding most of the machine. Overshooting the
+    /// pool costs ~1-2%; undershooting costs far more.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fast_cores_fails_open_on_an_unrecognised_tier_name() {
+        let renamed = [("Performance".into(), 4), ("E-Core".into(), 4)];
+        assert_eq!(fast_cores_from_tiers(&renamed), 8);
+    }
+
+    /// The tier names really are readable on this machine, so the policy above
+    /// is driven by data rather than by an assumption about the sysctl.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn perflevel_names_are_readable() {
+        let levels = sysctl_u32("hw.nperflevels").expect("macOS reports hw.nperflevels");
+        assert!(levels >= 1);
+        let name = sysctl_string("hw.perflevel0.name").expect("perflevel0 has a name");
+        assert!(!name.is_empty(), "perflevel0.name was empty");
+    }
+
+    /// The override is the escape hatch for a machine wider than this one, so
+    /// it must beat the sanity bound — and must not be trusted blindly.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn thread_count_override_bypasses_the_bound() {
+        assert_eq!(resolve_thread_count(Some("16"), 4), 16);
+        assert_eq!(resolve_thread_count(Some(" 24 "), 4), 24);
+
+        // Past MAX_CONVERT_THREADS, which detection alone can never reach.
+        assert_eq!(
+            resolve_thread_count(Some(&MAX_OVERRIDE_THREADS.to_string()), 4),
+            MAX_OVERRIDE_THREADS
+        );
+
+        // Garbage, zero and absurd values fall back to detection rather than
+        // taking the process down or spawning thousands of threads.
+        for bad in ["", "  ", "no", "-1", "0", "65", "999999", "4.5"] {
+            assert_eq!(
+                resolve_thread_count(Some(bad), 4),
+                4,
+                "STROM_VIDEOCONVERT_THREADS={:?} should have been rejected",
+                bad
+            );
+        }
+    }
+
+    /// Tripwire for a VideoToolbox converter arriving in a future GStreamer.
+    ///
+    /// The macOS choice of `Software` rests on there being no hardware
+    /// converter for `autovideoconvert` to offer. `autovideoconvert` discovers
+    /// candidates by klass (`Filter/Converter/Video...`), and today no
+    /// applemedia element carries one — the plugin ships codecs, a source and a
+    /// sink, nothing that transforms raw video.
+    ///
+    /// That is a gap in GStreamer, not in the platform: Apple exposes
+    /// `VTPixelTransferSession`, which converts colour and scales, and nothing
+    /// upstream wraps it yet. If that changes, `autovideoconvert` will pick the
+    /// new element up automatically and `GpuAccelerated` becomes worth
+    /// re-measuring here — a VideoToolbox transfer session would keep frames in
+    /// `CVPixelBuffer`s and skip both the CPU stripe work and the GL round trip
+    /// that makes `glcolorconvert` unprofitable for system memory today.
+    ///
+    /// This test fails on the day that lands, so the decision gets revisited
+    /// deliberately instead of the constant above quietly going stale.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn no_applemedia_converter_to_reconsider() {
+        gst::init().expect("gst init");
+
+        let converters: Vec<String> = gst::Registry::get()
+            .features_by_plugin("applemedia")
+            .into_iter()
+            .filter_map(|f| f.downcast::<gst::ElementFactory>().ok())
+            .filter(|f| {
+                f.metadata(gst::ELEMENT_METADATA_KLASS)
+                    .map(|k| k.contains("Converter"))
+                    .unwrap_or(false)
+            })
+            .map(|f| f.name().to_string())
+            .collect();
+
+        assert!(
+            converters.is_empty(),
+            "applemedia now ships a video converter ({:?}) - autovideoconvert will \
+             discover it, so re-measure GpuAccelerated against threaded Software on macOS",
+            converters
+        );
     }
 }
