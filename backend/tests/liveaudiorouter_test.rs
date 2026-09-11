@@ -70,6 +70,10 @@ fn liveaudiorouter_exposes_the_same_property_set_as_audiorouter() {
         "latency".to_string(),
         "min_upstream_latency".to_string(),
         "output_buffer_duration".to_string(),
+        // ...including the two that give the bus somewhere to put a fan-in
+        // sum. `builtin.audiorouter` has neither and clips the same way.
+        liveaudiorouter::OUTPUT_HEADROOM_PROPERTY.to_string(),
+        liveaudiorouter::OUTPUT_LIMITER_PROPERTY.to_string(),
     ]
     .into();
     let extra: Vec<_> = new_names
@@ -197,6 +201,7 @@ fn liveaudiorouter_definition_pad_shape_matches_audiorouter() {
 /// reason to skip — a skipped test guards nothing.
 const REQUIRED_ELEMENTS: &[&str] = &[
     "volume",
+    "rglimiter",
     "audiomixer",
     "deinterleave",
     "tee",
@@ -992,4 +997,293 @@ fn the_original_audiorouter_keeps_its_silent_default() {
         !result.elements.iter().any(|(id, _)| id.contains(":xp_")),
         "the old block has no crosspoint elements at all"
     );
+}
+
+// ============================================================================
+// Output headroom
+//
+// A mix-minus return carries every seat but its own, so an output bus sums
+// N-1 sources at unity. Speech from independent talkers sums in power: four
+// seats each aligned to leave 16 dB of peak headroom still put the bus over
+// full scale. These tests drive that overload through the block's own builder
+// output and measure what leaves the output pad.
+// ============================================================================
+
+/// Four inputs, each a sine at `amplitude`, all routed onto output 0 channel 0.
+/// Four times 0.5 is 2.0, so the bus is 6 dB over full scale by construction.
+fn four_into_one(instance: &str, amplitude: f64, extra: &[(&str, PropertyValue)]) -> Harness {
+    let mut pairs: Vec<(&str, PropertyValue)> = vec![
+        ("num_inputs", PropertyValue::UInt(4)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("input_1_channels", PropertyValue::UInt(1)),
+        ("input_2_channels", PropertyValue::UInt(1)),
+        ("input_3_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(1)),
+        (
+            "routing_matrix",
+            PropertyValue::String(
+                r#"{"i0c0":["o0c0"],"i1c0":["o0c0"],"i2c0":["o0c0"],"i3c0":["o0c0"]}"#.to_string(),
+            ),
+        ),
+    ];
+    pairs.extend(extra.iter().cloned());
+
+    let h = assemble(instance, &props(&pairs));
+    for input in 0..4 {
+        feed(&h, instance, input, &[(440.0, amplitude)]);
+    }
+    h
+}
+
+#[test]
+fn a_fan_in_overload_leaves_the_output_over_full_scale_when_nothing_catches_it() {
+    let h = four_into_one("headroom_none", 0.5, &[]);
+    tap(&h, "headroom_none", 0);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 1, Duration::from_secs(3));
+
+    // Two things at once: the exposure is real, and the bus carries it in
+    // float. Were the sum happening in a fixed-point format it would saturate
+    // inside `audiomixer` and this would read 0.0 dB, not the sum.
+    assert!(
+        peaks[0] > 4.0,
+        "four unity crosspoints summing 0.5 amplitude must leave the output around \
+         +6 dBFS with no trim and no limiter, got {peaks:?} dBFS"
+    );
+}
+
+#[test]
+fn the_output_limiter_holds_a_fan_in_overload_below_full_scale() {
+    let h = four_into_one(
+        "headroom_limited",
+        0.5,
+        &[("output_limiter_enabled", PropertyValue::Bool(true))],
+    );
+    tap(&h, "headroom_limited", 0);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 1, Duration::from_secs(3));
+
+    assert!(
+        peaks[0] <= 0.0,
+        "the output limiter must keep the same overload at or below full scale, \
+         got {peaks:?} dBFS"
+    );
+    // A limiter, not a mute: what it holds down it must still pass.
+    assert!(
+        peaks[0] > -6.0,
+        "the limiter must hold the bus just under full scale, not attenuate it away, \
+         got {peaks:?} dBFS"
+    );
+}
+
+#[test]
+fn the_output_trim_attenuates_every_output_bus() {
+    let h = four_into_one(
+        "headroom_trimmed",
+        0.5,
+        &[("output_headroom", PropertyValue::Float(-12.0))],
+    );
+    tap(&h, "headroom_trimmed", 0);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 1, Duration::from_secs(3));
+
+    // +6 dBFS of sum, trimmed 12 dB, is -6 dBFS.
+    assert!(
+        (peaks[0] - -6.0).abs() < 1.5,
+        "a -12 dB output trim must bring the +6 dBFS sum to about -6 dBFS, got {peaks:?} dBFS"
+    );
+}
+
+#[test]
+fn a_trim_cannot_be_used_to_boost_a_bus_that_is_already_summing() {
+    let h = four_into_one(
+        "headroom_boost",
+        0.5,
+        &[("output_headroom", PropertyValue::Float(12.0))],
+    );
+    let trim = h
+        .elements
+        .get("headroom_boost:trim_out_0")
+        .expect("no trim_out_0");
+
+    assert!(
+        (trim.property::<f64>("volume") - 1.0).abs() < 1e-9,
+        "a positive trim must clamp to unity, got {}",
+        trim.property::<f64>("volume")
+    );
+}
+
+#[test]
+fn an_engaged_output_bus_sums_in_float() {
+    let h = four_into_one(
+        "headroom_float",
+        0.5,
+        &[("output_limiter_enabled", PropertyValue::Bool(true))],
+    );
+
+    // The pin, at the element that carries it. `audiomixer` saturates at the
+    // sum in a fixed-point format, so an output bus that is about to be
+    // trimmed or limited has to be told to stay in float — by the time the
+    // overload reaches either stage, a saturated sum is already gone.
+    let caps = h
+        .elements
+        .get("headroom_float:caps_out_0")
+        .expect("no caps_out_0")
+        .property::<gst::Caps>("caps");
+    assert_eq!(
+        caps.structure(0)
+            .and_then(|s| s.get::<String>("format").ok())
+            .unwrap_or_default(),
+        "F32LE",
+        "an engaged output bus must be pinned to float, got {caps}"
+    );
+
+    // And what it negotiates once running, with a consumer that would rather
+    // have S16.
+    let convert = gst::ElementFactory::make("audioconvert")
+        .build()
+        .expect("audioconvert");
+    let s16 = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("rate", 48000i32)
+                .field("channels", 1i32)
+                .build(),
+        )
+        .build()
+        .expect("capsfilter");
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .expect("fakesink");
+    h.pipeline
+        .add_many([&convert, &s16, &sink])
+        .expect("add consumer");
+    gst::Element::link_many([&convert, &s16, &sink]).expect("link consumer");
+    h.elements
+        .get("headroom_float:queue_out_0")
+        .expect("no queue_out_0")
+        .link(&convert)
+        .expect("link output to consumer");
+
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+    h.pipeline
+        .state(gst::ClockTime::from_seconds(5))
+        .0
+        .expect("reach Playing");
+
+    for element in ["mixer_0", "trim_out_0", "limiter_out_0"] {
+        let negotiated = h
+            .elements
+            .get(&format!("headroom_float:{element}"))
+            .unwrap_or_else(|| panic!("no {element}"))
+            .static_pad("src")
+            .expect("src pad")
+            .current_caps()
+            .unwrap_or_else(|| panic!("{element} never negotiated caps"));
+        assert_eq!(
+            negotiated
+                .structure(0)
+                .and_then(|s| s.get::<String>("format").ok())
+                .unwrap_or_default(),
+            "F32LE",
+            "{element} must carry float however the consumer would prefer to be fed, \
+             got {negotiated}"
+        );
+    }
+}
+
+#[test]
+fn a_router_that_has_not_asked_for_headroom_is_left_exactly_as_it_was() {
+    let h = four_into_one("headroom_default", 0.5, &[]);
+
+    let trim = h
+        .elements
+        .get("headroom_default:trim_out_0")
+        .expect("no trim_out_0");
+    assert!(
+        (trim.property::<f64>("volume") - 1.0).abs() < 1e-9,
+        "the output trim must default to unity, got {}",
+        trim.property::<f64>("volume")
+    );
+
+    // No limiter in the chain at all, not a disabled one. `rglimiter` takes
+    // F32LE and nothing else, so a disabled one left in place would still pin
+    // the whole output to float for a flow that never asked to be limited.
+    assert!(
+        !h.elements.contains_key("headroom_default:limiter_out_0"),
+        "a router with no headroom configured must not have a limiter in its output chain"
+    );
+
+    let caps = h
+        .elements
+        .get("headroom_default:caps_out_0")
+        .expect("no caps_out_0")
+        .property::<gst::Caps>("caps");
+    assert!(
+        caps.structure(0)
+            .map(|s| !s.has_field("format"))
+            .unwrap_or(false),
+        "a disengaged output bus must negotiate its format the way it always did, got {caps}"
+    );
+}
+
+#[test]
+fn the_headroom_properties_are_offered_and_default_to_no_op() {
+    let def = definition(liveaudiorouter::get_blocks(), "builtin.liveaudiorouter");
+    let by_name: HashMap<_, _> = def
+        .exposed_properties
+        .iter()
+        .map(|p| (p.name.as_str(), p))
+        .collect();
+
+    let headroom = by_name
+        .get("output_headroom")
+        .expect("output_headroom is not exposed");
+    // PropertyValue does not implement PartialEq; compare Debug, as the
+    // parity tests above do.
+    assert_eq!(
+        format!("{:?}", headroom.default_value),
+        format!(
+            "{:?}",
+            Some(PropertyValue::Float(
+                strom_types::routing::DEFAULT_OUTPUT_HEADROOM_DB
+            ))
+        ),
+        "the output trim must default to no attenuation"
+    );
+
+    let limiter = by_name
+        .get("output_limiter_enabled")
+        .expect("output_limiter_enabled is not exposed");
+    assert_eq!(
+        format!("{:?}", limiter.default_value),
+        format!(
+            "{:?}",
+            Some(PropertyValue::Bool(
+                strom_types::routing::DEFAULT_OUTPUT_LIMITER_ENABLED
+            ))
+        ),
+        "the output limiter must default to off"
+    );
+    const {
+        assert!(
+            !strom_types::routing::DEFAULT_OUTPUT_LIMITER_ENABLED,
+            "defaulting the limiter on would change what every existing flow sounds like"
+        )
+    };
 }
