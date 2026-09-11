@@ -125,7 +125,7 @@ exists; `feature` adds something new. **Most of the board is not `bug`.**
 
 `class=` appears **only** on a `kind=fix` marker — a PR the implementation stage authored,
 never a review of somebody else's PR. "Find the open class=C PRs" therefore means "the fix
-PRs you opened", which `gh pr list --author @me --draft` answers.
+PRs you opened", which `gh pr list --author @me` answers.
 
 `excluded=` lists the areas from `FIX.md`'s exclusion gate that the fix would **break or take
 a lifetime risk in**, comma-separated, or `none` — not the areas the diff merely touches.
