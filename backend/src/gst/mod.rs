@@ -5,7 +5,6 @@ pub mod buffer_age_probe;
 pub(crate) mod control_bindings;
 pub(crate) mod crop;
 pub mod discovery;
-pub mod gl_bridge;
 pub mod gl_link;
 pub mod ice_preflight;
 pub mod keyframe_request;
@@ -19,6 +18,7 @@ pub mod thumbnail_tap;
 pub mod transitions;
 pub(crate) mod underlay;
 pub mod video_frame;
+pub mod video_input_bridge;
 pub mod volume_ramp;
 pub mod whep_probe;
 
