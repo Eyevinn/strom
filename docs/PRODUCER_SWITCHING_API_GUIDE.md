@@ -188,7 +188,7 @@ are still composing, and unnecessary for a single deliberate move.
 | anything → anything | `cut` (or `duration_ms: 0`) | One-frame switch. Verified: last frame of the old look, next frame the new look, nothing between. |
 | input → input | `fade` | A true dissolve. Frames mid-transition show both pictures blended. |
 | PiP → PiP, **no shared sources** | `fade` | A true dissolve between the two compositions. |
-| PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-up to that participant full frame reads as a zoom-in, with the other tiles covered as the box grows. |
+| PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-up to that participant full frame reads as a zoom-in, with the other tiles covered as the box grows. Reported back as `actual_transition_type: "morph"`. |
 | either bus is a PiP | `slide_*` | Silently downgraded to `fade`. The server logs the downgrade; the HTTP response reports the transition that actually ran in `actual_transition_type`. |
 
 The shared-source case is the one that surprises people. The engine animates pads, not
@@ -197,7 +197,8 @@ pictures: a source present in both the outgoing and incoming composition is trea
 out of a multi-box layout, take to a composition that shares no inputs with it, or use a
 cut.
 
-Check `actual_transition_type` in the response if you care which one ran.
+`actual_transition_type` in the take response always names what ran — `cut`, `fade`,
+or `morph` — so a control surface can label the move without replaying this table.
 
 ---
 
@@ -215,18 +216,28 @@ participants into a full 2×2. There is no automatic compaction.
 ### A seat drops while it is on air
 
 **The tile freezes on its last frame and stays there indefinitely.** It does not go black,
-it is not removed, and the composition does not re-flow. On the rig the freeze followed the
-publisher's death within about two seconds — the measurement cannot separate the jitter
-buffer from the mixer's own output latency, so treat it as immediate. The frozen frame was
-still on air minutes later, long after the ingest session had been reaped for inactivity.
+it is not removed, and the composition does not re-flow. The last frame arrives about a
+quarter of a second after the publisher dies, which is the jitter buffer draining, and then
+the picture stops. The frozen frame was still on air minutes later, long after the ingest
+session had been reaped for inactivity.
 
 This is the most dangerous failure in the set, because a frozen participant looks exactly
-like a still one. Two consequences for a live show:
+like a still one. **Do not use the program picture to decide whether a seat is alive.** Use
+`input_media_age_ms` from `GET .../state`, which reports milliseconds since each input last
+delivered a frame to the mixer:
 
-- Do not trust the program picture to tell you a seat is gone. Watch the ingest session
-  state or the per-seat block health instead.
-- The recovery is automatic: when the participant rejoins, their tile resumes in place with
-  no operator action and no layout change.
+```jsonc
+"input_media_age_ms": [ 24, 24, 7727, 24, null ]
+//                       ^live ^live  ^^^^ frozen 7.7s   ^never published
+```
+
+A live 30 fps source sits in the tens of milliseconds. Anything past a second or so is a
+seat that has stopped, and `null` is a seat that has never published at all. The counter is
+stamped from the mixer's own input pads, so it covers every kind of input, not just WHIP
+seats, and it measures what actually determines the picture.
+
+Recovery is automatic: when the participant rejoins, their tile resumes in place with no
+operator action and no layout change, and the age drops back to single-frame values.
 
 If you need the seat gone from the picture, you must remove it from the zone yourself —
 which is a live edit and animates as described in §3.
@@ -273,7 +284,8 @@ Two things make verification reliable:
    one unless the picture itself is moving. Burning a running timecode into each
    participant feed turns "is this seat alive?" into something you can read off a single
    frame. Two seats reading the same time and one reading an older time is the whole
-   diagnosis.
+   diagnosis. `input_media_age_ms` answers the same question without a capture, and the
+   two agree; the burned clock is what proves the field is telling the truth.
 2. **Tap the program output to a file** rather than capturing it over the network. Adding a
    video encoder plus a recorder block fed from the mixer's PGM output gives frame-accurate
    material with no transport in the way, and the recorder's split endpoint closes a
@@ -283,11 +295,21 @@ Expect the recording to sit a couple of seconds behind your API calls — the mi
 queue plus the encoder. Wait 6–10 s after a move before closing the segment, or the moment
 you care about lands in the next file.
 
-One environment caveat worth knowing: on the macOS development rig, pulling the program
-with a GStreamer WHEP client failed ICE negotiation every time, roughly two seconds into
-the session, after the first connectivity check had already succeeded. The same client
-against a plain standalone WHEP sink on the same machine worked. This was not chased down;
-it is a capture-path problem, not a mixer problem, and the file tap sidesteps it entirely.
+If you would rather pull the program over WHEP than tap it to a file, **use `whepsrc`, not
+`whepclientsrc`**:
+
+```bash
+gst-launch-1.0 -e whepsrc whep-endpoint="http://127.0.0.1:8123/whep/program-video" \
+  ! queue ! decodebin ! videoconvert ! videorate ! video/x-raw,framerate=1/1 \
+  ! pngenc ! multifilesink location="frames/f_%03d.png"
+```
+
+`whepclientsrc`, the newer `webrtcsrc`-based client, could not complete ICE against
+Strom's WHEP output on the macOS rig — it reached one successful connectivity check, then
+the server side stopped answering and it gave up about eight seconds in. `whepsrc` pulls
+the identical endpoint without trouble, which is also why Strom's own WHEP *input* block
+defaults to the `whepsrc` implementation. Treat this as a client-element choice, not a
+server problem.
 
 ---
 
