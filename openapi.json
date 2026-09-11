@@ -4907,6 +4907,39 @@
           }
         }
       },
+      "BlockHealth": {
+        "type": "object",
+        "description": "Runtime health of one block in a running flow.",
+        "required": [
+          "block_id",
+          "status"
+        ],
+        "properties": {
+          "block_id": {
+            "type": "string",
+            "description": "Block instance ID this health report belongs to."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable detail naming the element and pad whose task stopped.\n`None` when the block is healthy."
+          },
+          "status": {
+            "$ref": "#/components/schemas/BlockHealthStatus",
+            "description": "Whether the block's element chain is running or has stopped."
+          }
+        }
+      },
+      "BlockHealthStatus": {
+        "type": "string",
+        "description": "Health of a single block's element chain while the flow is running.\n\nPausing a pad task is not a state change: the pipeline and every element in\nit stay `PLAYING` while that branch stops passing data, so the failure does\nnot show up in the flow's `gst_state`.",
+        "enum": [
+          "ok",
+          "failed"
+        ]
+      },
       "BlockInstance": {
         "type": "object",
         "description": "Block instance in a flow",
@@ -5991,6 +6024,13 @@
           "name"
         ],
         "properties": {
+          "block_health": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockHealth"
+            },
+            "description": "Per-block runtime health. Populated only while a pipeline is running;\nempty otherwise. An entry with a failed status means that block has\nstopped passing data even though `gst_state` is still `Playing`."
+          },
           "blocks": {
             "type": "array",
             "items": {
@@ -9553,6 +9593,52 @@
                 "type": "string",
                 "enum": [
                   "SubscriptionStatusChanged"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A block's element chain stopped passing data, or resumed.\n\nEmitted only on a change of status, not on every health poll.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "object",
+                "description": "A block's element chain stopped passing data, or resumed.\n\nEmitted only on a change of status, not on every health poll.",
+                "required": [
+                  "flow_id",
+                  "block_id",
+                  "status"
+                ],
+                "properties": {
+                  "block_id": {
+                    "type": "string",
+                    "description": "Block instance ID, or element ID for a standalone element"
+                  },
+                  "detail": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Element and pad whose task stopped; None when the block recovered"
+                  },
+                  "flow_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "status": {
+                    "$ref": "#/components/schemas/BlockHealthStatus",
+                    "description": "Whether the block is passing data or has stopped"
+                  }
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "BlockHealthChanged"
                 ]
               }
             }

@@ -47,6 +47,9 @@ impl PipelineManager {
         self.start_qos_broadcast_task();
         info!("QoS stats task started");
 
+        // Start the scan for stalled pad tasks
+        self.start_block_health_task();
+
         // Configure clock before starting
         info!(
             "Configuring clock (type: {:?})...",
@@ -202,6 +205,7 @@ impl PipelineManager {
 
         // Stop QoS broadcast task
         self.stop_qos_broadcast_task();
+        self.stop_block_health_task();
 
         // Stop thumbnail deactivation task
         if let Some(task) = self.thumbnail_deactivation_task.take() {
