@@ -168,12 +168,18 @@ pub(crate) fn scan_block_health(
     // Reported against the block owning the source element, which is where the
     // branch dies, and allowed to overwrite a stall found above: a task parked
     // behind a link that never formed is the symptom, and the link is the cause.
+    // Where a block has several, the first names it, as in the scan above.
+    let mut named_by_link: std::collections::HashSet<String> = std::collections::HashSet::new();
     for link in pending_links {
         if !unformed_link(elements, link) {
             continue;
         }
         let (from_ref, _) = link.to_pad_refs();
-        let Some(entry) = by_block.get_mut(owning_block(&from_ref.element_id)) else {
+        let block_id = owning_block(&from_ref.element_id);
+        if !named_by_link.insert(block_id.to_string()) {
+            continue;
+        }
+        let Some(entry) = by_block.get_mut(block_id) else {
             continue;
         };
         entry.status = BlockHealthStatus::Failed;
