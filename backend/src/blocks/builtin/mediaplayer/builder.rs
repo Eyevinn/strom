@@ -12,7 +12,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use strom_types::element::ElementPadRef;
 use strom_types::{FlowId, PropertyValue, StromEvent};
@@ -178,7 +178,7 @@ fn build_media_player(
     // --- Create shared state ---
     let player_instance_id = Uuid::new_v4();
     let source_element_weak = gst::glib::WeakRef::new();
-    let ts_offset = Arc::new(AtomicI64::new(i64::MIN));
+    let bridge = Arc::new(crate::gst::pipeline_bridge::SessionBridge::new());
     let state = Arc::new(MediaPlayerState {
         instance_id: player_instance_id,
         source_element: source_element_weak,
@@ -199,7 +199,7 @@ fn build_media_player(
         decode,
         sync,
         media_path: media_path.clone(),
-        ts_offset,
+        bridge,
         main_pipeline: gst::glib::WeakRef::new(),
         bus_watch: std::sync::Mutex::new(None),
     });
