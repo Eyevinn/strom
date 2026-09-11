@@ -1,10 +1,11 @@
-//! A pipeline branch can stop dead while the pipeline still reports Playing.
+//! A pipeline branch can carry nothing while the pipeline still reports Playing.
 //!
-//! When a downstream push fails with `not-negotiated`, `GstAggregator` marks
-//! its sink pads flushing and pauses its source pad task. Nothing is posted to
-//! the bus and no element changes state, so the failure is invisible in
-//! `gst_state`. These tests pin both halves: that the stall is silent, and
-//! that the block health scan reports it.
+//! Two ways in. When a downstream push fails with `not-negotiated`,
+//! `GstAggregator` marks its sink pads flushing and pauses its source pad task.
+//! When a link is refused for having no format in common, the branch below it
+//! never starts at all. Neither posts to the bus and neither changes any
+//! element's state, so both are invisible in `gst_state`. These tests pin that
+//! silence; `gst::pipeline::health` covers the detection.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -142,5 +143,135 @@ fn aggregator_stall_is_silent_and_leaves_pipeline_playing() {
         errors.is_empty(),
         "expected no bus error, got: {:?}",
         errors
+    );
+}
+
+/// videotestsrc -> tee -> videoconvert, with videoconvert's output meant to go
+/// to audioconvert - a pair with no format in common.
+///
+/// The shape a vision mixer takes when its output caps cannot be negotiated
+/// across `gldownload`: a tee with `allow-not-linked=true` above a branch whose
+/// link was refused.
+struct UnformedLinkRig {
+    pipeline: gst::Pipeline,
+    videoconvert: gst::Element,
+    audioconvert: gst::Element,
+    bus_errors: Arc<Mutex<Vec<String>>>,
+}
+
+impl UnformedLinkRig {
+    fn build() -> Self {
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        let tee = gst::ElementFactory::make("tee")
+            .property("allow-not-linked", true)
+            .build()
+            .unwrap();
+        let videoconvert = gst::ElementFactory::make("videoconvert").build().unwrap();
+        let audioconvert = gst::ElementFactory::make("audioconvert").build().unwrap();
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .unwrap();
+
+        pipeline
+            .add_many([&src, &tee, &videoconvert, &audioconvert, &sink])
+            .unwrap();
+        src.link(&tee).unwrap();
+        tee.link(&sink).unwrap();
+        tee.link(&videoconvert).unwrap();
+
+        let bus_errors = Arc::new(Mutex::new(Vec::new()));
+        let collected = bus_errors.clone();
+        let bus = pipeline.bus().unwrap();
+        bus.add_signal_watch();
+        bus.connect_message(Some("error"), move |_, msg| {
+            if let gst::MessageView::Error(err) = msg.view() {
+                collected.lock().unwrap().push(err.error().to_string());
+            }
+        });
+
+        Self {
+            pipeline,
+            videoconvert,
+            audioconvert,
+            bus_errors,
+        }
+    }
+
+    /// Pads parked in the state the stalled-pad-task scan looks for, across the
+    /// whole pipeline.
+    fn paused_pads(&self) -> Vec<String> {
+        self.pipeline
+            .iterate_recurse()
+            .into_iter()
+            .flatten()
+            .flat_map(|element| {
+                element
+                    .pads()
+                    .into_iter()
+                    .filter(|pad| pad.task_state() == gst::TaskState::Paused)
+                    .map(|pad| format!("{}:{}", element.name(), pad.name()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+}
+
+impl Drop for UnformedLinkRig {
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[test]
+fn an_unformed_link_is_silent_and_leaves_no_paused_task() {
+    init();
+    let rig = UnformedLinkRig::build();
+
+    let refused = rig
+        .videoconvert
+        .static_pad("src")
+        .unwrap()
+        .link(&rig.audioconvert.static_pad("sink").unwrap());
+    assert_eq!(
+        refused,
+        Err(gst::PadLinkError::Noformat),
+        "the pair must be unlinkable for the rest of this test to mean anything"
+    );
+
+    rig.pipeline.set_state(gst::State::Playing).unwrap();
+    let (res, current, _) = rig.pipeline.state(gst::ClockTime::from_seconds(10));
+    assert_eq!(res, Ok(gst::StateChangeSuccess::Success));
+    assert_eq!(current, gst::State::Playing);
+
+    // Let the source push into the dead branch for a while.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let (_, current, _) = rig.pipeline.state(gst::ClockTime::from_seconds(1));
+    assert_eq!(
+        current,
+        gst::State::Playing,
+        "pipeline should still report Playing while the branch carries nothing"
+    );
+    let errors = rig.bus_errors.lock().unwrap();
+    assert!(
+        errors.is_empty(),
+        "expected no bus error, got: {:?}",
+        errors
+    );
+    assert!(
+        rig.videoconvert.static_pad("src").unwrap().peer().is_none(),
+        "videoconvert should still be unlinked"
+    );
+    // The reason the stalled-pad-task scan cannot find this: the tee absorbs
+    // the not-linked return, so no task anywhere is paused.
+    assert!(
+        rig.paused_pads().is_empty(),
+        "expected no paused pad task, got: {:?}",
+        rig.paused_pads()
     );
 }
