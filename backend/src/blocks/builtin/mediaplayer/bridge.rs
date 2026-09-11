@@ -7,6 +7,7 @@
 use super::state::MediaPlayerState;
 use crate::blocks::BlockBuildError;
 use crate::events::EventBroadcaster;
+use crate::gst::rtp_hdrext;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -122,6 +123,10 @@ pub fn create_decode_pipeline(
             }
         }
     });
+
+    // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
+    // internal pipeline needs the same gstreamer#5057 workaround as the main one.
+    rtp_hdrext::install(&pipeline);
 
     Ok(pipeline)
 }
@@ -315,6 +320,10 @@ pub fn create_passthrough_pipeline(
             );
         }
     });
+
+    // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
+    // internal pipeline needs the same gstreamer#5057 workaround as the main one.
+    rtp_hdrext::install(&pipeline);
 
     Ok(pipeline)
 }
@@ -600,5 +609,95 @@ pub fn watch_internal_bus(
         );
         bus.disconnect(previous);
         bus.remove_signal_watch();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::state::Playlist;
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicI64};
+    use std::sync::{Mutex, RwLock};
+
+    /// The bare minimum for the two pipeline constructors: they read `sync` and
+    /// stash a weak ref to the source element, nothing else, before returning.
+    fn test_state() -> Arc<MediaPlayerState> {
+        Arc::new(MediaPlayerState {
+            instance_id: uuid::Uuid::new_v4(),
+            source_element: gst::glib::WeakRef::new(),
+            internal_pipeline: RwLock::new(None),
+            video_appsrc: None,
+            audio_appsrc: None,
+            playlist: RwLock::new(Playlist {
+                files: Vec::new(),
+                current_index: 0,
+            }),
+            is_paused: AtomicBool::new(false),
+            loop_playlist: AtomicBool::new(false),
+            block_id: "test".to_string(),
+            flow_id: uuid::Uuid::new_v4(),
+            switching_file: AtomicBool::new(false),
+            video_linked: AtomicBool::new(false),
+            audio_linked: AtomicBool::new(false),
+            decode: true,
+            sync: true,
+            media_path: std::env::temp_dir(),
+            ts_offset: Arc::new(AtomicI64::new(i64::MIN)),
+            main_pipeline: gst::glib::WeakRef::new(),
+            bus_watch: Mutex::new(None),
+        })
+    }
+
+    /// An `rtsp://` URI makes `uridecodebin`/`urisourcebin` autoplug an RTP
+    /// depayloader inside this pipeline, at which point it needs the
+    /// gstreamer#5057 workaround exactly as much as the main pipeline does —
+    /// the abort takes down the whole process, not just this flow.
+    ///
+    /// CI cannot serve an RTSP stream, so the test stands in for the autoplugged
+    /// element by adding a depayloader to a nested bin after construction. That
+    /// is the same path `deep-element-added` sees, and it fails if the
+    /// `rtp_hdrext::install()` call is removed from the constructor.
+    fn assert_hdrext_disabled_on_late_depayloader(pipeline: &gst::Pipeline) {
+        let inner = gst::Bin::builder().name("inner").build();
+        pipeline.add(&inner).unwrap();
+
+        let depay = gst::ElementFactory::make("rtph264depay")
+            .build()
+            .expect("rtph264depay is in gstreamer1.0-plugins-good, installed in CI")
+            .downcast::<gstreamer_rtp::RTPBaseDepayload>()
+            .expect("rtph264depay derives from GstRTPBaseDepayload");
+        inner.add(&depay).unwrap();
+
+        assert_eq!(
+            rtp_hdrext::is_enabled(&depay),
+            Some(false),
+            "a depayloader autoplugged in the Media Player's internal pipeline still \
+             has RTP header extension aggregation enabled — an interrupted H264 \
+             fragmentation unit from an rtsp:// source will abort the whole process \
+             (gstreamer#5057)"
+        );
+    }
+
+    #[test]
+    fn decode_pipeline_disables_hdrext_aggregation() {
+        let _ = gst::init();
+        if !rtp_hdrext::is_supported() {
+            // GStreamer < 1.24: aggregation does not exist, so neither does the bug.
+            return;
+        }
+        let state = test_state();
+        let pipeline = create_decode_pipeline("test", &state, None).unwrap();
+        assert_hdrext_disabled_on_late_depayloader(&pipeline);
+    }
+
+    #[test]
+    fn passthrough_pipeline_disables_hdrext_aggregation() {
+        let _ = gst::init();
+        if !rtp_hdrext::is_supported() {
+            return;
+        }
+        let state = test_state();
+        let pipeline = create_passthrough_pipeline("test", &state, None).unwrap();
+        assert_hdrext_disabled_on_late_depayloader(&pipeline);
     }
 }

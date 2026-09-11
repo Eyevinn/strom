@@ -192,21 +192,26 @@ async fn unmute_after_mid_mute_fader_change_fades_in_from_zero() {
     settle(80).await;
     assert!(p.mute(), "still muted (audio silent regardless of cs)");
 
-    // Unmute — must fade *up from 0* to 0.3.
-    assert!(mgr.apply_mute(&p.volume, "v", false, 30));
+    // Unmute — must fade *up from 0* to 0.3. The fade is long relative to
+    // the sample below because Windows timers have ~15 ms granularity: a
+    // short fade can finish inside a single overshooting sleep, which reads
+    // back as "no fade" and fails a correct implementation.
+    assert!(mgr.apply_mute(&p.volume, "v", false, 200));
 
-    // Sample mid-fade: at 5ms, volume should still be small. If the fix is
-    // missing, the unmute would step straight to 0.3 with no fade.
-    tokio::time::sleep(Duration::from_millis(8)).await;
+    // Sample mid-fade. The curve is dB-linear, so a fade-in from silence
+    // does not reach 0.25 until ~97% along - the assertion holds anywhere in
+    // the first 190 ms. If the fix is missing, unmute steps straight to 0.3
+    // with no fade at all.
+    tokio::time::sleep(Duration::from_millis(40)).await;
     let mid = p.vol();
     assert!(
         mid < 0.25,
-        "unmute did NOT fade in (P0 regression): volume={} at +8ms (expected <0.25)",
+        "unmute did NOT fade in (P0 regression): volume={} at +40ms of a 200ms fade (expected <0.25)",
         mid
     );
 
     // Settled value lands at the new pre-mute target.
-    settle(60).await;
+    settle(220).await;
     assert!(
         (p.vol() - 0.3).abs() < 0.05,
         "expected ~0.3 after fade-in, got {}",

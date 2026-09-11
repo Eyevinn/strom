@@ -30,6 +30,7 @@ gstreamer = { version = "0.25", features = ["v1_22"] }
 gstreamer-app = { version = "0.25", features = ["v1_22"] }
 gstreamer-controller = { version = "0.25", features = ["v1_22"] }
 gstreamer-net = { version = "0.25", features = ["v1_22"] }
+gstreamer-rtp = { version = "0.25", features = ["v1_22"] }
 gstreamer-gl = { version = "0.25", features = ["v1_22"] }
 gstreamer-video = { version = "0.25", features = ["v1_22"] }
 # gio 0.22 matches the glib 0.22 transitive that gstreamer 0.25 pulls in.
