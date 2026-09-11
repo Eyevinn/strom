@@ -1,7 +1,7 @@
 //! Thumbnail capture error types.
 //!
 //! The actual thumbnail capture logic has moved to `thumbnail_tap.rs`, which
-//! uses GStreamer-native processing (autovideoconvert, videoscale) instead of
+//! uses GStreamer-native processing (videoconvertscale) instead of
 //! CPU-based pad probes. This module retains the shared error type.
 
 use thiserror::Error;
