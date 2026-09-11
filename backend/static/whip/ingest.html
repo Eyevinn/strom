@@ -113,8 +113,8 @@
         let reconnectAttempt = 0;
         let reconnectTimer = null;
         let activeEndpoint = null;
-        const MAX_RECONNECT_ATTEMPTS = 15;
-        const RECONNECT_DELAY = 10000;
+        // MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAYS and whipReconnectDelay() are
+        // globals from whip.js, which is loaded above.
 
         // Elements
         const endpointSelect = document.getElementById('endpointSelect');
@@ -285,12 +285,13 @@
                 return;
             }
             reconnectAttempt++;
-            log('Reconnecting in ' + (RECONNECT_DELAY / 1000) + 's (attempt ' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
-            setStatus('status', 'Reconnecting in ' + (RECONNECT_DELAY / 1000) + 's (attempt ' + reconnectAttempt + ')...', 'connecting');
+            const delay = whipReconnectDelay(reconnectAttempt);
+            log('Reconnecting in ' + (delay / 1000) + 's (attempt ' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')... Reason: ' + reason, 'warning');
+            setStatus('status', 'Reconnecting in ' + (delay / 1000) + 's (attempt ' + reconnectAttempt + ')...', 'connecting');
             reconnectTimer = setTimeout(() => {
                 reconnectTimer = null;
                 if (wantConnected) doReconnect();
-            }, RECONNECT_DELAY);
+            }, delay);
         }
 
         function cancelReconnect() {
@@ -567,7 +568,7 @@
                 onIceState: () => {},
             });
 
-            log('WHIP ingest client v10');
+            log('WHIP ingest client v12');
             whipClient.connect(stream);
         }
 
