@@ -16,6 +16,16 @@
 //! `identity` handed over there sees a CAPS event exactly when that codec got
 //! past the encoder, and sees nothing when it did not.
 //!
+//! Only the first round of discovery counts. That is the one that runs when
+//! the input caps arrive, with output caps of `ANY`, and its result becomes the
+//! codec list the sink will answer a viewer with. Every later round belongs to
+//! a viewer that has already connected and is asked a different question - its
+//! output caps come from that viewer's SDP, so `force_profile` is false and the
+//! `codec-parser-caps` filter stops demanding `constrained-baseline`. H.264
+//! therefore passes on the viewer path even when it failed at startup, and
+//! letting that clear the verdict would report the block healthy while its
+//! answer still has no H.264 in it.
+//!
 //! Audio is left alone. There is one audio codec to discover, and a WHEP
 //! output that loses it stalls a pad task in the flow pipeline, which the
 //! health scan already finds.
@@ -60,9 +70,11 @@ struct Inner {
     attempts: BTreeMap<String, Attempt>,
     /// When the most recent discovery pipeline was built.
     last_attempt_at: Option<Instant>,
-    /// Last verdict reached, held while a later round of discovery settles so
-    /// that a viewer connecting does not flap the block's health.
+    /// Verdict on the first round of discovery. Held from the moment it is
+    /// reached; later rounds answer a different question and cannot revise it.
     verdict: Option<String>,
+    /// Whether `verdict` is final.
+    decided: bool,
 }
 
 /// Per-block record of which requested video codecs `whepserversink` kept.
@@ -154,6 +166,9 @@ impl CodecDiscoveryReport {
             return;
         };
         let mut inner = self.inner.lock().unwrap();
+        if inner.decided {
+            return;
+        }
         inner
             .attempts
             .entry(codec)
@@ -178,14 +193,14 @@ impl CodecDiscoveryReport {
 
         let negotiated = {
             let mut inner = self.inner.lock().unwrap();
+            if inner.decided {
+                return None;
+            }
             inner.last_attempt_at = Some(Instant::now());
             let attempt = inner.attempts.entry(codec.to_string()).or_insert(Attempt {
                 encoder: None,
                 negotiated: Arc::new(AtomicBool::new(false)),
             });
-            // A fresh round of discovery re-runs the same codecs. Reuse the
-            // flag rather than clearing it: a codec that has ever negotiated is
-            // one whepserversink can offer.
             Arc::clone(&attempt.negotiated)
         };
 
@@ -233,11 +248,14 @@ impl BlockDiagnostic for CodecDiscoveryReport {
     fn degraded(&self) -> Option<String> {
         let settled = {
             let inner = self.inner.lock().unwrap();
+            if inner.decided {
+                return inner.verdict.clone();
+            }
             // No discovery yet means nothing to conclude, not "all missing".
             inner.last_attempt_at?.elapsed() >= self.settle_after
         };
         if !settled {
-            return self.inner.lock().unwrap().verdict.clone();
+            return None;
         }
 
         let missing = self.missing();
@@ -246,7 +264,9 @@ impl BlockDiagnostic for CodecDiscoveryReport {
         } else {
             Some(missing.join("; "))
         };
-        self.inner.lock().unwrap().verdict = verdict.clone();
+        let mut inner = self.inner.lock().unwrap();
+        inner.verdict = verdict.clone();
+        inner.decided = true;
         verdict
     }
 }
@@ -335,16 +355,44 @@ mod tests {
         assert_eq!(report.degraded(), None);
     }
 
-    /// A viewer connecting makes whepserversink run discovery again. The
-    /// verdict has to hold across that, or the block flaps back to healthy for
-    /// as long as the new round takes to settle.
+    /// A viewer connecting makes whepserversink run discovery again, with the
+    /// viewer's own SDP caps instead of ANY, so `codec-parser-caps` stops
+    /// demanding constrained-baseline and H.264 passes where it failed at
+    /// startup. That says nothing about what the sink will answer with, so it
+    /// must not revise the verdict.
     #[test]
-    fn verdict_holds_while_a_later_round_settles() {
+    fn a_later_round_cannot_revise_the_verdict() {
+        let report = report_for(&["video/x-h264"]);
+        record(&report, "video/x-h264", "vtenc_h264", false);
+        let first = report.degraded();
+        assert_eq!(
+            first.as_deref(),
+            Some("H.264 was dropped from the offer: vtenc_h264 failed codec discovery")
+        );
+
+        // The viewer's round negotiates the same codec.
+        record(&report, "video/x-h264", "vtenc_h264", true);
+        assert_eq!(report.degraded(), first);
+    }
+
+    /// A codec that has not finished negotiating is not yet a dropped codec.
+    #[test]
+    fn an_unsettled_round_reports_nothing() {
         let report = CodecDiscoveryReport::with_settle("whep".to_string(), Duration::from_secs(60));
         report.inner.lock().unwrap().requested = vec!["video/x-h264".to_string()];
-        report.inner.lock().unwrap().verdict = Some("H.264 was dropped".to_string());
         record(&report, "video/x-h264", "vtenc_h264", false);
-        assert_eq!(report.degraded().as_deref(), Some("H.264 was dropped"));
+        assert_eq!(report.degraded(), None);
+    }
+
+    /// Once the first round has been judged healthy it stays healthy, and the
+    /// probe stops instrumenting later rounds.
+    #[test]
+    fn a_healthy_first_round_is_also_final() {
+        let report = report_for(&["video/x-h264"]);
+        record(&report, "video/x-h264", "vtenc_h264", true);
+        assert_eq!(report.degraded(), None);
+        assert!(report.inner.lock().unwrap().decided);
+        assert!(report.make_probe_filter("video/x-h264").is_none());
     }
 
     #[test]
