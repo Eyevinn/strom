@@ -579,3 +579,130 @@ fn overlay_timer_exits_when_its_appsrc_is_orphaned() {
     let _ = appsrc.set_state(gst::State::Null);
     unregister_flow(&flow_id);
 }
+
+/// An input that has never delivered a buffer reads as `None`; once it has,
+/// the age is measured from that buffer and keeps growing while the input
+/// stays silent. This is what separates a frozen participant from a
+/// motionless one, which the picture alone cannot do.
+#[test]
+fn input_media_age_tracks_buffer_arrival() {
+    use super::layout;
+    use super::overlay::VisionMixerOverlayState;
+
+    let lo = layout::compute_layout(1280, 720, 3, 0, ASPECT_16_9, false);
+    let state = VisionMixerOverlayState::new(
+        3,
+        0,
+        0,
+        1,
+        vec!["A".into(), "B".into(), "C".into()],
+        lo,
+        1920,
+        1080,
+        false,
+        super::overlay::PipInitialState::default(),
+    );
+
+    // Nothing has arrived yet on any input.
+    for i in 0..3 {
+        assert_eq!(state.input_media_age_ms(i), None, "input {}", i);
+    }
+
+    state.note_input_buffer(1);
+    let age = state
+        .input_media_age_ms(1)
+        .expect("input 1 has delivered a buffer");
+    assert!(age < 1000, "fresh buffer should read as young, got {}", age);
+
+    // Its silent neighbours are still untouched.
+    assert_eq!(state.input_media_age_ms(0), None);
+    assert_eq!(state.input_media_age_ms(2), None);
+
+    // The age grows while the input stays silent.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let later = state
+        .input_media_age_ms(1)
+        .expect("input 1 has delivered a buffer");
+    assert!(
+        later >= age + 20,
+        "age should grow while silent: {} -> {}",
+        age,
+        later
+    );
+
+    // A fresh buffer resets it.
+    state.note_input_buffer(1);
+    assert!(state.input_media_age_ms(1).unwrap() < later);
+
+    // Out-of-range inputs have no slot rather than panicking.
+    assert_eq!(state.input_media_age_ms(9), None);
+    state.note_input_buffer(9);
+}
+
+/// The activity probes must land on the dist compositor's input sink pads and
+/// stamp real buffers. Exercised against a running compositor, because the
+/// accessor test alone would still pass if the probes were never installed or
+/// were attached to the wrong pad names.
+#[test]
+fn activity_probes_stamp_buffers_from_a_running_compositor() {
+    use super::layout;
+    use super::overlay::VisionMixerOverlayState;
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    use std::sync::Arc;
+
+    gst::init().unwrap();
+
+    let lo = layout::compute_layout(1280, 720, 2, 0, ASPECT_16_9, false);
+    let state = Arc::new(VisionMixerOverlayState::new(
+        2,
+        0,
+        0,
+        1,
+        vec!["A".into(), "B".into()],
+        lo,
+        1280,
+        720,
+        false,
+        super::overlay::PipInitialState::default(),
+    ));
+
+    let pipeline = gst::Pipeline::new();
+    let src = gst::ElementFactory::make("videotestsrc")
+        .property("num-buffers", 5i32)
+        .build()
+        .expect("videotestsrc is in gst-plugins-base");
+    let comp = gst::ElementFactory::make("compositor")
+        .build()
+        .expect("compositor is in gst-plugins-base");
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .unwrap();
+    pipeline.add_many([&src, &comp, &sink]).unwrap();
+    gst::Element::link_many([&comp, &sink]).unwrap();
+
+    // sink_0 carries input 0, and must exist before the probe is installed.
+    let sink_pad = comp.request_pad_simple("sink_0").expect("sink_0");
+    src.static_pad("src").unwrap().link(&sink_pad).unwrap();
+
+    super::activity::install_input_activity_probes("test-vm-activity", &comp, &state, 2);
+
+    // Input 0 has not delivered anything until the pipeline runs.
+    assert_eq!(state.input_media_age_ms(0), None);
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let bus = pipeline.bus().unwrap();
+    let _ = bus.timed_pop_filtered(
+        gst::ClockTime::from_seconds(10),
+        &[gst::MessageType::Eos, gst::MessageType::Error],
+    );
+    pipeline.set_state(gst::State::Null).unwrap();
+
+    assert!(
+        state.input_media_age_ms(0).is_some(),
+        "input 0 delivered buffers, so its age must be stamped"
+    );
+    // Input 1 was never linked, so it stays unstamped.
+    assert_eq!(state.input_media_age_ms(1), None);
+}
