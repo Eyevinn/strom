@@ -1033,6 +1033,13 @@ fn four_into_one(instance: &str, amplitude: f64, extra: &[(&str, PropertyValue)]
                 r#"{"i0c0":["o0c0"],"i1c0":["o0c0"],"i2c0":["o0c0"],"i3c0":["o0c0"]}"#.to_string(),
             ),
         ),
+        // An output bus emits after `latency` whether or not every pad has
+        // delivered, and `make_audiomixer` also sets `ignore-inactive-pads`.
+        // At the 30 ms default a loaded machine starves a source past the
+        // deadline and the bus emits three of the four sources, which is a
+        // measurement of the runner rather than of the router. These tests are
+        // about what four sources add up to, so let the bus wait for four.
+        ("latency", PropertyValue::UInt(500)),
     ];
     pairs.extend(extra.iter().cloned());
 
