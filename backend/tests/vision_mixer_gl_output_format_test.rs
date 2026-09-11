@@ -13,6 +13,7 @@
 //! still exists, on the GPU, before the buffer crosses the bus.
 
 use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
@@ -310,4 +311,232 @@ async fn gpu_output_format_is_negotiated_end_to_end() {
             caps
         );
     }
+}
+
+/// A flow for the keyed-alpha measurement: a white program input, and on
+/// `dsk_in_0` a graphic whose left half is opaque red and whose right half is
+/// fully transparent. `videobox` pads the half-width red source out to full
+/// width with `border-alpha=0`.
+fn build_keyed_flow() -> Flow {
+    let mut flow = Flow::new("vm_gl_keyed_alpha");
+    flow.blocks.push(strom_types::BlockInstance {
+        id: BLOCK_ID.to_string(),
+        block_definition_id: "builtin.vision_mixer".to_string(),
+        name: None,
+        properties: {
+            let mut p = HashMap::new();
+            p.insert(
+                "compositor_preference".to_string(),
+                PV::String("gpu".to_string()),
+            );
+            p.insert("num_inputs".to_string(), PV::UInt(2));
+            p.insert("num_dsk_inputs".to_string(), PV::String("1".to_string()));
+            p.insert(
+                "output_format".to_string(),
+                PV::String(OUTPUT_FORMAT.to_string()),
+            );
+            // The measurement tap is a plain videoconvert, which cannot take GL
+            // memory, so the block has to hand out system memory.
+            p.insert("gl_download".to_string(), PV::Bool(true));
+            p.insert(
+                "pgm_resolution".to_string(),
+                PV::String(format!("{}x{}", W, H)),
+            );
+            p.insert(
+                "multiview_resolution".to_string(),
+                PV::String(format!("{}x{}", W, H)),
+            );
+            p
+        },
+        position: strom_types::block::Position { x: 100.0, y: 100.0 },
+        runtime_data: None,
+        computed_external_pads: None,
+    });
+
+    let rgba = |w: u32| {
+        PV::String(format!(
+            "video/x-raw,format=RGBA,width={},height={},framerate=30/1",
+            w, H
+        ))
+    };
+    flow.elements.push(elem(
+        "bg",
+        "videotestsrc",
+        vec![
+            ("pattern", PV::String("white".into())),
+            ("is-live", PV::Bool(true)),
+        ],
+    ));
+    flow.elements
+        .push(elem("bgcaps", "capsfilter", vec![("caps", rgba(W))]));
+    flow.elements.push(elem(
+        "gfx",
+        "videotestsrc",
+        vec![
+            ("pattern", PV::String("red".into())),
+            ("is-live", PV::Bool(true)),
+        ],
+    ));
+    flow.elements
+        .push(elem("gfxcaps", "capsfilter", vec![("caps", rgba(W / 2))]));
+    flow.elements.push(elem(
+        "gfxbox",
+        "videobox",
+        vec![
+            ("right", PV::Int(-((W / 2) as i64))),
+            ("border-alpha", PV::Float(0.0)),
+        ],
+    ));
+    flow.elements
+        .push(elem("gfxout", "capsfilter", vec![("caps", rgba(W))]));
+    // Measure in RGBA whatever the block negotiated. Converting after the
+    // mixer cannot restore alpha already flattened upstream, so it cannot mask
+    // the failure.
+    flow.elements.push(elem("pgmconv", "videoconvert", vec![]));
+    flow.elements.push(elem(
+        "pgmcaps",
+        "capsfilter",
+        vec![("caps", PV::String("video/x-raw,format=RGBA".into()))],
+    ));
+    flow.elements.push(elem(
+        "pgmsink",
+        "appsink",
+        vec![
+            ("sync", PV::Bool(false)),
+            ("max-buffers", PV::UInt(1)),
+            ("drop", PV::Bool(true)),
+        ],
+    ));
+    flow.elements.push(elem(
+        "mvsink",
+        "fakesink",
+        vec![("sync", PV::Bool(false)), ("async", PV::Bool(false))],
+    ));
+
+    for block in &mut flow.blocks {
+        if let Some(builder) = strom::blocks::builtin::get_builder(&block.block_definition_id) {
+            block.computed_external_pads = builder.get_external_pads(&block.properties);
+        }
+    }
+
+    for (from, to) in [
+        ("bg:src".to_string(), "bgcaps:sink".to_string()),
+        ("bgcaps:src".to_string(), format!("{}:video_in_0", BLOCK_ID)),
+        ("gfx:src".to_string(), "gfxcaps:sink".to_string()),
+        ("gfxcaps:src".to_string(), "gfxbox:sink".to_string()),
+        ("gfxbox:src".to_string(), "gfxout:sink".to_string()),
+        ("gfxout:src".to_string(), format!("{}:dsk_in_0", BLOCK_ID)),
+        (format!("{}:pgm_out", BLOCK_ID), "pgmconv:sink".to_string()),
+        ("pgmconv:src".to_string(), "pgmcaps:sink".to_string()),
+        ("pgmcaps:src".to_string(), "pgmsink:sink".to_string()),
+        (
+            format!("{}:multiview_out", BLOCK_ID),
+            "mvsink:sink".to_string(),
+        ),
+    ] {
+        flow.links.push(strom_types::Link { from, to });
+    }
+    flow
+}
+
+/// Fraction of red and of white pixels in a horizontal band of an RGBA frame.
+/// Colour fractions rather than brightness: an all-black startup frame is dark
+/// the same way a flattened key is, so a luma threshold cannot tell them apart.
+fn band_colors(sample: &gstreamer::Sample, x0: usize, x1: usize) -> (f64, f64) {
+    let caps = sample.caps().expect("sample caps");
+    let info = gstreamer_video::VideoInfo::from_caps(caps).expect("video info");
+    assert_eq!(info.format(), gstreamer_video::VideoFormat::Rgba);
+    let buffer = sample.buffer().expect("sample buffer");
+    let frame =
+        gstreamer_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).expect("map frame");
+    let stride = info.stride()[0] as usize;
+    let data = frame.plane_data(0).expect("plane 0");
+    let (mut red, mut white, mut total) = (0usize, 0usize, 0usize);
+    let h = info.height() as usize;
+    for y in (h / 4)..(3 * h / 4) {
+        let row = &data[y * stride..];
+        for x in x0..x1 {
+            let o = x * 4;
+            let (r, g, b) = (row[o], row[o + 1], row[o + 2]);
+            if r > 150 && g < 100 && b < 100 {
+                red += 1;
+            }
+            if r > 200 && g > 200 && b > 200 {
+                white += 1;
+            }
+            total += 1;
+        }
+    }
+    (red as f64 / total as f64, white as f64 / total as f64)
+}
+
+/// A keyed DSK graphic must keep its per-pixel alpha with an alpha-less
+/// `output_format`. The GL mixer cannot blend in anything but RGBA, so the
+/// format pin cannot reach the blend the way it does on `compositor` — this
+/// measures that rather than assuming it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keyed_dsk_alpha_survives_nv12_on_gpu() {
+    gstreamer::init().unwrap();
+    if !gl_environment_available() {
+        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+        return;
+    }
+    strom::gpu::detect_gpu_capabilities();
+
+    let temp_file = tempfile::NamedTempFile::new().unwrap();
+    let registry = BlockRegistry::new(temp_file.path());
+    let events = EventBroadcaster::new(10);
+    let mut manager = PipelineManager::new(
+        &build_keyed_flow(),
+        events,
+        &registry,
+        vec![],
+        "all".to_string(),
+        None,
+        std::env::temp_dir(),
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    )
+    .expect("build GPU pipeline");
+    manager.start().expect("start GPU pipeline");
+
+    // DSK pads are built hidden (alpha=0) — key the graphic in.
+    manager
+        .set_dsk_enabled(BLOCK_ID, 0, 2, true)
+        .expect("enable DSK 0");
+
+    let sink = manager
+        .pipeline()
+        .by_name("pgmsink")
+        .expect("pgmsink")
+        .downcast::<gst_app::AppSink>()
+        .expect("appsink type");
+
+    // Pull until the graphic is actually on screen: the pad alpha change lands
+    // a frame or two after set_dsk_enabled, and early frames are still black.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let (left_red, right_white) = loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "DSK graphic never appeared in PGM within 30s"
+        );
+        let Some(sample) = sink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) else {
+            continue;
+        };
+        let w = W as usize;
+        let (left_red, _) = band_colors(&sample, w / 8, 3 * w / 8);
+        let (_, right_white) = band_colors(&sample, 5 * w / 8, 7 * w / 8);
+        if left_red > 0.8 {
+            break (left_red, right_white);
+        }
+    };
+
+    let _ = manager.stop();
+
+    assert!(
+        right_white > 0.8,
+        "transparent half of the DSK graphic must show the white background, {:.3} white \
+         (alpha flattened before blending); opaque half was {:.3} red",
+        right_white,
+        left_red
+    );
 }
