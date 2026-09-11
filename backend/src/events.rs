@@ -80,7 +80,10 @@ impl Default for EventBroadcaster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use strom_types::FlowId;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -107,5 +110,63 @@ mod tests {
             StromEvent::FlowCreated { flow_id: id } => assert_eq!(id, flow_id),
             _ => panic!("Unexpected event type"),
         }
+    }
+
+    /// Counts tracing events emitted from `event_logging`, so tests can assert on the
+    /// `structured_events` / `include_high_frequency_events` gate in `broadcast()` without
+    /// depending on the unrelated "Broadcasting event" trace/debug line.
+    struct StructuredLogCounter {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for StructuredLogCounter {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().target().ends_with("event_logging") {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn structured_events_disabled_emits_no_log_record() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let layer = StructuredLogCounter {
+            count: count.clone(),
+        };
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+
+        let broadcaster = EventBroadcaster::new(10, false, false);
+        broadcaster.broadcast(StromEvent::FlowCreated {
+            flow_id: FlowId::nil(),
+        });
+
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn high_frequency_events_dropped_unless_included() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let layer = StructuredLogCounter {
+            count: count.clone(),
+        };
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(layer));
+
+        let broadcaster = EventBroadcaster::new(10, true, false);
+
+        // High-frequency: dropped even though structured_events is on.
+        broadcaster.broadcast(StromEvent::MeterData {
+            flow_id: FlowId::nil(),
+            element_id: "level0".to_string(),
+            rms: vec![],
+            peak: vec![],
+            decay: vec![],
+        });
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        // Not high-frequency: still logged.
+        broadcaster.broadcast(StromEvent::FlowCreated {
+            flow_id: FlowId::nil(),
+        });
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

@@ -111,6 +111,8 @@ async fn failed_start_leaves_no_overlay_timer() {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     );
 
     let timers_before = overlay::overlay_timers_running();
