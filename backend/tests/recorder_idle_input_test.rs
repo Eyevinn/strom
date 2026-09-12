@@ -118,7 +118,7 @@ fn add_recorder_with_audio(
 /// linking and before PLAYING.
 fn run_setups(ctx: &BlockBuildContext) {
     for setup in ctx.take_element_setups() {
-        setup(uuid::Uuid::new_v4(), EventBroadcaster::new(16));
+        setup(uuid::Uuid::new_v4(), EventBroadcaster::with_capacity(16));
     }
 }
 
