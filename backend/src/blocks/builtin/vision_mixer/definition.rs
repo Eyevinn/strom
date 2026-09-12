@@ -387,6 +387,43 @@ fn vision_mixer_definition() -> BlockDefinition {
         });
     }
 
+    // Per-DSK alpha mode, one property per possible DSK slot; the frontend
+    // hides slots beyond `num_dsk_inputs` (see `vision_mixer_skip_set`).
+    for i in 0..MAX_DSK_INPUTS {
+        let name = dsk_alpha_mode_property(i);
+        exposed_properties.push(ExposedProperty {
+            name: name.clone(),
+            label: format!("DSK{} Alpha", i + 1),
+            description: format!(
+                "How DSK{}'s source encodes alpha. HTML sources paint premultiplied; \
+                 composited as straight they come out too dark wherever alpha is partial",
+                i + 1
+            ),
+            property_type: PropertyType::Enum {
+                values: vec![
+                    EnumValue {
+                        value: AlphaMode::Straight.as_str().to_string(),
+                        label: Some("Straight".to_string()),
+                    },
+                    EnumValue {
+                        value: AlphaMode::Premultiplied.as_str().to_string(),
+                        label: Some("Premultiplied".to_string()),
+                    },
+                ],
+            },
+            default_value: Some(PropertyValue::String(
+                AlphaMode::default().as_str().to_string(),
+            )),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: name,
+                transform: None,
+            },
+            live: false,
+            persist: None,
+        });
+    }
+
     // Number of PiP tiles
     {
         let mut pip_values = vec![EnumValue {

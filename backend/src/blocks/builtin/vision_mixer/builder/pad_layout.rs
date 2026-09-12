@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use strom_types::{vision_mixer, PropertyValue};
 
+use super::super::elements::CompositorBackend;
 use super::super::layout;
 use super::PipelineParams;
 
@@ -164,6 +165,17 @@ pub(super) fn build_pad_properties(
             "sizing-policy".to_string(),
             PropertyValue::String("keep-aspect-ratio".to_string()),
         );
+        if p.backend == CompositorBackend::OpenGL && p.dsk_premultiplied(i) {
+            // Premultiplied colour must not be scaled by its own alpha again,
+            // but still has to fade with the pad: blending with the constant
+            // gives src * pad_alpha + dst * (1 - src_alpha * pad_alpha).
+            // `one` would be right only at full pad alpha. The constant
+            // follows `alpha` through a binding set up in `pipeline_gpu`.
+            props.insert(
+                "blend-function-src-rgb".to_string(),
+                PropertyValue::String("constant-alpha".to_string()),
+            );
+        }
     }
 
     // --- Dist border underlay pads: sink_{N + DSK + i} ---

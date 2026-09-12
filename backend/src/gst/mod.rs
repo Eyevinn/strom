@@ -21,6 +21,7 @@ pub mod thumbnail;
 pub mod thumbnail_tap;
 pub mod transitions;
 pub(crate) mod underlay;
+pub mod unpremultiply;
 pub mod video_adapt;
 pub mod video_frame;
 pub mod video_input_bridge;

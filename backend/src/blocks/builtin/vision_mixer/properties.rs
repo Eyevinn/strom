@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use strom_types::vision_mixer::{
-    Source, DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, DEFAULT_NUM_PIPS, DEFAULT_SHOW_VU_METERS,
-    MAX_DSK_INPUTS, MAX_NUM_INPUTS, MAX_NUM_PIPS, MIN_NUM_INPUTS,
+    dsk_alpha_mode_property, AlphaMode, Source, DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS,
+    DEFAULT_NUM_PIPS, DEFAULT_SHOW_VU_METERS, MAX_DSK_INPUTS, MAX_NUM_INPUTS, MAX_NUM_PIPS,
+    MIN_NUM_INPUTS,
 };
 use strom_types::FlowId;
 use strom_types::PropertyValue;
@@ -35,6 +36,20 @@ pub fn parse_num_dsk_inputs(properties: &HashMap<String, PropertyValue>) -> usiz
         })
         .unwrap_or(DEFAULT_DSK_INPUTS)
         .min(MAX_DSK_INPUTS)
+}
+
+/// Parse each DSK input's alpha mode. Missing or unrecognised values are
+/// straight, which is what the compositors assume.
+pub fn parse_dsk_alpha_modes(
+    properties: &HashMap<String, PropertyValue>,
+    num_dsk_inputs: usize,
+) -> Vec<AlphaMode> {
+    (0..num_dsk_inputs)
+        .map(|i| match properties.get(&dsk_alpha_mode_property(i)) {
+            Some(PropertyValue::String(s)) => s.parse().unwrap_or_default(),
+            _ => AlphaMode::default(),
+        })
+        .collect()
 }
 
 /// Parse the number of PiP tiles from block properties.
@@ -272,6 +287,28 @@ pub fn parse_u64(properties: &HashMap<String, PropertyValue>, key: &str, default
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dsk_alpha_modes_default_to_straight() {
+        let mut props = HashMap::new();
+        props.insert(
+            "dsk_1_alpha_mode".to_string(),
+            PropertyValue::String("premultiplied".to_string()),
+        );
+        props.insert(
+            "dsk_2_alpha_mode".to_string(),
+            PropertyValue::String("nonsense".to_string()),
+        );
+        assert_eq!(
+            parse_dsk_alpha_modes(&props, 4),
+            vec![
+                AlphaMode::Straight,
+                AlphaMode::Premultiplied,
+                AlphaMode::Straight,
+                AlphaMode::Straight,
+            ]
+        );
+    }
 
     #[test]
     fn parse_framerate_string_valid_fractions() {
