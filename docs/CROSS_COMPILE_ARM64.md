@@ -38,9 +38,8 @@ Strom can be cross-compiled from x86_64 Linux to ARM64 targets (aarch64). Two bu
 ./scripts/cross-compile/build-arm64.sh
 ```
 
-Binaries are output to:
+The binary is output to:
 - `target/aarch64-unknown-linux-gnu/release/strom`
-- `target/aarch64-unknown-linux-gnu/release/strom-mcp-server`
 
 ## Prerequisites
 

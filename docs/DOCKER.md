@@ -58,30 +58,10 @@ No `docker-compose.yml` is committed to the repository — compose files are dep
 and gitignored. Use the worked example in [OPEN_LIVE_SETUP.md](OPEN_LIVE_SETUP.md) §5 as a
 starting point and adapt it (GPU, auth, TLS, network mode, DeckLink mounts) to your host.
 
-## MCP server in Docker
+## MCP in Docker
 
-The image bundles the standalone MCP server binary at `/app/strom-mcp-server` (stdio
-transport). The backend also serves MCP over HTTP at `/api/mcp` directly, so for most setups
-you do **not** need to run the separate binary — point your MCP client at
-`http://<host>:8080/api/mcp`. See [MCP.md](MCP.md).
-
-To run the stdio MCP server against a running backend (e.g. for Claude Desktop), it's usually
-simplest to run it on the host, pointing at the container's HTTP port:
-
-```bash
-STROM_API_URL=http://localhost:8080 ./target/release/strom-mcp-server
-```
-
-```json
-{
-  "mcpServers": {
-    "strom": {
-      "command": "/path/to/strom-mcp-server",
-      "env": { "STROM_API_URL": "http://localhost:8080" }
-    }
-  }
-}
-```
+The backend serves MCP over HTTP at `/api/mcp`, so nothing extra needs to run in the
+container — point your MCP client at `http://<host>:8080/api/mcp`. See [MCP.md](MCP.md).
 
 ## Building the image yourself
 

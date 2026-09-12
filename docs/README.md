@@ -26,7 +26,7 @@ palette and inspector — the code is the source of truth. Older block design wr
 
 ## API & integration
 
-- [MCP.md](MCP.md) — Model Context Protocol server (AI assistant integration).
+- [MCP.md](MCP.md) — Model Context Protocol endpoint (AI assistant integration).
 - [INTEGRATION.md](INTEGRATION.md) — MCP / OpenAPI integration overview.
 - Interactive OpenAPI docs are served at `/swagger-ui` on a running instance.
 

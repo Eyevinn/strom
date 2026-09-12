@@ -187,7 +187,7 @@ COPY . .
 # Note: Trunk.toml puts output in ../backend/dist relative to frontend/
 COPY --from=frontend-builder /app/backend/dist backend/dist
 
-# Build the backend (headless - no native GUI needed in Docker) and MCP server
+# Build the backend (headless - no native GUI needed in Docker)
 ENV RUST_BACKTRACE=1
 
 # Cross-compilation: Use cargo-zigbuild with glibc 2.36 targeting (Raspberry Pi compatible)
@@ -219,15 +219,12 @@ RUN --mount=type=secret,id=aws_access_key_id \
     export CMAKE_CXX_FLAGS="-std=gnu++17" && \
     export RUSTFLAGS="-L /usr/lib/aarch64-linux-gnu" && \
     cargo zigbuild --release --package strom --no-default-features --features no-gui,efp --target aarch64-unknown-linux-gnu.2.36 && \
-    cargo zigbuild --release --package strom-mcp-server --target aarch64-unknown-linux-gnu.2.36 && \
-    # Move binaries to expected location (cargo-zigbuild puts them in target/aarch64-unknown-linux-gnu/release)
+    # Move the binary to expected location (cargo-zigbuild puts it in target/aarch64-unknown-linux-gnu/release)
     mkdir -p target/release && \
-    cp target/aarch64-unknown-linux-gnu/release/strom target/release/strom && \
-    cp target/aarch64-unknown-linux-gnu/release/strom-mcp-server target/release/strom-mcp-server; \
+    cp target/aarch64-unknown-linux-gnu/release/strom target/release/strom; \
 else \
     echo "==> Native build for $TARGETPLATFORM"; \
-    cargo build --release --package strom --features no-gui,efp && \
-    cargo build --release --package strom-mcp-server; \
+    cargo build --release --package strom --features no-gui,efp; \
 fi && \
     { command -v sccache >/dev/null && [ -n "$RUSTC_WRAPPER" ] && sccache --show-stats || true; }
 
@@ -286,9 +283,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the compiled binaries from backend-builder to /app
+# Copy the compiled binary from backend-builder to /app
 COPY --from=backend-builder /app/target/release/strom /app/strom
-COPY --from=backend-builder /app/target/release/strom-mcp-server /app/strom-mcp-server
 
 # Copy setup scripts for optional host/container configuration (NDI, NVIDIA, etc.)
 COPY scripts/setup /app/scripts/setup
