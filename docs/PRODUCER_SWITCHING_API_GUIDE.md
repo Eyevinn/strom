@@ -10,10 +10,6 @@ page. Companion to the [Vision Mixer Operator Guide](VISION_MIXER_OPERATOR_GUIDE
 which covers the same mixer from the GUI. Read that one first for the concepts; this one
 is the call-by-call recipe, the on-air behaviour of each move, and what breaks.
 
-Everything below was exercised against a live five-seat meeting flow and checked against
-captured program frames, not against HTTP status codes. Where a claim is about what the
-audience sees, it was read off a frame.
-
 ---
 
 ## 1. The model in one minute
@@ -29,7 +25,7 @@ The mixer has two buses, **PGM** (on air) and **PVW** (preview). Each bus holds 
 So "all five up" and "one participant full frame" are not different features. They are
 two sources you can put on either bus. Cutting between them is an ordinary take.
 
-Three endpoints do all the work:
+Four calls do all the work:
 
 | Call | What it does |
 |---|---|
@@ -159,9 +155,8 @@ curl -X PUT -H 'content-type: application/json' -d '{
 **It is safe, and it is not a cut.** Changing zones on the PiP currently on PGM produces an
 animated re-tile: every source that stays in the composition slides and scales from its old
 box to its new one over about 250 ms, sources that are leaving fade out, sources that are
-arriving fade in. No black frame, no flash, no dropped frame. Frame-by-frame inspection of
-a full mirror-image layout change (big box moved from left to right, three small boxes moved
-from right to left) showed a smooth eight-frame move with every source visible throughout.
+arriving fade in. No black frame, no flash, no dropped frame. A full mirror-image layout
+change animates over about eight frames with every source visible throughout.
 
 So the choice between editing on air and preview-then-take is editorial, not technical:
 
@@ -170,11 +165,8 @@ So the choice between editing on air and preview-then-take is editorial, not tec
   rearrangement, which is what a viewer expects from a video call layout.
 - **Preview then take** when you want the change to be invisible until you commit, or when
   you are building something complex and do not want half-finished states on air. Editing
-  the PiP that is on PVW provably does not touch PGM: a full re-layout of the preview PiP
-  left every program frame unchanged.
-
-Preview-then-take is therefore **not mandatory**. It is the right habit for anything you
-are still composing, and unnecessary for a single deliberate move.
+  the PiP that is on PVW does not touch PGM: a full re-layout of the preview PiP left
+  every program frame unchanged.
 
 ---
 
@@ -191,13 +183,10 @@ are still composing, and unnecessary for a single deliberate move.
 | PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-up to that participant full frame reads as a zoom-in, with the other tiles covered as the box grows. |
 | either bus is a PiP | `slide_*` | Silently downgraded to `fade`. The server logs the downgrade; the HTTP response reports the transition that actually ran in `actual_transition_type`. |
 
-The shared-source case is the one that surprises people. The engine animates pads, not
-pictures: a source present in both the outgoing and incoming composition is treated as
+The engine animates pads, not pictures: a source present in both the outgoing and incoming composition is treated as
 *moving*, and only sources exclusive to one side cross-fade. If you want a genuine dissolve
 out of a multi-box layout, take to a composition that shares no inputs with it, or use a
 cut.
-
-Check `actual_transition_type` in the response if you care which one ran.
 
 ---
 
@@ -283,11 +272,10 @@ Expect the recording to sit a couple of seconds behind your API calls — the mi
 queue plus the encoder. Wait 6–10 s after a move before closing the segment, or the moment
 you care about lands in the next file.
 
-One environment caveat worth knowing: on the macOS development rig, pulling the program
-with a GStreamer WHEP client failed ICE negotiation every time, roughly two seconds into
-the session, after the first connectivity check had already succeeded. The same client
-against a plain standalone WHEP sink on the same machine worked. This was not chased down;
-it is a capture-path problem, not a mixer problem, and the file tap sidesteps it entirely.
+Capturing the program with a GStreamer WHEP client failed ICE negotiation on the macOS
+rig, about two seconds in, while the same client against a plain standalone WHEP sink on
+the same machine worked. That is a capture-path problem, not a mixer one, and the file tap
+sidesteps it.
 
 ---
 
