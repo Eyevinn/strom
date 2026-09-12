@@ -97,16 +97,30 @@ pub struct UpdatePropertyRequest {
 }
 
 /// Request to trigger a transition on a compositor block.
+///
+/// A vision mixer holds authoritative PGM/PVW bus state and takes between
+/// those two sources, so `from_input` and `to_input` are accepted and
+/// ignored. A plain compositor holds no such state, and there the two
+/// indices are the only thing naming which pads to animate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "validation", derive(garde::Validate))]
 pub struct TriggerTransitionRequest {
-    /// Index of the currently active input (0-based)
+    /// Index of the currently active input (0-based).
+    ///
+    /// Ignored by a vision mixer: an index the client computed can already
+    /// be stale when the request arrives, so honoring it would make every
+    /// take a lost-update race. Required when the block has no live
+    /// PGM/PVW state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "validation", garde(skip))]
-    pub from_input: usize,
-    /// Index of the input to transition to (0-based)
+    pub from_input: Option<usize>,
+    /// Index of the input to transition to (0-based).
+    ///
+    /// Same rule as `from_input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "validation", garde(skip))]
-    pub to_input: usize,
+    pub to_input: Option<usize>,
     /// Type of transition: "cut", "fade", "slide_left", "slide_right", "slide_up", "slide_down"
     #[serde(default = "default_transition_type")]
     #[cfg_attr(feature = "validation", garde(length(min = 1, max = 50)))]
@@ -1357,4 +1371,47 @@ pub struct FadeToBlackResponse {
 pub struct MultiviewEndpointResponse {
     /// WHEP endpoint path (e.g. "/whep/my-endpoint"), empty if not connected.
     pub endpoint: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Clients written against the old schema sent both indices as required
+    /// integers. They must keep deserializing unchanged.
+    #[test]
+    fn transition_request_accepts_legacy_body() {
+        let req: TriggerTransitionRequest = serde_json::from_str(
+            r#"{"from_input":0,"to_input":1,"transition_type":"fade","duration_ms":300}"#,
+        )
+        .expect("legacy body must still deserialize");
+        assert_eq!(req.from_input, Some(0));
+        assert_eq!(req.to_input, Some(1));
+    }
+
+    /// A vision mixer client has no useful index to send, so omitting both
+    /// must be accepted rather than rejected as a missing field.
+    #[test]
+    fn transition_request_accepts_omitted_indices() {
+        let req: TriggerTransitionRequest =
+            serde_json::from_str(r#"{"transition_type":"cut"}"#).expect("indices are optional");
+        assert_eq!(req.from_input, None);
+        assert_eq!(req.to_input, None);
+        assert_eq!(req.transition_type, "cut");
+    }
+
+    /// `skip_serializing_if` keeps the omitted case off the wire entirely
+    /// instead of sending explicit nulls.
+    #[test]
+    fn transition_request_omits_absent_indices() {
+        let json = serde_json::to_string(&TriggerTransitionRequest {
+            from_input: None,
+            to_input: None,
+            transition_type: "cut".to_string(),
+            duration_ms: 0,
+        })
+        .expect("serialize");
+        assert!(!json.contains("from_input"), "got {}", json);
+        assert!(!json.contains("to_input"), "got {}", json);
+    }
 }

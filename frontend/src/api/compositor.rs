@@ -110,8 +110,8 @@ impl ApiClient {
         );
 
         let request = TriggerTransitionRequest {
-            from_input,
-            to_input,
+            from_input: Some(from_input),
+            to_input: Some(to_input),
             transition_type: transition_type.to_string(),
             duration_ms,
         };
