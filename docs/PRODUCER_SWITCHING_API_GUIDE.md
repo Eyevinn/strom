@@ -279,11 +279,6 @@ Expect the recording to sit a couple of seconds behind your API calls — the mi
 queue plus the encoder. Wait 6–10 s after a move before closing the segment, or the moment
 you care about lands in the next file.
 
-Capturing the program with a GStreamer WHEP client failed ICE negotiation on the macOS
-rig, about two seconds in, while the same client against a plain standalone WHEP sink on
-the same machine worked. That is a capture-path problem, not a mixer one, and the file tap
-sidesteps it.
-
 ---
 
 ## 7. Quick reference
