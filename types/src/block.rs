@@ -377,6 +377,12 @@ pub const DEFAULT_SRT_OUTPUT_URI: &str = "srt://:5000?mode=listener";
 /// Default SRT URI for input (caller connecting to the output listener).
 pub const DEFAULT_SRT_INPUT_URI: &str = "srt://127.0.0.1:5000?mode=caller";
 
+/// Default RTMP URL for output.
+///
+/// Deliberately a loopback address: a default that reached a real server would
+/// publish a programme by accident on the first flow start.
+pub const DEFAULT_RTMP_LOCATION: &str = "rtmp://127.0.0.1:1935/live/stream";
+
 /// Default SRT latency in milliseconds.
 pub const DEFAULT_SRT_LATENCY_MS: i32 = 125;
 
