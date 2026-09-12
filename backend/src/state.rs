@@ -609,9 +609,11 @@ impl AppState {
                     }
                     flow.properties.ntp_info = pipeline.get_ntp_info();
                     flow.properties.thread_priority_status = pipeline.get_thread_priority_status();
+                    flow.block_health = pipeline.get_block_health();
                 } else {
                     // Clear runtime-only status when no pipeline is running
                     flow.set_gst_state(None);
+                    flow.block_health.clear();
                     flow.properties.thread_priority_status = None;
                     flow.properties.clock_sync_status = None;
                     flow.properties.ptp_info = None;
@@ -643,9 +645,11 @@ impl AppState {
                 }
                 flow.properties.ntp_info = pipeline.get_ntp_info();
                 flow.properties.thread_priority_status = pipeline.get_thread_priority_status();
+                flow.block_health = pipeline.get_block_health();
             } else {
                 // Clear runtime-only status when no pipeline is running
                 flow.set_gst_state(None);
+                flow.block_health.clear();
                 flow.properties.thread_priority_status = None;
                 flow.properties.clock_sync_status = None;
                 flow.properties.ptp_info = None;
