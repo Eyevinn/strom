@@ -34,10 +34,6 @@ Four calls do all the work:
 | `POST /api/flows/{flow_id}/blocks/{block_id}/transition` | Take: swap PGM and PVW. |
 | `GET  /api/flows/{flow_id}/blocks/{block_id}/state` | Read back both buses and every PiP. |
 
-The broadcast pattern is: build the next look on a PiP that is **not** on air, preview it,
-take it. A mixer with `num_pips: 2` supports this indefinitely, because the take swaps the
-buses and hands the previous PGM composition back to you on preview to rebuild.
-
 ### On a vision mixer, the take is a swap
 
 `POST .../transition` takes `from_input` and `to_input`, but a vision mixer ignores them
@@ -168,7 +164,10 @@ So the choice between editing on air and preview-then-take is editorial, not tec
 - **Preview then take** when you want the change to be invisible until you commit, or when
   you are building something complex and do not want half-finished states on air. Editing
   the PiP that is on PVW does not touch PGM: a full re-layout of the preview PiP left
-  every program frame unchanged.
+  every program frame unchanged. Note what actually protects you. A bus points at a PiP
+  slot rather than holding a copy of it, so what makes the edit safe is the slot being off
+  air, not the fact that you previewed it. `num_pips: 2` keeps a spare slot available
+  permanently, because the take hands the outgoing composition back on preview.
 
 ---
 
