@@ -892,7 +892,7 @@ impl AppState {
                 // change: the program still cuts, once the claim is gone.
                 let (reason, program_changed) = if cut_instead {
                     let cut = self
-                        .trigger_transition(flow_id, block, from, to, "cut", 0)
+                        .trigger_transition(flow_id, block, Some(from), Some(to), "cut", 0)
                         .await;
                     (format!("{reason}, cut instead"), cut.is_ok())
                 } else {
@@ -1066,8 +1066,8 @@ impl AppState {
         self.after_vision_mixer_take(
             flow_id,
             block,
-            from,
-            to,
+            Some(from),
+            Some(to),
             "stinger",
             plan.duration_ms,
             ftb_cancelled,
