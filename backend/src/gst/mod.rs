@@ -31,6 +31,7 @@ pub mod tls;
 pub mod transitions;
 pub mod ts_arrival_clock;
 pub(crate) mod underlay;
+pub mod unpremultiply;
 pub mod video_adapt;
 pub mod video_input_bridge;
 pub mod volume_ramp;
