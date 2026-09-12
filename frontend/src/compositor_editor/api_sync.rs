@@ -360,7 +360,8 @@ impl CompositorEditor {
     }
 
     /// Trigger a transition between inputs.
-    /// Returns true if transition was triggered (for swapping from/to after).
+    /// Returns true if the request was dispatched. The local from/to pair is only
+    /// swapped once the backend confirms the transition, in `check_transition_status`.
     pub(super) fn trigger_transition(&mut self, ctx: &Context) -> bool {
         if self.transition_from == self.transition_to {
             return false;
@@ -384,23 +385,6 @@ impl CompositorEditor {
             }
         ));
 
-        // Swap from/to immediately so "From" shows what's now live
-        self.transition_from = to_input;
-        self.transition_to = from_input;
-
-        // Invert slide/push direction for natural back-and-forth
-        self.transition_type = match self.transition_type.as_str() {
-            "slide_left" => "slide_right".to_string(),
-            "slide_right" => "slide_left".to_string(),
-            "slide_up" => "slide_down".to_string(),
-            "slide_down" => "slide_up".to_string(),
-            "push_left" => "push_right".to_string(),
-            "push_right" => "push_left".to_string(),
-            "push_up" => "push_down".to_string(),
-            "push_down" => "push_up".to_string(),
-            other => other.to_string(),
-        };
-
         tracing::info!(
             "Triggering {} transition: {} -> {} ({}ms)",
             transition_type,
@@ -423,9 +407,8 @@ impl CompositorEditor {
             {
                 Ok(_) => {
                     tracing::info!("Transition triggered successfully");
-                    let key = format!("transition_status_{}", block_id);
                     crate::app::set_local_storage(
-                        &key,
+                        &transition_status_key(&block_id),
                         &format!(
                             "{} {} -> {}",
                             egui_phosphor::regular::CHECK,
@@ -433,12 +416,18 @@ impl CompositorEditor {
                             to_input
                         ),
                     );
+                    // Only now is `to_input` actually live, so only now may the local
+                    // pair be swapped. The UI loop picks this up in
+                    // `check_transition_status`.
+                    crate::app::set_local_storage(
+                        &transition_commit_key(&block_id),
+                        &format!("{}|{}|{}", from_input, to_input, transition_type),
+                    );
                 }
                 Err(e) => {
                     tracing::error!("Transition failed: {}", e);
-                    let key = format!("transition_status_{}", block_id);
                     crate::app::set_local_storage(
-                        &key,
+                        &transition_status_key(&block_id),
                         &format!("{} {}", egui_phosphor::regular::X, e),
                     );
                 }
@@ -449,12 +438,144 @@ impl CompositorEditor {
         true
     }
 
-    /// Check for transition status updates.
+    /// Check for transition status updates, and commit the from/to swap for any
+    /// transition the backend has confirmed since the last frame.
     pub(super) fn check_transition_status(&mut self) {
-        let key = format!("transition_status_{}", self.block_id);
-        if let Some(status) = crate::app::get_local_storage(&key) {
+        let status_key = transition_status_key(&self.block_id);
+        if let Some(status) = crate::app::get_local_storage(&status_key) {
             self.transition_status = Some(status);
-            crate::app::remove_local_storage(&key);
+            crate::app::remove_local_storage(&status_key);
         }
+
+        let commit_key = transition_commit_key(&self.block_id);
+        let Some(commit) = crate::app::get_local_storage(&commit_key) else {
+            return;
+        };
+        crate::app::remove_local_storage(&commit_key);
+
+        let Some((from_input, to_input, transition_type)) = parse_transition_commit(&commit) else {
+            tracing::warn!("Ignoring malformed transition commit: {}", commit);
+            return;
+        };
+
+        // Anything the user changed while the request was in flight wins, so a late
+        // confirmation never overwrites a fresh selection. The pair and the direction
+        // are guarded separately because they are edited separately.
+        if self.transition_from == from_input && self.transition_to == to_input {
+            self.transition_from = to_input;
+            self.transition_to = from_input;
+        }
+        if self.transition_type == transition_type {
+            self.transition_type = invert_transition_direction(&transition_type);
+        }
+    }
+}
+
+/// Local storage key for the human-readable status of the last transition.
+fn transition_status_key(block_id: &str) -> String {
+    format!("transition_status_{}", block_id)
+}
+
+/// Local storage key for a confirmed transition awaiting its local from/to swap.
+fn transition_commit_key(block_id: &str) -> String {
+    format!("transition_commit_{}", block_id)
+}
+
+/// Parse a `from|to|type` commit payload written by a successful transition.
+fn parse_transition_commit(value: &str) -> Option<(usize, usize, String)> {
+    let mut parts = value.splitn(3, '|');
+    let from_input = parts.next()?.parse().ok()?;
+    let to_input = parts.next()?.parse().ok()?;
+    let transition_type = parts.next()?.to_string();
+    Some((from_input, to_input, transition_type))
+}
+
+/// Invert a slide/push direction so repeated takes move back and forth.
+fn invert_transition_direction(transition_type: &str) -> String {
+    match transition_type {
+        "slide_left" => "slide_right",
+        "slide_right" => "slide_left",
+        "slide_up" => "slide_down",
+        "slide_down" => "slide_up",
+        "push_left" => "push_right",
+        "push_right" => "push_left",
+        "push_up" => "push_down",
+        "push_down" => "push_up",
+        other => other,
+    }
+    .to_string()
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::api::ApiClient;
+
+    fn editor(block_id: &str) -> CompositorEditor {
+        CompositorEditor::new(
+            uuid::Uuid::nil(),
+            block_id.to_string(),
+            1920,
+            1080,
+            4,
+            ApiClient::new_with_auth("http://127.0.0.1:1", None),
+        )
+    }
+
+    /// A failed take must not leave the pair backwards, so nothing may be swapped
+    /// while the request is still in flight.
+    #[tokio::test]
+    async fn trigger_transition_does_not_swap_before_confirmation() {
+        let mut editor = editor("take-pending");
+        editor.transition_type = "slide_left".to_string();
+
+        assert!(editor.trigger_transition(&Context::default()));
+
+        assert_eq!(editor.transition_from, 0);
+        assert_eq!(editor.transition_to, 1);
+        assert_eq!(editor.transition_type, "slide_left");
+    }
+
+    #[test]
+    fn confirmed_transition_swaps_pair_and_inverts_direction() {
+        let mut editor = editor("take-confirmed");
+        editor.transition_type = "slide_left".to_string();
+        crate::app::set_local_storage(&transition_commit_key("take-confirmed"), "0|1|slide_left");
+
+        editor.check_transition_status();
+
+        assert_eq!(editor.transition_from, 1);
+        assert_eq!(editor.transition_to, 0);
+        assert_eq!(editor.transition_type, "slide_right");
+        assert!(crate::app::get_local_storage(&transition_commit_key("take-confirmed")).is_none());
+    }
+
+    /// A confirmation that arrives after the operator has re-staged must not
+    /// overwrite the new selection.
+    #[test]
+    fn confirmation_does_not_overwrite_a_selection_changed_in_flight() {
+        let mut editor = editor("take-restaged");
+        editor.transition_from = 2;
+        editor.transition_to = 3;
+        editor.transition_type = "dip_to_black".to_string();
+        crate::app::set_local_storage(&transition_commit_key("take-restaged"), "0|1|slide_left");
+
+        editor.check_transition_status();
+
+        assert_eq!(editor.transition_from, 2);
+        assert_eq!(editor.transition_to, 3);
+        assert_eq!(editor.transition_type, "dip_to_black");
+    }
+
+    #[test]
+    fn malformed_commit_leaves_state_alone() {
+        let mut editor = editor("take-malformed");
+        crate::app::set_local_storage(&transition_commit_key("take-malformed"), "not-a-commit");
+
+        editor.check_transition_status();
+
+        assert_eq!(editor.transition_from, 0);
+        assert_eq!(editor.transition_to, 1);
+        assert!(crate::app::get_local_storage(&transition_commit_key("take-malformed")).is_none());
     }
 }
