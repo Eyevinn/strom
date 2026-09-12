@@ -190,6 +190,16 @@ COPY --from=frontend-builder /app/backend/dist backend/dist
 # Build the backend (headless - no native GUI needed in Docker) and MCP server
 ENV RUST_BACKTRACE=1
 
+# Git provenance for /api/version and --version-info. The build context has no .git/
+# (see .dockerignore), so build.rs cannot shell out to git here and takes these instead.
+# Declared immediately before the build so an earlier layer is not invalidated per commit.
+ARG GIT_HASH
+ARG GIT_TAG
+ARG GIT_BRANCH
+ENV GIT_HASH=${GIT_HASH} \
+    GIT_TAG=${GIT_TAG} \
+    GIT_BRANCH=${GIT_BRANCH}
+
 # Cross-compilation: Use cargo-zigbuild with glibc 2.36 targeting (Raspberry Pi compatible)
 # Native compilation: Use regular cargo build
 # sccache: see the frontend stage — probe the backend and only wrap rustc when
