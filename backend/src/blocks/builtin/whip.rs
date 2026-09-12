@@ -318,11 +318,6 @@ fn build_whipserversrc(
     // the pipeline owns them.
     let mut slot_decodebins: Vec<Vec<gst::glib::WeakRef<gst::Element>>> = Vec::new();
 
-    // One flag per slot, set when decodebin exposes that slot's video pad.
-    // A session stops asking the publisher for keyframes once its flag flips.
-    let video_decoding: Arc<Vec<AtomicBool>> =
-        Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect());
-
     // One record per slot, one stamp per medium inside it, written by a probe on
     // that slot's output tees below. This is where a session's media becomes
     // usable to the flow, so this is where its liveness is measured; see
@@ -497,15 +492,9 @@ fn build_whipserversrc(
 
                 // decodebin has dynamic pads — connect pad-added to link to videoconvert
                 let videoconvert_weak = videoconvert.downgrade();
-                let video_decoding_for_pad = video_decoding.clone();
                 decodebin.connect_pad_added(move |_dec, src_pad| {
                     if src_pad.direction() != gst::PadDirection::Src {
                         return;
-                    }
-                    // Video is decoding: whoever is asking for keyframes on
-                    // this slot can stop.
-                    if let Some(flag) = video_decoding_for_pad.get(slot) {
-                        flag.store(true, Ordering::Relaxed);
                     }
                     if let Some(vc) = videoconvert_weak.upgrade() {
                         let sink = vc.static_pad("sink").unwrap();
@@ -586,7 +575,6 @@ fn build_whipserversrc(
             ice_transport_policy: ctx.ice_transport_policy().to_string(),
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
-            video_decoding,
             jitterbuffer_latency_ms,
             do_retransmission,
             dynamic_webrtcbin_store: ctx.dynamic_webrtcbin_store(),
@@ -883,13 +871,6 @@ pub fn create_whipserversrc_for_session(
     let slot_audio_appsrc: Option<gst_app::AppSrc> = config.slot_audio_appsrcs.get(slot).cloned();
     let slot_video_appsrc: Option<gst_app::AppSrc> = config.slot_video_appsrcs.get(slot).cloned();
 
-    // Re-arm the slot: this session has to prove for itself that video decodes.
-    // A previous session on the same slot left the flag set.
-    let video_decoding = config.video_decoding.clone();
-    if let Some(flag) = video_decoding.get(slot) {
-        flag.store(false, Ordering::Relaxed);
-    }
-
     // Shared timestamp offset for A/V sync across audio and video appsrcs.
     // Computed from the first buffer on either stream:
     //   offset = main_pipeline_running_time - buffer_pts
@@ -913,7 +894,7 @@ pub fn create_whipserversrc_for_session(
             Arc::new(SlotOutput::new(Instant::now()))
         }
     };
-    let activity = Arc::new(SessionActivity::new(Instant::now(), slot_output));
+    let activity = Arc::new(SessionActivity::new(Instant::now(), slot_output.clone()));
 
     // Inactivity watchdog. A background thread triggers cleanup once the session
     // has gone INACTIVITY_TIMEOUT without producing usable media — which covers
@@ -965,6 +946,7 @@ pub fn create_whipserversrc_for_session(
         let audio_connected = Arc::new(AtomicBool::new(false));
         let video_connected = Arc::new(AtomicBool::new(false));
         let activity_for_pads = activity.clone();
+        let slot_output_for_pads = slot_output.clone();
 
         whipserversrc.connect_pad_added(move |_src, pad| {
             let pad_name = pad.name();
@@ -1063,21 +1045,26 @@ pub fn create_whipserversrc_for_session(
                     // Ask for one. The event has to be sent here, on the WebRTC
                     // source's pad, because this is the only side of the
                     // appsink/appsrc boundary from which it reaches the
-                    // publisher. It stops as soon as video decodes, so a
-                    // healthy session is normally never asked at all.
+                    // publisher. It stops as soon as video decodes, so a healthy
+                    // session is asked once at most, before its first frame has
+                    // finished crossing the slot's decode chain.
                     let request_pad = pad.clone();
-                    let request_flag = video_decoding.clone();
+                    // Stop asking when *this session's* video comes out of the
+                    // slot's chain. `decodebin` exposing a pad is the wrong
+                    // signal: it happens once per flow, so on a reused slot the
+                    // pad is already there and no later session could ever be
+                    // seen to start. The slot's video stamp is reset when a
+                    // session claims the slot, so a reading of it is about this
+                    // session and no other.
+                    let request_output = slot_output_for_pads.clone();
                     let request_slot = slot;
                     if let Err(e) = std::thread::Builder::new()
                         .name(format!("whip-keyframe-{}", request_slot))
                         .spawn(move || {
                             let policy = keyframe_request::KeyframeRequestPolicy::default();
-                            let Some(flag) = request_flag.get(request_slot) else {
-                                return;
-                            };
                             let sent = keyframe_request::request_until_decoding(
                                 policy,
-                                flag,
+                                || request_output.stamp(Medium::Video).last() != 0,
                                 std::thread::sleep,
                                 |attempt| {
                                     debug!(
@@ -2209,6 +2196,107 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("timed out waiting for {}", what);
+    }
+
+    /// A publisher that reconnects to a slot must not be asked for keyframes it
+    /// does not need.
+    ///
+    /// Every request forces a keyframe on the publisher's uplink, so a session
+    /// whose video is already decoding has to be left alone. The signal that says
+    /// so cannot be `decodebin` exposing a pad: that happens once per flow, so on
+    /// a slot that has carried a session before, the pad is already there and no
+    /// later session can ever be seen to start. The slot's video stamp can,
+    /// because claiming a slot clears it.
+    ///
+    /// This pins the stop condition, not the wiring that consults it.
+    #[test]
+    fn a_reconnecting_publisher_is_not_asked_for_keyframes() {
+        let _ = gst::init();
+
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = build_whipserversrc(
+            "whip-rearm-test",
+            &props(&[
+                ("mode", PropertyValue::String("video".to_string())),
+                ("decode", PropertyValue::Bool(true)),
+                ("max_sessions", PropertyValue::Int(1)),
+            ]),
+            &ctx,
+        )
+        .expect("build_whipserversrc failed");
+
+        let configs = ctx.take_whip_endpoint_configs();
+        let config = &configs[0].1;
+        let output = config.slot_output[0].clone();
+        let appsrc = config.slot_video_appsrcs[0].clone();
+
+        let pipeline = assemble(&result);
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add(&sink).expect("add fakesink");
+        let tee = result
+            .elements
+            .iter()
+            .find(|(id, _)| id.ends_with(":video_out_tee_0"))
+            .map(|(_, element)| element.clone())
+            .expect("the block builds an output tee per slot");
+        let tee_src = tee.request_pad_simple("src_%u").expect("tee src pad");
+        tee_src
+            .link(&sink.static_pad("sink").unwrap())
+            .expect("link tee to fakesink");
+
+        appsrc.set_caps(Some(
+            &gst::Caps::builder("video/x-raw")
+                .field("format", "I420")
+                .field("width", 64i32)
+                .field("height", 64i32)
+                .field("framerate", gst::Fraction::new(30, 1))
+                .build(),
+        ));
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline to PLAYING");
+
+        // First session on the slot.
+        assert_eq!(config.allocate_slot("first"), Some(0));
+        for index in 0..30 {
+            appsrc.push_buffer(i420_frame(index)).expect("push frame");
+        }
+        wait_for("the first session's video to reach the slot's tee", || {
+            output.stamp(Medium::Video).last() != 0
+        });
+        config.release_slot(0);
+
+        // The slot is reused. `SessionActivity::new` is what clears the stamps a
+        // session inherits, so go through it rather than resetting by hand.
+        assert_eq!(config.allocate_slot("second"), Some(0));
+        let _activity = SessionActivity::new(Instant::now(), output.clone());
+        assert_eq!(
+            output.stamp(Medium::Video).last(),
+            0,
+            "claiming the slot has to clear what the last session left behind"
+        );
+
+        for index in 30..60 {
+            appsrc.push_buffer(i420_frame(index)).expect("push frame");
+        }
+        wait_for("the second session's video to reach the slot's tee", || {
+            output.stamp(Medium::Video).last() != 0
+        });
+
+        // What the keyframe requester runs, with the real policy.
+        let sent = keyframe_request::request_until_decoding(
+            keyframe_request::KeyframeRequestPolicy::default(),
+            || output.stamp(Medium::Video).last() != 0,
+            |_| {},
+            |_| panic!("a session whose video is decoding was asked for a keyframe"),
+        );
+        assert_eq!(sent, 0);
+
+        let _ = pipeline.set_state(gst::State::Null);
     }
 
     /// The signal a WHIP slot is judged by has to mean "this session is producing

@@ -34,13 +34,6 @@ pub struct WhipEndpointConfig {
     pub pipeline_weak: gst::glib::WeakRef<gst::Pipeline>,
     /// Whether to decode RTP to raw media (true) or pass through RTP (false)
     pub decode: bool,
-    /// Per-slot flag, set once the main pipeline's `decodebin` has exposed a
-    /// video pad for that slot — i.e. video is genuinely being decoded.
-    ///
-    /// A session asks the publisher for a keyframe until this flips, because
-    /// without the parameter sets that travel with a keyframe the depayloader
-    /// can never produce an access unit. See `gst::keyframe_request`.
-    pub video_decoding: Arc<Vec<AtomicBool>>,
     /// Jitterbuffer latency in milliseconds for the per-session webrtcbin.
     pub jitterbuffer_latency_ms: u32,
     /// Whether whipserversrc should request retransmission (NACK) of lost
@@ -1413,7 +1406,6 @@ mod tests {
             ice_transport_policy: "all".to_string(),
             pipeline_weak: Default::default(),
             decode: true,
-            video_decoding: Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect()),
             jitterbuffer_latency_ms: 200,
             do_retransmission: true,
             dynamic_webrtcbin_store: Arc::new(Mutex::new(HashMap::new())),
