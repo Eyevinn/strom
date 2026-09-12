@@ -4,9 +4,9 @@
 > implementation.** This guide describes behaviour observed on a running rig at one point
 > in time. When in doubt, read the code and check the in-app UI.
 
-How a producer changes what the audience sees — all participants, one participant, or
-anything in between — by driving the vision mixer block over HTTP instead of the operator
-page. Companion to the [Vision Mixer Operator Guide](VISION_MIXER_OPERATOR_GUIDE.md),
+How a producer changes what the audience sees — one camera full frame, several sources at
+once, or anything in between — by driving the vision mixer block over HTTP instead of the
+operator page. Companion to the [Vision Mixer Operator Guide](VISION_MIXER_OPERATOR_GUIDE.md),
 which covers the same mixer from the GUI. Read that one first for the concepts; this one
 is the call-by-call recipe, the on-air behaviour of each move, and what breaks.
 
@@ -22,7 +22,7 @@ The mixer has two buses, **PGM** (on air) and **PVW** (preview). Each bus holds 
   full-region background input plus a list of **zones**. Each zone is a rectangle holding
   one or more inputs that auto-tile inside it.
 
-So "all five up" and "one participant full frame" are not different features. They are
+So "a five-box" and "one camera full frame" are not different features. They are
 two sources you can put on either bus. Cutting between them is an ordinary take.
 
 Four calls do all the work:
@@ -60,12 +60,14 @@ air.
 
 ---
 
-## 2. The four layouts, verified
+## 2. The layouts, verified
 
-All examples assume a five-input mixer with two PiPs, inputs `0..4` fed by participants
-P1..P5. Every layout below was taken to air and read off a captured program frame.
+All examples assume a five-input mixer with two PiPs, inputs `0..4` fed by five sources —
+CAM 1..5 below, though nothing here cares whether a given input is a camera, a remote
+contributor or a graphics feed. Every layout was taken to air and read off a captured
+program frame.
 
-### All five up
+### All five sources up
 
 One zone, no rect (fills the PiP region), all five inputs. The zone auto-tiles them.
 
@@ -84,10 +86,10 @@ Result: three tiles across the top, two on the second row. The tiling is a
 `cols = ceil(sqrt(N))` by `rows = ceil(N/cols)` grid, so five sources give a 3×2 grid with
 one empty cell. The grid **as a block** is centred in the region, but cells fill row-major
 left to right, so the short last row sits to the **left**, not centred under the row above.
-If you want the odd participant centred, do not use a single auto-tiling zone — give each
+If you want the odd source centred, do not use a single auto-tiling zone — give each
 row its own zone, or each source its own zone.
 
-### One participant full frame
+### One source full frame
 
 No PiP involved. Preview the input and take.
 
@@ -99,7 +101,7 @@ curl -X POST -H 'content-type: application/json' \
 
 ### Two up
 
-Same as five up with two sources. Two sources tile side by side, each cell aspect-fitted,
+Same as the five-box with two sources. Two sources tile side by side, each cell aspect-fitted,
 the pair vertically centred with black above and below when the region is wider than two
 16:9 cells.
 
@@ -160,7 +162,7 @@ So the choice between editing on air and preview-then-take is editorial, not tec
 
 - **Edit on air** when you want the audience to see the move — opening a box for a guest who
   just joined, dropping a box when someone leaves. It reads as a deliberate animated
-  rearrangement, which is what a viewer expects from a video call layout.
+  rearrangement rather than a fault.
 - **Preview then take** when you want the change to be invisible until you commit, or when
   you are building something complex and do not want half-finished states on air. Editing
   the PiP that is on PVW does not touch PGM: a full re-layout of the preview PiP left
@@ -181,45 +183,50 @@ So the choice between editing on air and preview-then-take is editorial, not tec
 | anything → anything | `cut` (or `duration_ms: 0`) | One-frame switch. Verified: last frame of the old look, next frame the new look, nothing between. |
 | input → input | `fade` | A true dissolve. Frames mid-transition show both pictures blended. |
 | PiP → PiP, **no shared sources** | `fade` | A true dissolve between the two compositions. |
-| PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-up to that participant full frame reads as a zoom-in, with the other tiles covered as the box grows. |
+| PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-box to that source full frame reads as a zoom-in, with the other tiles covered as the box grows. |
 | either bus is a PiP | `slide_*` | Silently downgraded to `fade`. The server logs the downgrade; the HTTP response reports the transition that actually ran in `actual_transition_type`. |
 
-The engine animates pads, not pictures: a source present in both the outgoing and incoming composition is treated as
-*moving*, and only sources exclusive to one side cross-fade. If you want a genuine dissolve
-out of a multi-box layout, take to a composition that shares no inputs with it, or use a
-cut.
+The engine animates pads, not pictures: a source present in both the outgoing and
+incoming composition is treated as *moving*, and only sources exclusive to one side
+cross-fade. If you want a genuine dissolve out of a multi-box layout, take to a
+composition that shares no inputs with it, or use a cut.
 
 ---
 
 ## 5. Failure modes
 
-### A zone names a seat that is not publishing
+### A zone names a source that is not delivering frames
 
 **Nothing warns you, and the layout does not re-flow.** The call succeeds, the layout keeps
-a cell for that participant, and the cell is simply empty. A five-up including one absent
-seat renders as a 3×2 grid with a black hole where they would be — not as a tidy four-up.
+a cell for that source, and the cell is simply empty. A five-box including one silent input
+renders as a 3×2 grid with a black hole where it would be — not as a tidy four-box.
 
-The fix is to rebuild the zone without that source, which re-tiles the remaining
-participants into a full 2×2. There is no automatic compaction.
+The fix is to rebuild the zone without that source, which re-tiles the rest into a full
+2×2. There is no automatic compaction. This bites hardest with remote contributors, who
+come and go on their own schedule; a wired camera is either there for the whole show or
+obviously absent before you start.
 
-### A seat drops while it is on air
+### A source stops while it is on air
 
 **The tile freezes on its last frame and stays there indefinitely.** It does not go black,
-it is not removed, and the composition does not re-flow. On the rig the freeze followed the
-publisher's death within about two seconds — the measurement cannot separate the jitter
-buffer from the mixer's own output latency, so treat it as immediate. The frozen frame was
-still on air minutes later, long after the ingest session had been reaped for inactivity.
+it is not removed, and the composition does not re-flow. A compositor pad repeats its last
+buffer for as long as the mixer runs, so this is the general behaviour for any input that
+stops, not a property of one ingest type. Measured on a WHIP contributor, the freeze
+followed the publisher's death within about two seconds — the measurement cannot separate
+the jitter buffer from the mixer's own output latency, so treat it as immediate. The frozen
+frame was still on air minutes later, long after the ingest session had been reaped for
+inactivity.
 
-This is the most dangerous failure in the set, because a frozen participant looks exactly
-like a still one. Two consequences for a live show:
+This is the most dangerous failure in the set, because a frozen tile looks exactly like a
+static one. Two consequences for a live show:
 
-- Do not trust the program picture to tell you a seat is gone. Watch the ingest session
-  state or the per-seat block health instead.
-- The recovery is automatic: when the participant rejoins, their tile resumes in place with
-  no operator action and no layout change.
+- Do not trust the program picture to tell you a source is gone. Watch the ingest session
+  state or the per-input block health instead.
+- The recovery is automatic: when the source resumes, its tile picks up in place with no
+  operator action and no layout change.
 
-If you need the seat gone from the picture, you must remove it from the zone yourself —
-which is a live edit and animates as described in §3.
+If you need it gone from the picture, you must remove it from the zone yourself — which is
+a live edit and animates as described in §3.
 
 ### A zone holds more sources than its capacity
 
@@ -254,16 +261,15 @@ but that ceiling is unreachable on a mixer with fewer than 16 inputs.
 ## 6. Verifying what is actually on air
 
 **A 200 is not evidence.** Every claim in this guide was checked against program frames,
-and two of the findings (the shared-source "fade", the frozen dropped seat) look completely
-correct from the API side.
+and two of the findings (the shared-source "fade", the frozen stopped input) look
+completely correct from the API side.
 
 Two things make verification reliable:
 
 1. **Give every source a visible clock.** A frozen tile is indistinguishable from a live
-   one unless the picture itself is moving. Burning a running timecode into each
-   participant feed turns "is this seat alive?" into something you can read off a single
-   frame. Two seats reading the same time and one reading an older time is the whole
-   diagnosis.
+   one unless the picture itself is moving. Burning a running timecode into each feed turns
+   "is this input alive?" into something you can read off a single frame. Two tiles reading
+   the same time and one reading an older time is the whole diagnosis.
 2. **Tap the program output to a file** rather than capturing it over the network. Adding a
    video encoder plus a recorder block fed from the mixer's PGM output gives frame-accurate
    material with no transport in the way, and the recorder's split endpoint closes a
