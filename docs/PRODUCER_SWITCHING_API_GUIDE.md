@@ -38,11 +38,13 @@ The broadcast pattern is: build the next look on a PiP that is **not** on air, p
 take it. A mixer with `num_pips: 2` supports this indefinitely, because the take swaps the
 buses and hands the previous PGM composition back to you on preview to rebuild.
 
-### The take is a swap, and it ignores half its own request body
+### On a vision mixer, the take is a swap
 
-`POST .../transition` takes `from_input` and `to_input`, but whenever the block has live
-state the engine ignores them and swaps whatever is currently on PGM and PVW. Send `0` for
-both. What matters is `transition_type` and `duration_ms`.
+`POST .../transition` takes `from_input` and `to_input`, but a vision mixer ignores them
+and swaps whatever is currently on PGM and PVW. The block's own bus state is authoritative,
+because an index you computed before the call can be stale by the time it arrives. Send `0`
+for both. What matters is `transition_type` and `duration_ms`. The same endpoint on a plain
+compositor block, which has no PGM/PVW state, does use the two indices.
 
 ```bash
 FLOW=945fa329-...   BLOCK=vmix
