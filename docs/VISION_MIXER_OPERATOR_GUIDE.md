@@ -248,7 +248,7 @@ just like a regular input.
 |---|---|
 | **Background** | One input that fills the whole PiP region. Optional — a PiP can be overlay-only. |
 | **Zone** | A rectangular sub-region inside the PiP that hosts one or more overlay sources. Each zone has its own position, size and capacity. |
-| **Zone capacity** | Max number of overlay sources allowed in the zone. When full, pushing a new source **evicts the oldest** (FIFO). Capacity `1` is "swap mode" — replacing the source cross-fades. |
+| **Zone capacity** | Max number of overlay sources allowed in the zone. When full, pushing a new source **evicts the oldest** (FIFO) — the editor does this before it sends the change, and the API rejects a zone that arrives over-full. Capacity `1` is "swap mode" — replacing the source cross-fades. |
 | **Auto-tile** | When a zone holds multiple sources, they auto-tile in a grid (1, 2 side-by-side, 2+1, 2×2, 3×2, etc.). Each source is fitted with its **own** aspect ratio — a 2.39:1 source letterboxes inside its cell instead of being stretched. |
 | **Source crop ("punch-in")** | Each source in a PiP can carry a crop window: the visible part of the source that scales to fill its box. Think virtual PTZ — zoom into a person's face from a wide shot. See §4.4. |
 | **Zone border** | A colored frame around each source box in the zone — on the **PGM output** and mirrored on the multiview (PiP tiles and the PVW display, proportionally scaled). The border belongs to the box (it survives source swaps in the zone) and is composited as part of the mix, so it tracks morphs, takes and punch-ins frame-accurately and **fades with its box** (FTB, capacity-1 cross-fades). The frame sits fully *outside* the picture edge (it never covers content), and where zones overlap the upper zone covers the lower zone's frame — like stacked framed cards. Sits below the DSK stack. Set per zone: color (`#RRGGBB` or `#RRGGBBAA`) + width in PGM pixels — the width normalizes to each render target, so 4 px on air looks like 4 px-equivalent everywhere (0 = off). |
@@ -259,7 +259,8 @@ just like a regular input.
 |---|---|
 | Max PiPs in the mixer | 4 |
 | Max overlays per PiP (across all zones) | 15 (= max inputs − 1) |
-| Sources are deduplicated across zones | The same input cannot occupy two zones in the same PiP — first zone wins. |
+| Sources are deduplicated across zones | The same input cannot occupy two zones in the same PiP. The API rejects a config that names one twice. |
+| A zone's sources must fit its capacity | The API rejects an over-full zone rather than dropping the extras. Evicting the oldest is the caller's job — the built-in editor does it for you. |
 
 ### 4.3 How the operator configures a PiP
 

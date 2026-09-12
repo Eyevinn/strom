@@ -2015,23 +2015,6 @@ pub async fn update_pip_config(
     Path((flow_id, block_id, pip_idx)): Path<(FlowId, String, usize)>,
     Json(req): Json<strom_types::api::UpdatePipConfigRequest>,
 ) -> Result<Json<strom_types::api::UpdatePipConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
-    use strom_types::vision_mixer::MAX_PIP_OVERLAYS;
-    let total_sources: usize = req.zones.iter().map(|z| z.sources.len()).sum();
-    if total_sources > MAX_PIP_OVERLAYS {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::with_details(
-                "Too many PiP overlay sources",
-                format!(
-                    "Got {} total sources across {} zones, but MAX_PIP_OVERLAYS is {}",
-                    total_sources,
-                    req.zones.len(),
-                    MAX_PIP_OVERLAYS
-                ),
-            )),
-        ));
-    }
-
     info!(
         "Updating PiP {} on vision mixer {} in flow {}: bg={:?}, zones={:?}, transforms={:?}",
         pip_idx, block_id, flow_id, req.bg, req.zones, req.transforms
@@ -2057,9 +2040,10 @@ pub async fn update_pip_config(
             )
         })?;
 
-    // Read back authoritative state. Validation runs in
-    // `apply_vision_mixer_pip_config`, so the only mutation vs. the request
-    // is rect/crop clamping (NormRect → [0,1], SourceCrop clamped + zero
+    // Read back authoritative state. All validation runs in
+    // `apply_vision_mixer_pip_config` — including zone capacity and the
+    // MAX_PIP_OVERLAYS ceiling — so the only mutation vs. the request is
+    // rect/crop clamping (NormRect → [0,1], SourceCrop clamped + zero
     // entries dropped).
     let (bg, zones, transforms) = if let Some(s) =
         crate::blocks::builtin::vision_mixer::overlay::get_overlay_state(&block_id)
