@@ -360,8 +360,11 @@ impl CompositorEditor {
     }
 
     /// Trigger a transition between inputs.
-    /// Returns true if the request was dispatched. The local from/to pair is only
-    /// swapped once the backend confirms the transition, in `check_transition_status`.
+    ///
+    /// Returns true if the request was dispatched. The from/to pair is swapped and
+    /// the direction inverted optimistically, so the controls track the take without
+    /// waiting for the round trip. A failed request queues a rollback that
+    /// `check_transition_status` applies on the next frame.
     pub(super) fn trigger_transition(&mut self, ctx: &Context) -> bool {
         if self.transition_from == self.transition_to {
             return false;
@@ -384,6 +387,12 @@ impl CompositorEditor {
                 "Transitioning"
             }
         ));
+
+        // Swap from/to immediately so "From" shows what's now live. The request is
+        // expected to succeed; the error arm below undoes this.
+        self.transition_from = to_input;
+        self.transition_to = from_input;
+        self.transition_type = invert_transition_direction(&transition_type);
 
         tracing::info!(
             "Triggering {} transition: {} -> {} ({}ms)",
@@ -416,19 +425,19 @@ impl CompositorEditor {
                             to_input
                         ),
                     );
-                    // Only now is `to_input` actually live, so only now may the local
-                    // pair be swapped. The UI loop picks this up in
-                    // `check_transition_status`.
-                    crate::app::set_local_storage(
-                        &transition_commit_key(&block_id),
-                        &format!("{}|{}|{}", from_input, to_input, transition_type),
-                    );
                 }
                 Err(e) => {
                     tracing::error!("Transition failed: {}", e);
                     crate::app::set_local_storage(
                         &transition_status_key(&block_id),
                         &format!("{} {}", egui_phosphor::regular::X, e),
+                    );
+                    // Nothing went to air, so the optimistic swap has to come back.
+                    // The payload is what was staged before the swap; the UI loop
+                    // restores it in `check_transition_status`.
+                    crate::app::set_local_storage(
+                        &transition_rollback_key(&block_id),
+                        &format!("{}|{}|{}", from_input, to_input, transition_type),
                     );
                 }
             }
@@ -438,8 +447,8 @@ impl CompositorEditor {
         true
     }
 
-    /// Check for transition status updates, and commit the from/to swap for any
-    /// transition the backend has confirmed since the last frame.
+    /// Check for transition status updates, and undo the optimistic swap for any
+    /// transition the backend rejected since the last frame.
     pub(super) fn check_transition_status(&mut self) {
         let status_key = transition_status_key(&self.block_id);
         if let Some(status) = crate::app::get_local_storage(&status_key) {
@@ -447,26 +456,28 @@ impl CompositorEditor {
             crate::app::remove_local_storage(&status_key);
         }
 
-        let commit_key = transition_commit_key(&self.block_id);
-        let Some(commit) = crate::app::get_local_storage(&commit_key) else {
+        let rollback_key = transition_rollback_key(&self.block_id);
+        let Some(rollback) = crate::app::get_local_storage(&rollback_key) else {
             return;
         };
-        crate::app::remove_local_storage(&commit_key);
+        crate::app::remove_local_storage(&rollback_key);
 
-        let Some((from_input, to_input, transition_type)) = parse_transition_commit(&commit) else {
-            tracing::warn!("Ignoring malformed transition commit: {}", commit);
+        let Some((from_input, to_input, transition_type)) = parse_transition_rollback(&rollback)
+        else {
+            tracing::warn!("Ignoring malformed transition rollback: {}", rollback);
             return;
         };
 
-        // Anything the user changed while the request was in flight wins, so a late
-        // confirmation never overwrites a fresh selection. The pair and the direction
-        // are guarded separately because they are edited separately.
-        if self.transition_from == from_input && self.transition_to == to_input {
-            self.transition_from = to_input;
-            self.transition_to = from_input;
+        // Only undo a swap that is still standing. Anything the user changed while
+        // the request was in flight wins, so a late rollback never overwrites a fresh
+        // selection. The pair and the direction are guarded separately because they
+        // are edited separately.
+        if self.transition_from == to_input && self.transition_to == from_input {
+            self.transition_from = from_input;
+            self.transition_to = to_input;
         }
-        if self.transition_type == transition_type {
-            self.transition_type = invert_transition_direction(&transition_type);
+        if self.transition_type == invert_transition_direction(&transition_type) {
+            self.transition_type = transition_type;
         }
     }
 }
@@ -476,13 +487,14 @@ fn transition_status_key(block_id: &str) -> String {
     format!("transition_status_{}", block_id)
 }
 
-/// Local storage key for a confirmed transition awaiting its local from/to swap.
-fn transition_commit_key(block_id: &str) -> String {
-    format!("transition_commit_{}", block_id)
+/// Local storage key for a failed transition awaiting its optimistic swap being undone.
+fn transition_rollback_key(block_id: &str) -> String {
+    format!("transition_rollback_{}", block_id)
 }
 
-/// Parse a `from|to|type` commit payload written by a successful transition.
-fn parse_transition_commit(value: &str) -> Option<(usize, usize, String)> {
+/// Parse a `from|to|type` rollback payload written by a failed transition. The
+/// triple is the state as it was staged, before the optimistic swap.
+fn parse_transition_rollback(value: &str) -> Option<(usize, usize, String)> {
     let mut parts = value.splitn(3, '|');
     let from_input = parts.next()?.parse().ok()?;
     let to_input = parts.next()?.parse().ok()?;
@@ -491,6 +503,9 @@ fn parse_transition_commit(value: &str) -> Option<(usize, usize, String)> {
 }
 
 /// Invert a slide/push direction so repeated takes move back and forth.
+///
+/// Every mapping is its own inverse, so applying this twice is the identity — which
+/// is what lets the rollback path reuse it to undo an inversion.
 fn invert_transition_direction(transition_type: &str) -> String {
     match transition_type {
         "slide_left" => "slide_right",
@@ -522,43 +537,76 @@ mod tests {
         )
     }
 
-    /// A failed take must not leave the pair backwards, so nothing may be swapped
-    /// while the request is still in flight.
+    /// The optimistic swap is the point of the eager path, so it must still land
+    /// on dispatch without waiting for the response.
     #[tokio::test]
-    async fn trigger_transition_does_not_swap_before_confirmation() {
-        let mut editor = editor("take-pending");
+    async fn trigger_transition_swaps_optimistically() {
+        let mut editor = editor("take-optimistic");
         editor.transition_type = "slide_left".to_string();
 
         assert!(editor.trigger_transition(&Context::default()));
+
+        assert_eq!(editor.transition_from, 1);
+        assert_eq!(editor.transition_to, 0);
+        assert_eq!(editor.transition_type, "slide_right");
+    }
+
+    /// A take that never went to air must leave the controls where they started,
+    /// or the next take runs the wrong way.
+    #[test]
+    fn failed_transition_rolls_the_swap_back() {
+        let mut editor = editor("take-failed");
+        // State as trigger_transition leaves it after the optimistic swap of 0 -> 1.
+        editor.transition_from = 1;
+        editor.transition_to = 0;
+        editor.transition_type = "slide_right".to_string();
+        crate::app::set_local_storage(&transition_rollback_key("take-failed"), "0|1|slide_left");
+
+        editor.check_transition_status();
+
+        assert_eq!(editor.transition_from, 0);
+        assert_eq!(editor.transition_to, 1);
+        assert_eq!(editor.transition_type, "slide_left");
+        assert!(crate::app::get_local_storage(&transition_rollback_key("take-failed")).is_none());
+    }
+
+    /// End-to-end over a real failed request: the optimistic swap lands, the error
+    /// arm queues the rollback, and the next frame undoes it. Guards the error-arm
+    /// write, which the hand-seeded tests above cannot.
+    #[tokio::test]
+    async fn a_rejected_request_rolls_the_swap_back() {
+        let mut editor = editor("take-rejected");
+        editor.transition_type = "slide_left".to_string();
+
+        assert!(editor.trigger_transition(&Context::default()));
+        assert_eq!(editor.transition_from, 1);
+
+        // Nothing listens on port 1, so the POST is refused promptly.
+        let key = transition_rollback_key("take-rejected");
+        for _ in 0..200 {
+            if crate::app::get_local_storage(&key).is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        editor.check_transition_status();
 
         assert_eq!(editor.transition_from, 0);
         assert_eq!(editor.transition_to, 1);
         assert_eq!(editor.transition_type, "slide_left");
     }
 
+    /// A rollback that arrives after the operator has re-staged must not overwrite
+    /// the new selection.
     #[test]
-    fn confirmed_transition_swaps_pair_and_inverts_direction() {
-        let mut editor = editor("take-confirmed");
-        editor.transition_type = "slide_left".to_string();
-        crate::app::set_local_storage(&transition_commit_key("take-confirmed"), "0|1|slide_left");
-
-        editor.check_transition_status();
-
-        assert_eq!(editor.transition_from, 1);
-        assert_eq!(editor.transition_to, 0);
-        assert_eq!(editor.transition_type, "slide_right");
-        assert!(crate::app::get_local_storage(&transition_commit_key("take-confirmed")).is_none());
-    }
-
-    /// A confirmation that arrives after the operator has re-staged must not
-    /// overwrite the new selection.
-    #[test]
-    fn confirmation_does_not_overwrite_a_selection_changed_in_flight() {
+    fn rollback_does_not_overwrite_a_selection_changed_in_flight() {
         let mut editor = editor("take-restaged");
         editor.transition_from = 2;
         editor.transition_to = 3;
         editor.transition_type = "dip_to_black".to_string();
-        crate::app::set_local_storage(&transition_commit_key("take-restaged"), "0|1|slide_left");
+        crate::app::set_local_storage(&transition_rollback_key("take-restaged"), "0|1|slide_left");
 
         editor.check_transition_status();
 
@@ -567,15 +615,50 @@ mod tests {
         assert_eq!(editor.transition_type, "dip_to_black");
     }
 
+    /// A successful take writes no rollback, so the optimistic swap stands.
     #[test]
-    fn malformed_commit_leaves_state_alone() {
+    fn absent_rollback_leaves_the_swap_in_place() {
+        let mut editor = editor("take-succeeded");
+        editor.transition_from = 1;
+        editor.transition_to = 0;
+        editor.transition_type = "slide_right".to_string();
+
+        editor.check_transition_status();
+
+        assert_eq!(editor.transition_from, 1);
+        assert_eq!(editor.transition_to, 0);
+        assert_eq!(editor.transition_type, "slide_right");
+    }
+
+    #[test]
+    fn malformed_rollback_leaves_state_alone() {
         let mut editor = editor("take-malformed");
-        crate::app::set_local_storage(&transition_commit_key("take-malformed"), "not-a-commit");
+        editor.transition_from = 1;
+        editor.transition_to = 0;
+        crate::app::set_local_storage(&transition_rollback_key("take-malformed"), "not-a-rollback");
+
+        editor.check_transition_status();
+
+        assert_eq!(editor.transition_from, 1);
+        assert_eq!(editor.transition_to, 0);
+        assert!(
+            crate::app::get_local_storage(&transition_rollback_key("take-malformed")).is_none()
+        );
+    }
+
+    /// Non-directional types are their own inverse, so the guard must still match.
+    #[test]
+    fn rollback_matches_a_non_directional_type() {
+        let mut editor = editor("take-fade");
+        editor.transition_from = 1;
+        editor.transition_to = 0;
+        editor.transition_type = "fade".to_string();
+        crate::app::set_local_storage(&transition_rollback_key("take-fade"), "0|1|fade");
 
         editor.check_transition_status();
 
         assert_eq!(editor.transition_from, 0);
         assert_eq!(editor.transition_to, 1);
-        assert!(crate::app::get_local_storage(&transition_commit_key("take-malformed")).is_none());
+        assert_eq!(editor.transition_type, "fade");
     }
 }
