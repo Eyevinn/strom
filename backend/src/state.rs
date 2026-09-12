@@ -2101,17 +2101,25 @@ impl AppState {
     }
 
     /// Trigger a transition on a compositor/mixer block.
+    ///
+    /// `from_input`/`to_input` are honoured only for a block with no live
+    /// PGM/PVW state; see [`TriggerTransitionRequest`].
+    ///
+    /// Returns `(actual_kind, old_pgm, new_pgm)` — the latter two are the
+    /// sources the take actually ran between, `None` when that bus is a PiP.
+    ///
+    /// [`TriggerTransitionRequest`]: strom_types::api::TriggerTransitionRequest
     pub async fn trigger_transition(
         &self,
         flow_id: &FlowId,
         block_instance_id: &str,
-        from_input: usize,
-        to_input: usize,
+        from_input: Option<usize>,
+        to_input: Option<usize>,
         transition_type: &str,
         duration_ms: u64,
-    ) -> Result<String, PipelineError> {
+    ) -> Result<(String, Option<usize>, Option<usize>), PipelineError> {
         debug!(
-            "Triggering {} transition on block {} in flow {} ({} -> {}, {}ms)",
+            "Triggering {} transition on block {} in flow {} ({:?} -> {:?}, {}ms)",
             transition_type, block_instance_id, flow_id, from_input, to_input, duration_ms
         );
 
@@ -2221,19 +2229,21 @@ impl AppState {
             }
         }
 
-        // Broadcast transition event
+        // Report the sources the take actually ran between, falling back to
+        // the request. The variant's fields are `usize`, so a PiP bus still
+        // has to report something: 0 stands in.
         self.inner
             .events
             .broadcast(StromEvent::TransitionTriggered {
                 flow_id: *flow_id,
                 block_instance_id: block_instance_id.to_string(),
-                from_input,
-                to_input,
+                from_input: old_pgm.or(from_input).unwrap_or(0),
+                to_input: new_pgm.or(to_input).unwrap_or(0),
                 transition_type: transition_type.to_string(),
                 duration_ms,
             });
 
-        Ok(actual_kind)
+        Ok((actual_kind, old_pgm, new_pgm))
     }
 
     /// Select a preview input on a vision mixer block.
