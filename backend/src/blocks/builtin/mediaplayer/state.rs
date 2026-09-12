@@ -46,6 +46,14 @@ pub struct MediaPlayerState {
     pub is_paused: AtomicBool,
     /// Whether to loop the playlist
     pub loop_playlist: AtomicBool,
+    /// True while the player is parked on its first frame, ready to fire as a
+    /// stinger with no decode latency. Cleared as soon as it plays.
+    ///
+    /// Armed start is ~0.5 ms and independent of resolution, because the frame
+    /// is already decoded and `play()` is only a state change. Firing without
+    /// arming — straight after a clip switch — costs up to a full frame at 4K,
+    /// which is the whole reason this state is tracked rather than assumed.
+    pub stinger_armed: AtomicBool,
     /// Block ID for event broadcasting
     pub block_id: String,
     /// Flow ID for event broadcasting
@@ -269,6 +277,7 @@ impl MediaPlayerState {
             "Failed to resume playback".to_string()
         })?;
         self.is_paused.store(false, Ordering::SeqCst);
+        self.stinger_armed.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -294,6 +303,24 @@ impl MediaPlayerState {
         self.pause()?;
         self.seek(0)?;
         Ok(())
+    }
+
+    /// Park this player on its first frame so a stinger can fire from it
+    /// without paying decode latency, and stop it looping.
+    ///
+    /// A stinger plays once per trigger, so looping is forced off here rather
+    /// than left to the block's `loop_playlist` property: a stinger clip that
+    /// restarts would put a second copy on air behind the program.
+    pub fn arm_stinger(&self) -> Result<(), String> {
+        self.loop_playlist.store(false, Ordering::SeqCst);
+        self.stop()?;
+        self.stinger_armed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Whether this player is parked on its first frame.
+    pub fn is_stinger_armed(&self) -> bool {
+        self.stinger_armed.load(Ordering::SeqCst)
     }
 
     /// Seek to a position in nanoseconds.

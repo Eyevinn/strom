@@ -68,6 +68,17 @@ struct AppStateInner {
     affinity_manager: AffinityManager,
     /// Thread CPU sampler for measuring per-thread CPU usage
     thread_cpu_sampler: parking_lot::Mutex<ThreadCpuSampler>,
+    /// Mixers with a stinger currently in flight, as (flow, mixer block id).
+    ///
+    /// A stinger owns a keyed pad and the program bus for the length of its
+    /// clip, so a second trigger is refused rather than queued — queuing would
+    /// need a depth policy and could put a stale stinger on air later.
+    /// Mixers with a stinger running, each holding the token of the take that
+    /// claimed it. A take carries its token so a stale one — from a flow that
+    /// has since been stopped and restarted — cannot act on the new pipeline
+    /// or release a claim that now belongs to somebody else.
+    stingers_in_flight: parking_lot::Mutex<std::collections::HashMap<(FlowId, String), u64>>,
+    next_stinger_token: std::sync::atomic::AtomicU64,
     /// Channel registry for inter-pipeline sharing
     channel_registry: ChannelRegistry,
     /// AES67 stream discovery service (SAP/mDNS)
@@ -134,6 +145,8 @@ impl AppState {
         let num_cores = affinity_manager.num_cores();
         Self {
             inner: Arc::new(AppStateInner {
+                stingers_in_flight: parking_lot::Mutex::new(std::collections::HashMap::new()),
+                next_stinger_token: std::sync::atomic::AtomicU64::new(0),
                 flows: RwLock::new(HashMap::new()),
                 storage: Arc::new(storage),
                 element_discovery: RwLock::new(ElementDiscovery::new()),
@@ -974,6 +987,10 @@ impl AppState {
         };
         info!("manager.start() returned with state: {:?}", state);
 
+        // Park declared stinger clips on their first frame and stop the keyed
+        // inputs they feed holding a stale one, now the pipeline is up.
+        crate::gst::stinger::prepare_declared_sources(*id, &flow, &manager);
+
         // Store pipeline manager and keep a reference for SDP generation
         let pipelines_guard = {
             let mut pipelines = self.inner.pipelines.write().await;
@@ -1523,6 +1540,14 @@ impl AppState {
         {
             let mut state = self.inner.mixer_solo_state.write().await;
             state.remove(id);
+        }
+
+        // Release this flow's stinger claims. Their tasks are still sleeping
+        // out the rest of their clips; dropping the claims is what tells them
+        // they have been superseded, so they leave the next pipeline alone.
+        {
+            let mut in_flight = self.inner.stingers_in_flight.lock();
+            in_flight.retain(|(flow_id, _), _| flow_id != id);
         }
 
         // Get and remove the pipeline
@@ -2100,6 +2125,300 @@ impl AppState {
         Ok(out)
     }
 
+    /// Trigger a stinger: play a keyed clip over the program while another
+    /// transition runs beneath it.
+    ///
+    /// Everything that can be rejected is rejected before anything moves on
+    /// air, so a bad request leaves the program untouched. Once the clip is
+    /// rolling, a single task drives the rest: the underlying transition at the
+    /// cut point, then teardown and re-arm when the clip ends.
+    #[allow(clippy::too_many_arguments)]
+    /// Largest believable gap between the pipeline clock and the mixer's output
+    /// position. A few frames at any sane rate.
+    const STINGER_MAX_OUTPUT_TRAIL: std::time::Duration = std::time::Duration::from_millis(250);
+
+    pub async fn trigger_stinger(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        from_input: usize,
+        to_input: usize,
+        source_block_id: Option<&str>,
+    ) -> Result<String, PipelineError> {
+        use crate::blocks::builtin::mediaplayer::{MediaPlayerKey, MEDIA_PLAYER_REGISTRY};
+        use crate::gst::stinger::{self, StingerError};
+        use crate::gst::transitions::TransitionType;
+
+        // --- Validation. Nothing below this block touches the pipeline. ---
+        let binding = {
+            let flows = self.inner.flows.read().await;
+            let flow = flows
+                .get(flow_id)
+                .ok_or_else(|| PipelineError::InvalidFlow(format!("No flow {flow_id}")))?;
+            stinger::resolve_binding(
+                &flow.blocks,
+                &flow.links,
+                block_instance_id,
+                source_block_id,
+            )?
+        };
+
+        // Cut point and the transition beneath are properties of the clip, not
+        // of the take: the person who cut the clip knows where it covers.
+        let under_name = binding.under_transition.clone();
+        let under_duration_ms = binding.under_duration_ms;
+        let under_type: TransitionType = under_name
+            .parse()
+            .map_err(|_| StingerError::UnknownUnderTransition(under_name.clone()))?;
+        if matches!(under_type, TransitionType::Stinger) {
+            return Err(StingerError::StingerBeneathStinger.into());
+        }
+
+        let key = MediaPlayerKey {
+            flow_id: *flow_id,
+            block_id: binding.source_block_id.clone(),
+        };
+        let player = MEDIA_PLAYER_REGISTRY
+            .get(&key)
+            .ok_or_else(|| StingerError::UnknownSource(binding.source_block_id.clone()))?;
+
+        // Clip length drives the stinger; duration_ms is the transition beneath.
+        //
+        // No readable duration means the clip is missing or undecodable. Degrade
+        // rather than reject: a broken clip must not leave the program
+        // mid-transition. The mixer is not claimed yet, so nothing to release.
+        let Some(clip_ms) = player
+            .duration()
+            .map(|ns| ns / 1_000_000)
+            .filter(|ms| *ms > 0)
+        else {
+            error!(
+                "Stinger clip on {} has no readable duration — it is missing or \
+                 undecodable; running the transition beneath on its own",
+                binding.source_block_id
+            );
+            self.inner.events.broadcast(StromEvent::StingerFailed {
+                flow_id: *flow_id,
+                block_instance_id: block_instance_id.to_string(),
+                source_block_id: binding.source_block_id.clone(),
+                reason: "clip has no readable duration (missing or undecodable)".to_string(),
+                still_running: false,
+            });
+            return self
+                .trigger_transition(
+                    flow_id,
+                    block_instance_id,
+                    from_input,
+                    to_input,
+                    &under_name,
+                    under_duration_ms,
+                )
+                .await;
+        };
+
+        // A cut point is optional; without one, cut where a covering clip is
+        // most likely to be opaque.
+        let cut_point = binding.cut_point_ms.unwrap_or(clip_ms / 2);
+        let (under_ms, clamped_from) =
+            stinger::fit_under_transition(cut_point, under_duration_ms, clip_ms)?;
+        if let Some(requested) = clamped_from {
+            warn!(
+                "Stinger on {}: transition beneath shortened from {} ms to {} ms so it \
+                 completes before the {} ms clip ends",
+                block_instance_id, requested, under_ms, clip_ms
+            );
+        }
+
+        let was_armed = player.is_stinger_armed();
+        if !was_armed {
+            warn!(
+                "Stinger source {} was not armed; its first frame will be late",
+                binding.source_block_id
+            );
+        }
+
+        // --- Claim the mixer. A stinger owns the program bus until it ends. ---
+        let claim = (*flow_id, block_instance_id.to_string());
+        let token = self
+            .inner
+            .next_stinger_token
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        {
+            let mut in_flight = self.inner.stingers_in_flight.lock();
+            if in_flight.contains_key(&claim) {
+                return Err(StingerError::AlreadyRunning(block_instance_id.to_string()).into());
+            }
+            in_flight.insert(claim.clone(), token);
+        }
+
+        // From here on, every exit path must release the claim.
+        let release = {
+            let inner = self.inner.clone();
+            let claim = claim.clone();
+            move || {
+                let mut in_flight = inner.stingers_in_flight.lock();
+                if in_flight.get(&claim) == Some(&token) {
+                    in_flight.remove(&claim);
+                }
+            }
+        };
+
+        if let Err(e) = self
+            .set_dsk_enabled(flow_id, block_instance_id, binding.dsk_index, true)
+            .await
+        {
+            release();
+            return Err(e);
+        }
+
+        // A clip that will not play costs the branding, not the cut: run the
+        // transition beneath on its own so the program still changes.
+        if let Err(e) = player.play() {
+            error!(
+                "Stinger clip on {} failed to play ({}) — running the transition \
+                 beneath on its own",
+                binding.source_block_id, e
+            );
+            let _ = self
+                .set_dsk_enabled(flow_id, block_instance_id, binding.dsk_index, false)
+                .await;
+            release();
+            self.inner.events.broadcast(StromEvent::StingerFailed {
+                flow_id: *flow_id,
+                block_instance_id: block_instance_id.to_string(),
+                source_block_id: binding.source_block_id.clone(),
+                reason: e.to_string(),
+                still_running: false,
+            });
+            let actual = self
+                .trigger_transition(
+                    flow_id,
+                    block_instance_id,
+                    from_input,
+                    to_input,
+                    &under_name,
+                    under_ms,
+                )
+                .await?;
+            return Ok(actual);
+        }
+
+        self.inner.events.broadcast(StromEvent::StingerStarted {
+            flow_id: *flow_id,
+            block_instance_id: block_instance_id.to_string(),
+            source_block_id: binding.source_block_id.clone(),
+            clip_ms,
+            cut_point_ms: cut_point,
+            under_transition: under_name.clone(),
+            under_duration_ms: under_ms,
+            under_duration_clamped_from: clamped_from,
+            armed: was_armed,
+        });
+
+        let state = self.clone();
+        let flow = *flow_id;
+        let mixer = block_instance_id.to_string();
+        let dsk_index = binding.dsk_index;
+        let source = binding.source_block_id.clone();
+        tokio::spawn(async move {
+            let claim = (flow, mixer.clone());
+            let still_ours = || state.inner.stingers_in_flight.lock().get(&claim) == Some(&token);
+
+            tokio::time::sleep(std::time::Duration::from_millis(cut_point)).await;
+
+            // The flow may have been stopped and restarted while this slept.
+            // Acting now would drive a pipeline this take knows nothing about.
+            if !still_ours() {
+                debug!(
+                    "Stinger on {} was superseded; leaving the mixer alone",
+                    mixer
+                );
+                return;
+            }
+
+            // A transition applies at the frame the mixer is currently
+            // producing, which trails the clock by the compositor's latency.
+            // Without waiting that out the cut lands before the clip has
+            // reached the cut point on air.
+            if let Some(trail) = state.mixer_output_trail_ns(&flow, &mixer).await {
+                // Clamped because the two clocks only share an origin while the
+                // mixer's segment starts at zero. A position query that answers
+                // 0, or in another timebase, would otherwise read as a trail of
+                // the whole pipeline uptime and park the take indefinitely,
+                // holding the mixer and leaving the program on the old source.
+                if trail > Self::STINGER_MAX_OUTPUT_TRAIL.as_nanos() as u64 {
+                    warn!(
+                        "Stinger on {}: mixer output trail of {} ms is implausible, \
+                         cutting without it",
+                        mixer,
+                        trail / 1_000_000
+                    );
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_nanos(trail)).await;
+                }
+            }
+            if let Err(e) = state
+                .trigger_transition(&flow, &mixer, from_input, to_input, &under_name, under_ms)
+                .await
+            {
+                // The clip is already on air, so this is the worst place to
+                // fail quietly: the graphic plays but the program never
+                // changes. Report it rather than leaving it in the log.
+                error!("Stinger on {}: transition beneath failed: {}", mixer, e);
+                state.inner.events.broadcast(StromEvent::StingerFailed {
+                    flow_id: flow,
+                    block_instance_id: mixer.clone(),
+                    source_block_id: source.clone(),
+                    reason: format!("the transition beneath did not run: {e}"),
+                    still_running: true,
+                });
+            }
+
+            // Hold the keyed pad up for the rest of the clip.
+            let remaining = clip_ms.saturating_sub(cut_point);
+            tokio::time::sleep(std::time::Duration::from_millis(remaining)).await;
+
+            if !still_ours() {
+                debug!(
+                    "Stinger on {} was superseded; leaving the mixer alone",
+                    mixer
+                );
+                return;
+            }
+
+            if let Err(e) = state.set_dsk_enabled(&flow, &mixer, dsk_index, false).await {
+                error!(
+                    "Stinger on {}: could not hide the keyed input: {}",
+                    mixer, e
+                );
+            }
+
+            // Re-arm so the next fire is fast again, then release the mixer.
+            if let Some(player) = MEDIA_PLAYER_REGISTRY.get(&MediaPlayerKey {
+                flow_id: flow,
+                block_id: source.clone(),
+            }) {
+                if let Err(e) = player.arm_stinger() {
+                    warn!("Stinger source {} could not be re-armed: {}", source, e);
+                }
+            }
+            {
+                let mut in_flight = state.inner.stingers_in_flight.lock();
+                if in_flight.get(&claim) == Some(&token) {
+                    in_flight.remove(&claim);
+                }
+            }
+            state.inner.events.broadcast(StromEvent::StingerCompleted {
+                flow_id: flow,
+                block_instance_id: mixer.clone(),
+                source_block_id: source.clone(),
+            });
+            debug!("Stinger on {} complete", mixer);
+        });
+
+        Ok("stinger".to_string())
+    }
+
     /// Trigger a transition on a compositor/mixer block.
     pub async fn trigger_transition(
         &self,
@@ -2345,6 +2664,19 @@ impl AppState {
             .and_then(|flow| flow.blocks.iter().find(|b| b.id == block_instance_id))
             .map(|block| vm_props::parse_num_inputs(&block.properties))
             .unwrap_or(4)
+    }
+
+    /// How far the mixer's output trails the pipeline clock.
+    async fn mixer_output_trail_ns(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+    ) -> Option<u64> {
+        let pipelines = self.inner.pipelines.read().await;
+        let manager = pipelines.get(flow_id)?;
+        let now = manager.running_time_ns()?;
+        let at = manager.mixer_position_ns(block_instance_id)?;
+        Some(now.saturating_sub(at))
     }
 
     /// Toggle a DSK (Downstream Keyer) layer on a vision mixer block.
