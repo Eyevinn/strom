@@ -9,7 +9,9 @@ use tracing::info;
 use super::super::{elements, layout};
 use super::{audio_meter, pad_layout, setup_overlay_renderer, PipelineParams};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult};
+use crate::gpu;
 use crate::gst::download_front;
+use crate::gst::unpremultiply;
 use crate::gst::video_adapt::VIDEO_CONVERT_FACTORY;
 
 pub(super) fn build_cpu_pipeline(
@@ -154,19 +156,61 @@ pub(super) fn build_cpu_pipeline(
         let vc_id_dsk = p.id(&format!("videoconvert_dsk_{}", i));
 
         let queue = elements::make_queue(&q_id)?;
-        let front = input_front(p, &format!("dsk_in_{}", i), &vc_id_dsk)?;
-        let front_id = front.front_id.clone();
-        let front_link = front.link();
 
-        elems.push((q_id.clone(), queue));
-        elems.push((front_id.clone(), front.front));
-        elems.push((vc_id_dsk.clone(), front.convert));
-
-        links.push((
-            ElementPadRef::pad(&q_id, "src"),
-            ElementPadRef::pad(&front_id, "sink"),
-        ));
-        links.push(front_link);
+        if p.dsk_premultiplied(i) {
+            // `compositor` blends straight alpha only, so a premultiplied
+            // source is unpremultiplied first. The element takes packed RGB
+            // with alpha; the converter behind the front brings anything else
+            // (a decoded A420 clip) to that, and passes RGBA-family input
+            // straight through. `vc_id_dsk` then feeds the compositor.
+            if !unpremultiply::register() {
+                return Err(BlockBuildError::ElementCreation(format!(
+                    "DSK{} is premultiplied but {} could not be registered",
+                    i + 1,
+                    unpremultiply::ELEMENT_NAME
+                )));
+            }
+            let vc_pre_id = p.id(&format!("videoconvert_unpremultiply_dsk_{}", i));
+            let unpre_id = p.id(&format!("unpremultiply_dsk_{}", i));
+            let front = input_front(p, &format!("dsk_in_{}", i), &vc_pre_id)?;
+            let front_id = front.front_id.clone();
+            let front_link = front.link();
+            let videoconvert_dsk = elements::make_element(VIDEO_CONVERT_FACTORY, &vc_id_dsk)?;
+            gpu::configure_video_convert(&videoconvert_dsk);
+            elems.push((q_id.clone(), queue));
+            elems.push((front_id.clone(), front.front));
+            elems.push((vc_pre_id.clone(), front.convert));
+            elems.push((
+                unpre_id.clone(),
+                elements::make_element(unpremultiply::ELEMENT_NAME, &unpre_id)?,
+            ));
+            elems.push((vc_id_dsk.clone(), videoconvert_dsk));
+            links.push((
+                ElementPadRef::pad(&q_id, "src"),
+                ElementPadRef::pad(&front_id, "sink"),
+            ));
+            links.push(front_link);
+            links.push((
+                ElementPadRef::pad(&vc_pre_id, "src"),
+                ElementPadRef::pad(&unpre_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&unpre_id, "src"),
+                ElementPadRef::pad(&vc_id_dsk, "sink"),
+            ));
+        } else {
+            let front = input_front(p, &format!("dsk_in_{}", i), &vc_id_dsk)?;
+            let front_id = front.front_id.clone();
+            let front_link = front.link();
+            elems.push((q_id.clone(), queue));
+            elems.push((front_id.clone(), front.front));
+            elems.push((vc_id_dsk.clone(), front.convert));
+            links.push((
+                ElementPadRef::pad(&q_id, "src"),
+                ElementPadRef::pad(&front_id, "sink"),
+            ));
+            links.push(front_link);
+        }
 
         // No output_format capsfilter here. A DSK is a keyer: forcing an
         // alpha-less format (I420/NV12) ahead of the compositor silently
