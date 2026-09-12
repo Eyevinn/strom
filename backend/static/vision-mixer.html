@@ -1239,7 +1239,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.39-roll-punch-fix | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.40-zone-capacity | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1970,10 +1970,12 @@
                 .catch(e => setStatus('Preview error: ' + e.message));
         }
 
-        // Replace any non-finite number (NaN/Infinity) in rects and crops.
-        // JSON.stringify turns NaN into null, which the backend rejects with
-        // 422 — and since the poison stays in pipConfigs, every later update
-        // for the PiP would fail too, freezing the editor until reload.
+        // Repair values the backend rejects — NaN/Infinity in rects and crops
+        // (JSON.stringify writes null, 422) and over-capacity zones (400).
+        // A rejected payload stays in pipConfigs, so every later update for
+        // that PiP fails too and the panel freezes until reload. The editor's
+        // own edits evict oldest-first already; state adopted from another
+        // client can arrive over-full.
         function sanitizePipConfig(cfg) {
             const fin = (v, fb) => (Number.isFinite(v) ? v : fb);
             cfg.zones.forEach(z => {
@@ -1984,6 +1986,9 @@
                     z.rect.h = fin(z.rect.h, 1);
                 }
                 if (z.border) z.border.width = fin(z.border.width, 0);
+                if (z.capacity != null && z.sources.length > z.capacity) {
+                    z.sources.splice(0, z.sources.length - z.capacity);
+                }
             });
             Object.keys(cfg.transforms || {}).forEach(k => {
                 const c = cfg.transforms[k];

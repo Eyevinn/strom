@@ -11734,7 +11734,7 @@
       },
       "Zone": {
         "type": "object",
-        "description": "A sub-region of a PiP that hosts one or more overlay sources.\n\nSources inside a zone auto-tile within its `rect` (using\n[`compute_pip_overlay_rects`]) so the zone behaves like a \"mini-PiP\"\nnested inside the parent PiP region. The `capacity` puts a cap on how\nmany sources can occupy the zone; pushing a new source into a full zone\nis expected to evict the oldest (client-side FIFO).",
+        "description": "A sub-region of a PiP that hosts one or more overlay sources.\n\nSources inside a zone auto-tile within its `rect` (using\n[`compute_pip_overlay_rects`]) so the zone behaves like a \"mini-PiP\"\nnested inside the parent PiP region. The `capacity` puts a cap on how\nmany sources can occupy the zone; pushing a new source into a full zone\nis expected to evict the oldest (client-side FIFO). The `/pip` endpoint\nrejects a zone whose `sources` outgrow its `capacity` rather than\ntruncating it, so stored state always matches what renders.",
         "properties": {
           "border": {
             "oneOf": [
