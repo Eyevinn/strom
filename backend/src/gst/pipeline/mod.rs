@@ -3,6 +3,7 @@
 mod bus;
 mod construction;
 pub(crate) mod effects;
+mod health;
 mod lifecycle;
 mod linking;
 mod properties;
@@ -195,6 +196,10 @@ pub struct PipelineManager {
     qos_aggregator: QoSAggregator,
     /// Handle for the periodic QoS stats broadcast task
     qos_broadcast_task: Option<tokio::task::JoinHandle<()>>,
+    /// Latest per-block health snapshot from the stalled-pad-task scan
+    block_health: std::sync::Arc<std::sync::RwLock<Vec<strom_types::flow::BlockHealth>>>,
+    /// Handle for the periodic block health scan task
+    block_health_task: Option<tokio::task::JoinHandle<()>>,
     /// PTP clock reference (stored for querying grandmaster/master info)
     ptp_clock: Option<gst_net::PtpClock>,
     /// PTP statistics (updated by statistics callback)
@@ -214,6 +219,8 @@ pub struct PipelineManager {
     whip_endpoints: Vec<crate::blocks::WhipEndpointInfo>,
     /// WHIP endpoint configs for session manager (collected from block expansion)
     whip_endpoint_configs: Vec<(String, crate::whip_session_manager::WhipEndpointConfig)>,
+    /// Per-block liveness reporters, polled alongside the stalled-pad-task scan
+    block_liveness: Vec<(String, std::sync::Arc<dyn crate::blocks::BlockLiveness>)>,
     /// Dynamically created webrtcbins (from webrtcsink/whepserversink consumer-added callbacks).
     /// Maps block_id to list of (consumer_id, webrtcbin) pairs.
     dynamic_webrtcbins: crate::blocks::DynamicWebrtcbinStore,
@@ -244,6 +251,7 @@ impl Drop for PipelineManager {
         self.probe_manager.stop_broadcast_task();
         self.probe_manager.deactivate_all();
         self.stop_qos_broadcast_task();
+        self.stop_block_health_task();
 
         // Ensure pipeline is in Null state before releasing references.
         // If stop() was already called this is a no-op.
