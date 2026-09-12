@@ -105,8 +105,8 @@ fn connect_level_message_handler(
         flow_id, expected_element_id
     );
 
-    // First ensure signal watch is enabled (this is ref-counted, safe to call multiple times)
-    bus.add_signal_watch();
+    // No add_signal_watch() here: setup_bus_watch takes the single watch this
+    // bus needs, and matches it with exactly one remove on teardown.
 
     // Connect to message signal - this allows multiple handlers unlike add_watch
     bus.connect_message(None, move |_bus, msg| {

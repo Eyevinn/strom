@@ -99,7 +99,9 @@ pub(super) fn build_meter_bus_handler(
               _flow_id: FlowId,
               _events: EventBroadcaster|
               -> gst::glib::SignalHandlerId {
-            bus.add_signal_watch();
+            // No add_signal_watch() here: setup_bus_watch takes the single
+            // watch this bus needs, and matches it with exactly one remove on
+            // teardown.
             let state = overlay_state;
             bus.connect_message(None, move |_bus, msg| {
                 use gst::MessageView;
