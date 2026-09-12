@@ -28,6 +28,7 @@ tower-http = { version = "0.7", features = ["fs", "cors", "trace"] }
 cairo-rs = { version = "0.22", features = ["v1_16"] }
 gstreamer = { version = "0.25", features = ["v1_22"] }
 gstreamer-app = { version = "0.25", features = ["v1_22"] }
+gstreamer-base = { version = "0.25", features = ["v1_22"] }
 gstreamer-controller = { version = "0.25", features = ["v1_22"] }
 gstreamer-net = { version = "0.25", features = ["v1_22"] }
 gstreamer-rtp = { version = "0.25", features = ["v1_22"] }

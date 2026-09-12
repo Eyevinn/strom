@@ -114,6 +114,63 @@ pub const MAX_DSK_INPUTS: usize = 4;
 /// Default number of DSK inputs (0 = no DSK).
 pub const DEFAULT_DSK_INPUTS: usize = 0;
 
+/// How a keyed (DSK) input encodes its alpha.
+///
+/// Caps cannot say whether colour is already multiplied by alpha, so it is
+/// declared per input. `cefsrc` (HTML graphics) paints premultiplied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlphaMode {
+    /// Colour is independent of alpha. What the compositors assume.
+    #[default]
+    Straight,
+    /// Colour has already been multiplied by alpha.
+    Premultiplied,
+}
+
+impl AlphaMode {
+    /// Property value, as stored on the block.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AlphaMode::Straight => "straight",
+            AlphaMode::Premultiplied => "premultiplied",
+        }
+    }
+}
+
+impl fmt::Display for AlphaMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error returned when an [`AlphaMode`] string cannot be parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseAlphaModeError;
+
+impl fmt::Display for ParseAlphaModeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("expected 'straight' or 'premultiplied'")
+    }
+}
+
+impl std::error::Error for ParseAlphaModeError {}
+
+impl FromStr for AlphaMode {
+    type Err = ParseAlphaModeError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "straight" => Ok(AlphaMode::Straight),
+            "premultiplied" => Ok(AlphaMode::Premultiplied),
+            _ => Err(ParseAlphaModeError),
+        }
+    }
+}
+
+/// Block property declaring DSK input `dsk_index`'s [`AlphaMode`] (0-based).
+pub fn dsk_alpha_mode_property(dsk_index: usize) -> String {
+    format!("dsk_{}_alpha_mode", dsk_index)
+}
+
 /// Maximum number of PiP (Picture-in-Picture) tiles rendered virtually in the multiview.
 /// Each PiP consumes one tile in the multiview thumbnail grid alongside the inputs.
 pub const MAX_NUM_PIPS: usize = 4;
@@ -808,6 +865,16 @@ pub fn compute_pip_overlay_rects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpha_mode_round_trips_through_its_property_value() {
+        for mode in [AlphaMode::Straight, AlphaMode::Premultiplied] {
+            assert_eq!(mode.as_str().parse::<AlphaMode>(), Ok(mode));
+        }
+        assert_eq!(" Premultiplied ".parse(), Ok(AlphaMode::Premultiplied));
+        assert_eq!("".parse::<AlphaMode>(), Err(ParseAlphaModeError));
+        assert_eq!(dsk_alpha_mode_property(2), "dsk_2_alpha_mode");
+    }
 
     #[test]
     fn test_pip_overlay_rects_one_full_aspect() {

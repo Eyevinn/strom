@@ -134,6 +134,7 @@ impl BlockBuilder for VisionMixerBuilder {
         );
 
         let num_dsk_inputs = properties::parse_num_dsk_inputs(props);
+        let dsk_alpha_modes = properties::parse_dsk_alpha_modes(props, num_dsk_inputs);
 
         let pip_bg_inputs: Vec<Option<usize>> = (0..num_pips)
             .map(|i| properties::parse_pip_bg(props, i, num_inputs))
@@ -172,6 +173,7 @@ impl BlockBuilder for VisionMixerBuilder {
             flow_id: properties::parse_flow_id(props),
             num_inputs,
             num_dsk_inputs,
+            dsk_alpha_modes: &dsk_alpha_modes,
             num_pips,
             pgm_input,
             pvw_input,
@@ -211,6 +213,8 @@ pub(super) struct PipelineParams<'a> {
     pub(super) flow_id: strom_types::FlowId,
     pub(super) num_inputs: usize,
     pub(super) num_dsk_inputs: usize,
+    /// Alpha encoding of each DSK input, `num_dsk_inputs` long.
+    pub(super) dsk_alpha_modes: &'a [vision_mixer::AlphaMode],
     pub(super) num_pips: usize,
     pub(super) pgm_input: usize,
     pub(super) pvw_input: usize,
@@ -241,6 +245,11 @@ impl<'a> PipelineParams<'a> {
     /// Create a namespaced element ID.
     pub(super) fn id(&self, name: &str) -> String {
         format!("{}:{}", self.instance_id, name)
+    }
+
+    /// Whether DSK input `i` was declared premultiplied.
+    pub(super) fn dsk_premultiplied(&self, i: usize) -> bool {
+        self.dsk_alpha_modes.get(i) == Some(&vision_mixer::AlphaMode::Premultiplied)
     }
 
     /// Build PGM output caps with resolution, framerate, and optional pixel format.

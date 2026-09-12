@@ -1322,10 +1322,13 @@ impl PropertyInspector {
         result
     }
 
-    /// Skip per-input labels for slots beyond the configured `num_inputs`
-    /// so the property panel shows just the inputs in use.
+    /// Skip per-input labels and per-DSK alpha modes for slots beyond the
+    /// configured counts so the property panel shows just the inputs in use.
     fn vision_mixer_skip_set(block: &BlockInstance) -> std::collections::HashSet<String> {
-        use strom_types::vision_mixer::{DEFAULT_NUM_INPUTS, MAX_NUM_INPUTS};
+        use strom_types::vision_mixer::{
+            dsk_alpha_mode_property, DEFAULT_DSK_INPUTS, DEFAULT_NUM_INPUTS, MAX_DSK_INPUTS,
+            MAX_NUM_INPUTS,
+        };
 
         let num_inputs = block
             .properties
@@ -1338,9 +1341,23 @@ impl PropertyInspector {
             })
             .unwrap_or(DEFAULT_NUM_INPUTS);
 
+        let num_dsk_inputs = block
+            .properties
+            .get("num_dsk_inputs")
+            .and_then(|v| match v {
+                PropertyValue::String(s) => s.parse().ok(),
+                PropertyValue::UInt(n) => Some(*n as usize),
+                PropertyValue::Int(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_DSK_INPUTS);
+
         let mut skip = std::collections::HashSet::new();
         for i in num_inputs..MAX_NUM_INPUTS {
             skip.insert(format!("input_{}_label", i));
+        }
+        for i in num_dsk_inputs..MAX_DSK_INPUTS {
+            skip.insert(dsk_alpha_mode_property(i));
         }
         skip
     }

@@ -563,6 +563,7 @@ pub(super) fn build_gpu_pipeline(
         let block_id = p.instance_id.to_string();
         let num_inputs = p.num_inputs;
         let num_pips = p.num_pips;
+        let dist_weak = dist_weak.clone();
         ctx.register_element_setup(Box::new(move |_flow_id, _events| {
             let (Some(mixer), Some(mv_comp)) = (dist_weak.upgrade(), mv_weak.upgrade()) else {
                 return;
@@ -570,6 +571,32 @@ pub(super) fn build_gpu_pipeline(
             super::super::geometry::install_caps_probes(
                 &block_id, &mixer, &mv_comp, num_inputs, num_pips,
             );
+        }));
+    }
+
+    // --- Premultiplied DSK pads: blend constant follows pad alpha ---
+    // `pad_layout` blends these pads with `constant-alpha`, which is only
+    // correct while the constant equals the pad's alpha. A property binding
+    // keeps them equal for every writer: DSK toggles, takes, fade to black
+    // (whose control binding sets `alpha` per frame), and the property API.
+    let premultiplied_dsk_pads: Vec<String> = (0..p.num_dsk_inputs)
+        .filter(|&i| p.dsk_premultiplied(i))
+        .map(|i| format!("sink_{}", p.num_inputs + i))
+        .collect();
+    if !premultiplied_dsk_pads.is_empty() {
+        ctx.register_element_setup(Box::new(move |_flow_id, _events| {
+            let Some(mixer) = dist_weak.upgrade() else {
+                return;
+            };
+            for pad in mixer
+                .sink_pads()
+                .into_iter()
+                .filter(|pad| premultiplied_dsk_pads.iter().any(|n| pad.name() == *n))
+            {
+                pad.bind_property("alpha", &pad, "blend-constant-color-alpha")
+                    .sync_create()
+                    .build();
+            }
         }));
     }
 
