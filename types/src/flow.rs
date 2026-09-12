@@ -1,9 +1,10 @@
 //! Flow (pipeline) definitions.
 
 use crate::block::BlockInstance;
-use crate::element::{Element, Link};
+use crate::element::{Element, ElementPadRef, Link};
 use crate::state::PipelineState;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[cfg(feature = "openapi")]
@@ -458,11 +459,202 @@ impl Flow {
         self.running = state.is_some_and(|s| s.is_active());
         self.gst_state = state;
     }
+
+    /// Declared input pads that no link feeds, as `(block id, pad name)`,
+    /// restricted to blocks where another input of the *same media type* is
+    /// fed.
+    ///
+    /// The media-type grouping is what makes this quiet enough to be useful.
+    /// A vision mixer declares an `audio_in_N` pad for every video input, and
+    /// a video-only production legitimately wires none of them; a whole media
+    /// type left unwired is an ordinary configuration. A media type that is
+    /// only *half* wired is not, and that is the state that silently degrades
+    /// output.
+    ///
+    /// Only blocks carrying [`BlockInstance::computed_external_pads`] are
+    /// considered, since that is the declared pad list to compare against.
+    pub fn partially_unwired_block_inputs(&self) -> Vec<(String, String)> {
+        let mut fed_pads: HashSet<(String, String)> = HashSet::new();
+        let mut fed_without_pad: HashSet<String> = HashSet::new();
+        for link in &self.links {
+            let to = ElementPadRef::from_string(&link.to);
+            match to.pad_name {
+                Some(pad) => {
+                    fed_pads.insert((to.element_id, pad));
+                }
+                // A padless target is resolved to a concrete input pad when
+                // the flow is stored, so treat one that survives as "cannot
+                // attribute" and stay silent rather than guess which input it
+                // feeds.
+                None => {
+                    fed_without_pad.insert(to.element_id);
+                }
+            }
+        }
+
+        let mut unwired = Vec::new();
+        for block in &self.blocks {
+            let Some(pads) = &block.computed_external_pads else {
+                continue;
+            };
+            if fed_without_pad.contains(&block.id) {
+                continue;
+            }
+
+            let fed_here: HashSet<&str> = pads
+                .inputs
+                .iter()
+                .filter(|pad| fed_pads.contains(&(block.id.clone(), pad.name.clone())))
+                .map(|pad| pad.name.as_str())
+                .collect();
+
+            for pad in &pads.inputs {
+                if fed_here.contains(pad.name.as_str()) {
+                    continue;
+                }
+                let group_partly_fed = pads.inputs.iter().any(|other| {
+                    other.media_type == pad.media_type && fed_here.contains(other.name.as_str())
+                });
+                if group_partly_fed {
+                    unwired.push((block.id.clone(), pad.name.clone()));
+                }
+            }
+        }
+        unwired
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block::{ExternalPad, ExternalPads, Position};
+    use crate::MediaType;
+
+    /// A vision mixer as `get_external_pads` declares it: one video input and
+    /// one audio input per declared input, plus a dedicated PGM audio input.
+    fn mixer_block(id: &str, num_inputs: usize) -> BlockInstance {
+        let mut inputs: Vec<ExternalPad> = (0..num_inputs)
+            .map(|i| {
+                ExternalPad::new(
+                    format!("video_in_{}", i),
+                    MediaType::Video,
+                    format!("queue_{}", i),
+                    "sink",
+                )
+            })
+            .collect();
+        for i in 0..num_inputs {
+            inputs.push(ExternalPad::new(
+                format!("audio_in_{}", i),
+                MediaType::Audio,
+                format!("queue_audio_{}", i),
+                "sink",
+            ));
+        }
+        inputs.push(ExternalPad::new(
+            "pgm_audio_in",
+            MediaType::Audio,
+            "queue_audio_pgm",
+            "sink",
+        ));
+
+        BlockInstance {
+            id: id.to_string(),
+            block_definition_id: "builtin.vision_mixer".to_string(),
+            name: None,
+            properties: Default::default(),
+            position: Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: Some(ExternalPads {
+                inputs,
+                outputs: vec![ExternalPad::new(
+                    "pgm_out",
+                    MediaType::Video,
+                    "queue_dist_out",
+                    "src",
+                )],
+            }),
+        }
+    }
+
+    fn flow_with(block: BlockInstance, links: &[(&str, &str)]) -> Flow {
+        let mut flow = Flow::new("test");
+        flow.blocks = vec![block];
+        flow.links = links
+            .iter()
+            .map(|(from, to)| Link {
+                from: (*from).to_string(),
+                to: (*to).to_string(),
+            })
+            .collect();
+        flow
+    }
+
+    /// The configuration from issue #673: `num_inputs: 2` with only
+    /// `video_in_0` wired.
+    #[test]
+    fn half_wired_video_inputs_are_reported() {
+        let flow = flow_with(
+            mixer_block("mixer", 2),
+            &[("src0:src", "mixer:video_in_0"), ("mixer:pgm_out", "sink")],
+        );
+
+        assert_eq!(
+            flow.partially_unwired_block_inputs(),
+            vec![("mixer".to_string(), "video_in_1".to_string())]
+        );
+    }
+
+    /// A media type with nothing wired at all is an ordinary configuration: a
+    /// video-only production wires none of the mixer's audio inputs. Reporting
+    /// those would put a warning on almost every real flow, so this is the
+    /// case that keeps the check quiet enough to be worth having.
+    #[test]
+    fn wholly_unwired_media_type_is_not_reported() {
+        let flow = flow_with(
+            mixer_block("mixer", 2),
+            &[
+                ("src0:src", "mixer:video_in_0"),
+                ("src1:src", "mixer:video_in_1"),
+                ("mixer:pgm_out", "sink"),
+            ],
+        );
+
+        assert!(flow.partially_unwired_block_inputs().is_empty());
+    }
+
+    /// Grouping is per media type, not per block, so a half-wired audio side
+    /// is still reported while the video side is fully wired.
+    #[test]
+    fn each_media_type_is_grouped_separately() {
+        let flow = flow_with(
+            mixer_block("mixer", 2),
+            &[
+                ("src0:src", "mixer:video_in_0"),
+                ("src1:src", "mixer:video_in_1"),
+                ("a0:src", "mixer:audio_in_0"),
+            ],
+        );
+
+        assert_eq!(
+            flow.partially_unwired_block_inputs(),
+            vec![
+                ("mixer".to_string(), "audio_in_1".to_string()),
+                ("mixer".to_string(), "pgm_audio_in".to_string()),
+            ]
+        );
+    }
+
+    /// Blocks whose pads were never computed carry no declared input list to
+    /// compare against.
+    #[test]
+    fn block_without_computed_pads_is_skipped() {
+        let mut block = mixer_block("mixer", 2);
+        block.computed_external_pads = None;
+        let flow = flow_with(block, &[("src0:src", "mixer:video_in_0")]);
+
+        assert!(flow.partially_unwired_block_inputs().is_empty());
+    }
 
     #[test]
     fn supports_wall_clock_pts_matches_clock_types() {
