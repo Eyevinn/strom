@@ -201,12 +201,12 @@ async fn vision_mixer_fx_engine_end_to_end() {
 
     // Shader wipe take and master-FX take must run without error.
     manager
-        .trigger_transition(BLOCK_ID, 0, 1, "wipe_left", 200)
+        .trigger_transition(BLOCK_ID, None, None, "wipe_left", 200)
         .expect("wipe take failed");
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     manager
-        .trigger_transition(BLOCK_ID, 1, 0, "glitch_cut", 200)
+        .trigger_transition(BLOCK_ID, None, None, "glitch_cut", 200)
         .expect("glitch take failed");
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -497,7 +497,7 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     // --- classic orientation: 2.40:1 -> 2.34:1 (outgoing does not cover) ---
     manager
-        .trigger_transition(BLOCK_ID, 0, 1, "wipe_left", 2000)
+        .trigger_transition(BLOCK_ID, None, None, "wipe_left", 2000)
         .expect("wipe 0->1");
     // Mirror the API handler: persist the PGM/PVW swap after the take —
     // trigger_transition reads the authoritative bus state from overlay
@@ -523,7 +523,7 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     // --- inverted orientation: 2.34:1 -> 2.40:1 (outgoing covers) ---
     manager
-        .trigger_transition(BLOCK_ID, 1, 0, "wipe_left", 2000)
+        .trigger_transition(BLOCK_ID, None, None, "wipe_left", 2000)
         .expect("wipe 1->0");
     manager
         .update_vision_mixer_after_take(BLOCK_ID, Some(0), Some(1), 2)

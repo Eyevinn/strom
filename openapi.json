@@ -1973,7 +1973,7 @@
           "flows"
         ],
         "summary": "Trigger a scene transition on a compositor block.",
-        "description": "Animates the transition between two inputs on a compositor/mixer block.\nSupported transition types:\n- `cut`: Instant switch (no animation)\n- `fade`: Cross-fade via alpha blending\n- `slide_left`: New input slides in from the right\n- `slide_right`: New input slides in from the left\n- `slide_up`: New input slides in from the bottom\n- `slide_down`: New input slides in from the top",
+        "description": "Animates the transition between two inputs on a compositor/mixer block.\n\nA vision mixer takes between its own authoritative PGM/PVW bus state and\nignores `from_input`/`to_input`. A block with no live state requires them.\n\nSupported transition types:\n- `cut`: Instant switch (no animation)\n- `fade`: Cross-fade via alpha blending\n- `slide_left`: New input slides in from the right\n- `slide_right`: New input slides in from the left\n- `slide_up`: New input slides in from the bottom\n- `slide_down`: New input slides in from the top",
         "operationId": "trigger_transition",
         "parameters": [
           {
@@ -10914,11 +10914,7 @@
       },
       "TriggerTransitionRequest": {
         "type": "object",
-        "description": "Request to trigger a transition on a compositor block.",
-        "required": [
-          "from_input",
-          "to_input"
-        ],
+        "description": "Request to trigger a transition on a compositor block.\n\nA vision mixer holds authoritative PGM/PVW bus state and takes between\nthose two sources, so `from_input` and `to_input` are accepted and\nignored. A plain compositor holds no such state, and there the two\nindices are the only thing naming which pads to animate.",
         "properties": {
           "duration_ms": {
             "type": "integer",
@@ -10927,13 +10923,19 @@
             "minimum": 0
           },
           "from_input": {
-            "type": "integer",
-            "description": "Index of the currently active input (0-based)",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Index of the currently active input (0-based).\n\nIgnored by a vision mixer: an index the client computed can already\nbe stale when the request arrives, so honoring it would make every\ntake a lost-update race. Required when the block has no live\nPGM/PVW state.",
             "minimum": 0
           },
           "to_input": {
-            "type": "integer",
-            "description": "Index of the input to transition to (0-based)",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Index of the input to transition to (0-based).\n\nSame rule as `from_input`.",
             "minimum": 0
           },
           "transition_type": {
