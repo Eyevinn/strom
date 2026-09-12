@@ -51,6 +51,7 @@ utoipa-swagger-ui.workspace = true
 cairo-rs.workspace = true
 gstreamer.workspace = true
 gstreamer-app.workspace = true
+gstreamer-base.workspace = true
 # gio is used to format GSocketAddress fields returned by the SRT plugin's stats.
 gio.workspace = true
 gstreamer-controller.workspace = true

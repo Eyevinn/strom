@@ -18,6 +18,7 @@ pub mod thumbnail;
 pub mod thumbnail_tap;
 pub mod transitions;
 pub(crate) mod underlay;
+pub mod unpremultiply;
 pub mod video_frame;
 pub mod volume_ramp;
 pub mod whep_probe;
