@@ -412,7 +412,7 @@ fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
     // --- TAKE: a shader wipe from red (0) to white (1) must animate. ---
     h.reset_counters();
     h.manager
-        .trigger_transition(h.block_id, 0, 1, "wipe_left", 1500)
+        .trigger_transition(h.block_id, Some(0), Some(1), "wipe_left", 1500)
         .expect("wipe take");
     h.manager
         .update_vision_mixer_after_take(h.block_id, Some(1), Some(0), 2)
@@ -442,7 +442,7 @@ fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
 
     // The next take resets the TAKE slots to neutral: all idle again.
     h.manager
-        .trigger_transition(h.block_id, 1, 0, "cut", 0)
+        .trigger_transition(h.block_id, Some(1), Some(0), "cut", 0)
         .expect("cut back");
     h.manager
         .update_vision_mixer_after_take(h.block_id, Some(0), Some(1), 2)
@@ -457,7 +457,7 @@ fn idle_fx_slots_pass_buffers_through_and_effects_still_apply() {
     // --- Master-FX take: the envelope renders on fx_pgm_take. ---
     h.reset_counters();
     h.manager
-        .trigger_transition(h.block_id, 0, 1, "glitch_cut", 600)
+        .trigger_transition(h.block_id, Some(0), Some(1), "glitch_cut", 600)
         .expect("glitch take");
     h.manager
         .update_vision_mixer_after_take(h.block_id, Some(1), Some(0), 2)

@@ -411,7 +411,7 @@ impl Running {
     fn cut_frames(&self) -> u32 {
         let (_, old_pgm, new_pgm, _) = self
             .manager
-            .trigger_transition(self.block_id, 0, 1, "cut", 0)
+            .trigger_transition(self.block_id, Some(0), Some(1), "cut", 0)
             .expect("cut");
         self.manager
             .update_vision_mixer_after_take(self.block_id, new_pgm, old_pgm, self.num_inputs)
@@ -594,7 +594,7 @@ async fn tally_follows_a_cut_on_the_same_frame_with_late_inputs() {
     // two frames, for slow CI).
     let (_, old_pgm, new_pgm, _) = running
         .manager
-        .trigger_transition(running.block_id, 0, 1, "cut", 0)
+        .trigger_transition(running.block_id, Some(0), Some(1), "cut", 0)
         .expect("cut");
     running
         .manager
