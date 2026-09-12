@@ -47,6 +47,14 @@ interests you, open a GitHub issue or discussion.
 
 ## Platform & reach
 
+- **Publish straight to the big live platforms** — take Strom's RTMP output to YouTube Live
+  and Twitch and write down what an operator has to set. The transport side is there: the
+  sink speaks `rtmp` and `rtmps`, and it keeps the query string Twitch's
+  `?bandwidthtest=true` rides on, so a test broadcast can be verified in Twitch Inspector
+  without going live. The encoder side needs a look — the Video Encoder block pins no
+  profile by default, which is fine from a 4:2:0 source but follows a 4:2:2 or 10-bit one
+  into a profile no platform ingest accepts, so a capture feed may need `profile=high` set
+  by hand. Both platforms also want an audio track and roughly 2-second keyframes.
 - **Kubernetes operator** — deploy flows as pods with resource limits and auto-scaling.
 - **Block marketplace** — browse and install community-contributed blocks.
 - **Mobile companion** — monitor status, start/stop flows, and receive alerts from a phone.
