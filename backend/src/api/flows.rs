@@ -1779,6 +1779,10 @@ pub async fn get_flow_pad_caps(
 /// Trigger a scene transition on a compositor block.
 ///
 /// Animates the transition between two inputs on a compositor/mixer block.
+///
+/// A vision mixer takes between its own authoritative PGM/PVW bus state and
+/// ignores `from_input`/`to_input`. A block with no live state requires them.
+///
 /// Supported transition types:
 /// - `cut`: Instant switch (no animation)
 /// - `fade`: Cross-fade via alpha blending
@@ -1833,21 +1837,12 @@ pub async fn trigger_transition(
         }));
     }
 
-    let (Some(from_input), Some(to_input)) = (req.from_input, req.to_input) else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::with_details(
-                "Failed to trigger transition",
-                "from_input and to_input are required (only a stinger may leave them out)",
-            )),
-        ));
-    };
-    let actual_transition_type = state
+    let (actual_transition_type, old_pgm, new_pgm) = state
         .trigger_transition(
             &flow_id,
             &block_id,
-            from_input,
-            to_input,
+            req.from_input,
+            req.to_input,
             &req.transition_type,
             req.duration_ms,
         )
@@ -1863,11 +1858,18 @@ pub async fn trigger_transition(
             )
         })?;
 
-    Ok(Json(TransitionResponse {
-        message: format!(
+    // Report the sources the take actually ran between, not the request —
+    // on a vision mixer those differ. Neither is named when a bus is a PiP.
+    let message = match (old_pgm, new_pgm) {
+        (Some(from), Some(to)) => format!(
             "Transition {} started: input {} -> {}",
-            req.transition_type, from_input, to_input
+            req.transition_type, from, to
         ),
+        _ => format!("Transition {} started", req.transition_type),
+    };
+
+    Ok(Json(TransitionResponse {
+        message,
         transition_type: req.transition_type,
         actual_transition_type,
         duration_ms: req.duration_ms,
