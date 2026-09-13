@@ -5,10 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # `labeled` is what lets a maintainer ask for a macOS or Windows build on a
-    # pull request (see build-macos). Naming `types` at all replaces the default
-    # set, so the three defaults have to be listed again or pushes to a PR stop
-    # triggering CI.
+    # `labeled` is what lets a maintainer ask for a macOS, Windows or cefsrc
+    # run on a pull request (see build-macos and test-cef). Naming `types` at
+    # all replaces the default set, so the three defaults have to be listed
+    # again or pushes to a PR stop triggering CI.
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
@@ -17,6 +17,10 @@ on:
         type: choice
         default: both
         options: [both, macos, windows, none]
+      cef:
+        description: "Run the cefsrc tests (they run on main, on ci:cef PRs and on PRs touching the gstcefsrc pin anyway)"
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -47,14 +51,15 @@ jobs:
   # build instead of failing CI. Exposes cache_ok consumed by every build job.
   preflight:
     name: sccache preflight
-    # A `labeled` event is only interesting when the label is one of the two
-    # that ask for a platform build. Skipping here takes every job that needs
+    # A `labeled` event is only interesting when the label is one of the three
+    # that ask for an optional job. Skipping here takes every job that needs
     # this one with it, and api-contract excludes `labeled` itself, so adding an
     # unrelated label to a pull request costs nothing.
     if: >-
       github.event.action != 'labeled'
       || contains(github.event.pull_request.labels.*.name, 'ci:macos')
       || contains(github.event.pull_request.labels.*.name, 'ci:windows')
+      || contains(github.event.pull_request.labels.*.name, 'ci:cef')
     runs-on: ubuntu-latest
     outputs:
       cache_ok: ${{ steps.probe.outputs.cache_ok }}
@@ -78,6 +83,135 @@ jobs:
             echo "::warning::sccache backend unreachable or bucket missing - building WITHOUT compile cache"
             echo "cache_ok=false" >> "$GITHUB_OUTPUT"
           fi
+
+  # Whether a pull request touches the gstcefsrc build, the strom-full image,
+  # or the cefsrc tests.
+  cef-changes:
+    name: cefsrc change detection
+    if: github.event_name == 'pull_request' && github.event.action != 'labeled'
+    runs-on: ubuntu-latest
+    outputs:
+      touched: ${{ steps.files.outputs.touched }}
+    steps:
+      - name: List changed files
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+               --jq '.[].filename' \
+             | grep -E '^(docker/strom-full/|docker/gstcefsrc/|\.github/workflows/build-gstcefsrc\.yml$|backend/tests/cefsrc_test\.rs$)'; then
+            echo "touched=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touched=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Tests against a real cefsrc (gstcefsrc, the element behind HTML sources and
+  # DSK graphics). No other job has it, and its tests skip without it.
+  #
+  # Runs on every merge to main, on a pull request carrying the `ci:cef` label
+  # or touching the gstcefsrc pin, and on demand. It downloads a ~450 MB plugin
+  # tarball and starts Chromium, which most diffs have no reason to pay for.
+  #
+  # The container is ubuntu:questing, the strom-full base: the prebuilt plugin
+  # is built against its glibc, and production loads it into its GStreamer 1.26,
+  # not the runner's 1.24.
+  test-cef:
+    name: Test (Linux, cefsrc)
+    needs: [preflight, cef-changes]
+    if: >-
+      !cancelled()
+      && needs.preflight.result == 'success'
+      && (github.event_name == 'push'
+          || (github.event_name == 'pull_request'
+              && (contains(github.event.pull_request.labels.*.name, 'ci:cef')
+                  || needs.cef-changes.outputs.touched == 'true'))
+          || (github.event_name == 'workflow_dispatch' && inputs.cef))
+    runs-on: ubuntu-24.04
+    container: ubuntu:questing
+    timeout-minutes: 45
+    env:
+      RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
+      # Line tables keep panic locations; full debuginfo only costs disk here.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Install build and GStreamer packages
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config cmake libclang-dev \
+            libunwind-dev libssl-dev libcairo2-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice gstreamer1.0-tools \
+            xvfb zstd
+
+      - uses: actions/checkout@v6
+
+      # The container starts with no Rust. With no argument, `rustup toolchain
+      # install` installs the toolchain pinned in rust-toolchain.toml.
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          "$HOME/.cargo/bin/rustup" toolchain install
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Setup sccache
+        if: needs.preflight.outputs.cache_ok == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      # One pin for the image and CI: the ARG in the strom-full Dockerfile.
+      - name: Read gstcefsrc version
+        id: gstcefsrc
+        run: |
+          VERSION=$(sed -n 's/^ARG GSTCEFSRC_VERSION=//p' docker/strom-full/Dockerfile)
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tarball=$RUNNER_TEMP/gstcefsrc-$VERSION-linux-amd64.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Cache gstcefsrc tarball
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.gstcefsrc.outputs.tarball }}
+          key: gstcefsrc-${{ steps.gstcefsrc.outputs.version }}-linux-amd64
+
+      - name: Install gstcefsrc
+        env:
+          GSTCEFSRC_VERSION: ${{ steps.gstcefsrc.outputs.version }}
+        run: sh docker/strom-full/install-gstcefsrc.sh "${{ steps.gstcefsrc.outputs.tarball }}"
+
+      - name: Build tests
+        run: cargo test --package strom --test cefsrc_test --no-run
+
+      - name: Run cefsrc tests
+        env:
+          # Same values as the ENV lines in docker/strom-full/Dockerfile.
+          GST_PLUGIN_PATH: /usr/local/lib/gstreamer-1.0
+          LD_LIBRARY_PATH: /usr/local/lib/cef
+          GST_CEF_SUBPROCESS_PATH: /usr/local/lib/gstreamer-1.0/gstcefsubprocess
+          # Turn a missing cefsrc into a failure — see cefsrc_available().
+          STROM_REQUIRE_CEF: 1
+        # Explicit bash turns on pipefail, so the tee cannot hide a test failure.
+        shell: bash
+        run: |
+          gst-inspect-1.0 cefsrc > /dev/null
+          . docker/strom-full/cef-env.sh
+          cef_start_xvfb
+          export GST_CEF_CHROME_EXTRA_FLAGS="$CEF_SOFTWARE_FLAGS"
+          cef_setup_cache
+          cef_preload_mallinfo_shim
+          cargo test --package strom --test cefsrc_test -- --nocapture 2>&1 | tee cefsrc-test.log
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cefsrc-test-log
+          path: cefsrc-test.log
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Fast checks on Linux: fmt + clippy + test
   check-linux:
     name: Check (Linux)
