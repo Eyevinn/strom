@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["types", "backend", "frontend", "mcp-server"]
+members = ["types", "backend", "frontend"]
 default-members = ["backend"]
 
 [workspace.package]

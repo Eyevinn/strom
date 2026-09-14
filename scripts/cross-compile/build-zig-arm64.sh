@@ -56,18 +56,14 @@ TARGET="aarch64-unknown-linux-gnu.${GLIBC_VERSION}"
 echo "Building backend for ARM64 (target: ${TARGET})..."
 cargo zigbuild --release --package strom --target "$TARGET"
 
-echo "Building MCP server for ARM64 (target: ${TARGET})..."
-cargo zigbuild --release --package strom-mcp-server --target "$TARGET"
-
 # Binaries go to the standard target directory (without the glibc version suffix)
 OUTPUT_DIR="target/aarch64-unknown-linux-gnu/release"
 
 echo ""
 echo "✓ Build complete!"
 echo ""
-echo "Binaries location (dynamically linked with glibc ${GLIBC_VERSION}):"
+echo "Binary location (dynamically linked with glibc ${GLIBC_VERSION}):"
 echo "  Backend:    ${OUTPUT_DIR}/strom"
-echo "  MCP Server: ${OUTPUT_DIR}/strom-mcp-server"
 echo ""
 echo "These binaries will run on any ARM64 Linux system with glibc ${GLIBC_VERSION} or newer."
 echo ""

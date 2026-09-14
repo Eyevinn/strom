@@ -14,9 +14,6 @@
 .PARAMETER StromExe
     Path to the strom.exe binary
 
-.PARAMETER StromMcpServerExe
-    Path to the strom-mcp-server.exe binary
-
 .PARAMETER FullGStreamer
     Include all GStreamer plugins (larger bundle)
 
@@ -30,9 +27,6 @@ param(
 
     [Parameter(Mandatory=$true)]
     [string]$StromExe,
-
-    [Parameter(Mandatory=$true)]
-    [string]$StromMcpServerExe,
 
     [switch]$FullGStreamer,
     [switch]$SkipDependencies
@@ -50,17 +44,12 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Version:        $Version"
 Write-Host "Strom:          $StromExe"
-Write-Host "MCP Server:     $StromMcpServerExe"
 Write-Host "GStreamer mode: $(if ($FullGStreamer) { 'Full' } else { 'Minimal' })"
 Write-Host ""
 
 # Validate input files
 if (-not (Test-Path $StromExe)) {
     Write-Error "Strom executable not found: $StromExe"
-    exit 1
-}
-if (-not (Test-Path $StromMcpServerExe)) {
-    Write-Error "Strom MCP Server executable not found: $StromMcpServerExe"
     exit 1
 }
 
@@ -152,7 +141,6 @@ try {
 
     # Convert paths to absolute
     $absStromExe = (Resolve-Path $StromExe).Path
-    $absStromMcpServerExe = (Resolve-Path $StromMcpServerExe).Path
     $absGstDir = (Resolve-Path "gstreamer-bundle").Path
     $absGvDir = (Resolve-Path "graphviz-bundle").Path
 
@@ -164,7 +152,6 @@ try {
     wix build `
         -d ProductVersion="$Version" `
         -d StromExe="$absStromExe" `
-        -d StromMcpServerExe="$absStromMcpServerExe" `
         -d GStreamerDir="$absGstDir" `
         -d GraphvizDir="$absGvDir" `
         -ext WixToolset.UI.wixext `

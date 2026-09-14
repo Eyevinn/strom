@@ -1,13 +1,12 @@
 # Integration Options
 
-How to integrate with Strom from the outside: the REST/OpenAPI API and the MCP server.
+How to integrate with Strom from the outside: the REST/OpenAPI API and the MCP endpoint.
 
 ## MCP (Model Context Protocol)
 
 Strom speaks MCP so AI assistants (Claude, etc.) can query flows, create/modify them, start/stop
-pipelines, and inspect elements. It's available two ways — HTTP at `/api/mcp` on the backend, or
-the standalone `strom-mcp-server` (stdio). See [MCP.md](MCP.md) for setup, transports, and the
-tool list.
+pipelines, and inspect elements. It's served over HTTP at `/api/mcp` on the backend. See
+[MCP.md](MCP.md) for setup and the tool list.
 
 ## OpenAPI / Swagger
 

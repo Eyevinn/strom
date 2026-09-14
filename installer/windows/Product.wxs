@@ -48,13 +48,9 @@
       <Directory Id="ApplicationProgramsFolder" Name="Strom" />
     </StandardDirectory>
 
-    <!-- Main Strom executables -->
+    <!-- Main Strom executable -->
     <Component Id="StromExe" Directory="BinFolder" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
       <File Id="strom.exe" Source="$(var.StromExe)" KeyPath="yes" />
-    </Component>
-
-    <Component Id="StromMcpServerExe" Directory="BinFolder" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
-      <File Id="strom_mcp_server.exe" Source="$(var.StromMcpServerExe)" KeyPath="yes" />
     </Component>
 
     <!-- Environment variables -->
@@ -106,7 +102,6 @@
     <!-- Main Feature -->
     <Feature Id="MainFeature" Title="Strom" Description="GStreamer Flow Engine - visual pipeline management" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentRef Id="StromExe" />
-      <ComponentRef Id="StromMcpServerExe" />
       <ComponentRef Id="PathEnvironment" />
       <ComponentRef Id="ApplicationShortcut" />
 
