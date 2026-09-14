@@ -1019,6 +1019,15 @@ const FAN_IN_TONES: [f64; 4] = [440.0, 557.0, 691.0, 823.0];
 /// Four inputs, each a sine at `amplitude`, all routed onto output 0 channel 0.
 /// Four times 0.5 is 2.0, so the bus is 6 dB over full scale by construction.
 fn four_into_one(instance: &str, amplitude: f64, extra: &[(&str, PropertyValue)]) -> Harness {
+    let h = four_into_one_router(instance, extra);
+    for (input, freq) in FAN_IN_TONES.iter().enumerate() {
+        feed(&h, instance, input, &[(*freq, amplitude)]);
+    }
+    h
+}
+
+/// The router of `four_into_one`, with nothing feeding its inputs yet.
+fn four_into_one_router(instance: &str, extra: &[(&str, PropertyValue)]) -> Harness {
     let mut pairs: Vec<(&str, PropertyValue)> = vec![
         ("num_inputs", PropertyValue::UInt(4)),
         ("num_outputs", PropertyValue::UInt(1)),
@@ -1043,11 +1052,16 @@ fn four_into_one(instance: &str, amplitude: f64, extra: &[(&str, PropertyValue)]
     ];
     pairs.extend(extra.iter().cloned());
 
-    let h = assemble(instance, &props(&pairs));
-    for (input, freq) in FAN_IN_TONES.iter().enumerate() {
-        feed(&h, instance, input, &[(*freq, amplitude)]);
-    }
-    h
+    assemble(instance, &props(&pairs))
+}
+
+/// `S16LE` mono caps, the format a decoded source typically arrives in.
+fn s16_caps() -> gst::Caps {
+    gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("rate", 48000i32)
+        .field("channels", 1i32)
+        .build()
 }
 
 /// Loudest peak on output 0 of a four-into-one router with these settings.
@@ -1215,6 +1229,100 @@ fn an_engaged_output_bus_sums_in_float() {
              got {negotiated}"
         );
     }
+}
+
+#[test]
+fn a_fader_alone_keeps_a_fixed_point_bus_summing_in_float() {
+    // The case the soft clipper cannot cover for: `rglimiter` takes only
+    // F32LE, so with it in the chain the bus would negotiate float with or
+    // without the pin. With only the fader engaged, the pin is all that stands
+    // between S16 sources, an S16 consumer and a sum saturated inside
+    // `audiomixer`.
+    let instance = "headroom_fader_s16";
+    let h = four_into_one_router(
+        instance,
+        &[("output_fader_db", PropertyValue::Float(-12.0))],
+    );
+    for (input, freq) in FAN_IN_TONES.iter().enumerate() {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .property("freq", *freq)
+            .property("volume", 0.5)
+            .build()
+            .expect("audiotestsrc");
+        let s16 = gst::ElementFactory::make("capsfilter")
+            .property("caps", s16_caps())
+            .build()
+            .expect("capsfilter");
+        h.pipeline.add_many([&src, &s16]).expect("add source");
+        gst::Element::link_many([&src, &s16]).expect("link source");
+        s16.link(
+            h.elements
+                .get(&format!("{instance}:identity_in_{input}"))
+                .unwrap_or_else(|| panic!("no identity_in_{input}")),
+        )
+        .expect("link input");
+    }
+
+    // A consumer the way the router's real consumers are built: convert, then
+    // the format it wants, then the meter reading what it received.
+    let convert = gst::ElementFactory::make("audioconvert")
+        .build()
+        .expect("audioconvert");
+    let s16 = gst::ElementFactory::make("capsfilter")
+        .property("caps", s16_caps())
+        .build()
+        .expect("capsfilter");
+    let level = gst::ElementFactory::make("level")
+        .property("post-messages", true)
+        .property("interval", 50_000_000u64)
+        .build()
+        .expect("level");
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .expect("fakesink");
+    h.pipeline
+        .add_many([&convert, &s16, &level, &sink])
+        .expect("add consumer");
+    gst::Element::link_many([&convert, &s16, &level, &sink]).expect("link consumer");
+    h.elements
+        .get(&format!("{instance}:queue_out_0"))
+        .expect("no queue_out_0")
+        .link(&convert)
+        .expect("link output to consumer");
+
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+    let peak = observe_peaks(&h.pipeline, 1, Duration::from_secs(3))[0];
+
+    // The sum is +6 dBFS, so faded by 12 dB it reaches the consumer near
+    // -6 dBFS. Saturated inside the mixer it would have been flattened to
+    // 0 dBFS first and arrive at -12 dBFS.
+    assert!(
+        peak > -9.0,
+        "the fader must turn down the overload rather than a sum already saturated at \
+         full scale, got {peak} dBFS"
+    );
+
+    let negotiated = h
+        .elements
+        .get(&format!("{instance}:mixer_0"))
+        .expect("no mixer_0")
+        .static_pad("src")
+        .expect("src pad")
+        .current_caps()
+        .expect("mixer_0 never negotiated caps");
+    assert_eq!(
+        negotiated
+            .structure(0)
+            .and_then(|s| s.get::<String>("format").ok())
+            .unwrap_or_default(),
+        "F32LE",
+        "a bus with only its fader engaged must sum in float between S16 sources and an \
+         S16 consumer, got {negotiated}"
+    );
 }
 
 #[test]
