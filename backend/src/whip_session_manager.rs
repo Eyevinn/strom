@@ -43,6 +43,9 @@ pub struct WhipEndpointConfig {
     pub video_decoding: Arc<Vec<AtomicBool>>,
     /// Jitterbuffer latency in milliseconds for the per-session webrtcbin.
     pub jitterbuffer_latency_ms: u32,
+    /// Jitterbuffer latency for the audio stream, when it differs from
+    /// `jitterbuffer_latency_ms`.
+    pub audio_jitterbuffer_latency_ms: Option<u32>,
     /// Whether whipserversrc should request retransmission (NACK) of lost
     /// packets from the publisher.
     pub do_retransmission: bool,
