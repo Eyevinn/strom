@@ -15,6 +15,7 @@ use crate::blocks::{
     APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
 use crate::gst::ice_preflight;
+use crate::gst::jitterbuffer_media_latency;
 use crate::gst::keyframe_request;
 use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{SessionActivity, SessionCleanupRequest, WhipEndpointConfig};
@@ -230,6 +231,17 @@ fn parse_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValue>) ->
         .unwrap_or(400)
 }
 
+/// Parse audio_jitterbuffer_latency_ms from properties. Negative (the default)
+/// means audio uses `jitterbuffer_latency_ms` like video.
+fn parse_audio_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValue>) -> Option<u32> {
+    properties
+        .get("audio_jitterbuffer_latency_ms")
+        .and_then(|v| match v {
+            PropertyValue::Int(i) if *i >= 0 => Some(*i as u32),
+            _ => None,
+        })
+}
+
 /// Parse do_retransmission from properties (default: true).
 fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool {
     properties
@@ -331,6 +343,7 @@ pub fn build_whipserversrc(
     // causing the whole video stream to stall (never reaching decodebin)
     // even though the packets arrived fine over the network.
     let jitterbuffer_latency_ms = parse_jitterbuffer_latency_ms(properties);
+    let audio_jitterbuffer_latency_ms = parse_audio_jitterbuffer_latency_ms(properties);
     let do_retransmission = parse_do_retransmission(properties);
     let drop_on_latency = parse_drop_on_latency(properties);
 
@@ -634,6 +647,7 @@ pub fn build_whipserversrc(
             decode,
             video_decoding,
             jitterbuffer_latency_ms,
+            audio_jitterbuffer_latency_ms,
             do_retransmission,
             drop_on_latency,
             dynamic_webrtcbin_store: ctx.dynamic_webrtcbin_store(),
@@ -812,6 +826,9 @@ pub fn create_whipserversrc_for_session(
     let ice_transport_policy = config.ice_transport_policy.clone();
     let jitterbuffer_latency_ms = config.jitterbuffer_latency_ms;
     let drop_on_latency = config.drop_on_latency;
+    let audio_jitterbuffer_latency_ms = config
+        .audio_jitterbuffer_latency_ms
+        .filter(|ms| *ms != jitterbuffer_latency_ms);
     // `cleanup_sent` ensures only one cleanup request per session (shared across the
     // ICE callback, the inactivity watchdog and the session manager's teardown paths).
     let cleanup_sent_for_ice = cleanup_sent.clone();
@@ -907,6 +924,13 @@ pub fn create_whipserversrc_for_session(
                 .factory()
                 .map(|f| f.name().to_string())
                 .unwrap_or_default();
+            if factory_name == "rtpjitterbuffer" {
+                if let Some(audio_ms) = audio_jitterbuffer_latency_ms {
+                    jitterbuffer_media_latency::set_audio_latency_on_first_packet(
+                        &element, audio_ms,
+                    );
+                }
+            }
             if factory_name == "rtpsession" && element.has_property("internal-session") {
                 let internal: gst::glib::Object = element.property("internal-session");
                 if internal.has_property("twcc-feedback-interval") {
@@ -947,6 +971,18 @@ pub fn create_whipserversrc_for_session(
     //   offset = main_pipeline_running_time - buffer_pts
     // i64::MIN means "not yet computed".
     let shared_ts_offset = Arc::new(AtomicI64::new(i64::MIN));
+    // An audio jitterbuffer with a shorter latency releases audio earlier than
+    // video by the difference. When audio's first buffer sets the offset, that
+    // lead is added so the flow runs on the video jitterbuffer's timeline, as it
+    // does with one latency; otherwise a video stall longer than the audio
+    // latency would reach the flow's sinks late. Unsynced consumers of the
+    // audio still get it as soon as its jitterbuffer releases it.
+    let audio_release_lead_ns: i64 = match config.audio_jitterbuffer_latency_ms {
+        Some(audio_ms) if config.mode.has_video() => {
+            (i64::from(config.jitterbuffer_latency_ms) - i64::from(audio_ms)) * 1_000_000
+        }
+        _ => 0,
+    };
 
     // Inactivity watchdog: tracks when the last buffer arrived on any stream.
     // A background thread checks this and triggers cleanup if no data arrives
@@ -1150,6 +1186,7 @@ pub fn create_whipserversrc_for_session(
                 }
 
                 let ts_offset = shared_ts_offset.clone();
+                let release_lead_ns = if media_type == "audio" { audio_release_lead_ns } else { 0 };
                 let main_pipeline_for_ts = main_pipeline_weak.clone();
                 let media_for_log = media_type.to_string();
                 let activity_cb = activity_for_pads.clone();
@@ -1173,6 +1210,7 @@ pub fn create_whipserversrc_for_session(
                                 &main_pipeline_for_ts,
                                 &media_for_log,
                                 slot,
+                                release_lead_ns,
                             )?;
 
                             Ok(gst::FlowSuccess::Ok)
@@ -1231,11 +1269,14 @@ pub fn create_whipserversrc_for_session(
 ///
 /// The offset is computed once, from the first buffer on either stream, then
 /// applied to every buffer on both streams to preserve A/V sync.
+/// `release_lead_ns` is how much earlier this stream leaves its jitterbuffer
+/// than video; it is added when this stream's buffer sets the offset.
 ///
 /// Nothing is pushed once `session_finished` is set. The slot's appsrc belongs to
 /// whoever holds the slot, and takeover releases the slot while the displaced
 /// session may still be delivering media: without this check, two sessions push
 /// into one appsrc with different offsets until the old pipeline reaches NULL.
+#[allow(clippy::too_many_arguments)]
 fn forward_sample_to_slot(
     sample: &gst::Sample,
     appsrc: &gst_app::AppSrc,
@@ -1244,6 +1285,7 @@ fn forward_sample_to_slot(
     main_pipeline: &gst::glib::WeakRef<gst::Pipeline>,
     media: &str,
     slot: usize,
+    release_lead_ns: i64,
 ) -> Result<(), gst::FlowError> {
     if session_finished.load(Ordering::Relaxed) {
         return Ok(());
@@ -1263,7 +1305,8 @@ fn forward_sample_to_slot(
             if let (Some(clock), Some(base_time)) = (clock, base_time) {
                 let now = clock.time();
                 let running = now.saturating_sub(base_time);
-                let offset = running.nseconds() as i64 - pts_val.nseconds() as i64;
+                let offset =
+                    running.nseconds() as i64 - pts_val.nseconds() as i64 + release_lead_ns;
                 ts_offset.store(offset, Ordering::Relaxed);
                 info!(
                     "WHIP Input: Computed shared ts-offset={}ms from {} stream (slot {})",
@@ -1867,6 +1910,20 @@ fn whip_input_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
+                name: "audio_jitterbuffer_latency_ms".to_string(),
+                label: "Audio Jitterbuffer Latency (ms)".to_string(),
+                description: "Jitterbuffer latency for the audio stream only. -1 uses Jitterbuffer Latency. A lost audio packet holds back all later audio for up to this long, because publishers do not retransmit audio; lower it for low-latency audio paths (conversation returns) while video keeps the longer latency it needs for retransmission.".to_string(),
+                property_type: PropertyType::Int,
+                default_value: Some(PropertyValue::Int(-1)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "audio_jitterbuffer_latency_ms".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "do_retransmission".to_string(),
                 label: "Retransmission (RTX)".to_string(),
                 description: "Request retransmission of lost packets from the publisher (NACK-based). Without it, any packet loss forces a full keyframe request instead of a cheap resend.".to_string(),
@@ -2144,6 +2201,29 @@ mod tests {
     }
 
     #[test]
+    fn audio_jitterbuffer_latency_ms_defaults_to_video_latency() {
+        assert_eq!(parse_audio_jitterbuffer_latency_ms(&props(&[])), None);
+        assert_eq!(
+            parse_audio_jitterbuffer_latency_ms(&props(&[(
+                "audio_jitterbuffer_latency_ms",
+                PropertyValue::Int(-1)
+            )])),
+            None
+        );
+    }
+
+    #[test]
+    fn audio_jitterbuffer_latency_ms_respects_explicit_value() {
+        assert_eq!(
+            parse_audio_jitterbuffer_latency_ms(&props(&[(
+                "audio_jitterbuffer_latency_ms",
+                PropertyValue::Int(80)
+            )])),
+            Some(80)
+        );
+    }
+
+    #[test]
     fn do_retransmission_defaults_to_true() {
         assert!(parse_do_retransmission(&props(&[])));
     }
@@ -2376,6 +2456,7 @@ mod tests {
             &no_main_pipeline,
             "audio",
             0,
+            0,
         )
         .unwrap();
 
@@ -2387,6 +2468,7 @@ mod tests {
             &ts_offset,
             &no_main_pipeline,
             "audio",
+            0,
             0,
         )
         .unwrap();
@@ -2400,6 +2482,66 @@ mod tests {
             first.buffer().unwrap().pts(),
             Some(gst::ClockTime::from_seconds(2)),
             "the first sample in the slot must be the current session's, not the displaced one's"
+        );
+    }
+
+    /// With a shorter audio jitterbuffer, audio's first buffer arrives early by
+    /// the latency difference. The offset it sets must include that lead, or the
+    /// flow runs on the audio jitterbuffer's timeline and video reaches it late.
+    #[test]
+    fn audio_first_offset_includes_the_release_lead() {
+        let _ = gst::init();
+
+        let pipeline = gst::Pipeline::new();
+        let appsrc = gst_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            .is_live(true)
+            .build();
+        let appsink = gst_app::AppSink::builder().sync(false).build();
+        appsink.set_property("async", false);
+        pipeline
+            .add_many([appsrc.upcast_ref::<gst::Element>(), appsink.upcast_ref()])
+            .unwrap();
+        appsrc.link(&appsink).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let (result, state, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+        result.unwrap();
+        assert_eq!(state, gst::State::Playing);
+
+        let running = || {
+            let clock = pipeline.clock().unwrap();
+            (clock.time() - pipeline.base_time().unwrap()).nseconds() as i64
+        };
+        let mut buffer = gst::Buffer::new();
+        buffer
+            .get_mut()
+            .unwrap()
+            .set_pts(gst::ClockTime::from_seconds(10));
+        let caps = gst::Caps::builder("application/x-test").build();
+        let sample = gst::Sample::builder().buffer(&buffer).caps(&caps).build();
+
+        let lead_ns = 300_000_000;
+        let ts_offset = AtomicI64::new(i64::MIN);
+        let before = running();
+        forward_sample_to_slot(
+            &sample,
+            &appsrc,
+            &AtomicBool::new(false),
+            &ts_offset,
+            &pipeline.downgrade(),
+            "audio",
+            0,
+            lead_ns,
+        )
+        .unwrap();
+        let after = running();
+        pipeline.set_state(gst::State::Null).unwrap();
+
+        let pts_ns = 10_000_000_000i64;
+        let offset = ts_offset.load(Ordering::Relaxed);
+        assert!(
+            (before - pts_ns + lead_ns..=after - pts_ns + lead_ns).contains(&offset),
+            "offset {offset} must be running time - pts + lead ({lead_ns})"
         );
     }
 }
