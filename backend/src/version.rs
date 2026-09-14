@@ -114,6 +114,12 @@ fn is_in_docker() -> bool {
         return true;
     }
 
+    // Method 4: Kubernetes injects this into every pod whatever the runtime, so
+    // it is the only one of the four that fires under containerd on cgroup v2.
+    if strom_types::env::var_opt("KUBERNETES_SERVICE_HOST").is_some() {
+        return true;
+    }
+
     false
 }
 
