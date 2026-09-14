@@ -50,12 +50,20 @@ jobs:
 
       - name: Extract version
         id: version
+        env:
+          BASE_REF: ${{ github.event.base_ref }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            echo "git_tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            # A tag push is a detached checkout; base_ref names the branch it was cut from.
+            echo "git_branch=${BASE_REF#refs/heads/}" >> $GITHUB_OUTPUT
           else
             echo "version=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "git_tag=" >> $GITHUB_OUTPUT
+            echo "git_branch=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
           fi
+          echo "git_hash=$(git rev-parse --short=8 HEAD)" >> $GITHUB_OUTPUT
 
       - name: Build and push AMD64 image
         uses: docker/build-push-action@v7
@@ -66,6 +74,11 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-amd64
           platforms: linux/amd64
+          # The build context excludes .git/, so provenance has to be passed in.
+          build-args: |
+            GIT_HASH=${{ steps.version.outputs.git_hash }}
+            GIT_TAG=${{ steps.version.outputs.git_tag }}
+            GIT_BRANCH=${{ steps.version.outputs.git_branch }}
           cache-from: type=gha,scope=docker-amd64
           # mode=min: cache only the final image layers. mode=max also exported
           # the builder's multi-GB target/ each build (~6 min), which COPY . .
@@ -78,6 +91,28 @@ jobs:
           secrets: |
             aws_access_key_id=${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
             aws_secret_access_key=${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+
+      # The guard for #741: build.rs is not reachable from `cargo test`, so the only place
+      # the build-arg plumbing can be checked is against a running image. Failing here also
+      # stops create-manifest, so a provenance-less build never becomes the published tag.
+      - name: Verify git provenance in the AMD64 image
+        env:
+          IMAGE: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-amd64
+          EXPECTED_HASH: ${{ steps.version.outputs.git_hash }}
+        run: |
+          docker run --rm -d --name strom-provenance -p 8080:8080 "$IMAGE"
+          reported=""
+          for _ in $(seq 1 30); do
+            reported=$(curl -fsS localhost:8080/api/version 2>/dev/null | jq -r '.git_hash // empty') || true
+            [ -n "$reported" ] && break
+            sleep 2
+          done
+          docker rm -f strom-provenance >/dev/null 2>&1 || true
+          echo "==> /api/version reports git_hash='$reported', expected '$EXPECTED_HASH'"
+          if [ "$reported" != "$EXPECTED_HASH" ]; then
+            echo "The image cannot be mapped back to a commit (#741)."
+            exit 1
+          fi
 
   # Build ARM64 image natively on ARM64 runner (no cross-compilation!)
   build-arm64:
@@ -104,12 +139,20 @@ jobs:
 
       - name: Extract version
         id: version
+        env:
+          BASE_REF: ${{ github.event.base_ref }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            echo "git_tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            # A tag push is a detached checkout; base_ref names the branch it was cut from.
+            echo "git_branch=${BASE_REF#refs/heads/}" >> $GITHUB_OUTPUT
           else
             echo "version=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "git_tag=" >> $GITHUB_OUTPUT
+            echo "git_branch=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
           fi
+          echo "git_hash=$(git rev-parse --short=8 HEAD)" >> $GITHUB_OUTPUT
 
       - name: Build and push ARM64 image
         uses: docker/build-push-action@v7
@@ -120,6 +163,11 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-arm64
           platforms: linux/arm64
+          # The build context excludes .git/, so provenance has to be passed in.
+          build-args: |
+            GIT_HASH=${{ steps.version.outputs.git_hash }}
+            GIT_TAG=${{ steps.version.outputs.git_tag }}
+            GIT_BRANCH=${{ steps.version.outputs.git_branch }}
           cache-from: type=gha,scope=docker-arm64
           # mode=min: see the AMD64 job above.
           cache-to: type=gha,mode=min,scope=docker-arm64
@@ -130,6 +178,26 @@ jobs:
           secrets: |
             aws_access_key_id=${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
             aws_secret_access_key=${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+
+      # See the AMD64 job above.
+      - name: Verify git provenance in the ARM64 image
+        env:
+          IMAGE: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-arm64
+          EXPECTED_HASH: ${{ steps.version.outputs.git_hash }}
+        run: |
+          docker run --rm -d --name strom-provenance -p 8080:8080 "$IMAGE"
+          reported=""
+          for _ in $(seq 1 30); do
+            reported=$(curl -fsS localhost:8080/api/version 2>/dev/null | jq -r '.git_hash // empty') || true
+            [ -n "$reported" ] && break
+            sleep 2
+          done
+          docker rm -f strom-provenance >/dev/null 2>&1 || true
+          echo "==> /api/version reports git_hash='$reported', expected '$EXPECTED_HASH'"
+          if [ "$reported" != "$EXPECTED_HASH" ]; then
+            echo "The image cannot be mapped back to a commit (#741)."
+            exit 1
+          fi
 
   # Create multi-arch manifest combining AMD64 and ARM64 images
   create-manifest:
