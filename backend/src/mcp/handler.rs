@@ -97,6 +97,59 @@ struct ToolCallParams {
     arguments: Option<Value>,
 }
 
+/// Why a `tools/call` did not produce a result.
+///
+/// The MCP spec splits these: a call the server could not make sense of is a
+/// JSON-RPC error, while a tool that ran and failed returns a normal result
+/// carrying `isError: true`.
+enum ToolError {
+    /// Unknown tool, missing argument, unparseable argument.
+    BadRequest(String),
+    /// The tool ran and failed.
+    Execution(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ToolError {
+    fn from(e: anyhow::Error) -> Self {
+        ToolError::Execution(e)
+    }
+}
+
+impl From<crate::gst::pipeline::PipelineError> for ToolError {
+    fn from(e: crate::gst::pipeline::PipelineError) -> Self {
+        ToolError::Execution(e.into())
+    }
+}
+
+/// Build the `isError` result for a tool that ran and failed.
+fn tool_error_result(error: &anyhow::Error) -> Value {
+    json!({
+        "isError": true,
+        "content": [{
+            "type": "text",
+            "text": format!("{:#}", error)
+        }]
+    })
+}
+
+/// Read a required string argument.
+fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
+    args[name]
+        .as_str()
+        .ok_or_else(|| ToolError::BadRequest(format!("{} is required and must be a string", name)))
+}
+
+/// Read a required flow id argument.
+fn required_flow_id(args: &Value) -> Result<strom_types::FlowId, ToolError> {
+    let raw = required_str(args, "flow_id")?;
+    raw.parse().map_err(|_| {
+        ToolError::BadRequest(format!(
+            "flow_id must be a UUID (got '{}') - use list_flows to find valid ids",
+            raw
+        ))
+    })
+}
+
 /// MCP request handler with direct AppState access.
 pub struct McpHandler;
 
@@ -111,10 +164,6 @@ impl McpHandler {
 
         match request.method.as_str() {
             "initialize" => Some(Self::handle_initialize(id)),
-            "initialized" => {
-                // Notification, no response needed
-                None
-            }
             "ping" => Some(JsonRpcResponse::success(id, json!({}))),
             "tools/list" => Some(Self::handle_list_tools(id)),
             "tools/call" => {
@@ -122,15 +171,35 @@ impl McpHandler {
                     Self::handle_call_tool(state, request.params.unwrap_or(json!({}))).await;
                 match result {
                     Ok(value) => Some(JsonRpcResponse::success(id, value)),
-                    Err(e) => Some(JsonRpcResponse::error(
-                        id,
-                        -32603,
-                        format!("Tool call failed: {}", e),
-                    )),
+                    // A tool that ran and failed is a result, not a transport
+                    // failure: the caller gets isError so the model can read
+                    // the reason and try something else. Only a malformed call
+                    // is a JSON-RPC error.
+                    Err(ToolError::Execution(e)) => {
+                        error!("MCP: Tool execution failed: {:#}", e);
+                        Some(JsonRpcResponse::success(id, tool_error_result(&e)))
+                    }
+                    Err(ToolError::BadRequest(message)) => {
+                        error!("MCP: Invalid tool call: {}", message);
+                        Some(JsonRpcResponse::error(id, -32602, message))
+                    }
                 }
             }
-            "notifications/cancelled" => {
-                // Client cancelled a request - acknowledge
+            // Notifications carry no id and MUST NOT be answered — a response to
+            // one is an unmatchable message on the client's side. Anything under
+            // notifications/* is swallowed, which also covers the notifications
+            // this server has not heard of yet.
+            //
+            // "initialized" (no prefix) is not a real MCP method; it is kept
+            // because this server used to answer only that spelling, so a client
+            // built against the old behaviour may still send it.
+            method if method.starts_with("notifications/") || method == "initialized" => {
+                debug!("MCP: Ignoring notification: {}", method);
+                None
+            }
+            _ if id.is_none() => {
+                // An unknown method with no id is still a notification.
+                debug!("MCP: Ignoring unknown notification: {}", request.method);
                 None
             }
             _ => Some(JsonRpcResponse::error(
@@ -361,8 +430,9 @@ impl McpHandler {
     }
 
     /// Handle a tools/call request.
-    async fn handle_call_tool(state: &AppState, params: Value) -> anyhow::Result<Value> {
-        let tool_params: ToolCallParams = serde_json::from_value(params)?;
+    async fn handle_call_tool(state: &AppState, params: Value) -> Result<Value, ToolError> {
+        let tool_params: ToolCallParams = serde_json::from_value(params)
+            .map_err(|e| ToolError::BadRequest(format!("Invalid tools/call params: {}", e)))?;
         let args = tool_params.arguments.unwrap_or(json!({}));
 
         let result = match tool_params.name.as_str() {
@@ -373,22 +443,17 @@ impl McpHandler {
             }
 
             "get_flow" => {
-                let flow_id = args["flow_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("flow_id is required"))?;
+                let flow_id = required_flow_id(&args)?;
                 info!("MCP: Getting flow {}", flow_id);
-                let flow_uuid: strom_types::FlowId = flow_id.parse()?;
                 let flow = state
-                    .get_flow(&flow_uuid)
+                    .get_flow(&flow_id)
                     .await
                     .ok_or_else(|| anyhow::anyhow!("Flow not found: {}", flow_id))?;
                 json!({ "flow": flow })
             }
 
             "create_flow" => {
-                let name = args["name"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("name is required"))?;
+                let name = required_str(&args, "name")?;
                 info!("MCP: Creating flow '{}'", name);
                 let flow = Flow::new(name.to_string());
                 state.upsert_flow(flow.clone()).await?;
@@ -396,59 +461,45 @@ impl McpHandler {
             }
 
             "update_flow" => {
-                let flow_id = args["flow_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("flow_id is required"))?;
+                let flow_id = required_flow_id(&args)?;
                 let flow: Flow = serde_json::from_value(args["flow"].clone())
-                    .map_err(|e| anyhow::anyhow!("Invalid flow object: {}", e))?;
+                    .map_err(|e| ToolError::BadRequest(format!("Invalid flow object: {}", e)))?;
                 info!("MCP: Updating flow {}", flow_id);
                 state.upsert_flow(flow.clone()).await?;
                 json!({ "flow": flow })
             }
 
             "delete_flow" => {
-                let flow_id = args["flow_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("flow_id is required"))?;
+                let flow_id = required_flow_id(&args)?;
                 info!("MCP: Deleting flow {}", flow_id);
-                let flow_uuid: strom_types::FlowId = flow_id.parse()?;
-                let deleted = state.delete_flow(&flow_uuid).await?;
+                let deleted = state.delete_flow(&flow_id).await?;
                 if !deleted {
-                    return Err(anyhow::anyhow!("Flow not found: {}", flow_id));
+                    return Err(anyhow::anyhow!("Flow not found: {}", flow_id).into());
                 }
                 json!({ "success": true, "message": format!("Flow {} deleted", flow_id) })
             }
 
             "start_flow" => {
-                let flow_id = args["flow_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("flow_id is required"))?;
+                let flow_id = required_flow_id(&args)?;
                 info!("MCP: Starting flow {}", flow_id);
-                let flow_uuid: strom_types::FlowId = flow_id.parse()?;
-                let _state = state.start_flow(&flow_uuid).await?;
+                let _state = state.start_flow(&flow_id).await?;
                 json!({ "success": true, "message": format!("Flow {} started", flow_id) })
             }
 
             "stop_flow" => {
-                let flow_id = args["flow_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("flow_id is required"))?;
+                let flow_id = required_flow_id(&args)?;
                 info!("MCP: Stopping flow {}", flow_id);
-                let flow_uuid: strom_types::FlowId = flow_id.parse()?;
-                let _state = state.stop_flow(&flow_uuid).await?;
+                let _state = state.stop_flow(&flow_id).await?;
                 json!({ "success": true, "message": format!("Flow {} stopped", flow_id) })
             }
 
             "update_flow_properties" => {
-                let flow_id = args["flow_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("flow_id is required"))?;
+                let flow_id = required_flow_id(&args)?;
                 info!("MCP: Updating properties for flow {}", flow_id);
-                let flow_uuid: strom_types::FlowId = flow_id.parse()?;
 
                 // Get current flow
                 let mut flow = state
-                    .get_flow(&flow_uuid)
+                    .get_flow(&flow_id)
                     .await
                     .ok_or_else(|| anyhow::anyhow!("Flow not found: {}", flow_id))?;
 
@@ -461,7 +512,7 @@ impl McpHandler {
                 if let Some(clock_type_str) = args["clock_type"].as_str() {
                     flow.properties.clock_type = clock_type_str
                         .parse::<GStreamerClockType>()
-                        .map_err(|e| anyhow::anyhow!(e))?;
+                        .map_err(ToolError::BadRequest)?;
                 }
 
                 state.upsert_flow(flow.clone()).await?;
@@ -484,43 +535,30 @@ impl McpHandler {
             }
 
             "get_element_info" => {
-                let element_name = args["element_name"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("element_name is required"))?;
+                let element_name = required_str(&args, "element_name")?;
                 info!("MCP: Getting info for element '{}'", element_name);
                 let info = state
                     .get_element_info_with_properties(element_name)
                     .await
                     .ok_or_else(|| anyhow::anyhow!("Element not found: {}", element_name))?;
-                serde_json::to_value(&info)?
+                serde_json::to_value(&info).map_err(anyhow::Error::from)?
             }
 
             "get_element_properties" => {
-                let flow_id = args["flow_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("flow_id is required"))?;
-                let element_id = args["element_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("element_id is required"))?;
+                let flow_id = required_flow_id(&args)?;
+                let element_id = required_str(&args, "element_id")?;
                 info!(
                     "MCP: Getting properties for element {} in flow {}",
                     element_id, flow_id
                 );
-                let flow_uuid: strom_types::FlowId = flow_id.parse()?;
-                let properties = state.get_element_properties(&flow_uuid, element_id).await?;
-                serde_json::to_value(&properties)?
+                let properties = state.get_element_properties(&flow_id, element_id).await?;
+                serde_json::to_value(&properties).map_err(anyhow::Error::from)?
             }
 
             "update_element_property" => {
-                let flow_id = args["flow_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("flow_id is required"))?;
-                let element_id = args["element_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("element_id is required"))?;
-                let property_name = args["property_name"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("property_name is required"))?;
+                let flow_id = required_flow_id(&args)?;
+                let element_id = required_str(&args, "element_id")?;
+                let property_name = required_str(&args, "property_name")?;
 
                 // Parse property value from JSON value
                 let value: PropertyValue = match &args["value"] {
@@ -533,20 +571,27 @@ impl McpHandler {
                         } else if let Some(f) = n.as_f64() {
                             PropertyValue::Float(f)
                         } else {
-                            return Err(anyhow::anyhow!("Invalid number value"));
+                            return Err(ToolError::BadRequest(format!(
+                                "value {} is not a representable number",
+                                n
+                            )));
                         }
                     }
                     Value::Bool(b) => PropertyValue::Bool(*b),
-                    _ => return Err(anyhow::anyhow!("Invalid property value type")),
+                    other => {
+                        return Err(ToolError::BadRequest(format!(
+                            "value must be a string, number or boolean (got {})",
+                            other
+                        )))
+                    }
                 };
 
                 info!(
                     "MCP: Updating property {}.{} = {:?} in flow {}",
                     element_id, property_name, value, flow_id
                 );
-                let flow_uuid: strom_types::FlowId = flow_id.parse()?;
                 state
-                    .update_element_property(&flow_uuid, element_id, property_name, value, None)
+                    .update_element_property(&flow_id, element_id, property_name, value, None)
                     .await?;
                 json!({
                     "success": true,
@@ -554,9 +599,11 @@ impl McpHandler {
                 })
             }
 
-            _ => {
-                error!("MCP: Unknown tool: {}", tool_params.name);
-                return Err(anyhow::anyhow!("Unknown tool: {}", tool_params.name));
+            unknown => {
+                return Err(ToolError::BadRequest(format!(
+                    "Unknown tool: {} - call tools/list for the available tools",
+                    unknown
+                )));
             }
         };
 
@@ -564,7 +611,7 @@ impl McpHandler {
         Ok(json!({
             "content": [{
                 "type": "text",
-                "text": serde_json::to_string_pretty(&result)?
+                "text": serde_json::to_string_pretty(&result).map_err(anyhow::Error::from)?
             }]
         }))
     }
