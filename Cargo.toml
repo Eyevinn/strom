@@ -50,7 +50,7 @@ garde = { version = "0.23", features = ["derive"] }
 
 # Frontend
 egui = "0.34"
-egui-phosphor = "0.12"
+egui-phosphor = "0.13"
 # default-features disabled: eframe 0.34's `default` set includes `wgpu`, which
 # would otherwise be pulled into the WASM build where wgpu fails to compile.
 # Native-only renderer/platform features (wgpu, accesskit, wayland, x11) are
