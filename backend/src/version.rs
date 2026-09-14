@@ -120,6 +120,25 @@ fn is_in_docker() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn kubernetes_service_host_is_a_container_signal() {
+        // Vacuous on a host that is already detected as containerised by one of
+        // the other methods, so the baseline goes into the failure message.
+        let baseline = is_in_docker();
+
+        std::env::set_var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
+        let detected = is_in_docker();
+        std::env::remove_var("KUBERNETES_SERVICE_HOST");
+
+        assert!(
+            detected,
+            "a pod with KUBERNETES_SERVICE_HOST set must be reported as containerised \
+             (is_in_docker() was {baseline} before the variable was set)"
+        );
+    }
 
     #[test]
     fn test_system_info() {
