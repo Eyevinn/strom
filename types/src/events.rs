@@ -250,7 +250,12 @@ pub enum StromEvent {
         #[cfg_attr(feature = "openapi", schema(value_type = String, format = Uuid))]
         flow_id: FlowId,
         block_instance_id: String,
+        /// Input the take left (0-based). On a vision mixer this is what was
+        /// on PGM, not the index in the request. `0` also stands in when PGM
+        /// held a PiP, so it is ambiguous; `VisionMixerStateChanged` is not.
         from_input: usize,
+        /// Input the take landed on (0-based). `0` also stands in when the new
+        /// PGM is a PiP, with the same ambiguity as `from_input`.
         to_input: usize,
         transition_type: String,
         duration_ms: u64,

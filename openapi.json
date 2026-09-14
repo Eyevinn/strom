@@ -9884,10 +9884,12 @@
                   },
                   "from_input": {
                     "type": "integer",
+                    "description": "Input the take left (0-based). On a vision mixer this is what was\non PGM, not the index in the request. `0` also stands in when PGM\nheld a PiP, so it is ambiguous; `VisionMixerStateChanged` is not.",
                     "minimum": 0
                   },
                   "to_input": {
                     "type": "integer",
+                    "description": "Input the take landed on (0-based). `0` also stands in when the new\nPGM is a PiP, with the same ambiguity as `from_input`.",
                     "minimum": 0
                   },
                   "transition_type": {
