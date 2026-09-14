@@ -334,9 +334,9 @@ impl BlockBuilder for LiveAudioRouterBuilder {
         );
         // A bus with its fader down or its soft clipper on has to sum in
         // float, and a bus with neither must negotiate as it did before:
-        // neither stage is any use after an `audiomixer` has already saturated the sum
-        // in a fixed-point format, and pinning a format nobody asked for would
-        // change what every existing flow negotiates.
+        // neither stage is any use after an `audiomixer` has already saturated
+        // the sum in a fixed-point format, and pinning a format nobody asked
+        // for would change what every existing flow negotiates.
         let sum_in_float = soft_clip_enabled || fader_db != 0.0;
 
         // A matrix that has never been set gets the straight-through default,
@@ -408,9 +408,9 @@ impl BlockBuilder for LiveAudioRouterBuilder {
 
             // Headroom: bring the bus down so the sum fits, then cap what is
             // left. The fader is a `volume`, which leaves samples untouched at
-            // unity, so it is always built. Its caps are narrower than
-            // `audiomixer`'s — no unsigned formats — and that is the one thing
-            // it changes on a bus with its fader at unity.
+            // unity, so it is always built. It takes no unsigned formats, but
+            // neither does any crosspoint `volume` in front of the mixer, so
+            // at unity it changes nothing about what the bus can negotiate.
             let fader_id = format!("{instance_id}:fader_out_{out_idx}");
             let fader = gst::ElementFactory::make("volume")
                 .name(&fader_id)

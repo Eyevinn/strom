@@ -8,6 +8,8 @@ use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::{audiorouter, liveaudiorouter};
 use strom::blocks::{BlockBuildContext, BlockBuilder};
@@ -1055,6 +1057,31 @@ fn four_into_one_router(instance: &str, extra: &[(&str, PropertyValue)]) -> Harn
     assemble(instance, &props(&pairs))
 }
 
+/// Feed each input of a `four_into_one_router` its `FAN_IN_TONES` sine at
+/// `amplitude`, as `S16LE`.
+fn feed_s16(h: &Harness, instance: &str, amplitude: f64) {
+    for (input, freq) in FAN_IN_TONES.iter().enumerate() {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .property("freq", *freq)
+            .property("volume", amplitude)
+            .build()
+            .expect("audiotestsrc");
+        let s16 = gst::ElementFactory::make("capsfilter")
+            .property("caps", s16_caps())
+            .build()
+            .expect("capsfilter");
+        h.pipeline.add_many([&src, &s16]).expect("add source");
+        src.link(&s16).expect("link source");
+        s16.link(
+            h.elements
+                .get(&format!("{instance}:identity_in_{input}"))
+                .unwrap_or_else(|| panic!("no identity_in_{input}")),
+        )
+        .expect("link input");
+    }
+}
+
 /// `S16LE` mono caps, the format a decoded source typically arrives in.
 fn s16_caps() -> gst::Caps {
     gst::Caps::builder("audio/x-raw")
@@ -1243,26 +1270,7 @@ fn a_fader_alone_keeps_a_fixed_point_bus_summing_in_float() {
         instance,
         &[("output_fader_db", PropertyValue::Float(-12.0))],
     );
-    for (input, freq) in FAN_IN_TONES.iter().enumerate() {
-        let src = gst::ElementFactory::make("audiotestsrc")
-            .property("is-live", true)
-            .property("freq", *freq)
-            .property("volume", 0.5)
-            .build()
-            .expect("audiotestsrc");
-        let s16 = gst::ElementFactory::make("capsfilter")
-            .property("caps", s16_caps())
-            .build()
-            .expect("capsfilter");
-        h.pipeline.add_many([&src, &s16]).expect("add source");
-        gst::Element::link_many([&src, &s16]).expect("link source");
-        s16.link(
-            h.elements
-                .get(&format!("{instance}:identity_in_{input}"))
-                .unwrap_or_else(|| panic!("no identity_in_{input}")),
-        )
-        .expect("link input");
-    }
+    feed_s16(&h, instance, 0.5);
 
     // A consumer the way the router's real consumers are built: convert, then
     // the format it wants, then the meter reading what it received.
@@ -1357,6 +1365,70 @@ fn a_router_that_has_not_asked_for_headroom_is_left_exactly_as_it_was() {
             .map(|s| !s.has_field("format"))
             .unwrap_or(false),
         "a disengaged output bus must negotiate its format the way it always did, got {caps}"
+    );
+}
+
+#[test]
+fn an_unconfigured_bus_still_feeds_an_integer_consumer_without_a_converter() {
+    // The running half of the checks above. The router's output carries the
+    // format its sources arrive in, so S16 sources reach an S16-only consumer
+    // with nothing converting between them. Pin the bus to float, or leave an
+    // F32LE-only `rglimiter` in the chain, and that consumer is refused.
+    let instance = "headroom_s16_passthrough";
+    let h = four_into_one_router(instance, &[]);
+    feed_s16(&h, instance, 0.1);
+
+    let s16 = gst::ElementFactory::make("capsfilter")
+        .property("caps", s16_caps())
+        .build()
+        .expect("capsfilter");
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .expect("fakesink");
+    h.pipeline.add_many([&s16, &sink]).expect("add consumer");
+    s16.link(&sink).expect("link consumer");
+    h.elements
+        .get(&format!("{instance}:queue_out_0"))
+        .expect("no queue_out_0")
+        .link(&s16)
+        .expect("an unconfigured bus must link to an S16-only consumer");
+
+    let buffers = Arc::new(AtomicUsize::new(0));
+    let counter = buffers.clone();
+    sink.static_pad("sink")
+        .expect("fakesink sink pad")
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+    let bus = h.pipeline.bus().expect("pipeline bus");
+    let start = Instant::now();
+    while buffers.load(Ordering::Relaxed) == 0 && start.elapsed() < Duration::from_secs(5) {
+        if let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Error],
+        ) {
+            if let gst::MessageView::Error(e) = msg.view() {
+                panic!(
+                    "an unconfigured bus must negotiate with an S16-only consumer, got an error \
+                     from {:?}: {} ({:?})",
+                    e.src().map(|s| s.path_string()),
+                    e.error(),
+                    e.debug()
+                );
+            }
+        }
+    }
+    h.pipeline.set_state(gst::State::Null).expect("set Null");
+
+    assert!(
+        buffers.load(Ordering::Relaxed) > 0,
+        "an unconfigured bus must deliver audio to an S16-only consumer"
     );
 }
 
