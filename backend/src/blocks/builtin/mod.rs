@@ -28,6 +28,7 @@ pub mod spectrum;
 pub mod tams_output;
 pub mod thumbnail;
 pub mod time_offset;
+pub mod tsdemux_anchor;
 pub mod videoenc;
 pub mod videoformat;
 pub mod vision_mixer;
