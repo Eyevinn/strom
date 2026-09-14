@@ -901,12 +901,13 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         label: "Output Fader (dB)".to_string(),
         description: format!(
             "Master level of every output bus, in dB ({} to {}). An output sums every \
-             crosspoint routed to it, so a mix-minus return carries every other seat at once and \
-             goes over full scale long before any one of them does. {:.0} dB is the starting \
-             point for a return carrying 4 seats. Construction-time only.",
+             crosspoint routed to it, so two seats talking over each other in a mix-minus \
+             return can go over full scale when neither alone does. {:.0} dB with the soft \
+             clipper on is the starting point for a conversation, whatever the seat count: \
+             overlaps are short and almost always two voices. Construction-time only.",
             routing::MIN_OUTPUT_FADER_DB,
             routing::MAX_OUTPUT_FADER_DB,
-            routing::fader_db_for_sources(4),
+            routing::SUGGESTED_OUTPUT_FADER_DB,
         ),
         property_type: PropertyType::Float,
         default_value: Some(PropertyValue::Float(routing::DEFAULT_OUTPUT_FADER_DB)),
@@ -926,8 +927,8 @@ fn liveaudiorouter_definition() -> BlockDefinition {
                       it, and it adds no latency. Unlike a limiter it does not turn the bus \
                       down, so a bus driven hard into it distorts. The ceiling is full scale \
                       itself, which leaves nothing for a lossy return leg to overshoot into, so \
-                      this catches an output fader set for fewer seats than turned up rather \
-                      than replacing it. \
+                      it catches the rare collision the output fader leaves rather than \
+                      replacing the fader. \
                       Construction-time only."
             .to_string(),
         property_type: PropertyType::Bool,

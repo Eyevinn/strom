@@ -26,10 +26,10 @@ pub const MAX_CROSSPOINT_GAIN_DB: f64 = 0.0;
 pub const GAIN_FLOOR_DB: f64 = -60.0;
 
 // Output bus headroom. A router output sums every crosspoint routed to it, so
-// on a mix-minus rig it carries N-1 talkers at unity. Four seats each aligned
-// to leave 16 dB of peak headroom still put that bus over full scale. The two
-// stages below are applied in this order: a fader brings the bus down so the
-// sum fits, then a soft clipper puts a ceiling on what is left.
+// on a mix-minus rig it carries N-1 talkers at unity, and two of them talking
+// over each other can put it over full scale. The two stages below are applied
+// in this order: a fader brings the bus down so the sum fits, then a soft
+// clipper puts a ceiling on what is left.
 
 /// Default output fader: unity. Existing flows keep their level.
 pub const DEFAULT_OUTPUT_FADER_DB: f64 = 0.0;
@@ -47,20 +47,16 @@ pub const MAX_OUTPUT_FADER_DB: f64 = 0.0;
 /// changes until someone asks for it.
 pub const DEFAULT_OUTPUT_SOFT_CLIP_ENABLED: bool = false;
 
-/// Output fader setting, in dB, that makes an N-source sum of independent
-/// speech fit where one source fitted: `-10 * log10(n)`, the same law an
-/// automixer uses for its open-microphone attenuation. Power, not amplitude —
-/// two independent talkers are 3 dB louder than one, not 6 dB.
+/// Suggested output fader for a conversation, with the soft clipper on.
 ///
-/// A starting point, not a guarantee: this tracks the sum's energy, and what
-/// clips is its peaks.
-pub fn fader_db_for_sources(n: usize) -> f64 {
-    if n <= 1 {
-        0.0
-    } else {
-        -10.0 * (n as f64).log10()
-    }
-}
+/// Sized for two voices at once, not for every seat: in conversation people
+/// seldom talk over each other, and when they do it is almost always one
+/// other person, whatever the size of the group. Two voices at browser
+/// automatic-gain level, which peaks near -3 dBFS, can reach +3 dBFS where
+/// their peaks coincide; -3 dB brings that to full scale and leaves the soft
+/// clipper the rare remainder. Sizing for N-1 simultaneous voices instead
+/// costs every lone voice that much level for a case that barely occurs.
+pub const SUGGESTED_OUTPUT_FADER_DB: f64 = -3.0;
 
 /// One crosspoint of a routing matrix: an input channel feeding an output
 /// channel.
