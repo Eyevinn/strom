@@ -63,11 +63,14 @@ fn slot_audio_caps() -> gst::Caps {
 
 /// Freeze a slot's audio capsfilter on the format that was actually negotiated.
 ///
-/// `rate` is the one field [`slot_audio_caps`] leaves open, and so the one a
-/// later session could still change underneath a committed consumer. Downstream
-/// fixes it on the first session; writing that value back into the capsfilter
-/// resamples every later session to it. The value came from downstream, so
-/// pinning it cannot conflict with downstream — which a build-time rate does.
+/// `rate` is the one field [`slot_audio_caps`] leaves open. No live session
+/// changes it today: `whipserversrc` negotiates Opus only, and `opusdec` always
+/// outputs 48 kHz. This is defence in depth for a future non-Opus path, where a
+/// later session could arrive at a different rate and slip a change past the
+/// capsfilter to a committed consumer. Downstream fixes the rate on the first
+/// session; writing that value back into the capsfilter resamples every later
+/// session to it. The value came from downstream, so pinning it cannot conflict
+/// with downstream — which a build-time rate does.
 ///
 /// CAPS events are rare; this is not a per-buffer probe.
 fn lock_slot_audio_caps(capsfilter: &gst::Element, slot: usize) {
