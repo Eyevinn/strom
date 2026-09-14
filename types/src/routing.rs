@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 /// somewhere with a meter and a limiter in front of it — `builtin.audiogain`
 /// or the mixer block — not on a routing crosspoint. A boosted crosspoint
 /// plus fan-in clips, and fan-in alone can clip without any boost at all:
-/// `DEFAULT_OUTPUT_HEADROOM_DB` and `DEFAULT_OUTPUT_LIMITER_ENABLED` below are
+/// `DEFAULT_OUTPUT_FADER_DB` and `DEFAULT_OUTPUT_SOFT_CLIP_ENABLED` below are
 /// what the output bus has to catch that. Attenuation is the useful half of a
 /// crosspoint and cannot clip.
 pub const MAX_CROSSPOINT_GAIN: f64 = 1.0;
@@ -28,31 +28,33 @@ pub const GAIN_FLOOR_DB: f64 = -60.0;
 // Output bus headroom. A router output sums every crosspoint routed to it, so
 // on a mix-minus rig it carries N-1 talkers at unity. Four seats each aligned
 // to leave 16 dB of peak headroom still put that bus over full scale. The two
-// knobs below are applied in that order: trim the bus so the sum fits, then
-// put a ceiling on what is left.
+// stages below are applied in this order: a fader brings the bus down so the
+// sum fits, then a soft clipper puts a ceiling on what is left.
 
-/// Default output trim: none. Existing flows keep their level.
-pub const DEFAULT_OUTPUT_HEADROOM_DB: f64 = 0.0;
+/// Default output fader: unity. Existing flows keep their level.
+pub const DEFAULT_OUTPUT_FADER_DB: f64 = 0.0;
 
-/// Most attenuation the output trim will apply. Below this the return is too
-/// quiet to be a usable headphone feed whatever the fan-in.
-pub const MIN_OUTPUT_HEADROOM_DB: f64 = -24.0;
+/// Lowest the output fader goes. Below this the return is too quiet to be a
+/// usable headphone feed whatever the fan-in.
+pub const MIN_OUTPUT_FADER_DB: f64 = -24.0;
 
-/// The trim attenuates; it does not make up gain. Boost on a bus that is
-/// already summing without headroom is the problem, not the fix.
-pub const MAX_OUTPUT_HEADROOM_DB: f64 = 0.0;
+/// The output fader stops at unity rather than going above it the way a
+/// console fader does. Boost on a bus that is already summing without headroom
+/// is the problem, not the fix.
+pub const MAX_OUTPUT_FADER_DB: f64 = 0.0;
 
-/// Default for the output limiter: off, so nothing about an existing flow
+/// Default for the output soft clipper: off, so nothing about an existing flow
 /// changes until someone asks for it.
-pub const DEFAULT_OUTPUT_LIMITER_ENABLED: bool = false;
+pub const DEFAULT_OUTPUT_SOFT_CLIP_ENABLED: bool = false;
 
-/// Trim, in dB, that makes an N-source sum of independent speech fit where one
-/// source fitted: `10 * log10(n)`. Power, not amplitude — two independent
-/// talkers are 3 dB louder than one, not 6 dB.
+/// Output fader setting, in dB, that makes an N-source sum of independent
+/// speech fit where one source fitted: `-10 * log10(n)`, the same law an
+/// automixer uses for its open-microphone attenuation. Power, not amplitude —
+/// two independent talkers are 3 dB louder than one, not 6 dB.
 ///
 /// A starting point, not a guarantee: this tracks the sum's energy, and what
 /// clips is its peaks.
-pub fn headroom_for_sources(n: usize) -> f64 {
+pub fn fader_db_for_sources(n: usize) -> f64 {
     if n <= 1 {
         0.0
     } else {

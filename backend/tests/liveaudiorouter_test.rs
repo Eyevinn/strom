@@ -72,8 +72,8 @@ fn liveaudiorouter_exposes_the_same_property_set_as_audiorouter() {
         "output_buffer_duration".to_string(),
         // ...including the two that give the bus somewhere to put a fan-in
         // sum. `builtin.audiorouter` has neither and clips the same way.
-        liveaudiorouter::OUTPUT_HEADROOM_PROPERTY.to_string(),
-        liveaudiorouter::OUTPUT_LIMITER_PROPERTY.to_string(),
+        liveaudiorouter::OUTPUT_FADER_PROPERTY.to_string(),
+        liveaudiorouter::OUTPUT_SOFT_CLIP_PROPERTY.to_string(),
     ]
     .into();
     let extra: Vec<_> = new_names
@@ -1072,64 +1072,64 @@ fn a_fan_in_overload_leaves_the_output_over_full_scale_when_nothing_catches_it()
     assert!(
         peak > 2.0,
         "four unity crosspoints summing 0.5 amplitude must leave the output clear of \
-         full scale with no trim and no limiter, got {peak} dBFS"
+         full scale with the fader at unity and no soft clipper, got {peak} dBFS"
     );
 }
 
 #[test]
-fn the_output_limiter_holds_a_fan_in_overload_below_full_scale() {
+fn the_output_soft_clipper_holds_a_fan_in_overload_below_full_scale() {
     let peak = fan_in_peak(
-        "headroom_limited",
-        &[("output_limiter_enabled", PropertyValue::Bool(true))],
+        "headroom_soft_clipped",
+        &[("output_soft_clip_enabled", PropertyValue::Bool(true))],
     );
 
     assert!(
         peak <= 0.0,
-        "the output limiter must keep the same overload at or below full scale, \
+        "the output soft clipper must keep the same overload at or below full scale, \
          got {peak} dBFS"
     );
-    // A limiter, not a mute: what it holds down it must still pass.
+    // A clipper, not a mute: what it holds down it must still pass.
     assert!(
         peak > -6.0,
-        "the limiter must hold the bus just under full scale, not attenuate it away, \
+        "the soft clipper must hold the bus just under full scale, not attenuate it away, \
          got {peak} dBFS"
     );
 }
 
 #[test]
-fn the_output_trim_attenuates_every_output_bus() {
-    // Measured against the same router without the trim rather than against an
-    // absolute level, so what is asserted is what the trim does and not what
+fn the_output_fader_attenuates_every_output_bus() {
+    // Measured against the same router at unity rather than against an
+    // absolute level, so what is asserted is what the fader does and not what
     // four live sources happened to sum to on this machine.
-    let untrimmed = fan_in_peak("headroom_untrimmed", &[]);
-    let trimmed = fan_in_peak(
-        "headroom_trimmed",
-        &[("output_headroom", PropertyValue::Float(-12.0))],
+    let unity = fan_in_peak("headroom_unity", &[]);
+    let faded = fan_in_peak(
+        "headroom_faded",
+        &[("output_fader_db", PropertyValue::Float(-12.0))],
     );
 
     assert!(
-        ((untrimmed - trimmed) - 12.0).abs() < 1.5,
-        "a -12 dB output trim must take 12 dB off the bus: untrimmed {untrimmed} dBFS, \
-         trimmed {trimmed} dBFS"
+        ((unity - faded) - 12.0).abs() < 1.5,
+        "an output fader at -12 dB must take 12 dB off the bus: unity {unity} dBFS, \
+         faded {faded} dBFS"
     );
 }
 
 #[test]
-fn a_trim_cannot_be_used_to_boost_a_bus_that_is_already_summing() {
+fn the_output_fader_cannot_boost_a_bus_that_is_already_summing() {
     let h = four_into_one(
         "headroom_boost",
         0.5,
-        &[("output_headroom", PropertyValue::Float(12.0))],
+        &[("output_fader_db", PropertyValue::Float(12.0))],
     );
-    let trim = h
+    let fader = h
         .elements
-        .get("headroom_boost:trim_out_0")
-        .expect("no trim_out_0");
+        .get("headroom_boost:fader_out_0")
+        .expect("no fader_out_0");
 
     assert!(
-        (trim.property::<f64>("volume") - 1.0).abs() < 1e-9,
-        "a positive trim must clamp to unity, got {}",
-        trim.property::<f64>("volume")
+        (fader.property::<f64>("volume") - 1.0).abs() < 1e-9,
+        "a positive fader setting must clamp to unity, got {}",
+        fader.property::<f64>("volume")
     );
 }
 
@@ -1138,12 +1138,12 @@ fn an_engaged_output_bus_sums_in_float() {
     let h = four_into_one(
         "headroom_float",
         0.5,
-        &[("output_limiter_enabled", PropertyValue::Bool(true))],
+        &[("output_soft_clip_enabled", PropertyValue::Bool(true))],
     );
 
     // The pin, at the element that carries it. `audiomixer` saturates at the
     // sum in a fixed-point format, so an output bus that is about to be
-    // trimmed or limited has to be told to stay in float — by the time the
+    // faded or soft-clipped has to be told to stay in float — by the time the
     // overload reaches either stage, a saturated sum is already gone.
     let caps = h
         .elements
@@ -1196,7 +1196,7 @@ fn an_engaged_output_bus_sums_in_float() {
         .0
         .expect("reach Playing");
 
-    for element in ["mixer_0", "trim_out_0", "limiter_out_0"] {
+    for element in ["mixer_0", "fader_out_0", "soft_clip_out_0"] {
         let negotiated = h
             .elements
             .get(&format!("headroom_float:{element}"))
@@ -1221,22 +1221,22 @@ fn an_engaged_output_bus_sums_in_float() {
 fn a_router_that_has_not_asked_for_headroom_is_left_exactly_as_it_was() {
     let h = four_into_one("headroom_default", 0.5, &[]);
 
-    let trim = h
+    let fader = h
         .elements
-        .get("headroom_default:trim_out_0")
-        .expect("no trim_out_0");
+        .get("headroom_default:fader_out_0")
+        .expect("no fader_out_0");
     assert!(
-        (trim.property::<f64>("volume") - 1.0).abs() < 1e-9,
-        "the output trim must default to unity, got {}",
-        trim.property::<f64>("volume")
+        (fader.property::<f64>("volume") - 1.0).abs() < 1e-9,
+        "the output fader must default to unity, got {}",
+        fader.property::<f64>("volume")
     );
 
-    // No limiter in the chain at all, not a disabled one. `rglimiter` takes
+    // No soft clipper in the chain at all, not a disabled one. `rglimiter` takes
     // F32LE and nothing else, so a disabled one left in place would still pin
-    // the whole output to float for a flow that never asked to be limited.
+    // the whole output to float for a flow that never asked for it.
     assert!(
-        !h.elements.contains_key("headroom_default:limiter_out_0"),
-        "a router with no headroom configured must not have a limiter in its output chain"
+        !h.elements.contains_key("headroom_default:soft_clip_out_0"),
+        "a router with no headroom configured must not have a soft clipper in its output chain"
     );
 
     let caps = h
@@ -1261,39 +1261,39 @@ fn the_headroom_properties_are_offered_and_default_to_no_op() {
         .map(|p| (p.name.as_str(), p))
         .collect();
 
-    let headroom = by_name
-        .get("output_headroom")
-        .expect("output_headroom is not exposed");
+    let fader = by_name
+        .get("output_fader_db")
+        .expect("output_fader_db is not exposed");
     // PropertyValue does not implement PartialEq; compare Debug, as the
     // parity tests above do.
     assert_eq!(
-        format!("{:?}", headroom.default_value),
+        format!("{:?}", fader.default_value),
         format!(
             "{:?}",
             Some(PropertyValue::Float(
-                strom_types::routing::DEFAULT_OUTPUT_HEADROOM_DB
+                strom_types::routing::DEFAULT_OUTPUT_FADER_DB
             ))
         ),
-        "the output trim must default to no attenuation"
+        "the output fader must default to unity"
     );
 
-    let limiter = by_name
-        .get("output_limiter_enabled")
-        .expect("output_limiter_enabled is not exposed");
+    let soft_clip = by_name
+        .get("output_soft_clip_enabled")
+        .expect("output_soft_clip_enabled is not exposed");
     assert_eq!(
-        format!("{:?}", limiter.default_value),
+        format!("{:?}", soft_clip.default_value),
         format!(
             "{:?}",
             Some(PropertyValue::Bool(
-                strom_types::routing::DEFAULT_OUTPUT_LIMITER_ENABLED
+                strom_types::routing::DEFAULT_OUTPUT_SOFT_CLIP_ENABLED
             ))
         ),
-        "the output limiter must default to off"
+        "the output soft clipper must default to off"
     );
     const {
         assert!(
-            !strom_types::routing::DEFAULT_OUTPUT_LIMITER_ENABLED,
-            "defaulting the limiter on would change what every existing flow sounds like"
+            !strom_types::routing::DEFAULT_OUTPUT_SOFT_CLIP_ENABLED,
+            "defaulting the soft clipper on would change what every existing flow sounds like"
         )
     };
 }
