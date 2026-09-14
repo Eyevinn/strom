@@ -117,7 +117,8 @@ pub const DEFAULT_DSK_INPUTS: usize = 0;
 /// How a keyed (DSK) input encodes its alpha.
 ///
 /// Caps cannot say whether colour is already multiplied by alpha, so it is
-/// declared per input. `cefsrc` (HTML graphics) paints premultiplied.
+/// declared per input. `cefsrc` (HTML graphics) emits premultiplied unless its
+/// `unpremultiply` property is set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlphaMode {
     /// Colour is independent of alpha. What the compositors assume.

@@ -395,8 +395,10 @@ fn vision_mixer_definition() -> BlockDefinition {
             name: name.clone(),
             label: format!("DSK{} Alpha", i + 1),
             description: format!(
-                "How DSK{}'s source encodes alpha. HTML sources paint premultiplied; \
-                 composited as straight they come out too dark wherever alpha is partial",
+                "How DSK{}'s source encodes alpha. HTML sources (cefsrc) emit premultiplied \
+                 by default, which composites too dark as straight. Leave straight if the \
+                 source already converts, e.g. cefsrc with unpremultiply=true; converting \
+                 twice comes out too bright",
                 i + 1
             ),
             property_type: PropertyType::Enum {
