@@ -554,7 +554,7 @@ impl WhipSessionManager {
     /// Only a session that has delivered audio is ever displaced. Audio is what
     /// makes `TAKEOVER_IDLE_THRESHOLD` mean anything; a video-only session can
     /// sit that long between frames while its publisher is healthy, so it is
-    /// left to the inactivity watchdog and the new client gets a 503. The
+    /// left to the inactivity watchdog and the new client gets a 503 at once. The
     /// residual case is a session whose audio stopped for good — a muted or
     /// failed microphone — while its video continues at gaps wider than the
     /// threshold: that one can still be displaced.
@@ -580,10 +580,14 @@ impl WhipSessionManager {
             if candidate.dying {
                 // Another path is already tearing it down. Wait for the slot it
                 // is about to release rather than asking for cleanup twice.
-            } else if candidate.has_audio
-                && candidate
-                    .idle
-                    .is_some_and(|idle| idle >= TAKEOVER_IDLE_THRESHOLD)
+            } else if !candidate.has_audio {
+                // Sessions with audio sort first, so no session on this endpoint
+                // can be displaced. One that starts delivering audio while we
+                // wait moves its counter, which refuses too, so answer now.
+                return None;
+            } else if candidate
+                .idle
+                .is_some_and(|idle| idle >= TAKEOVER_IDLE_THRESHOLD)
             {
                 // Win the flag every other teardown path uses, so the session is
                 // cleaned up exactly once and its watchdog thread stops. The
@@ -622,6 +626,10 @@ impl WhipSessionManager {
     /// a new client would displace. `None` if the endpoint has no registered
     /// session at all.
     ///
+    /// A session already being torn down sorts first, then sessions that have
+    /// delivered audio, so a sparse video-only session cannot hide a dead one
+    /// behind its longer idle time.
+    ///
     /// A session that has never delivered a buffer sorts last and is never
     /// displaced: it may simply be slow to negotiate (ICE through a TURN relay),
     /// and evicting it would let two clients take turns throwing each other off
@@ -640,7 +648,7 @@ impl WhipSessionManager {
                 has_audio: s.activity.has_delivered_audio(),
                 cleanup_sent: s.cleanup_sent.clone(),
             })
-            .max_by_key(|c| (c.dying, c.idle))
+            .max_by_key(|c| (c.dying, c.has_audio, c.idle))
     }
 
     /// Look up the port for a session by resource_id.
@@ -918,6 +926,16 @@ mod tests {
         port: u16,
         activity: Arc<SessionActivity>,
     ) -> Arc<AtomicBool> {
+        register_in_slot(manager, resource_id, port, 0, activity)
+    }
+
+    fn register_in_slot(
+        manager: &WhipSessionManager,
+        resource_id: &str,
+        port: u16,
+        slot: usize,
+        activity: Arc<SessionActivity>,
+    ) -> Arc<AtomicBool> {
         let (element, pipeline, cleanup_sent) = dummy_session();
         let registered = manager.register_session(NewWhipSession {
             resource_id: resource_id.to_string(),
@@ -925,7 +943,7 @@ mod tests {
             element,
             session_pipeline: pipeline,
             endpoint_id: "endpoint".to_string(),
-            slot: 0,
+            slot,
             cleanup_sent: cleanup_sent.clone(),
             activity,
         });
@@ -1137,6 +1155,7 @@ mod tests {
     async fn a_session_that_has_not_delivered_media_yet_is_not_displaced() {
         let (manager, config, cleanup_sent) = full_endpoint("negotiating", 40012, no_media_yet());
 
+        let started = Instant::now();
         let slot = manager
             .allocate_slot_or_take_over(&config, "second-client")
             .await;
@@ -1146,6 +1165,11 @@ mod tests {
         assert!(
             manager.get_session_port("negotiating").is_some(),
             "the negotiating session must still be registered"
+        );
+        assert!(
+            started.elapsed() < TAKEOVER_IDLE_THRESHOLD,
+            "a session that cannot be displaced must not hold the POST: took {:?}",
+            started.elapsed()
         );
     }
 
@@ -1160,6 +1184,7 @@ mod tests {
             sparse_video_publisher(TAKEOVER_IDLE_THRESHOLD * 2),
         );
 
+        let started = Instant::now();
         let slot = manager
             .allocate_slot_or_take_over(&config, "second-client")
             .await;
@@ -1175,6 +1200,56 @@ mod tests {
         assert!(
             manager.get_session_port("screenshare").is_some(),
             "the video-only session must still be registered"
+        );
+        assert!(
+            started.elapsed() < TAKEOVER_IDLE_THRESHOLD,
+            "a session that cannot be displaced must not hold the POST: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// With more than one slot, the idlest session is not necessarily the one
+    /// that can be displaced. A video-only seat that has been quiet longer must
+    /// not shield a dead audio-bearing seat from takeover.
+    #[tokio::test]
+    async fn a_dead_session_is_displaced_past_a_quieter_video_only_one() {
+        let manager = Arc::new(WhipSessionManager::new());
+        manager.start_cleanup_task();
+        manager.register_endpoint("endpoint".to_string(), endpoint_config(2));
+        let config = manager
+            .get_endpoint_config("endpoint")
+            .expect("endpoint was just registered");
+
+        assert_eq!(config.allocate_slot("screenshare"), Some(0));
+        let screenshare_cleanup = register_in_slot(
+            &manager,
+            "screenshare",
+            40014,
+            0,
+            sparse_video_publisher(TAKEOVER_IDLE_THRESHOLD * 3),
+        );
+        assert_eq!(config.allocate_slot("dead-session"), Some(1));
+        let dead_cleanup = register_in_slot(
+            &manager,
+            "dead-session",
+            40015,
+            1,
+            dead_publisher(TAKEOVER_IDLE_THRESHOLD * 2),
+        );
+
+        let slot = manager
+            .allocate_slot_or_take_over(&config, "rejoining-client")
+            .await;
+
+        assert_eq!(
+            slot,
+            Some(1),
+            "the rejoining client must get the dead session's slot"
+        );
+        assert!(dead_cleanup.load(Ordering::SeqCst));
+        assert!(
+            !screenshare_cleanup.load(Ordering::SeqCst),
+            "the video-only session must not be torn down"
         );
     }
 }
