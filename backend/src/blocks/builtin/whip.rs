@@ -31,46 +31,44 @@ use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-/// The raw audio format every WHIP Input slot presents downstream, whoever is
-/// publishing into it.
+/// The part of a WHIP Input slot's audio format fixed at build time: two
+/// channels, whoever is publishing into it.
 ///
 /// A slot outlives its sessions, and caps travel with each sample pushed into
 /// `appsrc_audio_<slot>`, so a second publisher can hand a running chain a
-/// different channel count than the first. Consumers past the slot's tee have
+/// different format than the first. Consumers past the slot's tee have
 /// committed to the first one — a muxer will not renegotiate mid-file, and its
 /// `not-negotiated` travels back up and kills the appsrc's streaming thread.
-/// Pinning the format keeps the change on this side of the tee, where
-/// `audioconvert` absorbs it.
+/// The slot's capsfilter keeps the format on this side of the tee, where
+/// `audioconvert` absorbs a change; [`lock_slot_audio_caps`] freezes it on
+/// what the first session negotiated.
 ///
-/// `rate` is deliberately absent. The sample rate belongs to the seat's
-/// downstream graph, not to the slot: consumers are shared (every seat feeds
-/// one audio mixer), and they settle on a rate of their own — 44.1 kHz in
-/// practice. Pinning a rate here makes the caps query through
-/// `audioconvert`/`audioresample` intersect to nothing whenever downstream
-/// settled on a different one, and then `decodebin`'s audio pad cannot link at
-/// all and the seat gets no audio whatsoever. `audioresample` adapts the rate
-/// instead. Nothing is lost by leaving it free: WHIP audio is Opus and
-/// `opusdec` always outputs 48 kHz, so the rate arriving at this boundary is
-/// the same for every session anyway. The Mixer block pins its own format the
-/// same way, and for the same reason omits `rate`.
+/// Only `channels` is pinned here, so a mono first publisher does not downmix
+/// every later one. The other fields are left for downstream to choose,
+/// because a build-time value can contradict what downstream accepts, and then
+/// the slot's audio cannot link or negotiate at all and the seat gets no
+/// audio. A pinned rate breaks a seat whose shared mixer settled on another
+/// one; a pinned S16LE breaks a consumer that takes only float and has no
+/// converter of its own, such as the Latency block's `audiolatency`.
 fn slot_audio_caps() -> gst::Caps {
     gst::Caps::builder("audio/x-raw")
-        .field("format", "S16LE")
-        .field("layout", "interleaved")
         .field("channels", 2i32)
         .build()
 }
 
 /// Freeze a slot's audio capsfilter on the format that was actually negotiated.
 ///
-/// `rate` is the one field [`slot_audio_caps`] leaves open. No live session
-/// changes it today: `whipserversrc` negotiates Opus only, and `opusdec` always
-/// outputs 48 kHz. This is defence in depth for a future non-Opus path, where a
-/// later session could arrive at a different rate and slip a change past the
-/// capsfilter to a committed consumer. Downstream fixes the rate on the first
-/// session; writing that value back into the capsfilter resamples every later
-/// session to it. The value came from downstream, so pinning it cannot conflict
-/// with downstream — which a build-time rate does.
+/// [`slot_audio_caps`] pins only the channel count; downstream chooses the
+/// sample format, layout and rate on the first session. Writing those caps
+/// back into the capsfilter makes `audioconvert`/`audioresample` convert every
+/// later session to them. The values came from downstream, so pinning them cannot
+/// conflict with downstream — which build-time values can.
+///
+/// The format needs this even though `opusdec` always outputs S16LE: without
+/// it, a mono session is converted to the consumer's preferred float, while a
+/// stereo session already has the pinned channel count and `audioconvert`
+/// passes its S16LE straight through. For the rate it is defence in depth:
+/// `opusdec` always outputs 48 kHz.
 ///
 /// CAPS events are rare; this is not a per-buffer probe.
 fn lock_slot_audio_caps(capsfilter: &gst::Element, slot: usize) {
@@ -458,7 +456,7 @@ pub fn build_whipserversrc(
                 // audioconvert → audioresample → capsfilter → tee.
                 // The capsfilter is what makes the slot reusable by a publisher
                 // whose audio format differs from the last one — see
-                // `slot_audio_caps`.
+                // `slot_audio_caps` and `lock_slot_audio_caps`.
                 internal_links.push((
                     ElementPadRef::pad(&audioconvert_id, "src"),
                     ElementPadRef::pad(&audioresample_id, "sink"),

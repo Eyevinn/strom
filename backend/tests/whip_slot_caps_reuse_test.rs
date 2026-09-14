@@ -12,6 +12,9 @@
 //! shape (aac → mp4mux). Both must reach the muxer, and the tee must see a
 //! single caps event — the guard is that the format past the slot never
 //! changes, which is what keeps a committed consumer from refusing.
+//!
+//! The slot must also leave the format to its consumers: one test feeds an
+//! encoder that takes only float, with no converter of its own in front.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -170,9 +173,19 @@ fn push_session(appsrc: &gst_app::AppSrc, session: &Session, pts_offset: gst::Cl
     }
 }
 
+/// How the consumer past the slot takes its audio.
+#[derive(Clone, Copy)]
+enum Consumer {
+    /// `audioconvert` in front of the encoder, so it accepts any raw format.
+    Converts,
+    /// The encoder straight off the tee. `avenc_aac` takes only float, so this
+    /// is served only if the slot converts to what its consumer asks for.
+    FloatOnly,
+}
+
 /// Run `first` then `second` through one WHIP Input slot and assert the slot
 /// carried both without ever changing the format it presents downstream.
-fn reuse_slot(first: &Session, second: &Session) {
+fn reuse_slot(first: &Session, second: &Session, consumer: Consumer) {
     let instance_id = "whip_in";
     let mut props: HashMap<String, PropertyValue> = HashMap::new();
     // Audio only: the slot's video chain would sit unfed and has nothing to do
@@ -236,7 +249,6 @@ fn reuse_slot(first: &Session, second: &Session) {
     // The recorder's shape: an encoder and a muxer that commit to the first
     // caps they see and refuse to renegotiate afterwards.
     let queue = gst::ElementFactory::make("queue").build().unwrap();
-    let convert = gst::ElementFactory::make("audioconvert").build().unwrap();
     let enc = gst::ElementFactory::make("avenc_aac")
         .build()
         .expect("avenc_aac");
@@ -245,10 +257,13 @@ fn reuse_slot(first: &Session, second: &Session) {
         .property("sync", false)
         .build()
         .unwrap();
-    pipeline
-        .add_many([&queue, &convert, &enc, &mux, &sink])
-        .unwrap();
-    gst::Element::link_many([&queue, &convert, &enc, &mux, &sink]).unwrap();
+    let mut branch = vec![queue.clone()];
+    if let Consumer::Converts = consumer {
+        branch.push(gst::ElementFactory::make("audioconvert").build().unwrap());
+    }
+    branch.extend([enc.clone(), mux, sink]);
+    pipeline.add_many(&branch).unwrap();
+    gst::Element::link_many(&branch).unwrap();
 
     let tee_src = tee.request_pad_simple("src_%u").expect("tee src pad");
     tee_src
@@ -405,6 +420,7 @@ fn slot_accepts_a_second_session_with_a_different_channel_count() {
     reuse_slot(
         &encode_session("opusenc", 48000, 1),
         &encode_session("opusenc", 48000, 2),
+        Consumer::Converts,
     );
 }
 
@@ -419,5 +435,27 @@ fn slot_normalises_a_second_session_at_a_different_sample_rate() {
         eprintln!("skipping: required GStreamer elements are missing");
         return;
     }
-    reuse_slot(&raw_session(48000, 2), &raw_session(16000, 1));
+    reuse_slot(
+        &raw_session(48000, 2),
+        &raw_session(16000, 1),
+        Consumer::Converts,
+    );
+}
+
+/// `opusdec` emits S16LE, so a slot that fixed its sample format at build time
+/// would present S16LE to every consumer and one that takes only float could
+/// not link at all. The Latency block's `audiolatency` is such a consumer; so
+/// is an encoder placed straight after a WHIP Input.
+#[test]
+fn slot_serves_a_consumer_that_takes_only_float() {
+    gst::init().unwrap();
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements are missing");
+        return;
+    }
+    reuse_slot(
+        &encode_session("opusenc", 48000, 1),
+        &encode_session("opusenc", 48000, 2),
+        Consumer::FloatOnly,
+    );
 }
