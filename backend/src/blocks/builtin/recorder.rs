@@ -91,7 +91,9 @@ fn activate_recording_sink(splitmuxsink: &gst::Element, instance_id: &str) {
 /// is already well past anything a live source does normally — a WHIP seat's
 /// jitter buffer runs at 400 ms. Ending a track is not reversible: the recording
 /// keeps the tracks that are still running, but the one that ended does not come
-/// back.
+/// back. That is why a frozen recording is not enough on its own, and the queues
+/// feeding the muxer have to show one track dry while another is backed up (see
+/// `watch_tracks`).
 const TRACK_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often the stall watchdog looks. Also how quickly it notices the pipeline
@@ -121,6 +123,8 @@ struct WatchedTrack {
     /// "video 0" / "audio 1" — for the log line, built once at setup.
     label: String,
     input: gst::glib::WeakRef<gst::Element>,
+    /// The splitmuxsink sink pad this track holds. Its peer is the track's queue.
+    muxer_pad: gst::glib::WeakRef<gst::Pad>,
     activity: Arc<TrackActivity>,
 }
 
@@ -286,6 +290,46 @@ fn spawn_track_stall_watchdog(
     }
 }
 
+/// Buffers waiting in the queue that feeds this splitmuxsink pad, or `None` while
+/// the track's chain is not linked yet.
+///
+/// Reading the level takes the queue's lock. Its streaming threads release that
+/// lock while they wait on a full queue or push downstream, so a stalled muxer
+/// cannot block the watchdog here.
+fn queued_buffers(muxer_pad: &gst::Pad) -> Option<u32> {
+    let queue = muxer_pad.peer()?.parent_element()?;
+    queue
+        .has_property("current-level-buffers")
+        .then(|| queue.property::<u32>("current-level-buffers"))
+}
+
+/// Which frozen track, if any, is holding the recording up. Each entry is a track's
+/// running time and the level of its queue.
+///
+/// Every track being quiet at the muxer does not mean one of them died: a muxer
+/// that stops writing — a stalled disk, slow network storage — freezes every track
+/// at once. The queue in front of each pad tells the two apart. A track whose
+/// source stopped has handed its last buffers to the muxer, so its queue is empty;
+/// a track the muxer is refusing fills its queue. A track is held responsible only
+/// when its queue is empty and another track's queue is backed up behind it. All
+/// backed up is the muxer itself; all empty is every source stopping together,
+/// where no track is waiting on another.
+///
+/// Among the empty ones, splitmuxsink waits on whichever has carried the recording
+/// least far, so that is the one to end — the same choice it is making internally.
+fn track_holding_the_recording(tracks: &[(u64, Option<u32>)]) -> Option<usize> {
+    let backed_up = tracks.iter().any(|(_, level)| level.is_some_and(|n| n > 0));
+    if !backed_up {
+        return None;
+    }
+    tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, level))| *level == Some(0))
+        .min_by_key(|(_, (running_ms, _))| *running_ms)
+        .map(|(index, _)| index)
+}
+
 /// The watchdog loop. Returns once the pipeline is gone or every track has ended.
 fn watch_tracks(
     block_id: &str,
@@ -299,6 +343,10 @@ fn watch_tracks(
     // poll interval: without a pause here the whole recording is ended track by
     // track before the first one has taken effect.
     let mut last_end_ms: Option<u64> = None;
+
+    // Whether the current freeze has already been reported as the muxer's own, so
+    // a long storage stall logs once rather than on every poll.
+    let mut reported_muxer_stall = false;
 
     loop {
         std::thread::sleep(TRACK_STALL_POLL);
@@ -325,11 +373,16 @@ fn watch_tracks(
             if last_ms == 0 {
                 continue;
             }
+            let queued = track
+                .muxer_pad
+                .upgrade()
+                .and_then(|pad| queued_buffers(&pad));
             live.push((
                 track,
                 input,
                 now_ms.saturating_sub(last_ms),
                 track.activity.last_muxed_running_ms.load(Ordering::Relaxed),
+                queued,
             ));
         }
 
@@ -345,21 +398,30 @@ fn watch_tracks(
             && !last_end_ms.is_some_and(|t| now_ms.saturating_sub(t) < timeout_ms)
             && live
                 .iter()
-                .all(|(_, _, quiet_ms, _)| *quiet_ms >= timeout_ms);
+                .all(|(_, _, quiet_ms, _, _)| *quiet_ms >= timeout_ms);
         if !frozen {
+            reported_muxer_stall = false;
             continue;
         }
 
-        // splitmuxsink waits on whichever track has carried the recording least far,
-        // so that is the one to end — the same choice it is making internally.
-        let Some((track, input, quiet_ms, running_ms)) = live
-            .into_iter()
-            .min_by_key(|(_, _, _, running_ms)| *running_ms)
-        else {
+        let positions: Vec<(u64, Option<u32>)> = live
+            .iter()
+            .map(|(_, _, _, running_ms, queued)| (*running_ms, *queued))
+            .collect();
+        let Some(index) = track_holding_the_recording(&positions) else {
+            if !reported_muxer_stall && positions.iter().all(|(_, q)| q.is_some_and(|n| n > 0)) {
+                warn!(
+                    "Recorder {}: nothing muxed for {}s with every track backed up — the muxer or its storage is stalled, so no track is ended",
+                    block_id,
+                    live.iter().map(|(_, _, quiet_ms, _, _)| *quiet_ms).min().unwrap_or(0) / 1000
+                );
+                reported_muxer_stall = true;
+            }
             continue;
         };
+        let (track, input, quiet_ms, running_ms, _) = live.swap_remove(index);
         warn!(
-            "Recorder {}: nothing muxed for {}s and {} is furthest behind at {}ms — ending that track so the rest of the recording continues",
+            "Recorder {}: nothing muxed for {}s and {} has run dry at {}ms while another track is backed up — ending that track so the rest of the recording continues",
             block_id,
             quiet_ms / 1000,
             track.label,
@@ -1231,6 +1293,7 @@ impl BlockBuilder for RecorderBuilder {
                             watched.push(WatchedTrack {
                                 label: format!("video {}", vi),
                                 input: input.clone(),
+                                muxer_pad: pad.downgrade(),
                                 activity: Arc::clone(activity),
                             });
                         }
@@ -1273,6 +1336,7 @@ impl BlockBuilder for RecorderBuilder {
                             watched.push(WatchedTrack {
                                 label: format!("audio {}", i),
                                 input: input.clone(),
+                                muxer_pad: pad.downgrade(),
                                 activity: Arc::clone(activity),
                             });
                         }
@@ -1601,6 +1665,52 @@ mod tests {
             running_time_offset_ns: AtomicI64::new(0),
             retired: AtomicBool::new(false),
         }
+    }
+
+    /// A track that stopped: its queue has drained while the one the muxer is
+    /// refusing has filled up.
+    #[test]
+    fn a_drained_track_behind_a_backed_up_one_is_ended() {
+        assert_eq!(
+            track_holding_the_recording(&[(9_000, Some(40)), (7_000, Some(0))]),
+            Some(1)
+        );
+    }
+
+    /// The muxer or its storage stopped, so every queue is backed up. Ending the
+    /// track furthest behind would lose it for the rest of the recording and
+    /// rescue nothing.
+    #[test]
+    fn a_muxer_that_stalls_for_every_track_ends_none() {
+        assert_eq!(
+            track_holding_the_recording(&[(9_000, Some(40)), (7_000, Some(12))]),
+            None
+        );
+    }
+
+    /// Every source stopped together: nothing is waiting on anything.
+    #[test]
+    fn tracks_that_stop_together_are_left_alone() {
+        assert_eq!(
+            track_holding_the_recording(&[(9_000, Some(0)), (7_000, Some(0))]),
+            None
+        );
+    }
+
+    /// Of two drained tracks, the one splitmuxsink is waiting on is the one that
+    /// has carried the recording least far. A track whose queue could not be read
+    /// is never the one ended.
+    #[test]
+    fn of_several_drained_tracks_the_furthest_behind_is_ended() {
+        assert_eq!(
+            track_holding_the_recording(&[
+                (9_000, Some(40)),
+                (8_000, Some(0)),
+                (6_000, None),
+                (7_000, Some(0)),
+            ]),
+            Some(3)
+        );
     }
 
     /// Ending a track must not take the rest of the seat with it.

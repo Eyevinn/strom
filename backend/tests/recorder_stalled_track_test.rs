@@ -9,11 +9,12 @@
 //! ignores it on a non-reference stream. So the recorder ends the track rather
 //! than trying to keep it idling.
 //!
-//! The two tests are a pair: one asserts that a stopped track does not freeze the
-//! rest, the other that tracks which are still running are left alone. Ending
-//! every track on a timer would satisfy the first and destroy every recording.
-//! The first also pins down *which* track is ended: if the recorder ended the
-//! video track — the one still delivering — no video would reach the muxer either.
+//! The first test asserts that a stopped track does not freeze the rest; the
+//! other two, that tracks which are still running are left alone — both when the
+//! recording is healthy and when the muxer itself stops for a while. Ending every
+//! track on a timer would satisfy the first and destroy every recording. The first
+//! also pins down *which* track is ended: if the recorder ended the video track —
+//! the one still delivering — no video would reach the muxer either.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -322,6 +323,100 @@ fn tracks_that_keep_running_are_left_alone() {
     assert!(
         video_after - video_before >= 45,
         "the video track was ended while it was still delivering: {} buffers reached the muxer in 5 s",
+        video_after - video_before
+    );
+}
+
+/// The muxer stops writing for longer than the stall timeout — a disk or network
+/// share that stalls — while both sources keep delivering. Every track goes quiet
+/// at the muxer, exactly as when one of them dies, but none of them is at fault,
+/// and once the write goes through both have to keep recording.
+///
+/// A watchdog that trusts a frozen recording alone ends one track here, and that
+/// track never comes back: it fails the assertion on the track it picked.
+#[test]
+fn a_muxer_that_stalls_for_every_track_ends_none() {
+    gst::init().expect("gstreamer init");
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements missing");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let media_root = tmp.path();
+    let pipeline = gst::Pipeline::new();
+    let (video_in, audio_in, ctx) = add_recorder(&pipeline, "rec_disk", media_root);
+    feed_video(&pipeline, &video_in, -1);
+    feed_audio(&pipeline, &audio_in, -1);
+    run_setups(&ctx);
+
+    pipeline
+        .set_state(gst::State::Playing)
+        .expect("pipeline accepts PLAYING");
+    let _ = pipeline.state(gst::ClockTime::from_seconds(15));
+    let audio_into_muxer = count_into_muxer(&pipeline, "rec_disk", "audio_0");
+    let video_into_muxer = count_into_muxer(&pipeline, "rec_disk", "video");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Park the muxer's output where its file write would block.
+    let splitmuxsink = pipeline
+        .by_name("rec_disk:splitmuxsink")
+        .expect("splitmuxsink in pipeline")
+        .downcast::<gst::Bin>()
+        .expect("splitmuxsink is a bin");
+    let file_sink_pad = splitmuxsink
+        .iterate_sinks()
+        .into_iter()
+        .filter_map(Result::ok)
+        .find_map(|sink| sink.static_pad("sink"))
+        .expect("splitmuxsink has created its file sink");
+    let block = file_sink_pad
+        .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_pad, _info| {
+            gst::PadProbeReturn::Ok
+        })
+        .expect("block the file sink");
+
+    // Long enough for the stall to reach every input, and then the timeout.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let stalled_from = (
+        audio_into_muxer.load(Ordering::Relaxed),
+        video_into_muxer.load(Ordering::Relaxed),
+    );
+    std::thread::sleep(std::time::Duration::from_secs(7));
+    let stalled_to = (
+        audio_into_muxer.load(Ordering::Relaxed),
+        video_into_muxer.load(Ordering::Relaxed),
+    );
+    file_sink_pad.remove_probe(block);
+
+    // Give the backlog time to drain, then measure.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let (audio_before, video_before) = (
+        audio_into_muxer.load(Ordering::Relaxed),
+        video_into_muxer.load(Ordering::Relaxed),
+    );
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let (audio_after, video_after) = (
+        audio_into_muxer.load(Ordering::Relaxed),
+        video_into_muxer.load(Ordering::Relaxed),
+    );
+    pipeline
+        .set_state(gst::State::Null)
+        .expect("pipeline to NULL");
+
+    // Without a real stall at the muxer pads this test proves nothing.
+    assert_eq!(
+        stalled_to, stalled_from,
+        "blocking the file sink did not stop the muxer taking buffers (audio, video)"
+    );
+    assert!(
+        audio_after - audio_before >= 45,
+        "the audio track was ended during a stall that was not its fault: {} buffers reached the muxer in 5 s after it cleared",
+        audio_after - audio_before
+    );
+    assert!(
+        video_after - video_before >= 45,
+        "the video track was ended during a stall that was not its fault: {} buffers reached the muxer in 5 s after it cleared",
         video_after - video_before
     );
 }
