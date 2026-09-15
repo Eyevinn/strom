@@ -90,6 +90,8 @@ impl PipelineManager {
             cached_state: std::sync::Arc::new(std::sync::RwLock::new(PipelineState::Null)),
             qos_aggregator: QoSAggregator::new(),
             qos_broadcast_task: None,
+            block_health: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
+            block_health_task: None,
             ptp_clock: None,
             ptp_stats: std::sync::Arc::new(std::sync::RwLock::new(None)),
             ntp_clock: None,
@@ -98,6 +100,7 @@ impl PipelineManager {
             whep_endpoints: Vec::new(),
             whip_endpoints: Vec::new(),
             whip_endpoint_configs: Vec::new(),
+            block_liveness: Vec::new(),
             dynamic_webrtcbins: Arc::clone(&dynamic_webrtcbins),
             thumbnail_taps: crate::gst::new_tap_store(),
             thumbnail_deactivation_task: None,
@@ -233,6 +236,7 @@ impl PipelineManager {
         }
         manager.whip_endpoints = expanded.whip_endpoints;
         manager.whip_endpoint_configs = expanded.whip_endpoint_configs;
+        manager.block_liveness = expanded.block_liveness;
 
         // Analyze links and auto-insert tee elements where needed
         let all_links = expanded.links;

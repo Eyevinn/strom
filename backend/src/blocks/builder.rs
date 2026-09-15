@@ -63,6 +63,23 @@ pub type BusWatchSetupFn = BusMessageConnectFn;
 /// The GStreamer element(s) to connect signals on are captured in the closure during build time.
 pub type ElementSetupFn = Box<dyn FnOnce(FlowId, EventBroadcaster) + Send + Sync>;
 
+/// A block that knows something about its own liveness that the flow's
+/// stalled-pad-task scan cannot see.
+///
+/// That scan finds a branch whose pad task was paused, which is how a *blocked*
+/// chain shows up. A chain that is simply never pushed to stalls nothing: every
+/// element in it sits idle and `PLAYING`, and there is no paused task to find.
+/// A block that can tell the difference reports it here.
+///
+/// Polled from the block health task; keep it cheap and free of GStreamer
+/// object references, which would keep the pipeline alive past drop.
+pub trait BlockLiveness: Send + Sync {
+    /// `Some(detail)` when the block is running but not delivering what it was
+    /// built to deliver. Becomes `BlockHealth::detail`, so phrase it for an
+    /// operator reading a log line.
+    fn failure(&self) -> Option<String>;
+}
+
 /// WHIP endpoint registration info (for WHIP Input blocks).
 #[derive(Debug, Clone)]
 pub struct WhipEndpointInfo {
@@ -104,6 +121,8 @@ pub struct BlockBuildContext {
     whip_endpoints: RefCell<Vec<WhipEndpointInfo>>,
     /// WHIP endpoint configs queued for session manager registration
     whip_endpoint_configs: RefCell<Vec<(String, WhipEndpointConfig)>>,
+    /// Per-block liveness reporters queued for the block health scan
+    block_liveness: RefCell<Vec<(String, Arc<dyn BlockLiveness>)>>,
     /// ICE servers for WebRTC NAT traversal (STUN/TURN URLs)
     ice_servers: Vec<String>,
     /// ICE transport policy ("all" or "relay")
@@ -131,6 +150,7 @@ impl BlockBuildContext {
             whep_endpoints: RefCell::new(Vec::new()),
             whip_endpoints: RefCell::new(Vec::new()),
             whip_endpoint_configs: RefCell::new(Vec::new()),
+            block_liveness: RefCell::new(Vec::new()),
             ice_servers,
             ice_transport_policy,
             dynamic_webrtcbins: Arc::new(Mutex::new(HashMap::new())),
@@ -154,6 +174,7 @@ impl BlockBuildContext {
             whep_endpoints: RefCell::new(Vec::new()),
             whip_endpoints: RefCell::new(Vec::new()),
             whip_endpoint_configs: RefCell::new(Vec::new()),
+            block_liveness: RefCell::new(Vec::new()),
             ice_servers,
             ice_transport_policy,
             dynamic_webrtcbins,
@@ -320,6 +341,21 @@ impl BlockBuildContext {
     /// Called after block expansion to register configs with the session manager.
     pub fn take_whip_endpoint_configs(&self) -> Vec<(String, WhipEndpointConfig)> {
         self.whip_endpoint_configs.borrow_mut().drain(..).collect()
+    }
+
+    /// Register a liveness reporter for a block instance.
+    ///
+    /// Called during build by blocks whose failure modes the stalled-pad-task
+    /// scan cannot see; see `BlockLiveness`.
+    pub fn register_block_liveness(&self, block_id: &str, reporter: Arc<dyn BlockLiveness>) {
+        self.block_liveness
+            .borrow_mut()
+            .push((block_id.to_string(), reporter));
+    }
+
+    /// Take all queued block liveness reporters.
+    pub fn take_block_liveness(&self) -> Vec<(String, Arc<dyn BlockLiveness>)> {
+        self.block_liveness.borrow_mut().drain(..).collect()
     }
 
     /// Register an element signal setup function to be called at pipeline start.

@@ -395,6 +395,46 @@ impl eframe::App for StromApp {
                                 }
                             });
                         }
+                        StromEvent::BlockHealthChanged {
+                            flow_id,
+                            block_id,
+                            status,
+                            detail,
+                        } => {
+                            // block_health rides on the Flow payload, so the
+                            // indicator only updates if the flow is refetched.
+                            match status {
+                                strom_types::BlockHealthStatus::Failed => tracing::error!(
+                                    "Block {} in flow {} stopped passing data: {}",
+                                    block_id,
+                                    flow_id,
+                                    detail.as_deref().unwrap_or("no detail")
+                                ),
+                                strom_types::BlockHealthStatus::Ok => {
+                                    tracing::info!("Block {} in flow {} resumed", block_id, flow_id)
+                                }
+                            }
+                            let api = self.api.clone();
+                            let tx = self.channels.sender();
+                            let ctx = ui.ctx().clone();
+
+                            spawn_task(async move {
+                                match api.get_flow(flow_id).await {
+                                    Ok(flow) => {
+                                        let _ = tx.send(AppMessage::FlowFetched(Box::new(flow)));
+                                        ctx.request_repaint();
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to fetch flow after block health change: {}",
+                                            e
+                                        );
+                                        let _ = tx.send(AppMessage::RefreshNeeded);
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            });
+                        }
                         StromEvent::FlowUpdated { flow_id } => {
                             // For updates, fetch the specific flow to update it in-place
                             tracing::info!("Flow {} updated, fetching updated flow", flow_id);
