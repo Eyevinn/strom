@@ -55,6 +55,13 @@ pub(super) fn build_gpu_pipeline(
     // With gl_download=false: mixer → queue_post_dist → tee_pgm → capsfilter(GLMemory) → queue_dist_out
     // The capsfilter on the false path enforces pgm_framerate/resolution while
     // keeping memory in GL — without it, the framerate property is silently ignored.
+    //
+    // These capsfilters carry output_format (see pgm_caps/mv_caps), and keyed
+    // pads still keep their alpha: glvideomixer is a bin whose own converter
+    // absorbs the pin, so the blend stays RGBA in GL memory. Keep a converting
+    // element between the mixer and any format pin — a mixer converts every
+    // sink pad to its own src format, so an alpha-less pin on mixer:src strips
+    // the alpha of every DSK graphic and border underlay feeding it.
     let q_post_dist_id = p.id("queue_post_dist");
     let queue_post_dist = elements::make_queue(&q_post_dist_id)?;
     let tee_pgm_id = p.id("tee_pgm");
