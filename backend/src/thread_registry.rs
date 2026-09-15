@@ -3,6 +3,7 @@
 //! This module maintains a mapping between native thread IDs and the
 //! GStreamer elements that own them, enabling CPU usage correlation.
 
+use crate::thread_handle::ThreadHandle;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,8 +12,9 @@ use strom_types::FlowId;
 /// Information about a registered GStreamer streaming thread.
 #[derive(Debug, Clone)]
 pub struct ThreadInfo {
-    /// Native thread ID (OS-specific)
-    pub thread_id: u64,
+    /// Owned handle to the thread, safe to sample for as long as it is held
+    /// (see [`ThreadHandle`]).
+    pub handle: ThreadHandle,
     /// Name of the GStreamer element that owns this thread
     pub element_name: String,
     /// Flow ID this thread belongs to
@@ -21,6 +23,14 @@ pub struct ThreadInfo {
     pub block_id: Option<String>,
     /// Logical CPUs this thread is pinned to (None if affinity is off)
     pub pinned_cpus: Option<Vec<usize>>,
+}
+
+impl ThreadInfo {
+    /// Native thread ID (OS-specific), used as the registry key and shown in
+    /// the UI.
+    pub fn thread_id(&self) -> u64 {
+        self.handle.id()
+    }
 }
 
 /// Registry for tracking active GStreamer streaming threads.
@@ -41,14 +51,18 @@ impl ThreadRegistry {
     }
 
     /// Register a thread that has entered its streaming loop.
+    ///
+    /// `handle` must have been captured on that thread; the registry owns it
+    /// from here, which is what keeps it valid to sample.
     pub fn register(
         &self,
-        thread_id: u64,
+        handle: ThreadHandle,
         element_name: String,
         flow_id: FlowId,
         block_id: Option<String>,
         pinned_cpus: Option<Vec<usize>>,
     ) {
+        let thread_id = handle.id();
         tracing::debug!(
             "Registered thread {} for element '{}' in flow {}",
             thread_id,
@@ -59,7 +73,7 @@ impl ThreadRegistry {
         threads.insert(
             thread_id,
             ThreadInfo {
-                thread_id,
+                handle,
                 element_name,
                 flow_id,
                 block_id,
@@ -127,21 +141,30 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    /// A handle to a thread that has already exited, which is the interesting
+    /// case: on macOS the registry entry is the only thing keeping its mach
+    /// port name from being freed and recycled.
+    fn handle_from_finished_thread() -> ThreadHandle {
+        std::thread::spawn(ThreadHandle::current).join().unwrap()
+    }
+
     #[test]
     fn test_register_unregister() {
         let registry = ThreadRegistry::new();
         let flow_id = Uuid::new_v4();
+        let handle = handle_from_finished_thread();
+        let thread_id = handle.id();
 
-        registry.register(12345, "element0".to_string(), flow_id, None, None);
+        registry.register(handle, "element0".to_string(), flow_id, None, None);
         assert_eq!(registry.len(), 1);
 
         let threads = registry.get_all();
         assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].thread_id, 12345);
+        assert_eq!(threads[0].thread_id(), thread_id);
         assert_eq!(threads[0].element_name, "element0");
         assert_eq!(threads[0].flow_id, flow_id);
 
-        registry.unregister(12345);
+        registry.unregister(thread_id);
         assert!(registry.is_empty());
     }
 
@@ -151,9 +174,27 @@ mod tests {
         let flow1 = Uuid::new_v4();
         let flow2 = Uuid::new_v4();
 
-        registry.register(1, "elem1".to_string(), flow1, None, None);
-        registry.register(2, "elem2".to_string(), flow1, None, None);
-        registry.register(3, "elem3".to_string(), flow2, None, None);
+        registry.register(
+            handle_from_finished_thread(),
+            "elem1".to_string(),
+            flow1,
+            None,
+            None,
+        );
+        registry.register(
+            handle_from_finished_thread(),
+            "elem2".to_string(),
+            flow1,
+            None,
+            None,
+        );
+        registry.register(
+            handle_from_finished_thread(),
+            "elem3".to_string(),
+            flow2,
+            None,
+            None,
+        );
 
         assert_eq!(registry.len(), 3);
 
@@ -162,5 +203,112 @@ mod tests {
 
         let threads = registry.get_all();
         assert_eq!(threads[0].flow_id, flow2);
+    }
+
+    /// A registered thread's mach port name must stay allocated for as long as
+    /// the registry holds it, so a sampler that reaches the entry after the
+    /// thread has exited cannot hit a name the kernel has handed to another —
+    /// possibly guarded — port.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_registered_thread_keeps_its_port_name_after_exiting() {
+        use crate::thread_handle::mach_port_name_is_allocated;
+
+        let registry = ThreadRegistry::new();
+        let handle = handle_from_finished_thread();
+        let name = handle.mach_port();
+        let thread_id = handle.id();
+
+        registry.register(handle, "elem".to_string(), Uuid::new_v4(), None, None);
+
+        assert!(
+            mach_port_name_is_allocated(name),
+            "registry entry did not keep port name {:#x} allocated",
+            name
+        );
+
+        registry.unregister(thread_id);
+
+        assert!(
+            !mach_port_name_is_allocated(name),
+            "unregister leaked the port reference for name {:#x}",
+            name
+        );
+    }
+
+    /// `get_all` hands out clones that the sampler holds across its mach calls,
+    /// so those clones must keep the port alive even if the thread unregisters
+    /// in between.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_snapshot_outlives_a_concurrent_unregister() {
+        use crate::thread_handle::mach_port_name_is_allocated;
+
+        let registry = ThreadRegistry::new();
+        let handle = handle_from_finished_thread();
+        let name = handle.mach_port();
+        let thread_id = handle.id();
+        registry.register(handle, "elem".to_string(), Uuid::new_v4(), None, None);
+
+        let snapshot = registry.get_all();
+        registry.unregister(thread_id);
+
+        assert!(
+            mach_port_name_is_allocated(name),
+            "a snapshot taken before unregister did not keep port name {:#x} alive",
+            name
+        );
+
+        drop(snapshot);
+        assert!(!mach_port_name_is_allocated(name));
+    }
+
+    /// Every unregister path releases the reference, including dropping the
+    /// registry outright and overwriting an entry with the same key.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn every_removal_path_releases_the_port_reference() {
+        use crate::thread_handle::mach_port_name_is_allocated;
+
+        let flow_id = Uuid::new_v4();
+
+        // unregister_flow
+        let registry = ThreadRegistry::new();
+        let handle = handle_from_finished_thread();
+        let name = handle.mach_port();
+        registry.register(handle, "elem".to_string(), flow_id, None, None);
+        registry.unregister_flow(&flow_id);
+        assert!(
+            !mach_port_name_is_allocated(name),
+            "unregister_flow leaked the reference for name {:#x}",
+            name
+        );
+
+        // Dropping the registry.
+        let registry = ThreadRegistry::new();
+        let handle = handle_from_finished_thread();
+        let name = handle.mach_port();
+        registry.register(handle, "elem".to_string(), flow_id, None, None);
+        drop(registry);
+        assert!(
+            !mach_port_name_is_allocated(name),
+            "dropping the registry leaked the reference for name {:#x}",
+            name
+        );
+
+        // Re-registering the same thread must not leak the displaced entry.
+        let registry = ThreadRegistry::new();
+        let handle = handle_from_finished_thread();
+        let name = handle.mach_port();
+        let thread_id = handle.id();
+        registry.register(handle.clone(), "first".to_string(), flow_id, None, None);
+        registry.register(handle, "second".to_string(), flow_id, None, None);
+        assert_eq!(registry.len(), 1);
+        registry.unregister(thread_id);
+        assert!(
+            !mach_port_name_is_allocated(name),
+            "overwriting an entry leaked the reference for name {:#x}",
+            name
+        );
     }
 }
