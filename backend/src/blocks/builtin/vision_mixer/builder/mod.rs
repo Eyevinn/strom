@@ -162,10 +162,10 @@ impl BlockBuilder for VisionMixerBuilder {
         let backend = super::elements::select_backend(pref)?;
 
         info!(
-            "Building vision mixer: {} inputs, PGM={}x{}@{}/{}, MV={}x{}@{}/{}, backend={:?}, pgm={}, pvw={}",
+            "Building vision mixer: {} inputs, PGM={}x{}@{}/{}, MV={}x{}@{}/{}, backend={:?}, pgm={}, pvw={}, dsk_alpha={:?}",
             num_inputs, pgm_w, pgm_h, pgm_framerate.0, pgm_framerate.1,
             mv_w, mv_h, mv_framerate.0, mv_framerate.1,
-            backend, pgm_input, pvw_input
+            backend, pgm_input, pvw_input, dsk_alpha_modes
         );
 
         let p = PipelineParams {
