@@ -224,6 +224,9 @@ fn replay(port: u16, chunks: &[(gst::ClockTime, gst::Buffer)]) -> gst::Pipeline 
     for (_, buffer) in chunks.iter().filter(|(t, _)| *t < HEAD) {
         appsrc.push_buffer(buffer.copy()).unwrap();
     }
+    for buffer in tables_between(chunks, HEAD, GAP) {
+        appsrc.push_buffer(buffer).unwrap();
+    }
     let start = Instant::now();
     for (t, buffer) in chunks.iter().filter(|(t, _)| *t >= GAP && *t < GAP + LIVE) {
         let due = Duration::from_nanos((*t - GAP).nseconds());
@@ -234,6 +237,62 @@ fn replay(port: u16, chunks: &[(gst::ClockTime, gst::Buffer)]) -> gst::Pipeline 
     }
     std::thread::sleep(Duration::from_millis(300));
     pipeline
+}
+
+const TS_PACKET: usize = 188;
+
+fn ts_pid(packet: &[u8]) -> u16 {
+    (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2])
+}
+
+/// Whether a TS packet starts a PES packet, i.e. carries media rather than
+/// tables.
+fn starts_pes(packet: &[u8]) -> bool {
+    if packet[1] & 0x40 == 0 {
+        return false;
+    }
+    let payload = match (packet[3] >> 4) & 0x3 {
+        1 => 4,
+        3 => 5 + usize::from(packet[4]),
+        _ => return false,
+    };
+    packet.get(payload..payload + 3) == Some(&[0, 0, 1][..])
+}
+
+/// The table packets (PAT, PMT) of the chunks in `[from, to)`, without media.
+///
+/// Keeps the tables continuous across the jump to the live part. GStreamer
+/// 1.24.2, which CI runs, re-applies the PMT after a continuity break and, with
+/// `ignore-pcr`, mistakes it for a new program (fixed in 1.24.3, "mpegtsbase:
+/// Fix Program equality check"). tsdemux then replaces its source pad, the new
+/// pad is not linked, and the stream stops before any live audio leaves the
+/// block.
+fn tables_between(
+    chunks: &[(gst::ClockTime, gst::Buffer)],
+    from: gst::ClockTime,
+    to: gst::ClockTime,
+) -> Vec<gst::Buffer> {
+    let mut media_pids = std::collections::HashSet::new();
+    for (_, buffer) in chunks {
+        let map = buffer.map_readable().unwrap();
+        for packet in map.chunks_exact(TS_PACKET).filter(|p| starts_pes(p)) {
+            media_pids.insert(ts_pid(packet));
+        }
+    }
+    chunks
+        .iter()
+        .filter(|(t, _)| *t >= from && *t < to)
+        .filter_map(|(_, buffer)| {
+            let map = buffer.map_readable().unwrap();
+            let tables: Vec<u8> = map
+                .chunks_exact(TS_PACKET)
+                .filter(|p| !media_pids.contains(&ts_pid(p)))
+                .flatten()
+                .copied()
+                .collect();
+            (!tables.is_empty()).then(|| gst::Buffer::from_mut_slice(tables))
+        })
+        .collect()
 }
 
 /// Stops the named SRT element on its own, then the rest of its pipeline.
