@@ -275,8 +275,11 @@ impl PipelineManager {
                 // A GL-memory producer and a system-memory consumer share no
                 // format. Adapt here, where both pads are known; every other
                 // refusal returns the original error.
-                match crate::gst::gl_link::retry_link_with_gl_download(&src_pad_obj, &sink_pad_obj)
-                {
+                match crate::gst::gl_link::retry_link_with_gl_download(
+                    &src_pad_obj,
+                    &sink_pad_obj,
+                    e,
+                ) {
                     Ok(true) => {}
                     Ok(false) => {
                         return Err(PipelineError::LinkError(
