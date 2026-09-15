@@ -2153,6 +2153,10 @@ pub async fn get_vision_mixer_state(
         .map(|e| e.clone())
         .unwrap_or_default();
 
+    let input_media_age_ms: Vec<Option<u64>> = (0..overlay.num_inputs)
+        .map(|i| overlay.input_media_age_ms(i))
+        .collect();
+
     Ok(Json(strom_types::api::VisionMixerState {
         program_input: overlay.pgm_input(),
         preview_input: overlay.pvw_input(),
@@ -2168,6 +2172,7 @@ pub async fn get_vision_mixer_state(
         fx_available,
         input_effects,
         master_effect,
+        input_media_age_ms,
     }))
 }
 
