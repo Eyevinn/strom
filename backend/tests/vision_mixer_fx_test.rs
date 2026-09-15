@@ -94,7 +94,7 @@ async fn vision_mixer_fx_engine_end_to_end() {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
     let media_path = std::env::temp_dir();
 
     let flow = build_vm_flow();
@@ -373,7 +373,7 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
 
     let mut manager = match PipelineManager::new(
         &flow,
