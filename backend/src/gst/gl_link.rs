@@ -15,20 +15,19 @@
 //!
 //! A `queue` or `identity` front does not open the link: both answer a caps
 //! query by proxying it downstream, so their sink pads advertise whatever the
-//! converter behind them does. Only a front whose src pad stays unlinked until
-//! caps arrive keeps a sink pad that accepts anything, which is why the
-//! Recorder and the MPEG-TS output take a GL input where the Video Encoder
-//! cannot.
+//! converter behind them does.
 //!
-//! [`retry_link_with_gl_download`] runs only after a plain link has failed, and
-//! only when the producer offers GL memory and nothing else while the consumer
-//! wants raw video in system memory. A path that links on its own never reaches
+//! [`retry_link_with_gl_download`] runs only after a plain link has been
+//! refused for want of a common format, and only when the producer offers GL
+//! memory and nothing else while the consumer takes raw video in system memory.
+//! If the adaptation cannot be completed it is undone, so the pads are left as
+//! the refused link left them. A path that links on its own never reaches
 //! this code, so no flow pays for a download it did not need, and CUDA, NVMM,
 //! D3D11 and VA producers are left alone.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use tracing::info;
+use tracing::{info, warn};
 
 /// The caps feature that marks a buffer as living in GL memory.
 const GL_MEMORY_FEATURE: &str = "memory:GLMemory";
@@ -50,13 +49,13 @@ fn offers_only_gl_memory(caps: &gst::Caps) -> bool {
     })
 }
 
-/// True when `caps` offer raw video in something other than GL memory.
+/// True when `caps` accept raw video in system memory.
 ///
 /// This is the consumer half of the test: a `videoconvert` with an encoder
-/// behind it advertises plain `video/x-raw`, which a `gldownload` can feed. A
-/// consumer offering only GL memory, or no raw video at all, is refusing the
-/// link for a reason a download does not address.
-fn accepts_raw_video_outside_gl(caps: &gst::Caps) -> bool {
+/// behind it advertises plain `video/x-raw`, which is what a `gldownload`
+/// produces. A consumer that takes only GPU memory of any kind, or no raw
+/// video at all, is refusing the link for a reason a download does not address.
+fn accepts_system_memory_raw_video(caps: &gst::Caps) -> bool {
     if caps.is_empty() {
         return false;
     }
@@ -65,7 +64,7 @@ fn accepts_raw_video_outside_gl(caps: &gst::Caps) -> bool {
     }
     caps.iter_with_features().any(|(structure, features)| {
         structure.name() == "video/x-raw"
-            && (features.is_any() || !features.contains(GL_MEMORY_FEATURE))
+            && (features.is_any() || features.contains(gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY))
     })
 }
 
@@ -78,17 +77,24 @@ fn accepts_raw_video_outside_gl(caps: &gst::Caps) -> bool {
 /// "anything".
 pub fn needs_gl_download_to_link(src: &gst::Pad, sink: &gst::Pad) -> bool {
     offers_only_gl_memory(&src.query_caps(None))
-        && accepts_raw_video_outside_gl(&sink.query_caps(None))
+        && accepts_system_memory_raw_video(&sink.query_caps(None))
 }
 
-/// Link `src` to `sink` through a `gldownload`, for a pair that has already
-/// refused to link directly.
+/// Link `src` to `sink` through a `gldownload`, for a pair whose direct link was
+/// refused with `refusal`.
 ///
 /// Returns `Ok(false)` when this is not that kind of failure and the caller
 /// should report the original error, `Ok(true)` when the link now stands, and
-/// `Err` when the adaptation was called for but could not be carried out.
-pub fn retry_link_with_gl_download(src: &gst::Pad, sink: &gst::Pad) -> Result<bool, String> {
-    if !needs_gl_download_to_link(src, sink) {
+/// `Err` when the adaptation was called for but could not be carried out. On
+/// `Err` the `gldownload` has been removed again and `src` is unlinked.
+pub fn retry_link_with_gl_download(
+    src: &gst::Pad,
+    sink: &gst::Pad,
+    refusal: gst::PadLinkError,
+) -> Result<bool, String> {
+    // An already-linked pad or a hierarchy mismatch looks the same to the caps
+    // test, but a download does not resolve it.
+    if refusal != gst::PadLinkError::Noformat || !needs_gl_download_to_link(src, sink) {
         return Ok(false);
     }
 
@@ -107,6 +113,34 @@ pub fn retry_link_with_gl_download(src: &gst::Pad, sink: &gst::Pad) -> Result<bo
     bin.add(&gldownload)
         .map_err(|e| format!("gldownload could not be added to {}: {}", bin.name(), e))?;
 
+    if let Err(e) = link_through(src, &gldownload, sink) {
+        // Removing the element from the bin unlinks its pads, so `src` is
+        // left unlinked rather than feeding an element with no output.
+        if let Err(state_error) = gldownload.set_state(gst::State::Null) {
+            warn!("{} could not be set to NULL: {}", name, state_error);
+        }
+        if let Err(remove_error) = bin.remove(&gldownload) {
+            warn!(
+                "{} could not be removed from {}: {}",
+                name,
+                bin.name(),
+                remove_error
+            );
+        }
+        return Err(e);
+    }
+
+    info!(
+        "{} produces GL memory that {} cannot take, inserted {} between them",
+        src.name(),
+        sink.name(),
+        name
+    );
+    Ok(true)
+}
+
+/// Link `src -> gldownload -> sink` and bring the element to its bin's state.
+fn link_through(src: &gst::Pad, gldownload: &gst::Element, sink: &gst::Pad) -> Result<(), String> {
     let download_sink = gldownload
         .static_pad("sink")
         .ok_or_else(|| "gldownload has no sink pad".to_string())?;
@@ -125,14 +159,7 @@ pub fn retry_link_with_gl_download(src: &gst::Pad, sink: &gst::Pad) -> Result<bo
     gldownload
         .sync_state_with_parent()
         .map_err(|e| format!("gldownload could not reach the pipeline state: {}", e))?;
-
-    info!(
-        "{} produces GL memory that {} cannot take, inserted {} between them",
-        src.name(),
-        sink.name(),
-        name
-    );
-    Ok(true)
+    Ok(())
 }
 
 /// Name the inserted element after the pad it feeds, so two request pads on one
@@ -198,19 +225,38 @@ mod tests {
 
     #[test]
     fn a_system_memory_consumer_can_be_fed() {
-        assert!(accepts_raw_video_outside_gl(&caps(
+        assert!(accepts_system_memory_raw_video(&caps(
             "video/x-raw, format=(string){ NV12, I420 }"
         )));
-        assert!(accepts_raw_video_outside_gl(&caps("ANY")));
+        assert!(accepts_system_memory_raw_video(&caps("video/x-raw(ANY)")));
+        assert!(accepts_system_memory_raw_video(&caps("ANY")));
     }
 
-    /// Both ends on the GPU: the link failed over something else.
+    /// A `gldownload` produces system memory, so a consumer that takes only GPU
+    /// memory, of whatever kind, cannot be fed by one.
     #[test]
-    fn a_gl_only_consumer_cannot() {
-        assert!(!accepts_raw_video_outside_gl(&caps(
-            "video/x-raw(memory:GLMemory), format=RGBA"
-        )));
-        assert!(!accepts_raw_video_outside_gl(&caps("EMPTY")));
-        assert!(!accepts_raw_video_outside_gl(&caps("video/x-h264")));
+    fn a_consumer_that_takes_only_gpu_memory_cannot() {
+        for feature in [
+            "memory:GLMemory",
+            "memory:CUDAMemory",
+            "memory:NVMM",
+            "memory:D3D11Memory",
+            "memory:VAMemory",
+        ] {
+            assert!(
+                !accepts_system_memory_raw_video(&caps(&format!(
+                    "video/x-raw({}), format=NV12",
+                    feature
+                ))),
+                "a {} consumer should not be fed through a gldownload",
+                feature
+            );
+        }
+    }
+
+    #[test]
+    fn a_consumer_that_takes_no_raw_video_cannot() {
+        assert!(!accepts_system_memory_raw_video(&caps("EMPTY")));
+        assert!(!accepts_system_memory_raw_video(&caps("video/x-h264")));
     }
 }

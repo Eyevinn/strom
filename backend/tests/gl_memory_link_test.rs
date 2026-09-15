@@ -22,8 +22,9 @@ use strom_types::{Flow, PropertyValue as PV};
 use tempfile::NamedTempFile;
 
 /// `gldownload` and `gltestsrc` both ship in the GL plugin (`gstreamer1.0-gl`
-/// on Ubuntu), which CI installs. A silent skip here would let the guard pass green while testing
-/// nothing, so their absence is a CI regression and must fail.
+/// on Ubuntu), which CI installs. A silent skip here would let the guard pass
+/// green while testing nothing, so their absence is a CI regression and must
+/// fail.
 fn require_gl_plugin() {
     for factory in ["gltestsrc", "gldownload"] {
         assert!(
@@ -84,10 +85,10 @@ fn flow_into_encoder(name: &str, source: strom_types::Element) -> Flow {
     ));
 
     // Consumer chain first, producer last. A block's internal links are made
-    // before the links between blocks, so by the time the flow-level link into it is
-    // attempted the converter already has an encoder behind it and answers a
-    // caps query with system memory only. Linked the other way round the
-    // converter is still unconstrained, advertises `video/x-raw(ANY)`, and
+    // before the links between blocks, so by the time the flow-level link into
+    // it is attempted the converter already has an encoder behind it and
+    // answers a caps query with system memory only. Linked the other way round
+    // the converter is still unconstrained, advertises `video/x-raw(ANY)`, and
     // takes the GL producer unaided — which is not the shape that fails.
     for (from, to) in [
         ("convert:src".to_string(), "enc:sink".to_string()),
@@ -216,5 +217,105 @@ async fn a_gl_only_producer_reaches_the_video_encoder_block() {
         src_pad.is_linked(),
         "glsrc:src has no peer — the Video Encoder block records nothing from a \
          GPU vision mixer"
+    );
+}
+
+/// A bare pipeline holding `elements`, as `(factory, name)`, all unlinked.
+fn bare_pipeline(elements: &[(&str, &str)]) -> (gstreamer::Pipeline, Vec<gstreamer::Element>) {
+    let pipeline = gstreamer::Pipeline::new();
+    let elements: Vec<_> = elements
+        .iter()
+        .map(|(factory, name)| {
+            gstreamer::ElementFactory::make(factory)
+                .name(*name)
+                .build()
+                .unwrap_or_else(|e| panic!("{} could not be created: {}", factory, e))
+        })
+        .collect();
+    pipeline.add_many(&elements).unwrap();
+    (pipeline, elements)
+}
+
+fn gldownloads_in(pipeline: &gstreamer::Pipeline) -> usize {
+    pipeline
+        .children()
+        .iter()
+        .filter(|e| e.factory().is_some_and(|f| f.name() == "gldownload"))
+        .count()
+}
+
+/// A consumer pad that is already linked passes the caps test just as a
+/// system-memory one does, but a download cannot link to it either. The
+/// refusal is not a format one, so it must come back unadapted.
+#[test]
+fn a_link_refused_for_another_reason_is_not_adapted() {
+    gstreamer::init().unwrap();
+    require_gl_plugin();
+
+    let (pipeline, elements) = bare_pipeline(&[
+        ("gltestsrc", "glsrc"),
+        ("videotestsrc", "syssrc"),
+        ("videoconvert", "convert"),
+        ("x264enc", "enc"),
+        ("fakesink", "sink"),
+    ]);
+    gstreamer::Element::link_many(&elements[1..]).unwrap();
+
+    let src = elements[0].static_pad("src").unwrap();
+    let sink = elements[2].static_pad("sink").unwrap();
+    let refusal = src.link(&sink).expect_err("convert:sink is already linked");
+    assert_eq!(refusal, gstreamer::PadLinkError::WasLinked);
+
+    assert_eq!(
+        strom::gst::gl_link::retry_link_with_gl_download(&src, &sink, refusal),
+        Ok(false),
+        "a WasLinked refusal was treated as a memory-format one"
+    );
+    assert_eq!(gldownloads_in(&pipeline), 0);
+    assert!(!src.is_linked());
+}
+
+/// An adaptation that cannot be completed is undone. `gltestsrc` offers RGBA
+/// only, so the `gldownload` behind it cannot produce the I420 the capsfilter
+/// demands: the first half of the splice links and the second is refused.
+#[test]
+fn a_failed_adaptation_leaves_nothing_behind() {
+    gstreamer::init().unwrap();
+    require_gl_plugin();
+
+    let (pipeline, elements) = bare_pipeline(&[
+        ("gltestsrc", "glsrc"),
+        ("capsfilter", "i420"),
+        ("fakesink", "sink"),
+    ]);
+    elements[1].set_property(
+        "caps",
+        gstreamer::Caps::builder("video/x-raw")
+            .field("format", "I420")
+            .build(),
+    );
+    elements[1].link(&elements[2]).unwrap();
+
+    let src = elements[0].static_pad("src").unwrap();
+    let sink = elements[1].static_pad("sink").unwrap();
+    let refusal = src
+        .link(&sink)
+        .expect_err("GL memory into a system-memory capsfilter");
+    assert_eq!(refusal, gstreamer::PadLinkError::Noformat);
+
+    let result = strom::gst::gl_link::retry_link_with_gl_download(&src, &sink, refusal);
+    assert!(
+        result.is_err(),
+        "expected the splice to fail, got {:?}",
+        result
+    );
+    assert_eq!(
+        gldownloads_in(&pipeline),
+        0,
+        "the gldownload from a failed adaptation was left in the pipeline"
+    );
+    assert!(
+        !src.is_linked(),
+        "glsrc:src still feeds the removed gldownload"
     );
 }
