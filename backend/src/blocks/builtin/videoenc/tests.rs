@@ -294,7 +294,8 @@ fn test_encoder_property_setting_x264() {
         "zerolatency",
         RateControl::VBR,
         60,
-    );
+    )
+    .expect("valid properties apply");
 
     // Verify bitrate was set
     let bitrate: u32 = encoder.property("bitrate");
@@ -334,7 +335,8 @@ fn test_encoder_property_setting_nvenc() {
             "zerolatency",
             RateControl::VBR,
             60,
-        );
+        )
+        .expect("valid properties apply");
 
         // Verify bitrate
         let bitrate: u32 = encoder.property("bitrate");
@@ -380,7 +382,8 @@ fn test_gop_size_properties() {
             "zerolatency",
             RateControl::VBR,
             60,
-        );
+        )
+        .expect("valid properties apply");
 
         // x264enc's key-int-max is u32 (guint), not i32 (gint)
         let gop: u32 = encoder.property("key-int-max");
@@ -408,7 +411,8 @@ fn test_gop_size_properties() {
                 "zerolatency",
                 RateControl::VBR,
                 60,
-            );
+            )
+            .expect("valid properties apply");
 
             let gop: i32 = encoder.property("gop-size");
             assert_eq!(
@@ -444,7 +448,8 @@ fn test_gop_size_type_casting() {
             "zerolatency",
             RateControl::VBR,
             *gop_value,
-        );
+        )
+        .expect("valid properties apply");
 
         if *gop_value > 0 {
             // x264enc's key-int-max is u32 (guint), not i32
