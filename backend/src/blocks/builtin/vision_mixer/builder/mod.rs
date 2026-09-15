@@ -276,7 +276,6 @@ impl<'a> PipelineParams<'a> {
     }
 
     /// Build PGM output caps for the GL-memory passthrough path.
-    /// Constrains framerate/resolution without forcing a download to system memory.
     pub(super) fn pgm_caps_glmem(&self) -> gst::Caps {
         self.raw_caps_glmem(self.pgm_w, self.pgm_h, self.pgm_framerate)
     }
