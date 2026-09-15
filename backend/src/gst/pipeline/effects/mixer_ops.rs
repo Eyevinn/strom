@@ -526,10 +526,10 @@ impl PipelineManager {
         }
 
         // Validate bg + zone sources: indices must be in range, must not
-        // overlap each other, and must not equal bg. Empty zones (no sources)
-        // are allowed — they still hold rect/capacity config. Rects are
-        // clamped to [0,1] (silent — clamping is a layout concern, not
-        // semantic state).
+        // overlap each other, must not equal bg, and must fit the zone's
+        // capacity. Empty zones (no sources) are allowed — they still hold
+        // rect/capacity config. Rects are clamped to [0,1] (silent — clamping
+        // is a layout concern, not semantic state).
         if let Some(b) = bg {
             if b >= state.num_inputs {
                 return Err(PipelineError::InvalidProperty {
@@ -545,7 +545,8 @@ impl PipelineManager {
         let mut seen = std::collections::HashSet::new();
         let zones: Vec<strom_types::vision_mixer::Zone> = zones
             .into_iter()
-            .map(|z| {
+            .enumerate()
+            .map(|(zone_idx, z)| {
                 for &input in &z.sources {
                     if input >= state.num_inputs {
                         return Err(PipelineError::InvalidProperty {
@@ -569,6 +570,25 @@ impl PipelineManager {
                             element: block_instance_id.to_string(),
                             property: "zones".to_string(),
                             reason: format!("Zone source {} appears in more than one zone", input),
+                        });
+                    }
+                }
+                // Capacity: reject an over-full zone. `effective_sources`
+                // renders only the newest entries, so a longer stored list
+                // leaves state and picture disagreeing for good. Evicting
+                // the oldest is the client's job (FIFO).
+                if let Some(cap) = z.capacity {
+                    if z.sources.len() > cap {
+                        return Err(PipelineError::InvalidProperty {
+                            element: block_instance_id.to_string(),
+                            property: "zones".to_string(),
+                            reason: format!(
+                                "Zone {} holds {} sources but its capacity is {} \
+                                 (evict oldest first)",
+                                zone_idx,
+                                z.sources.len(),
+                                cap
+                            ),
                         });
                     }
                 }
@@ -597,6 +617,23 @@ impl PipelineManager {
                 })
             })
             .collect::<Result<_, _>>()?;
+
+        // Total overlay pads across every zone. Runs after the per-source
+        // checks so a duplicate or out-of-range index reports itself rather
+        // than inflating this count into a misleading "too many" error.
+        let total_sources: usize = zones.iter().map(|z| z.sources.len()).sum();
+        if total_sources > vision_mixer::MAX_PIP_OVERLAYS {
+            return Err(PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "zones".to_string(),
+                reason: format!(
+                    "{} total sources across {} zones exceeds MAX_PIP_OVERLAYS ({})",
+                    total_sources,
+                    zones.len(),
+                    vision_mixer::MAX_PIP_OVERLAYS
+                ),
+            });
+        }
 
         // Validate transforms: input indices must be in range. Crop fractions
         // are clamped (like rects, clamping is a layout concern) and entries
