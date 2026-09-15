@@ -2764,7 +2764,8 @@ impl AppState {
     }
 
     /// Get RTP statistics for a running flow.
-    /// Returns jitterbuffer statistics from RTP-based blocks like AES67 Input.
+    /// Returns jitterbuffer statistics from RTP-based blocks: AES67 Input, and
+    /// WHIP Input for each seat currently publishing.
     pub async fn get_flow_rtp_stats(
         &self,
         flow_id: &FlowId,
@@ -2780,6 +2781,7 @@ impl AppState {
         Some(StatsCollector::collect_flow_stats(
             pipeline.pipeline(),
             flow,
+            &self.inner.whip_session_manager,
         ))
     }
 

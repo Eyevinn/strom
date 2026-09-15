@@ -139,6 +139,12 @@ pub struct RtpJitterbufferStats {
     pub rtx_per_packet: f64,
     /// Retransmission round-trip time in nanoseconds
     pub rtx_rtt_ns: u64,
+    /// The buffer's configured size in milliseconds.
+    ///
+    /// Reported alongside the measured jitter so the two can be compared: a
+    /// buffer is sized correctly when it comfortably exceeds the jitter the
+    /// stream actually shows, and `num_late` stays at zero.
+    pub latency_ms: u64,
 }
 
 impl RtpJitterbufferStats {
@@ -192,6 +198,17 @@ impl RtpJitterbufferStats {
                     display_name: "Average Jitter".to_string(),
                     description: "Average network jitter".to_string(),
                     unit: Some("ns".to_string()),
+                    category: Some("RTP".to_string()),
+                },
+            },
+            Statistic {
+                id: "latency_ms".to_string(),
+                value: StatValue::Gauge(self.latency_ms as i64),
+                metadata: StatMetadata {
+                    display_name: "Configured Buffer".to_string(),
+                    description: "How much audio or video this jitterbuffer is configured to hold"
+                        .to_string(),
+                    unit: Some("ms".to_string()),
                     category: Some("RTP".to_string()),
                 },
             },
