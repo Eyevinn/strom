@@ -10,7 +10,7 @@
 <body style="display: flex; flex-direction: column; align-items: center;">
     <div class="container">
         <div style="position: relative; margin-bottom: 8px;">
-            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v15</span>
+            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v16</span>
             <h1 style="text-align: center; margin: 0;">WHEP Player at <span id="hostAddress"></span></h1>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em; position: absolute; right: 0; top: 50%; transform: translateY(-50%);">All streams</a>
         </div>
@@ -116,6 +116,11 @@
         let selectedAudioIndex = 0;    // Which track index is currently routed to the audio element
         let availableVideoTracks = []; // Multi-video: tracks received so far
         let selectedVideoIndex = 0;    // Which track index is currently routed to the video element
+        // Listener mute/volume. Audio plays from the video element when the
+        // stream has video and one audio track, and from the audio element
+        // otherwise, so both are kept in step with these.
+        let earMuted = true;
+        let earVolume = 1;
         const MAX_RECONNECT_ATTEMPTS = 15;
         const RECONNECT_DELAY = 10000;
 
@@ -199,6 +204,7 @@
             const audio = document.getElementById('audio');
             const stream = new MediaStream([track]);
             audio.srcObject = stream;
+            applyEarState();
             audio.play().catch(() => {});
             // Restart the meter on the new track.
             startAudioMeter(track);
@@ -248,7 +254,7 @@
             // the audio element / audio-track dropdown).
             video.srcObject = new MediaStream([track]);
             setElementClass('videoContainer', 'active', true);
-            video.muted = true;
+            applyEarState();
             video.play().catch(() => {});
         }
 
@@ -353,6 +359,7 @@
                     // onVideoTrack will move it to the video stream
                     const audio = document.getElementById('audio');
                     audio.srcObject = stream;
+                    applyEarState();
                     audio.play().catch(() => {});
                 },
                 onAudioTracks: (tracks) => {
@@ -389,7 +396,7 @@
                     }
                     video.srcObject = videoStream;
                     setElementClass('videoContainer', 'active', true);
-                    video.muted = true;
+                    applyEarState();
                     video.play().catch(e => {
                         log('Autoplay blocked: ' + e.message, 'warning');
                     });
@@ -447,9 +454,9 @@
                     if (myConnectionId !== connectionId) return; // Stale
                     const isAudioOnly = hasAudio && !hasVideo;
                     setElementClass('audioIndicator', 'active', hasAudio);
-                    // In multi-audio we always need the mute/volume controls
-                    // for the selected track, even when video is also present.
-                    setElementClass('audioControls', 'active', isAudioOnly || multiAudio);
+                    // The media elements start muted, so any stream with audio
+                    // needs the controls or it can never be heard.
+                    setElementClass('audioControls', 'active', hasAudio);
                     hasAudioStream = hasAudio;
                     if (hasVideo && !multiAudio) {
                         // Audio is on the video element now, clear the
@@ -560,36 +567,49 @@
             }
         }
 
-        function toggleMute() {
-            const audio = document.getElementById('audio');
+        function applyEarState() {
+            for (const id of ['audio', 'video']) {
+                const el = document.getElementById(id);
+                el.muted = earMuted;
+                el.volume = earVolume;
+            }
             const muteBtn = document.getElementById('muteBtn');
-            audio.muted = !audio.muted;
-            if (audio.muted) {
-                muteBtn.innerHTML = '&#128263;'; // Muted speaker
-                muteBtn.classList.add('muted');
-            } else {
-                muteBtn.innerHTML = '&#128266;'; // Speaker with sound
-                muteBtn.classList.remove('muted');
-                // Ensure playback after user interaction (autoplay policy)
-                audio.play().catch(() => {});
+            const silent = earMuted || earVolume === 0;
+            muteBtn.innerHTML = silent ? '&#128263;' : '&#128266;';
+            muteBtn.classList.toggle('muted', silent);
+            document.getElementById('volumeSlider').value = Math.round(earVolume * 100);
+            document.getElementById('volumeLabel').textContent = Math.round(earVolume * 100) + '%';
+        }
+
+        function toggleMute() {
+            earMuted = !earMuted;
+            applyEarState();
+            if (!earMuted) {
+                // Runs inside the click, which is what lets autoplay policy
+                // allow audible playback.
+                for (const id of ['audio', 'video']) {
+                    const el = document.getElementById(id);
+                    if (el.srcObject) el.play().catch(() => {});
+                }
                 if (audioMeter) audioMeter.ctx.resume();
             }
         }
 
         function setVolume(value) {
-            const audio = document.getElementById('audio');
-            const volumeLabel = document.getElementById('volumeLabel');
-            const muteBtn = document.getElementById('muteBtn');
-            audio.volume = value / 100;
-            volumeLabel.textContent = value + '%';
-            if (value == 0) {
-                muteBtn.innerHTML = '&#128263;';
-                muteBtn.classList.add('muted');
-            } else if (!audio.muted) {
-                muteBtn.innerHTML = '&#128266;';
-                muteBtn.classList.remove('muted');
-            }
+            earVolume = value / 100;
+            applyEarState();
         }
+
+        // The video element's native controls can mute or change volume on
+        // their own; follow them so the page controls do not contradict it.
+        document.getElementById('video').addEventListener('volumechange', (e) => {
+            const el = e.target;
+            const hasAudio = el.srcObject && el.srcObject.getAudioTracks().length > 0;
+            if (!hasAudio || (el.muted === earMuted && el.volume === earVolume)) return;
+            earMuted = el.muted;
+            earVolume = el.volume;
+            applyEarState();
+        });
 
         function startAudioMeter(track) {
             stopAudioMeter();
