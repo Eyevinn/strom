@@ -5,7 +5,7 @@ mod construction;
 pub(crate) mod effects;
 mod lifecycle;
 mod linking;
-mod properties;
+pub(crate) mod properties;
 mod srt;
 mod state;
 mod webrtc;
