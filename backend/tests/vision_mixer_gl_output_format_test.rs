@@ -39,10 +39,10 @@ fn elem(id: &str, ty: &str, props: Vec<(&str, PV)>) -> strom_types::Element {
 }
 
 /// The GPU backend cannot be built without this factory, so a silent skip here
-/// would let the guard pass green while testing nothing. The GL plugin ships in
-/// `gstreamer1.0-plugins-base`, which CI installs, so its absence is a CI
-/// regression. Only the end-to-end test below needs a GL *context*, which
-/// headless runners do not have.
+/// would let the guard pass green while testing nothing. On Debian and Ubuntu
+/// the GL plugin is packaged as `gstreamer1.0-gl`, which CI installs, so its
+/// absence is a CI regression. Only the end-to-end tests below need a GL
+/// *context*, which headless runners do not have.
 fn require_gl_plugin() {
     assert!(
         gstreamer::ElementFactory::find("glvideomixerelement").is_some(),
@@ -81,8 +81,8 @@ fn gl_environment_available() -> bool {
     ok
 }
 
-/// A vision mixer forced onto the GPU backend with one keyed DSK pad, both
-/// outputs terminated in a sink. `gl_download` selects between the two GPU
+/// A vision mixer forced onto the GPU backend, one input fed, both outputs
+/// terminated in a sink. The DSK pad exists but is left unfed. `gl_download` selects between the two GPU
 /// output shapes: download to system memory, or hand GL memory downstream.
 fn build_flow(gl_download: bool) -> Flow {
     let mut flow = Flow::new(format!("vm_gl_output_format_{}", gl_download));
@@ -186,25 +186,63 @@ fn build_manager(gl_download: bool) -> PipelineManager {
     .expect("build GPU pipeline")
 }
 
+/// Walk upstream from `start` to the element named `origin`, asserting every
+/// hop is linked, and return the names of the elements in between.
+fn upstream_chain(start: &gstreamer::Element, origin: &str) -> Vec<String> {
+    let mut between = Vec::new();
+    let mut elem = start.clone();
+    loop {
+        let sink = elem
+            .static_pad("sink")
+            .unwrap_or_else(|| panic!("{} has no sink pad", elem.name()));
+        let peer = sink.peer().unwrap_or_else(|| {
+            panic!(
+                "{}:sink never linked — the output branch carries no video",
+                elem.name()
+            )
+        });
+        let up = peer.parent_element().expect("linked pad has a parent");
+        if up.name() == origin {
+            return between;
+        }
+        assert!(
+            between.len() < 8,
+            "never reached {} walking upstream from {}: {:?}",
+            origin,
+            start.name(),
+            between
+        );
+        between.push(up.name().to_string());
+        elem = up;
+    }
+}
+
 /// The format pin on each output branch must be reachable and must actually
 /// carry `output_format`. Needs the GL plugin installed but no GL context —
 /// element creation and linking happen in NULL.
 fn assert_output_chain_pins_format(gl_download: bool) {
     let manager = build_manager(gl_download);
+    let pipeline = manager.pipeline();
 
-    for branch in ["dist", "mv"] {
+    // (branch, element the branch starts from)
+    for (branch, origin) in [("dist", "tee_pgm"), ("mv", "queue_post_mv")] {
         let name = format!("{}:capsfilter_{}", BLOCK_ID, branch);
-        let cf = manager
-            .pipeline()
+        let cf = pipeline
             .by_name(&name)
             .unwrap_or_else(|| panic!("{} exists", name));
 
-        let sink = cf.static_pad("sink").expect("capsfilter sink pad");
+        // Every hop back to the branch origin must be linked, and the GL
+        // conversion must sit on it: the capsfilter's own link alone would
+        // still pass with a dead link further up.
+        let chain = upstream_chain(&cf, &format!("{}:{}", BLOCK_ID, origin));
+        let convert = format!("{}:glcolorconvert_{}_out", BLOCK_ID, branch);
         assert!(
-            sink.is_linked(),
-            "{}:sink never linked — the {} output branch carries no video",
-            name,
-            branch
+            chain.contains(&convert),
+            "{} output branch has no {} between {} and its format pin: {:?}",
+            branch,
+            convert,
+            origin,
+            chain
         );
 
         let caps = cf.property::<gstreamer::Caps>("caps");
@@ -219,6 +257,19 @@ fn assert_output_chain_pins_format(gl_download: bool) {
             caps
         );
     }
+
+    // The multiview's PGM tile must not pass through the output conversion,
+    // whether it lands before tee_pgm or on the tile's own branch: mv_comp is
+    // RGBA-only too.
+    let q_pgm_mv = pipeline
+        .by_name(&format!("{}:queue_pgm_mv", BLOCK_ID))
+        .expect("queue_pgm_mv exists");
+    let tile_chain = upstream_chain(&q_pgm_mv, &format!("{}:queue_post_dist", BLOCK_ID));
+    assert!(
+        !tile_chain.iter().any(|n| n.contains("glcolorconvert")),
+        "the multiview PGM tile is fed through a format conversion: {:?}",
+        tile_chain
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -236,16 +287,16 @@ async fn gpu_output_format_links_without_gl_download() {
 }
 
 /// End to end: the requested format has to be *negotiated*, not merely
-/// requested. Needs a working GL context.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gpu_output_format_is_negotiated_end_to_end() {
+/// requested, in the memory type `gl_download` asks for. Needs a working GL
+/// context.
+async fn assert_negotiated_end_to_end(gl_download: bool) {
     gstreamer::init().unwrap();
     if !gl_environment_available() {
         eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
         return;
     }
 
-    let mut manager = build_manager(true);
+    let mut manager = build_manager(gl_download);
     manager.start().expect("start GPU pipeline");
 
     // Count buffers reaching the PGM sink: negotiated caps alone would not
@@ -301,16 +352,28 @@ async fn gpu_output_format_is_negotiated_end_to_end() {
             caps,
             OUTPUT_FORMAT
         );
-        assert!(
-            !caps
-                .features(0)
-                .map(|f| f.contains("memory:GLMemory"))
-                .unwrap_or(false),
-            "capsfilter_{} still carries GL memory with gl_download=true: {}",
-            branch,
-            caps
+        let gl_memory = caps
+            .features(0)
+            .map(|f| f.contains("memory:GLMemory"))
+            .unwrap_or(false);
+        assert_eq!(
+            gl_memory, !gl_download,
+            "capsfilter_{} negotiated the wrong memory type with gl_download={}: {}",
+            branch, gl_download, caps
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gpu_output_format_is_negotiated_with_gl_download() {
+    assert_negotiated_end_to_end(true).await;
+}
+
+/// The passthrough path is the default (`gl_download` is off by default), so
+/// NV12 in GL memory needs the same proof as the download path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gpu_output_format_is_negotiated_without_gl_download() {
+    assert_negotiated_end_to_end(false).await;
 }
 
 /// A flow for the keyed-alpha measurement: a white program input, and on
