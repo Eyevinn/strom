@@ -1,5 +1,6 @@
-//! Regression test: the `/pip` write path must reject a zone whose source
-//! list outgrows its `capacity`.
+//! Regression tests: the `/pip` write path must reject a zone whose source
+//! list outgrows its `capacity`, and must enforce the `MAX_PIP_OVERLAYS`
+//! ceiling only after the per-source checks.
 //!
 //! `Zone::effective_sources` renders only the newest `capacity` entries. The
 //! validator used to copy `sources` through verbatim, so an over-capacity PUT
@@ -13,20 +14,21 @@ use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
-use strom_types::vision_mixer::Zone;
+use strom_types::vision_mixer::{Zone, MAX_NUM_INPUTS, MAX_PIP_OVERLAYS};
 use strom_types::{Flow, PropertyValue};
 use tempfile::NamedTempFile;
 
 const BLOCK_ID: &str = "vm-pip-capacity";
 const NUM_INPUTS: u64 = 4;
+const CEILING_BLOCK_ID: &str = "vm-pip-ceiling";
 
 /// A vision mixer with one PiP, forced onto the CPU compositor. Inputs are
 /// left unlinked, as in `vision_mixer_fx_test` — force-live compositors
 /// output regardless.
-fn build_vm_flow() -> Flow {
+fn build_vm_flow(block_id: &str, num_inputs: u64) -> Flow {
     let mut flow = Flow::new("vm_pip_capacity_test");
     flow.blocks.push(strom_types::BlockInstance {
-        id: BLOCK_ID.to_string(),
+        id: block_id.to_string(),
         block_definition_id: "builtin.vision_mixer".to_string(),
         name: None,
         properties: {
@@ -35,7 +37,7 @@ fn build_vm_flow() -> Flow {
                 "compositor_preference".to_string(),
                 PropertyValue::String("cpu".to_string()),
             );
-            p.insert("num_inputs".to_string(), PropertyValue::UInt(NUM_INPUTS));
+            p.insert("num_inputs".to_string(), PropertyValue::UInt(num_inputs));
             p.insert("num_pips".to_string(), PropertyValue::UInt(1));
             p
         },
@@ -55,8 +57,9 @@ fn zone(capacity: Option<usize>, sources: Vec<usize>) -> Zone {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn over_capacity_zone_is_rejected() {
+/// Builds and starts a CPU vision mixer. The temp file backs the block
+/// registry and must outlive the manager.
+fn start_vm(block_id: &str, num_inputs: u64) -> (PipelineManager, NamedTempFile) {
     gstreamer::init().unwrap();
     // The vision mixer's converters ask for the detected GPU mode, which
     // panics if nothing has probed for it — `main` does this at startup.
@@ -66,7 +69,7 @@ async fn over_capacity_zone_is_rejected() {
     let registry = BlockRegistry::new(temp_file.path());
     let events = EventBroadcaster::new(10);
 
-    let flow = build_vm_flow();
+    let flow = build_vm_flow(block_id, num_inputs);
     let mut manager = PipelineManager::new(
         &flow,
         events,
@@ -79,6 +82,12 @@ async fn over_capacity_zone_is_rejected() {
     )
     .expect("CPU vision mixer pipeline should build");
     manager.start().expect("CPU vision mixer should start");
+    (manager, temp_file)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_capacity_zone_is_rejected() {
+    let (mut manager, _registry_file) = start_vm(BLOCK_ID, NUM_INPUTS);
 
     let transforms = strom_types::vision_mixer::PipTransforms::new();
 
@@ -157,6 +166,76 @@ async fn over_capacity_zone_is_rejected() {
             transforms,
         )
         .expect("an uncapped zone must accept any in-range source list");
+
+    manager.stop().expect("stop failed");
+    drop(manager);
+}
+
+/// The overlay ceiling is reachable only with no bg and every input placed:
+/// `MAX_PIP_OVERLAYS` is `MAX_NUM_INPUTS - 1`, and sources must be distinct
+/// and in range. So this needs a full-size mixer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlay_ceiling_applies_after_source_checks() {
+    let (mut manager, _registry_file) = start_vm(CEILING_BLOCK_ID, MAX_NUM_INPUTS as u64);
+    let transforms = strom_types::vision_mixer::PipTransforms::new();
+    let split = MAX_NUM_INPUTS / 2;
+
+    // Positive control: exactly MAX_PIP_OVERLAYS sources across two uncapped
+    // zones is accepted.
+    manager
+        .apply_vision_mixer_pip_config(
+            CEILING_BLOCK_ID,
+            0,
+            None,
+            vec![
+                zone(None, (0..split).collect()),
+                zone(None, (split..MAX_PIP_OVERLAYS).collect()),
+            ],
+            transforms.clone(),
+        )
+        .expect("MAX_PIP_OVERLAYS sources must be accepted");
+
+    // One over the ceiling, every zone within its capacity and every source
+    // distinct: only the ceiling can reject this.
+    let err = manager
+        .apply_vision_mixer_pip_config(
+            CEILING_BLOCK_ID,
+            0,
+            None,
+            vec![
+                zone(None, (0..split).collect()),
+                zone(None, (split..MAX_NUM_INPUTS).collect()),
+            ],
+            transforms.clone(),
+        )
+        .expect_err("more than MAX_PIP_OVERLAYS sources must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("MAX_PIP_OVERLAYS"),
+        "the rejection must name the overlay ceiling, got: {}",
+        msg
+    );
+
+    // Over the ceiling only because one input is named twice. The duplicate
+    // is the real mistake, so it must be what the error reports; a ceiling
+    // check that runs first reports "too many" instead.
+    let mut second: Vec<usize> = vec![split - 1];
+    second.extend(split..MAX_NUM_INPUTS - 1);
+    let err = manager
+        .apply_vision_mixer_pip_config(
+            CEILING_BLOCK_ID,
+            0,
+            None,
+            vec![zone(None, (0..split).collect()), zone(None, second)],
+            transforms,
+        )
+        .expect_err("a source named in two zones must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("more than one zone") && !msg.contains("MAX_PIP_OVERLAYS"),
+        "a duplicate source must be reported as a duplicate, got: {}",
+        msg
+    );
 
     manager.stop().expect("stop failed");
     drop(manager);
