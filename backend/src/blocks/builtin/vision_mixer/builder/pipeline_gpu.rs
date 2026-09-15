@@ -230,8 +230,8 @@ pub(super) fn build_gpu_pipeline(
 
     // --- Multiview output chain ---
     // queue_post_mv decouples the compositor from downstream processing.
-    // With gl_download=true:  mv_comp → queue_post_mv → gldownload → capsfilter → tee_mv → queue_mv_out
-    // With gl_download=false: mv_comp → queue_post_mv → capsfilter(GLMemory) → tee_mv → queue_mv_out
+    // With gl_download=true:  mv_comp → queue_post_mv → [glcolorconvert] → gldownload → capsfilter → tee_mv → queue_mv_out
+    // With gl_download=false: mv_comp → queue_post_mv → [glcolorconvert] → capsfilter(GLMemory) → tee_mv → queue_mv_out
     // The capsfilter on the false path enforces multiview_framerate/resolution while
     // keeping memory in GL — without it, the framerate property is silently ignored.
     let q_post_mv_id = p.id("queue_post_mv");
