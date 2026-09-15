@@ -160,9 +160,9 @@ pub(super) fn build_cpu_pipeline(
         if p.dsk_premultiplied(i) {
             // `compositor` blends straight alpha only, so a premultiplied
             // source is unpremultiplied first. The element takes packed RGB
-            // with alpha; the converter behind the front brings anything else
-            // (a decoded A420 clip) to that, and passes RGBA-family input
-            // straight through. `vc_id_dsk` then feeds the compositor.
+            // with alpha; the converter behind the front brings other formats
+            // (such as a decoded A420 clip) to that, and passes RGBA-family
+            // input straight through. `vc_id_dsk` then feeds the compositor.
             if !unpremultiply::register() {
                 return Err(BlockBuildError::ElementCreation(format!(
                     "DSK{} is premultiplied but {} could not be registered",
