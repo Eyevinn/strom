@@ -8,6 +8,7 @@ use strom_types::vision_mixer::{
 };
 use strom_types::FlowId;
 use strom_types::PropertyValue;
+use tracing::warn;
 
 /// Parse the owning flow id, injected as `_flow_id` by block expansion.
 ///
@@ -39,15 +40,24 @@ pub fn parse_num_dsk_inputs(properties: &HashMap<String, PropertyValue>) -> usiz
 }
 
 /// Parse each DSK input's alpha mode. Missing or unrecognised values are
-/// straight, which is what the compositors assume.
+/// straight, which is what the compositors assume; unrecognised ones are
+/// logged, since the only symptom on air is a graphic that is too dark.
 pub fn parse_dsk_alpha_modes(
     properties: &HashMap<String, PropertyValue>,
     num_dsk_inputs: usize,
 ) -> Vec<AlphaMode> {
     (0..num_dsk_inputs)
-        .map(|i| match properties.get(&dsk_alpha_mode_property(i)) {
-            Some(PropertyValue::String(s)) => s.parse().unwrap_or_default(),
-            _ => AlphaMode::default(),
+        .map(|i| {
+            let name = dsk_alpha_mode_property(i);
+            let parsed = match properties.get(&name) {
+                None => return AlphaMode::default(),
+                Some(PropertyValue::String(s)) => s.parse().map_err(|e| format!("{s:?}: {e}")),
+                Some(other) => Err(format!("{other:?} is not a string")),
+            };
+            parsed.unwrap_or_else(|e| {
+                warn!("{name} = {e}; using straight");
+                AlphaMode::default()
+            })
         })
         .collect()
 }
