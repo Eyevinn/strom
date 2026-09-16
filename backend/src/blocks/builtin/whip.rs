@@ -599,6 +599,83 @@ fn wait_for_inactivity(
     }
 }
 
+/// Drain one `whipserversrc` pad into the session pipeline: `pad → tee →
+/// fakesink + appsink`, with every element brought up to the pipeline's state.
+///
+/// Returns the appsink the caller installs its bridge callbacks on, or `None`
+/// if the branch could not be built — every failure is logged here.
+///
+/// Both sinks run with `async` off. The pipeline they join is already PLAYING,
+/// and a sink that still wants a preroll answers the state change with ASYNC.
+/// whipserversrc adds its audio and video pads one after the other within a
+/// millisecond, so the second branch lands while the first is still waiting,
+/// and the second is then left below PLAYING: it takes a single buffer and
+/// blocks its streaming thread for good. From the outside that is a publisher
+/// whose audio or video never starts, with nothing in the log to say so —
+/// `sync_state_with_parent` reports the state change as accepted either way.
+pub fn attach_session_branch(
+    session_pipeline: &gst::Pipeline,
+    pad: &gst::Pad,
+    appsink_name: &str,
+) -> Option<gst_app::AppSink> {
+    let tee = match gst::ElementFactory::make("tee")
+        .property("allow-not-linked", true)
+        .build()
+    {
+        Ok(t) => t,
+        Err(e) => {
+            error!("WHIP Input: Failed to create tee in pad-added: {}", e);
+            return None;
+        }
+    };
+    let fakesink = match gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .property("async", false)
+        .build()
+    {
+        Ok(f) => f,
+        Err(e) => {
+            error!("WHIP Input: Failed to create fakesink in pad-added: {}", e);
+            return None;
+        }
+    };
+    let appsink = gst_app::AppSink::builder()
+        .name(appsink_name)
+        .sync(false)
+        .async_(false)
+        .build();
+
+    if let Err(e) = session_pipeline.add_many([&tee, &fakesink, appsink.upcast_ref()]) {
+        error!(
+            "WHIP Input: Failed to add elements to session pipeline: {}",
+            e
+        );
+        return None;
+    }
+    if let Err(e) = pad.link(&tee.static_pad("sink").expect("tee has no sink pad")) {
+        error!("WHIP Input: Failed to link pad to tee: {:?}", e);
+        return None;
+    }
+    if let (Some(tee_src1), Some(tee_src2)) = (
+        tee.request_pad_simple("src_%u"),
+        tee.request_pad_simple("src_%u"),
+    ) {
+        let _ = tee_src1.link(
+            &fakesink
+                .static_pad("sink")
+                .expect("fakesink has no sink pad"),
+        );
+        let _ = tee_src2.link(&appsink.static_pad("sink").expect("appsink has no sink pad"));
+    } else {
+        error!("WHIP Input: Failed to request tee src pads");
+        return None;
+    }
+    let _ = tee.sync_state_with_parent();
+    let _ = fakesink.sync_state_with_parent();
+    let _ = appsink.sync_state_with_parent();
+    Some(appsink)
+}
+
 /// Create a new whipserversrc element for a single WHIP client session.
 ///
 /// Each session runs in its own isolated GStreamer pipeline to avoid
@@ -878,54 +955,13 @@ pub fn create_whipserversrc_for_session(
                 return;
             };
 
-            // Session pipeline: pad → tee → fakesink (drain) + appsink (bridge)
-            let tee = match gst::ElementFactory::make("tee")
-                .property("allow-not-linked", true)
-                .build()
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    error!("WHIP Input: Failed to create tee in pad-added: {}", e);
-                    return;
-                }
+            let Some(appsink) = attach_session_branch(
+                &session_pipeline,
+                pad,
+                &format!("{}:{}_appsink_{}", prefix, pad_name, stream_num),
+            ) else {
+                return;
             };
-            let fakesink = match gst::ElementFactory::make("fakesink")
-                .property("sync", false)
-                .property("async", false)
-                .build()
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    error!("WHIP Input: Failed to create fakesink in pad-added: {}", e);
-                    return;
-                }
-            };
-            let appsink = gst_app::AppSink::builder()
-                .name(format!("{}:{}_appsink_{}", prefix, pad_name, stream_num))
-                .sync(false)
-                .build();
-
-            if let Err(e) = session_pipeline.add_many([&tee, &fakesink, appsink.upcast_ref()]) {
-                error!("WHIP Input: Failed to add elements to session pipeline: {}", e);
-                return;
-            }
-            if let Err(e) = pad.link(&tee.static_pad("sink").expect("tee has no sink pad")) {
-                error!("WHIP Input: Failed to link pad to tee: {:?}", e);
-                return;
-            }
-            if let (Some(tee_src1), Some(tee_src2)) = (
-                tee.request_pad_simple("src_%u"),
-                tee.request_pad_simple("src_%u"),
-            ) {
-                let _ = tee_src1.link(&fakesink.static_pad("sink").expect("fakesink has no sink pad"));
-                let _ = tee_src2.link(&appsink.static_pad("sink").expect("appsink has no sink pad"));
-            } else {
-                error!("WHIP Input: Failed to request tee src pads");
-                return;
-            }
-            let _ = tee.sync_state_with_parent();
-            let _ = fakesink.sync_state_with_parent();
-            let _ = appsink.sync_state_with_parent();
 
             // Determine which slot appsrc to feed based on pad type
             let target_appsrc: Option<gst_app::AppSrc> =
