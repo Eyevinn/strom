@@ -12,6 +12,26 @@ use super::mixer_layout::{
     pads_for_source,
 };
 
+/// Name the animated PiP-aware take `outgoing` → `incoming` produces.
+///
+/// The animated path is not always a dissolve: a source present in both
+/// compositions animates position+size instead of cross-fading, so a four-up
+/// taken to that participant full frame reads as a zoom, and reports "morph".
+fn animated_kind(
+    outgoing: &[crate::gst::transitions::PadTarget],
+    incoming: &[crate::gst::transitions::PadTarget],
+) -> &'static str {
+    use crate::gst::transitions::{plan_transition, PadAction};
+    let moves = plan_transition(outgoing, incoming)
+        .iter()
+        .any(|(_, action)| matches!(action, PadAction::Morph { .. }));
+    if moves {
+        "morph"
+    } else {
+        "fade"
+    }
+}
+
 impl PipelineManager {
     /// Trigger a transition on a compositor/mixer block.
     ///
@@ -23,8 +43,9 @@ impl PipelineManager {
     /// Returns `(was_ftb_cancelled, old_pgm, new_pgm, actual_kind)`. The two
     /// middle elements are `None` when the corresponding bus is a PiP source.
     /// `actual_kind` is the transition that actually ran — differs from
-    /// `transition_type` when the engine downgraded the request (e.g. Slide
-    /// across heterogeneous PiP/input sources downgrades to "fade").
+    /// `transition_type` when the engine downgraded the request (Slide across
+    /// heterogeneous PiP/input sources downgrades to "fade") and when an
+    /// animated take moved a shared source instead of dissolving ("morph").
     pub fn trigger_transition(
         &self,
         block_instance_id: &str,
@@ -368,9 +389,11 @@ impl PipelineManager {
                     new_pvw_pip,
                     new_pvw_swap,
                 );
-                // After the downgrade guard above, the PiP-aware branch only
-                // ever runs a Cut or a Fade.
-                let actual_kind = if is_cut { "cut" } else { "fade" }.to_string();
+                let actual_kind = if is_cut {
+                    "cut".to_string()
+                } else {
+                    animated_kind(&old_dist_targets, &new_dist_targets).to_string()
+                };
                 return Ok((was_ftb, old_pgm, new_pgm_swap, actual_kind));
             }
         }
@@ -494,5 +517,50 @@ impl PipelineManager {
             trans_type.to_string()
         };
         Ok((was_ftb, old_pgm, new_pgm, actual_kind))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::animated_kind;
+    use crate::gst::transitions::PadTarget;
+
+    fn pad(idx: usize, x: i32, y: i32, w: i32, h: i32) -> PadTarget {
+        PadTarget {
+            pad_idx: idx,
+            x,
+            y,
+            w,
+            h,
+            zorder: 10,
+            underlay: None,
+        }
+    }
+
+    #[test]
+    fn disjoint_compositions_report_fade() {
+        // Nothing is shared between the two looks, so every pad cross-fades.
+        let old = vec![pad(0, 0, 0, 640, 720), pad(1, 640, 0, 640, 720)];
+        let new = vec![pad(2, 0, 0, 640, 720), pad(3, 640, 0, 640, 720)];
+        assert_eq!(animated_kind(&old, &new), "fade");
+    }
+
+    #[test]
+    fn shared_source_that_moves_reports_morph() {
+        // Input 1 is a quadrant in the outgoing look and full frame in the
+        // incoming one: it animates, and the audience sees a zoom, not a
+        // dissolve.
+        let old = vec![pad(0, 0, 0, 640, 360), pad(1, 640, 0, 640, 360)];
+        let new = vec![pad(1, 0, 0, 1280, 720)];
+        assert_eq!(animated_kind(&old, &new), "morph");
+    }
+
+    #[test]
+    fn shared_source_that_stays_put_reports_fade() {
+        // Input 0 keeps its exact box, so it is affirmed rather than morphed;
+        // the visible change is input 1 fading out and input 2 fading in.
+        let old = vec![pad(0, 0, 0, 640, 360), pad(1, 640, 0, 640, 360)];
+        let new = vec![pad(0, 0, 0, 640, 360), pad(2, 640, 0, 640, 360)];
+        assert_eq!(animated_kind(&old, &new), "fade");
     }
 }

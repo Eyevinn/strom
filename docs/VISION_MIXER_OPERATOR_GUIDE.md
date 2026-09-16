@@ -263,6 +263,10 @@ just like a regular input.
 
 ### 4.3 How the operator configures a PiP
 
+> Driving the same compositions from a control surface or script instead of the page?
+> See the [Producer Switching over the API guide](PRODUCER_SWITCHING_API_GUIDE.md) for
+> the call-by-call recipes, what an on-air layout edit looks like, and the failure modes.
+
 A PiP is configured at runtime from the **operator control page** served
 by the backend. Press **Edit** on a PiP row to open the layout editor —
 two side-by-side panels:

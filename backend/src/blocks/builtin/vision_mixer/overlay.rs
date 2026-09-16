@@ -123,6 +123,10 @@ pub struct VisionMixerOverlayState {
     pub pgm_peak: AtomicU8,
     /// Quantized decay (0..255) for the PGM audio input; max of L/R.
     pub pgm_decay: AtomicU8,
+    /// Milliseconds after `instant_base` at which each input last delivered a
+    /// buffer to the dist compositor, or [`NO_MEDIA`] when it never has.
+    /// Written from a BUFFER pad probe, so it stays one relaxed store.
+    input_last_buffer_ms: Vec<AtomicU64>,
 }
 
 /// Initial PiP runtime state passed to [`VisionMixerOverlayState::new`].
@@ -146,6 +150,10 @@ pub const NO_PIP: u64 = u64::MAX;
 /// Sentinel for "no input source on this bus" in [`VisionMixerOverlayState::pgm_input`]
 /// / `pvw_input` (e.g. when the bus shows a PiP composition instead).
 pub const NO_SOURCE: u64 = u64::MAX;
+
+/// Sentinel for "this input has never delivered a buffer" in
+/// [`VisionMixerOverlayState::input_media_age_ms`].
+const NO_MEDIA: u64 = u64::MAX;
 
 impl VisionMixerOverlayState {
     #[allow(clippy::too_many_arguments)]
@@ -223,7 +231,32 @@ impl VisionMixerOverlayState {
             input_decay: (0..num_inputs).map(|_| AtomicU8::new(0)).collect(),
             pgm_peak: AtomicU8::new(0),
             pgm_decay: AtomicU8::new(0),
+            input_last_buffer_ms: (0..num_inputs).map(|_| AtomicU64::new(NO_MEDIA)).collect(),
         }
+    }
+
+    /// Stamp input `i` as having just delivered a buffer.
+    ///
+    /// Called from a BUFFER pad probe — the hottest path in the pipeline — so
+    /// it does no more than read the monotonic clock and store one atomic.
+    pub fn note_input_buffer(&self, i: usize) {
+        if let Some(slot) = self.input_last_buffer_ms.get(i) {
+            let ms = self.instant_base.elapsed().as_millis() as u64;
+            slot.store(ms, Ordering::Relaxed);
+        }
+    }
+
+    /// Milliseconds since input `i` last delivered a buffer to the mixer.
+    ///
+    /// `None` means it has never delivered one. A value that keeps growing is
+    /// a frozen input: the compositor repeats its last frame indefinitely, so
+    /// the picture alone cannot distinguish that from a motionless source.
+    pub fn input_media_age_ms(&self, i: usize) -> Option<u64> {
+        let last = self.input_last_buffer_ms.get(i)?.load(Ordering::Relaxed);
+        if last == NO_MEDIA {
+            return None;
+        }
+        Some((self.instant_base.elapsed().as_millis() as u64).saturating_sub(last))
     }
 
     /// Returns the PiP index currently displayed on PGM, or `None` if PGM
