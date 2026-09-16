@@ -14,7 +14,7 @@
 //! Unspecified properties allow passthrough - elements will not modify those aspects.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gpu::video_convert_mode;
+use crate::gpu::{self, video_convert_mode};
 use gstreamer as gst;
 use std::collections::HashMap;
 use strom_types::{
@@ -126,6 +126,7 @@ impl BlockBuilder for VideoFormatBuilder {
             .map_err(|e| {
                 BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
             })?;
+        gpu::configure_video_convert(&videoconvert);
 
         // capsfilter with caps (only constraints specified properties)
         let caps = caps_str.parse::<gst::Caps>().map_err(|_| {

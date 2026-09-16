@@ -5,7 +5,7 @@
 //! Requires the NDI SDK from NewTek/Vizrt to be installed.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
-use crate::gpu::video_convert_mode;
+use crate::gpu::{self, video_convert_mode};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -217,6 +217,7 @@ impl BlockBuilder for NDIInputBuilder {
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
                     })?;
+                gpu::configure_video_convert(&videoconvert);
 
                 let video_caps = gst::Caps::builder("video/x-raw").build();
                 let videocaps = gst::ElementFactory::make("capsfilter")
@@ -304,6 +305,7 @@ impl BlockBuilder for NDIInputBuilder {
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
                     })?;
+                gpu::configure_video_convert(&videoconvert);
 
                 let caps = gst::Caps::builder("video/x-raw").build();
                 let capsfilter = gst::ElementFactory::make("capsfilter")
@@ -499,6 +501,7 @@ impl BlockBuilder for NDIOutputBuilder {
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
                     })?;
+                gpu::configure_video_convert(&videoconvert);
 
                 // Audio path
                 let audioconvert_id = format!("{}:audioconvert", instance_id);
@@ -585,6 +588,7 @@ impl BlockBuilder for NDIOutputBuilder {
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!("{}: {}", convert_element_name, e))
                     })?;
+                gpu::configure_video_convert(&videoconvert);
 
                 let ndisink = gst::ElementFactory::make("ndisink")
                     .name(&ndisink_id)
