@@ -675,3 +675,48 @@ fn other_audio_codecs_are_refused_and_named() {
         message
     );
 }
+
+/// Every audio refusal must name the block that fixes it, the way the video
+/// refusal names `builtin.videoenc`.
+///
+/// `builtin.audioenc` encodes raw audio to AAC, Opus, MP3 or AC-3, so it is the
+/// one answer to all three refusals: whatever reached this block, putting that
+/// one in front with `codec=aac` produces audio flvmux accepts. Without the name
+/// in the message an operator has to know the block exists, and the two most
+/// likely wrong moves, changing the RTMP URL or the container, both leave the
+/// flow just as broken.
+#[test]
+fn every_audio_refusal_names_the_audio_encoder_block() {
+    let refusals = [
+        ("MP3", audio_plan("audio/mpeg", 1, 3)),
+        ("MPEG-1 layer 2", audio_plan("audio/mpeg", 1, 2)),
+        ("Opus", audio_plan("audio/x-opus", 0, 0)),
+        ("AC-3", audio_plan("audio/x-ac3", 0, 0)),
+    ];
+    for (what, result) in refusals {
+        let message = result.expect_err(&format!("{} must be refused", what));
+        assert!(
+            message.contains("builtin.audioenc"),
+            "the {} refusal must name the block to add, got: {}",
+            what,
+            message
+        );
+    }
+}
+
+/// `builtin.audioenc` on its default codec must produce audio this block parses
+/// rather than re-encodes.
+///
+/// The two blocks agree today only because `audioenc` emits
+/// `audio/mpeg,mpegversion=4` and `audio_plan` reads mpegversion 2 and 4 as AAC.
+/// Nothing links those two facts, so this pins the pairing: if either side
+/// changes what it calls AAC, an `audioenc -> rtmp_output` flow would silently
+/// take the encode path and run a second encoder over already-encoded audio.
+#[test]
+fn audioenc_default_output_takes_the_parse_only_path() {
+    assert_eq!(
+        audio_plan("audio/mpeg", 4, 0),
+        Ok(AudioPlan::Parse),
+        "builtin.audioenc emits audio/mpeg,mpegversion=4 on its default codec"
+    );
+}

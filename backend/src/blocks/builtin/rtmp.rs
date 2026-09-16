@@ -14,22 +14,27 @@
 //! Two reasons, and the second is the one that bites.
 //!
 //! FLV carries a small closed set of codecs, so the muxer needs H.264 and AAC
-//! whatever arrives. The audio side therefore has to encode raw input, because
-//! **no block produces AAC as its output**: `avenc_aac` and `opusenc` exist
-//! only inside `builtin.mpegtssrt_output`, `builtin.whip_output` and
-//! `builtin.efpsrt_output` as internal chains, and there is no audio encoder
-//! block the way `builtin.videoenc` is one for video.
+//! whatever arrives. Both forms therefore have to be accepted on the audio pad:
+//! raw is encoded here, AAC is parsed only.
 //!
-//! So a block that demanded encoded AAC on its pad could be fed only by an
-//! input block in passthrough mode, where the encoded stream comes from
-//! upstream rather than from Strom: `builtin.mpegtssrt_input`, or
-//! `builtin.media_player`, whose passthrough pipeline is
-//! `urisourcebin(parse-streams=true)` and so emits AAC from an AAC-bearing
-//! file. AAC is the criterion rather than encoded audio, which is why
-//! `builtin.efpsrt_input` is not a third: its passthrough carries Opus, and FLV
-//! cannot. Neither carries a mixed programme, which is the point: `builtin.mixer`
-//! outputs raw audio, so encoding inside this block is what makes it usable
-//! downstream of mixing at all.
+//! **Raw is encoded in the block, even though `builtin.audioenc` exists.** That
+//! block encodes raw audio to AAC, Opus, MP3 or AC-3, so it is a real route to
+//! this one and the supported one when the bitrate, sample rate or channel count
+//! matter: put it in front, leave its codec on `aac`, and this block takes the
+//! parse-only path. It is not made mandatory, because `builtin.mixer` outputs
+//! raw audio and the common case is a mixed programme going straight out. The
+//! three other output blocks that speak a muxed container,
+//! `builtin.mpegtssrt_output`, `builtin.whip_output` and
+//! `builtin.efpsrt_output`, all encode raw audio internally for the same reason,
+//! and an output that refused raw would be the odd one out.
+//!
+//! Audio is deliberately asymmetric with video for that reason rather than by
+//! omission, and the asymmetry is in the defaults, not in what is possible: an
+//! H.264 encoder has a bitrate and a profile an operator has to choose, so
+//! `builtin.videoenc` is required and raw video is refused; an AAC encoder at
+//! 128 kbps is a reasonable default nobody needs to see. Encoded audio that is
+//! not AAC is refused with a message naming `builtin.audioenc`, since FLV cannot
+//! carry it whatever produced it.
 //!
 //! # Why the pads are reserved before the pipeline starts, not from the probes
 //!
@@ -88,14 +93,22 @@
 //! programme feed, a typo that quietly drops encryption is the failure worth
 //! refusing, so `parse_rtmp_location` names what is wrong instead.
 //!
-//! **No secret in an RTMP URL reaches a log, and there are three of them.**
-//! `user:pass@`, the stream key in the last path segment, and any token in a
-//! query string. The stream key is the one worth naming: for most servers it is
-//! the whole authorisation, which is exactly why the section above calls it the
-//! only thing protecting the feed, so logging it would contradict that. All
-//! three are masked by `redact_location`, which everything logged here goes
-//! through; the host and the application survive so a line can still be
+//! **No secret in an RTMP URL reaches a log from this block, and there are three
+//! of them.** `user:pass@`, the stream key in the last path segment, and any
+//! token in a query string. The stream key is the one worth naming: for most
+//! servers it is the whole authorisation, which is exactly why the section above
+//! calls it the only thing protecting the feed, so logging it would contradict
+//! that. All three are masked by `redact_location`, which everything logged here
+//! goes through; the host and the application survive so a line can still be
 //! attributed to an output.
+//!
+//! **"from this block" is load-bearing, and was measured rather than assumed.**
+//! The API's flow-create handler logs the whole request body at `debug`, so a
+//! `location` carrying a stream key is already in the log before this block is
+//! ever built. Redacting here is still worth doing: these are the lines emitted
+//! on every start, at `info`, which is the level a deployment actually runs at.
+//! But it does not make the URL a secret, and a reader of this module should not
+//! conclude that it does.
 //!
 //! `rtmp2sink` lifts `user:pass@` into its own `username` and `password`
 //! properties, so reading the property back is safe. The string the operator
@@ -109,11 +122,11 @@
 //!
 //! # Video is expected to arrive encoded
 //!
-//! Deliberately asymmetric with audio, and for a reason rather than by
-//! omission: `builtin.videoenc` already exposes encoded H.264 on an
-//! `encoded_out` pad, so the operator has a block for it, and encoding video
-//! inside an output block would hide a codec choice that belongs in the graph.
-//! Raw video is refused with a message naming that block.
+//! `builtin.videoenc` exposes encoded H.264 on an `encoded_out` pad, so the
+//! operator has a block for it, and encoding video inside an output block would
+//! hide a bitrate and profile choice that belongs in the graph. Raw video is
+//! refused with a message naming that block. See the audio section above for why
+//! the two sides differ.
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -720,22 +733,29 @@ pub fn video_plan(caps_name: &str) -> Result<(), String> {
 /// 44100 Hz, per `flvmux`'s own sink caps, but this block does not implement
 /// that path: it would need a rate check and a resample, and every producer we
 /// care about emits AAC or raw.
+///
+/// Every refusal names `builtin.audioenc`, because that block is the fix for all
+/// of them: it takes whatever raw or encoded audio reached it and emits AAC.
 pub fn audio_plan(caps_name: &str, mpegversion: i32, layer: i32) -> Result<AudioPlan, String> {
     match caps_name {
         "audio/x-raw" => Ok(AudioPlan::Encode),
         "audio/mpeg" if mpegversion == 2 || mpegversion == 4 => Ok(AudioPlan::Parse),
         "audio/mpeg" if mpegversion == 1 && layer == 3 => Err(
             "RTMP Output needs AAC or raw audio, but its audio input carries MP3. \
-                 FLV can carry MP3 and this block does not implement that path"
+                 FLV can carry MP3 and this block does not implement that path. \
+                 Set builtin.audioenc's codec to aac, or feed this block raw audio"
                 .to_string(),
         ),
         "audio/mpeg" => Err(format!(
             "RTMP Output needs AAC or raw audio, but its audio input carries MPEG-{} \
-             audio layer {}, which FLV cannot carry",
+             audio layer {}, which FLV cannot carry. Set builtin.audioenc's codec \
+             to aac, or feed this block raw audio",
             mpegversion, layer
         )),
         other => Err(format!(
-            "RTMP Output needs AAC or raw audio, but its audio input carries {}",
+            "RTMP Output needs AAC or raw audio, but its audio input carries {}, \
+             which flvmux cannot mux. Set builtin.audioenc's codec to aac, or feed \
+             this block raw audio",
             other
         )),
     }
@@ -1015,8 +1035,9 @@ fn rtmp_output_definition() -> BlockDefinition {
         id: "builtin.rtmp_output".to_string(),
         name: "RTMP Output".to_string(),
         description: "Publish a programme to an RTMP server, muxed as FLV. Takes H.264 \
-                      video, so place a Video Encoder before it; audio may be raw or AAC \
-                      and is encoded here when raw."
+                      video, so place a Video Encoder before it. Audio may be raw or AAC: \
+                      raw is encoded here, or place an Audio Encoder set to AAC before it \
+                      to choose the bitrate, sample rate and channel count yourself."
             .to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
