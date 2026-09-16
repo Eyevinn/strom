@@ -326,7 +326,7 @@ pub fn build_whipserversrc(
 
     // Jitterbuffer latency: how long to buffer before dropping/releasing packets.
     // Left unset, webrtcbin defaults to 200ms, which combined with
-    // drop-on-latency=true (below) can be too tight for an initial video
+    // drop-on-latency (below, on by default) can be too tight for an initial video
     // keyframe's packet burst on a freshly-created per-session pipeline,
     // causing the whole video stream to stall (never reaching decodebin)
     // even though the packets arrived fine over the network.
