@@ -16,6 +16,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 ## Using Strom
 
 - [VISION_MIXER_OPERATOR_GUIDE.md](VISION_MIXER_OPERATOR_GUIDE.md) — broadcast PVW/PGM switcher: transitions, DSK, PiP, multiview.
+- [PRODUCER_SWITCHING_API_GUIDE.md](PRODUCER_SWITCHING_API_GUIDE.md) — driving the vision mixer over HTTP: PiP layout recipes, on-air edits, failure modes.
 - [AUDIO_MIXER_OPERATOR_GUIDE.md](AUDIO_MIXER_OPERATOR_GUIDE.md) — audio mixing console signal flow and operation.
 - [HTML_RENDER.md](HTML_RENDER.md) — render web pages as video sources (CEF / `strom-full`).
 - [STREAM_SYNCHRONIZATION.md](STREAM_SYNCHRONIZATION.md) — aligning multiple inputs with PTP/NTP clocks.
@@ -26,7 +27,7 @@ palette and inspector — the code is the source of truth. Older block design wr
 
 ## API & integration
 
-- [MCP.md](MCP.md) — Model Context Protocol server (AI assistant integration).
+- [MCP.md](MCP.md) — Model Context Protocol endpoint (AI assistant integration).
 - [INTEGRATION.md](INTEGRATION.md) — MCP / OpenAPI integration overview.
 - Interactive OpenAPI docs are served at `/swagger-ui` on a running instance.
 

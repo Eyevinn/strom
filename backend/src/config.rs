@@ -442,7 +442,12 @@ mod tests {
         assert!(config.database_url.is_none());
     }
 
+    // Serialized with its neighbours: from_figment reads `.strom.toml` from the
+    // process working directory, which those tests move into a TempDir and then
+    // delete. Without the lock this test can pick up their config file and try to
+    // create a data directory that is being torn down.
     #[test]
+    #[serial]
     fn test_from_figment_cli_args_override() {
         let temp_dir = TempDir::new().unwrap();
         let flows = temp_dir.path().join("flows.json");

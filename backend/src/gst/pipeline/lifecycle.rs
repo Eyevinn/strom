@@ -1,5 +1,5 @@
 use super::{PipelineError, PipelineManager};
-use crate::gst::thread_priority;
+use crate::gst::{rtp_hdrext, thread_priority};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use strom_types::PipelineState;
@@ -10,6 +10,11 @@ impl PipelineManager {
     pub fn start(&mut self) -> Result<PipelineState, PipelineError> {
         info!("Starting pipeline: {}", self.flow_name);
         info!("Pipeline has {} elements", self.elements.len());
+
+        // Disable RTP header extension aggregation before any state changes, so
+        // the handler is in place before decodebin can autoplug a depayloader.
+        // Works around gstreamer#5057, which aborts the whole process.
+        rtp_hdrext::install(&self.pipeline);
 
         // Set up thread priority handler FIRST (before any state changes)
         // This must be done before the pipeline starts so we catch all thread enter events
