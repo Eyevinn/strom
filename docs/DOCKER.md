@@ -69,7 +69,7 @@ The [`Dockerfile`](../Dockerfile) uses a multi-stage build on Ubuntu 25.10 (Ques
 provides GStreamer 1.26 with the nvcodec fix:
 
 1. **Frontend builder** — builds the WASM frontend (platform-independent output).
-2. **Backend builder** — builds the backend and the MCP server, optionally cross-compiling
+2. **Backend builder** — builds the backend, optionally cross-compiling
    for ARM64 via Zig (targets an older glibc for broad compatibility — see
    [CROSS_COMPILE_ARM64.md](CROSS_COMPILE_ARM64.md)).
 3. **Runtime** — minimal Ubuntu with the GStreamer runtime plugins and the GL/EGL libraries
