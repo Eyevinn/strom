@@ -148,6 +148,14 @@ jobs:
       - name: Run tests on shared types
         run: cargo test --package strom-types
 
+      # The frontend's own tests are plain logic (no wasm, no GL), so this
+      # Linux job is the only place they need to run. The wasm job below
+      # cannot reach them: they are gated not(target_arch = "wasm32"), and a
+      # cfg(test) module is not built for a crate pulled in as a dependency,
+      # so without this step frontend test code is neither run nor compiled.
+      - name: Run tests on frontend
+        run: cargo test --package strom-frontend
+
   # WASM: clippy + build frontend
   check-wasm:
     name: Check & Build (WASM)
