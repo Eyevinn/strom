@@ -37,8 +37,9 @@ impl PipelineManager {
         // Take the connect functions (they're FnOnce, so we consume them)
         let connect_fns = std::mem::take(&mut self.block_message_connect_fns);
         for connect_fn in connect_fns {
-            // Each block's connect_fn calls bus.add_signal_watch() and bus.connect_message()
-            // add_signal_watch is ref-counted so multiple calls are safe
+            // Each block's connect_fn calls bus.connect_message(). It does not
+            // take a signal watch of its own — the single one below covers
+            // every handler on this bus.
             let handler_id = connect_fn(&bus, flow_id, events_for_blocks.clone());
             debug!("Successfully connected block message handler");
             self.block_message_handlers.push(handler_id);
@@ -51,9 +52,10 @@ impl PipelineManager {
             debug!("Successfully called element signal setup");
         }
 
-        // Enable signal watch on the bus (ref-counted, safe to call multiple times)
-        // This allows using connect_message for multiple handlers
+        // Enable signal watch on the bus. This is what makes connect_message
+        // fire at all, for every handler connected above and below.
         bus.add_signal_watch();
+        self.bus_signal_watches += 1;
 
         // Set up main pipeline message handler using connect_message
         let flow_name = self.flow_name.clone();
@@ -231,16 +233,19 @@ impl PipelineManager {
                 "Disconnecting {} message handler(s) for flow: {}",
                 handler_count, self.flow_name
             );
+            // remove_signal_watch is ref-counted — each add_signal_watch call
+            // needs exactly one matching remove, and a surplus one is a
+            // GStreamer CRITICAL. Take the count from the adds; the handler
+            // count is a different number, since a block may register a
+            // message handler without taking a watch of its own.
+            let watch_count = std::mem::take(&mut self.bus_signal_watches);
+
             // Disconnect signal handlers from the bus
             if let Some(bus) = self.pipeline.bus() {
                 for handler_id in self.block_message_handlers.drain(..) {
                     bus.disconnect(handler_id);
                 }
-                // remove_signal_watch is ref-counted — each add_signal_watch call
-                // needs a matching remove. handler_count matches the number of
-                // add_signal_watch calls: one per block connect_fn plus one in
-                // setup_bus_watch (which also adds the main handler to the list).
-                for _ in 0..handler_count {
+                for _ in 0..watch_count {
                     bus.remove_signal_watch();
                 }
             } else {

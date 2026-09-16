@@ -56,6 +56,29 @@ fn gl_environment_available() -> bool {
     ok
 }
 
+/// Skip unless GL actually works — but only where skipping is legitimate.
+///
+/// A headless Linux runner has the GL elements installed and still cannot create
+/// a context, so this test can only ever run where one exists. That makes the skip
+/// path the normal path on Linux, and a silent one: a real GL regression on a
+/// platform that *can* render would slip through as a green 0.05 s pass.
+///
+/// `STROM_REQUIRE_GL=1` turns the skip into a failure. CI sets it on the macOS job,
+/// which is the one platform whose runner renders, so that job cannot quietly stop
+/// exercising the FX engine.
+fn gl_available_or_required() -> bool {
+    if gl_environment_available() {
+        return true;
+    }
+    assert!(
+        strom_types::env::var_opt("STROM_REQUIRE_GL").is_none(),
+        "STROM_REQUIRE_GL is set but no GL context could be created — this platform \
+         is supposed to render, so a skip here would hide a GL regression"
+    );
+    eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    false
+}
+
 /// A flow with a single vision mixer block forced onto the GPU backend.
 /// Inputs are left unlinked — force-live compositors output regardless.
 fn build_vm_flow() -> Flow {
@@ -87,8 +110,7 @@ fn build_vm_flow() -> Flow {
 async fn vision_mixer_fx_engine_end_to_end() {
     gstreamer::init().unwrap();
 
-    if !gl_environment_available() {
-        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    if !gl_available_or_required() {
         return;
     }
 
@@ -265,8 +287,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     use gstreamer::prelude::*;
     gstreamer::init().unwrap();
 
-    if !gl_environment_available() {
-        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    if !gl_available_or_required() {
         return;
     }
 
@@ -421,18 +442,29 @@ async fn wipe_between_letterboxed_sources_animates() {
             "BGRA" | "BGRx" => (2, 1, 0),
             other => panic!("unexpected PGM format {}", other),
         };
+        // Sample every STRIDE-th pixel rather than all of them. These are flat
+        // colour fields, so the fractions are unchanged, but the scan runs in a
+        // sixteenth of the time — and this loop runs unoptimised under `cargo
+        // test`, between two pulls from an appsink set to `max-buffers=1
+        // drop=true`. A slow scan there is not merely slow: the wipe being
+        // measured lasts two seconds, and a scan that outlasts it makes the
+        // observer skip from the frame before the wipe to the frame after it and
+        // conclude the wipe never animated.
+        const STRIDE: usize = 4;
         let mut white = 0u64;
         let mut red = 0u64;
-        let total = (w * h) as u64;
-        for px in map.chunks_exact(4).take(w * h) {
+        let mut total = 0u64;
+        for px in map.chunks_exact(4).take(w * h).step_by(STRIDE) {
             let (r, g, b) = (px[ri], px[gi], px[bi]);
             if r > 200 && g > 200 && b > 200 {
                 white += 1;
             } else if r > 200 && g < 80 && b < 80 {
                 red += 1;
             }
+            total += 1;
         }
-        (white as f64 / total as f64, red as f64 / total as f64)
+        let total = total.max(1) as f64;
+        (white as f64 / total, red as f64 / total)
     };
 
     // Debug aid: verify the source branches are actually linked.
@@ -442,22 +474,33 @@ async fn wipe_between_letterboxed_sources_animates() {
         eprintln!("{} sink linked: {}", name, linked);
     }
 
-    // First frame: a cold software-GL CI runner can take many seconds to
-    // produce it (GL context creation + llvmpipe shader JIT) — poll
-    // generously instead of a single short pull.
-    let first = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            if let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) {
-                break s;
+    // Opening picture: wait for the mixer to be composing PGM, not merely for a
+    // frame to exist. A cold software-GL CI runner takes many seconds to reach
+    // steady state (GL context creation + llvmpipe shader JIT), and the frames it
+    // emits on the way there are black — the compositor is running before the
+    // source pads have delivered anything. The fixed settle sleep above is not a
+    // guarantee, so poll for the picture itself rather than asserting on whichever
+    // frame happens to arrive first.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let (w0, r0) = loop {
+        if let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) {
+            let f = fractions_of(&s);
+            if f.0 > 0.5 {
+                break f;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PGM never settled on a mostly-white picture within 30s, last frame white={:.2} red={:.2}",
+                f.0,
+                f.1
+            );
+        } else {
             assert!(
                 std::time::Instant::now() < deadline,
                 "no PGM frame within 30s of start"
             );
         }
     };
-    let (w0, r0) = fractions_of(&first);
     assert!(w0 > 0.5, "PGM should start mostly white, got {}", w0);
     assert!(r0 < 0.05, "no red expected before take, got {}", r0);
 

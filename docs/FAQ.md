@@ -75,7 +75,7 @@ fallback). The Video Encoder block picks the best available encoder; its propert
 in-app inspector are the authoritative list.
 
 ### How do I integrate with an AI assistant (Claude, etc.)?
-Strom speaks the Model Context Protocol over HTTP (`/api/mcp`) and stdio. See [MCP.md](MCP.md).
+Strom speaks the Model Context Protocol over HTTP at `/api/mcp`. See [MCP.md](MCP.md).
 
 ## Troubleshooting
 

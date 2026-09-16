@@ -23,7 +23,12 @@
 //!
 //! The sink itself stays locked until a track's caps arrive, so a recorder whose input
 //! never carries data cannot hold the pipeline out of PLAYING (see
-//! `prepare_idle_recording_sink`).
+//! `prepare_idle_recording_sink`). The `ts_passthrough` multifilesink is locked the same
+//! way, from the single caps probe on its static input.
+//!
+//! A track that carried data and then stopped is a different matter: splitmuxsink goes on
+//! waiting for it and the whole recording freezes. `spawn_track_stall_watchdog` ends such
+//! a track so the others keep recording.
 //!
 //! Output files are written to: {media_path}/{output_dir}/{filename_prefix}_%05d.{ext}
 
@@ -33,8 +38,9 @@ use gst::glib::prelude::ToValue;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use strom_types::{
     block::{EnumValue, *},
     PropertyValue, *,
@@ -63,19 +69,367 @@ pub const SPLITMUXSINK_SUFFIX: &str = "splitmuxsink";
 /// PLAYING — and a flow where only some inputs are live has recorders in
 /// exactly that position. Locked, the sink sits in NULL and writes no file
 /// until `activate_recording_sink` brings it in on a track's first caps.
-fn prepare_idle_recording_sink(splitmuxsink: &gst::Element) {
-    splitmuxsink.set_locked_state(true);
+fn prepare_idle_recording_sink(sink: &gst::Element) {
+    sink.set_locked_state(true);
 }
 
 /// Bring the recording sink into the running pipeline, from the caps probe of a
 /// track that is about to be linked to it. Idempotent across tracks.
-fn activate_recording_sink(splitmuxsink: &gst::Element, instance_id: &str) {
-    splitmuxsink.set_locked_state(false);
-    if let Err(e) = splitmuxsink.sync_state_with_parent() {
+fn activate_recording_sink(sink: &gst::Element, instance_id: &str) {
+    sink.set_locked_state(false);
+    if let Err(e) = sink.sync_state_with_parent() {
         error!(
-            "Recorder {}: failed to sync splitmuxsink with pipeline state: {}",
+            "Recorder {}: failed to sync recording sink with pipeline state: {}",
             instance_id, e
         );
+    }
+}
+
+/// How long the muxer may accept nothing at all before the recorder ends the
+/// track it is waiting for.
+///
+/// The trigger is the whole recording being frozen, not one quiet input, so this
+/// is already well past anything a live source does normally — a WHIP seat's
+/// jitter buffer runs at 400 ms. Ending a track is not reversible: the recording
+/// keeps the tracks that are still running, but the one that ended does not come
+/// back. That is why a frozen recording is not enough on its own, and the queues
+/// feeding the muxer have to show one track dry while another is backed up (see
+/// `watch_tracks`).
+const TRACK_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the stall watchdog looks. Also how quickly it notices the pipeline
+/// is gone and stops.
+const TRACK_STALL_POLL: Duration = Duration::from_millis(500);
+
+/// What the stall watchdog knows about one track, written by that track's probes.
+struct TrackActivity {
+    /// Milliseconds since the recorder's epoch when the muxer last took a buffer
+    /// from this track. 0 = it never has.
+    last_muxed_ms: AtomicU64,
+    /// Running time of that buffer, in milliseconds: how far this track has carried
+    /// the recording, in the form splitmuxsink compares between its pads.
+    last_muxed_running_ms: AtomicU64,
+    /// `base - start` of this track's segment, added to a PTS to reach running time.
+    running_time_offset_ns: AtomicI64,
+    /// Set once this track has left the recording — the watchdog ended it, or the
+    /// caps probe handed its sink pad back. The input probe then drops buffers, so
+    /// upstream never sees the flow error a dead branch would return: a WHIP seat's
+    /// encoder feeds the vision mixer through the same tee, and must not be stopped
+    /// along with the recording.
+    retired: AtomicBool,
+}
+
+/// A track the stall watchdog is responsible for.
+struct WatchedTrack {
+    /// "video 0" / "audio 1" — for the log line, built once at setup.
+    label: String,
+    input: gst::glib::WeakRef<gst::Element>,
+    /// The splitmuxsink sink pad this track holds. Its peer is the track's queue.
+    muxer_pad: gst::glib::WeakRef<gst::Pad>,
+    activity: Arc<TrackActivity>,
+}
+
+/// Drop this track's buffers at the block boundary once it has left the recording.
+///
+/// Without it the branch answers upstream with a flow error, and a WHIP seat's
+/// encoder — which feeds the vision mixer through the same tee — stops with it.
+///
+/// It has to be the identity's **sink** pad. `end_stalled_track` retires a track by
+/// pushing EOS out of the src pad, and `gst_pad_push` answers `GST_FLOW_EOS` from
+/// that sticky flag before it dispatches any probe — so a drop probe on the src pad
+/// stops running at the one moment it is needed.
+///
+/// Events have to be dropped as well as buffers, and that is what makes this a
+/// correctness matter rather than a tidiness one. An encoder upstream of the block
+/// emits a sticky TAG event every so often. Forwarding one into a pad that already
+/// carries EOS fails, `push_sticky` turns that refusal into `GST_FLOW_ERROR`, and
+/// the error travels back to the seat's source, which pauses its streaming task and
+/// never restarts. A buffer probe alone lets those events straight through.
+///
+/// Flush events are deliberately not covered: they carry pad state that has to
+/// reach the branch even after it has left the recording.
+///
+/// These are the hottest paths in the pipeline, so this is one relaxed atomic load
+/// and nothing else.
+fn add_retired_input_probe(pad: &gst::Pad, activity: &Arc<TrackActivity>) {
+    let activity = Arc::clone(activity);
+    pad.add_probe(
+        gst::PadProbeType::BUFFER
+            | gst::PadProbeType::BUFFER_LIST
+            | gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_pad, _info| {
+            if activity.retired.load(Ordering::Relaxed) {
+                gst::PadProbeReturn::Drop
+            } else {
+                gst::PadProbeReturn::Ok
+            }
+        },
+    );
+}
+
+/// Record what the muxer takes from this track: when, and how far it carried the
+/// recording. Measured at the splitmuxsink sink pad rather than at the block's
+/// input, because the input goes quiet whatever the cause — once the muxer stops,
+/// backpressure reaches every input within a second and they all look equally
+/// dead.
+///
+/// Position is kept as running time, not as the raw PTS. The two are far apart
+/// here — a WHIP seat's video arrives with a timestamp offset its audio does not
+/// have — and running time is what splitmuxsink itself compares between pads, so
+/// it is the only form in which two tracks can be ranked against each other.
+///
+/// A buffer with no PTS is dropped: `mp4mux` answers one with "Buffer has no PTS"
+/// and errors the whole pipeline, which takes the seat's video with it. `aacparse`
+/// emits one when it drains a partial frame at EOS, so ending a track produces
+/// exactly this buffer.
+///
+/// The segment arrives as an event, and events on a muxer sink pad are rare, so
+/// the conversion is folded into an offset there and the buffer path stays at two
+/// relaxed atomic stores plus `Instant::elapsed` on the vDSO fast path.
+fn add_muxer_intake_probe(pad: &gst::Pad, activity: &Arc<TrackActivity>, epoch: Instant) {
+    let segment_activity = Arc::clone(activity);
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = info.data.as_ref() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Segment(segment) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if let Some(segment) = segment.segment().downcast_ref::<gst::ClockTime>() {
+            let base = segment.base().unwrap_or(gst::ClockTime::ZERO).nseconds() as i64;
+            let start = segment.start().unwrap_or(gst::ClockTime::ZERO).nseconds() as i64;
+            segment_activity
+                .running_time_offset_ns
+                .store(base - start, Ordering::Relaxed);
+        }
+        gst::PadProbeReturn::Ok
+    });
+
+    let activity = Arc::clone(activity);
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+        let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Some(pts) = buffer.pts() else {
+            return gst::PadProbeReturn::Drop;
+        };
+        let offset_ns = activity.running_time_offset_ns.load(Ordering::Relaxed);
+        let running_ns = (pts.nseconds() as i64).saturating_add(offset_ns).max(0);
+        activity
+            .last_muxed_running_ms
+            .store(running_ns as u64 / 1_000_000, Ordering::Relaxed);
+        activity
+            .last_muxed_ms
+            .store(epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// End a track, so the muxer stops waiting for it.
+///
+/// splitmuxsink holds a GOP until every one of its sink pads has advanced past it,
+/// so a single track that stops freezes the whole recording — and, through the tee
+/// that feeds the recorder, every other branch of that source with it. EOS is what
+/// takes a pad out of that wait. A GAP event does not: splitmuxsink ignores it on a
+/// non-reference stream, so the track has to end rather than idle.
+///
+/// The EOS is pushed from the watchdog thread rather than from an IDLE probe. By
+/// the time a track has stalled, the thread that fed it is usually parked inside
+/// `gst_pad_push` on this very pad, so the pad never goes idle and an IDLE probe
+/// would never run. An identity src pad has no task of its own, so its stream lock
+/// is free and the push goes straight through.
+fn end_stalled_track(input: &gst::Element, activity: &TrackActivity) {
+    if activity.retired.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(pad) = input.static_pad("src") else {
+        return;
+    };
+    if !pad.push_event(gst::event::Eos::new()) {
+        warn!(
+            "Recorder: {} refused the EOS that would end its track — the recording stays stalled",
+            pad.parent()
+                .map(|p| p.name().to_string())
+                .unwrap_or_default()
+        );
+    }
+}
+
+/// Watch the recording and end a track that has stopped the muxer.
+///
+/// Only tracks that hold a splitmuxsink pad are watched, and only from the muxer's
+/// first buffer on that pad. A connected track that never carries one is not
+/// covered: the muxer does wait for it just the same, but the timeout would then be
+/// counting against a publisher that has not connected yet, whose track is meant to
+/// start late.
+///
+/// The thread holds weak references only and stops within a poll interval of the
+/// pipeline being torn down, so it cannot outlive its flow.
+fn spawn_track_stall_watchdog(
+    instance_id: &str,
+    splitmuxsink: &gst::Element,
+    tracks: Vec<WatchedTrack>,
+    epoch: Instant,
+) {
+    if tracks.len() < 2 {
+        // One track cannot be held up by another, and ending it would end the
+        // recording rather than rescue it.
+        return;
+    }
+    let splitmuxsink_weak = splitmuxsink.downgrade();
+    let block_id = instance_id.to_string();
+
+    let spawned = std::thread::Builder::new()
+        .name(format!("rec-stall-{}", instance_id))
+        .spawn(move || watch_tracks(&block_id, splitmuxsink_weak, &tracks, epoch));
+
+    if let Err(e) = spawned {
+        error!(
+            "Recorder {}: failed to start the track stall watchdog: {} — a track that stops will freeze this recording",
+            instance_id, e
+        );
+    }
+}
+
+/// Buffers waiting in the queue that feeds this splitmuxsink pad, or `None` while
+/// the track's chain is not linked yet.
+///
+/// Reading the level takes the queue's lock. Its streaming threads release that
+/// lock while they wait on a full queue or push downstream, so a stalled muxer
+/// cannot block the watchdog here.
+fn queued_buffers(muxer_pad: &gst::Pad) -> Option<u32> {
+    let queue = muxer_pad.peer()?.parent_element()?;
+    queue
+        .has_property("current-level-buffers")
+        .then(|| queue.property::<u32>("current-level-buffers"))
+}
+
+/// Which frozen track, if any, is holding the recording up. Each entry is a track's
+/// running time and the level of its queue.
+///
+/// Every track being quiet at the muxer does not mean one of them died: a muxer
+/// that stops writing — a stalled disk, slow network storage — freezes every track
+/// at once. The queue in front of each pad tells the two apart. A track whose
+/// source stopped has handed its last buffers to the muxer, so its queue is empty;
+/// a track the muxer is refusing fills its queue. A track is held responsible only
+/// when its queue is empty and another track's queue is backed up behind it. All
+/// backed up is the muxer itself; all empty is every source stopping together,
+/// where no track is waiting on another.
+///
+/// Among the empty ones, splitmuxsink waits on whichever has carried the recording
+/// least far, so that is the one to end — the same choice it is making internally.
+fn track_holding_the_recording(tracks: &[(u64, Option<u32>)]) -> Option<usize> {
+    let backed_up = tracks.iter().any(|(_, level)| level.is_some_and(|n| n > 0));
+    if !backed_up {
+        return None;
+    }
+    tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, level))| *level == Some(0))
+        .min_by_key(|(_, (running_ms, _))| *running_ms)
+        .map(|(index, _)| index)
+}
+
+/// The watchdog loop. Returns once the pipeline is gone or every track has ended.
+fn watch_tracks(
+    block_id: &str,
+    splitmuxsink: gst::glib::WeakRef<gst::Element>,
+    tracks: &[WatchedTrack],
+    epoch: Instant,
+) {
+    let timeout_ms = TRACK_STALL_TIMEOUT.as_millis() as u64;
+
+    // When the last track was ended. Ending one frees the others, but not within a
+    // poll interval: without a pause here the whole recording is ended track by
+    // track before the first one has taken effect.
+    let mut last_end_ms: Option<u64> = None;
+
+    // Whether the current freeze has already been reported as the muxer's own, so
+    // a long storage stall logs once rather than on every poll.
+    let mut reported_muxer_stall = false;
+
+    loop {
+        std::thread::sleep(TRACK_STALL_POLL);
+
+        // The pipeline is gone: nothing left to watch.
+        if splitmuxsink.upgrade().is_none() {
+            return;
+        }
+
+        let now_ms = epoch.elapsed().as_millis() as u64;
+        let mut live = Vec::with_capacity(tracks.len());
+        let mut still_watching = 0usize;
+
+        for track in tracks {
+            if track.activity.retired.load(Ordering::Relaxed) {
+                continue;
+            }
+            let Some(input) = track.input.upgrade() else {
+                continue;
+            };
+            still_watching += 1;
+
+            let last_ms = track.activity.last_muxed_ms.load(Ordering::Relaxed);
+            if last_ms == 0 {
+                continue;
+            }
+            let queued = track
+                .muxer_pad
+                .upgrade()
+                .and_then(|pad| queued_buffers(&pad));
+            live.push((
+                track,
+                input,
+                now_ms.saturating_sub(last_ms),
+                track.activity.last_muxed_running_ms.load(Ordering::Relaxed),
+                queued,
+            ));
+        }
+
+        if still_watching == 0 {
+            return;
+        }
+
+        // The whole recording has to be frozen before anything is ended. One quiet
+        // input proves nothing: whichever track stopped, the muxer blocks and every
+        // other input backs up behind it within a second, so a machine that is
+        // merely overloaded looks exactly the same from any single input.
+        let frozen = live.len() > 1
+            && !last_end_ms.is_some_and(|t| now_ms.saturating_sub(t) < timeout_ms)
+            && live
+                .iter()
+                .all(|(_, _, quiet_ms, _, _)| *quiet_ms >= timeout_ms);
+        if !frozen {
+            reported_muxer_stall = false;
+            continue;
+        }
+
+        let positions: Vec<(u64, Option<u32>)> = live
+            .iter()
+            .map(|(_, _, _, running_ms, queued)| (*running_ms, *queued))
+            .collect();
+        let Some(index) = track_holding_the_recording(&positions) else {
+            if !reported_muxer_stall && positions.iter().all(|(_, q)| q.is_some_and(|n| n > 0)) {
+                warn!(
+                    "Recorder {}: nothing muxed for {}s with every track backed up — the muxer or its storage is stalled, so no track is ended",
+                    block_id,
+                    live.iter().map(|(_, _, quiet_ms, _, _)| *quiet_ms).min().unwrap_or(0) / 1000
+                );
+                reported_muxer_stall = true;
+            }
+            continue;
+        };
+        let (track, input, quiet_ms, running_ms, _) = live.swap_remove(index);
+        warn!(
+            "Recorder {}: nothing muxed for {}s and {} has run dry at {}ms while another track is backed up — ending that track so the rest of the recording continues",
+            block_id,
+            quiet_ms / 1000,
+            track.label,
+            running_ms
+        );
+        end_stalled_track(&input, &track.activity);
+        last_end_ms = Some(now_ms);
     }
 }
 
@@ -398,6 +752,11 @@ impl BlockBuilder for RecorderBuilder {
         let mut video_input_weaks: Vec<gst::glib::WeakRef<gst::Element>> = Vec::new();
         let mut audio_input_weaks: Vec<gst::glib::WeakRef<gst::Element>> = Vec::new();
 
+        // Track liveness, for the stall watchdog the setup hook starts.
+        let stall_epoch = Instant::now();
+        let mut video_activities: Vec<Arc<TrackActivity>> = Vec::new();
+        let mut audio_activities: Vec<Arc<TrackActivity>> = Vec::new();
+
         // --- Create video input chains ---
         for vi in 0..num_video_tracks {
             let video_input_id = format!("{}:video_input_{}", instance_id, vi);
@@ -420,6 +779,19 @@ impl BlockBuilder for RecorderBuilder {
             let src_pad = video_input.static_pad("src").ok_or_else(|| {
                 BlockBuildError::ElementCreation("video identity has no src pad".to_string())
             })?;
+            let sink_pad_for_drops = video_input.static_pad("sink").ok_or_else(|| {
+                BlockBuildError::ElementCreation("video identity has no sink pad".to_string())
+            })?;
+
+            let activity = Arc::new(TrackActivity {
+                last_muxed_ms: AtomicU64::new(0),
+                last_muxed_running_ms: AtomicU64::new(0),
+                running_time_offset_ns: AtomicI64::new(0),
+                retired: AtomicBool::new(false),
+            });
+            add_retired_input_probe(&sink_pad_for_drops, &activity);
+            let probe_activity = Arc::clone(&activity);
+            video_activities.push(activity);
 
             src_pad.add_probe(
                 gst::PadProbeType::EVENT_DOWNSTREAM,
@@ -474,8 +846,13 @@ impl BlockBuilder for RecorderBuilder {
                     };
 
                     // Every path that gives up below must hand the pad back, or splitmuxsink
-                    // waits on it forever and the recording stalls.
-                    let give_pad_back = || splitmuxsink.release_request_pad(&sink_pad);
+                    // waits on it forever and the recording stalls. Retiring the track with
+                    // it takes it off the stall watchdog, which has nothing left to end, and
+                    // drops the buffers that would otherwise be pushed into the dead branch.
+                    let give_pad_back = || {
+                        probe_activity.retired.store(true, Ordering::SeqCst);
+                        splitmuxsink.release_request_pad(&sink_pad)
+                    };
 
                     let (parser_factory, config_interval) = if caps_name == "video/x-h264" {
                         ("h264parse", -1i32)
@@ -643,6 +1020,19 @@ impl BlockBuilder for RecorderBuilder {
             let src_pad = audio_input.static_pad("src").ok_or_else(|| {
                 BlockBuildError::ElementCreation(format!("audio_{} identity has no src pad", i))
             })?;
+            let sink_pad_for_drops = audio_input.static_pad("sink").ok_or_else(|| {
+                BlockBuildError::ElementCreation(format!("audio_{} identity has no sink pad", i))
+            })?;
+
+            let activity = Arc::new(TrackActivity {
+                last_muxed_ms: AtomicU64::new(0),
+                last_muxed_running_ms: AtomicU64::new(0),
+                running_time_offset_ns: AtomicI64::new(0),
+                retired: AtomicBool::new(false),
+            });
+            add_retired_input_probe(&sink_pad_for_drops, &activity);
+            let probe_activity = Arc::clone(&activity);
+            audio_activities.push(activity);
 
             src_pad.add_probe(
                 gst::PadProbeType::EVENT_DOWNSTREAM,
@@ -698,8 +1088,13 @@ impl BlockBuilder for RecorderBuilder {
                     };
 
                     // Every path that gives up below must hand the pad back, or splitmuxsink
-                    // waits on it forever and the recording stalls.
-                    let give_pad_back = || splitmuxsink.release_request_pad(&sink_pad);
+                    // waits on it forever and the recording stalls. Retiring the track with
+                    // it takes it off the stall watchdog, which has nothing left to end, and
+                    // drops the buffers that would otherwise be pushed into the dead branch.
+                    let give_pad_back = || {
+                        probe_activity.retired.store(true, Ordering::SeqCst);
+                        splitmuxsink.release_request_pad(&sink_pad)
+                    };
 
                     // Only accept pre-encoded audio. Raw audio requires an encoder before the recorder.
                     if caps_name == "audio/x-raw" {
@@ -864,9 +1259,11 @@ impl BlockBuilder for RecorderBuilder {
                 // on its keyframes; the rest take video_aux. splitmuxsink names video pads
                 // itself, so record what it handed back, not what we asked for.
                 let mut have_primary_video = false;
-                for (vi, (input, cell)) in video_input_weaks
+                let mut watched: Vec<WatchedTrack> = Vec::new();
+                for (vi, ((input, cell), activity)) in video_input_weaks
                     .iter()
                     .zip(video_pad_cells.iter())
+                    .zip(video_activities.iter())
                     .enumerate()
                 {
                     if !input_is_connected(input) {
@@ -893,6 +1290,13 @@ impl BlockBuilder for RecorderBuilder {
                                 vi
                             );
                             let _ = cell.set(pad.name().to_string());
+                            add_muxer_intake_probe(&pad, activity, stall_epoch);
+                            watched.push(WatchedTrack {
+                                label: format!("video {}", vi),
+                                input: input.clone(),
+                                muxer_pad: pad.downgrade(),
+                                activity: Arc::clone(activity),
+                            });
                         }
                         None => error!(
                             "Recorder {}: splitmuxsink refused a sink pad for video track {} — that track will not be recorded",
@@ -901,9 +1305,10 @@ impl BlockBuilder for RecorderBuilder {
                     }
                 }
 
-                for (i, (input, cell)) in audio_input_weaks
+                for (i, ((input, cell), activity)) in audio_input_weaks
                     .iter()
                     .zip(audio_pad_cells.iter())
+                    .zip(audio_activities.iter())
                     .enumerate()
                 {
                     if !input_is_connected(input) {
@@ -928,6 +1333,13 @@ impl BlockBuilder for RecorderBuilder {
                                 i
                             );
                             let _ = cell.set(pad.name().to_string());
+                            add_muxer_intake_probe(&pad, activity, stall_epoch);
+                            watched.push(WatchedTrack {
+                                label: format!("audio {}", i),
+                                input: input.clone(),
+                                muxer_pad: pad.downgrade(),
+                                activity: Arc::clone(activity),
+                            });
                         }
                         None => error!(
                             "Recorder {}: splitmuxsink refused a sink pad for audio track {} — that track will not be recorded",
@@ -935,6 +1347,10 @@ impl BlockBuilder for RecorderBuilder {
                         ),
                     }
                 }
+
+                // Every pad requested above is one the muxer will wait for. Watch
+                // exactly those.
+                spawn_track_stall_watchdog(&block_id, &splitmuxsink, watched, stall_epoch);
             }));
         }
 
@@ -1037,6 +1453,8 @@ fn build_ts_passthrough(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("multifilesink: {}", e)))?;
 
+    prepare_idle_recording_sink(&multifilesink);
+
     multifilesink.set_property("location", location);
     // next-file=4 means split on each buffer that has the DISCONT flag, which
     // aligns well with TS packet boundaries when used with tsparse upstream.
@@ -1052,18 +1470,58 @@ fn build_ts_passthrough(
     // sync=false: don't block on clock, write as fast as data arrives
     multifilesink.set_property("sync", false);
 
+    // One caps probe, not one per track: this path has a single static input, so
+    // the first caps to reach it is the only signal that data is coming. Until
+    // then the sink stays locked in NULL and cannot stall the pipeline's preroll.
+    //
+    // The link is made here rather than declared, as the splitmuxsink path does.
+    // A pad linked to a sink sitting in NULL loses stream-start and segment, which
+    // are pushed before caps and dropped by the inactive peer; GStreamer replays
+    // sticky events only on link, so linking after activation is what delivers them.
+    let src_pad = ts_input.static_pad("src").ok_or_else(|| {
+        BlockBuildError::ElementCreation("ts_input identity has no src pad".to_string())
+    })?;
+    let sink_weak = multifilesink.downgrade();
+    let activated = AtomicBool::new(false);
+    let activate_instance_id = instance_id.to_string();
+    src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = &info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if event.type_() != gst::EventType::Caps {
+            return gst::PadProbeReturn::Ok;
+        }
+        if activated.swap(true, Ordering::SeqCst) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(sink) = sink_weak.upgrade() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        activate_recording_sink(&sink, &activate_instance_id);
+
+        let sink_pad = match sink.static_pad("sink") {
+            Some(p) => p,
+            None => {
+                error!(
+                    "Recorder {}: multifilesink has no sink pad",
+                    activate_instance_id
+                );
+                return gst::PadProbeReturn::Ok;
+            }
+        };
+        if let Err(e) = pad.link(&sink_pad) {
+            error!(
+                "Recorder {}: failed to link ts_input to multifilesink: {:?}",
+                activate_instance_id, e
+            );
+        }
+        gst::PadProbeReturn::Ok
+    });
+
     let elements = vec![
         (input_id.clone(), ts_input.clone()),
         (sink_id.clone(), multifilesink.clone()),
     ];
-
-    // Static link: ts_input -> multifilesink
-    use strom_types::Link;
-    let internal_links = vec![Link {
-        from: format!("{}:src", input_id),
-        to: format!("{}:sink", sink_id),
-    }
-    .to_pad_refs()];
 
     info!(
         "Recorder {}: TS passthrough mode, writing to: {}",
@@ -1072,7 +1530,7 @@ fn build_ts_passthrough(
 
     Ok(BlockBuildResult {
         elements,
-        internal_links,
+        internal_links: vec![],
         bus_message_handler: None,
         pad_properties: HashMap::new(),
     })
@@ -1236,5 +1694,136 @@ fn recorder_definition() -> BlockDefinition {
             height: Some(2.5),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn idle_activity() -> TrackActivity {
+        TrackActivity {
+            last_muxed_ms: AtomicU64::new(0),
+            last_muxed_running_ms: AtomicU64::new(0),
+            running_time_offset_ns: AtomicI64::new(0),
+            retired: AtomicBool::new(false),
+        }
+    }
+
+    /// A track that stopped: its queue has drained while the one the muxer is
+    /// refusing has filled up.
+    #[test]
+    fn a_drained_track_behind_a_backed_up_one_is_ended() {
+        assert_eq!(
+            track_holding_the_recording(&[(9_000, Some(40)), (7_000, Some(0))]),
+            Some(1)
+        );
+    }
+
+    /// The muxer or its storage stopped, so every queue is backed up. Ending the
+    /// track furthest behind would lose it for the rest of the recording and
+    /// rescue nothing.
+    #[test]
+    fn a_muxer_that_stalls_for_every_track_ends_none() {
+        assert_eq!(
+            track_holding_the_recording(&[(9_000, Some(40)), (7_000, Some(12))]),
+            None
+        );
+    }
+
+    /// Every source stopped together: nothing is waiting on anything.
+    #[test]
+    fn tracks_that_stop_together_are_left_alone() {
+        assert_eq!(
+            track_holding_the_recording(&[(9_000, Some(0)), (7_000, Some(0))]),
+            None
+        );
+    }
+
+    /// Of two drained tracks, the one splitmuxsink is waiting on is the one that
+    /// has carried the recording least far. A track whose queue could not be read
+    /// is never the one ended.
+    #[test]
+    fn of_several_drained_tracks_the_furthest_behind_is_ended() {
+        assert_eq!(
+            track_holding_the_recording(&[
+                (9_000, Some(40)),
+                (8_000, Some(0)),
+                (6_000, None),
+                (7_000, Some(0)),
+            ]),
+            Some(3)
+        );
+    }
+
+    /// Ending a track must not take the rest of the seat with it.
+    ///
+    /// A WHIP seat's media leaves one tee for the recorder, the vision mixer, the
+    /// audio mixer and the return router. A retired branch that answers upstream
+    /// with a flow error stops the encoder feeding it, and the seat then goes
+    /// silent for the whole flow until it is restarted. It has to swallow what
+    /// arrives and answer OK instead.
+    ///
+    /// Both halves matter. Move the drop probe back to the identity's src pad and
+    /// the buffer case fails, because `gst_pad_push` reads the EOS flag before it
+    /// dispatches probes. Narrow the probe to buffers alone and the event case
+    /// fails, which is the half that bites in a real flow: an encoder upstream
+    /// emits a sticky TAG event every so often, and `push_sticky` reports a
+    /// refused one to the caller as `GST_FLOW_ERROR`.
+    #[test]
+    fn a_retired_track_still_answers_ok_upstream() {
+        gst::init().expect("gstreamer init");
+        let pipeline = gst::Pipeline::new();
+        let input = gst::ElementFactory::make("identity")
+            .build()
+            .expect("identity is part of gstreamer core");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .property("sync", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add_many([&input, &sink]).expect("add elements");
+        input.link(&sink).expect("link identity to fakesink");
+
+        let sink_pad = input.static_pad("sink").expect("identity has a sink pad");
+        let activity = Arc::new(idle_activity());
+        add_retired_input_probe(&sink_pad, &activity);
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+
+        let push = || sink_pad.chain(gst::Buffer::with_size(16).expect("allocate buffer"));
+        assert_eq!(
+            push(),
+            Ok(gst::FlowSuccess::Ok),
+            "the branch takes buffers while the track is live"
+        );
+
+        end_stalled_track(&input, &activity);
+        assert!(
+            activity.retired.load(Ordering::SeqCst),
+            "the watchdog ended the track"
+        );
+
+        assert_eq!(
+            push(),
+            Ok(gst::FlowSuccess::Ok),
+            "a retired branch has to keep answering OK, or it stops whatever feeds the tee it hangs off"
+        );
+
+        let tags = gst::TagList::new();
+        assert!(
+            sink_pad.send_event(gst::event::Tag::new(tags)),
+            "a retired branch has to take events too, not just buffers"
+        );
+        assert_eq!(
+            push(),
+            Ok(gst::FlowSuccess::Ok),
+            "a sticky event refused by the retired branch turns the next push into a flow error"
+        );
+
+        let _ = pipeline.set_state(gst::State::Null);
     }
 }

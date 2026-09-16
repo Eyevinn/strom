@@ -103,7 +103,6 @@ Quick links: [Open Live setup](docs/OPEN_LIVE_SETUP.md) · [Docker](docs/DOCKER.
 - `strom-types` - Shared domain models and API types
 - `strom` - Server with GStreamer pipeline management
 - `strom-frontend` - egui UI (compiles to WASM or native)
-- `strom-mcp-server` - Model Context Protocol server for AI integration
 
 ## Configuration
 
@@ -122,7 +121,7 @@ Copy `.strom.toml.example` to `.strom.toml` for all options. Key topics have ded
 - REST + WebSocket/SSE API, with interactive OpenAPI docs at `/swagger-ui`.
 - `WS /api/ws` and `GET /api/events` for real-time state and pipeline events.
 - gst-launch import/export via `POST /api/gst-launch/parse` and `/export`.
-- Model Context Protocol at `/api/mcp` (HTTP) or the `strom-mcp-server` binary (stdio) — see [docs/MCP.md](docs/MCP.md).
+- Model Context Protocol over HTTP at `/api/mcp` — see [docs/MCP.md](docs/MCP.md).
 
 ## Built by AI
 

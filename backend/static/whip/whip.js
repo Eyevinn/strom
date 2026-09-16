@@ -1,5 +1,26 @@
 // WHIP Client - WebRTC-HTTP Ingestion Protocol client for browser-based sending.
 
+// How long ICE 'disconnected' is given to recover before the session is treated
+// as dead. It fires on a couple of missed consent checks and often recovers, so
+// tearing down at once costs a needless renegotiation; waiting too long is worse,
+// because the publisher keeps encoding into a dead transport and the server cannot
+// free the slot for the reconnect until this expires.
+const ICE_DISCONNECT_GRACE_MS = 4000;
+
+// Reconnect backoff for the ingest page, in ms. Attempts past the end of the list
+// reuse the last delay. The first retry is deliberately early: the server decides
+// an abruptly dropped publisher is gone a couple of seconds after its media stops,
+// and holds an arriving POST while it decides, so an early retry is answered
+// rather than refused.
+const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000];
+const MAX_RECONNECT_ATTEMPTS = 15;
+
+// Delay before reconnect attempt `attempt`, which is 1-based: the first retry is
+// attempt 1. Lives here rather than in the page so CI can exercise it.
+function whipReconnectDelay(attempt) {
+    return RECONNECT_DELAYS[Math.min(attempt, RECONNECT_DELAYS.length) - 1];
+}
+
 // Global debug mode flag - toggle via UI or setWhipDebugMode(true/false)
 let whipDebugMode = false;
 
@@ -224,8 +245,8 @@ class WhipClient {
                     }
                 } else if (state === 'disconnected') {
                     // ICE 'disconnected' is transient — it can recover to 'connected'.
-                    // Wait 10s before treating it as a real disconnect.
-                    this._logAlways('ICE disconnected (waiting 10s for recovery...)', 'warning');
+                    this._logAlways('ICE disconnected (waiting ' + (ICE_DISCONNECT_GRACE_MS / 1000) +
+                        's for recovery...)', 'warning');
                     if (!this._disconnectTimer) {
                         this._disconnectTimer = setTimeout(() => {
                             this._disconnectTimer = null;
@@ -237,7 +258,7 @@ class WhipClient {
                                     this.callbacks.onDisconnected();
                                 }
                             }
-                        }, 10000);
+                        }, ICE_DISCONNECT_GRACE_MS);
                     }
                 }
             };
@@ -593,4 +614,16 @@ class WhipClient {
             return null;
         }
     }
+}
+
+// The browser loads this file as a classic script, where `module` is undefined and
+// this block is skipped. Node's test runner require()s it, which supplies `module`
+// and hands the pure logic to the unit tests in ../tests/.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        ICE_DISCONNECT_GRACE_MS,
+        RECONNECT_DELAYS,
+        MAX_RECONNECT_ATTEMPTS,
+        whipReconnectDelay,
+    };
 }

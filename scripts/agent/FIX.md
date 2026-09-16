@@ -1,4 +1,4 @@
-# Turning an approved design into a draft PR
+# Turning an approved design into a PR
 
 Read `PROTOCOL.md` first. This is the stage after a human answered a triage `Ask:`.
 
@@ -12,7 +12,7 @@ proposal** with the exact experiment that would falsify it.
 
 Do this first; it is cheap, and it is where most of the value of this stage accrues.
 
-For every open draft PR authored by you:
+For every open PR authored by you:
 
 1. Read its check runs (`gh pr checks <N>`). If both runs of the two-commit structure have
    concluded, edit the body to replace the pending evidence lines with the actual
@@ -116,7 +116,7 @@ exercises the new code rather than restating it — but say so explicitly in the
 an unexplained compile error reads as a broken PR and a reviewer who assumes that will close
 it.
 
-Everything else — the classes, the required sections, the draft rule, the excluded areas — is
+Everything else — the classes, the required sections, the excluded areas — is
 identical. Pick the row from `work=`, not from the issue's label.
 
 The test must exercise the code it guards — call the changed module, do not rebuild the
@@ -141,15 +141,18 @@ Expect a formatting round trip. Without `cargo` you cannot run `cargo fmt`, and 
 check is the only thing red, fix it and **force-push, keeping exactly the two commits**.
 Never add a third commit to repair a mechanical check.
 
-Push commit 1, open the draft PR, then push commit 2. CI has no concurrency group, so both
+Push commit 1, open the PR, then push commit 2. CI has no concurrency group, so both
 runs complete and both appear on the PR: the first is the deliberate failure, the second is
 the state you are proposing. Record both run URLs in the body; Phase 1 of a later run fills
 in their conclusions.
 
 ## The PR
 
-**Draft, always.** Title `fix(<scope>): <what it does>`, prefixed `[needs hardware]` when
-class B applies for want of a device rather than for want of time.
+**Ready for review, never a draft.** You stop when the work is finished, so the PR opens
+finished. The verdict line already carries whether the evidence has arrived; a draft flag
+would say it a second time, and less precisely. Title `fix(<scope>): <what it does>`,
+prefixed `[needs hardware]` when class B applies for want of a device rather than for want
+of time.
 
 - **Class A — verified.** You are holding execution evidence right now: test output you
   produced in this run, or two concluded CI runs showing commit 1 red and commit 2 green.
@@ -212,7 +215,7 @@ body** — link it. That comment is read alongside the PR, not instead of it.
 
 - `verify-citations.sh` exits zero on the body, if the body cites code.
 - The branch has exactly the two commits, in that order.
-- The PR is a draft.
+- The PR is ready for review, not a draft.
 - The class matches evidence you can point at. If you did not run the test yourself and CI
   has not concluded, it is B, and the body says `Refs`, not `Fixes`. The issue comment and
   the run summary repeat whatever class the body claims, so a premature A propagates to three

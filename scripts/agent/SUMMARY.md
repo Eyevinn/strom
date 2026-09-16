@@ -83,7 +83,7 @@ Two things belong in `needs_human` **every run**, not just the run that discover
 otherwise they scroll away and the work stalls silently:
 
 - the dispatch command for every open `class=C` PR **that the implementation stage authored**
-  (`gh pr list --author @me --draft`), which cannot reach class A without it. A review you
+  (`gh pr list --author @me`), which cannot reach class A without it. A review you
   posted on someone else's PR carries no `class=` and never will — do not report its absence
   as a finding;
 - every issue `board.sh` lists under "replied, but not by someone who may decide", and every
