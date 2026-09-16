@@ -631,6 +631,10 @@ jobs:
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
           STROM_REQUIRE_GST_PLUGINS: 1
+          # This runner can create a GL context, so the GL tests must run here
+          # rather than skip green — see gl_available_or_required(). It is set on
+          # macOS alone: the Linux runners are headless and legitimately skip.
+          STROM_REQUIRE_GL: 1
 
       - name: Build
         run: |

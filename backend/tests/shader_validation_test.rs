@@ -92,6 +92,12 @@ fn gl_environment_available() -> bool {
     ) {
         Ok(()) => true,
         Err(e) => {
+            assert!(
+                strom_types::env::var_opt("STROM_REQUIRE_GL").is_none(),
+                "STROM_REQUIRE_GL is set but no GL context could be created ({}) — this \
+                 platform is supposed to render, so a skip here would hide a GL regression",
+                e
+            );
             eprintln!("SKIP: GL environment unavailable ({})", e);
             false
         }
