@@ -20,10 +20,10 @@
 //!
 //! This module is the part worth testing: *when* to ask, and when to stop.
 //! Asking is cheap but not free — a forced keyframe is a bitrate spike — so a
-//! healthy session should never be asked at all, and a stalled one should be
-//! asked a bounded number of times and then left alone.
+//! healthy session should be asked at most once, while its first frames are still
+//! crossing the decode chain, and a stalled one should be asked a bounded number
+//! of times and then left alone.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// How persistently to ask for a keyframe before giving up.
@@ -57,14 +57,14 @@ impl Default for KeyframeRequestPolicy {
 /// and without a pipeline. Returns the number of requests actually sent.
 pub fn request_until_decoding(
     policy: KeyframeRequestPolicy,
-    decoding: &AtomicBool,
+    decoding: impl Fn() -> bool,
     mut wait: impl FnMut(Duration),
     mut send: impl FnMut(u32),
 ) -> u32 {
     let mut sent = 0;
     for attempt in 1..=policy.attempts {
         wait(policy.interval);
-        if decoding.load(Ordering::Relaxed) {
+        if decoding() {
             break;
         }
         send(attempt);
@@ -76,6 +76,7 @@ pub fn request_until_decoding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn policy(attempts: u32) -> KeyframeRequestPolicy {
         KeyframeRequestPolicy {
@@ -90,7 +91,12 @@ mod tests {
     #[test]
     fn a_healthy_session_is_never_asked() {
         let decoding = AtomicBool::new(true);
-        let sent = request_until_decoding(policy(5), &decoding, |_| {}, |_| panic!("asked anyway"));
+        let sent = request_until_decoding(
+            policy(5),
+            || decoding.load(Ordering::Relaxed),
+            |_| {},
+            |_| panic!("asked anyway"),
+        );
         assert_eq!(sent, 0);
     }
 
@@ -100,7 +106,7 @@ mod tests {
         let decoding = AtomicBool::new(false);
         let sent = request_until_decoding(
             policy(5),
-            &decoding,
+            || decoding.load(Ordering::Relaxed),
             |_| decoding.store(true, Ordering::Relaxed),
             |_| panic!("asked after video started"),
         );
@@ -114,7 +120,7 @@ mod tests {
         let mut waits = 0;
         let sent = request_until_decoding(
             policy(5),
-            &decoding,
+            || decoding.load(Ordering::Relaxed),
             |_| waits += 1,
             |_| decoding.store(true, Ordering::Relaxed),
         );
@@ -132,7 +138,7 @@ mod tests {
         let mut attempts_seen = Vec::new();
         let sent = request_until_decoding(
             policy(5),
-            &decoding,
+            || decoding.load(Ordering::Relaxed),
             |_| {},
             |attempt| attempts_seen.push(attempt),
         );
@@ -146,7 +152,12 @@ mod tests {
     fn it_waits_once_per_attempt_and_not_after_the_last() {
         let decoding = AtomicBool::new(false);
         let mut waits = 0;
-        request_until_decoding(policy(3), &decoding, |_| waits += 1, |_| {});
+        request_until_decoding(
+            policy(3),
+            || decoding.load(Ordering::Relaxed),
+            |_| waits += 1,
+            |_| {},
+        );
         assert_eq!(waits, 3);
     }
 
