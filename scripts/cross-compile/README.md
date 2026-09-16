@@ -49,7 +49,6 @@ Builds Strom for ARM64 targeting a specific glibc version.
 
 **Outputs:**
 - `target/aarch64-unknown-linux-gnu/release/strom`
-- `target/aarch64-unknown-linux-gnu/release/strom-mcp-server`
 
 **Usage:**
 ```bash
@@ -88,7 +87,6 @@ Builds Strom for ARM64 using glibc (standard dynamic linking).
 
 **Outputs:**
 - `target/aarch64-unknown-linux-gnu/release/strom`
-- `target/aarch64-unknown-linux-gnu/release/strom-mcp-server`
 
 **Usage:**
 ```bash

@@ -91,7 +91,8 @@ fn connect_loudness_message_handler(
         flow_id, expected_element_id
     );
 
-    bus.add_signal_watch();
+    // No add_signal_watch() here: setup_bus_watch takes the single watch this
+    // bus needs, and matches it with exactly one remove on teardown.
 
     bus.connect_message(None, move |_bus, msg| {
         if let MessageView::Element(element_msg) = msg.view() {

@@ -12,37 +12,39 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Instant, SystemTime};
 use strom_types::vision_mixer::{self, Zone, TIMEZONE_REFRESH_SECS};
+use strom_types::FlowId;
 use tracing::{debug, warn};
+
+/// A per-block overlay registry: keyed by block instance ID, each entry tagged
+/// with the flow that registered it so [`unregister_flow`] can sweep by flow.
+type OverlayRegistry<T> = Mutex<HashMap<String, (FlowId, T)>>;
 
 /// Global registry of vision mixer overlay states, keyed by block instance ID.
 /// Used by the API layer to access overlay state for preview/PGM updates.
-fn overlay_states() -> &'static Mutex<HashMap<String, Arc<VisionMixerOverlayState>>> {
-    static INSTANCE: OnceLock<Mutex<HashMap<String, Arc<VisionMixerOverlayState>>>> =
-        OnceLock::new();
+fn overlay_states() -> &'static OverlayRegistry<Arc<VisionMixerOverlayState>> {
+    static INSTANCE: OnceLock<OverlayRegistry<Arc<VisionMixerOverlayState>>> = OnceLock::new();
     INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Register an overlay state for a block instance.
-pub fn register_overlay_state(block_id: &str, state: Arc<VisionMixerOverlayState>) {
+pub fn register_overlay_state(
+    flow_id: FlowId,
+    block_id: &str,
+    state: Arc<VisionMixerOverlayState>,
+) {
     if let Ok(mut map) = overlay_states().lock() {
-        map.insert(block_id.to_string(), state);
+        map.insert(block_id.to_string(), (flow_id, state));
     }
 }
 
 /// Get the overlay state for a block instance (if registered).
 pub fn get_overlay_state(block_id: &str) -> Option<Arc<VisionMixerOverlayState>> {
-    overlay_states().lock().ok()?.get(block_id).cloned()
-}
-
-/// Unregister the overlay state for a block instance (call on flow stop).
-pub fn unregister_overlay_state(block_id: &str) {
-    if let Ok(mut map) = overlay_states().lock() {
-        map.remove(block_id);
-    }
+    Some(overlay_states().lock().ok()?.get(block_id)?.1.clone())
 }
 
 /// Shared state read by the cairooverlay draw callback.
@@ -1012,26 +1014,104 @@ impl OverlayRenderer {
 }
 
 /// Global registry of overlay renderers, keyed by block instance ID.
-fn overlay_renderers() -> &'static Mutex<HashMap<String, Arc<Mutex<OverlayRenderer>>>> {
-    static INSTANCE: OnceLock<Mutex<HashMap<String, Arc<Mutex<OverlayRenderer>>>>> =
-        OnceLock::new();
+fn overlay_renderers() -> &'static OverlayRegistry<Arc<Mutex<OverlayRenderer>>> {
+    static INSTANCE: OnceLock<OverlayRegistry<Arc<Mutex<OverlayRenderer>>>> = OnceLock::new();
     INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn register_overlay_renderer(block_id: &str, renderer: Arc<Mutex<OverlayRenderer>>) {
+pub fn register_overlay_renderer(
+    flow_id: FlowId,
+    block_id: &str,
+    renderer: Arc<Mutex<OverlayRenderer>>,
+) {
     if let Ok(mut map) = overlay_renderers().lock() {
-        map.insert(block_id.to_string(), renderer);
+        map.insert(block_id.to_string(), (flow_id, renderer));
     }
 }
 
 pub fn get_overlay_renderer(block_id: &str) -> Option<Arc<Mutex<OverlayRenderer>>> {
-    overlay_renderers().lock().ok()?.get(block_id).cloned()
+    Some(overlay_renderers().lock().ok()?.get(block_id)?.1.clone())
 }
 
-pub fn unregister_overlay_renderer(block_id: &str) {
-    if let Ok(mut map) = overlay_renderers().lock() {
-        map.remove(block_id);
+/// Drop every overlay registration belonging to a flow.
+///
+/// Keyed off the flow rather than off a block list: a flow edited while running
+/// no longer matches the ids its pipeline was built from, and a build that
+/// failed before the pipeline existed leaves registrations behind with no
+/// `PipelineManager` to consult. Either case strands the timer thread started
+/// by [`start_overlay_timer`] — its `still_mine` check is what stops it.
+///
+/// Call this from the single flow teardown path, so every way a pipeline goes
+/// away reaches it, and before the pipeline is dropped, so the timer is not
+/// still rendering into an appsrc on its way to NULL.
+pub fn unregister_flow(flow_id: &FlowId) {
+    if let Ok(mut map) = overlay_states().lock() {
+        map.retain(|_, (owner, _)| owner != flow_id);
     }
+    let stopped = match overlay_renderers().lock() {
+        Ok(mut map) => {
+            let before = map.len();
+            map.retain(|_, (owner, _)| owner != flow_id);
+            before - map.len()
+        }
+        Err(_) => 0,
+    };
+    if stopped > 0 {
+        debug!(
+            "Unregistered {} vision mixer overlay(s) for flow {}",
+            stopped, flow_id
+        );
+    }
+}
+
+/// Join handles for every overlay timer thread started in this process.
+fn overlay_timer_handles() -> &'static Mutex<Vec<JoinHandle<()>>> {
+    static INSTANCE: OnceLock<Mutex<Vec<JoinHandle<()>>>> = OnceLock::new();
+    INSTANCE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Makes every overlay timer thread leave its loop at the next tick,
+/// regardless of registry state.
+static OVERLAY_TIMERS_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Timer threads currently inside their loop.
+static OVERLAY_TIMERS_RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of overlay timer threads currently running.
+pub fn overlay_timers_running() -> usize {
+    OVERLAY_TIMERS_RUNNING.load(Ordering::SeqCst)
+}
+
+/// Stop every overlay timer thread and wait for it to exit.
+///
+/// Must run before `main` returns: these threads call cairo, and pixman frees
+/// its global implementation chain from a `__cxa_atexit` destructor while other
+/// threads are still running, so cairo entered after `exit()` walks freed heap.
+///
+/// Terminal, and bounded by one frame interval plus one render. The appsrc is
+/// leaky and non-blocking, so a render in flight cannot stall the join.
+pub fn shutdown_overlay_timers() {
+    OVERLAY_TIMERS_SHUTDOWN.store(true, Ordering::SeqCst);
+    let handles: Vec<JoinHandle<()>> = match overlay_timer_handles().lock() {
+        Ok(mut h) => std::mem::take(&mut *h),
+        Err(mut poisoned) => std::mem::take(&mut **poisoned.get_mut()),
+    };
+    let count = handles.len();
+    for handle in handles {
+        if let Err(e) = handle.join() {
+            warn!("Overlay timer thread panicked during shutdown: {:?}", e);
+        }
+    }
+    if count > 0 {
+        debug!("Joined {} overlay timer thread(s)", count);
+    }
+}
+
+/// Clear the shutdown flag so a later test in the same process can start
+/// another overlay timer.
+#[cfg(test)]
+pub fn reset_overlay_timers_shutdown_for_test() {
+    OVERLAY_TIMERS_SHUTDOWN.store(false, Ordering::SeqCst);
 }
 
 /// Trigger an immediate overlay re-render (called from API on state changes).
@@ -1060,7 +1140,11 @@ pub fn trigger_overlay_update(block_id: &str) {
 /// Pushes at the multiview framerate so the compositor always has a current
 /// buffer on the overlay pad. Only re-renders when state actually changes
 /// (PGM/PVW switch, clock tick); otherwise re-pushes the last sample.
-/// The thread stops when the renderer is unregistered (flow stop).
+///
+/// Stops when the renderer is unregistered ([`unregister_flow`], on every flow
+/// teardown path) or on [`shutdown_overlay_timers`] (process exit), which joins
+/// the kept handle. As a backstop it also stops once its appsrc has no parent,
+/// so a teardown path that forgets to unregister cannot strand it forever.
 pub fn start_overlay_timer(
     block_id: String,
     renderer: Arc<Mutex<OverlayRenderer>>,
@@ -1069,12 +1153,27 @@ pub fn start_overlay_timer(
     let frame_interval = std::time::Duration::from_nanos(
         (mv_framerate.1 as u64 * 1_000_000_000) / mv_framerate.0.max(1) as u64,
     );
-    std::thread::Builder::new()
+    // Reap finished handles so they do not accumulate across flow restarts.
+    if let Ok(mut handles) = overlay_timer_handles().lock() {
+        handles.retain(|h| !h.is_finished());
+    }
+
+    OVERLAY_TIMERS_RUNNING.fetch_add(1, Ordering::SeqCst);
+    let spawned = std::thread::Builder::new()
         .name(format!(
             "overlay-timer-{}",
             &block_id[..8.min(block_id.len())]
         ))
         .spawn(move || {
+            // Decrements on every exit path, including a panic.
+            struct RunningGuard;
+            impl Drop for RunningGuard {
+                fn drop(&mut self) {
+                    OVERLAY_TIMERS_RUNNING.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let _running = RunningGuard;
+
             debug!("Overlay timer started for {}", block_id);
             // Wait for pipeline to reach PLAYING before pushing first frame.
             // The appsrc needs caps negotiation to complete first.
@@ -1083,13 +1182,31 @@ pub fn start_overlay_timer(
             // thread observes the unregistration — presence alone would keep
             // the old thread (and its strong AppSrc ref) alive forever.
             let still_mine = |r: &Arc<Mutex<OverlayRenderer>>| {
+                if OVERLAY_TIMERS_SHUTDOWN.load(Ordering::SeqCst) {
+                    return false;
+                }
                 get_overlay_renderer(&block_id)
                     .map(|cur| Arc::ptr_eq(&cur, r))
                     .unwrap_or(false)
             };
+            // Backstop for a missed unregistration. A pipeline unparents its
+            // children when it finalizes, so an appsrc with no parent means the
+            // flow this thread belongs to is gone. Without it, a teardown path
+            // that forgets `unregister_flow` costs a thread rendering at full
+            // framerate for the life of the process; with it, one poll.
+            //
+            // Not a substitute for the unregistration: it only fires once the
+            // pipeline actually finalizes, so a leaked strong reference — the
+            // case teardown already logs "still alive after drop" for — defeats
+            // this too.
+            let appsrc = match renderer.lock() {
+                Ok(r) => r.appsrc.clone(),
+                Err(_) => return,
+            };
+            let orphaned = move || appsrc.parent().is_none();
             let ready = loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                if !still_mine(&renderer) {
+                if !still_mine(&renderer) || orphaned() {
                     break false;
                 }
                 if let Ok(r) = renderer.lock() {
@@ -1099,12 +1216,14 @@ pub fn start_overlay_timer(
                 }
             };
             if !ready {
-                debug!("Overlay timer exiting early (renderer unregistered)");
+                debug!("Overlay timer exiting early (renderer unregistered or appsrc orphaned)");
                 return;
             }
             debug!("Overlay appsrc PLAYING, pushing initial frame");
-            if let Ok(mut r) = renderer.lock() {
-                r.render_if_dirty();
+            if still_mine(&renderer) {
+                if let Ok(mut r) = renderer.lock() {
+                    r.render_if_dirty();
+                }
             }
             // Deadline-based loop: advance by frame_interval per tick so that
             // render/push time doesn't accumulate as drift.
@@ -1120,7 +1239,7 @@ pub fn start_overlay_timer(
                     // spinning a catch-up burst.
                     next_tick = now;
                 }
-                if !still_mine(&renderer) {
+                if !still_mine(&renderer) || orphaned() {
                     debug!("Overlay timer stopping for {}", block_id);
                     break;
                 }
@@ -1128,12 +1247,20 @@ pub fn start_overlay_timer(
                     r.render_if_dirty();
                 }
             }
-        })
-        .unwrap_or_else(|e| {
-            warn!("Failed to start overlay timer: {}", e);
-            // Return a dummy handle — the overlay just won't update the clock
-            std::thread::spawn(|| {})
         });
+
+    match spawned {
+        Ok(handle) => {
+            if let Ok(mut handles) = overlay_timer_handles().lock() {
+                handles.push(handle);
+            }
+        }
+        Err(e) => {
+            // Thread never ran, so its guard never will.
+            OVERLAY_TIMERS_RUNNING.fetch_sub(1, Ordering::SeqCst);
+            warn!("Failed to start overlay timer: {}", e);
+        }
+    }
 }
 
 /// Collect the input indices that contribute to a PiP composition (background

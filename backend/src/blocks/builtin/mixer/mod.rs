@@ -59,6 +59,7 @@
 mod builder;
 mod definition;
 mod elements;
+pub(crate) use elements::make_audiomixer;
 mod metering;
 mod properties;
 #[cfg(test)]

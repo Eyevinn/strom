@@ -598,7 +598,7 @@ impl PropertyInspector {
             }
 
             // Edit Routing Matrix button for Audio Router blocks
-            if definition.id == "builtin.audiorouter"
+            if crate::audiorouter::has_routing_matrix(definition)
                 && ui.button(format!("{} Routing", egui_phosphor::regular::GRAPH)).clicked()
             {
                 crate::app::set_local_storage("open_routing_editor", &block.id);
@@ -805,7 +805,7 @@ impl PropertyInspector {
                 .show(ui, |ui| {
                     if !definition.exposed_properties.is_empty() {
                         // Special handling for Audio Router - show only relevant properties
-                        if definition.id == "builtin.audiorouter" {
+                        if crate::audiorouter::has_routing_matrix(definition) {
                             Self::show_audiorouter_properties(
                                 ui,
                                 block,
@@ -813,6 +813,7 @@ impl PropertyInspector {
                                 flow_id,
                                 network_interfaces,
                                 available_channels,
+                                &mut result,
                             );
                         } else if definition.id == "builtin.mixer" {
                             Self::show_mixer_properties(
@@ -1878,6 +1879,7 @@ impl PropertyInspector {
     }
 
     /// Show Audio Router properties with filtered view.
+    #[allow(clippy::too_many_arguments)]
     fn show_audiorouter_properties(
         ui: &mut Ui,
         block: &mut BlockInstance,
@@ -1885,7 +1887,61 @@ impl PropertyInspector {
         flow_id: Option<strom_types::FlowId>,
         network_interfaces: &[strom_types::NetworkInterfaceInfo],
         available_channels: &[strom_types::api::AvailableOutput],
+        result: &mut BlockInspectorResult,
     ) {
+        /// Render one property and, if it changed and is declared live, queue
+        /// the write to the running pipeline.
+        ///
+        /// The generic property view does this inline; this view lays its
+        /// properties out by hand and used to drop the `changed` flag on the
+        /// floor, so a live property here only took effect on the next save.
+        #[allow(clippy::too_many_arguments)]
+        fn render(
+            ui: &mut Ui,
+            block: &mut BlockInstance,
+            prop: &ExposedProperty,
+            definition: &BlockDefinition,
+            flow_id: Option<strom_types::FlowId>,
+            network_interfaces: &[strom_types::NetworkInterfaceInfo],
+            available_channels: &[strom_types::api::AvailableOutput],
+            result: &mut BlockInspectorResult,
+        ) {
+            let mut sink = DevicePickerActions::default();
+            let changed = PropertyInspector::show_exposed_property(
+                ui,
+                block,
+                prop,
+                definition,
+                flow_id,
+                network_interfaces,
+                available_channels,
+                &[],
+                &[],
+                false,
+                &std::collections::HashSet::new(),
+                &mut sink,
+            );
+            if !(changed && prop.live) {
+                return;
+            }
+            let (Some(flow_id), Some(value)) = (
+                flow_id,
+                block
+                    .properties
+                    .get(&prop.name)
+                    .or(prop.default_value.as_ref())
+                    .cloned(),
+            ) else {
+                return;
+            };
+            result.live_property_updates.push(LivePropertyUpdate {
+                flow_id,
+                block_id: block.id.clone(),
+                property_name: prop.name.clone(),
+                value,
+            });
+        }
+
         // Helper to get property value (from block or default)
         let get_uint_prop = |name: &str| -> usize {
             block
@@ -1921,8 +1977,7 @@ impl PropertyInspector {
             .iter()
             .find(|p| p.name == "num_inputs")
         {
-            let mut sink = DevicePickerActions::default();
-            Self::show_exposed_property(
+            render(
                 ui,
                 block,
                 prop,
@@ -1930,11 +1985,7 @@ impl PropertyInspector {
                 flow_id,
                 network_interfaces,
                 available_channels,
-                &[],
-                &[],
-                false,
-                &std::collections::HashSet::new(),
-                &mut sink,
+                result,
             );
         }
 
@@ -1946,8 +1997,7 @@ impl PropertyInspector {
                 .iter()
                 .find(|p| p.name == prop_name)
             {
-                let mut sink = DevicePickerActions::default();
-                Self::show_exposed_property(
+                render(
                     ui,
                     block,
                     prop,
@@ -1955,11 +2005,7 @@ impl PropertyInspector {
                     flow_id,
                     network_interfaces,
                     available_channels,
-                    &[],
-                    &[],
-                    false,
-                    &std::collections::HashSet::new(),
-                    &mut sink,
+                    result,
                 );
             }
         }
@@ -1974,8 +2020,7 @@ impl PropertyInspector {
             .iter()
             .find(|p| p.name == "num_outputs")
         {
-            let mut sink = DevicePickerActions::default();
-            Self::show_exposed_property(
+            render(
                 ui,
                 block,
                 prop,
@@ -1983,11 +2028,7 @@ impl PropertyInspector {
                 flow_id,
                 network_interfaces,
                 available_channels,
-                &[],
-                &[],
-                false,
-                &std::collections::HashSet::new(),
-                &mut sink,
+                result,
             );
         }
 
@@ -1999,8 +2040,7 @@ impl PropertyInspector {
                 .iter()
                 .find(|p| p.name == prop_name)
             {
-                let mut sink = DevicePickerActions::default();
-                Self::show_exposed_property(
+                render(
                     ui,
                     block,
                     prop,
@@ -2008,17 +2048,47 @@ impl PropertyInspector {
                     flow_id,
                     network_interfaces,
                     available_channels,
-                    &[],
-                    &[],
-                    false,
-                    &std::collections::HashSet::new(),
-                    &mut sink,
+                    result,
                 );
             }
         }
 
         // Note: routing_matrix property is NOT shown as a text field
-        // The modal routing editor handles all routing configuration
+        // The modal routing editor handles all routing configuration.
+
+        // Anything else the block exposes. The channel-count properties above
+        // are laid out by hand because their number follows num_inputs /
+        // num_outputs; the rest are rendered generically so a block can add a
+        // property without also having to be added here. `builtin.audiorouter`
+        // has none of these, so its inspector is unchanged.
+        let laid_out_by_hand = |name: &str| {
+            name == "num_inputs"
+                || name == "num_outputs"
+                || name == "routing_matrix"
+                || name.starts_with("input_") && name.ends_with("_channels")
+                || name.starts_with("output_") && name.ends_with("_channels")
+        };
+        let extra: Vec<&ExposedProperty> = definition
+            .exposed_properties
+            .iter()
+            .filter(|p| !laid_out_by_hand(&p.name))
+            .collect();
+        if !extra.is_empty() {
+            ui.add_space(4.0);
+            ui.separator();
+            for prop in extra {
+                render(
+                    ui,
+                    block,
+                    prop,
+                    definition,
+                    flow_id,
+                    network_interfaces,
+                    available_channels,
+                    result,
+                );
+            }
+        }
     }
 
     /// Show an exposed property editor. Returns true if the value was changed.

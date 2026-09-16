@@ -11,7 +11,11 @@ use super::EQ_BAND_TYPE_BELL;
 static AUDIOMIXER_HAS_FORCE_LIVE: OnceLock<bool> = OnceLock::new();
 
 /// Create a configured audiomixer element with force-live, latency, and start-time-selection.
-pub(super) fn make_audiomixer(
+///
+/// Shared with `builtin.liveaudiorouter`, which sums its crosspoints on the
+/// same kind of bus — one place decides how this project configures an
+/// aggregator-based audio bus.
+pub(crate) fn make_audiomixer(
     name: &str,
     force_live: bool,
     latency_ms: u64,

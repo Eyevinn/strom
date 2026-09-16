@@ -183,6 +183,21 @@ fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool 
         .unwrap_or(true)
 }
 
+/// Parse drop_on_latency from properties (default: true).
+///
+/// True works around a GStreamer rtpjitterbuffer bug (see `build_whepsrc`'s
+/// iterate_recurse). False keeps late packets for a downstream WebRTC endpoint
+/// that buffers adaptively, and reinstates the stall.
+fn parse_drop_on_latency(properties: &HashMap<String, PropertyValue>) -> bool {
+    properties
+        .get("drop_on_latency")
+        .and_then(|v| match v {
+            PropertyValue::Bool(b) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
 /// Migrate a legacy `mode` property on a WHEP Output block to explicit
 /// `num_audio_tracks` / `num_video_tracks` counts, and drop `mode`.
 ///
@@ -317,6 +332,7 @@ fn build_whepsrc(
             }
         })
         .unwrap_or(DEFAULT_JITTERBUFFER_LATENCY_MS as u32);
+    let drop_on_latency = parse_drop_on_latency(properties);
 
     // Create namespaced element IDs
     let instance_id_owned = instance_id.to_string();
@@ -369,13 +385,15 @@ fn build_whepsrc(
             // of the mute gap instead of being output immediately.
             // Setting drop-on-latency on rtpbin propagates to all its
             // jitterbuffers, making them drop queued packets that exceed the
-            // configured latency — breaking the stall.
+            // configured latency — breaking the stall. Configurable because the
+            // workaround costs late packets a downstream WebRTC endpoint could
+            // still have used.
             // Upstream: https://gitlab.freedesktop.org/gstreamer/gst-plugins-good/-/merge_requests/951
             if name.starts_with("rtpbin") && element.has_property("drop-on-latency") {
-                element.set_property("drop-on-latency", true);
+                element.set_property("drop-on-latency", drop_on_latency);
                 info!(
-                    "WHEP Input (whepsrc): Set drop-on-latency=true on existing {}",
-                    name
+                    "WHEP Input (whepsrc): Set drop-on-latency={} on existing {}",
+                    drop_on_latency, name
                 );
             }
         }
@@ -586,6 +604,7 @@ fn build_whepclientsrc(
             }
         })
         .unwrap_or(DEFAULT_JITTERBUFFER_LATENCY_MS as u32);
+    let drop_on_latency = parse_drop_on_latency(properties);
 
     // Create namespaced element IDs
     let instance_id_owned = instance_id.to_string();
@@ -725,10 +744,10 @@ fn build_whepclientsrc(
                 // Workaround for GStreamer rtpjitterbuffer packet_spacing bug:
                 // see comment in build_whepsrc iterate_recurse for details.
                 if element_name.starts_with("rtpbin") && element.has_property("drop-on-latency") {
-                    element.set_property("drop-on-latency", true);
+                    element.set_property("drop-on-latency", drop_on_latency);
                     info!(
-                        "WHEP Input (whepclientsrc): Set drop-on-latency=true on {}",
-                        element_name
+                        "WHEP Input (whepclientsrc): Set drop-on-latency={} on {}",
+                        drop_on_latency, element_name
                     );
                 }
 
@@ -2290,6 +2309,20 @@ fn whep_input_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },
+            ExposedProperty {
+                name: "drop_on_latency".to_string(),
+                label: "Drop On Latency".to_string(),
+                description: "Drop queued packets that exceed the jitterbuffer latency instead of holding them. On by default: it works around a jitterbuffer bug that otherwise stalls the stream for the length of a mute gap. Turn it off when a downstream WebRTC endpoint has its own adaptive buffer and should decide what is too late.".to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "drop_on_latency".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![],
@@ -2489,6 +2522,19 @@ mod tests {
         assert!(parse_do_retransmission(&raw_props(&[(
             "do_retransmission",
             PropertyValue::Bool(true)
+        )])));
+    }
+
+    #[test]
+    fn drop_on_latency_defaults_to_true() {
+        assert!(parse_drop_on_latency(&raw_props(&[])));
+    }
+
+    #[test]
+    fn drop_on_latency_respects_explicit_false() {
+        assert!(!parse_drop_on_latency(&raw_props(&[(
+            "drop_on_latency",
+            PropertyValue::Bool(false)
         )])));
     }
 

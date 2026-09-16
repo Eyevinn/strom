@@ -1,7 +1,8 @@
 //! EFP over SRT input block builder.
 //!
 //! This block receives an SRT stream carrying EFP (Elastic Frame Protocol) and demuxes
-//! it into separate video and audio output pads.
+//! it into separate video and audio output pads, plus optional embedded-data
+//! outputs carrying efpdemux's `embedded_%u` pads (default: 0 data tracks).
 //!
 //! Pipeline structure (decode=true, default):
 //! ```text
@@ -22,6 +23,7 @@
 //! No videoconvert is inserted in the decoded video path to preserve GPU memory
 //! (e.g. CUDAMemory from nvh264dec) for downstream elements.
 
+use crate::blocks::builtin::efpsrt::track_count;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::events::EventBroadcaster;
 use gstreamer as gst;
@@ -32,6 +34,62 @@ use std::sync::Arc;
 use strom_types::{block::*, element::ElementPadRef, FlowId, PropertyValue, *};
 use tracing::{debug, error, warn};
 
+/// Caps name of `efpdemux`'s embedded-data src pad.
+const EFP_EMBEDDED_CAPS_NAME: &str = "application/x-efp-embedded";
+
+/// Parse the `data_stream_ids` property into one entry per data track.
+///
+/// `None` means "whichever embedded pad arrives next", which is how every data
+/// track behaved before this property existed and is still the default. A
+/// stream ID pins a track to one sender stream, so `data_out_0` means the same
+/// thing on every run.
+///
+/// An empty value gives every track `None`. Otherwise the list must name one
+/// stream per track, so a short list cannot silently leave later tracks
+/// unpinned when the operator meant to pin them all.
+fn parse_data_stream_ids(
+    value: Option<&str>,
+    num_data_tracks: usize,
+) -> Result<Vec<Option<u8>>, BlockBuildError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(vec![None; num_data_tracks]);
+    };
+
+    let mut ids = Vec::new();
+    for field in value.split(',') {
+        let field = field.trim();
+        let id = field.parse::<u8>().map_err(|_| {
+            BlockBuildError::InvalidProperty(format!(
+                "data_stream_ids: '{}' is not an EFP stream ID (0-255)",
+                field
+            ))
+        })?;
+        if id == 0 {
+            return Err(BlockBuildError::InvalidProperty(
+                "data_stream_ids: stream 0 is reserved and never carries media".to_string(),
+            ));
+        }
+        if ids.contains(&Some(id)) {
+            return Err(BlockBuildError::InvalidProperty(format!(
+                "data_stream_ids: stream {} is listed twice; one pad cannot feed two outputs",
+                id
+            )));
+        }
+        ids.push(Some(id));
+    }
+
+    if ids.len() != num_data_tracks {
+        return Err(BlockBuildError::InvalidProperty(format!(
+            "data_stream_ids lists {} stream(s) but num_data_tracks is {}; \
+             list one stream per track, or leave it empty to fill them in arrival order",
+            ids.len(),
+            num_data_tracks
+        )));
+    }
+
+    Ok(ids)
+}
+
 /// EFP/SRT Input block builder.
 pub struct EfpSrtInputBuilder;
 
@@ -40,23 +98,11 @@ impl BlockBuilder for EfpSrtInputBuilder {
         &self,
         properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
-        let num_video_tracks = properties
-            .get("num_video_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_video_tracks = track_count(properties, "num_video_tracks").unwrap_or(1);
 
-        let num_audio_tracks = properties
-            .get("num_audio_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_audio_tracks = track_count(properties, "num_audio_tracks").unwrap_or(1);
+
+        let num_data_tracks = track_count(properties, "num_data_tracks").unwrap_or(0);
 
         let mut outputs = Vec::new();
 
@@ -84,6 +130,16 @@ impl BlockBuilder for EfpSrtInputBuilder {
                 name: format!("audio_out_{}", i),
                 media_type: MediaType::Audio,
                 internal_element_id: format!("audio_output_{}", i),
+                internal_pad_name: "src".to_string(),
+            });
+        }
+
+        for i in 0..num_data_tracks {
+            outputs.push(ExternalPad {
+                label: Some(format!("D{}", i)),
+                name: format!("data_out_{}", i),
+                media_type: MediaType::Generic,
+                internal_element_id: format!("data_output_{}", i),
                 internal_pad_name: "src".to_string(),
             });
         }
@@ -162,23 +218,11 @@ impl BlockBuilder for EfpSrtInputBuilder {
             )));
         }
 
-        let num_video_tracks = properties
-            .get("num_video_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_video_tracks = track_count(properties, "num_video_tracks").unwrap_or(1);
 
-        let num_audio_tracks = properties
-            .get("num_audio_tracks")
-            .and_then(|v| match v {
-                PropertyValue::UInt(u) => Some(*u as usize),
-                PropertyValue::Int(i) => Some(*i as usize),
-                _ => None,
-            })
-            .unwrap_or(1);
+        let num_audio_tracks = track_count(properties, "num_audio_tracks").unwrap_or(1);
+
+        let num_data_tracks = track_count(properties, "num_data_tracks").unwrap_or(0);
 
         // Create srtsrc
         let src_id = format!("{}:srtsrc", instance_id);
@@ -294,6 +338,32 @@ impl BlockBuilder for EfpSrtInputBuilder {
             elements.push((element_id, identity));
         }
 
+        // Create embedded-data output identity elements, one per data track.
+        // efpdemux publishes one `embedded_<stream-id>` pad per EFP stream that
+        // carries data. A track with a configured stream ID takes that stream's
+        // pad; the rest are filled in arrival order, the way audio outputs are.
+        let data_stream_ids = parse_data_stream_ids(
+            properties.get("data_stream_ids").and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.as_str()),
+                _ => None,
+            }),
+            num_data_tracks,
+        )?;
+
+        let mut data_guards = Vec::new();
+        for (i, stream_id) in data_stream_ids.iter().enumerate() {
+            let element_id = format!("{}:data_output_{}", instance_id, i);
+            let identity = gst::ElementFactory::make("identity")
+                .name(&element_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("data identity {}: {}", i, e))
+                })?;
+            let guard = Arc::new(AtomicBool::new(false));
+            data_guards.push((identity.downgrade(), guard, *stream_id));
+            elements.push((element_id, identity));
+        }
+
         // Setup dynamic pad linking on efpdemux pad-added.
         // - decode mode: video via h264parse + decoder, audio via opusdec + audioconvert + audioresample.
         // - passthrough mode: video via h264parse, audio linked directly.
@@ -325,6 +395,10 @@ impl BlockBuilder for EfpSrtInputBuilder {
             let is_audio = caps_name
                 .as_ref()
                 .map(|n| n.starts_with("audio/"))
+                .unwrap_or(false);
+            let is_data = caps_name
+                .as_deref()
+                .map(|n| n == EFP_EMBEDDED_CAPS_NAME)
                 .unwrap_or(false);
 
             debug!(
@@ -424,6 +498,74 @@ impl BlockBuilder for EfpSrtInputBuilder {
                 }
                 warn!(
                     "EFPSRT Input {}: No available audio output for pad {}",
+                    instance_id_clone, pad_name
+                );
+            } else if is_data {
+                // Embedded data is opaque bytes — nothing to parse or decode in
+                // either mode, so it is always linked straight through.
+                //
+                // gst-plugin-efp v0.4.0 puts the sender's stream ID on these
+                // caps. A track configured for that stream takes the pad;
+                // otherwise the first unconfigured track does, so a flow that
+                // never set data_stream_ids behaves as it did before.
+                let pad_stream_id = caps
+                    .as_ref()
+                    .and_then(|c| c.structure(0))
+                    .and_then(|s| s.get::<i32>("stream-id").ok())
+                    .and_then(|id| u8::try_from(id).ok());
+
+                let matches_pad = |configured: Option<u8>| match (configured, pad_stream_id) {
+                    (Some(want), Some(got)) => want == got,
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                };
+
+                // Pinned tracks first, so an unpinned track cannot swallow a pad
+                // another track was configured to receive.
+                let ordered = data_guards
+                    .iter()
+                    .filter(|(_, _, configured)| configured.is_some())
+                    .chain(
+                        data_guards
+                            .iter()
+                            .filter(|(_, _, configured)| configured.is_none()),
+                    );
+
+                for (weak_identity, guard, configured) in ordered {
+                    if !matches_pad(*configured) {
+                        continue;
+                    }
+                    if guard.swap(true, Ordering::SeqCst) {
+                        continue;
+                    }
+
+                    if let Some(identity) = weak_identity.upgrade() {
+                        let sink_pad = match identity.static_pad("sink") {
+                            Some(p) => p,
+                            None => {
+                                guard.store(false, Ordering::SeqCst);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = pad.link(&sink_pad) {
+                            error!(
+                                "EFPSRT Input {}: Failed to link embedded-data pad {}: {:?}",
+                                instance_id_clone, pad_name, e
+                            );
+                            guard.store(false, Ordering::SeqCst);
+                            continue;
+                        }
+                        debug!(
+                            "EFPSRT Input {}: Linked embedded-data pad {} -> {}",
+                            instance_id_clone,
+                            pad_name,
+                            identity.name()
+                        );
+                        return;
+                    }
+                }
+                warn!(
+                    "EFPSRT Input {}: No available data output for pad {}",
                     instance_id_clone, pad_name
                 );
             } else {
@@ -784,7 +926,36 @@ fn efpsrt_input_definition() -> BlockDefinition {
                 },
                 live: false,
                 persist: None,
-            },            ExposedProperty {
+            },
+            ExposedProperty {
+                name: "num_data_tracks".to_string(),
+                label: "Number of Data Tracks".to_string(),
+                description: "Number of EFP embedded-data output tracks (default: 0). Each track is an output pad carrying one sender stream's embedded data. By default the pads are filled in arrival order; set 'data_stream_ids' to pin each track to a stream instead.".to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(0)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "num_data_tracks".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "data_stream_ids".to_string(),
+                label: "Data Track Stream IDs".to_string(),
+                description: "Which EFP stream feeds each data track, as a comma-separated list with one entry per track (e.g. '2,1'). Empty (default) fills the tracks in arrival order, so which sender stream reaches 'data_out_0' can differ between runs. Stream IDs are assigned by the sender from 1 in pad order, so a sender with one video and one audio track uses 1 for video and 2 for audio. Stream 0 is reserved.".to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "data_stream_ids".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "srt_uri".to_string(),
                 label: "SRT URI".to_string(),
                 description: "SRT URI (e.g., 'srt://:4000?mode=listener' or 'srt://192.0.2.1:4000?mode=caller')".to_string(),

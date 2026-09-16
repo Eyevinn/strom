@@ -34,9 +34,18 @@ pub struct Element {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct Link {
-    /// Source element and pad (format: "element_id" or "element_id:pad_name")
+    /// Source element and pad.
+    ///
+    /// Accepted forms:
+    /// - `"element_id:pad_name"` - a named pad
+    /// - `"element_id"` (or `"element_id::"`) - element-level link, GStreamer
+    ///   picks compatible pads
+    /// - `"block_id:external_pad_name"` - a block's external pad
+    /// - `"block_id"` - resolved when the flow is stored to the block's only
+    ///   output pad; a block with several output pads is rejected with 400
     pub from: String,
-    /// Destination element and pad (format: "element_id" or "element_id:pad_name")
+    /// Destination element and pad. Same forms as `from`; a bare `"block_id"`
+    /// resolves to the block's only input pad.
     pub to: String,
 }
 

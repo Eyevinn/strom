@@ -55,6 +55,7 @@ gstreamer-app.workspace = true
 gio.workspace = true
 gstreamer-controller.workspace = true
 gstreamer-net.workspace = true
+gstreamer-rtp.workspace = true
 gstreamer-gl.workspace = true
 gstreamer-video.workspace = true
 gst-plugin-audiofx.workspace = true
@@ -63,7 +64,7 @@ gst-plugin-webrtchttp.workspace = true
 gst-plugin-inter.workspace = true
 gst-plugin-rtp.workspace = true
 gst-plugins-lsp = { git = "https://github.com/srperens/lsp-plugins-rs", tag = "v1.3.1", package = "gst-plugins-lsp" }
-gst-plugin-efp = { git = "https://github.com/Eyevinn/efp", tag = "v0.3.0", package = "gst-plugin-efp", optional = true }
+gst-plugin-efp = { git = "https://github.com/Eyevinn/efp", tag = "v0.4.0", package = "gst-plugin-efp", optional = true }
 
 # Encoding
 base64 = "0.22"
@@ -129,7 +130,7 @@ crossterm = "0.29"
 # Network discovery
 socket2 = "0.6"      # Multicast socket options for SAP
 flate2 = "1.1"       # Zlib decompression for SAP
-mdns-sd = "0.20"     # mDNS service discovery (RAVENNA, NDI, etc.)
+mdns-sd = "0.21"     # mDNS service discovery (RAVENNA, NDI, etc.)
 hostname = "0.4"     # Cross-platform hostname detection
 
 # GUI (native frontend) - use --features no-gui to disable
@@ -140,6 +141,15 @@ eframe = { workspace = true }
 chrono = "0.4"
 uuid = { version = "1.23", features = ["v4"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# App Nap opt-out: see backend/src/macos_app_nap.rs. Already in the tree via
+# eframe, so this adds no new crate.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSProcessInfo",
+    "NSString",
+] }
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
@@ -148,7 +158,7 @@ tempfile = "3.27"
 tokio = { version = "1.52", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-serial_test = "3.5"
+serial_test = "4.0"
 
 [[bin]]
 name = "gen-icons"

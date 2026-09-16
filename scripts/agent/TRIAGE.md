@@ -40,15 +40,13 @@ this way for those:
 
 Then set `work=` in the marker: `bug` for wrong behaviour, `extension` for adding to
 something that exists, `feature` for something new. The implementation stage reads it to pick
-its branch, commit and title vocabulary, so a mislabelled shape ships a PR that misdescribes
-itself.
+its branch, commit and title vocabulary.
 
 ## For a CONFIRMED issue, add a design proposal
 
 Then **stop**. Do not implement it, do not open a PR, do not write more code than makes an
-option concrete. A human decides the design before anything is built; that is the point of
-this stage and where redirection is cheapest. A separate task implements what the maintainer
-approves.
+option concrete. A human decides the design before anything is built, and a separate task
+implements what they approve.
 
 The proposal carries, in this order:
 
@@ -57,14 +55,12 @@ The proposal carries, in this order:
    one option and why the obvious alternative is worse.
 3. **Blast radius** of the recommendation. One token from the radius row. **Radius scores
    what the change modifies, not how much it adds** — a new block with no existing call sites
-   is `LOCAL` however large it is, and calling it `SHARED` for its size locks it out of
-   implementation for the wrong reason. Size belongs in the scope proposal below.
+   is `LOCAL` however large it is. Size belongs in the scope proposal below.
 4. **The test that would guard the change**, and where it would live.
 5. **Recommendation** in one line.
 6. For `work=extension` or `work=feature`, a **scope proposal**: what PR 1 contains, and what
-   becomes follow-up issues. A feature request is usually several PRs, and nothing else in
-   this protocol cuts one into slices — so if you do not propose the cut, the maintainer
-   writes it by hand or the implementation stage tries to build all of it at once.
+   becomes follow-up issues. Nothing else in this protocol cuts a feature into slices, so if
+   you do not propose the cut, nobody does.
 7. **`Ask:`** — the question, answerable in one line.
 
 The `Ask:` is the interface to the implementation stage, which will not act until a human
@@ -79,9 +75,8 @@ answers it. So:
 ## Marker backfill — cheap, and not a re-triage
 
 Triage comments written before the marker carried `verdict=` / `radius=` / `excluded=` /
-`ask=` leave `board.sh` unable to say anything useful about an issue, and because a standing
-v3 comment also suppresses re-triage they would otherwise stay that way. `board.sh` reports
-them as notes against the candidate:
+`ask=` leave `board.sh` unable to say anything useful about an issue. It reports them as
+notes against the candidate:
 
     #719   notes: triage marker predates the structured fields
 
@@ -94,11 +89,10 @@ restates the standing triage rather than replacing it:
 
     <!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none ask=open confidence=HIGH -->
 
-That middle line matters more than it looks. Standing triages were written before the answer
-syntax existed, so nothing on those issues tells a maintainer the token exists — and a
-decision typed any other way cannot be read. The backfill is the only comment that will be
-posted on them, so it has to carry the invitation. Where the marker records a non-`LOCAL`
-radius or an excluded area, spell out the override the answer needs:
+**That middle line is required, not decoration** — the backfill is the only comment that will
+be posted on those issues, so it is the only place the answer syntax can be offered. Where
+the marker records a non-`LOCAL` radius or an excluded area, spell out the override the
+answer needs:
 
     To implement Option A, reply: /agent-fix A --accept-radius SHARED
 
@@ -117,9 +111,7 @@ the issue has moved and nothing else will ever notice:
 
 1. **`verdict=NEEDS_INFO` and a human has commented since.** That comment is the answer to
    your own question. Re-triage from scratch — the new information very likely changes the
-   verdict. Live example of the failure this prevents: an issue triaged `NEEDS_INFO` received
-   a detailed research follow-up ninety minutes later, and four consecutive runs then
-   reported "all open issues already carry a current v3 comment" without ever reading it.
+   verdict.
 2. **`ask=open` and a human replied without the answer syntax.** The implementation stage
    cannot act on that reply, but you are the stage that should read it and decide whether the
    design changed. If it did, publish a new proposal. If it did not, say so and restate the
@@ -134,10 +126,11 @@ in case 1 explicitly (`needs RE-TRIAGE, not a fix`) and lists case 2 under the
 **The triage comment body is at most 2500 characters.** Count before posting; the check is
 `scripts/agent/verify-citations.sh --max-chars 2500 <file>`.
 
-That is a ceiling, not a target. The design proposal is the part worth its length — it is the
-design record for work that has not been built yet. What has to go is the restatement: do not
-summarise the issue back at the reporter, do not repeat what your own standing comment already
-established, and do not pad the options with reasoning that does not change the choice.
+That is a ceiling. The target is the worked example below, which is 2000 characters — most
+triages should land near it. The design proposal is the part worth its length; what has to go
+is restatement: do not summarise the issue back at the reporter, do not repeat what your own
+standing comment already established, and do not pad the options with reasoning that does not
+change the choice.
 
 ## Labels
 

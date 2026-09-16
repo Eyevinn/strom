@@ -19,9 +19,9 @@ echo "✓ Formatting check passed"
 
 # Run clippy. The features matter: nvidia and efp are opt-in, so without them
 # the feature-gated code CI lints is never compiled here and the hook can pass
-# on code CI rejects. --workspace --all-targets covers strom-types,
-# strom-mcp-server and the frontend on the host target in the same pass, which
-# makes this a superset of the two clippy steps in the Linux CI job.
+# on code CI rejects. --workspace --all-targets covers strom-types and the
+# frontend on the host target in the same pass, which makes this a superset of
+# the clippy step in the Linux CI job.
 echo "→ Running clippy linter..."
 if ! cargo clippy --workspace --all-targets --features efp,nvidia -- -D warnings; then
     echo ""

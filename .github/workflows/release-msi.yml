@@ -63,9 +63,6 @@ jobs:
           Write-Host "Downloading strom-v$version-windows-x86_64.exe..."
           Invoke-WebRequest -Uri "$baseUrl/strom-v$version-windows-x86_64.exe" -OutFile "binaries/strom.exe"
 
-          Write-Host "Downloading strom-mcp-server-v$version-windows-x86_64.exe..."
-          Invoke-WebRequest -Uri "$baseUrl/strom-mcp-server-v$version-windows-x86_64.exe" -OutFile "binaries/strom-mcp-server.exe"
-
           Write-Host "Downloaded binaries:"
           Get-ChildItem binaries/
 
@@ -223,7 +220,6 @@ jobs:
 
           # Get absolute paths
           $absStromExe = (Resolve-Path "binaries/strom.exe").Path
-          $absStromMcpServerExe = (Resolve-Path "binaries/strom-mcp-server.exe").Path
           $absStromIcon = (Resolve-Path "$buildDir/strom.ico").Path
           $absGstDir = (Resolve-Path "$buildDir/gstreamer-bundle").Path
           $absGvDir = (Resolve-Path "$buildDir/graphviz-bundle").Path
@@ -241,7 +237,6 @@ jobs:
           wix build `
             -d ProductVersion="$version" `
             -d StromExe="$absStromExe" `
-            -d StromMcpServerExe="$absStromMcpServerExe" `
             -d StromIcon="$absStromIcon" `
             -d GStreamerDir="$absGstDir" `
             -d GraphvizDir="$absGvDir" `

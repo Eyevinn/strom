@@ -1,4 +1,4 @@
-# Turning an approved design into a draft PR
+# Turning an approved design into a PR
 
 Read `PROTOCOL.md` first. This is the stage after a human answered a triage `Ask:`.
 
@@ -6,14 +6,13 @@ You never decide the design yourself, and you never merge.
 
 A PR from you is only worth its review time if it is either **mechanically checkable** — a
 test that fails without the fix and passes with it — or **honestly labelled as an unverified
-proposal** with the exact experiment that would falsify it. A PR that looks verified and is
-not is the one unrecoverable failure of this stage.
+proposal** with the exact experiment that would falsify it.
 
 ## Phase 1 — follow up on what you opened earlier
 
 Do this first; it is cheap, and it is where most of the value of this stage accrues.
 
-For every open draft PR authored by you:
+For every open PR authored by you:
 
 1. Read its check runs (`gh pr checks <N>`). If both runs of the two-commit structure have
    concluded, edit the body to replace the pending evidence lines with the actual
@@ -27,17 +26,14 @@ For every open draft PR authored by you:
    diff, or set the body's verdict to `BLOCKED` and say what you could not resolve.
 4. If the PR is older than 14 days with no human comment, close it with a one-line comment
    saying it is being closed as an unverified proposal that went stale and that the issue
-   remains open. Stale proposals that look like work in progress cost more than they are
-   worth.
+   remains open.
 
-   **Exception — never close a PR that is only waiting for a dispatch.** macOS and Windows do
-   not build on push or `pull_request`, and this stage may not fire a workflow run. So for a
-   platform-specific fix the *only* route to class A runs through a human typing
-   `gh workflow run ci.yml --ref <branch> -f platforms=windows`. Closing that work as stale
-   destroys a correct PR for being blocked on someone else. Such a PR is `class=C`
-   (`blocked-on-dispatch`, see below): instead of closing it, re-post the dispatch command as
-   a comment and carry it in every run summary while the PR stays open. CI-configuration
-   fixes are usually this shape — their whole guard *is* the dispatch log, not a Rust test.
+   **Exception — never close a PR that is only waiting for a dispatch.** For a
+   platform-specific fix the only route to class A runs through a human asking for the
+   platform build, and this stage may not fire one. Such a PR is `class=C`: instead of closing
+   it, re-post the command as a comment and carry it in every run summary while the PR stays
+   open. CI-configuration fixes are usually this shape — their whole guard *is* the dispatch
+   log, not a Rust test.
 
 ## Phase 2 — pick at most one issue
 
@@ -120,7 +116,7 @@ exercises the new code rather than restating it — but say so explicitly in the
 an unexplained compile error reads as a broken PR and a reviewer who assumes that will close
 it.
 
-Everything else — the classes, the required sections, the draft rule, the excluded areas — is
+Everything else — the classes, the required sections, the excluded areas — is
 identical. Pick the row from `work=`, not from the issue's label.
 
 The test must exercise the code it guards — call the changed module, do not rebuild the
@@ -145,15 +141,18 @@ Expect a formatting round trip. Without `cargo` you cannot run `cargo fmt`, and 
 check is the only thing red, fix it and **force-push, keeping exactly the two commits**.
 Never add a third commit to repair a mechanical check.
 
-Push commit 1, open the draft PR, then push commit 2. CI has no concurrency group, so both
+Push commit 1, open the PR, then push commit 2. CI has no concurrency group, so both
 runs complete and both appear on the PR: the first is the deliberate failure, the second is
 the state you are proposing. Record both run URLs in the body; Phase 1 of a later run fills
 in their conclusions.
 
 ## The PR
 
-**Draft, always.** Title `fix(<scope>): <what it does>`, prefixed `[needs hardware]` when
-class B applies for want of a device rather than for want of time.
+**Ready for review, never a draft.** You stop when the work is finished, so the PR opens
+finished. The verdict line already carries whether the evidence has arrived; a draft flag
+would say it a second time, and less precisely. Title `fix(<scope>): <what it does>`,
+prefixed `[needs hardware]` when class B applies for want of a device rather than for want
+of time.
 
 - **Class A — verified.** You are holding execution evidence right now: test output you
   produced in this run, or two concluded CI runs showing commit 1 red and commit 2 green.
@@ -161,16 +160,13 @@ class B applies for want of a device rather than for want of time.
 - **Class B — proposal, not verified.** The evidence has not arrived yet, or cannot be
   produced here at all (no device, browser, GPU or network).
 - **Class C — blocked on a dispatch.** The evidence exists and is one human command away:
-  the covering check is a macOS or Windows build that this repo runs only on
-  `workflow_dispatch`. Distinct from B because "no evidence yet" and "evidence that needs a
-  human to fire it" call for different things from the reader, and because C is exempt from
-  the 14-day stale closure. State the exact dispatch command in the body.
+  the covering check is a macOS or Windows build this repo does not run on a pull request by
+  default. C is exempt from the 14-day stale closure. State the exact command in the body.
 
 **A newly opened PR is therefore almost always class B**, because you open it before CI can
 have concluded — or class C, when the covering check is a platform build only a human can
-fire. That is not a defect in the work — it is the honest state of the evidence, and
-Phase 1 of a later run promotes it. Never reason "the mechanism is obviously right, so this is
-A": certainty is not evidence.
+fire. Phase 1 of a later run promotes it. Never reason "the mechanism is obviously right, so
+this is A": certainty is not evidence.
 
 Required sections, in this order, omitting any with nothing to say:
 
@@ -194,10 +190,23 @@ Required sections, in this order, omitting any with nothing to say:
 6. **Blast radius.** What else calls the changed symbol (grep and read at least one call
    site), and which configurations other than the reporter's change behaviour.
 
-**The PR body is at most 3500 characters**, checked with
-`scripts/agent/verify-citations.sh --max-chars 3500 <file>`. The Problem, Change and Evidence
-sections are the design record and are worth their length; what to cut is anything the diff
-already says.
+### Size the body before you write it
+
+**At most 3500 characters**, checked with
+`scripts/agent/verify-citations.sh --max-chars 3500 <file>`. Aim at 3000, and write to this
+allocation so the first draft is already the right size:
+
+| | Verdict | Problem | Change | Evidence | Not verified | Blast radius |
+|---|---|---|---|---|---|---|
+| Characters | 150 | 700 | 800 | 800 | 350 | 500 |
+
+Per-section ceilings; a section with nothing to say is still omitted. Problem, Change and
+Evidence are the design record and are worth their length — cut anything the diff already says.
+
+Over the ceiling means **one section is over its allocation.** Rewrite that section against
+its number; do not reword across the whole body to recover a few dozen characters. Two checks
+is the budget. Still over after the second: cut Not verified to one sentence naming the
+categories, and Blast radius to the one call site you read.
 
 Then comment once on the issue linking the PR and naming its class. **Do not restate the
 body** — link it. That comment is read alongside the PR, not instead of it.
@@ -206,7 +215,7 @@ body** — link it. That comment is read alongside the PR, not instead of it.
 
 - `verify-citations.sh` exits zero on the body, if the body cites code.
 - The branch has exactly the two commits, in that order.
-- The PR is a draft.
+- The PR is ready for review, not a draft.
 - The class matches evidence you can point at. If you did not run the test yourself and CI
   has not concluded, it is B, and the body says `Refs`, not `Fixes`. The issue comment and
   the run summary repeat whatever class the body claims, so a premature A propagates to three

@@ -159,6 +159,11 @@ struct Args {
     #[arg(long, env = "STROM_MEDIA_PATH")]
     media_path: Option<PathBuf>,
 
+    /// Directory for the CEF/Chromium profile used by HTML sources and DSK
+    /// graphics (defaults to a per-instance directory in the OS cache directory)
+    #[arg(long, env = "STROM_CEF_CACHE_PATH")]
+    cef_cache_path: Option<PathBuf>,
+
     /// Database URL (e.g., postgresql://user:pass@localhost/strom)
     /// If set, database storage is used instead of JSON files
     /// Supported schemes: postgresql://
@@ -306,6 +311,7 @@ fn main() -> anyhow::Result<()> {
         args.flows_path.clone(),
         args.blocks_path.clone(),
         args.media_path.clone(),
+        args.cef_cache_path.clone(),
         args.database_url.clone(),
         args.tls_cert.clone(),
         args.tls_key.clone(),
@@ -338,6 +344,41 @@ fn main() -> anyhow::Result<()> {
              accepts unauthenticated requests",
             blank_credentials.join(", ")
         );
+    }
+
+    // Give CEF (the `cefsrc` element behind HTML sources and DSK graphics) a
+    // per-instance cache directory. Native runs otherwise get Chromium's
+    // default, which warns
+    //
+    //   Please customize CefSettings.root_cache_path for your application. Use
+    //   of the default value may lead to unintended process singleton behavior.
+    //
+    // and leaves Chromium's process singleton shared: a second Strom instance
+    // on the same machine cannot start any cefsrc element, failing in
+    // gst_base_src_start() so the flow start returns 500 "Element failed to
+    // change its state". The resolved path is per data directory, so instances
+    // stay isolated while keeping a warm profile across restarts, which also
+    // cuts repeat flow-start latency. GST_CEF_CACHE_LOCATION always wins if it
+    // is already set — the strom-full Docker image sets it in its entrypoint.
+    //
+    // set_var is safe here: this is early in main(), before any thread is
+    // spawned and before GStreamer (and therefore CEF) is initialized.
+    match std::env::var_os("GST_CEF_CACHE_LOCATION") {
+        Some(existing) => info!(
+            "CEF cache directory: {} (from GST_CEF_CACHE_LOCATION)",
+            PathBuf::from(existing).display()
+        ),
+        None => {
+            if let Err(e) = std::fs::create_dir_all(&config.cef_cache_path) {
+                warn!(
+                    "Could not create CEF cache directory {}: {}",
+                    config.cef_cache_path.display(),
+                    e
+                );
+            }
+            std::env::set_var("GST_CEF_CACHE_LOCATION", &config.cef_cache_path);
+            info!("CEF cache directory: {}", config.cef_cache_path.display());
+        }
     }
 
     // Determine if GUI should be enabled
@@ -582,6 +623,9 @@ fn run_with_gui(
         error!("GUI error: {:?}", e);
     }
 
+    // Must run before library destructors; see `shutdown_overlay_timers`.
+    strom::blocks::builtin::vision_mixer::overlay::shutdown_overlay_timers();
+
     Ok(())
 }
 
@@ -599,6 +643,11 @@ fn run_headless_entry(
     log_reload_handle: strom::state::LogReloadHandle,
     default_log_filter: String,
 ) -> anyhow::Result<()> {
+    // Before the CFRunLoop starts: without this the process is App-Napped into the
+    // background QoS band ~32 s in, and every pipeline after that runs on
+    // efficiency cores.
+    strom::macos_app_nap::hold_activity_for_process_lifetime();
+
     #[cfg(target_os = "macos")]
     {
         gstreamer::macos_main(move || {
@@ -763,7 +812,12 @@ async fn run_headless(
         handle_for_signal.graceful_shutdown(Some(Duration::from_secs(10)));
     });
 
-    serve_with_tls(addr, app, handle, tls_config).await?;
+    let serve_result = serve_with_tls(addr, app, handle, tls_config).await;
+
+    // Must run before library destructors; see `shutdown_overlay_timers`.
+    strom::blocks::builtin::vision_mixer::overlay::shutdown_overlay_timers();
+
+    serve_result?;
 
     Ok(())
 }

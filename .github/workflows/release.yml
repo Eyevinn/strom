@@ -289,7 +289,6 @@ jobs:
           else
             cargo zigbuild --release --package strom --target ${{ matrix.target }}.${{ matrix.glibc }}
           fi
-          cargo zigbuild --release --package strom-mcp-server --target ${{ matrix.target }}.${{ matrix.glibc }}
 
       # Non-Linux: Build with regular cargo
       - name: Build backend (non-Linux)
@@ -305,21 +304,12 @@ jobs:
           else
             cargo build --release --package strom --target ${{ matrix.target }}
           fi
-          cargo build --release --package strom-mcp-server --target ${{ matrix.target }}
 
       - name: Upload backend binary
         uses: actions/upload-artifact@v7
         with:
           name: strom-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/strom${{ matrix.binary_ext }}
-          retention-days: 90
-          if-no-files-found: error
-
-      - name: Upload MCP server binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: strom-mcp-server-v${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/strom-mcp-server${{ matrix.binary_ext }}
           retention-days: 90
           if-no-files-found: error
 
@@ -360,19 +350,7 @@ jobs:
           mv artifacts/strom-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc/strom.exe \
              release-assets/strom-v${{ steps.version.outputs.version }}-windows-x86_64.exe
 
-          mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64-x86_64-unknown-linux-gnu/strom-mcp-server \
-             release-assets/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-x86_64
-
-          mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-arm64-aarch64-unknown-linux-gnu/strom-mcp-server \
-             release-assets/strom-mcp-server-v${{ steps.version.outputs.version }}-linux-aarch64
-
-          mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-macos-aarch64-apple-darwin/strom-mcp-server \
-             release-assets/strom-mcp-server-v${{ steps.version.outputs.version }}-macos-aarch64
-
-          mv artifacts/strom-mcp-server-v${{ steps.version.outputs.version }}-windows-x86_64-pc-windows-msvc/strom-mcp-server.exe \
-             release-assets/strom-mcp-server-v${{ steps.version.outputs.version }}-windows-x86_64.exe
-
-          chmod +x release-assets/strom-*-linux-* release-assets/strom-*-macos-* release-assets/strom-mcp-server-*-linux-* release-assets/strom-mcp-server-*-macos-*
+          chmod +x release-assets/strom-*-linux-* release-assets/strom-*-macos-*
           ls -lh release-assets/
 
       - name: Create Release
