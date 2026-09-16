@@ -2,6 +2,127 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.6.9] - 2026-09-16
+
+### Added
+- Blocks: `builtin.rtmp_output` — publish a flow to an RTMP endpoint (#827)
+- Blocks: `builtin.audioenc`, an audio encoder block (#744)
+- Blocks: live audio router on synchronising buses, with per-sample crosspoint fades (#740)
+- EFP over SRT: reach EFP's embedded-data channel from a flow, and carry embedded data end to end with per-track stream routing (#700, #778)
+- WHIP/WHEP Input: make `drop-on-latency` configurable (#791)
+
+### Changed
+- MCP: drop the stdio MCP server and the dead demo script — the HTTP endpoint is the supported transport (#765)
+- Flow: warn when a block starts with partially wired inputs (#777)
+
+### Performance
+- macOS: let the platform choose its own convert mode, and thread the conversion (#726)
+
+### Fixed
+- WHIP: let a rejoining client take over a dead session's slot (#753)
+- WHIP: keep a slot's audio format stable across sessions (#758)
+- WHIP: detect a dropped ingest sooner and retry with backoff (#754)
+- WHIP: stop slots without a publisher holding the pipeline out of PLAYING (#749)
+- WHIP: evaluate the inactivity watchdog per poll tick, not per timeout (#752)
+- Recorder: end a track that stops so the rest of the recording continues (#757)
+- Recorder: lock the `ts_passthrough` multifilesink until its input carries data (#824)
+- Recorder: stop an input with no data holding the pipeline out of PLAYING (#750)
+- RTP: disable header extension aggregation on every depayloader (#721)
+- Vision Mixer: stop overlay timer threads on every teardown path (#784)
+- Vision Mixer: join overlay timer threads before the process exits (#746)
+- Compositor editor: undo the optimistic take swap when the request fails (#807)
+- Compositor: honour `force_live` on the CPU mixer path (#745)
+- Bus: remove exactly as many bus signal watches as were added (#788)
+- Pipeline: check property values against the spec instead of panicking (#724)
+- API: stop discarding links written with a bare element id (#725)
+- MCP: make the HTTP endpoint usable and correct, with tests (#766)
+- Version: report Kubernetes pods as containerised (#816)
+- macOS: keep the headless server out of App Nap (#735)
+- CEF: give it a per-instance cache directory on native runs (#671)
+- Build: accept git provenance as Docker build args (#800)
+
+### CI
+- Build macOS and Windows on main, and on labelled pull requests (#768)
+- Run the frontend's own tests (#826)
+- Stop the FX wipe test failing on a slow runner (#825)
+- Serialize `test_from_figment_cli_args_override` (#760)
+
+### Documentation
+- Vision Mixer: producer switching guide for the HTTP API (#798)
+- Hardware requirements and sizing doc (WIP) (#736)
+- Note publishing to YouTube Live and Twitch as an idea (#776)
+- Agent: move role, budget, priority order and review reasoning into the repo, and tighten the PR and onward-message rules (#751, #761, #773, #774, #775, #779, #780, #781, #801)
+
+### Dependencies
+- Bump cairo-rs, rust-embed, sysinfo, serial_test, mdns-sd, thiserror and libc (#696, #698, #732, #734, #818, #819, #820)
+
+---
+
+## [0.6.8] - 2026-09-01
+
+### Fixed
+- Env: a set-but-empty Strom variable means unset, not empty (#738)
+
+### Documentation
+- Agent: move the review-bot protocol into the repo, with two checks in code (#728)
+- Agent: scope `class=` to fix markers, so its absence stops being a finding (#730)
+
+---
+
+## [0.6.7] - 2026-08-27
+
+### Added
+- AES67 Output: expose the RTP payload type as a block property (#677)
+- WHIP/WHEP: expose `do-retransmission` as a block property (#663)
+- WHIP: add a `jitterbuffer_latency_ms` property to prevent stalls on session start (#665)
+
+### Fixed
+- State: one teardown path for every way a flow goes away (#715)
+- WHIP: stop a session's inactivity watchdog when the session ends (#720)
+- WHIP: ask the publisher for a keyframe when video does not start (#693)
+- WebRTC: refuse to build WHIP/WHEP blocks when ICE is unavailable (#689)
+- WHEP: download GL-memory video before it reaches `whepserversink` (#687)
+- WHEP: quieten and escape the unregistered-endpoint log lines (#713)
+- MPEG-TS over SRT: stop `srtsink` replaying a stale PAT/PMT to every caller (#712)
+- Pipeline: fail `start()` when the pipeline cannot reach PLAYING (#705)
+- Recorder: request `splitmuxsink` pads for connected tracks only (#676)
+- Recorder: add a queue per leg between parser and `splitmuxsink` (#675)
+- API: return a JSON 404 for unmatched `/api/*` paths (#692, #695)
+- API: honour the client-supplied flow id on `POST /api/flows` (#681)
+- macOS: run a Cocoa run loop in headless mode so CEF can initialise (#669)
+- macOS: install libnice-gstreamer so `webrtcbin` has ICE (#686)
+- Frontend: pin ambiguous float literals to f32 for the new rustc lint (#664)
+- Scripts: make the pre-commit hook match the checks CI actually runs (#718)
+
+### CI
+- Run the tests that were silently skipping, and make platform builds selectable (#678)
+- macOS: raise the job timeout from 30 to 45 minutes (#688)
+
+### Documentation
+- Correct the X11/Docker-only claim for HTML rendering on macOS (#670)
+
+### Dependencies
+- Bump gstreamer and gstreamer-video to 0.25.3 together, plus gst-plugin-rtp, eframe, gio, bcrypt, uuid, http-body-util and quinn-proto (#657, #658, #659, #660, #662, #697, #699, #704)
+
+---
+
+## [0.6.6] - 2026-06-26
+
+### Added
+- TAMS Output block with OSC PAT/SAT authentication (#647)
+
+### CI
+- Make the sccache cache non-blocking via a backend preflight (#654)
+- Point the sccache cache at the olivedev MinIO instance (#653)
+
+### Documentation
+- Document the 0.6.3–0.6.5 releases (#641)
+
+### Dependencies
+- Bump uuid, thread-priority, rustls, time, sysinfo, chrono, tower-http and egui_extras (#642, #643, #644, #645, #646, #648, #649, #650, #651, #652)
+
+---
+
 ## [0.6.5] - 2026-06-12
 
 ### Added
