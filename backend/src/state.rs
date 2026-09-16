@@ -912,6 +912,13 @@ impl AppState {
             }
         }
 
+        for (block_id, pad_name) in flow.partially_unwired_block_inputs() {
+            warn!(
+                "Block {} starts with input pad {} unconnected while other inputs of the same media type are connected - it may produce black or silent output",
+                block_id, pad_name
+            );
+        }
+
         // Snapshot the live local-device map so the Local Input block can
         // resolve a chosen device id without starting a transient
         // DeviceMonitor inside its build() (which crashes inside
