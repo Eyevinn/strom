@@ -46,6 +46,9 @@ pub struct WhipEndpointConfig {
     /// Whether whipserversrc should request retransmission (NACK) of lost
     /// packets from the publisher.
     pub do_retransmission: bool,
+    /// Whether the per-session rtpbin's jitterbuffers drop queued packets that
+    /// exceed `jitterbuffer_latency_ms` rather than holding them.
+    pub drop_on_latency: bool,
     /// Shared dynamic webrtcbin store for ICE policy tracking
     pub dynamic_webrtcbin_store: DynamicWebrtcbinStore,
     /// Maximum video bitrate hint for Chrome (kbps). Injected into the SDP
@@ -871,6 +874,7 @@ mod tests {
             video_decoding: Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect()),
             jitterbuffer_latency_ms: 200,
             do_retransmission: true,
+            drop_on_latency: true,
             dynamic_webrtcbin_store: Arc::new(Mutex::new(HashMap::new())),
             max_video_bitrate_kbps: 4000,
             max_sessions,
