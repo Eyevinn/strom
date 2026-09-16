@@ -23,7 +23,8 @@
 //!
 //! The sink itself stays locked until a track's caps arrive, so a recorder whose input
 //! never carries data cannot hold the pipeline out of PLAYING (see
-//! `prepare_idle_recording_sink`).
+//! `prepare_idle_recording_sink`). The `ts_passthrough` multifilesink is locked the same
+//! way, from the single caps probe on its static input.
 //!
 //! Output files are written to: {media_path}/{output_dir}/{filename_prefix}_%05d.{ext}
 
@@ -63,17 +64,17 @@ pub const SPLITMUXSINK_SUFFIX: &str = "splitmuxsink";
 /// PLAYING — and a flow where only some inputs are live has recorders in
 /// exactly that position. Locked, the sink sits in NULL and writes no file
 /// until `activate_recording_sink` brings it in on a track's first caps.
-fn prepare_idle_recording_sink(splitmuxsink: &gst::Element) {
-    splitmuxsink.set_locked_state(true);
+fn prepare_idle_recording_sink(sink: &gst::Element) {
+    sink.set_locked_state(true);
 }
 
 /// Bring the recording sink into the running pipeline, from the caps probe of a
 /// track that is about to be linked to it. Idempotent across tracks.
-fn activate_recording_sink(splitmuxsink: &gst::Element, instance_id: &str) {
-    splitmuxsink.set_locked_state(false);
-    if let Err(e) = splitmuxsink.sync_state_with_parent() {
+fn activate_recording_sink(sink: &gst::Element, instance_id: &str) {
+    sink.set_locked_state(false);
+    if let Err(e) = sink.sync_state_with_parent() {
         error!(
-            "Recorder {}: failed to sync splitmuxsink with pipeline state: {}",
+            "Recorder {}: failed to sync recording sink with pipeline state: {}",
             instance_id, e
         );
     }
@@ -1037,6 +1038,8 @@ fn build_ts_passthrough(
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("multifilesink: {}", e)))?;
 
+    prepare_idle_recording_sink(&multifilesink);
+
     multifilesink.set_property("location", location);
     // next-file=4 means split on each buffer that has the DISCONT flag, which
     // aligns well with TS packet boundaries when used with tsparse upstream.
@@ -1052,18 +1055,58 @@ fn build_ts_passthrough(
     // sync=false: don't block on clock, write as fast as data arrives
     multifilesink.set_property("sync", false);
 
+    // One caps probe, not one per track: this path has a single static input, so
+    // the first caps to reach it is the only signal that data is coming. Until
+    // then the sink stays locked in NULL and cannot stall the pipeline's preroll.
+    //
+    // The link is made here rather than declared, as the splitmuxsink path does.
+    // A pad linked to a sink sitting in NULL loses stream-start and segment, which
+    // are pushed before caps and dropped by the inactive peer; GStreamer replays
+    // sticky events only on link, so linking after activation is what delivers them.
+    let src_pad = ts_input.static_pad("src").ok_or_else(|| {
+        BlockBuildError::ElementCreation("ts_input identity has no src pad".to_string())
+    })?;
+    let sink_weak = multifilesink.downgrade();
+    let activated = AtomicBool::new(false);
+    let activate_instance_id = instance_id.to_string();
+    src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = &info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if event.type_() != gst::EventType::Caps {
+            return gst::PadProbeReturn::Ok;
+        }
+        if activated.swap(true, Ordering::SeqCst) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(sink) = sink_weak.upgrade() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        activate_recording_sink(&sink, &activate_instance_id);
+
+        let sink_pad = match sink.static_pad("sink") {
+            Some(p) => p,
+            None => {
+                error!(
+                    "Recorder {}: multifilesink has no sink pad",
+                    activate_instance_id
+                );
+                return gst::PadProbeReturn::Ok;
+            }
+        };
+        if let Err(e) = pad.link(&sink_pad) {
+            error!(
+                "Recorder {}: failed to link ts_input to multifilesink: {:?}",
+                activate_instance_id, e
+            );
+        }
+        gst::PadProbeReturn::Ok
+    });
+
     let elements = vec![
         (input_id.clone(), ts_input.clone()),
         (sink_id.clone(), multifilesink.clone()),
     ];
-
-    // Static link: ts_input -> multifilesink
-    use strom_types::Link;
-    let internal_links = vec![Link {
-        from: format!("{}:src", input_id),
-        to: format!("{}:sink", sink_id),
-    }
-    .to_pad_refs()];
 
     info!(
         "Recorder {}: TS passthrough mode, writing to: {}",
@@ -1072,7 +1115,7 @@ fn build_ts_passthrough(
 
     Ok(BlockBuildResult {
         elements,
-        internal_links,
+        internal_links: vec![],
         bus_message_handler: None,
         pad_properties: HashMap::new(),
     })
