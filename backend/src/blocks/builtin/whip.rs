@@ -31,6 +31,81 @@ use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+/// The part of a WHIP Input slot's audio format fixed at build time: two
+/// channels, whoever is publishing into it.
+///
+/// A slot outlives its sessions, and caps travel with each sample pushed into
+/// `appsrc_audio_<slot>`, so a second publisher can hand a running chain a
+/// different format than the first. Consumers past the slot's tee have
+/// committed to the first one — a muxer will not renegotiate mid-file, and its
+/// `not-negotiated` travels back up and kills the appsrc's streaming thread.
+/// The slot's capsfilter keeps the format on this side of the tee, where
+/// `audioconvert` absorbs a change; [`lock_slot_audio_caps`] freezes it on
+/// what the first session negotiated.
+///
+/// Only `channels` is pinned here, so a mono first publisher does not downmix
+/// every later one. The other fields are left for downstream to choose,
+/// because a build-time value can contradict what downstream accepts, and then
+/// the slot's audio cannot link or negotiate at all and the seat gets no
+/// audio. A pinned rate breaks a seat whose shared mixer settled on another
+/// one; a pinned S16LE breaks a consumer that takes only float and has no
+/// converter of its own, such as the Latency block's `audiolatency`.
+fn slot_audio_caps() -> gst::Caps {
+    gst::Caps::builder("audio/x-raw")
+        .field("channels", 2i32)
+        .build()
+}
+
+/// Freeze a slot's audio capsfilter on the format that was actually negotiated.
+///
+/// [`slot_audio_caps`] pins only the channel count; downstream chooses the
+/// sample format, layout and rate on the first session. Writing those caps
+/// back into the capsfilter makes `audioconvert`/`audioresample` convert every
+/// later session to them. The values came from downstream, so pinning them cannot
+/// conflict with downstream — which build-time values can.
+///
+/// The format needs this even though `opusdec` always outputs S16LE: without
+/// it, a mono session is converted to the consumer's preferred float, while a
+/// stereo session already has the pinned channel count and `audioconvert`
+/// passes its S16LE straight through. For the rate it is defence in depth:
+/// `opusdec` always outputs 48 kHz.
+///
+/// CAPS events are rare; this is not a per-buffer probe.
+fn lock_slot_audio_caps(capsfilter: &gst::Element, slot: usize) {
+    let Some(src_pad) = capsfilter.static_pad("src") else {
+        warn!(
+            "WHIP Input: audio capsfilter for slot {} has no src pad",
+            slot
+        );
+        return;
+    };
+    // Weak: the element owns the probe, so a strong ref would be a cycle and
+    // would keep the pipeline from ever finalizing.
+    let capsfilter_weak = capsfilter.downgrade();
+    let locked = AtomicBool::new(false);
+    src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = &info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps_event) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if locked.swap(true, Ordering::Relaxed) {
+            return gst::PadProbeReturn::Ok;
+        }
+        let Some(capsfilter) = capsfilter_weak.upgrade() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let caps = caps_event.caps().to_owned();
+        capsfilter.set_property("caps", &caps);
+        info!(
+            "WHIP Input: slot {} audio format locked to {} for the life of the flow",
+            slot, caps
+        );
+        gst::PadProbeReturn::Ok
+    });
+}
+
 /// WHIP Output block builder.
 pub struct WHIPOutputBuilder;
 
@@ -186,7 +261,7 @@ fn prepare_idle_decodebin(decodebin: &gst::Element) {
 /// Build WHIP Input per-slot output chains.
 ///
 /// At build time, per-slot chains are created in the main pipeline:
-/// - decode=true: appsrc → decodebin → audioconvert → audioresample → tee (audio),
+/// - decode=true: appsrc → decodebin → audioconvert → audioresample → capsfilter → tee (audio),
 ///   appsrc → decodebin → videoconvert → tee (video)
 /// - decode=false: appsrc → tee (audio/video passthrough)
 ///
@@ -197,7 +272,11 @@ fn prepare_idle_decodebin(decodebin: &gst::Element) {
 /// A slot's `decodebin` starts with its state locked (see
 /// `prepare_idle_decodebin`); `WhipEndpointConfig::allocate_slot` unlocks it
 /// when a session claims the slot.
-fn build_whipserversrc(
+///
+/// Public so tests can build the slot chains on a host without ICE elements —
+/// `WHIPInputBuilder::build` refuses there, but the slot chains themselves use
+/// nothing from `gst-plugins-rs`.
+pub fn build_whipserversrc(
     instance_id: &str,
     properties: &HashMap<String, PropertyValue>,
     ctx: &BlockBuildContext,
@@ -312,6 +391,7 @@ fn build_whipserversrc(
                 let decodebin_id = format!("{}:decodebin_audio_{}", instance_id, slot);
                 let audioconvert_id = format!("{}:audioconvert_{}", instance_id, slot);
                 let audioresample_id = format!("{}:audioresample_{}", instance_id, slot);
+                let audio_caps_id = format!("{}:audio_caps_{}", instance_id, slot);
 
                 let decodebin = gst::ElementFactory::make("decodebin")
                     .name(&decodebin_id)
@@ -336,6 +416,15 @@ fn build_whipserversrc(
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!("audioresample_{}: {}", slot, e))
                     })?;
+
+                let audio_caps = gst::ElementFactory::make("capsfilter")
+                    .name(&audio_caps_id)
+                    .property("caps", slot_audio_caps())
+                    .build()
+                    .map_err(|e| {
+                        BlockBuildError::ElementCreation(format!("audio_caps_{}: {}", slot, e))
+                    })?;
+                lock_slot_audio_caps(&audio_caps, slot);
 
                 // appsrc → decodebin
                 internal_links.push((
@@ -364,19 +453,27 @@ fn build_whipserversrc(
                     }
                 });
 
-                // audioconvert → audioresample → tee
+                // audioconvert → audioresample → capsfilter → tee.
+                // The capsfilter is what makes the slot reusable by a publisher
+                // whose audio format differs from the last one — see
+                // `slot_audio_caps` and `lock_slot_audio_caps`.
                 internal_links.push((
                     ElementPadRef::pad(&audioconvert_id, "src"),
                     ElementPadRef::pad(&audioresample_id, "sink"),
                 ));
                 internal_links.push((
                     ElementPadRef::pad(&audioresample_id, "src"),
+                    ElementPadRef::pad(&audio_caps_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::pad(&audio_caps_id, "src"),
                     ElementPadRef::pad(&audio_out_tee_id, "sink"),
                 ));
 
                 elements.push((decodebin_id, decodebin));
                 elements.push((audioconvert_id, audioconvert));
                 elements.push((audioresample_id, audioresample));
+                elements.push((audio_caps_id, audio_caps));
             } else {
                 // decode=false: clocksync → tee directly
                 internal_links.push((
