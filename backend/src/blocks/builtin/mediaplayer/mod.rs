@@ -68,7 +68,7 @@ mod tests {
         MediaPlayerKey, MediaPlayerRegistry, MediaPlayerState, Playlist,
     };
     use gstreamer as gst;
-    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, RwLock};
     use strom_types::block::PropertyType;
     use strom_types::PropertyValue;
@@ -96,7 +96,7 @@ mod tests {
             decode: false,
             sync: true,
             media_path: std::path::PathBuf::from("/media"),
-            ts_offset: Arc::new(AtomicI64::new(i64::MIN)),
+            bridge: Arc::new(crate::gst::pipeline_bridge::SessionBridge::new()),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: std::sync::Mutex::new(None),
         }
