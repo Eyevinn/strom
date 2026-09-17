@@ -6,6 +6,7 @@ use crate::gst::SessionThreadConfig;
 use crate::whip_registry::WhipRegistry;
 use crate::whip_session_manager::WhipEndpointConfig;
 use gstreamer as gst;
+use gstreamer::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,7 +16,37 @@ use strom_types::{
     FlowId, PropertyValue,
 };
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, info, warn};
+
+/// Apply an ICE transport policy to an element that owns its own webrtcbin.
+///
+/// `whipsink`, `whepsrc` and the webrtcsink-based `whipclientsink` /
+/// `whepserversink` expose `ice-transport-policy` themselves and hand the value
+/// to every webrtcbin they create, as they create it. That is more robust than
+/// setting it on the child from a `deep-element-added` handler, which depends
+/// on the child's name and on running before that session's pipeline leaves
+/// READY — the last state in which webrtcbin accepts the property.
+///
+/// `whipserversrc` and `whepclientsrc` have no such property, so those blocks
+/// still configure the child directly.
+pub fn set_ice_transport_policy(element: &gst::Element, policy: &str, label: &str) {
+    if !element.has_property("ice-transport-policy") {
+        debug!(
+            "{}: {} has no ice-transport-policy property, leaving it to the webrtcbin handler",
+            label,
+            element.name()
+        );
+        return;
+    }
+
+    element.set_property_from_str("ice-transport-policy", policy);
+    info!(
+        "{}: Set ice-transport-policy={} on {}",
+        label,
+        policy,
+        element.name()
+    );
+}
 
 /// Block property name for the per-block ICE transport policy override.
 ///
@@ -242,7 +273,7 @@ impl BlockBuildContext {
             })
             .unwrap_or("");
 
-        match requested {
+        let resolved = match requested {
             "" => self.ice_transport_policy.clone(),
             "all" | "relay" => requested.to_string(),
             other => {
@@ -252,7 +283,20 @@ impl BlockBuildContext {
                 );
                 self.ice_transport_policy.clone()
             }
+        };
+
+        // Relay-only gathers nothing but TURN candidates, so a block without a
+        // TURN server offers no candidates at all and never connects. Nothing
+        // downstream reports this: the block builds, the flow starts, and the
+        // connection simply never establishes.
+        if resolved == "relay" && self.turn_server().is_none() {
+            warn!(
+                "ICE transport policy is 'relay' but no TURN server is configured in ice_servers — \
+                 this block gathers no candidates and will not connect"
+            );
         }
+
+        resolved
     }
 
     /// Get the first STUN server URL (for GStreamer elements).

@@ -11,8 +11,8 @@
 //!   (appsrc → decodebin → convert → tee per slot).
 
 use crate::blocks::{
-    BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, APPSRC_MAX_BYTES_AUDIO,
-    APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
+    set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder,
+    APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
 use crate::gst::ice_preflight;
 use crate::gst::keyframe_request;
@@ -1386,6 +1386,15 @@ fn build_whipclientsink(
         whipclientsink.set_property("turn-servers", turn_servers);
     }
 
+    // webrtcsink applies this to the webrtcbin it creates for the session, as
+    // it creates it. The deep-element-added handler below sets the same value
+    // again, which covers a webrtcsink that does not expose the property.
+    set_ice_transport_policy(
+        &whipclientsink,
+        &ice_transport_policy,
+        "WHIP Output (whipclientsink)",
+    );
+
     // Disable video codecs by setting video-caps to empty
     whipclientsink.set_property("video-caps", gst::Caps::new_empty());
 
@@ -1583,6 +1592,11 @@ fn build_whipsink(
     }
 
     let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
+
+    // whipsink forwards this to the webrtcbin it owns. The handler installed
+    // below sets the same value on that webrtcbin, which covers a whipsink that
+    // does not expose the property.
+    set_ice_transport_policy(&whipsink, &ice_transport_policy, "WHIP Output (whipsink)");
 
     debug!(
         "WHIP Output (whipsink legacy) configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",

@@ -9,7 +9,9 @@
 //!
 //! Handles dynamic pad creation by linking new audio streams to a liveadder mixer.
 
-use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::blocks::{
+    set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder,
+};
 use crate::gst::gl_bridge;
 use crate::gst::ice_preflight;
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
@@ -361,6 +363,11 @@ fn build_whepsrc(
         whepsrc.set_property("turn-server", turn);
     }
 
+    // whepsrc owns the webrtcbin it builds and forwards this to it, so setting
+    // it here beats hooking the child: it lands before the element leaves NULL,
+    // which is the state webrtcbin requires for this property.
+    set_ice_transport_policy(&whepsrc, &ice_transport_policy, "WHEP Input (whepsrc)");
+
     if let Some(token) = &auth_token {
         whepsrc.set_property("auth-token", token);
     }
@@ -372,22 +379,12 @@ fn build_whepsrc(
         // Set on already-existing children (webrtcbin and its internal rtpbin)
         for element in bin.iterate_recurse().into_iter().flatten() {
             let name = element.name();
-            if name.starts_with("webrtcbin") {
-                if element.has_property("latency") {
-                    element.set_property("latency", jitterbuffer_latency_ms);
-                    info!(
-                        "WHEP Input (whepsrc): Set jitterbuffer latency={}ms on existing {}",
-                        jitterbuffer_latency_ms, name
-                    );
-                }
-
-                if element.has_property("ice-transport-policy") {
-                    element.set_property_from_str("ice-transport-policy", &ice_transport_policy);
-                    info!(
-                        "WHEP Input (whepsrc): Set ice-transport-policy={} on existing {}",
-                        ice_transport_policy, name
-                    );
-                }
+            if name.starts_with("webrtcbin") && element.has_property("latency") {
+                element.set_property("latency", jitterbuffer_latency_ms);
+                info!(
+                    "WHEP Input (whepsrc): Set jitterbuffer latency={}ms on existing {}",
+                    jitterbuffer_latency_ms, name
+                );
             }
             // Workaround for GStreamer rtpjitterbuffer packet_spacing bug:
             // After a mute gap (no RTP packets), calculate_packet_spacing sees
@@ -410,27 +407,16 @@ fn build_whepsrc(
         }
 
         // Also catch any dynamically added webrtcbins, rtpbins and jitterbuffers
-        let ice_transport_policy = ice_transport_policy.clone();
         bin.connect("deep-element-added", false, move |values| {
             let element = values[2].get::<gst::Element>().unwrap();
             let element_name = element.name();
 
-            if element_name.starts_with("webrtcbin") {
-                if element.has_property("latency") {
-                    element.set_property("latency", jitterbuffer_latency_ms);
-                    info!(
-                        "WHEP Input (whepsrc): Set jitterbuffer latency={}ms on {}",
-                        jitterbuffer_latency_ms, element_name
-                    );
-                }
-
-                if element.has_property("ice-transport-policy") {
-                    element.set_property_from_str("ice-transport-policy", &ice_transport_policy);
-                    info!(
-                        "WHEP Input (whepsrc): Set ice-transport-policy={} on {}",
-                        ice_transport_policy, element_name
-                    );
-                }
+            if element_name.starts_with("webrtcbin") && element.has_property("latency") {
+                element.set_property("latency", jitterbuffer_latency_ms);
+                info!(
+                    "WHEP Input (whepsrc): Set jitterbuffer latency={}ms on {}",
+                    jitterbuffer_latency_ms, element_name
+                );
             }
 
             None
@@ -1061,6 +1047,7 @@ fn build_whepserversink(
     // Get ICE servers from application config
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
     // Create whepserversink element
     // This is based on webrtcsink and handles encoding internally
@@ -1081,6 +1068,12 @@ fn build_whepserversink(
         let turn_servers = gst::Array::new([turn]);
         whepserversink.set_property("turn-servers", turn_servers);
     }
+
+    // webrtcsink applies this to every consumer's webrtcbin as it creates it,
+    // before that session's pipeline leaves NULL. The consumer-added handler
+    // below sets the same value again, which covers a webrtcsink that does not
+    // expose the property at all.
+    set_ice_transport_policy(&whepserversink, &ice_transport_policy, "WHEP Output");
 
     // Disable FEC; RTX (retransmission) is configurable, default on.
     // - FEC adds proactive redundancy packets on every stream (~50% constant
@@ -1205,7 +1198,7 @@ fn build_whepserversink(
     // Also register the webrtcbin for stats collection (since it's in a separate session pipeline).
     let dynamic_webrtcbin_store = ctx.dynamic_webrtcbin_store();
     let block_id_for_callback = instance_id.to_string();
-    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
+    let ice_transport_policy = ice_transport_policy.clone();
     whepserversink.connect("consumer-added", false, move |values| {
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let webrtcbin = values[2].get::<gst::Element>().unwrap();
