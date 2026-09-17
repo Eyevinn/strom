@@ -7,6 +7,7 @@
 //! context (probed like `shader_validation_test`; merely having the GL
 //! plugins installed is not enough, as headless CI runners show).
 
+use serial_test::serial;
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
@@ -104,7 +105,11 @@ fn build_vm_flow() -> Flow {
     flow
 }
 
+// Rendering through llvmpipe costs whole cores, and both tests here also scan
+// every program frame they pull. Run alone a wipe arrives at 30 fps; run against
+// a sibling GL test on a 4-core runner the observer misses the whole animation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn vision_mixer_fx_engine_end_to_end() {
     gstreamer::init().unwrap();
 
@@ -281,6 +286,7 @@ async fn vision_mixer_fx_engine_end_to_end() {
 /// asserts mid-wipe frames contain a substantial amount of BOTH sources
 /// (i.e. the wipe actually animates instead of switching).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn wipe_between_letterboxed_sources_animates() {
     use gstreamer::prelude::*;
     gstreamer::init().unwrap();
