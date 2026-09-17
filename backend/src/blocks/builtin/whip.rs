@@ -2223,10 +2223,18 @@ mod tests {
     fn watchdog_detects_inactivity_within_one_poll_of_the_timeout() {
         let timeout = std::time::Duration::from_millis(1000);
         let stop = Arc::new(AtomicBool::new(false));
-        let output = Arc::new(ActivityStamp::new(Instant::now()));
-        let activity = Arc::new(SessionActivity::new(Instant::now(), output.clone()));
+        // Running for a minute already, so the decoder's grace is long spent and
+        // only the inactivity timeout is under test.
+        let running = || {
+            ActivityStamp::backdated(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::ZERO,
+            )
+        };
+        let output = Arc::new(running());
+        let activity = Arc::new(SessionActivity::from_stamps(running(), output.clone()));
 
-        // One buffer that both arrives and comes out of the slot, then nothing.
+        // One more buffer that both arrives and comes out of the slot, then nothing.
         let publisher = activity.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(150));
