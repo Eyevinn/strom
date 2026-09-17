@@ -285,10 +285,25 @@ RUN apt-get update && apt-get install -y \
 # in this image because it was built against the 1.22 ABI.
 ARG PATCHED_PLUGINS_TAG=patched-plugins-v1.0-gst1.22.12
 ARG PATCHED_PLUGINS_REPO=Eyevinn/strom
+# Pin each artifact by digest. A GitHub release asset can be replaced in place,
+# so fetching by tag alone means a substituted .so would be written straight
+# into a system library path and loaded into the strom process, with nothing in
+# the build failing. Download to a temporary path, verify, then install.
+ARG PATCHED_DECKLINK_SHA256_AMD64=ffdcb4f89e3fd91deb1926bbca57adf02d67e89a8db1c265a62f5d4885a69e5b
+ARG PATCHED_DECKLINK_SHA256_ARM64=75309b22382e834f3caa25b9e177120f56826bdde231a00d66dd54866d3a090b
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && case "${TARGETARCH}" in \
+         amd64) expected="${PATCHED_DECKLINK_SHA256_AMD64}" ;; \
+         arm64) expected="${PATCHED_DECKLINK_SHA256_ARM64}" ;; \
+         *) echo "No pinned libgstdecklink digest for TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
     && curl -fsSL \
         "https://github.com/${PATCHED_PLUGINS_REPO}/releases/download/${PATCHED_PLUGINS_TAG}/libgstdecklink-linux-${TARGETARCH}.so" \
-        -o "/usr/lib/$(uname -m)-linux-gnu/gstreamer-1.0/libgstdecklink.so" \
+        -o /tmp/libgstdecklink.so \
+    && echo "${expected}  /tmp/libgstdecklink.so" | sha256sum -c - \
+    && install -m 0644 /tmp/libgstdecklink.so \
+        "/usr/lib/$(uname -m)-linux-gnu/gstreamer-1.0/libgstdecklink.so" \
+    && rm -f /tmp/libgstdecklink.so \
     && apt-get remove -y curl \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
