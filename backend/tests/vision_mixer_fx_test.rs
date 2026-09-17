@@ -58,14 +58,12 @@ fn gl_environment_available() -> bool {
 
 /// Skip unless GL actually works — but only where skipping is legitimate.
 ///
-/// A headless Linux runner has the GL elements installed and still cannot create
-/// a context, so this test can only ever run where one exists. That makes the skip
-/// path the normal path on Linux, and a silent one: a real GL regression on a
-/// platform that *can* render would slip through as a green 0.05 s pass.
+/// A skip is silent: a real GL regression on a platform that *can* render would
+/// slip through as a green 0.05 s pass.
 ///
-/// `STROM_REQUIRE_GL=1` turns the skip into a failure. CI sets it on the macOS job,
-/// which is the one platform whose runner renders, so that job cannot quietly stop
-/// exercising the FX engine.
+/// `STROM_REQUIRE_GL=1` turns the skip into a failure. CI sets it on both test
+/// jobs — Linux renders through llvmpipe under Xvfb, macOS natively — so neither
+/// can quietly stop exercising the FX engine.
 fn gl_available_or_required() -> bool {
     if gl_environment_available() {
         return true;
