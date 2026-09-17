@@ -512,12 +512,16 @@ async fn cefsrc_emits_premultiplied_alpha() {
         .downcast::<gst_app::AppSink>()
         .expect("tap is an appsink");
 
-    // Frames before the page loads are fully transparent. Sample the centre,
-    // far from the animated corner, once the page has painted a few times.
+    // Frames before the page loads can be transparent or opaque black, so a
+    // non-zero centre alpha does not prove the page painted. The corner square
+    // turning red or blue does: it is drawn by the page's own script. Sample
+    // the centre, far from that square, once it has shown a few times.
     let mut painted = 0;
     let sample = tokio::task::block_in_place(|| {
         pull_until(&tap, FIRST_FRAME_TIMEOUT, |sample| {
-            if pixel(sample, 160, 90)[3] != 0 {
+            let [b, g, r, a] = pixel(sample, 1, 1);
+            let red_or_blue = g < 32 && ((r > 223 && b < 32) || (b > 223 && r < 32));
+            if a == 255 && red_or_blue {
                 painted += 1;
             }
             painted >= 3
