@@ -92,18 +92,24 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       touched: ${{ steps.files.outputs.touched }}
+      image: ${{ steps.files.outputs.image }}
     steps:
       - name: List changed files
         id: files
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-               --jq '.[].filename' \
-             | grep -E '^(docker/strom-full/|docker/gstcefsrc/|\.github/workflows/build-gstcefsrc\.yml$|backend/tests/cefsrc_test\.rs$)'; then
+          gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --jq '.[].filename' > changed-files.txt
+          if grep -E '^(docker/strom-full/|docker/gstcefsrc/|\.github/workflows/build-gstcefsrc\.yml$|backend/tests/cefsrc_test\.rs$)' changed-files.txt; then
             echo "touched=true" >> "$GITHUB_OUTPUT"
           else
             echo "touched=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -E '^docker/strom-full/' changed-files.txt; then
+            echo "image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=false" >> "$GITHUB_OUTPUT"
           fi
 
   # Tests against a real cefsrc (gstcefsrc, the element behind HTML sources and
@@ -211,6 +217,43 @@ jobs:
           path: cefsrc-test.log
           retention-days: 7
           if-no-files-found: ignore
+
+  # Builds the strom-full image when a pull request changes it. The publish
+  # workflow is the only other build, and it runs after merge. Nothing is
+  # pushed. The base is the published eyevinntechnology/strom:latest, not this
+  # pull request's backend: the check is on the layers strom-full adds.
+  build-strom-full:
+    name: Build strom-full image
+    needs: cef-changes
+    if: needs.cef-changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Reads the publish workflow's layer cache but does not write to it.
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: docker/strom-full
+          file: docker/strom-full/Dockerfile
+          push: false
+          load: true
+          tags: strom-full:ci
+          platforms: linux/amd64
+          build-args: |
+            TARGETARCH=amd64
+          cache-from: type=gha,scope=docker-full-amd64
+          provenance: false
+          sbom: false
+
+      # Goes through the entrypoint, so this fails if cef-env.sh is missing or
+      # broken, or if the plugin did not install where the ENV lines point.
+      - name: Load cefsrc through the entrypoint
+        run: docker run --rm strom-full:ci gst-inspect-1.0 cefsrc > /dev/null
 
   # Fast checks on Linux: fmt + clippy + test
   check-linux:
