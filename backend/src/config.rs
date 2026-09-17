@@ -2,7 +2,7 @@
 
 use crate::paths::{DataPaths, PathConfig};
 use figment::{
-    providers::{Env, Format, Serialized, Toml},
+    providers::{Format, Serialized, Toml},
     Figment,
 };
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,51 @@ fn default_sap_multicast_addresses() -> Vec<String> {
     ]
 }
 
+/// Environment variables that map to a scalar config key.
+///
+/// These have to be listed explicitly. A generic `Env::prefixed("STROM_")`
+/// provider splits the variable name on every underscore, which only produces
+/// the right key for single-word fields: `STROM_SERVER_ICE_TRANSPORT_POLICY`
+/// becomes `server.ice.transport.policy`, which no field matches, so the
+/// variable is silently ignored.
+const SCALAR_ENV_VARS: &[(&str, &str)] = &[
+    (
+        "STROM_SERVER_ICE_TRANSPORT_POLICY",
+        "server.ice_transport_policy",
+    ),
+    ("STROM_TLS_CERT", "server.tls_cert"),
+    ("STROM_TLS_KEY", "server.tls_key"),
+    ("STROM_STORAGE_DATABASE_URL", "storage.database_url"),
+    ("STROM_STORAGE_DATA_DIR", "storage.data_dir"),
+    ("STROM_STORAGE_FLOWS_PATH", "storage.flows_path"),
+    ("STROM_STORAGE_BLOCKS_PATH", "storage.blocks_path"),
+    ("STROM_STORAGE_MEDIA_PATH", "storage.media_path"),
+    ("STROM_STORAGE_CEF_CACHE_PATH", "storage.cef_cache_path"),
+    ("STROM_LOGGING_LOG_FILE", "logging.log_file"),
+    ("STROM_LOGGING_LOG_LEVEL", "logging.log_level"),
+];
+
+/// Environment variables that map to a list config key, comma-separated.
+const LIST_ENV_VARS: &[(&str, &str)] = &[
+    ("STROM_SERVER_ICE_SERVERS", "server.ice_servers"),
+    (
+        "STROM_SERVER_CORS_ALLOWED_ORIGINS",
+        "server.cors_allowed_origins",
+    ),
+    (
+        "STROM_DISCOVERY_SAP_MULTICAST_ADDRESSES",
+        "discovery.sap_multicast_addresses",
+    ),
+];
+
+/// Splits a comma-separated environment variable into non-empty entries.
+fn split_list_env(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn default_port() -> u16 {
     strom_types::DEFAULT_PORT
 }
@@ -217,37 +262,29 @@ impl Config {
             }
         }
 
-        // 4. Merge environment variables (STROM_* prefix)
-        // Note: Single underscore splits nested keys (e.g., STROM_SERVER_PORT -> server.port)
-        // This means field names with underscores can't be set via env vars using this method
-        figment = figment.merge(
-            Env::prefixed("STROM_")
-                .map(|key| key.as_str().replace("__", ".").into())
-                .split("_"),
-        );
-
-        // 4b. Handle STROM_SERVER_ICE_SERVERS specially (comma-separated array)
-        // This needs special handling because:
-        // - The split("_") above would turn ICE_SERVERS into ice.servers (wrong)
-        // - Figment doesn't parse comma-separated values into arrays
-        if let Some(ice_servers_str) = strom_types::env::var_opt("STROM_SERVER_ICE_SERVERS") {
-            let ice_servers: Vec<String> = ice_servers_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !ice_servers.is_empty() {
-                figment = figment.merge(Serialized::default("server.ice_servers", ice_servers));
+        // 4. Merge environment variables (STROM_* prefix).
+        //
+        // Every key is mapped explicitly. A generic provider that splits the
+        // variable name on underscores cannot express a field name that itself
+        // contains one, and figment does not parse comma-separated lists.
+        if let Some(port) = strom_types::env::var_opt("STROM_SERVER_PORT") {
+            let port: u16 = port
+                .parse()
+                .map_err(|_| anyhow::anyhow!("STROM_SERVER_PORT is not a valid port: {}", port))?;
+            figment = figment.merge(Serialized::default("server.port", port));
+        }
+        for (var, key) in SCALAR_ENV_VARS {
+            if let Some(value) = strom_types::env::var_opt(var) {
+                figment = figment.merge(Serialized::default(key, value));
             }
         }
-
-        // 4c. Handle STROM_TLS_CERT / STROM_TLS_KEY specially
-        // (underscore in field name breaks the split("_") env mapping)
-        if let Some(cert) = strom_types::env::var_opt("STROM_TLS_CERT") {
-            figment = figment.merge(Serialized::default("server.tls_cert", PathBuf::from(cert)));
-        }
-        if let Some(key) = strom_types::env::var_opt("STROM_TLS_KEY") {
-            figment = figment.merge(Serialized::default("server.tls_key", PathBuf::from(key)));
+        for (var, key) in LIST_ENV_VARS {
+            if let Some(raw) = strom_types::env::var_opt(var) {
+                let values = split_list_env(&raw);
+                if !values.is_empty() {
+                    figment = figment.merge(Serialized::default(key, values));
+                }
+            }
         }
 
         // 5. Merge CLI arguments (highest priority)
@@ -740,6 +777,141 @@ data_dir = "{}"
             config.ice_servers[1],
             "turn:user:pass@turn.example.com:3478"
         );
+    }
+
+    /// Restores an environment variable on drop so a failing assertion cannot
+    /// leak it into the next test.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// Loads a config from a temp directory, so a `.strom.toml` in the working
+    /// directory cannot influence the result.
+    fn config_from_env() -> Config {
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let config = Config::from_figment(None, None, None, None, None, None, None, None, None);
+        let _ = std::env::set_current_dir(original_dir);
+        config.unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn test_ice_transport_policy_env_var() {
+        let _guard = EnvGuard::set("STROM_SERVER_ICE_TRANSPORT_POLICY", "relay");
+
+        assert_eq!(config_from_env().ice_transport_policy, "relay");
+    }
+
+    #[test]
+    #[serial]
+    fn test_cors_allowed_origins_env_var() {
+        let _guard = EnvGuard::set(
+            "STROM_SERVER_CORS_ALLOWED_ORIGINS",
+            "https://a.example.com, https://b.example.com",
+        );
+
+        assert_eq!(
+            config_from_env().cors_allowed_origins,
+            vec![
+                "https://a.example.com".to_string(),
+                "https://b.example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_sap_multicast_addresses_env_var() {
+        let _guard = EnvGuard::set(
+            "STROM_DISCOVERY_SAP_MULTICAST_ADDRESSES",
+            "239.0.0.1,239.0.0.2",
+        );
+
+        assert_eq!(
+            config_from_env().sap_multicast_addresses,
+            vec!["239.0.0.1".to_string(), "239.0.0.2".to_string()]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_logging_env_vars() {
+        let _level = EnvGuard::set("STROM_LOGGING_LOG_LEVEL", "debug");
+        let _file = EnvGuard::set("STROM_LOGGING_LOG_FILE", "/tmp/strom-env-test.log");
+
+        let config = config_from_env();
+
+        assert_eq!(config.log_level.as_deref(), Some("debug"));
+        assert_eq!(
+            config.log_file,
+            Some(PathBuf::from("/tmp/strom-env-test.log"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_storage_env_vars() {
+        let temp_dir = TempDir::new().unwrap();
+        let flows = temp_dir.path().join("custom-flows.json");
+        let _db = EnvGuard::set(
+            "STROM_STORAGE_DATABASE_URL",
+            "postgresql://user:pass@db.example.com/strom",
+        );
+        let _flows = EnvGuard::set("STROM_STORAGE_FLOWS_PATH", flows.to_str().unwrap());
+
+        let config = config_from_env();
+
+        assert_eq!(
+            config.database_url.as_deref(),
+            Some("postgresql://user:pass@db.example.com/strom")
+        );
+        assert_eq!(config.flows_path, flows);
+    }
+
+    #[test]
+    #[serial]
+    fn test_tls_env_vars() {
+        let _cert = EnvGuard::set("STROM_TLS_CERT", "/etc/strom/cert.pem");
+        let _key = EnvGuard::set("STROM_TLS_KEY", "/etc/strom/key.pem");
+
+        let config = config_from_env();
+
+        assert_eq!(config.tls_cert, Some(PathBuf::from("/etc/strom/cert.pem")));
+        assert_eq!(config.tls_key, Some(PathBuf::from("/etc/strom/key.pem")));
+    }
+
+    #[test]
+    #[serial]
+    fn test_invalid_port_env_var_is_an_error() {
+        let _guard = EnvGuard::set("STROM_SERVER_PORT", "not-a-port");
+
+        let temp_dir = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+        let _ = std::env::set_current_dir(original_dir);
+
+        assert!(result.is_err());
     }
 
     #[test]
