@@ -6,6 +6,7 @@ use crate::gst::SessionThreadConfig;
 use crate::whip_registry::WhipRegistry;
 use crate::whip_session_manager::WhipEndpointConfig;
 use gstreamer as gst;
+use gstreamer::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,43 @@ use strom_types::{
     FlowId, PropertyValue,
 };
 use thiserror::Error;
+use tracing::{debug, info, warn};
+
+/// Apply an ICE transport policy to an element that owns its own webrtcbin.
+///
+/// `whipsink`, `whepsrc` and the webrtcsink-based `whipclientsink` /
+/// `whepserversink` expose `ice-transport-policy` themselves and hand the value
+/// to every webrtcbin they create, as they create it. That is more robust than
+/// setting it on the child from a `deep-element-added` handler, which depends
+/// on the child's name and on running before that session's pipeline leaves
+/// READY — the last state in which webrtcbin accepts the property.
+///
+/// `whipserversrc` and `whepclientsrc` have no such property, so those blocks
+/// still configure the child directly.
+pub fn set_ice_transport_policy(element: &gst::Element, policy: &str, label: &str) {
+    if !element.has_property("ice-transport-policy") {
+        debug!(
+            "{}: {} has no ice-transport-policy property, leaving it to the webrtcbin handler",
+            label,
+            element.name()
+        );
+        return;
+    }
+
+    element.set_property_from_str("ice-transport-policy", policy);
+    info!(
+        "{}: Set ice-transport-policy={} on {}",
+        label,
+        policy,
+        element.name()
+    );
+}
+
+/// Block property name for the per-block ICE transport policy override.
+///
+/// Exposed by the WHIP/WHEP blocks; an empty value inherits the server-wide
+/// `server.ice_transport_policy` setting.
+pub const ICE_TRANSPORT_POLICY_PROPERTY: &str = "ice_transport_policy";
 
 /// Storage for dynamically created webrtcbin elements (e.g., from webrtcsink/whepserversink).
 /// Maps block_id to a list of (consumer_id, webrtcbin) pairs.
@@ -211,6 +249,56 @@ impl BlockBuildContext {
         &self.ice_transport_policy
     }
 
+    /// Resolve the ICE transport policy for a single block.
+    ///
+    /// A block's own `ice_transport_policy` property wins over the server-wide
+    /// setting. An empty value is the default and inherits the server setting,
+    /// so a flow that never touches the property behaves exactly as before.
+    /// "relay" forces that one block's candidates through the configured TURN
+    /// server, without pushing every other WebRTC block onto TURN too.
+    ///
+    /// Anything that is neither "all" nor "relay" falls back to the server
+    /// setting: the value reaches webrtcbin through `set_property_from_str`,
+    /// which panics on a nick the enum does not know, and properties arrive
+    /// over the API where any string is possible.
+    pub fn resolve_ice_transport_policy(
+        &self,
+        properties: &HashMap<String, PropertyValue>,
+    ) -> String {
+        let requested = properties
+            .get(ICE_TRANSPORT_POLICY_PROPERTY)
+            .and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.trim()),
+                _ => None,
+            })
+            .unwrap_or("");
+
+        let resolved = match requested {
+            "" => self.ice_transport_policy.clone(),
+            "all" | "relay" => requested.to_string(),
+            other => {
+                warn!(
+                    "Unknown ice_transport_policy '{}' on block, falling back to server setting '{}'",
+                    other, self.ice_transport_policy
+                );
+                self.ice_transport_policy.clone()
+            }
+        };
+
+        // Relay-only gathers nothing but TURN candidates, so a block without a
+        // TURN server offers no candidates at all and never connects. Nothing
+        // downstream reports this: the block builds, the flow starts, and the
+        // connection simply never establishes.
+        if resolved == "relay" && self.turn_server().is_none() {
+            warn!(
+                "ICE transport policy is 'relay' but no TURN server is configured in ice_servers — \
+                 this block gathers no candidates and will not connect"
+            );
+        }
+
+        resolved
+    }
+
     /// Get the first STUN server URL (for GStreamer elements).
     /// Returns None if no STUN server configured.
     ///
@@ -398,5 +486,83 @@ pub trait BlockBuilder: Send + Sync {
         _properties: &HashMap<String, PropertyValue>,
     ) -> Option<ExternalPads> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx_with_server_policy(policy: &str) -> BlockBuildContext {
+        BlockBuildContext::new(vec![], policy.to_string())
+    }
+
+    fn props(policy: Option<&str>) -> HashMap<String, PropertyValue> {
+        let mut map = HashMap::new();
+        if let Some(p) = policy {
+            map.insert(
+                ICE_TRANSPORT_POLICY_PROPERTY.to_string(),
+                PropertyValue::String(p.to_string()),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn unset_policy_inherits_the_server_setting() {
+        let ctx = ctx_with_server_policy("all");
+        assert_eq!(ctx.resolve_ice_transport_policy(&props(None)), "all");
+    }
+
+    #[test]
+    fn empty_policy_inherits_the_server_setting() {
+        let ctx = ctx_with_server_policy("relay");
+        assert_eq!(ctx.resolve_ice_transport_policy(&props(Some(""))), "relay");
+    }
+
+    #[test]
+    fn block_policy_overrides_the_server_setting() {
+        let ctx = ctx_with_server_policy("all");
+        assert_eq!(
+            ctx.resolve_ice_transport_policy(&props(Some("relay"))),
+            "relay"
+        );
+    }
+
+    #[test]
+    fn block_policy_can_widen_a_relay_only_server() {
+        let ctx = ctx_with_server_policy("relay");
+        assert_eq!(ctx.resolve_ice_transport_policy(&props(Some("all"))), "all");
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_ignored() {
+        let ctx = ctx_with_server_policy("all");
+        assert_eq!(
+            ctx.resolve_ice_transport_policy(&props(Some(" relay "))),
+            "relay"
+        );
+    }
+
+    /// The value reaches webrtcbin via `set_property_from_str`, which panics on
+    /// an unknown nick — an API caller must not be able to trigger that.
+    #[test]
+    fn unknown_policy_falls_back_to_the_server_setting() {
+        let ctx = ctx_with_server_policy("all");
+        assert_eq!(
+            ctx.resolve_ice_transport_policy(&props(Some("turn-only"))),
+            "all"
+        );
+    }
+
+    #[test]
+    fn non_string_policy_falls_back_to_the_server_setting() {
+        let ctx = ctx_with_server_policy("all");
+        let mut map = HashMap::new();
+        map.insert(
+            ICE_TRANSPORT_POLICY_PROPERTY.to_string(),
+            PropertyValue::Bool(true),
+        );
+        assert_eq!(ctx.resolve_ice_transport_policy(&map), "all");
     }
 }

@@ -270,6 +270,14 @@ or in `.strom.toml`:
 ice_transport_policy = "relay"   # "all" (default) or "relay"
 ```
 
+This is the server-wide setting. The WHIP Input, WHIP Output, WHEP Input and
+WHEP Output blocks each also carry an **ICE Transport Policy** property, which
+defaults to "Server default" and overrides the server setting for that block
+alone — use it when one endpoint needs relay (or must not be forced onto it)
+while the rest of the server keeps the default. Forcing relay requires a TURN
+server in `ice_servers`; with only STUN configured, a relay-only block finds no
+candidates and never connects.
+
 ### Docker Compose Example
 
 Add to the `environment:` block in section 5:

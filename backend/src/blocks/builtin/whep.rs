@@ -9,7 +9,9 @@
 //!
 //! Handles dynamic pad creation by linking new audio streams to a liveadder mixer.
 
-use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
+use crate::blocks::{
+    set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder,
+};
 use crate::gst::gl_bridge;
 use crate::gst::ice_preflight;
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
@@ -308,6 +310,7 @@ fn build_whepsrc(
     // Get ICE servers from application config
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
     // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
     let mixer_latency_ms = properties
@@ -359,6 +362,11 @@ fn build_whepsrc(
     if let Some(ref turn) = turn_server {
         whepsrc.set_property("turn-server", turn);
     }
+
+    // whepsrc owns the webrtcbin it builds and forwards this to it, so setting
+    // it here beats hooking the child: it lands before the element leaves NULL,
+    // which is the state webrtcbin requires for this property.
+    set_ice_transport_policy(&whepsrc, &ice_transport_policy, "WHEP Input (whepsrc)");
 
     if let Some(token) = &auth_token {
         whepsrc.set_property("auth-token", token);
@@ -501,8 +509,8 @@ fn build_whepsrc(
     });
 
     debug!(
-        "WHEP Input (whepsrc stable) configured: endpoint={}, stun={:?}, turn={:?}",
-        whep_endpoint, stun_server, turn_server
+        "WHEP Input (whepsrc stable) configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
+        whep_endpoint, stun_server, turn_server, ice_transport_policy
     );
 
     // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
@@ -580,6 +588,7 @@ fn build_whepclientsrc(
     // Get ICE servers from application config
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
     // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
     let mixer_latency_ms = properties
@@ -733,7 +742,7 @@ fn build_whepclientsrc(
     if let Ok(bin) = whepclientsrc.clone().downcast::<gst::Bin>() {
         let liveadder_weak2 = liveadder.downgrade();
         let whepclientsrc_weak = whepclientsrc.downgrade();
-        let ice_transport_policy = ctx.ice_transport_policy().to_string();
+        let ice_transport_policy = ice_transport_policy.clone();
 
         // Use deep-element-added to catch webrtcbin when it's created
         bin.connect("deep-element-added", false, move |values| {
@@ -921,8 +930,8 @@ fn build_whepclientsrc(
     }
 
     debug!(
-        "WHEP Input configured: endpoint={}, stun={:?}, turn={:?}",
-        whep_endpoint, stun_server, turn_server
+        "WHEP Input configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
+        whep_endpoint, stun_server, turn_server, ice_transport_policy
     );
 
     // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
@@ -1038,6 +1047,7 @@ fn build_whepserversink(
     // Get ICE servers from application config
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
     // Create whepserversink element
     // This is based on webrtcsink and handles encoding internally
@@ -1058,6 +1068,12 @@ fn build_whepserversink(
         let turn_servers = gst::Array::new([turn]);
         whepserversink.set_property("turn-servers", turn_servers);
     }
+
+    // webrtcsink applies this to every consumer's webrtcbin as it creates it,
+    // before that session's pipeline leaves NULL. The consumer-added handler
+    // below sets the same value again, which covers a webrtcsink that does not
+    // expose the property at all.
+    set_ice_transport_policy(&whepserversink, &ice_transport_policy, "WHEP Output");
 
     // Disable FEC; RTX (retransmission) is configurable, default on.
     // - FEC adds proactive redundancy packets on every stream (~50% constant
@@ -1182,7 +1198,7 @@ fn build_whepserversink(
     // Also register the webrtcbin for stats collection (since it's in a separate session pipeline).
     let dynamic_webrtcbin_store = ctx.dynamic_webrtcbin_store();
     let block_id_for_callback = instance_id.to_string();
-    let ice_transport_policy = ctx.ice_transport_policy().to_string();
+    let ice_transport_policy = ice_transport_policy.clone();
     whepserversink.connect("consumer-added", false, move |values| {
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let webrtcbin = values[2].get::<gst::Element>().unwrap();
@@ -2323,6 +2339,35 @@ fn whep_input_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },
+            ExposedProperty {
+                name: "ice_transport_policy".to_string(),
+                label: "ICE Transport Policy".to_string(),
+                description: "Which ICE candidates this WHEP subscriber may use. Leave on the server default to follow the server-wide setting. Force TURN relay when host and server-reflexive candidates cannot cross the network in between — every candidate then goes through the configured TURN server, which requires one to be configured in the server's ICE servers.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "".to_string(),
+                            label: Some("Server default".to_string()),
+                        },
+                        EnumValue {
+                            value: "all".to_string(),
+                            label: Some("All (host, srflx, relay)".to_string()),
+                        },
+                        EnumValue {
+                            value: "relay".to_string(),
+                            label: Some("Relay only (force TURN)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ice_transport_policy".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![],
@@ -2417,6 +2462,35 @@ fn whep_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "do_retransmission".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "ice_transport_policy".to_string(),
+                label: "ICE Transport Policy".to_string(),
+                description: "Which ICE candidates this WHEP playback endpoint may use. Leave on the server default to follow the server-wide setting. Force TURN relay when host and server-reflexive candidates cannot cross the network in between — every candidate then goes through the configured TURN server, which requires one to be configured in the server's ICE servers.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "".to_string(),
+                            label: Some("Server default".to_string()),
+                        },
+                        EnumValue {
+                            value: "all".to_string(),
+                            label: Some("All (host, srflx, relay)".to_string()),
+                        },
+                        EnumValue {
+                            value: "relay".to_string(),
+                            label: Some("Relay only (force TURN)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ice_transport_policy".to_string(),
                     transform: None,
                 },
                 live: false,

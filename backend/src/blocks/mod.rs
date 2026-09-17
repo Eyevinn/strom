@@ -8,8 +8,8 @@ pub mod storage;
 pub mod transforms;
 
 pub use builder::{
-    BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, BusMessageConnectFn,
-    DynamicWebrtcbinStore, ElementSetupFn, WhepEndpointInfo, WhipEndpointInfo,
+    set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder,
+    BusMessageConnectFn, DynamicWebrtcbinStore, ElementSetupFn, WhepEndpointInfo, WhipEndpointInfo,
 };
 pub use registry::BlockRegistry;
 
