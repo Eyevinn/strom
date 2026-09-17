@@ -195,3 +195,67 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gstreamer as gst;
+    use strom_types::block::PropertyType;
+    use strom_types::PropertyValue;
+
+    /// Every WebRTC block must let an operator force TURN relay on its own,
+    /// without changing the server-wide policy. A block that misses the
+    /// property silently ignores the setting in the UI.
+    #[test]
+    fn webrtc_blocks_expose_the_ice_transport_policy_override() {
+        // Some block definitions query the GStreamer registry while building.
+        gst::init().expect("gst init");
+
+        let blocks = get_all_builtin_blocks();
+
+        for id in [
+            "builtin.whip_input",
+            "builtin.whip_output",
+            "builtin.whep_input",
+            "builtin.whep_output",
+        ] {
+            let block = blocks
+                .iter()
+                .find(|b| b.id == id)
+                .unwrap_or_else(|| panic!("{} missing from the built-in blocks", id));
+
+            let prop = block
+                .exposed_properties
+                .iter()
+                .find(|p| p.name == "ice_transport_policy")
+                .unwrap_or_else(|| panic!("{} does not expose ice_transport_policy", id));
+
+            match &prop.property_type {
+                PropertyType::Enum { values } => {
+                    let values: Vec<&str> = values.iter().map(|v| v.value.as_str()).collect();
+                    assert_eq!(
+                        values,
+                        vec!["", "all", "relay"],
+                        "{} exposes unexpected ice_transport_policy values",
+                        id
+                    );
+                }
+                other => panic!(
+                    "{} ice_transport_policy is {:?}, expected an enum",
+                    id, other
+                ),
+            }
+
+            // The default must inherit the server setting: adding this property
+            // may not change how any existing flow negotiates.
+            match &prop.default_value {
+                Some(PropertyValue::String(s)) if s.is_empty() => {}
+                other => panic!(
+                    "{} ice_transport_policy defaults to {:?}, expected the empty \
+                     value that inherits the server setting",
+                    id, other
+                ),
+            }
+        }
+    }
+}

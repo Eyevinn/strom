@@ -608,10 +608,11 @@ pub fn build_whipserversrc(
 
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
     info!(
-        "WHIP Input configured: endpoint_id='{}', stun={:?}, turn={:?}, mode={:?}, decode={}, do_retransmission={}, drop_on_latency={}, max_sessions={} (whipserversrc created per-session)",
-        endpoint_id, stun_server, turn_server, mode, decode, do_retransmission, drop_on_latency, max_sessions
+        "WHIP Input configured: endpoint_id='{}', stun={:?}, turn={:?}, ice_transport_policy={}, mode={:?}, decode={}, do_retransmission={}, drop_on_latency={}, max_sessions={} (whipserversrc created per-session)",
+        endpoint_id, stun_server, turn_server, ice_transport_policy, mode, decode, do_retransmission, drop_on_latency, max_sessions
     );
 
     // Register WHIP endpoint with the build context (port=0 placeholder, sessions get their own ports)
@@ -628,7 +629,7 @@ pub fn build_whipserversrc(
             mode,
             stun_server,
             turn_server,
-            ice_transport_policy: ctx.ice_transport_policy().to_string(),
+            ice_transport_policy,
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
             video_decoding,
@@ -1350,6 +1351,7 @@ fn build_whipclientsink(
     // Get ICE servers from application config
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
     // Create namespaced element IDs
     let whipclientsink_id = format!("{}:whipclientsink", instance_id);
@@ -1416,7 +1418,7 @@ fn build_whipclientsink(
     // - ICE transport policy on webrtcbin
     // - Opus encoder settings on opusenc
     if let Ok(bin) = whipclientsink.clone().downcast::<gst::Bin>() {
-        let ice_transport_policy = ctx.ice_transport_policy().to_string();
+        let ice_transport_policy = ice_transport_policy.clone();
         bin.connect("deep-element-added", false, move |values| {
             let element = values[2].get::<gst::Element>().unwrap();
             let element_name = element.name();
@@ -1443,8 +1445,8 @@ fn build_whipclientsink(
     }
 
     debug!(
-        "WHIP Output (whipclientsink) configured: endpoint={}, stun={:?}, turn={:?}",
-        whip_endpoint, stun_server, turn_server
+        "WHIP Output (whipclientsink) configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
+        whip_endpoint, stun_server, turn_server, ice_transport_policy
     );
 
     // Define internal links
@@ -1580,12 +1582,14 @@ fn build_whipsink(
         whipsink.set_property("auth-token", token);
     }
 
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
+
     debug!(
-        "WHIP Output (whipsink legacy) configured: endpoint={}, stun={:?}, turn={:?}",
-        whip_endpoint, stun_server, turn_server
+        "WHIP Output (whipsink legacy) configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
+        whip_endpoint, stun_server, turn_server, ice_transport_policy
     );
 
-    setup_incoming_rtp_handler(&whipsink, instance_id, ctx.ice_transport_policy());
+    setup_incoming_rtp_handler(&whipsink, instance_id, &ice_transport_policy);
 
     let internal_links = vec![
         (
@@ -1714,6 +1718,35 @@ fn whip_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "opus_bitrate".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "ice_transport_policy".to_string(),
+                label: "ICE Transport Policy".to_string(),
+                description: "Which ICE candidates this WHIP publisher may use. Leave on the server default to follow the server-wide setting. Force TURN relay when host and server-reflexive candidates cannot cross the network in between — every candidate then goes through the configured TURN server, which requires one to be configured in the server's ICE servers.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "".to_string(),
+                            label: Some("Server default".to_string()),
+                        },
+                        EnumValue {
+                            value: "all".to_string(),
+                            label: Some("All (host, srflx, relay)".to_string()),
+                        },
+                        EnumValue {
+                            value: "relay".to_string(),
+                            label: Some("Relay only (force TURN)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ice_transport_policy".to_string(),
                     transform: None,
                 },
                 live: false,
@@ -1872,6 +1905,35 @@ fn whip_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "max_sessions".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "ice_transport_policy".to_string(),
+                label: "ICE Transport Policy".to_string(),
+                description: "Which ICE candidates this WHIP ingest endpoint may use. Leave on the server default to follow the server-wide setting. Force TURN relay when host and server-reflexive candidates cannot cross the network in between — every candidate then goes through the configured TURN server, which requires one to be configured in the server's ICE servers.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "".to_string(),
+                            label: Some("Server default".to_string()),
+                        },
+                        EnumValue {
+                            value: "all".to_string(),
+                            label: Some("All (host, srflx, relay)".to_string()),
+                        },
+                        EnumValue {
+                            value: "relay".to_string(),
+                            label: Some("Relay only (force TURN)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ice_transport_policy".to_string(),
                     transform: None,
                 },
                 live: false,

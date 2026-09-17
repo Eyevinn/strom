@@ -308,6 +308,7 @@ fn build_whepsrc(
     // Get ICE servers from application config
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
     // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
     let mixer_latency_ms = properties
@@ -371,12 +372,22 @@ fn build_whepsrc(
         // Set on already-existing children (webrtcbin and its internal rtpbin)
         for element in bin.iterate_recurse().into_iter().flatten() {
             let name = element.name();
-            if name.starts_with("webrtcbin") && element.has_property("latency") {
-                element.set_property("latency", jitterbuffer_latency_ms);
-                info!(
-                    "WHEP Input (whepsrc): Set jitterbuffer latency={}ms on existing {}",
-                    jitterbuffer_latency_ms, name
-                );
+            if name.starts_with("webrtcbin") {
+                if element.has_property("latency") {
+                    element.set_property("latency", jitterbuffer_latency_ms);
+                    info!(
+                        "WHEP Input (whepsrc): Set jitterbuffer latency={}ms on existing {}",
+                        jitterbuffer_latency_ms, name
+                    );
+                }
+
+                if element.has_property("ice-transport-policy") {
+                    element.set_property_from_str("ice-transport-policy", &ice_transport_policy);
+                    info!(
+                        "WHEP Input (whepsrc): Set ice-transport-policy={} on existing {}",
+                        ice_transport_policy, name
+                    );
+                }
             }
             // Workaround for GStreamer rtpjitterbuffer packet_spacing bug:
             // After a mute gap (no RTP packets), calculate_packet_spacing sees
@@ -399,16 +410,27 @@ fn build_whepsrc(
         }
 
         // Also catch any dynamically added webrtcbins, rtpbins and jitterbuffers
+        let ice_transport_policy = ice_transport_policy.clone();
         bin.connect("deep-element-added", false, move |values| {
             let element = values[2].get::<gst::Element>().unwrap();
             let element_name = element.name();
 
-            if element_name.starts_with("webrtcbin") && element.has_property("latency") {
-                element.set_property("latency", jitterbuffer_latency_ms);
-                info!(
-                    "WHEP Input (whepsrc): Set jitterbuffer latency={}ms on {}",
-                    jitterbuffer_latency_ms, element_name
-                );
+            if element_name.starts_with("webrtcbin") {
+                if element.has_property("latency") {
+                    element.set_property("latency", jitterbuffer_latency_ms);
+                    info!(
+                        "WHEP Input (whepsrc): Set jitterbuffer latency={}ms on {}",
+                        jitterbuffer_latency_ms, element_name
+                    );
+                }
+
+                if element.has_property("ice-transport-policy") {
+                    element.set_property_from_str("ice-transport-policy", &ice_transport_policy);
+                    info!(
+                        "WHEP Input (whepsrc): Set ice-transport-policy={} on {}",
+                        ice_transport_policy, element_name
+                    );
+                }
             }
 
             None
@@ -501,8 +523,8 @@ fn build_whepsrc(
     });
 
     debug!(
-        "WHEP Input (whepsrc stable) configured: endpoint={}, stun={:?}, turn={:?}",
-        whep_endpoint, stun_server, turn_server
+        "WHEP Input (whepsrc stable) configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
+        whep_endpoint, stun_server, turn_server, ice_transport_policy
     );
 
     // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
@@ -580,6 +602,7 @@ fn build_whepclientsrc(
     // Get ICE servers from application config
     let stun_server = ctx.stun_server();
     let turn_server = ctx.turn_server();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
 
     // Get mixer latency (default 30ms - lower than default 200ms for lower latency)
     let mixer_latency_ms = properties
@@ -733,7 +756,7 @@ fn build_whepclientsrc(
     if let Ok(bin) = whepclientsrc.clone().downcast::<gst::Bin>() {
         let liveadder_weak2 = liveadder.downgrade();
         let whepclientsrc_weak = whepclientsrc.downgrade();
-        let ice_transport_policy = ctx.ice_transport_policy().to_string();
+        let ice_transport_policy = ice_transport_policy.clone();
 
         // Use deep-element-added to catch webrtcbin when it's created
         bin.connect("deep-element-added", false, move |values| {
@@ -921,8 +944,8 @@ fn build_whepclientsrc(
     }
 
     debug!(
-        "WHEP Input configured: endpoint={}, stun={:?}, turn={:?}",
-        whep_endpoint, stun_server, turn_server
+        "WHEP Input configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
+        whep_endpoint, stun_server, turn_server, ice_transport_policy
     );
 
     // Internal links: liveadder -> capsfilter -> audioconvert -> audioresample
@@ -1182,7 +1205,7 @@ fn build_whepserversink(
     // Also register the webrtcbin for stats collection (since it's in a separate session pipeline).
     let dynamic_webrtcbin_store = ctx.dynamic_webrtcbin_store();
     let block_id_for_callback = instance_id.to_string();
-    let ice_transport_policy = ctx.ice_transport_policy().to_string();
+    let ice_transport_policy = ctx.resolve_ice_transport_policy(properties);
     whepserversink.connect("consumer-added", false, move |values| {
         let consumer_id = values[1].get::<String>().unwrap_or_default();
         let webrtcbin = values[2].get::<gst::Element>().unwrap();
@@ -2323,6 +2346,35 @@ fn whep_input_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },
+            ExposedProperty {
+                name: "ice_transport_policy".to_string(),
+                label: "ICE Transport Policy".to_string(),
+                description: "Which ICE candidates this WHEP subscriber may use. Leave on the server default to follow the server-wide setting. Force TURN relay when host and server-reflexive candidates cannot cross the network in between — every candidate then goes through the configured TURN server, which requires one to be configured in the server's ICE servers.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "".to_string(),
+                            label: Some("Server default".to_string()),
+                        },
+                        EnumValue {
+                            value: "all".to_string(),
+                            label: Some("All (host, srflx, relay)".to_string()),
+                        },
+                        EnumValue {
+                            value: "relay".to_string(),
+                            label: Some("Relay only (force TURN)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ice_transport_policy".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![],
@@ -2417,6 +2469,35 @@ fn whep_output_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "do_retransmission".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "ice_transport_policy".to_string(),
+                label: "ICE Transport Policy".to_string(),
+                description: "Which ICE candidates this WHEP playback endpoint may use. Leave on the server default to follow the server-wide setting. Force TURN relay when host and server-reflexive candidates cannot cross the network in between — every candidate then goes through the configured TURN server, which requires one to be configured in the server's ICE servers.".to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: "".to_string(),
+                            label: Some("Server default".to_string()),
+                        },
+                        EnumValue {
+                            value: "all".to_string(),
+                            label: Some("All (host, srflx, relay)".to_string()),
+                        },
+                        EnumValue {
+                            value: "relay".to_string(),
+                            label: Some("Relay only (force TURN)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String("".to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "ice_transport_policy".to_string(),
                     transform: None,
                 },
                 live: false,
