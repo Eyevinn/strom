@@ -36,6 +36,14 @@ port = 8080
 # Env: STROM_SERVER_ICE_TRANSPORT_POLICY=relay
 # ice_transport_policy = "all"
 
+# CORS allowed origins
+# If empty (default), any origin is allowed
+# Env: STROM_SERVER_CORS_ALLOWED_ORIGINS (comma-separated)
+# cors_allowed_origins = [
+#     "https://studio.example.com",
+#     "https://player.example.com"
+# ]
+
 # TLS/HTTPS (optional)
 # When both tls_cert and tls_key are set, the server serves HTTPS instead of HTTP.
 # Certificate and key must be in PEM format. The cert file can include intermediates.
@@ -74,6 +82,11 @@ port = 8080
 # Env: STROM_STORAGE_BLOCKS_PATH=/custom/blocks.json
 # blocks_path = "/custom/path/blocks.json"
 
+# Custom path to the media file directory (overrides data_dir)
+# CLI: --media-path /custom/media
+# Env: STROM_STORAGE_MEDIA_PATH=/custom/media
+# media_path = "/custom/path/media"
+
 # Directory for the CEF/Chromium profile used by HTML sources and DSK graphics
 # Each instance needs its own: Chromium keys its process singleton on this
 # directory, so instances sharing one cannot both run HTML sources
@@ -82,7 +95,7 @@ port = 8080
 # The profile is disposable — delete it to clear cached pages, cookies and
 # local storage
 # CLI: --cef-cache-path /path/to/cef-cache
-# Env: STROM_CEF_CACHE_PATH=/path/to/cef-cache
+# Env: STROM_CEF_CACHE_PATH or STROM_STORAGE_CEF_CACHE_PATH
 # GST_CEF_CACHE_LOCATION overrides all of the above if it is set
 # cef_cache_path = "/var/cache/strom/cef"
 
@@ -112,3 +125,15 @@ port = 8080
 # 1. RUST_LOG environment variable (highest)
 # 2. log_level in this config file
 # 3. Default: "info"
+
+# ============================================================================
+# Discovery Configuration
+# ============================================================================
+[discovery]
+# SAP multicast addresses to listen on and announce to
+# Default: ["239.255.255.255", "224.2.127.254"] (AES67 + global scope)
+# Env: STROM_DISCOVERY_SAP_MULTICAST_ADDRESSES (comma-separated)
+# sap_multicast_addresses = [
+#     "239.255.255.255",
+#     "224.2.127.254"
+# ]
