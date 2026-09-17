@@ -17,7 +17,8 @@
 //! query by proxying it downstream, so their sink pads advertise whatever the
 //! converter behind them does.
 //!
-//! [`retry_link_with_gl_download`] runs only after a plain link has been
+//! [`retry_link_with_gl_download`] (or its element-level counterpart, for a
+//! link that leaves a pad unnamed) runs only after a plain link has been
 //! refused for want of a common format, and only when the producer offers GL
 //! memory and nothing else while the consumer takes raw video in system memory.
 //! If the adaptation cannot be completed it is undone, so the pads are left as
@@ -137,6 +138,58 @@ pub fn retry_link_with_gl_download(
         name
     );
     Ok(true)
+}
+
+/// The element-level counterpart of [`retry_link_with_gl_download`], for a link
+/// that names at most one pad on each side and was refused as a whole.
+///
+/// An element-level refusal does not say why, so the unlinked pads are paired
+/// up here: a named side contributes that pad, an unnamed side every unlinked
+/// pad it already has. The first pair a `gldownload` would join is linked
+/// directly to learn the concrete refusal, which then goes through the pad-level
+/// path. Request pads the element has not created yet are not considered.
+///
+/// Returns as [`retry_link_with_gl_download`] does.
+pub fn retry_element_link_with_gl_download(
+    src: &gst::Element,
+    src_pad_name: Option<&str>,
+    sink: &gst::Element,
+    sink_pad_name: Option<&str>,
+) -> Result<bool, String> {
+    let src_pads = candidate_pads(src, src_pad_name, gst::PadDirection::Src);
+    let sink_pads = candidate_pads(sink, sink_pad_name, gst::PadDirection::Sink);
+
+    let pair = src_pads.iter().find_map(|src_pad| {
+        sink_pads
+            .iter()
+            .find(|sink_pad| needs_gl_download_to_link(src_pad, sink_pad))
+            .map(|sink_pad| (src_pad, sink_pad))
+    });
+    let Some((src_pad, sink_pad)) = pair else {
+        return Ok(false);
+    };
+
+    match src_pad.link(sink_pad) {
+        Ok(_) => Ok(true),
+        Err(refusal) => retry_link_with_gl_download(src_pad, sink_pad, refusal),
+    }
+}
+
+/// The pad `name` on `element`, or every unlinked pad in `direction` when no
+/// name is given.
+fn candidate_pads(
+    element: &gst::Element,
+    name: Option<&str>,
+    direction: gst::PadDirection,
+) -> Vec<gst::Pad> {
+    match name {
+        Some(name) => element.static_pad(name).into_iter().collect(),
+        None => element
+            .pads()
+            .into_iter()
+            .filter(|pad| pad.direction() == direction && !pad.is_linked())
+            .collect(),
+    }
 }
 
 /// Link `src -> gldownload -> sink` and bring the element to its bin's state.

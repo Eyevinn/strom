@@ -73,8 +73,17 @@ fn build_manager(flow: &Flow) -> PipelineManager {
 /// CUDA host that is `autovideoconvert`, whose sink pad accepts anything and
 /// would link to GL memory unaided.
 fn flow_into_encoder(name: &str, source: strom_types::Element) -> Flow {
+    let link = (format!("{}:src", source.id), "convert:sink".to_string());
+    flow_into_encoder_via(name, source, link)
+}
+
+/// [`flow_into_encoder`], with the producer-to-converter link spelled as `link`.
+fn flow_into_encoder_via(
+    name: &str,
+    source: strom_types::Element,
+    (link_from, link_to): (String, String),
+) -> Flow {
     let mut flow = Flow::new(name.to_string());
-    let source_id = source.id.clone();
     flow.elements.push(source);
     flow.elements.push(elem("convert", "videoconvert", vec![]));
     flow.elements.push(elem("enc", "x264enc", vec![]));
@@ -93,7 +102,7 @@ fn flow_into_encoder(name: &str, source: strom_types::Element) -> Flow {
     for (from, to) in [
         ("convert:src".to_string(), "enc:sink".to_string()),
         ("enc:src".to_string(), "sink:sink".to_string()),
-        (format!("{}:src", source_id), "convert:sink".to_string()),
+        (link_from, link_to),
     ] {
         flow.links.push(strom_types::Link { from, to });
     }
@@ -147,6 +156,35 @@ async fn a_gl_only_producer_reaches_a_system_memory_encoder() {
         convert_sink.is_linked(),
         "the inserted gldownload does not feed the consumer"
     );
+}
+
+/// A link that leaves either pad unnamed is made element to element, and
+/// GStreamer refuses it without saying why. Each spelling must be adapted too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_gl_only_producer_is_adapted_when_a_pad_is_unnamed() {
+    gstreamer::init().unwrap();
+    require_gl_plugin();
+
+    for (from, to) in [
+        ("glsrc", "convert:sink"),
+        ("glsrc:src", "convert"),
+        ("glsrc", "convert"),
+    ] {
+        let flow = flow_into_encoder_via(
+            "gl_into_encoder_unnamed",
+            elem("glsrc", "gltestsrc", vec![]),
+            (from.to_string(), to.to_string()),
+        );
+        let manager = build_manager(&flow);
+
+        assert_eq!(
+            peer_factory(manager.pipeline(), "glsrc").as_deref(),
+            Some("gldownload"),
+            "{} -> {}: the GL producer was not linked through a gldownload",
+            from,
+            to
+        );
+    }
 }
 
 /// The adaptation must cost nothing where it is not needed: a system-memory
