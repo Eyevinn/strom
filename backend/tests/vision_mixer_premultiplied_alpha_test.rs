@@ -445,13 +445,32 @@ fn gl_environment_available() -> bool {
     ok
 }
 
+/// Skip unless GL actually works — but only where skipping is legitimate.
+///
+/// A skip is silent: a GL regression on a machine that can render would read as a
+/// green 0.05 s pass. `STROM_REQUIRE_GL=1` turns it into a failure, and CI sets it
+/// on both test jobs — Linux renders through llvmpipe under Xvfb, macOS natively —
+/// so the skip only ever applies to a developer box without GL. Same gate as
+/// `vision_mixer_fx_test::gl_available_or_required`.
+fn gl_available_or_required() -> bool {
+    if gl_environment_available() {
+        return true;
+    }
+    assert!(
+        strom_types::env::var_opt("STROM_REQUIRE_GL").is_none(),
+        "STROM_REQUIRE_GL is set but no GL context could be created — this platform \
+         is supposed to render, so a skip here would hide a GL regression"
+    );
+    eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    false
+}
+
 /// GL corrects the blend on the pad rather than converting the source, and
 /// the correction depends on a blend constant that has to track pad alpha.
 /// Half alpha is the case that catches a constant left behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gpu_premultiplied_dsk_composites_correctly() {
-    if !gl_environment_available() {
-        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    if !gl_available_or_required() {
         return;
     }
     assert_correct_at_full_and_half_alpha(
@@ -467,8 +486,7 @@ async fn gpu_premultiplied_dsk_composites_correctly() {
 /// follow that too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gpu_blend_constant_follows_fade_to_black() {
-    if !gl_environment_available() {
-        eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    if !gl_available_or_required() {
         return;
     }
     let block_id = "vmp_gpu_ftb";
