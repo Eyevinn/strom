@@ -377,19 +377,24 @@ impl SessionActivity {
     /// `DECODE_GRACE` ago and the decoder may still be waiting for the keyframe
     /// that carries H.264's parameter sets.
     ///
+    /// The grace holds even if the output stamp has moved. After a takeover the
+    /// displaced session's frames already inside the slot's chain still cross
+    /// the tee after `new` reset the stamp, and those must not start the clock
+    /// on a newcomer whose own decoder has not produced anything yet.
+    ///
     /// Otherwise it is the staler of the two stamps: a session is usable only
     /// while both move, and a publisher going away freezes `ingress` first while
     /// a stall below the decoder freezes `output` first.
     pub fn idle(&self) -> Option<Duration> {
         let ingress_idle = self.ingress.since_last()?;
+        let past_grace = self.ingress.since_first()?.checked_sub(DECODE_GRACE)?;
 
         let output_idle = match self.output.since_last() {
             Some(idle) => idle,
             // Media is arriving but nothing has come out of the decode chain.
-            // Inside the grace that is just preroll; past it, this is the
-            // failure the output stamp exists to catch, and the session has
-            // been useless since the grace ran out.
-            None => self.ingress.since_first()?.checked_sub(DECODE_GRACE)?,
+            // Past the grace this is the failure the output stamp exists to
+            // catch, and the session has been useless since the grace ran out.
+            None => past_grace,
         };
 
         Some(ingress_idle.max(output_idle))
@@ -1496,6 +1501,31 @@ mod tests {
             session.idle(),
             None,
             "a session whose own media has only just started must not be judged yet"
+        );
+    }
+
+    /// After a takeover, frames the displaced session had already pushed into
+    /// the slot's chain can cross the tee after the newcomer reset the stamp.
+    /// They must not stand in for the newcomer's own first decoded frame: they
+    /// stop within moments, and judging on them would let the next client evict
+    /// a session whose decoder has not had its keyframe yet.
+    #[test]
+    fn a_predecessors_trailing_frames_do_not_cut_the_decode_grace_short() {
+        let slot_output = Arc::new(ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO));
+        let session = SessionActivity::from_stamps(
+            ActivityStamp::backdated(Duration::from_millis(200), Duration::ZERO),
+            slot_output.clone(),
+        );
+        slot_output.reset();
+        // The predecessor's tail crosses the tee, then the newcomer's media arrives.
+        slot_output.touch();
+        std::thread::sleep(Duration::from_millis(50));
+        session.touch_ingress(true);
+
+        assert_eq!(
+            session.idle(),
+            None,
+            "a session inside its decode grace must not be judged on its predecessor's frames"
         );
     }
 
