@@ -320,6 +320,10 @@ fn the_missing_plugin_message_names_what_to_install() {
 fn the_aac_encoder_hint_names_a_different_package_than_the_sink() {
     let hint = libav_package_hint();
     assert!(!hint.is_empty());
+    // Windows ships every plugin in one MSI, so both hints correctly name that
+    // same installer and there is no wrong place to send anyone. The two
+    // packages are only distinct where the distribution splits them.
+    #[cfg(not(target_os = "windows"))]
     assert_ne!(
         hint,
         rtmp_package_hint(),
