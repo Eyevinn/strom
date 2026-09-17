@@ -10,6 +10,7 @@
 //! of 50 % white, `(128, 128, 128, 128)`, into the real block.
 
 use gstreamer::prelude::*;
+use serial_test::serial;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use strom::blocks::BlockRegistry;
@@ -331,7 +332,11 @@ fn assert_correct_at_full_and_half_alpha(
     run.stop();
 }
 
+// Every case here renders a flow and probes program frames; the GPU ones render
+// through llvmpipe in CI, which costs whole cores. Serialised so a sibling test
+// cannot starve the pipeline under measurement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn cpu_premultiplied_dsk_composites_correctly() {
     assert_correct_at_full_and_half_alpha(
         "cpu",
@@ -345,6 +350,7 @@ async fn cpu_premultiplied_dsk_composites_correctly() {
 /// mode set still composites as straight. Guards the default, so existing
 /// flows with straight graphics are not unpremultiplied behind their back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn cpu_default_mode_leaves_the_source_alone() {
     let run = Running::start("cpu", "vmp_cpu_default", None, DskSource::TestPattern);
     run.manager
@@ -393,6 +399,7 @@ fn write_premultiplied_clip(path: &std::path::Path) -> Result<(), String> {
 /// A premultiplied clip through the media player: the decoder hands out A420,
 /// which the unpremultiply element cannot take directly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn cpu_premultiplied_clip_through_media_player() {
     gstreamer::init().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -469,6 +476,7 @@ fn gl_available_or_required() -> bool {
 /// the correction depends on a blend constant that has to track pad alpha.
 /// Half alpha is the case that catches a constant left behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn gpu_premultiplied_dsk_composites_correctly() {
     if !gl_available_or_required() {
         return;
@@ -485,6 +493,7 @@ async fn gpu_premultiplied_dsk_composites_correctly() {
 /// not through `set_property` from Strom code. The blend constant has to
 /// follow that too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn gpu_blend_constant_follows_fade_to_black() {
     if !gl_available_or_required() {
         return;
