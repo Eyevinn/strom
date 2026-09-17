@@ -296,10 +296,9 @@ impl SessionActivity {
     /// this session was assigned.
     pub fn new(epoch: Instant, output: Arc<ActivityStamp>) -> Self {
         // This session has to prove for itself that its media comes out of the
-        // slot's chain. Buffers left in flight from the previous occupant can
-        // still stamp it for a moment afterwards, which only ever makes the new
-        // session look healthier than it is — the safe direction, and it
-        // corrects itself as soon as the chain drains.
+        // slot's chain. Frames already in flight from the previous occupant can
+        // still stamp it; `idle` holds the decode grace so they cannot count
+        // against it.
         output.reset();
         Self {
             ingress: ActivityStamp::new(epoch),
@@ -1029,8 +1028,8 @@ mod tests {
         ))
     }
 
-    /// The bug: RTP keeps arriving and has done for a minute, but nothing has
-    /// ever come out of the slot's chain — the decoder never got a usable
+    /// A seat that has received RTP for a minute while nothing has come out of
+    /// its slot's chain — the decoder never got a usable
     /// keyframe, or a consumer below the slot's tee is blocking it. Judged on
     /// arriving bytes alone this seat looks perfectly healthy.
     fn receiving_but_never_usable(stop: Arc<AtomicBool>) -> Arc<SessionActivity> {
@@ -1043,8 +1042,8 @@ mod tests {
         activity
     }
 
-    /// The other half of the bug: the seat decoded fine and then froze
-    /// `stalled_for` ago, while RTP keeps arriving.
+    /// A seat that decoded, then froze `stalled_for` ago, while RTP keeps
+    /// arriving.
     fn receiving_but_stalled(stop: Arc<AtomicBool>, stalled_for: Duration) -> Arc<SessionActivity> {
         let activity = Arc::new(SessionActivity::from_stamps(
             ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
