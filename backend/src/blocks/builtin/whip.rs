@@ -2473,9 +2473,9 @@ mod tests {
     ///
     /// Both halves matter, so this checks both: media that gets through stamps
     /// the slot, and media that arrives but cannot get through does not. The
-    /// second half is the seat that holds a slot for 45 minutes while receiving
-    /// RTP the whole time — here its tee is blocked by a stuck consumer, which is
-    /// what a stalled recorder branch does to it in a real flow.
+    /// second half is a seat that keeps receiving RTP while nothing gets
+    /// through: here a stuck consumer blocks its tee, which is what a stalled
+    /// recorder branch does in a real flow.
     #[test]
     fn the_slot_stamp_follows_media_out_of_the_decode_chain_not_into_it() {
         let _ = gst::init();
