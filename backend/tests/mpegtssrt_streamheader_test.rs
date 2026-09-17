@@ -20,6 +20,15 @@
 //! connects each replayed a byte-identical video-only PMT ahead of a live PMT
 //! carrying video and audio.
 
+// Not on Windows: `gstsrt.dll` intermittently fails to load inside the test
+// process there (Windows error 127), so `srtsink` cannot be created even though
+// the element is in the registry and works in every other process on the same
+// machine. `ElementFactory::find` succeeds, so the plugins_available() guard
+// below does not catch it. That load failure is its own defect, tracked in
+// #834; excluding this target keeps it from hiding the rest of the Windows
+// suite. Linux and macOS still run this test, so the regression stays guarded.
+#![cfg(not(target_os = "windows"))]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use strom::blocks::builtin::mpegtssrt::MpegTsSrtOutputBuilder;
