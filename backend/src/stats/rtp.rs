@@ -144,6 +144,7 @@ pub fn collect_all_jitterbuffer_stats(bin: &gst::Bin) -> Vec<(String, RtpJitterb
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gstreamer_app as gst_app;
 
     #[test]
     fn test_find_jitterbuffers_empty_bin() {
@@ -174,23 +175,44 @@ mod tests {
         assert!(collect_rtp_jitterbuffer_stats(&fakesrc).is_none());
     }
 
-    /// The walk is the part that is not obvious: inside `webrtcbin` the medium
-    /// is only visible some hops downstream of the buffer itself.
+    /// Inside `webrtcbin` the caps on the jitterbuffer name only an SSRC; the
+    /// medium appears two elements downstream.
     #[test]
     fn media_kind_is_found_downstream_of_the_element() {
         gst::init().unwrap();
         let pipeline = gst::Pipeline::new();
-        let src = gst::ElementFactory::make("audiotestsrc").build().unwrap();
+        let stripped = gst::Caps::builder("application/x-rtp")
+            .field("ssrc", 1u32)
+            .build();
+        let src = gst_app::AppSrc::builder().caps(&stripped).build();
         let queue = gst::ElementFactory::make("queue").build().unwrap();
+        let setter = gst::ElementFactory::make("capssetter")
+            .property(
+                "caps",
+                gst::Caps::builder("application/x-rtp")
+                    .field("media", "audio")
+                    .build(),
+            )
+            .build()
+            .expect("capssetter is in gst-plugins-good");
         let sink = gst::ElementFactory::make("fakesink").build().unwrap();
-        pipeline.add_many([&src, &queue, &sink]).unwrap();
-        gst::Element::link_many([&src, &queue, &sink]).unwrap();
+        pipeline
+            .add_many([src.upcast_ref(), &queue, &setter, &sink])
+            .unwrap();
+        gst::Element::link_many([src.upcast_ref(), &queue, &setter, &sink]).unwrap();
 
         pipeline.set_state(gst::State::Paused).unwrap();
-        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+        src.push_buffer(gst::Buffer::with_size(12).unwrap())
+            .unwrap();
+        let (res, _, _) = pipeline.state(gst::ClockTime::from_seconds(5));
+        res.expect("pipeline prerolls");
 
-        // Two hops from `src`, so the caps are not on its own pad.
-        assert_eq!(jitterbuffer_media_kind(&src).as_deref(), Some("audio"));
+        let own = src.static_pad("src").unwrap().current_caps();
+        assert_eq!(own.as_ref().and_then(media_kind_from_caps), None);
+        assert_eq!(
+            jitterbuffer_media_kind(src.upcast_ref()).as_deref(),
+            Some("audio")
+        );
 
         pipeline.set_state(gst::State::Null).unwrap();
     }
