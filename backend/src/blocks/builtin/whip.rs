@@ -242,6 +242,31 @@ fn parse_audio_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValu
         })
 }
 
+/// The audio latency to use, or `None` to keep audio on `video_latency_ms`.
+///
+/// With video, an audio latency above video's is refused: the flow runs on the
+/// video jitterbuffer's timeline, so audio released later than that reaches the
+/// mixer past its slot and is dropped. Audio-only endpoints have no such
+/// timeline and may use any value.
+fn effective_audio_latency_ms(
+    audio_latency_ms: Option<u32>,
+    video_latency_ms: u32,
+    has_video: bool,
+) -> Option<u32> {
+    let audio_ms = audio_latency_ms?;
+    if audio_ms == video_latency_ms {
+        return None;
+    }
+    if has_video && audio_ms > video_latency_ms {
+        warn!(
+            "WHIP Input: audio_jitterbuffer_latency_ms={}ms is above jitterbuffer_latency_ms={}ms; using {}ms for audio too",
+            audio_ms, video_latency_ms, video_latency_ms
+        );
+        return None;
+    }
+    Some(audio_ms)
+}
+
 /// Parse do_retransmission from properties (default: true).
 fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool {
     properties
@@ -343,7 +368,11 @@ pub fn build_whipserversrc(
     // causing the whole video stream to stall (never reaching decodebin)
     // even though the packets arrived fine over the network.
     let jitterbuffer_latency_ms = parse_jitterbuffer_latency_ms(properties);
-    let audio_jitterbuffer_latency_ms = parse_audio_jitterbuffer_latency_ms(properties);
+    let audio_jitterbuffer_latency_ms = effective_audio_latency_ms(
+        parse_audio_jitterbuffer_latency_ms(properties),
+        jitterbuffer_latency_ms,
+        mode.has_video(),
+    );
     let do_retransmission = parse_do_retransmission(properties);
     let drop_on_latency = parse_drop_on_latency(properties);
 
@@ -826,9 +855,7 @@ pub fn create_whipserversrc_for_session(
     let ice_transport_policy = config.ice_transport_policy.clone();
     let jitterbuffer_latency_ms = config.jitterbuffer_latency_ms;
     let drop_on_latency = config.drop_on_latency;
-    let audio_jitterbuffer_latency_ms = config
-        .audio_jitterbuffer_latency_ms
-        .filter(|ms| *ms != jitterbuffer_latency_ms);
+    let audio_jitterbuffer_latency_ms = config.audio_jitterbuffer_latency_ms;
     // `cleanup_sent` ensures only one cleanup request per session (shared across the
     // ICE callback, the inactivity watchdog and the session manager's teardown paths).
     let cleanup_sent_for_ice = cleanup_sent.clone();
@@ -2220,6 +2247,27 @@ mod tests {
                 PropertyValue::Int(80)
             )])),
             Some(80)
+        );
+    }
+
+    #[test]
+    fn audio_latency_equal_to_video_is_left_alone() {
+        assert_eq!(effective_audio_latency_ms(Some(400), 400, true), None);
+        assert_eq!(effective_audio_latency_ms(None, 400, true), None);
+    }
+
+    #[test]
+    fn audio_latency_below_video_is_used() {
+        assert_eq!(effective_audio_latency_ms(Some(100), 400, true), Some(100));
+    }
+
+    #[test]
+    fn audio_latency_above_video_is_refused_only_with_video() {
+        assert_eq!(effective_audio_latency_ms(Some(800), 400, true), None);
+        assert_eq!(
+            effective_audio_latency_ms(Some(800), 400, false),
+            Some(800),
+            "an audio-only endpoint has no video timeline to fall behind"
         );
     }
 

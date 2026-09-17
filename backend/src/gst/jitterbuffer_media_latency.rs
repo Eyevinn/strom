@@ -3,8 +3,8 @@
 //! `webrtcbin` gives every `rtpjitterbuffer` the same `latency`. A lost packet
 //! holds back everything behind it until it is retransmitted or its deadline,
 //! the latency, passes. Video is retransmitted, so a longer latency recovers
-//! frames. Opus is not (browsers negotiate no NACK for it, and `webrtcsink`
-//! sends no audio RTX), so for audio a longer latency only lengthens the stall.
+//! frames. Opus is not retransmitted, and the jitterbuffer's requests for it go
+//! unanswered, so for audio a longer latency only lengthens the stall.
 //!
 //! With BUNDLE, audio and video share one RTP session, so a jitterbuffer's
 //! media is unknown when it is created. The payload type of its first packet,
