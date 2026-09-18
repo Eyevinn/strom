@@ -30,9 +30,16 @@ probe() {
     local out status kids
     out=$("$GST_LAUNCH" -v "$@" 2>&1)
     status=$?
+    # Two shapes to catch. A template of several elements becomes a sub-bin
+    # named after them. A template of exactly one element does not: the base
+    # class parses with GST_PARSE_FLAG_NO_SINGLE_ELEMENT_BINS, so a lone
+    # d3d11convert appears as a plain child and a grep for the bin misses it —
+    # which reads as "nothing was selected" and is wrong.
     kids=$(printf '%s' "$out" \
-        | grep -oE "GstBin:auto(video)?convert[a-z0-9-]*" \
-        | sed 's/GstBin:autovideoconvert-//' \
+        | grep -oE "GstBin:auto(video)?convert-[a-z0-9]+|GstAutoVideoConvert:[a-z0-9_-]+/Gst[A-Za-z0-9]+:[a-z0-9_-]+" \
+        | sed -e 's|.*GstBin:autovideoconvert-||' \
+              -e 's|.*/Gst[A-Za-z0-9]*:||' \
+              -e 's/[0-9]*$//' \
         | sort -u | tr '\n' ' ')
     if [ $status -eq 0 ] && ! printf '%s' "$out" | grep -qE "ERROR|not-negotiated|erroneous pipeline"; then
         printf '  %-34s OK    %s\n' "$label" "${kids:--}"
