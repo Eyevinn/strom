@@ -110,8 +110,8 @@ Any risk you have not traced in the code gets the literal prefix `SPECULATIVE (n
 Every posted review, triage comment, draft-hold note and fix PR body ends with a marker. The
 keys are read by tooling, so spell them exactly and put them on one line.
 
-    <!-- strom-agent protocol=v3 kind=review pr=721 head=<full-sha> verdict=Comment radius=GLOBAL confidence=HIGH -->
-    <!-- strom-agent protocol=v3 kind=triage issue=719 base=<sha> verdict=CONFIRMED work=bug radius=LOCAL excluded=none ask=open confidence=HIGH -->
+    <!-- strom-agent protocol=v3 kind=review pr=721 head=<full-sha> verdict=Comment radius=GLOBAL overlaps=none confidence=HIGH -->
+    <!-- strom-agent protocol=v3 kind=triage issue=719 base=<sha> verdict=CONFIRMED work=bug radius=LOCAL excluded=none overlaps=none ask=open confidence=HIGH -->
     <!-- strom-agent protocol=v3 kind=fix issue=719 pr=730 class=B -->
     <!-- strom-agent protocol=v3 kind=draft-hold pr=726 -->
 
@@ -132,6 +132,10 @@ a lifetime risk in**, comma-separated, or `none` — not the areas the diff mere
 Adding a type, a variant or a block is `none`; renaming or changing an existing `StromEvent`
 variant, an endpoint's shape or a config key is `contract`.
 
+`overlaps=` lists the open issues and pull requests that own the same design decision or
+change the same code path, comma-separated, or `none`. It is set from the search in "Find
+what else is already open on it", and `none` asserts that the search was run.
+
 `ask=open` means a design question is waiting for a human; `ask=none` means no decision is
 needed. `kind=draft-hold` carries no verdict: it records only that a draft was seen and left
 alone, so a later run says it once rather than every run (`REVIEW.md`).
@@ -150,6 +154,38 @@ run. So the rule is not "be brief". It is:
 
 The ceilings in `REVIEW.md`, `TRIAGE.md`, `FIX.md` and `SUMMARY.md` follow from that: tight
 where output repeats every run, generous where it explains something once.
+
+## Find what else is already open on it
+
+An item is rarely alone. The design decision in front of you is often already being argued on
+another issue, and the code path you are about to change is often already being changed by an
+open pull request. Deciding without looking produces the two failures nothing downstream
+recovers from: a second design that contradicts the first, and two diffs that each make sense
+alone.
+
+Before you reach a verdict, run these and read what comes back:
+
+    gh issue list --state open --search "<subsystem term>" --limit 20
+    gh pr list --state open --search "<subsystem term>" --limit 20
+    gh pr list --state open --json number,title,files \
+      --jq '.[] | select(.files[].path | test("<path this would change>")) | "#\(.number) \(.title)"'
+
+An overlap is not "mentions the same words". It is one of three things:
+
+- another open item **owns the design decision** this one would settle in passing;
+- an open PR **already changes the code path** this one would change;
+- an open PR **would make this work unnecessary**, or this one would make it unnecessary.
+
+Name every overlap you find by number, say which of the three it is, and carry `overlaps=` in
+the marker — the numbers, comma-separated, or `none`. Writing `none` is a claim that you
+looked.
+
+**An overlap outranks the smaller change.** Where another open item owns the design, landing
+the local fix first commits the project to an answer that the open item has not finished
+asking, and the narrow radius is what makes that easy to miss: a change can be `LOCAL` in the
+code and `GLOBAL` in the design. Say so, and make **"wait for #N, change nothing here"** one
+of the options a human can choose. Pausing is a legitimate outcome and only a human can
+choose it, so offer it — do not decide it, and do not quietly propose the local fix anyway.
 
 ## Do not redo settled work
 
