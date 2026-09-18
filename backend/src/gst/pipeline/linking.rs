@@ -5,6 +5,35 @@ use strom_types::element::ElementPadRef;
 use strom_types::Link;
 use tracing::{debug, error, info, warn};
 
+/// Adapt an element-level link that GStreamer refused, or report the refusal.
+///
+/// Returns `Ok(())` when a `gldownload` now joins the two elements.
+fn adapt_element_link(
+    src: &gst::Element,
+    src_pad_name: Option<&str>,
+    sink: &gst::Element,
+    sink_pad_name: Option<&str>,
+    refusal: gst::glib::BoolError,
+    link: &Link,
+) -> Result<(), PipelineError> {
+    match crate::gst::gl_link::retry_element_link_with_gl_download(
+        src,
+        src_pad_name,
+        sink,
+        sink_pad_name,
+    ) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(PipelineError::LinkError(
+            link.from.clone(),
+            format!("{} - {}", link.to, refusal),
+        )),
+        Err(adapt_error) => Err(PipelineError::LinkError(
+            link.from.clone(),
+            format!("{} - {} ({})", link.to, refusal, adapt_error),
+        )),
+    }
+}
+
 impl PipelineManager {
     /// Try to link two elements according to a link definition.
     /// Returns Ok if successful, Err if pads don't exist yet (dynamic pads).
@@ -68,10 +97,7 @@ impl PipelineManager {
             } else {
                 // Not an aggregator - try simple link_pads
                 if let Err(e) = src.link_pads(Some(src_pad_name), sink, None::<&str>) {
-                    return Err(PipelineError::LinkError(
-                        link.from.clone(),
-                        format!("Failed to link: {}", e),
-                    ));
+                    return adapt_element_link(src, Some(src_pad_name), sink, None, e, link);
                 }
                 debug!("Successfully linked: {} -> {}", link.from, link.to);
                 return Ok(());
@@ -271,19 +297,39 @@ impl PipelineManager {
                 }
             };
 
-            src_pad_obj.link(&sink_pad_obj).map_err(|e| {
-                PipelineError::LinkError(link.from.clone(), format!("{} - {}", link.to, e))
-            })?;
+            if let Err(e) = src_pad_obj.link(&sink_pad_obj) {
+                // A GL-memory producer and a system-memory consumer share no
+                // format. Adapt here, where both pads are known; every other
+                // refusal returns the original error.
+                match crate::gst::gl_link::retry_link_with_gl_download(
+                    &src_pad_obj,
+                    &sink_pad_obj,
+                    e,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(PipelineError::LinkError(
+                            link.from.clone(),
+                            format!("{} - {}", link.to, e),
+                        ))
+                    }
+                    Err(adapt_error) => {
+                        return Err(PipelineError::LinkError(
+                            link.from.clone(),
+                            format!("{} - {} ({})", link.to, e, adapt_error),
+                        ))
+                    }
+                }
+            }
 
             debug!("Successfully linked: {} -> {}", link.from, link.to);
         } else if let Some(sink_pad_name) = to_pad {
             // Source is element-level, destination names a pad: let GStreamer
             // pick a compatible source pad but honour the sink pad the caller
             // asked for. link() would ignore it and pick both ends itself.
-            src.link_pads(None::<&str>, sink, Some(sink_pad_name))
-                .map_err(|e| {
-                    PipelineError::LinkError(link.from.clone(), format!("{} - {}", link.to, e))
-                })?;
+            if let Err(e) = src.link_pads(None::<&str>, sink, Some(sink_pad_name)) {
+                adapt_element_link(src, None, sink, Some(sink_pad_name), e, link)?;
+            }
 
             debug!("Successfully linked: {} -> {}", link.from, link.to);
         } else {
@@ -300,9 +346,9 @@ impl PipelineManager {
                 );
             }
 
-            src.link(sink).map_err(|e| {
-                PipelineError::LinkError(link.from.clone(), format!("{} - {}", link.to, e))
-            })?;
+            if let Err(e) = src.link(sink) {
+                adapt_element_link(src, None, sink, None, e, link)?;
+            }
 
             debug!("Successfully linked: {} -> {}", link.from, link.to);
         }
