@@ -124,9 +124,15 @@ struct WatchedTrack {
     /// "video 0" / "audio 1" — for the log line, built once at setup.
     label: String,
     input: gst::glib::WeakRef<gst::Element>,
-    /// The splitmuxsink sink pad this track holds. Its peer is the track's queue.
+    /// The splitmuxsink sink pad this track feeds. Its peer is the track's queue,
+    /// whose level the watchdog reads, and it is the second place an EOS can be
+    /// delivered when the block's own input pad will not take one. See
+    /// `end_stalled_track`.
     muxer_pad: gst::glib::WeakRef<gst::Pad>,
     activity: Arc<TrackActivity>,
+    /// Whether a refused EOS has already been reported for this track. The watchdog
+    /// retries every poll, and one line per attempt would be 120 a minute.
+    refusal_logged: AtomicBool,
 }
 
 /// Drop this track's buffers at the block boundary once it has left the recording.
@@ -225,7 +231,8 @@ fn add_muxer_intake_probe(pad: &gst::Pad, activity: &Arc<TrackActivity>, epoch: 
     });
 }
 
-/// End a track, so the muxer stops waiting for it.
+/// End a track, so the muxer stops waiting for it. Returns whether the EOS was
+/// actually delivered.
 ///
 /// splitmuxsink holds a GOP until every one of its sink pads has advanced past it,
 /// so a single track that stops freezes the whole recording — and, through the tee
@@ -237,22 +244,48 @@ fn add_muxer_intake_probe(pad: &gst::Pad, activity: &Arc<TrackActivity>, epoch: 
 /// the time a track has stalled, the thread that fed it is usually parked inside
 /// `gst_pad_push` on this very pad, so the pad never goes idle and an IDLE probe
 /// would never run. An identity src pad has no task of its own, so its stream lock
-/// is free and the push goes straight through.
-fn end_stalled_track(input: &gst::Element, activity: &TrackActivity) {
-    if activity.retired.swap(true, Ordering::SeqCst) {
-        return;
+/// is free.
+///
+/// That push can still be refused, and `gst_pad_push_event` answers a refusal with
+/// one bare `false` whatever the cause. For a sticky, serialized event on a src pad
+/// the causes are: the pad is flushing or is no longer activated, the pad already
+/// carries an EOS, the pad is unlinked, or the peer is flushing, already at EOS, or
+/// out of its parent. Every one of them means this branch is being taken down or is
+/// already dead — a busy downstream does not refuse, it blocks — and none of them
+/// can be told apart from the return value. A refusal is also usually terminal for
+/// this route: a failed push still leaves the sticky EOS on the pad, and the pad
+/// then refuses every later one on sight.
+///
+/// So there is a second place to deliver it: the splitmuxsink sink pad itself. That
+/// pad is the one splitmuxsink is actually waiting on, no upstream teardown can
+/// invalidate it, and the stalled track is by definition the one nothing is pushing
+/// into, so its stream lock is free. The block's input stays the first choice
+/// because it lets the parser drain its last frame on the way past.
+///
+/// The track is closed before the EOS goes in, and reopened if nothing took it.
+/// Both halves are needed. A `queue` sits between the block's input and the muxer,
+/// so `push_event` returns once that queue has the event rather than once the muxer
+/// does, and anything arriving before the track is closed is queued *behind* the
+/// EOS; the muxer answers post-EOS data with a flow error, which on a WHIP seat
+/// reaches a tee shared with the mixers and the return router and stops its source.
+/// Leaving the track closed after a refusal would take it off the watchdog whether
+/// or not the EOS worked, and one refusal would then freeze the recording for good.
+fn end_stalled_track(
+    input: &gst::Element,
+    muxer_pad: Option<&gst::Pad>,
+    activity: &TrackActivity,
+) -> bool {
+    activity.retired.store(true, Ordering::SeqCst);
+
+    let delivered = input
+        .static_pad("src")
+        .is_some_and(|pad| pad.push_event(gst::event::Eos::new()))
+        || muxer_pad.is_some_and(|pad| pad.send_event(gst::event::Eos::new()));
+
+    if !delivered {
+        activity.retired.store(false, Ordering::SeqCst);
     }
-    let Some(pad) = input.static_pad("src") else {
-        return;
-    };
-    if !pad.push_event(gst::event::Eos::new()) {
-        warn!(
-            "Recorder: {} refused the EOS that would end its track — the recording stays stalled",
-            pad.parent()
-                .map(|p| p.name().to_string())
-                .unwrap_or_default()
-        );
-    }
+    delivered
 }
 
 /// Watch the recording and end a track that has stopped the muxer.
@@ -302,33 +335,6 @@ fn queued_buffers(muxer_pad: &gst::Pad) -> Option<u32> {
     queue
         .has_property("current-level-buffers")
         .then(|| queue.property::<u32>("current-level-buffers"))
-}
-
-/// Which frozen track, if any, is holding the recording up. Each entry is a track's
-/// running time and the level of its queue.
-///
-/// Every track being quiet at the muxer does not mean one of them died: a muxer
-/// that stops writing — a stalled disk, slow network storage — freezes every track
-/// at once. The queue in front of each pad tells the two apart. A track whose
-/// source stopped has handed its last buffers to the muxer, so its queue is empty;
-/// a track the muxer is refusing fills its queue. A track is held responsible only
-/// when its queue is empty and another track's queue is backed up behind it. All
-/// backed up is the muxer itself; all empty is every source stopping together,
-/// where no track is waiting on another.
-///
-/// Among the empty ones, splitmuxsink waits on whichever has carried the recording
-/// least far, so that is the one to end — the same choice it is making internally.
-fn track_holding_the_recording(tracks: &[(u64, Option<u32>)]) -> Option<usize> {
-    let backed_up = tracks.iter().any(|(_, level)| level.is_some_and(|n| n > 0));
-    if !backed_up {
-        return None;
-    }
-    tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, level))| *level == Some(0))
-        .min_by_key(|(_, (running_ms, _))| *running_ms)
-        .map(|(index, _)| index)
 }
 
 /// The watchdog loop. Returns once the pipeline is gone or every track has ended.
@@ -391,46 +397,116 @@ fn watch_tracks(
             return;
         }
 
-        // The whole recording has to be frozen before anything is ended. One quiet
-        // input proves nothing: whichever track stopped, the muxer blocks and every
-        // other input backs up behind it within a second, so a machine that is
-        // merely overloaded looks exactly the same from any single input.
-        let frozen = live.len() > 1
-            && !last_end_ms.is_some_and(|t| now_ms.saturating_sub(t) < timeout_ms)
-            && live
-                .iter()
-                .all(|(_, _, quiet_ms, _, _)| *quiet_ms >= timeout_ms);
-        if !frozen {
-            reported_muxer_stall = false;
+        // Ending one track frees the others, but not within a poll interval: without
+        // a pause here the whole recording is ended track by track before the first
+        // one has taken effect.
+        if last_end_ms.is_some_and(|t| now_ms.saturating_sub(t) < timeout_ms) {
             continue;
         }
 
-        let positions: Vec<(u64, Option<u32>)> = live
+        let readings: Vec<TrackReading> = live
             .iter()
-            .map(|(_, _, _, running_ms, queued)| (*running_ms, *queued))
+            .map(|(_, _, quiet_ms, running_ms, queued)| TrackReading {
+                quiet_ms: *quiet_ms,
+                running_ms: *running_ms,
+                queued: *queued,
+            })
             .collect();
-        let Some(index) = track_holding_the_recording(&positions) else {
-            if !reported_muxer_stall && positions.iter().all(|(_, q)| q.is_some_and(|n| n > 0)) {
+        let Some(index) = track_holding_the_recording(&readings, timeout_ms) else {
+            let muxer_stalled = readings.len() > 1
+                && readings
+                    .iter()
+                    .all(|r| r.quiet_ms >= timeout_ms && r.queued.is_some_and(|n| n > 0));
+            if muxer_stalled && !reported_muxer_stall {
                 warn!(
                     "Recorder {}: nothing muxed for {}s with every track backed up — the muxer or its storage is stalled, so no track is ended",
                     block_id,
-                    live.iter().map(|(_, _, quiet_ms, _, _)| *quiet_ms).min().unwrap_or(0) / 1000
+                    timeout_ms / 1000
                 );
-                reported_muxer_stall = true;
             }
+            reported_muxer_stall = muxer_stalled;
             continue;
         };
-        let (track, input, quiet_ms, running_ms, _) = live.swap_remove(index);
-        warn!(
-            "Recorder {}: nothing muxed for {}s and {} has run dry at {}ms while another track is backed up — ending that track so the rest of the recording continues",
-            block_id,
-            quiet_ms / 1000,
-            track.label,
-            running_ms
-        );
-        end_stalled_track(&input, &track.activity);
-        last_end_ms = Some(now_ms);
+        let (track, input, quiet_ms, running_ms, _) = &live[index];
+
+        let muxer_pad = track.muxer_pad.upgrade();
+        if end_stalled_track(input, muxer_pad.as_ref(), &track.activity) {
+            warn!(
+                "Recorder {}: {} has muxed nothing for {}s at {}ms and its queue has run dry — ended that track so the rest of the recording continues",
+                block_id,
+                track.label,
+                quiet_ms / 1000,
+                running_ms
+            );
+            last_end_ms = Some(now_ms);
+        } else if !track.refusal_logged.swap(true, Ordering::Relaxed) {
+            warn!(
+                "Recorder {}: {} would not take the EOS that ends its track — retrying every {}ms until it does",
+                block_id,
+                track.label,
+                TRACK_STALL_POLL.as_millis()
+            );
+        }
     }
+}
+
+/// One track's state as the watchdog reads it on a poll.
+struct TrackReading {
+    /// How long since the muxer last took a buffer from this track.
+    quiet_ms: u64,
+    /// How far this track has carried the recording, in running time.
+    running_ms: u64,
+    /// Buffers waiting in the queue in front of this track's muxer pad, or `None`
+    /// if it could not be read.
+    queued: Option<u32>,
+}
+
+/// Which track, if any, is holding the recording up — an index into `readings`.
+///
+/// splitmuxsink waits on whichever pad has carried the recording least far, so that
+/// is the one to end: the same choice it is making internally. Three things have to
+/// be true of it before it is ended, and they answer different questions.
+///
+/// It has to have gone quiet, which says the muxer is not simply slow.
+///
+/// Its queue has to be empty, which says its source stopped rather than the muxer
+/// refusing it. A track whose source stopped hands its last buffers to the muxer; a
+/// track the muxer is refusing fills its queue. A muxer that stops writing — a
+/// stalled disk, slow network storage — freezes every track at once, and without
+/// this check the furthest behind would be ended for the rest of the recording.
+///
+/// And the muxer has to be waiting for it rather than for something outside it.
+/// Either the rest of the recording has moved on without it by at least the
+/// timeout, or every track has gone quiet and another's queue is backed up behind
+/// it. The spread is what makes this quick: it opens as soon as the track stops,
+/// because splitmuxsink goes on taking the other tracks into its internal queues for
+/// as long as those have room — for audio, tens of seconds — while the program
+/// output is frozen. Once that backpressure has reached every input the spread may
+/// never have opened, and a backed-up queue is what shows the stall is this track's.
+/// All queues empty is every source stopping together, where no track is waiting on
+/// another.
+fn track_holding_the_recording(readings: &[TrackReading], timeout_ms: u64) -> Option<usize> {
+    if readings.len() < 2 {
+        // One track cannot be held up by another, and ending it would end the
+        // recording rather than rescue it.
+        return None;
+    }
+    let furthest = readings.iter().map(|r| r.running_ms).max()?;
+    let (index, behind) = readings
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, r)| r.running_ms)?;
+
+    let quiet = behind.quiet_ms >= timeout_ms;
+    let drained = behind.queued == Some(0);
+    let lagging = furthest.saturating_sub(behind.running_ms) >= timeout_ms;
+    let all_quiet = readings.iter().all(|r| r.quiet_ms >= timeout_ms);
+    let other_backed_up = readings
+        .iter()
+        .enumerate()
+        .any(|(i, r)| i != index && r.queued.is_some_and(|n| n > 0));
+
+    (quiet && drained && (lagging || (all_quiet && other_backed_up))).then_some(index)
 }
 
 impl BlockBuilder for RecorderBuilder {
@@ -1296,6 +1372,7 @@ impl BlockBuilder for RecorderBuilder {
                                 input: input.clone(),
                                 muxer_pad: pad.downgrade(),
                                 activity: Arc::clone(activity),
+                                refusal_logged: AtomicBool::new(false),
                             });
                         }
                         None => error!(
@@ -1339,6 +1416,7 @@ impl BlockBuilder for RecorderBuilder {
                                 input: input.clone(),
                                 muxer_pad: pad.downgrade(),
                                 activity: Arc::clone(activity),
+                                refusal_logged: AtomicBool::new(false),
                             });
                         }
                         None => error!(
@@ -1701,23 +1779,40 @@ fn recorder_definition() -> BlockDefinition {
 mod tests {
     use super::*;
 
-    fn idle_activity() -> TrackActivity {
-        TrackActivity {
-            last_muxed_ms: AtomicU64::new(0),
-            last_muxed_running_ms: AtomicU64::new(0),
-            running_time_offset_ns: AtomicI64::new(0),
-            retired: AtomicBool::new(false),
+    fn reading(quiet_ms: u64, running_ms: u64, queued: Option<u32>) -> TrackReading {
+        TrackReading {
+            quiet_ms,
+            running_ms,
+            queued,
         }
     }
 
-    /// A track that stopped: its queue has drained while the one the muxer is
-    /// refusing has filled up.
+    /// The case the watchdog exists for, seen the moment it happens rather than
+    /// once the backpressure has reached every input: one track stopped and
+    /// drained, the others are still being taken in and have moved on without it.
+    #[test]
+    fn a_track_the_recording_has_moved_on_without_is_the_one_ended() {
+        let readings = [reading(6_000, 10_000, Some(0)), reading(0, 16_000, Some(0))];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), Some(0));
+    }
+
+    /// The same shape a second too early: the track is quiet but the recording
+    /// has not yet moved far enough past it to say the muxer is waiting on it.
+    #[test]
+    fn a_quiet_track_the_others_have_barely_passed_is_left_alone() {
+        let readings = [reading(6_000, 10_000, Some(0)), reading(0, 13_000, Some(0))];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), None);
+    }
+
+    /// The backpressure has reached every input, so the spread never opened: a
+    /// drained track behind one whose queue has filled is still the one ended.
     #[test]
     fn a_drained_track_behind_a_backed_up_one_is_ended() {
-        assert_eq!(
-            track_holding_the_recording(&[(9_000, Some(40)), (7_000, Some(0))]),
-            Some(1)
-        );
+        let readings = [
+            reading(6_000, 9_000, Some(40)),
+            reading(7_000, 7_000, Some(0)),
+        ];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), Some(1));
     }
 
     /// The muxer or its storage stopped, so every queue is backed up. Ending the
@@ -1725,35 +1820,61 @@ mod tests {
     /// rescue nothing.
     #[test]
     fn a_muxer_that_stalls_for_every_track_ends_none() {
-        assert_eq!(
-            track_holding_the_recording(&[(9_000, Some(40)), (7_000, Some(12))]),
-            None
-        );
+        let readings = [
+            reading(6_000, 9_000, Some(40)),
+            reading(7_000, 7_000, Some(12)),
+        ];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), None);
     }
 
-    /// Every source stopped together: nothing is waiting on anything.
+    /// A refused track fills its queue, however far the others got before the
+    /// muxer stopped, so a spread alone does not end it.
+    #[test]
+    fn a_lagging_track_the_muxer_is_refusing_is_left_alone() {
+        let readings = [
+            reading(6_000, 10_000, Some(40)),
+            reading(6_000, 16_000, Some(40)),
+        ];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), None);
+    }
+
+    /// Every source stopped together: no track is waiting on another.
     #[test]
     fn tracks_that_stop_together_are_left_alone() {
-        assert_eq!(
-            track_holding_the_recording(&[(9_000, Some(0)), (7_000, Some(0))]),
-            None
-        );
+        let readings = [
+            reading(6_000, 12_000, Some(0)),
+            reading(7_000, 11_000, Some(0)),
+        ];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), None);
     }
 
-    /// Of two drained tracks, the one splitmuxsink is waiting on is the one that
-    /// has carried the recording least far. A track whose queue could not be read
-    /// is never the one ended.
+    /// A track whose queue could not be read is never the one ended.
     #[test]
-    fn of_several_drained_tracks_the_furthest_behind_is_ended() {
-        assert_eq!(
-            track_holding_the_recording(&[
-                (9_000, Some(40)),
-                (8_000, Some(0)),
-                (6_000, None),
-                (7_000, Some(0)),
-            ]),
-            Some(3)
-        );
+    fn a_track_whose_queue_cannot_be_read_is_left_alone() {
+        let readings = [reading(6_000, 10_000, None), reading(0, 16_000, Some(0))];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), None);
+    }
+
+    #[test]
+    fn tracks_that_are_all_delivering_are_left_alone() {
+        let readings = [reading(30, 12_000, Some(1)), reading(20, 12_010, Some(0))];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), None);
+    }
+
+    /// A lone track is the recording; ending it would not rescue anything.
+    #[test]
+    fn a_single_track_is_never_ended() {
+        let readings = [reading(60_000, 10_000, Some(0))];
+        assert_eq!(track_holding_the_recording(&readings, 5_000), None);
+    }
+
+    fn idle_activity() -> TrackActivity {
+        TrackActivity {
+            last_muxed_ms: AtomicU64::new(0),
+            last_muxed_running_ms: AtomicU64::new(0),
+            running_time_offset_ns: AtomicI64::new(0),
+            retired: AtomicBool::new(false),
+        }
     }
 
     /// Ending a track must not take the rest of the seat with it.
@@ -1801,7 +1922,10 @@ mod tests {
             "the branch takes buffers while the track is live"
         );
 
-        end_stalled_track(&input, &activity);
+        assert!(
+            end_stalled_track(&input, None, &activity),
+            "a linked, playing branch takes the EOS"
+        );
         assert!(
             activity.retired.load(Ordering::SeqCst),
             "the watchdog ended the track"
@@ -1825,5 +1949,155 @@ mod tests {
         );
 
         let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// A pad outside a running pipeline has never been activated, and
+    /// `gst_pad_push_event` refuses a sticky event on one — the same bare `false`
+    /// a pad mid-teardown gives. A track retired on that refusal is one the
+    /// watchdog never looks at again, so the recording stays frozen for good.
+    #[test]
+    fn a_track_that_refused_the_eos_is_not_retired() {
+        gst::init().expect("gstreamer init");
+        let input = gst::ElementFactory::make("identity")
+            .build()
+            .expect("identity is part of gstreamer core");
+        let activity = idle_activity();
+
+        assert!(
+            !end_stalled_track(&input, None, &activity),
+            "an inactive pad cannot have taken the EOS"
+        );
+        assert!(
+            !activity.retired.load(Ordering::SeqCst),
+            "the track was retired on an EOS that was never delivered, so the watchdog will not try again"
+        );
+    }
+
+    /// The branch is shut before its EOS goes in.
+    ///
+    /// `push_event` returns once the queue between the block's input and the muxer
+    /// has the event, not once the muxer does. A buffer arriving before the track is
+    /// closed is queued behind that EOS and reaches the muxer after it, and the muxer
+    /// answers post-EOS data with a flow error — which on a WHIP seat stops the
+    /// source feeding the tee.
+    ///
+    /// Retire after the push instead of before and this fails.
+    #[test]
+    fn a_track_is_closed_before_its_eos_is_pushed() {
+        gst::init().expect("gstreamer init");
+        let pipeline = gst::Pipeline::new();
+        let input = gst::ElementFactory::make("identity")
+            .build()
+            .expect("identity is part of gstreamer core");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add_many([&input, &sink]).expect("add elements");
+        input.link(&sink).expect("link identity to fakesink");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+
+        let activity = Arc::new(idle_activity());
+        let closed_when_eos_passed = Arc::new(AtomicBool::new(false));
+
+        let watcher = Arc::clone(&activity);
+        let observed = Arc::clone(&closed_when_eos_passed);
+        input
+            .static_pad("src")
+            .expect("identity has a src pad")
+            .add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+                if let Some(gst::PadProbeData::Event(event)) = &info.data {
+                    if event.type_() == gst::EventType::Eos {
+                        observed.store(watcher.retired.load(Ordering::SeqCst), Ordering::SeqCst);
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+
+        assert!(
+            end_stalled_track(&input, None, &activity),
+            "a linked, playing branch takes the EOS"
+        );
+        assert!(
+            closed_when_eos_passed.load(Ordering::SeqCst),
+            "the track was still taking data when its EOS went past, so anything arriving lands behind it"
+        );
+
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// The counterpart: on a live branch the EOS lands, and only then does the
+    /// track leave the recording.
+    #[test]
+    fn a_track_that_took_the_eos_is_retired() {
+        gst::init().expect("gstreamer init");
+        let pipeline = gst::Pipeline::new();
+        let input = gst::ElementFactory::make("identity")
+            .build()
+            .expect("identity is part of gstreamer core");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add_many([&input, &sink]).expect("add elements");
+        input.link(&sink).expect("link identity to fakesink");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+        let activity = idle_activity();
+
+        assert!(
+            end_stalled_track(&input, None, &activity),
+            "a linked, playing branch takes the EOS"
+        );
+        assert!(activity.retired.load(Ordering::SeqCst));
+
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+    }
+
+    /// The block's own input is not the only way out of the muxer's wait. When it
+    /// will not take the EOS — unlinked here, one of the states a torn-down branch
+    /// leaves behind — the splitmuxsink pad the track feeds still will.
+    #[test]
+    fn an_unlinked_input_falls_back_to_the_muxer_pad() {
+        gst::init().expect("gstreamer init");
+        let pipeline = gst::Pipeline::new();
+        let input = gst::ElementFactory::make("identity")
+            .build()
+            .expect("identity is part of gstreamer core");
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("async", false)
+            .build()
+            .expect("fakesink is part of gstreamer core");
+        pipeline.add_many([&input, &sink]).expect("add elements");
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+        let muxer_pad = sink.static_pad("sink").expect("fakesink sink pad");
+        let activity = idle_activity();
+
+        assert!(
+            !input
+                .static_pad("src")
+                .expect("identity src pad")
+                .push_event(gst::event::Eos::new()),
+            "an unlinked src pad must refuse the EOS, or this test proves nothing"
+        );
+        assert!(
+            end_stalled_track(&input, Some(&muxer_pad), &activity),
+            "the muxer pad is the second route out of the wait"
+        );
+        assert!(activity.retired.load(Ordering::SeqCst));
+
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
     }
 }
