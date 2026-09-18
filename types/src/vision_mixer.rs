@@ -599,7 +599,9 @@ impl ZoneBorder {
 /// [`compute_pip_overlay_rects`]) so the zone behaves like a "mini-PiP"
 /// nested inside the parent PiP region. The `capacity` puts a cap on how
 /// many sources can occupy the zone; pushing a new source into a full zone
-/// is expected to evict the oldest (client-side FIFO).
+/// is expected to evict the oldest (client-side FIFO). The `/pip` endpoint
+/// rejects a zone whose `sources` outgrow its `capacity` rather than
+/// truncating it, so stored state always matches what renders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct Zone {
@@ -629,6 +631,9 @@ impl Zone {
 
     /// Effective source slice respecting `capacity` (truncate from the front,
     /// keeping the newest entries).
+    ///
+    /// A render-time net only: the `/pip` endpoint rejects an over-capacity
+    /// zone, so on state that came through it this returns all of `sources`.
     pub fn effective_sources(&self) -> &[usize] {
         match self.capacity {
             Some(cap) if cap < self.sources.len() => {
