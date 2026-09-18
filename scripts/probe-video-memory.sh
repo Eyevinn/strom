@@ -37,10 +37,14 @@ probe() {
     if [ $status -eq 0 ] && ! printf '%s' "$out" | grep -qE "ERROR|not-negotiated|erroneous pipeline"; then
         printf '  %-34s OK    %s\n' "$label" "${kids:--}"
     else
-        # A refused link is a WARNING from gst-launch, not an ERROR, and it is
-        # the most interesting failure here — report either.
-        printf '  %-34s FAIL  %s\n' "$label" \
-            "$(printf '%s' "$out" | grep -oE "(ERROR|WARNING)[^\"]{0,80}" | head -1)"
+        # The chosen sub-bin is the answer this script exists for, so print it
+        # on a failure too: a chain that fails still says what was selected,
+        # and a selection that reaches for GL on a headless host is the finding.
+        printf '  %-34s FAIL  %s\n' "$label" "${kids:--}"
+        # A refused link is a WARNING from gst-launch, not an ERROR. Print the
+        # whole line: the reason is the point, and truncating it loses the run.
+        printf '%s' "$out" | grep -E "(ERROR|WARNING)" | grep -v "^ERROR: pipeline doesn" \
+            | head -1 | sed 's/^/        /'
     fi
 }
 
