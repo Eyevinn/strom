@@ -12,9 +12,11 @@ use std::collections::{BTreeMap, HashMap};
 ///
 /// The `volume` element carrying it would go to +20 dB, but boost belongs
 /// somewhere with a meter and a limiter in front of it — `builtin.audiogain`
-/// or the mixer block — not on a routing crosspoint. The output bus sums
-/// without headroom, so a boosted crosspoint plus fan-in clips with nothing
-/// to catch it. Attenuation is the useful half and cannot clip.
+/// or the mixer block — not on a routing crosspoint. A boosted crosspoint
+/// plus fan-in clips, and fan-in alone can clip without any boost at all:
+/// `DEFAULT_OUTPUT_FADER_DB` and `DEFAULT_OUTPUT_SOFT_CLIP_ENABLED` below are
+/// what the output bus has to catch that. Attenuation is the useful half of a
+/// crosspoint and cannot clip.
 pub const MAX_CROSSPOINT_GAIN: f64 = 1.0;
 
 /// Ceiling expressed in dB — `20 * log10(MAX_CROSSPOINT_GAIN)`.
@@ -22,6 +24,39 @@ pub const MAX_CROSSPOINT_GAIN_DB: f64 = 0.0;
 
 /// Anything at or below this reads as fully closed.
 pub const GAIN_FLOOR_DB: f64 = -60.0;
+
+// Output bus headroom. A router output sums every crosspoint routed to it, so
+// on a mix-minus rig it carries N-1 talkers at unity, and two of them talking
+// over each other can put it over full scale. The two stages below are applied
+// in this order: a fader brings the bus down so the sum fits, then a soft
+// clipper puts a ceiling on what is left.
+
+/// Default output fader: unity. Existing flows keep their level.
+pub const DEFAULT_OUTPUT_FADER_DB: f64 = 0.0;
+
+/// Lowest the output fader goes. Below this the return is too quiet to be a
+/// usable headphone feed whatever the fan-in.
+pub const MIN_OUTPUT_FADER_DB: f64 = -24.0;
+
+/// The output fader stops at unity rather than going above it the way a
+/// console fader does. Boost on a bus that is already summing without headroom
+/// is the problem, not the fix.
+pub const MAX_OUTPUT_FADER_DB: f64 = 0.0;
+
+/// Default for the output soft clipper: off, so nothing about an existing flow
+/// changes until someone asks for it.
+pub const DEFAULT_OUTPUT_SOFT_CLIP_ENABLED: bool = false;
+
+/// Suggested output fader for a conversation, with the soft clipper on.
+///
+/// Sized for two voices at once, not for every seat: in conversation people
+/// seldom talk over each other, and when they do it is almost always one
+/// other person, whatever the size of the group. Two voices at browser
+/// automatic-gain level, which peaks near -3 dBFS, can reach +3 dBFS where
+/// their peaks coincide; -3 dB brings that to full scale and leaves the soft
+/// clipper the rare remainder. Sizing for N-1 simultaneous voices instead
+/// costs every lone voice that much level for a case that barely occurs.
+pub const SUGGESTED_OUTPUT_FADER_DB: f64 = -3.0;
 
 /// One crosspoint of a routing matrix: an input channel feeding an output
 /// channel.
