@@ -53,15 +53,21 @@ The proposal carries, in this order:
 1. **Root cause** in a sentence or two, cited.
 2. **Two options** with their trade-offs, including what each would break or complicate — or
    one option and why the obvious alternative is worse.
-3. **Blast radius** of the recommendation. One token from the radius row. **Radius scores
+3. **Overlaps**, from `PROTOCOL.md`'s "Find what else is already open on it". Every open
+   issue or pull request that owns this design decision or changes this code path, by number
+   and by which kind of overlap it is. Where one exists, **one of the two options above must
+   be "wait for #N, change nothing here"** — a fix that is `LOCAL` in the code can still
+   settle a `GLOBAL` design question by being merged first, and that is the reader's decision,
+   not yours. Where none exists, say the search found none.
+4. **Blast radius** of the recommendation. One token from the radius row. **Radius scores
    what the change modifies, not how much it adds** — a new block with no existing call sites
    is `LOCAL` however large it is. Size belongs in the scope proposal below.
-4. **The test that would guard the change**, and where it would live.
-5. **Recommendation** in one line.
-6. For `work=extension` or `work=feature`, a **scope proposal**: what PR 1 contains, and what
+5. **The test that would guard the change**, and where it would live.
+6. **Recommendation** in one line.
+7. For `work=extension` or `work=feature`, a **scope proposal**: what PR 1 contains, and what
    becomes follow-up issues. Nothing else in this protocol cuts a feature into slices, so if
    you do not propose the cut, nobody does.
-7. **`Ask:`** — the question, answerable in one line.
+8. **`Ask:`** — the question, answerable in one line.
 
 The `Ask:` is the interface to the implementation stage, which will not act until a human
 answers it. So:
@@ -87,7 +93,7 @@ restates the standing triage rather than replacing it:
 
     To implement Option A, reply: /agent-fix A
 
-    <!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none ask=open confidence=HIGH -->
+    <!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none overlaps=none ask=open confidence=HIGH -->
 
 **That middle line is required, not decoration** — the backfill is the only comment that will
 be posted on those issues, so it is the only place the answer syntax can be offered. Where
@@ -180,12 +186,14 @@ implementation stage can act.
 
 Confidence: HIGH
 
-`<!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none ask=open confidence=HIGH -->`
+`<!-- strom-agent protocol=v3 kind=triage issue=719 base=1c06c37 verdict=CONFIRMED work=bug radius=LOCAL excluded=none overlaps=none ask=open confidence=HIGH -->`
 
 ---
 
 ## Before you post, confirm
 
+- You ran the overlap search, and the proposal names what it found — or says it found
+  nothing.
 - `verify-citations.sh` exits zero on your body. A marker backfill cites nothing by
   design, so check that one with `--allow-no-citations`.
 - The marker carries `verdict=`, `work=`, `radius=`, `excluded=` and `ask=`, using vocabulary

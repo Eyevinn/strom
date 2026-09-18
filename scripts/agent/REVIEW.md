@@ -66,7 +66,7 @@ problem, not yours.
 A draft-hold is not a review: it never needs dismissal, and it does not stand in for the
 review the PR gets once it is marked ready.
 
-## Work these six, in order
+## Work these seven, in order
 
 1. **Claims.** Extract each checkable claim, verdict it from the claim-verdict row in
    `PROTOCOL.md`. The PR's own "Verification" section is a claim, not evidence. Table only
@@ -85,7 +85,16 @@ review the PR gets once it is marked ready.
    what it costs on the healthy path — the sessions where the condition being fixed is
    absent, which is most of them.
 
-3. **Blast radius.** One token from the radius row. Grep the changed symbols for call sites
+3. **Overlaps — is this PR the only one answering this question?** Run the searches in
+   `PROTOCOL.md`'s "Find what else is already open on it" against the files this diff
+   touches. A PR that settles, in passing, a design decision an open issue is still asking
+   is a finding whatever the diff's quality: name the issue, say what merging this first
+   commits the project to, and put it in the review. Two open PRs changing the same code
+   path is the same finding from the other side — say which should land first and why. Where
+   the overlap makes the diff unnecessary, say that plainly; it is the cheapest outcome
+   available to the author.
+
+4. **Blast radius.** One token from the radius row. Grep the changed symbols for call sites
    and read at least one. Additive code has no callers but still has a lifetime: name what
    creates it, what destroys it, whether the destroy path can run concurrently, and the
    overlap window in wall-clock terms — anything spawning a thread, arming a timer,
@@ -97,7 +106,7 @@ review the PR gets once it is marked ready.
    zero/one/many cases of any count property. `SHARED` or `GLOBAL` raises the bar — say what
    would break and how it would show up.
 
-4. **Tests and CI.** Read the actual check runs (`gh pr checks <N>`).
+5. **Tests and CI.** Read the actual check runs (`gh pr checks <N>`).
 
    **Zero check runs is not green — it is no evidence, and it blocks approval.** Look for a
    run stuck awaiting a maintainer (`gh api "repos/Eyevinn/strom/actions/runs?status=action_required"`)
@@ -120,7 +129,7 @@ review the PR gets once it is marked ready.
    is small, merging on Linux-green and letting the main run cover it is a legitimate call —
    say so rather than leaving the row silently unverified.
 
-5. **Repo rules.** Check CLAUDE.md and quote any rule violated: BUFFER probe constraints,
+6. **Repo rules.** Check CLAUDE.md and quote any rule violated: BUFFER probe constraints,
    `WeakRef` instead of strong refs to pipeline/element/bin in closures, queue properties
    left at defaults, shared types belonging in `strom-types`, endpoints needing both
    `#[utoipa::path]` and `openapi.rs` registration, no blanket `dead_code`, no emojis in log
@@ -130,7 +139,7 @@ review the PR gets once it is marked ready.
    `Pad` rather than an `Element`, say — answer the underlying question instead, which is
    what this object's lifetime is relative to the pipeline's.
 
-6. **Design record.** The repo deliberately keeps no internals docs, so the review trail is
+7. **Design record.** The repo deliberately keeps no internals docs, so the review trail is
    it. If the PR body does not say why this approach and what was rejected, write that
    reasoning into your review.
 
@@ -141,7 +150,10 @@ review the PR gets once it is marked ready.
 - every claim about code in this repository is `CONFIRMED`;
 - every remaining row is `EXTERNAL` with its assumption stated;
 - CI has run and is green, with the covering tests actually executed;
-- radius is `LOCAL`, or `SHARED` and explicitly argued.
+- radius is `LOCAL`, or `SHARED` and explicitly argued;
+- no overlap from check 3 is left for the merge to settle — where this PR would answer a
+  design question an open issue is still asking, a maintainer has to choose that, and
+  until they have, the verdict is `Comment`.
 
 A single `UNVERIFIED` or `CONTRADICTED` row, or zero check runs, means you may not approve.
 Do not approve and then add caveats — if you want to, the verdict is `Comment`.
@@ -199,13 +211,15 @@ host elements capable of autoplugging an RTP depayloader.
 **Radius** — `GLOBAL`: three independent `gst::Pipeline` hosts, and the install runs during
 pipeline construction.
 
+**Overlaps** — none open on `rtp_hdrext.rs` or on where the install belongs.
+
 **Tests & CI** — `Check (Linux)`, `Build (Linux x86_64/ARM64)`, `Check & Build (WASM)`,
 `API Contract Check` green at `55e91ef`. Dispatch before merge:
 `gh workflow run ci.yml --ref <branch> -f platforms=both`.
 
 Confidence: HIGH
 
-`<!-- strom-agent protocol=v3 kind=review pr=721 head=55e91ef... verdict=Comment radius=GLOBAL confidence=HIGH -->`
+`<!-- strom-agent protocol=v3 kind=review pr=721 head=55e91ef... verdict=Comment radius=GLOBAL overlaps=none confidence=HIGH -->`
 
 ---
 
@@ -214,5 +228,6 @@ Confidence: HIGH
 - The PR number and title match the API response you just fetched.
 - `verify-citations.sh` exits zero on your body.
 - You read the check runs, and distinguished "zero checks ran" from "checks passed".
-- The marker says `protocol=v3` with the correct head SHA and vocabulary tokens.
+- The marker says `protocol=v3` with the correct head SHA and vocabulary tokens, and an
+  `overlaps=` you actually searched for.
 - Body is under 4000 characters.

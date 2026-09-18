@@ -159,6 +159,7 @@ while IFS=$'\t' read -r num title; do
   work="$(marker_field "$marker" work)"
   radius="$(marker_field "$marker" radius)"
   excluded="$(marker_field "$marker" excluded)"
+  overlaps="$(marker_field "$marker" overlaps)"
 
   # Who replied since the triage, and how.
   m_ts="" m_by="" m_fix="" other_by=""
@@ -196,6 +197,8 @@ while IFS=$'\t' read -r num title; do
     notes="$notes; marker says radius=$radius — re-assess it for the design actually chosen"
   [ -n "$excluded" ] && [ "$excluded" != "none" ] && \
     notes="$notes; marker says excluded=$excluded"
+  [ -n "$overlaps" ] && [ "$overlaps" != "none" ] && \
+    notes="$notes; marker says overlaps=$overlaps — say whether those are settled before implementing"
   [ "$verdict" != "CONFIRMED" ] && [ -n "$verdict" ] && \
     notes="$notes; triage verdict is $verdict"
 

@@ -86,6 +86,16 @@ permission is a finding rather than an instruction.
   rubber stamp.
 - **`excluded=` means "would break", not "touches".** That distinction is what keeps gate 4 a
   real check.
+- **`overlaps=` exists because a `LOCAL` diff can settle a `GLOBAL` design question.** Issue
+  #837 (a macOS camera that cannot negotiate a system-memory capture front) was triaged on its
+  own merits: two options, both inside the one block, radius `SHARED`, recommend the smaller.
+  Both the reporter and the triage cited #682, the open issue that owns *where* GL memory gets
+  downloaded — and neither drew the conclusion that the fix therefore did not belong in the
+  block. Open PR #802, which changes the very linker the block's internal links go through,
+  was not mentioned at all. Radius did not catch it, because radius scores code touched, not
+  design committed to. So the searches are now mandatory for triage and review alike, "wait
+  for #N, change nothing here" is an option a triage must offer where one applies, and the
+  choice to pause stays with a human.
 - **The implementation stage opens a PR ready for review, and holds other people's drafts.**
   The two rules look contradictory and are not. A draft means "the author is not finished",
   and the implementation stage stops only when it is finished — it opened drafts for a while,
