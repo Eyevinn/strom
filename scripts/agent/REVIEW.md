@@ -69,8 +69,9 @@ review the PR gets once it is marked ready.
 ## Work these seven, in order
 
 1. **Claims.** Extract each checkable claim, verdict it from the claim-verdict row in
-   `PROTOCOL.md`. The PR's own "Verification" section is a claim, not evidence. Table only
-   claims that could change the decision.
+   `PROTOCOL.md`. The PR's own "Evidence", "Tests" or "Verification" section is a claim, not
+   evidence: use it as the list of claims to check. Table only claims that could change the
+   decision.
 
 2. **Diagnosis — right fix, or moved symptom?** Read the mechanism; do not accept the
    description's account of it. Does the stated cause explain every reported symptom? What
