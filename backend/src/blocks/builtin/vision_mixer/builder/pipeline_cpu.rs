@@ -10,6 +10,7 @@ use super::super::{elements, layout};
 use super::{audio_meter, pad_layout, setup_overlay_renderer, PipelineParams};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult};
 use crate::gpu;
+use crate::gst::unpremultiply;
 
 pub(super) fn build_cpu_pipeline(
     p: &PipelineParams,
@@ -114,10 +115,47 @@ pub(super) fn build_cpu_pipeline(
         elems.push((q_id.clone(), queue));
         elems.push((vc_id_dsk.clone(), videoconvert));
 
-        links.push((
-            ElementPadRef::pad(&q_id, "src"),
-            ElementPadRef::pad(&vc_id_dsk, "sink"),
-        ));
+        if p.dsk_premultiplied(i) {
+            // `compositor` blends straight alpha only, so a premultiplied
+            // source is unpremultiplied first. The element takes packed RGB
+            // with alpha; the converter in front brings other formats (such as
+            // a decoded A420 clip) to that, and passes RGBA-family input
+            // straight through.
+            if !unpremultiply::register() {
+                return Err(BlockBuildError::ElementCreation(format!(
+                    "DSK{} is premultiplied but {} could not be registered",
+                    i + 1,
+                    unpremultiply::ELEMENT_NAME
+                )));
+            }
+            let vc_pre_id = p.id(&format!("videoconvert_unpremultiply_dsk_{}", i));
+            let unpre_id = p.id(&format!("unpremultiply_dsk_{}", i));
+            elems.push((
+                vc_pre_id.clone(),
+                elements::make_element(vc_factory, &vc_pre_id)?,
+            ));
+            elems.push((
+                unpre_id.clone(),
+                elements::make_element(unpremultiply::ELEMENT_NAME, &unpre_id)?,
+            ));
+            links.push((
+                ElementPadRef::pad(&q_id, "src"),
+                ElementPadRef::pad(&vc_pre_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&vc_pre_id, "src"),
+                ElementPadRef::pad(&unpre_id, "sink"),
+            ));
+            links.push((
+                ElementPadRef::pad(&unpre_id, "src"),
+                ElementPadRef::pad(&vc_id_dsk, "sink"),
+            ));
+        } else {
+            links.push((
+                ElementPadRef::pad(&q_id, "src"),
+                ElementPadRef::pad(&vc_id_dsk, "sink"),
+            ));
+        }
 
         // When output_format is specified, force DSK inputs to match — same as video inputs.
         if let Some(ref fmt) = p.output_format {
