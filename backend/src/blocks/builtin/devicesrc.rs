@@ -80,6 +80,7 @@
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::gpu::{self, video_convert_mode};
+use crate::gst::gl_bridge;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -175,18 +176,38 @@ impl BlockBuilder for LocalInputBuilder {
             // Media Foundation all pick the closest matching mode) rather
             // than always running at the device's default mode and paying a
             // software downscale in videoconvert.
-            let mut src_caps_builder = gst::Caps::builder("video/x-raw");
+            // Both memory types are offered, system memory first so a device
+            // that can deliver either keeps producing what it does today. A
+            // capsfilter naming only `video/x-raw` means SystemMemory, not
+            // "any": a camera that offers GL memory and nothing else (an
+            // AVFoundation camera behind avfvideosrc is the common case) could
+            // not negotiate this filter at all. No download is asked for here
+            // — the linker inserts one where a GL producer meets a consumer
+            // that needs system memory.
+            let mut structure_builder = gst::Structure::builder("video/x-raw");
             if let Some((w, h)) = resolution {
-                src_caps_builder = src_caps_builder
+                structure_builder = structure_builder
                     .field("width", w as i32)
                     .field("height", h as i32);
             }
             if let Some(fr) = framerate {
-                src_caps_builder = src_caps_builder.field("framerate", fr);
+                structure_builder = structure_builder.field("framerate", fr);
             }
+            let structure = structure_builder.build();
+
+            let mut src_caps = gst::Caps::new_empty();
+            {
+                let caps = src_caps.get_mut().expect("fresh caps are uniquely owned");
+                caps.append_structure(structure.clone());
+                caps.append_structure_full(
+                    structure,
+                    Some(gst::CapsFeatures::new([gl_bridge::GL_MEMORY_FEATURE])),
+                );
+            }
+
             let videosrc_caps = gst::ElementFactory::make("capsfilter")
                 .name(&videosrc_caps_id)
-                .property("caps", src_caps_builder.build())
+                .property("caps", &src_caps)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("videosrc_caps: {}", e)))?;
 

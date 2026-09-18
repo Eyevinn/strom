@@ -24,7 +24,7 @@ use gstreamer::prelude::*;
 use tracing::{info, warn};
 
 /// The caps feature that marks a buffer as living in GL memory.
-const GL_MEMORY_FEATURE: &str = "memory:GLMemory";
+pub const GL_MEMORY_FEATURE: &str = "memory:GLMemory";
 
 /// True when `caps` describe raw video in GL memory.
 ///
