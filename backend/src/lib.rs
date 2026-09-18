@@ -25,6 +25,7 @@ pub mod blocks;
 pub mod client_auth;
 pub mod config;
 pub mod discovery;
+pub(crate) mod event_logging;
 pub mod events;
 pub mod gpu;
 pub mod gst;

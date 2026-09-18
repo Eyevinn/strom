@@ -46,6 +46,8 @@ fn new_state() -> AppState {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     )
 }
 
@@ -133,6 +135,8 @@ async fn load_from_storage_strips_transient_properties() {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     );
     state.load_from_storage().await.expect("load_from_storage");
 
