@@ -47,6 +47,7 @@ pub mod storage;
 pub mod system_clock;
 pub mod system_monitor;
 pub mod tams;
+pub mod thread_handle;
 pub mod thread_registry;
 pub mod tls;
 pub mod version;
