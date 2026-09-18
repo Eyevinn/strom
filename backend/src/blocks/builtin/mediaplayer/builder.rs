@@ -191,6 +191,9 @@ fn build_media_player(
         }),
         is_paused: AtomicBool::new(false),
         loop_playlist: AtomicBool::new(loop_playlist),
+        // Armed only once a stinger trigger parks it; a player is not on
+        // frame 0 merely because it was built.
+        stinger_armed: AtomicBool::new(false),
         block_id: block_id.to_string(),
         flow_id,
         switching_file: AtomicBool::new(false),
