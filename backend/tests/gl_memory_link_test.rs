@@ -357,3 +357,80 @@ fn a_failed_adaptation_leaves_nothing_behind() {
         "glsrc:src still feeds the removed gldownload"
     );
 }
+
+/// The Local Input capture front must not demand system memory.
+///
+/// `devicesrc` puts a capsfilter between the camera and its converter so the
+/// device negotiates the configured resolution and framerate at capture time.
+/// A capsfilter naming only `video/x-raw` means `memory:SystemMemory`, so a
+/// camera that delivers GL memory and nothing else — an AVFoundation camera
+/// behind `avfvideosrc` — shares no format with it and the capture front never
+/// negotiates. Offering both memory types lets it negotiate; the download that
+/// the system-memory output then needs is spliced by the linker, which is what
+/// the tests above cover.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_local_input_capture_front_accepts_gl_memory() {
+    gstreamer::init().unwrap();
+
+    let mut flow = Flow::new("local_input_capture_front".to_string());
+    flow.elements.push(elem(
+        "sink",
+        "fakesink",
+        vec![("sync", PV::Bool(false)), ("async", PV::Bool(false))],
+    ));
+    flow.blocks.push(strom_types::BlockInstance {
+        id: "cam".to_string(),
+        block_definition_id: "builtin.local_input".to_string(),
+        name: None,
+        properties: HashMap::from([
+            ("stream_mode".to_string(), PV::String("video".to_string())),
+            (
+                "video_resolution".to_string(),
+                PV::String("1280x720".to_string()),
+            ),
+            (
+                "video_framerate".to_string(),
+                PV::String("25/1".to_string()),
+            ),
+        ]),
+        position: strom_types::block::Position { x: 0.0, y: 0.0 },
+        runtime_data: None,
+        computed_external_pads: None,
+    });
+    for block in &mut flow.blocks {
+        if let Some(builder) = strom::blocks::builtin::get_builder(&block.block_definition_id) {
+            block.computed_external_pads = builder.get_external_pads(&block.properties);
+        }
+    }
+    flow.links.push(strom_types::Link {
+        from: "cam:video_out".to_string(),
+        to: "sink:sink".to_string(),
+    });
+
+    let manager = build_manager(&flow);
+    let capsfilter = manager
+        .pipeline()
+        .by_name("cam:videosrc_caps")
+        .expect("the capture front's pre-convert capsfilter exists");
+    let caps: gstreamer::Caps = capsfilter.property("caps");
+
+    let gl_caps = "video/x-raw(memory:GLMemory),width=1280,height=720,framerate=25/1"
+        .parse::<gstreamer::Caps>()
+        .expect("GL caps parse");
+    assert!(
+        caps.can_intersect(&gl_caps),
+        "the capture front demands system memory ({}), so a GL-memory-only camera \
+         cannot negotiate it and the capture stalls",
+        caps
+    );
+
+    let system_caps = "video/x-raw,width=1280,height=720,framerate=25/1"
+        .parse::<gstreamer::Caps>()
+        .expect("system caps parse");
+    assert!(
+        caps.can_intersect(&system_caps),
+        "the capture front stopped accepting system memory ({}), which would break \
+         every camera that works today",
+        caps
+    );
+}
