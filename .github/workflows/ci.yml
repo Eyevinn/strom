@@ -493,6 +493,16 @@ jobs:
     needs: [check-wasm, preflight]
     runs-on: windows-latest
     timeout-minutes: 45
+    # A `run:` step on a Windows runner defaults to pwsh, where a native command
+    # exiting non-zero neither aborts the script nor fails the step on its own —
+    # only the last command's exit code counts. A failing `cargo test` followed
+    # by a passing one therefore read as green here for as long as the job has
+    # existed. bash runs with `-e`, so the first failure ends the step, which is
+    # what every other job in this workflow already gets. The GStreamer install
+    # step is genuinely PowerShell and opts back out below.
+    defaults:
+      run:
+        shell: bash
     env:
       RUSTC_WRAPPER: ${{ needs.preflight.outputs.cache_ok == 'true' && 'sccache' || '' }}
     steps:
@@ -500,7 +510,6 @@ jobs:
 
       - name: Extract version from Cargo.toml
         id: version
-        shell: bash
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -511,6 +520,7 @@ jobs:
           components: clippy
 
       - name: Install GStreamer
+        shell: pwsh
         run: |
           $GSTREAMER_VERSION = "1.26.10"
           $BASE_URL = "https://github.com/Eyevinn/strom/releases/download/gstreamer-deps"
@@ -518,12 +528,16 @@ jobs:
           Write-Host "Downloading GStreamer runtime..."
           Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer.msi
           Write-Host "Installing GStreamer runtime..."
-          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer.msi /quiet /qn INSTALLDIR=D:\gstreamer'
+          # ADDLOCAL=ALL: without it msiexec installs the MSI's default feature
+          # set, which leaves out plugin groups the tests need — x264enc
+          # (gst-plugins-ugly) among them, which made both recorder tests skip
+          # green on this runner alone.
+          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer.msi /quiet /qn ADDLOCAL=ALL INSTALLDIR=D:\gstreamer'
 
           Write-Host "Downloading GStreamer development files..."
           Invoke-WebRequest -Uri "$BASE_URL/gstreamer-1.0-devel-msvc-x86_64-$GSTREAMER_VERSION.msi" -OutFile gstreamer-devel.msi
           Write-Host "Installing GStreamer development files..."
-          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /qn INSTALLDIR=D:\gstreamer'
+          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /qn ADDLOCAL=ALL INSTALLDIR=D:\gstreamer'
 
           choco install pkgconfiglite --yes --no-progress --allow-empty-checksums
 
@@ -553,6 +567,11 @@ jobs:
         run: |
           cargo test --package strom --features nvidia
           cargo test --package strom-types
+        env:
+          # Turn a missing-element skip into a failure — see plugins_available().
+          # Held back until the job could report a failure at all and the MSI
+          # installed every plugin group; both are true as of this commit.
+          STROM_REQUIRE_GST_PLUGINS: 1
 
       - name: Build
         run: |
