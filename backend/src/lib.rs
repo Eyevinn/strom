@@ -505,7 +505,16 @@ pub async fn create_app_with_config(
                     header::COOKIE,
                     HeaderName::from_static("mcp-session-id"),
                 ])
-                .expose_headers([HeaderName::from_static("mcp-session-id")]);
+                // This list replaces any Access-Control-Expose-Headers a handler
+                // sets, so it must carry what the WHIP/WHEP proxies expose: a
+                // client on another origin needs Location to end its session.
+                .expose_headers([
+                    HeaderName::from_static("mcp-session-id"),
+                    header::LOCATION,
+                    header::LINK,
+                    HeaderName::from_static("accept-patch"),
+                    header::ETAG,
+                ]);
 
             // If no origins specified, allow any origin
             // Otherwise, restrict to the specified origins
