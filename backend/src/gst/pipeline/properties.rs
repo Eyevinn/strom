@@ -1128,6 +1128,29 @@ fn set_checked_value<O: IsA<glib::Object>>(
     .map_err(|_| "GLib rejected the value (see the log for details)".to_string())
 }
 
+/// Apply a client-supplied property the way the generic path does.
+///
+/// Block builders apply their own properties, with the raw setters the generic
+/// path no longer uses: `set_property_from_str` is `find_property().unwrap()`
+/// plus a setter that aborts the thread whenever `g_param_value_validate` has
+/// to clamp. A block that forwards a request body into it is one call away
+/// from the panic class the generic path closed, so blocks go through here
+/// instead — the same conversion, returning the reason rather than unwinding.
+///
+/// The check reads the element's own `GParamSpec`, so there is no second copy
+/// of the range to drift from the element's.
+pub(crate) fn set_property_checked<O: IsA<glib::Object>>(
+    obj: &O,
+    prop_name: &str,
+    prop_value: &PropertyValue,
+) -> Result<(), String> {
+    let pspec = obj
+        .find_property(prop_name)
+        .ok_or_else(|| "Property not found".to_string())?;
+    let value = checked_property_value(&pspec, prop_value)?;
+    set_checked_value(obj, prop_name, &value)
+}
+
 /// The integer a client meant, whatever numeric shape it arrived in.
 fn integer_operand(prop_value: &PropertyValue, target_name: &str) -> Result<i128, String> {
     match prop_value {
