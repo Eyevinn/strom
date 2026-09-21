@@ -168,5 +168,17 @@ mod tests {
             flow_id: FlowId::nil(),
         });
         assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // Enabled path: with include_high_frequency_events = true, the same
+        // high-frequency event is no longer dropped.
+        let broadcaster = EventBroadcaster::new(10, true, true);
+        broadcaster.broadcast(StromEvent::MeterData {
+            flow_id: FlowId::nil(),
+            element_id: "level0".to_string(),
+            rms: vec![],
+            peak: vec![],
+            decay: vec![],
+        });
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 }
