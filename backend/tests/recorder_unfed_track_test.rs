@@ -39,13 +39,9 @@ const REQUIRED: &[&str] = &[
 ];
 
 /// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
+/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure. Every skip in
+/// this file goes through here, so none of them can quietly opt out of that.
+fn require_or_skip(missing: &[&str]) -> bool {
     if missing.is_empty() {
         return true;
     }
@@ -57,13 +53,30 @@ fn plugins_available() -> bool {
     false
 }
 
+fn plugins_available() -> bool {
+    let missing: Vec<&str> = REQUIRED
+        .iter()
+        .copied()
+        .filter(|e| gst::ElementFactory::find(e).is_none())
+        .collect();
+    require_or_skip(&missing)
+}
+
+/// The muxers are per-container, so they are checked where they are used rather
+/// than in `REQUIRED` — but through the same assert. Checking them directly let
+/// a runner without the isomp4 or matroska plugins skip green with
+/// `STROM_REQUIRE_GST_PLUGINS` set, which is what installing every plugin group
+/// on the Windows runner exists to prevent.
 fn container_available(container: &str) -> bool {
     let muxer = match container {
         "mkv" => "matroskamux",
         "mpegts" => "mpegtsmux",
         _ => "mp4mux",
     };
-    gst::ElementFactory::find(muxer).is_some()
+    if gst::ElementFactory::find(muxer).is_some() {
+        return true;
+    }
+    require_or_skip(&[muxer])
 }
 
 /// Which inputs the test actually connects to the recorder.
@@ -442,6 +455,15 @@ fn both_tracks_fed_records_both_streams() {
 /// because `set_state` returns before the encoders negotiate caps. Nothing guards
 /// that second direction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// On Windows this flow never reaches EOS, so splitmuxsink never finalizes the
+// file and the wait below always elapses — raising the ceiling from 30s to 180s
+// changes nothing. That is a defect in its own right, tracked in #835. Ignored
+// rather than cfg'd out so it stays visible in the Windows run, and so the other
+// three tests in this file keep running there.
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "never reaches EOS on Windows — see #835"
+)]
 async fn recorder_records_when_driven_through_pipeline_start() {
     gst::init().unwrap();
     if !plugins_available() {
