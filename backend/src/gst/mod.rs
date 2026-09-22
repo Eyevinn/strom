@@ -1,6 +1,7 @@
 //! GStreamer integration.
 
 pub(crate) mod aggregator_start;
+pub mod audio_bridge;
 mod block_expansion;
 pub mod buffer_age_probe;
 pub mod context_forward;
@@ -33,7 +34,7 @@ pub mod volume_ramp;
 pub mod whep_probe;
 
 /// Register the GStreamer plugins Strom links in statically (gst-plugins-rs
-/// WebRTC, inter, RTP, audiofx, isobmff, lsp-dsp-rs, and EFP with the `efp`
+/// WebRTC, inter, RTP, audiofx, isobmff, lsp-dsp-rs, Strom's audio bridge, and EFP with the `efp`
 /// feature). Call once, after `gst::init()`, before any flow is built. Panics
 /// when a plugin fails to register: the blocks that use it could not work.
 ///
@@ -56,6 +57,7 @@ pub fn register_static_plugins() {
         );
     }
     gst_plugins_lsp::plugin_register_static().expect("Could not register lsp-dsp-rs plugins");
+    audio_bridge::register().expect("Could not register audio bridge elements");
     #[cfg(feature = "efp")]
     gst_plugin_efp::plugin_register_static().expect("Could not register efp mux/demux plugins");
 }
