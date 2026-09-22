@@ -253,6 +253,34 @@ impl ActivityStamp {
     }
 }
 
+/// Which of a session's two stamps stopped moving; see `SessionActivity::idle`.
+///
+/// The two are different faults with different suspects, and a reap message that
+/// says only "no usable media" gives an operator no way to tell a participant
+/// whose laptop closed from a blocked consumer inside their own flow that is
+/// costing every publisher its seat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallSide {
+    /// Nothing is arriving from the publisher any more. The suspect is the
+    /// client or its transport.
+    Ingress,
+    /// Media is still arriving, but nothing usable is leaving the slot's chain.
+    /// The suspect is inside the flow: a decoder that never got its keyframe, or
+    /// a consumer downstream of the slot's tee blocking and backing pressure up.
+    Output,
+}
+
+impl std::fmt::Display for StallSide {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StallSide::Ingress => f.write_str("nothing arriving from the publisher"),
+            StallSide::Output => {
+                f.write_str("still receiving, nothing usable leaving the slot's chain")
+            }
+        }
+    }
+}
+
 /// Liveness of one WHIP session, in the only terms that matter to the slot it
 /// occupies: is it still producing media the flow can use?
 ///
@@ -385,6 +413,12 @@ impl SessionActivity {
     /// while both move, and a publisher going away freezes `ingress` first while
     /// a stall below the decoder freezes `output` first.
     pub fn idle(&self) -> Option<Duration> {
+        self.idle_detail().map(|(idle, _)| idle)
+    }
+
+    /// `idle`, with the stamp that produced the answer. Callers that log a reap
+    /// use this; callers that only compare durations use `idle`.
+    pub fn idle_detail(&self) -> Option<(Duration, StallSide)> {
         let ingress_idle = self.ingress.since_last()?;
         let past_grace = self.ingress.since_first()?.checked_sub(DECODE_GRACE)?;
 
@@ -396,7 +430,15 @@ impl SessionActivity {
             None => past_grace,
         };
 
-        Some(ingress_idle.max(output_idle))
+        // A publisher that goes away freezes `ingress` while the last buffers
+        // are still draining through the slot, so it is the staler one and
+        // anything close to a tie belongs to it. Only `output` being clearly
+        // staler means media is still arriving, which is the case worth naming.
+        if output_idle > ingress_idle + STALL_SIDE_MARGIN {
+            Some((output_idle, StallSide::Output))
+        } else {
+            Some((ingress_idle, StallSide::Ingress))
+        }
     }
 }
 
@@ -491,6 +533,15 @@ const PENDING_CLEANUP_TTL: Duration = Duration::from_secs(30);
 /// never decodes at all.
 const DECODE_GRACE: Duration = Duration::from_secs(5);
 
+/// How much staler `output` must be than `ingress` before a reap is blamed on
+/// the flow rather than on the publisher; see `StallSide`.
+///
+/// The two stamps keep separate epochs and store whole milliseconds, so
+/// simultaneous events can read a millisecond apart either way, and a publisher
+/// going away freezes both within one buffer of each other. The fault this
+/// margin exists to name holds `ingress` live for seconds.
+const STALL_SIDE_MARGIN: Duration = Duration::from_millis(100);
+
 /// How long a session must have gone without media before a new client is
 /// allowed to take its slot.
 ///
@@ -516,9 +567,9 @@ const TAKEOVER_POLL: Duration = Duration::from_millis(100);
 struct IdlestSession {
     resource_id: String,
     port: u16,
-    /// Time since it last produced usable media, `None` if it must not be
-    /// judged yet; see `SessionActivity::idle`.
-    idle: Option<Duration>,
+    /// Time since it last produced usable media and which stamp froze, `None`
+    /// if it must not be judged yet; see `SessionActivity::idle`.
+    idle: Option<(Duration, StallSide)>,
     /// Its slot's output counter, for comparison against the previous poll.
     last_usable: u64,
     /// Another path is already tearing it down, so its slot is about to free.
@@ -762,24 +813,24 @@ impl WhipSessionManager {
                 // can be displaced. One that starts delivering audio while we
                 // wait moves its counter, which refuses too, so answer now.
                 return None;
-            } else if candidate
+            } else if let Some((idle, side)) = candidate
                 .idle
-                .is_some_and(|idle| idle >= TAKEOVER_IDLE_THRESHOLD)
+                .filter(|(idle, _)| *idle >= TAKEOVER_IDLE_THRESHOLD)
             {
                 // Win the flag every other teardown path uses, so the session is
                 // cleaned up exactly once and its watchdog thread stops. The
                 // cleanup task is what releases the slot; the next poll takes it.
                 if !candidate.cleanup_sent.swap(true, Ordering::SeqCst) {
-                    let idle_ms = candidate.idle.unwrap_or_default().as_millis();
+                    let idle_ms = idle.as_millis();
                     warn!(
-                        "WhipSessionManager: Displacing session '{}' on port {} ({} ms without usable media) so a new client can take its slot on endpoint '{}'",
-                        candidate.resource_id, candidate.port, idle_ms, config.endpoint_id
+                        "WhipSessionManager: Displacing session '{}' on port {} ({} ms without usable media: {}) so a new client can take its slot on endpoint '{}'",
+                        candidate.resource_id, candidate.port, idle_ms, side, config.endpoint_id
                     );
                     let _ = self.cleanup_tx.send(SessionCleanupRequest {
                         port: candidate.port,
                         reason: format!(
-                            "displaced by a new client after {} ms without usable media",
-                            idle_ms
+                            "displaced by a new client after {} ms without usable media: {}",
+                            idle_ms, side
                         ),
                     });
                 }
@@ -819,13 +870,13 @@ impl WhipSessionManager {
             .map(|(resource_id, s)| IdlestSession {
                 resource_id: resource_id.clone(),
                 port: s.port,
-                idle: s.activity.idle(),
+                idle: s.activity.idle_detail(),
                 last_usable: s.activity.last_usable(),
                 dying: s.cleanup_sent.load(Ordering::SeqCst),
                 has_audio: s.activity.has_delivered_audio(),
                 cleanup_sent: s.cleanup_sent.clone(),
             })
-            .max_by_key(|c| (c.dying, c.has_audio, c.idle))
+            .max_by_key(|c| (c.dying, c.has_audio, c.idle.map(|(idle, _)| idle)))
     }
 
     /// The live sessions on an endpoint, with the pipeline each one runs in.
@@ -1525,6 +1576,56 @@ mod tests {
             session.idle(),
             None,
             "a session inside its decode grace must not be judged on its predecessor's frames"
+        );
+    }
+
+    /// Both faults reap the seat, but they have different suspects, and the reap
+    /// log is the only place an operator sees which one it was: a participant
+    /// who went away, or a consumer inside their own flow that is blocking the
+    /// slot's chain and will do the same to whoever reconnects.
+    #[test]
+    fn a_reaped_session_names_which_side_of_the_chain_stopped() {
+        // Arrivals stopped first and the buffers already in the slot's chain
+        // drained out after them, which is the order a publisher going away
+        // always produces.
+        let publisher_gone = SessionActivity::from_stamps(
+            ActivityStamp::backdated(RUNNING_FOR, RUNNING_FOR / 2),
+            Arc::new(ActivityStamp::backdated(
+                RUNNING_FOR,
+                RUNNING_FOR / 2 - Duration::from_secs(1),
+            )),
+        );
+        assert_eq!(
+            publisher_gone.idle_detail().map(|(_, side)| side),
+            Some(StallSide::Ingress),
+            "nothing arriving is the publisher's fault, not the flow's"
+        );
+
+        // Still receiving; the slot's chain stopped producing a while ago.
+        let stuck_consumer = SessionActivity::from_stamps(
+            ActivityStamp::backdated(RUNNING_FOR, Duration::ZERO),
+            Arc::new(ActivityStamp::backdated(RUNNING_FOR, RUNNING_FOR / 2)),
+        );
+        assert_eq!(
+            stuck_consumer.idle_detail().map(|(_, side)| side),
+            Some(StallSide::Output),
+            "a seat that still receives must be reaped against the slot's output"
+        );
+
+        // The stamps hold whole milliseconds against separate epochs, so a
+        // publisher drop that freezes both at once can read either way round by
+        // a millisecond. That must not be reported as a stuck consumer.
+        let near_tie = SessionActivity::from_stamps(
+            ActivityStamp::backdated(RUNNING_FOR, RUNNING_FOR / 2),
+            Arc::new(ActivityStamp::backdated(
+                RUNNING_FOR,
+                RUNNING_FOR / 2 + Duration::from_millis(1),
+            )),
+        );
+        assert_eq!(
+            near_tie.idle_detail().map(|(_, side)| side),
+            Some(StallSide::Ingress),
+            "a millisecond of stamp noise must not move the blame to the flow"
         );
     }
 
