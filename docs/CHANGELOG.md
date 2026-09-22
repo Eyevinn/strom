@@ -2,6 +2,30 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.6.10] - 2026-09-22
+
+### Added
+- Blocks: WHIP/WHEP — per-block ICE transport policy (#832)
+- Monitor: per-thread CPU sampling on macOS via mach `thread_info` (#722)
+- Tools: a probe for how a host bridges GPU video memory (#843)
+
+### Fixed
+- Device Source: let the capture front negotiate GL memory, so a GLMemory-only `avfvideosrc` no longer stalls macOS camera capture to ~1 fps (#837, #842)
+- GStreamer: download GL memory where a consumer cannot take it (#802)
+- Vision Mixer: keep per-pixel alpha on keyed pads when `output_format` cannot carry alpha (#748)
+- Video Encoder: reject out-of-range client properties instead of panicking (#769, #821)
+- Config: map every `STROM_*` environment variable explicitly (#831)
+- Docker: pin the patched decklink plugin by digest (#836)
+
+### CI
+- Windows: fail the job on a failing first command, and install every plugin (#838)
+
+### Documentation
+- Catch up with 0.6.9 — RTMP output, and the MCP server that is gone (#830)
+- Agent: make triage and review look for what is already open (#841)
+
+---
+
 ## [0.6.9] - 2026-09-16
 
 ### Added
