@@ -1,5 +1,6 @@
 //! GStreamer integration.
 
+pub mod audio_bridge;
 mod block_expansion;
 pub mod buffer_age_probe;
 pub(crate) mod control_bindings;
