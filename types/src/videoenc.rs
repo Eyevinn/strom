@@ -4,14 +4,23 @@ use crate::block::EnumValue;
 
 /// Codec profile constraint on the video encoder's output.
 ///
-/// Values map 1:1 to the GStreamer `profile` caps field for H.264 / H.265
-/// (except `None`, which means "no profile field" — let the encoder negotiate
-/// freely with downstream).
+/// Values map 1:1 to the GStreamer `profile` caps field for H.264 / H.265,
+/// except for the two that name a policy rather than a profile: `Auto`, which
+/// resolves per codec, and `None`, which means "no profile field" — let the
+/// encoder negotiate freely with downstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[allow(non_camel_case_types)]
 pub enum Profile {
-    /// No profile constraint — encoder negotiates freely with downstream.
+    /// The codec's widely decodable 8-bit 4:2:0 profile, resolved by the
+    /// caller that knows the codec: `high` for H.264, `main` for H.265, and no
+    /// profile field for AV1 / VP9.
+    ///
+    /// Unpinned, an encoder follows whatever pixel format reaches it, so a
+    /// 4:2:2, 4:4:4 or 10-bit input yields a profile many delivery targets
+    /// refuse.
     #[default]
+    Auto,
+    /// No profile constraint — encoder negotiates freely with downstream.
     None,
     ConstrainedBaseline,
     Baseline,
@@ -33,6 +42,7 @@ pub enum Profile {
 impl Profile {
     /// All variants in canonical display order.
     pub const ALL: &'static [Profile] = &[
+        Self::Auto,
         Self::None,
         Self::ConstrainedBaseline,
         Self::Baseline,
@@ -52,9 +62,11 @@ impl Profile {
     ];
 
     /// Property-value string used in the block's `properties` map and over the API.
-    /// For non-`None` variants this is also the GStreamer caps profile name.
+    /// For variants other than `Auto` and `None` this is also the GStreamer
+    /// caps profile name.
     pub fn as_property_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::None => "none",
             Self::ConstrainedBaseline => "constrained-baseline",
             Self::Baseline => "baseline",
@@ -76,9 +88,12 @@ impl Profile {
 
     /// GStreamer caps profile string, or `None` if no `profile=` field should
     /// be set on the capsfilter.
+    ///
+    /// [`Profile::Auto`] has no codec-independent name, so it also yields
+    /// `None` here. Resolve it against the codec first.
     pub fn as_caps_str(self) -> Option<&'static str> {
         match self {
-            Self::None => None,
+            Self::Auto | Self::None => None,
             other => Some(other.as_property_str()),
         }
     }
@@ -86,6 +101,7 @@ impl Profile {
     /// Human-readable UI label for property dropdowns.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Auto => "Auto (8-bit 4:2:0, widely decodable)",
             Self::None => "None (no constraint)",
             Self::ConstrainedBaseline => "Constrained Baseline (H.264)",
             Self::Baseline => "Baseline (H.264)",

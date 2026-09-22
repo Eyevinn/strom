@@ -239,20 +239,72 @@ fn test_get_codec_caps_string() {
     );
 }
 
+/// `Auto` is the default, so this is what an operator who sets no profile gets.
+/// It has to resolve per codec: "high" is not an H.265 profile name and pinning
+/// it on an h265 capsfilter fails to negotiate.
+#[test]
+fn test_get_codec_caps_string_auto_resolves_per_codec() {
+    assert_eq!(
+        get_codec_caps_string(Codec::H264, Profile::Auto),
+        "video/x-h264,alignment=au,profile=high"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::H265, Profile::Auto),
+        "video/x-h265,alignment=au,profile=main"
+    );
+    // AV1 and VP9 have no profile field on their caps at all.
+    assert_eq!(
+        get_codec_caps_string(Codec::AV1, Profile::Auto),
+        "video/x-av1"
+    );
+    assert_eq!(
+        get_codec_caps_string(Codec::VP9, Profile::Auto),
+        "video/x-vp9"
+    );
+
+    // The default must reach the capsfilter as a pinned profile, not as an
+    // empty one: this is the assertion that fails if the default is reverted.
+    assert_eq!(
+        get_codec_caps_string(Codec::H264, Profile::default()),
+        "video/x-h264,alignment=au,profile=high"
+    );
+}
+
 #[test]
 fn test_parse_profile_invalid_value_falls_back_to_default() {
     let mut props = HashMap::new();
     props.insert(
         "profile".to_string(),
-        PropertyValue::String("auto".to_string()),
-    );
-    assert_eq!(parse_profile(&props), Profile::default());
-
-    props.insert(
-        "profile".to_string(),
         PropertyValue::String("garbage".to_string()),
     );
     assert_eq!(parse_profile(&props), Profile::default());
+
+    // Not a GStreamer profile name, and close enough to a real one to be a
+    // plausible typo.
+    props.insert(
+        "profile".to_string(),
+        PropertyValue::String("high-4:2:0".to_string()),
+    );
+    assert_eq!(parse_profile(&props), Profile::default());
+}
+
+#[test]
+fn test_parse_profile_auto_is_the_default() {
+    let mut props = HashMap::new();
+    props.insert(
+        "profile".to_string(),
+        PropertyValue::String("auto".to_string()),
+    );
+    assert_eq!(parse_profile(&props), Profile::Auto);
+    assert_eq!(Profile::default(), Profile::Auto);
+
+    // "none" stays reachable: free negotiation is still on offer, it is just
+    // no longer what you get by not choosing.
+    props.insert(
+        "profile".to_string(),
+        PropertyValue::String("none".to_string()),
+    );
+    assert_eq!(parse_profile(&props), Profile::None);
 }
 
 #[test]

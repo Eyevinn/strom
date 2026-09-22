@@ -859,27 +859,37 @@ fn map_quality_preset_vp9enc(quality_preset: &str) -> i32 {
 
 /// Get codec-specific caps string for capsfilter, given a profile selection.
 ///
-/// For H.264/H.265: pins `profile=<name>` on the capsfilter unless `profile`
-/// is [`Profile::None`], in which case no profile field is added and the
-/// encoder negotiates freely with downstream.
+/// For H.264/H.265: pins `profile=<name>` on the capsfilter. [`Profile::Auto`]
+/// resolves to the codec's 8-bit 4:2:0 profile; [`Profile::None`] adds no
+/// profile field and lets the encoder negotiate freely with downstream.
 /// For AV1/VP9: profile is ignored — caps only contain the codec media type.
+///
+/// The pinned field is what keeps the output 4:2:0. It propagates back up
+/// through the parser to the encoder, which picks an input format that can
+/// produce the profile; without it the encoder follows whatever pixel format
+/// arrives and a 4:2:2, 4:4:4 or 10-bit input escalates the output profile.
 fn get_codec_caps_string(codec: Codec, profile: Profile) -> String {
-    match codec {
-        Codec::H264 => match profile.as_caps_str() {
-            None => "video/x-h264,alignment=au".to_string(),
-            Some(p) => format!("video/x-h264,alignment=au,profile={}", p),
-        },
-        Codec::H265 => match profile.as_caps_str() {
-            None => "video/x-h265,alignment=au".to_string(),
-            Some(p) => format!("video/x-h265,alignment=au,profile={}", p),
-        },
-        Codec::AV1 => "video/x-av1".to_string(),
-        Codec::VP9 => "video/x-vp9".to_string(),
+    let (media_type, auto) = match codec {
+        // High rather than Main: same 8-bit 4:2:0, better compression, and
+        // every H.264 target that takes Main takes High.
+        Codec::H264 => ("video/x-h264", Profile::High),
+        Codec::H265 => ("video/x-h265", Profile::Main),
+        Codec::AV1 => return "video/x-av1".to_string(),
+        Codec::VP9 => return "video/x-vp9".to_string(),
+    };
+    let effective = if profile == Profile::Auto {
+        auto
+    } else {
+        profile
+    };
+    match effective.as_caps_str() {
+        None => format!("{},alignment=au", media_type),
+        Some(p) => format!("{},alignment=au,profile={}", media_type, p),
     }
 }
 
 /// Parse the `profile` property. Unknown / missing values fall back to the
-/// enum's `Default` (no profile constraint).
+/// enum's `Default` ([`Profile::Auto`]).
 fn parse_profile(properties: &HashMap<String, PropertyValue>) -> Profile {
     properties
         .get("profile")
@@ -936,7 +946,7 @@ fn videoenc_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "profile".to_string(),
                 label: "Profile".to_string(),
-                description: "Codec profile pinned on the encoder's output capsfilter. \"none\" (default) omits the profile field, letting the encoder negotiate freely with downstream — works with any downstream and is the right choice unless something specifically requires a pinned profile. Pick an explicit profile only when the downstream needs it. H.264 profiles begin with baseline/main/high; H.265 profiles begin with main.".to_string(),
+                description: "Codec profile pinned on the encoder's output capsfilter. \"auto\" (default) pins the codec's 8-bit 4:2:0 profile — high for H.264, main for H.265 — which every common delivery target decodes; without it the encoder follows the incoming pixel format and a 4:2:2, 4:4:4 or 10-bit input produces a profile many targets refuse. \"none\" omits the profile field and lets the encoder negotiate freely with downstream. Pick an explicit profile when the downstream needs a particular one. H.264 profiles begin with baseline/main/high; H.265 profiles begin with main. Ignored for AV1 and VP9.".to_string(),
                 property_type: PropertyType::Enum {
                     values: Profile::block_enum_values(),
                 },
