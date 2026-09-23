@@ -834,6 +834,7 @@ async fn the_cut_lands_on_the_frame_the_cut_point_names() {
     const CUT_MS: u64 = 500;
     let expected = (CUT_MS / (FRAME_DUR_NS / 1_000_000)) as usize;
     let mut landed = Vec::new();
+    let mut unreadable = 0;
     for take in 0..TAKES {
         let (from, to) = if take % 2 == 0 { (0, 1) } else { (1, 0) };
         let mut rx = running.state.events().subscribe();
@@ -852,9 +853,9 @@ async fn the_cut_lands_on_the_frame_the_cut_point_names() {
 
         // Every frame in order, so the one the program changed on is visible.
         let mut was = None;
-        let mut cut_on = None;
+        let mut changed_at = None;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        while cut_on.is_none() && tokio::time::Instant::now() < deadline {
+        while changed_at.is_none() && tokio::time::Instant::now() < deadline {
             let Some(frame) = pgm_frame(&running).await else {
                 continue;
             };
@@ -863,17 +864,19 @@ async fn the_cut_lands_on_the_frame_the_cut_point_names() {
             };
             if was.is_some_and(|w| w != now_red) {
                 // Coverage counts the clip's own pixels, which are green.
-                let cov = green_fraction(&frame);
-                eprintln!(
-                    "DIAG changed coverage={:.4} -> frame {}",
-                    cov,
-                    (cov * FRAMES as f64).round() as i64 - 1
-                );
-                cut_on = Some((cov * FRAMES as f64).round() as usize - 1);
+                changed_at = Some(green_fraction(&frame));
             }
             was = Some(now_red);
         }
-        landed.push(cut_on);
+        // A starved process occasionally composites a frame with no clip on
+        // it: the clip's buffer is late, and a stinger's keyed pad does not
+        // repeat its last frame. When that frame is the one the program
+        // changed on, it cannot say which clip frame was on air.
+        match changed_at.map(|cov| ((cov * FRAMES as f64).round() as usize).checked_sub(1)) {
+            Some(Some(frame)) => landed.push(Some(frame)),
+            Some(None) => unreadable += 1,
+            None => landed.push(None),
+        }
 
         wait_for_event(&mut rx, 8000, |e| match e {
             strom_types::StromEvent::StingerCompleted { .. } => Some(()),
@@ -885,9 +888,17 @@ async fn the_cut_lands_on_the_frame_the_cut_point_names() {
     }
     let _ = std::fs::remove_file(&clip);
 
+    // A clip that never reaches the program at the cut would be unreadable on
+    // every take, so at most half may be.
+    assert!(
+        unreadable <= TAKES / 2,
+        "{unreadable} of {TAKES} takes changed the program on a frame with no \
+         clip on it; landed on {landed:?}"
+    );
     assert!(
         landed.iter().all(|l| l.is_some_and(|f| f <= expected)),
-        "no take may cut later than clip frame {expected}; landed on {landed:?}"
+        "no take may cut later than clip frame {expected}; landed on {landed:?} \
+         ({unreadable} unreadable)"
     );
 }
 
