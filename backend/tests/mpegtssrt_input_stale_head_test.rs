@@ -389,6 +389,18 @@ fn assert_on_time(decode: bool) {
     );
 }
 
+/// Whether this GStreamer keeps the demuxer's pad across a caller change.
+///
+/// Before 1.24.3, a re-parsed PMT reads as a new program under `ignore-pcr`
+/// ("mpegtsbase: Fix Program equality check"), and the caller change re-parses
+/// it. `tsdemux` then replaces its source pad, which the block does not relink
+/// (Eyevinn/strom#856), so a second caller delivers nothing whatever the anchor
+/// does. Ubuntu 24.04 and CI ship 1.24.2; the release image ships 1.26.
+fn second_caller_keeps_its_pad() -> bool {
+    let (major, minor, micro, _) = gst::version();
+    (major, minor, micro) >= (1, 24, 3)
+}
+
 /// Whether the caller that follows a corrected one leaves the block on time.
 ///
 /// `keep_listening` is on by default: one `srtsrc` serves caller after caller
@@ -401,6 +413,16 @@ fn assert_second_caller_on_time(second_from: gst::ClockTime) {
     gst::init().unwrap();
     if !plugins_available() {
         eprintln!("skipping: required GStreamer elements are missing");
+        return;
+    }
+    if !second_caller_keeps_its_pad() {
+        eprintln!(
+            "skipping: GStreamer {}.{}.{} replaces the tsdemux pad when a second caller \
+             connects, so no audio reaches the block's output at all",
+            gst::version().0,
+            gst::version().1,
+            gst::version().2
+        );
         return;
     }
 
