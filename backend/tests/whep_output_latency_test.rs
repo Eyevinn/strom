@@ -9,6 +9,8 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strom::blocks::{builtin, BlockBuildContext};
 use strom_types::PropertyValue;
@@ -133,6 +135,30 @@ fn direct_child_appsinks(sink: &gst::Element) -> Vec<(String, u64)> {
         .collect()
 }
 
+/// One flag per direct-child appsink of the whepserversink bin, set by the
+/// first buffer to reach it. The appsinks exist once the inputs are linked,
+/// so call this before PLAYING.
+fn flag_first_buffer_at_appsinks(sink: &gst::Element) -> Vec<Arc<AtomicBool>> {
+    let bin = sink.clone().downcast::<gst::Bin>().expect("sink is a bin");
+    bin.iterate_elements()
+        .into_iter()
+        .flatten()
+        .filter(|e| e.factory().is_some_and(|f| f.name() == "appsink"))
+        .map(|e| {
+            let reached = Arc::new(AtomicBool::new(false));
+            let flag = reached.clone();
+            e.static_pad("sink").expect("appsink sink pad").add_probe(
+                gst::PadProbeType::BUFFER,
+                move |_, _| {
+                    flag.store(true, Ordering::Relaxed);
+                    gst::PadProbeReturn::Remove
+                },
+            );
+            reached
+        })
+        .collect()
+}
+
 fn wait_playing(pipeline: &gst::Pipeline) {
     pipeline.set_state(gst::State::Playing).expect("PLAYING");
     let (res, state, _) = pipeline.state(gst::ClockTime::from_seconds(15));
@@ -142,8 +168,8 @@ fn wait_playing(pipeline: &gst::Pipeline) {
     );
 }
 
-/// whepserversink's sinks answer the latency query only once data has reached
-/// them, so poll until the query reports a live result.
+/// The pipeline can answer the latency query as non-live for a moment after
+/// reaching PLAYING, so poll until it reports a live result.
 fn live_pipeline_latency(pipeline: &gst::Pipeline) -> gst::ClockTime {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -193,11 +219,18 @@ fn whep_output_latency_excludes_appsink_processing_deadline() {
 #[test]
 fn every_input_appsink_is_zeroed_multi_track() {
     let built = build_block("latency-multi", 2, 2);
+    // Check after data has reached every appsink, so the test also catches
+    // anything that resets the deadline when streaming starts.
+    let reached = flag_first_buffer_at_appsinks(&built.sink);
     wait_playing(&built.pipeline);
-    // The appsinks exist once the inputs are linked; wait for data to reach
-    // them so the check also catches anything that resets the deadline when
-    // streaming starts.
-    live_pipeline_latency(&built.pipeline);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !reached.iter().all(|r| r.load(Ordering::Relaxed)) {
+        assert!(
+            Instant::now() < deadline,
+            "no buffer reached some appsinks within 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     let appsinks = direct_child_appsinks(&built.sink);
     let _ = built.pipeline.set_state(gst::State::Null);
