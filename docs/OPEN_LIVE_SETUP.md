@@ -218,6 +218,14 @@ This is the port Open Live needs reachable. Override it with `STROM_PORT` or `--
 
 Media-plane ports (RTP/SRT/WHIP/WHEP/AES67/NDI) are determined by the flows you build inside Strom and are independent of the control port — open those on the firewall as needed for each flow.
 
+### Port pool for a shared Strom
+
+Only relevant when **several** Open Live instances share this Strom. Each of them then reserves a set of SRT listener ports from Strom at startup (`POST /api/ports/reservations`) and registers sources only on ports it holds, so two instances never bind the same UDP port.
+
+The pool is off until you configure ports. Set `STROM_PORTS=47100-47999` (or `[ports] ports` in `.strom.toml`) and open that whole UDP range inbound on the firewall. A Strom serving one Open Live needs none of this — see [PORT_POOL.md](PORT_POOL.md) for the full picture.
+
+Code is the source of truth — this may have drifted; read the code for the current implementation.
+
 ---
 
 ## 7. ICE Servers (STUN / TURN) for WebRTC

@@ -37,6 +37,7 @@ pub mod network;
 pub mod openapi;
 pub mod osc;
 pub mod paths;
+pub mod ports;
 pub mod ptp_monitor;
 pub mod rtsp_server;
 pub mod server_hardening;
@@ -120,6 +121,25 @@ pub async fn create_app_with_config(
     let protected_api_router = Router::new()
         .route("/flows", get(api::flows::list_flows))
         .route("/flows", post(api::flows::create_flow))
+        .route("/ports", get(api::ports::get_pool))
+        .route("/ports/reservations", get(api::ports::list_reservations))
+        .route("/ports/reservations", post(api::ports::create_reservation))
+        .route(
+            "/ports/reservations/{id}",
+            get(api::ports::get_reservation).delete(api::ports::delete_reservation),
+        )
+        .route(
+            "/ports/reservations/{id}/renew",
+            post(api::ports::renew_reservation),
+        )
+        .route(
+            "/ports/reservations/{id}/assign",
+            post(api::ports::assign_ports),
+        )
+        .route(
+            "/ports/reservations/{id}/assign/{flow_id}",
+            delete(api::ports::unassign_ports),
+        )
         .route("/flows/{id}", get(api::flows::get_flow))
         .route("/flows/{id}", post(api::flows::update_flow))
         .route("/flows/{id}", put(api::flows::update_flow_put))
