@@ -194,11 +194,12 @@ fn whep_output_latency_excludes_appsink_processing_deadline() {
 fn every_input_appsink_is_zeroed_multi_track() {
     let built = build_block("latency-multi", 2, 2);
     wait_playing(&built.pipeline);
-    // Give webrtcsink time to finish preparing every input stream.
-    std::thread::sleep(Duration::from_millis(1500));
+    // The appsinks exist once the inputs are linked; wait for data to reach
+    // them so the check also catches anything that resets the deadline when
+    // streaming starts.
+    live_pipeline_latency(&built.pipeline);
 
     let appsinks = direct_child_appsinks(&built.sink);
-    live_pipeline_latency(&built.pipeline);
     let _ = built.pipeline.set_state(gst::State::Null);
 
     assert_eq!(
