@@ -79,7 +79,7 @@ const LIVE: gst::ClockTime = gst::ClockTime::from_mseconds(2500);
 /// A 128 kbit/s AAC transport stream in 1316-byte chunks, with each chunk's
 /// content time, encoded as fast as possible.
 fn encode_stream() -> Vec<(gst::ClockTime, gst::Buffer)> {
-    let seconds = (GAP + LIVE + gst::ClockTime::SECOND).seconds() as i32;
+    let seconds = (GAP + 2 * LIVE + 2 * gst::ClockTime::SECOND).seconds() as i32;
     let pipeline = gst::parse::launch(&format!(
         "audiotestsrc num-buffers={} samplesperbuffer=4800 wave=ticks \
          ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! avenc_aac bitrate=128000 \
@@ -105,7 +105,7 @@ fn encode_stream() -> Vec<(gst::ClockTime, gst::Buffer)> {
     }
     pipeline.set_state(gst::State::Null).unwrap();
     assert!(
-        chunks.last().is_some_and(|(t, _)| *t > GAP + LIVE),
+        chunks.last().is_some_and(|(t, _)| *t > GAP + 2 * LIVE),
         "encoder produced too little stream to replay"
     );
     chunks
@@ -117,14 +117,17 @@ struct Receiver {
     leads: Arc<Mutex<Vec<(u64, i64)>>>,
 }
 
-fn build_receiver(decode: bool, port: u16) -> Receiver {
+fn build_receiver(decode: bool, port: u16, keep_listening: bool) -> Receiver {
     let instance_id = "srt_in";
     let mut props: HashMap<String, PropertyValue> = HashMap::new();
     props.insert("decode".to_string(), PropertyValue::Bool(decode));
     props.insert("num_video_tracks".to_string(), PropertyValue::UInt(0));
     props.insert("num_audio_tracks".to_string(), PropertyValue::UInt(1));
     props.insert("latency".to_string(), PropertyValue::Int(20));
-    props.insert("keep_listening".to_string(), PropertyValue::Bool(false));
+    props.insert(
+        "keep_listening".to_string(),
+        PropertyValue::Bool(keep_listening),
+    );
     props.insert(
         "srt_uri".to_string(),
         PropertyValue::String(format!("srt://127.0.0.1:{}?mode=listener", port)),
@@ -201,9 +204,8 @@ fn build_receiver(decode: bool, port: u16) -> Receiver {
     Receiver { pipeline, leads }
 }
 
-/// Sends the head, then the live part in real time, over one SRT connection.
-/// Returns the sender still connected; see [`stop_srt`] for the teardown order.
-fn replay(port: u16, chunks: &[(gst::ClockTime, gst::Buffer)]) -> gst::Pipeline {
+/// One SRT caller, connected and ready to be fed.
+fn connect(port: u16) -> (gst::Pipeline, gst_app::AppSrc) {
     let pipeline = gst::parse::launch(&format!(
         "appsrc name=in is-live=true format=time \
          caps=video/mpegts,systemstream=true,packetsize=188 \
@@ -220,22 +222,46 @@ fn replay(port: u16, chunks: &[(gst::ClockTime, gst::Buffer)]) -> gst::Pipeline 
         .downcast::<gst_app::AppSrc>()
         .unwrap();
     pipeline.set_state(gst::State::Playing).unwrap();
+    (pipeline, appsrc)
+}
 
+/// The stale head, then the tables of the skipped part so the caller's PSI
+/// stays continuous across the jump.
+fn push_head(appsrc: &gst_app::AppSrc, chunks: &[(gst::ClockTime, gst::Buffer)]) {
     for (_, buffer) in chunks.iter().filter(|(t, _)| *t < HEAD) {
         appsrc.push_buffer(buffer.copy()).unwrap();
     }
     for buffer in tables_between(chunks, HEAD, GAP) {
         appsrc.push_buffer(buffer).unwrap();
     }
+}
+
+/// [`LIVE`] of stream from `from`, paced in real time.
+fn push_live(
+    appsrc: &gst_app::AppSrc,
+    chunks: &[(gst::ClockTime, gst::Buffer)],
+    from: gst::ClockTime,
+) {
     let start = Instant::now();
-    for (t, buffer) in chunks.iter().filter(|(t, _)| *t >= GAP && *t < GAP + LIVE) {
-        let due = Duration::from_nanos((*t - GAP).nseconds());
+    for (t, buffer) in chunks
+        .iter()
+        .filter(|(t, _)| *t >= from && *t < from + LIVE)
+    {
+        let due = Duration::from_nanos((*t - from).nseconds());
         if let Some(wait) = due.checked_sub(start.elapsed()) {
             std::thread::sleep(wait);
         }
         appsrc.push_buffer(buffer.copy()).unwrap();
     }
     std::thread::sleep(Duration::from_millis(300));
+}
+
+/// Sends the head, then the live part in real time, over one SRT connection.
+/// Returns the sender still connected; see [`stop_srt`] for the teardown order.
+fn replay(port: u16, chunks: &[(gst::ClockTime, gst::Buffer)]) -> gst::Pipeline {
+    let (pipeline, appsrc) = connect(port);
+    push_head(&appsrc, chunks);
+    push_live(&appsrc, chunks, GAP);
     pipeline
 }
 
@@ -313,7 +339,7 @@ fn max_live_lead(decode: bool) -> Option<(i64, usize)> {
 
     let chunks = encode_stream();
     let port = srt_port();
-    let receiver = build_receiver(decode, port);
+    let receiver = build_receiver(decode, port, false);
     receiver
         .pipeline
         .set_state(gst::State::Playing)
@@ -363,6 +389,76 @@ fn assert_on_time(decode: bool) {
     );
 }
 
+/// Whether the caller that follows a corrected one leaves the block on time.
+///
+/// `keep_listening` is on by default: one `srtsrc` serves caller after caller
+/// and `tsdemux` takes a fresh time reference for each, so a correction that
+/// outlives its caller stamps the next one behind its own arrival, where
+/// consumers that wait for running time drop it. `second_from` is where the
+/// second caller's stream starts: the same encoder carrying on, or a fresh one
+/// from zero.
+fn assert_second_caller_on_time(second_from: gst::ClockTime) {
+    gst::init().unwrap();
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements are missing");
+        return;
+    }
+
+    let chunks = encode_stream();
+    let port = srt_port();
+    let receiver = build_receiver(false, port, true);
+    receiver
+        .pipeline
+        .set_state(gst::State::Playing)
+        .expect("receiver goes to PLAYING");
+
+    // A caller with a stale head, so that a correction is made.
+    let (sender, appsrc) = connect(port);
+    push_head(&appsrc, &chunks);
+    push_live(&appsrc, &chunks, GAP);
+    stop_srt(&sender, "out");
+    std::thread::sleep(Duration::from_millis(500));
+    let boundary = receiver.leads.lock().unwrap().len();
+
+    // A second caller, with no stale head of its own. Nothing is replayed
+    // ahead of it: re-sending tables the first caller already sent breaks the
+    // continuity counters, which on GStreamer 1.24.2 costs the stream its pad.
+    let (sender, appsrc) = connect(port);
+    push_live(&appsrc, &chunks, second_from);
+    stop_srt(&receiver.pipeline, "srt_in:srtsrc");
+    stop_srt(&sender, "out");
+
+    let leads = receiver.leads.lock().unwrap().clone();
+    let first = leads
+        .get(boundary)
+        .map(|(i, _)| *i)
+        .expect("no audio left the block for the second caller, so the test proved nothing");
+    // Only the reconnect itself: the correction must go with the caller that
+    // was measured, not a window or two later.
+    let settle = first + gst::ClockTime::from_mseconds(300).nseconds();
+    let settled: Vec<i64> = leads[boundary..]
+        .iter()
+        .filter(|(input, _)| *input >= settle)
+        .map(|(_, lead)| *lead)
+        .collect();
+    assert!(
+        settled.len() > 20,
+        "only {} buffers from the second caller after it settled — too few to judge",
+        settled.len()
+    );
+    let worst = settled
+        .iter()
+        .copied()
+        .max_by_key(|lead| lead.abs())
+        .unwrap();
+    assert!(
+        worst.abs() < MAX_LEAD.nseconds() as i64,
+        "the second caller's audio left the block {} ms off its own arrival          ({} buffers). The correction made for the caller that has gone is          still on the pads, so every consumer that waits for running time          drops this caller as late.",
+        worst / 1_000_000,
+        settled.len()
+    );
+}
+
 #[test]
 fn stale_head_is_not_stamped_ahead_decoded() {
     assert_on_time(true);
@@ -371,4 +467,14 @@ fn stale_head_is_not_stamped_ahead_decoded() {
 #[test]
 fn stale_head_is_not_stamped_ahead_passthrough() {
     assert_on_time(false);
+}
+
+#[test]
+fn second_caller_restarting_is_not_stamped_behind() {
+    assert_second_caller_on_time(gst::ClockTime::ZERO);
+}
+
+#[test]
+fn second_caller_resuming_is_not_stamped_behind() {
+    assert_second_caller_on_time(GAP + LIVE);
 }
