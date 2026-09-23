@@ -19,8 +19,15 @@
 //! more than the few frames one SRT message carries. This watcher compares the
 //! two, and when the smallest lead over a window exceeds [`MAX_LEAD`] it shifts
 //! all of the demuxer's source pads back by the window's mean lead with a pad
-//! offset. One
-//! correction is shared by every pad, so audio and video stay aligned.
+//! offset. One correction is shared by every pad, so audio and video stay
+//! aligned.
+//!
+//! The shift belongs to the caller it was measured on: `srtsrc` keeps listening
+//! after a caller leaves and `tsdemux` takes a fresh reference for the next one,
+//! so the shift is dropped when the caller changes. Output that sits *behind*
+//! arrival is left alone, whatever the shift: a sender that stalls and resumes
+//! looks the same from here, and giving the shift back would throw its stream
+//! forward by that much in one buffer.
 //!
 //! Timing comes only from buffer timestamps, never the clock: the probes are on
 //! the streaming thread for every demuxed frame and every SRT message, so they
@@ -61,6 +68,17 @@ struct State {
     correction: AtomicI64,
 }
 
+impl State {
+    /// Drop the correction and the window in progress.
+    ///
+    /// The window counters are re-initialised by the first buffer after this,
+    /// which takes the `window_start == NONE` branch of [`on_output_buffer`].
+    fn reset(&self) {
+        self.correction.store(0, Ordering::Relaxed);
+        self.window_start.store(NONE, Ordering::Relaxed);
+    }
+}
+
 /// Watches one `tsdemux` and the element feeding it.
 #[derive(Clone)]
 pub struct TsDemuxAnchor {
@@ -94,6 +112,20 @@ impl TsDemuxAnchor {
             }
             gst::PadProbeReturn::Ok
         });
+    }
+
+    /// Drop the correction whenever the SRT caller changes.
+    ///
+    /// Listener mode only: `srtsrc` emits these while accepting and dropping a
+    /// caller, and neither fires in caller mode.
+    pub fn watch_caller(&self, srtsrc: &gst::Element) {
+        for signal in ["caller-added", "caller-removed"] {
+            let state = self.state.clone();
+            srtsrc.connect(signal, false, move |_| {
+                state.reset();
+                None
+            });
+        }
     }
 
     /// Watch every source pad the demuxer adds.
@@ -247,4 +279,71 @@ fn apply(segment: &PadSegment, pad: &gst::Pad, offset: i64) {
     // Takes effect for the buffer being pushed: gst_pad_push_data resends the
     // sticky SEGMENT, now offset, after the buffer probes and before the push.
     pad.set_offset(offset);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A source pad carrying a segment that starts at zero, as `tsdemux`
+    /// produces, with the timestamps left as running times.
+    fn pad_and_segment() -> (gst::Pad, PadSegment) {
+        gst::init().unwrap();
+        let pad = gst::Pad::builder(gst::PadDirection::Src)
+            .name("src")
+            .build();
+        let segment = PadSegment::default();
+        let time = gst::FormattedSegment::<gst::format::Time>::new();
+        segment.record(time.upcast_ref());
+        (pad, segment)
+    }
+
+    /// One full window of buffers whose running time sits `lead` from arrival.
+    fn window(state: &State, segment: &PadSegment, pad: &gst::Pad, lead: i64) {
+        for step in 0..8u64 {
+            let input = step * 100 * gst::ClockTime::MSECOND.nseconds();
+            state.last_input.store(input, Ordering::Relaxed);
+            // running_time(ts) is ts plus whatever offset the pad carries, so
+            // ask for a timestamp that produces this lead against it.
+            let applied = segment.applied_offset.load(Ordering::Relaxed);
+            on_output_buffer(state, segment, pad, (input as i64 + lead - applied) as u64);
+        }
+    }
+
+    /// A sender that stalls and resumes leaves its stream behind arrival with
+    /// the offset still right for it. Giving the offset back here would throw
+    /// the stream forward by that much in a single buffer.
+    #[test]
+    fn a_window_spent_behind_arrival_keeps_the_offset() {
+        let anchor = TsDemuxAnchor::new("test");
+        let (pad, segment) = pad_and_segment();
+        let two_seconds = 2 * gst::ClockTime::SECOND.nseconds() as i64;
+
+        window(&anchor.state, &segment, &pad, two_seconds);
+        assert_eq!(
+            pad.offset(),
+            -two_seconds,
+            "a window spent ahead of arrival is re-anchored"
+        );
+
+        window(&anchor.state, &segment, &pad, -two_seconds);
+        assert_eq!(pad.offset(), -two_seconds, "the offset is left alone");
+    }
+
+    /// The caller the offset was measured on has gone.
+    #[test]
+    fn a_caller_change_drops_the_offset() {
+        let anchor = TsDemuxAnchor::new("test");
+        let (pad, segment) = pad_and_segment();
+        let two_seconds = 2 * gst::ClockTime::SECOND.nseconds() as i64;
+
+        window(&anchor.state, &segment, &pad, two_seconds);
+        assert_eq!(pad.offset(), -two_seconds);
+
+        anchor.state.reset();
+        // A pad carries the offset it finds until something is pushed through
+        // it, so the next caller's first buffer is what clears it.
+        window(&anchor.state, &segment, &pad, 0);
+        assert_eq!(pad.offset(), 0, "the next caller starts unshifted");
+    }
 }
