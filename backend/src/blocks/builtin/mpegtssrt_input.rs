@@ -228,6 +228,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             if let Some(src_pad) = srtsrc.static_pad("src") {
                 anchor.watch_input(&src_pad);
             }
+            anchor.watch_caller(&srtsrc);
             Some(anchor)
         } else {
             None
