@@ -761,7 +761,7 @@ fn wait_for_inactivity(
         if wait_until_deadline_or_stop(stop, Instant::now() + WATCHDOG_POLL) {
             return None;
         }
-        let Some((idle, side)) = activity.idle_detail() else {
+        let Some((idle, side)) = activity.idle() else {
             continue;
         };
         if idle >= timeout {

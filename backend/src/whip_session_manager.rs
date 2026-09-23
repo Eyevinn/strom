@@ -411,14 +411,9 @@ impl SessionActivity {
     ///
     /// Otherwise it is the staler of the two stamps: a session is usable only
     /// while both move, and a publisher going away freezes `ingress` first while
-    /// a stall below the decoder freezes `output` first.
-    pub fn idle(&self) -> Option<Duration> {
-        self.idle_detail().map(|(idle, _)| idle)
-    }
-
-    /// `idle`, with the stamp that produced the answer. Callers that log a reap
-    /// use this; callers that only compare durations use `idle`.
-    pub fn idle_detail(&self) -> Option<(Duration, StallSide)> {
+    /// a stall below the decoder freezes `output` first. The `StallSide` that
+    /// comes with it is for the reap log only and never changes the duration.
+    pub fn idle(&self) -> Option<(Duration, StallSide)> {
         let ingress_idle = self.ingress.since_last()?;
         let past_grace = self.ingress.since_first()?.checked_sub(DECODE_GRACE)?;
 
@@ -434,11 +429,12 @@ impl SessionActivity {
         // are still draining through the slot, so it is the staler one and
         // anything close to a tie belongs to it. Only `output` being clearly
         // staler means media is still arriving, which is the case worth naming.
-        if output_idle > ingress_idle + STALL_SIDE_MARGIN {
-            Some((output_idle, StallSide::Output))
+        let side = if output_idle > ingress_idle + STALL_SIDE_MARGIN {
+            StallSide::Output
         } else {
-            Some((ingress_idle, StallSide::Ingress))
-        }
+            StallSide::Ingress
+        };
+        Some((ingress_idle.max(output_idle), side))
     }
 }
 
@@ -534,7 +530,8 @@ const PENDING_CLEANUP_TTL: Duration = Duration::from_secs(30);
 const DECODE_GRACE: Duration = Duration::from_secs(5);
 
 /// How much staler `output` must be than `ingress` before a reap is blamed on
-/// the flow rather than on the publisher; see `StallSide`.
+/// the flow rather than on the publisher; see `StallSide`. It moves the label
+/// only, never the idle duration.
 ///
 /// The two stamps keep separate epochs and store whole milliseconds, so
 /// simultaneous events can read a millisecond apart either way, and a publisher
@@ -870,7 +867,7 @@ impl WhipSessionManager {
             .map(|(resource_id, s)| IdlestSession {
                 resource_id: resource_id.clone(),
                 port: s.port,
-                idle: s.activity.idle_detail(),
+                idle: s.activity.idle(),
                 last_usable: s.activity.last_usable(),
                 dying: s.cleanup_sent.load(Ordering::SeqCst),
                 has_audio: s.activity.has_delivered_audio(),
@@ -1596,7 +1593,7 @@ mod tests {
             )),
         );
         assert_eq!(
-            publisher_gone.idle_detail().map(|(_, side)| side),
+            publisher_gone.idle().map(|(_, side)| side),
             Some(StallSide::Ingress),
             "nothing arriving is the publisher's fault, not the flow's"
         );
@@ -1607,25 +1604,33 @@ mod tests {
             Arc::new(ActivityStamp::backdated(RUNNING_FOR, RUNNING_FOR / 2)),
         );
         assert_eq!(
-            stuck_consumer.idle_detail().map(|(_, side)| side),
+            stuck_consumer.idle().map(|(_, side)| side),
             Some(StallSide::Output),
             "a seat that still receives must be reaped against the slot's output"
         );
 
         // The stamps hold whole milliseconds against separate epochs, so a
-        // publisher drop that freezes both at once can read either way round by
-        // a millisecond. That must not be reported as a stuck consumer.
+        // publisher drop that freezes both at once can read either way round.
+        // Anything inside the margin must not be reported as a stuck consumer,
+        // and the label must not change how long the session counts as idle.
+        let near_tie_output = Arc::new(ActivityStamp::backdated(
+            RUNNING_FOR,
+            RUNNING_FOR / 2 + STALL_SIDE_MARGIN / 2,
+        ));
         let near_tie = SessionActivity::from_stamps(
             ActivityStamp::backdated(RUNNING_FOR, RUNNING_FOR / 2),
-            Arc::new(ActivityStamp::backdated(
-                RUNNING_FOR,
-                RUNNING_FOR / 2 + Duration::from_millis(1),
-            )),
+            near_tie_output.clone(),
         );
+        let output_idle = near_tie_output.since_last().unwrap();
+        let (idle, side) = near_tie.idle().unwrap();
         assert_eq!(
-            near_tie.idle_detail().map(|(_, side)| side),
-            Some(StallSide::Ingress),
-            "a millisecond of stamp noise must not move the blame to the flow"
+            side,
+            StallSide::Ingress,
+            "stamp noise inside the margin must not move the blame to the flow"
+        );
+        assert!(
+            idle >= output_idle,
+            "idle must be the staler stamp whichever side is named: {idle:?} < {output_idle:?}"
         );
     }
 
