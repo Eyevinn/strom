@@ -44,6 +44,9 @@ impl AppState {
     /// Longest the mixer's output is held while a take is applied. Reaching it
     /// means the cut lands late, not that the mixer stays blocked.
     const STINGER_MAX_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
+    /// How long past the mixer's latency a finished stinger waits for the
+    /// mixer's output to move past its clip before releasing the mixer.
+    const STINGER_CLEAR_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
     /// Trigger a stinger: play a keyed clip over the program while another
     /// transition runs beneath it.
@@ -352,6 +355,30 @@ impl AppState {
             );
         }
 
+        // The keyed pad keeps the clip's last frame until the mixer produces
+        // an output frame past its end with nothing newer queued. A take fired
+        // before then queues the next playthrough's first frame, which keeps
+        // the stale one current, and revealing the keyed input puts it on air.
+        // This runs before re-arming, which resets the clip's offset.
+        let clip_ns = clip_player
+            .duration()
+            .unwrap_or(clip_ms.saturating_mul(1_000_000));
+        if let Some(clip_end_ns) = clip_player
+            .stream_offset_ns()
+            .map(|offset| offset.saturating_add(i64::try_from(clip_ns).unwrap_or(i64::MAX)))
+        {
+            state
+                .wait_for_mixer_to_pass(&flow, &mixer, clip_end_ns, &still_ours)
+                .await;
+        }
+        if !still_ours() {
+            debug!(
+                "Stinger on {} was superseded; leaving the mixer alone",
+                mixer
+            );
+            return;
+        }
+
         // Re-arm so the next fire is fast again, then release the mixer.
         if let Some(player) = MEDIA_PLAYER_REGISTRY.get(&MediaPlayerKey {
             flow_id: flow,
@@ -373,6 +400,66 @@ impl AppState {
             source_block_id: source.clone(),
         });
         debug!("Stinger on {} complete", mixer);
+    }
+
+    /// Wait until the mixer has produced an output frame starting after `at_ns`
+    /// on its timeline, while `keep_waiting` holds. Gives up after the mixer's
+    /// latency plus `STINGER_CLEAR_TIMEOUT`, since its output trails the clock
+    /// by that latency.
+    async fn wait_for_mixer_to_pass(
+        &self,
+        flow_id: &FlowId,
+        block_instance_id: &str,
+        at_ns: i64,
+        keep_waiting: &impl Fn() -> bool,
+    ) {
+        use gstreamer::prelude::PadExtManual;
+        let Ok(at_ns) = u64::try_from(at_ns) else {
+            return;
+        };
+        let Some((frame_ns, pad)) = ({
+            let pipelines = self.inner.pipelines.read().await;
+            pipelines.get(flow_id).and_then(|manager| {
+                Some((
+                    manager.mixer_frame_duration_ns(block_instance_id)?,
+                    manager.mixer_src_pad(block_instance_id)?,
+                ))
+            })
+        }) else {
+            return;
+        };
+        let latency = {
+            let mut query = gstreamer::query::Latency::new();
+            if pad.query(&mut query) {
+                query.result().1
+            } else {
+                gstreamer::ClockTime::ZERO
+            }
+        };
+        // The mixer's position is the end of the last frame it produced, so
+        // at this position that frame started at least half a frame after
+        // `at_ns`, whatever the rounding in either timestamp.
+        let target = at_ns.saturating_add(frame_ns + frame_ns / 2);
+        let give_up = std::time::Instant::now()
+            + std::time::Duration::from_nanos(latency.nseconds())
+            + Self::STINGER_CLEAR_TIMEOUT;
+        while keep_waiting() {
+            let position = pad
+                .query_position::<gstreamer::ClockTime>()
+                .map(|p| p.nseconds());
+            if position.is_some_and(|p| p >= target) {
+                return;
+            }
+            if std::time::Instant::now() > give_up {
+                warn!(
+                    "Stinger on {}: mixer did not move past the clip in time, so a \
+                     take fired now may flash its last frame",
+                    block_instance_id
+                );
+                return;
+            }
+            tokio::time::sleep(Self::STINGER_ANCHOR_POLL).await;
+        }
     }
 
     /// Hold the mixer's output thread just before the frame that carries the

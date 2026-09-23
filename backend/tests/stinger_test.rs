@@ -303,15 +303,7 @@ fn with_timing(tag: &str, mut flow: Flow, cut_ms: u64, under: &str, under_ms: u6
 async fn wait_until_mixer_produces(state: &AppState, flow_id: &strom_types::FlowId, tag: &str) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let ready = {
-            let pipelines = state.pipelines_read().await;
-            pipelines
-                .get(flow_id)
-                .and_then(|m| m.pipeline().by_name(&format!("{}:mixer", mixer_id(tag))))
-                .and_then(|mixer| mixer.query_position::<gst::ClockTime>())
-                .is_some()
-        };
-        if ready {
+        if mixer_position(state, flow_id, tag).await.is_some() {
             return;
         }
         assert!(
@@ -320,6 +312,20 @@ async fn wait_until_mixer_produces(state: &AppState, flow_id: &strom_types::Flow
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+/// Where the mixer's output has got to.
+async fn mixer_position(
+    state: &AppState,
+    flow_id: &strom_types::FlowId,
+    tag: &str,
+) -> Option<gst::ClockTime> {
+    let pipelines = state.pipelines_read().await;
+    pipelines
+        .get(flow_id)?
+        .pipeline()
+        .by_name(&format!("{}:mixer", mixer_id(tag)))?
+        .query_position::<gst::ClockTime>()
 }
 
 /// Build the flow through `AppState` and start it, which is the path that
@@ -630,15 +636,14 @@ async fn a_cut_point_beyond_the_clip_is_refused() {
     let _ = std::fs::remove_file(&clip);
 }
 
-/// A repeat stinger plays forward from the start of its clip.
+/// A repeat stinger plays forward from the start of its clip, with no frame of
+/// the last playthrough on air first.
 ///
-/// This does NOT guard the stale-frame flash it was written for. That flash
-/// lasts about two frames, and at the boundary the appsink hands back the
-/// frame it was already holding, which is indistinguishable from it — the test
-/// passes either way with the fix reverted. It is kept as a smoke test that a
-/// second stinger runs forward rather than jumping about, and the flash itself
-/// was verified by capturing program output frame by frame off a running
-/// server. The clip sweeps, so coverage says which frame is on air.
+/// The second take is fired as soon as the first completes, because that is
+/// when the keyed pad could still hold the previous clip's last frame. The clip
+/// sweeps, so coverage says which frame is on air, and frames are judged by
+/// their timestamp against the mixer's position at the take, so a frame from
+/// before the take is not mistaken for one it produced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_repeat_stinger_plays_forward_from_the_start() {
     let clip = clip_path("rearm-frame");
@@ -646,13 +651,13 @@ async fn a_repeat_stinger_plays_forward_from_the_start() {
     write_clip_with(&clip, sweep_frame).expect("write sweep clip");
     let running = start_with(
         "rearm-frame",
-        with_timing(
+        keep_every_pgm_frame(with_timing(
             "rearm-frame",
             build_watchable_flow("rearm-frame", &clip),
             500,
             "cut",
             0,
-        ),
+        )),
     )
     .await;
     let mut rx = running.state.events().subscribe();
@@ -675,8 +680,9 @@ async fn a_repeat_stinger_plays_forward_from_the_start() {
     .await
     .expect("the first stinger must finish");
 
-    // Wait until the keyed input is actually off air before firing again, so
-    // the first sample below cannot be the tail of the playthrough just ended.
+    // The keyed input must go off air once its clip ends. Skip the backlog,
+    // so the second take follows the first as closely as a client could.
+    drain_pgm(&running).await;
     let clear_by = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let frame = pgm_frame(&running).await.expect("a PGM frame");
@@ -687,9 +693,13 @@ async fn a_repeat_stinger_plays_forward_from_the_start() {
             tokio::time::Instant::now() < clear_by,
             "the keyed input must go off air once its clip ends"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
+    // Frames stamped before this were composited before the take, so they
+    // say nothing about it.
+    let taken_at = mixer_position(&running.state, &running.flow_id, "rearm-frame")
+        .await
+        .expect("mixer position");
     running
         .state
         .trigger_stinger(
@@ -702,28 +712,37 @@ async fn a_repeat_stinger_plays_forward_from_the_start() {
         .await
         .expect("second stinger must start");
 
-    // The sweep only ever grows, so coverage that falls means something other
-    // than this playthrough was on air: the frame the last one ended on.
-    // Pulling blocks until the next composited frame, so this is a dozen
-    // frames from the start of the clip, well before it ends.
-    let mut seq = Vec::new();
-    for _ in 0..12 {
-        if let Some(frame) = pgm_frame(&running).await {
-            seq.push(green_fraction(&frame));
+    // Every frame in order, so a stale frame lasting one frame is still seen.
+    // A frame with no clip on it comes before the clip arrives, or is a late
+    // clip frame on a starved machine, and says nothing about which frame is
+    // on air. A dozen with the clip on them is well before it ends.
+    let mut on_air = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while on_air.len() < 12 && tokio::time::Instant::now() < deadline {
+        if let Some((pts, frame)) = pgm_sample(&running).await {
+            let coverage = green_fraction(&frame);
+            if pts >= taken_at && coverage > 0.0 {
+                on_air.push(coverage);
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
     }
     let _ = std::fs::remove_file(&clip);
+    let shown = on_air
+        .iter()
+        .map(|g| (g * 100.0) as u32)
+        .collect::<Vec<_>>();
 
-    // The appsink can hand back the frame it was already holding, from before
-    // the take, so judge the run rather than that first sample.
-    let seq = &seq[1..];
-    let drop_at = seq.windows(2).position(|w| w[1] + 0.05 < w[0]);
+    assert!(
+        on_air.first().is_some_and(|g| *g < 0.5),
+        "the first clip frame on air after a repeat take must be from the start \
+         of the clip, not the end of the last playthrough; coverage was {shown:?}"
+    );
+    // The sweep only ever grows, so coverage that falls means something other
+    // than this playthrough was on air.
+    let drop_at = on_air.windows(2).position(|w| w[1] + 0.05 < w[0]);
     assert!(
         drop_at.is_none(),
-        "a repeat stinger must play forward; coverage fell at sample {:?} of {:?}",
-        drop_at,
-        seq.iter().map(|g| (g * 100.0) as u32).collect::<Vec<_>>()
+        "a repeat stinger must play forward; coverage was {shown:?}"
     );
 }
 
@@ -934,6 +953,11 @@ fn keep_every_pgm_frame(mut flow: Flow) -> Flow {
 
 /// Pull the newest composited PGM frame as tightly packed RGBA.
 async fn pgm_frame(running: &Running) -> Option<Vec<u8>> {
+    pgm_sample(running).await.map(|(_, frame)| frame)
+}
+
+/// Like `pgm_frame`, with the frame's timestamp on the mixer's output.
+async fn pgm_sample(running: &Running) -> Option<(gst::ClockTime, Vec<u8>)> {
     let pipelines = running.state.pipelines_read().await;
     let manager = pipelines.get(&running.flow_id)?;
     let appsink = manager
@@ -945,6 +969,7 @@ async fn pgm_frame(running: &Running) -> Option<Vec<u8>> {
     let caps = sample.caps()?;
     let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
     let buffer = sample.buffer()?;
+    let pts = buffer.pts()?;
     let frame = gstreamer_video::VideoFrameRef::from_buffer_ref_readable(buffer, &info).ok()?;
     let stride = frame.plane_stride()[0] as usize;
     let src = frame.plane_data(0).ok()?;
@@ -954,7 +979,7 @@ async fn pgm_frame(running: &Running) -> Option<Vec<u8>> {
     for y in 0..h {
         packed[y * w * 4..(y + 1) * w * 4].copy_from_slice(&src[y * stride..y * stride + w * 4]);
     }
-    Some(packed)
+    Some((pts, packed))
 }
 
 /// Fraction of pixels that read predominantly green — the stinger clip's
