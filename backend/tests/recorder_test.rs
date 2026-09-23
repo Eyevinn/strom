@@ -1019,6 +1019,12 @@ mod unfed_track {
 /// video track — the one still delivering — no video would reach the muxer
 /// either.
 ///
+/// The next covers the case where the stopped track's branch will not carry the
+/// EOS at all, which is what a dropped WHIP seat leaves behind.
+///
+/// Then that a track which ended with its own EOS is not mistaken for a stalled
+/// one: it would be retried for ever and hide the track that stalls next.
+///
 /// The sleeps are fixed because the recorder's stall timeout is: tracks have to
 /// be watched for longer than it to show that nothing was ended.
 mod stalled_track {
@@ -1060,7 +1066,7 @@ mod stalled_track {
         instance_id: &str,
         media_root: &Path,
         audio_buffers: i32,
-    ) {
+    ) -> Recorder {
         let rec = add_mp4_recorder(pipeline, instance_id, media_root, 1, 1);
         let video = video_source(pipeline, -1, true);
         link_without_eos(pipeline, &video, &rec.input("video_input_0"));
@@ -1072,6 +1078,7 @@ mod stalled_track {
             .set_state(gst::State::Playing)
             .expect("pipeline accepts PLAYING");
         let _ = pipeline.state(gst::ClockTime::from_seconds(15));
+        rec
     }
 
     /// Buffers reaching splitmuxsink's `pad`: what the muxer is actually
@@ -1265,6 +1272,119 @@ mod stalled_track {
             video_after - video_before >= 45,
             "the video track was ended during a stall that was not its fault: {} buffers reached the muxer in 5 s after it cleared",
             video_after - video_before
+        );
+    }
+
+    /// The same stall, with the stopped track's branch already coming apart — the
+    /// state the recorder is actually in when a WHIP seat drops, since the stall
+    /// and the teardown have the same cause. `gst_pad_push_event` refuses a sticky
+    /// event on a pad that is unlinked, flushing, no longer activated, or whose
+    /// peer is in any of those states, and answers all of them with the same bare
+    /// `false`.
+    ///
+    /// Unlinking is the one of those a test can arrange without racing a
+    /// teardown. The recovery must still get the muxer out of its wait, and must
+    /// not treat the refusal as though the track had ended.
+    ///
+    /// Reverting the fix pins the counted video at zero twice over: the refused
+    /// EOS leaves splitmuxsink waiting, and the track is marked retired anyway, so
+    /// no later poll tries again.
+    #[test]
+    fn a_stalled_track_whose_branch_is_coming_apart_still_ends() {
+        if !plugins_available() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let media_root = tmp.path();
+        let pipeline = gst::Pipeline::new();
+        let rec = start_recorder(&pipeline, "rec_torn", media_root, 86); // ~2 s at 1024 samples / 44.1 kHz
+        let video_into_muxer = count_into_muxer(&pipeline, "rec_torn", "video");
+
+        // Audio has stopped by now and its parser was inserted on the first caps,
+        // so the branch is quiet and safe to take apart.
+        std::thread::sleep(Duration::from_secs(3));
+        let audio_src = rec
+            .input("audio_input_0")
+            .static_pad("src")
+            .expect("audio input src pad");
+        let parser_sink = audio_src.peer().expect("audio parser is linked");
+        audio_src.unlink(&parser_sink).expect("unlink audio branch");
+        assert!(
+            !audio_src.push_event(gst::event::Eos::new()),
+            "an unlinked src pad must refuse the EOS, or this test proves nothing"
+        );
+
+        // Past the stall timeout with room for a poll or two, then measure the
+        // window after it: this is about recovery, not about the stall.
+        std::thread::sleep(Duration::from_secs(8));
+        let buffers_before = video_into_muxer.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(5));
+        let buffers_after = video_into_muxer.load(Ordering::Relaxed);
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+
+        assert!(
+            buffers_after - buffers_before >= 45,
+            "the recording stayed frozen on a track whose EOS was refused: {} video buffers reached the muxer in 5 s",
+            buffers_after - buffers_before
+        );
+    }
+
+    /// A track that ended with its own EOS is not a stalled one. It stays the
+    /// furthest behind for ever, and both EOS routes refuse a pad that already
+    /// carries one, so a watchdog that treats it as stuck retries it every poll
+    /// and never reaches the track that stops next — which is the one freezing
+    /// the recording.
+    ///
+    /// Here `audio 0` plays out after two seconds and `audio 1` stops silently
+    /// two seconds after that. Reverting the fix pins the counted video at zero:
+    /// the watchdog keeps picking the finished `audio 0`, `audio 1` is never
+    /// ended, and splitmuxsink goes on waiting for it.
+    #[test]
+    fn a_track_that_finished_does_not_hide_a_later_stall() {
+        if !plugins_available() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let media_root = tmp.path();
+        let pipeline = gst::Pipeline::new();
+        let rec = add_mp4_recorder(&pipeline, "rec_done", media_root, 1, 2);
+        let video = video_source(&pipeline, -1, true);
+        link_without_eos(&pipeline, &video, &rec.input("video_input_0"));
+        // ~2 s, then a real EOS: a file that played out, not a publisher that
+        // stopped.
+        audio_source(&pipeline, 86, true)
+            .link(&rec.input("audio_input_0"))
+            .expect("link audio 0 into recorder");
+        // ~4 s, then silence.
+        let audio_1 = audio_source(&pipeline, 172, true);
+        link_without_eos(&pipeline, &audio_1, &rec.input("audio_input_1"));
+        rec.run_setups();
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(15));
+        let video_into_muxer = count_into_muxer(&pipeline, "rec_done", "video");
+
+        // Past the stall timeout on the silent track with room for a poll or two,
+        // then measure the window after it: this is about recovery, not about the
+        // stall.
+        std::thread::sleep(Duration::from_secs(20));
+        let buffers_before = video_into_muxer.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(5));
+        let buffers_after = video_into_muxer.load(Ordering::Relaxed);
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+
+        assert!(
+            buffers_after - buffers_before >= 45,
+            "the finished audio track hid the stalled one: {} video buffers reached the muxer in 5 s",
+            buffers_after - buffers_before
         );
     }
 }
