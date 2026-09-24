@@ -51,11 +51,10 @@ interests you, open a GitHub issue or discussion.
   and Twitch and write down what an operator has to set. The transport side has landed: the
   RTMP Output block speaks `rtmp` and `rtmps` and keeps the query string Twitch's
   `?bandwidthtest=true` rides on, so a test broadcast can be verified in Twitch Inspector
-  without going live. What is left is the operator write-up, and a look at the encoder side —
-  the Video Encoder block pins no profile by default, which is fine from a 4:2:0 source but
-  follows a 4:2:2 or 10-bit one into a profile no platform ingest accepts, so a capture feed
-  may need `profile=high` set by hand. Both platforms also want an audio track and roughly
-  2-second keyframes.
+  without going live. What is left is the operator write-up. The encoder side is handled: the
+  Video Encoder block now defaults to the codec's 8-bit 4:2:0 profile, which both ingests
+  accept, instead of following the input's pixel format into one they refuse. Both platforms
+  also want an audio track and roughly 2-second keyframes.
 - **Kubernetes operator** — deploy flows as pods with resource limits and auto-scaling.
 - **Block marketplace** — browse and install community-contributed blocks.
 - **Mobile companion** — monitor status, start/stop flows, and receive alerts from a phone.
