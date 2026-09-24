@@ -273,6 +273,17 @@ struct WhipSession {
     activity: Arc<SessionActivity>,
 }
 
+/// One live session and the pipeline it runs in, for callers that need to
+/// inspect a seat's receive path from outside the session manager.
+pub struct WhipSessionPipeline {
+    /// The resource_id the session was registered under
+    pub resource_id: String,
+    /// The slot this session occupies on its endpoint
+    pub slot: usize,
+    /// The session's own pipeline
+    pub pipeline: gst::Pipeline,
+}
+
 /// A freshly created WHIP session, handed to `register_session`.
 pub struct NewWhipSession {
     /// The resource_id assigned by the internal whipserversrc signaller
@@ -652,6 +663,26 @@ impl WhipSessionManager {
                 cleanup_sent: s.cleanup_sent.clone(),
             })
             .max_by_key(|c| (c.dying, c.has_audio, c.idle))
+    }
+
+    /// The live sessions on an endpoint, with the pipeline each one runs in.
+    ///
+    /// A WHIP session's whipserversrc lives in its own pipeline, not the
+    /// flow's, so inspecting a seat's receive path needs that pipeline. Sorted
+    /// by slot so repeated polls return a stable order.
+    pub fn sessions_for_endpoint(&self, endpoint_id: &str) -> Vec<WhipSessionPipeline> {
+        let sessions = self.sessions.read().unwrap();
+        let mut found: Vec<WhipSessionPipeline> = sessions
+            .iter()
+            .filter(|(_, s)| s.endpoint_id == endpoint_id)
+            .map(|(resource_id, s)| WhipSessionPipeline {
+                resource_id: resource_id.clone(),
+                slot: s.slot,
+                pipeline: s.session_pipeline.clone(),
+            })
+            .collect();
+        found.sort_by_key(|s| s.slot);
+        found
     }
 
     /// Look up the port for a session by resource_id.
