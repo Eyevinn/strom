@@ -10,7 +10,9 @@
 //! without a running pipeline. Execution lives in the caller.
 
 use crate::blocks::builtin::mediaplayer::{MediaPlayerKey, MEDIA_PLAYER_REGISTRY};
-use crate::blocks::builtin::vision_mixer::properties::{parse_num_dsk_inputs, parse_num_inputs};
+use crate::blocks::builtin::vision_mixer::properties::{
+    parse_framerate, parse_num_dsk_inputs, parse_num_inputs,
+};
 use crate::gst::pipeline::PipelineManager;
 use strom_types::element::Link;
 use strom_types::Flow;
@@ -39,6 +41,15 @@ pub const ALPHA_MODE_PREMULTIPLIED: &str = "premultiplied";
 pub const CUT_POINT_PROPERTY: &str = "stinger_cut_point_ms";
 pub const UNDER_TRANSITION_PROPERTY: &str = "stinger_under_transition";
 pub const UNDER_DURATION_PROPERTY: &str = "stinger_under_duration_ms";
+
+/// How many mixer frames a stinger's keyed input keeps its last frame for.
+///
+/// A clip frame that reaches the mixer late would otherwise leave that output
+/// frame with no clip at all: the graphic blinks out, and on the cut frame the
+/// switch it exists to hide shows. Repeating the previous clip frame instead
+/// is a freeze too short to see. The cost is that a finished clip's last frame
+/// stays current this much longer, which the take's teardown waits out.
+pub const STINGER_LAST_FRAME_REPEAT_FRAMES: u64 = 2;
 
 /// Which keyed input of a mixer a stinger source feeds, and the timing the
 /// clip itself declares.
@@ -285,13 +296,22 @@ pub fn prepare_declared_sources(flow_id: FlowId, flow: &Flow, manager: &Pipeline
         // feeds are changed; holding is right for anything meant to stay on
         // screen.
         for (mixer_id, dsk_index) in keyed_inputs_fed_by(&flow.blocks, &flow.links, &block.id) {
-            let num_inputs = flow
-                .blocks
-                .iter()
-                .find(|b| b.id == mixer_id)
-                .map(|b| parse_num_inputs(&b.properties))
-                .unwrap_or(0);
-            if let Err(e) = manager.set_dsk_hold_last_frame(mixer_id, dsk_index, num_inputs, false)
+            let Some(mixer) = flow.blocks.iter().find(|b| b.id == mixer_id) else {
+                continue;
+            };
+            let num_inputs = parse_num_inputs(&mixer.properties);
+            let (fps_n, fps_d) = parse_framerate(
+                &mixer.properties,
+                "pgm_framerate",
+                strom_types::vision_mixer::DEFAULT_PGM_FRAMERATE,
+            );
+            let repeat_ns = if fps_n > 0 && fps_d > 0 {
+                STINGER_LAST_FRAME_REPEAT_FRAMES * 1_000_000_000 * fps_d as u64 / fps_n as u64
+            } else {
+                0
+            };
+            if let Err(e) =
+                manager.set_dsk_last_frame_repeat(mixer_id, dsk_index, num_inputs, Some(repeat_ns))
             {
                 warn!(
                     "Keyed input {} of {} could not be told to drop its last frame ({}) \
