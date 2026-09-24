@@ -410,20 +410,6 @@ fn watch_tracks(
                 continue;
             };
             let muxer_pad = track.muxer_pad.upgrade();
-
-            // A track whose own EOS reached the muxer pad has ended: splitmuxsink is
-            // not waiting for it and it will take no more data — a source that
-            // finished, not one that stalled. It has to leave the watchdog, or it
-            // stays the furthest behind for ever: both routes in `end_stalled_track`
-            // refuse a pad that already carries EOS, so every poll retries it and the
-            // track that stalls next is never looked at.
-            if muxer_pad
-                .as_ref()
-                .is_some_and(|pad| pad.sticky_event::<gst::event::Eos>(0).is_some())
-            {
-                track.activity.retired.store(true, Ordering::SeqCst);
-                continue;
-            }
             still_watching += 1;
 
             let last_ms = track.activity.last_muxed_ms.load(Ordering::Relaxed);
@@ -484,6 +470,17 @@ fn watch_tracks(
                 running_ms
             );
             last_end_ms = Some(now_ms);
+        } else if muxer_pad
+            .as_ref()
+            .is_some_and(|pad| pad.sticky_event::<gst::event::Eos>(0).is_some())
+        {
+            // Its own EOS already reached the muxer: a source that finished, not one
+            // that stalled. The refusal left it closed, so the next poll moves on to
+            // the track that is actually holding the recording.
+            debug!(
+                "Recorder {}: {} had already ended — looking at the other tracks",
+                block_id, track.label
+            );
         } else if track.activity.retired.load(Ordering::SeqCst) {
             warn!(
                 "Recorder {}: {} would not take the EOS that ends its track, and its input already carries one — the recording stays stalled",

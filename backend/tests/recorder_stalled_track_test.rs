@@ -522,14 +522,15 @@ fn a_stalled_track_whose_branch_is_coming_apart_still_ends() {
 }
 
 /// A track that ended with its own EOS is not a stalled one. It stays the furthest
-/// behind for ever, and both EOS routes refuse a pad that already carries one, so a
-/// watchdog that treats it as stuck retries it every poll and never reaches the
-/// track that stops next — which is the one freezing the recording.
+/// behind for ever, and both EOS routes refuse a pad that already carries one. The
+/// watchdog picks it once; the refusal leaves the EOS on its input, so it stays
+/// closed and the next poll reaches the track that stopped — the one freezing the
+/// recording.
 ///
 /// Here `audio 0` plays out after two seconds and `audio 1` stops silently two
-/// seconds after that. Reverting the fix pins the counted video at zero: the
-/// watchdog keeps picking the finished `audio 0`, `audio 1` is never ended, and
-/// splitmuxsink goes on waiting for it.
+/// seconds after that. Reopening a refused track even when its input carries the
+/// EOS pins the counted video at zero: the watchdog keeps picking the finished
+/// `audio 0`, `audio 1` is never ended, and splitmuxsink goes on waiting for it.
 #[test]
 fn a_track_that_finished_does_not_hide_a_later_stall() {
     gst::init().expect("gstreamer init");
