@@ -9,3 +9,23 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+    groups:
+      # One pull request per week for patch bumps instead of one per crate.
+      # The bumps themselves are rarely the point: each pull request re-resolves
+      # Cargo.lock, and most of the diff is unrelated churn - the four open on
+      # 2026-09-24 (tower-http, anyhow, reqwest, tokio-stream) were 13 to 16
+      # changed lines each, of which all but one were windows-sys edges. Those
+      # lockfiles disagree with each other, so merging one conflicts the rest
+      # and every rebase costs another CI run.
+      #
+      # Patch only, deliberately. Cargo treats the leading non-zero digit as the
+      # major one, so a 0.x minor bump is a breaking change: egui-phosphor
+      # 0.12 -> 0.13 (#733) only existed to follow egui to 0.35 and could never
+      # pass CI on its own. Grouping that class would block every safe bump
+      # behind it. Minor and major bumps keep coming one pull request at a time,
+      # where they can be read and reverted individually.
+      cargo-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
