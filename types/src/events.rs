@@ -291,9 +291,10 @@ pub enum StromEvent {
         block_instance_id: String,
         source_block_id: String,
         reason: String,
-        /// True when the clip is still on air and the mixer is still claimed,
-        /// which is the case when only the transition beneath failed. A client
-        /// must not treat that as the end of the stinger.
+        /// True when the stinger is still running and a `StingerCompleted`
+        /// follows: the transition beneath failed, or the cut was made without
+        /// the clip covering it. A client must not treat that as the end of the
+        /// stinger.
         still_running: bool,
     },
     /// Audio analyzer waveform and vectorscope data from appsink
@@ -786,8 +787,8 @@ impl StromEvent {
             } => {
                 if *still_running {
                     format!(
-                        "Stinger on {} in flow {} hit a problem ({}); its clip {} is \
-                         still on air",
+                        "Stinger on {} in flow {} hit a problem ({}); the stinger \
+                         with clip {} is still running",
                         block_instance_id, flow_id, reason, source_block_id
                     )
                 } else {

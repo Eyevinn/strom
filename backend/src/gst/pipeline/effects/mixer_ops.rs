@@ -265,19 +265,19 @@ impl PipelineManager {
         }
     }
 
-    /// Set whether a keyed input holds its last frame when its source stops
-    /// feeding it, or contributes nothing.
+    /// Set how long a keyed input keeps showing its last frame once its source
+    /// stops feeding it, after which it contributes nothing.
     ///
-    /// Holding is the default and is right for an input meant to stay on
-    /// screen. A stinger's input must not hold: the frame its clip ended on
-    /// would be composited the moment the input is revealed for the next take,
-    /// before the new clip's first frame arrives.
-    pub fn set_dsk_hold_last_frame(
+    /// Holding indefinitely (`None`) is the default and is right for an input
+    /// meant to stay on screen. A stinger's input must not: the frame its clip
+    /// ended on would be composited the moment the input is revealed for the
+    /// next take, before the new clip's first frame arrives.
+    pub fn set_dsk_last_frame_repeat(
         &self,
         block_instance_id: &str,
         dsk_index: usize,
         num_inputs: usize,
-        hold: bool,
+        repeat_ns: Option<u64>,
     ) -> Result<(), PipelineError> {
         let mixer_id = format!("{}:mixer", block_instance_id);
         let mixer = self
@@ -289,9 +289,10 @@ impl PipelineManager {
             element: mixer_id.clone(),
             pad: pad_name.clone(),
         })?;
-        // Holding is expressed as an unbounded repeat of the pad's last buffer.
+        // The repeat is measured from the end of the pad's last buffer, and
+        // u64::MAX means until EOS.
         if pad.has_property("max-last-buffer-repeat") {
-            pad.set_property("max-last-buffer-repeat", if hold { u64::MAX } else { 0u64 });
+            pad.set_property("max-last-buffer-repeat", repeat_ns.unwrap_or(u64::MAX));
         } else {
             warn!(
                 "Vision mixer {}: keyed pad {} cannot be told whether to hold its last \
@@ -300,6 +301,17 @@ impl PipelineManager {
             );
         }
         Ok(())
+    }
+
+    /// A keyed input's pad on the mixer element.
+    pub fn dsk_pad(
+        &self,
+        block_instance_id: &str,
+        dsk_index: usize,
+        num_inputs: usize,
+    ) -> Option<gst::Pad> {
+        let mixer = self.elements.get(&format!("{}:mixer", block_instance_id))?;
+        find_pad(mixer, &format!("sink_{}", num_inputs + dsk_index))
     }
 
     /// The mixer element's output pad.

@@ -19,6 +19,75 @@ struct CutGuard {
     _release: std::sync::mpsc::SyncSender<()>,
 }
 
+/// How a take's cut was anchored to its clip.
+enum CutAnchor {
+    /// The mixer is held on the frame before the cut until the guard drops.
+    /// The watch is absent when the keyed pad could not be probed.
+    Held(CutGuard, Option<ClipArrival>),
+    /// The clip never reached the mixer, so there is nothing on air to cover
+    /// the cut.
+    NoClip,
+    /// The mixer's output stopped before reaching the cut frame.
+    Stalled,
+    /// There is a clip but nothing to anchor it to: the mixer has no framerate
+    /// or output pad.
+    Unanchored,
+}
+
+/// Watches which clip frames have reached the mixer's keyed input, so a take
+/// can tell whether the frame covering its cut is there to be composited.
+///
+/// The probe is per buffer but does one atomic max, and lives only from the
+/// start of a take to its cut.
+struct ClipArrival {
+    pad: gstreamer::Pad,
+    probe: Option<gstreamer::PadProbeId>,
+    /// End of the latest clip frame to reach the pad, on the mixer's timeline.
+    latest_end: Arc<std::sync::atomic::AtomicU64>,
+    /// Start of the output frame carrying the cut, once known.
+    cut_frame_pts: Option<u64>,
+}
+
+impl ClipArrival {
+    fn watch(pad: gstreamer::Pad) -> Option<Self> {
+        use gstreamer::prelude::PadExtManual;
+        let latest_end = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let seen = latest_end.clone();
+        let probe = pad.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            if let Some(buffer) = info.buffer() {
+                if let Some(pts) = buffer.pts() {
+                    // Without a duration, a frame counts from its start only.
+                    let end = pts.nseconds() + buffer.duration().map_or(1, |d| d.nseconds());
+                    seen.fetch_max(end, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            gstreamer::PadProbeReturn::Ok
+        })?;
+        Some(Self {
+            pad,
+            probe: Some(probe),
+            latest_end,
+            cut_frame_pts: None,
+        })
+    }
+
+    /// Whether a clip frame reaching past the start of the cut frame has
+    /// arrived, so the mixer has the clip to composite into it.
+    fn covers_cut(&self) -> bool {
+        self.cut_frame_pts
+            .is_none_or(|cut| self.latest_end.load(std::sync::atomic::Ordering::Relaxed) > cut)
+    }
+}
+
+impl Drop for ClipArrival {
+    fn drop(&mut self) {
+        use gstreamer::prelude::PadExtManual;
+        if let Some(probe) = self.probe.take() {
+            self.pad.remove_probe(probe);
+        }
+    }
+}
+
 /// What the spawned half of a take needs once validation has passed.
 struct Take {
     flow: FlowId,
@@ -38,15 +107,19 @@ struct Take {
 
 impl AppState {
     /// How long past the cut point to keep waiting for the clip to reach the
-    /// mixer before giving up on anchoring and cutting on wall clock.
+    /// mixer before cutting without it.
     const STINGER_ANCHOR_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+    /// How long the mixer's output may stand still before a take stops waiting
+    /// for it to reach the cut frame. A stalled mixer puts nothing on air, so
+    /// waiting costs nothing visible; it only keeps the mixer claimed.
+    const STINGER_CUT_STALL: std::time::Duration = std::time::Duration::from_secs(5);
+    /// How long the mixer's output may stand still before a finished stinger
+    /// stops waiting for it to pass the clip's end.
+    const STINGER_CLEAR_STALL: std::time::Duration = std::time::Duration::from_millis(500);
     const STINGER_ANCHOR_POLL: std::time::Duration = std::time::Duration::from_millis(2);
     /// Longest the mixer's output is held while a take is applied. Reaching it
     /// means the cut lands late, not that the mixer stays blocked.
     const STINGER_MAX_HOLD: std::time::Duration = std::time::Duration::from_millis(250);
-    /// How long past the mixer's latency a finished stinger waits for the
-    /// mixer's output to move past its clip before releasing the mixer.
-    const STINGER_CLEAR_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
     /// Trigger a stinger: play a keyed clip over the program while another
     /// transition runs beneath it.
@@ -297,15 +370,22 @@ impl AppState {
         // Hold the mixer on the frame before the one carrying the cut
         // point, so the take is applied before that frame is composited.
         // Dropping the guard releases it.
-        let guard = state
-            .hold_mixer_before_cut(&flow, &mixer, &clip_player, cut_point, played_at)
+        let anchor = state
+            .hold_mixer_before_cut(&flow, &mixer, dsk_index, &clip_player, cut_point, played_at)
             .await;
-        if guard.is_none() {
-            // Nothing to anchor to: fall back to wall clock from the take.
-            let elapsed = played_at.elapsed();
-            let remaining = std::time::Duration::from_millis(cut_point).saturating_sub(elapsed);
-            tokio::time::sleep(remaining).await;
-        }
+        let clip_missing = matches!(anchor, CutAnchor::NoClip);
+        let stalled = matches!(anchor, CutAnchor::Stalled);
+        let (guard, arrival) = match anchor {
+            CutAnchor::Held(guard, arrival) => (Some(guard), arrival),
+            CutAnchor::NoClip | CutAnchor::Stalled => (None, None),
+            CutAnchor::Unanchored => {
+                // Nothing to anchor to: fall back to wall clock from the take.
+                let elapsed = played_at.elapsed();
+                let remaining = std::time::Duration::from_millis(cut_point).saturating_sub(elapsed);
+                tokio::time::sleep(remaining).await;
+                (None, None)
+            }
+        };
 
         // The flow may have been stopped and restarted while this waited.
         // Acting now would drive a pipeline this take knows nothing about.
@@ -317,9 +397,59 @@ impl AppState {
             return;
         }
 
+        if clip_missing {
+            // Nothing is on air to cover the cut, so it is made plainly. The
+            // keyed input comes off first, so a clip that arrives late cannot
+            // play over the new source out of step with the cut.
+            warn!(
+                "Stinger on {}: clip did not reach the mixer by its cut point, \
+                 cutting without it",
+                mixer
+            );
+            if let Err(e) = state.set_dsk_enabled(&flow, &mixer, dsk_index, false).await {
+                error!(
+                    "Stinger on {}: could not hide the keyed input: {}",
+                    mixer, e
+                );
+            }
+            state.report_uncovered_cut(
+                &flow,
+                &mixer,
+                &source,
+                "the clip did not reach the mixer by its cut point, so the cut was \
+                 made without it",
+            );
+        }
+        if stalled {
+            state.report_uncovered_cut(
+                &flow,
+                &mixer,
+                &source,
+                "the mixer's output stopped before the cut frame, so the cut was made \
+                 on wall clock",
+            );
+        }
+
         let beneath = state
             .trigger_transition(&flow, &mixer, from_input, to_input, &under_name, under_ms)
             .await;
+        // A clip frame that has not reached the mixer by now will not be in
+        // the cut frame: the mixer shows an earlier clip frame or none, and
+        // the switch shows through whatever the clip does not cover.
+        if arrival.as_ref().is_some_and(|a| !a.covers_cut()) {
+            warn!(
+                "Stinger on {}: clip frame for the cut point had not reached the mixer",
+                mixer
+            );
+            state.report_uncovered_cut(
+                &flow,
+                &mixer,
+                &source,
+                "the clip's frame for the cut point reached the mixer late, so the cut \
+                 may show",
+            );
+        }
+        drop(arrival);
         // Release the mixer only once the take has been applied.
         drop(guard);
         if let Err(e) = beneath {
@@ -348,18 +478,15 @@ impl AppState {
             return;
         }
 
-        if let Err(e) = state.set_dsk_enabled(&flow, &mixer, dsk_index, false).await {
-            error!(
-                "Stinger on {}: could not hide the keyed input: {}",
-                mixer, e
-            );
-        }
-
-        // The keyed pad keeps the clip's last frame until the mixer produces
-        // an output frame past its end with nothing newer queued. A take fired
-        // before then queues the next playthrough's first frame, which keeps
-        // the stale one current, and revealing the keyed input puts it on air.
-        // This runs before re-arming, which resets the clip's offset.
+        // The keyed input comes off once the mixer is past the clip, not when
+        // wall clock says it ended: a clip that started late is still playing.
+        //
+        // The keyed pad also keeps the clip's last frame until the mixer
+        // produces an output frame past its end, plus the pad's repeat window,
+        // with nothing newer queued. A take fired before then queues the next
+        // playthrough's first frame, which keeps the stale one current, and
+        // revealing the keyed input puts it on air. This runs before
+        // re-arming, which resets the clip's offset.
         let clip_ns = clip_player
             .duration()
             .unwrap_or(clip_ms.saturating_mul(1_000_000));
@@ -377,6 +504,13 @@ impl AppState {
                 mixer
             );
             return;
+        }
+
+        if let Err(e) = state.set_dsk_enabled(&flow, &mixer, dsk_index, false).await {
+            error!(
+                "Stinger on {}: could not hide the keyed input: {}",
+                mixer, e
+            );
         }
 
         // Re-arm so the next fire is fast again, then release the mixer.
@@ -402,10 +536,12 @@ impl AppState {
         debug!("Stinger on {} complete", mixer);
     }
 
-    /// Wait until the mixer has produced an output frame starting after `at_ns`
-    /// on its timeline, while `keep_waiting` holds. Gives up after the mixer's
-    /// latency plus `STINGER_CLEAR_TIMEOUT`, since its output trails the clock
-    /// by that latency.
+    /// Wait until the mixer has produced an output frame starting after the
+    /// keyed pad's repeat of a frame ending at `at_ns` has run out, while
+    /// `keep_waiting` holds.
+    ///
+    /// On a loaded machine the mixer's output can trail the clock by far more
+    /// than its latency, so this gives up only once the output stops advancing.
     async fn wait_for_mixer_to_pass(
         &self,
         flow_id: &FlowId,
@@ -413,7 +549,6 @@ impl AppState {
         at_ns: i64,
         keep_waiting: &impl Fn() -> bool,
     ) {
-        use gstreamer::prelude::PadExtManual;
         let Ok(at_ns) = u64::try_from(at_ns) else {
             return;
         };
@@ -426,33 +561,27 @@ impl AppState {
                 ))
             })
         }) else {
+            debug!(
+                "Stinger on {}: mixer has no framerate to wait on, so a take fired \
+                 now may flash the previous clip's last frame",
+                block_instance_id
+            );
             return;
         };
-        let latency = {
-            let mut query = gstreamer::query::Latency::new();
-            if pad.query(&mut query) {
-                query.result().1
-            } else {
-                gstreamer::ClockTime::ZERO
-            }
-        };
-        // The mixer's position is the end of the last frame it produced, so
-        // at this position that frame started at least half a frame after
-        // `at_ns`, whatever the rounding in either timestamp.
-        let target = at_ns.saturating_add(frame_ns + frame_ns / 2);
-        let give_up = std::time::Instant::now()
-            + std::time::Duration::from_nanos(latency.nseconds())
-            + Self::STINGER_CLEAR_TIMEOUT;
+        // The keyed pad repeats the clip's last frame for this long past
+        // `at_ns`. The mixer's position is the end of the last frame it
+        // produced, so at the target that frame started at least half a frame
+        // after the repeat ran out, whatever the rounding in either timestamp.
+        let repeat_ns = crate::gst::stinger::STINGER_LAST_FRAME_REPEAT_FRAMES * frame_ns;
+        let target = at_ns.saturating_add(repeat_ns + frame_ns + frame_ns / 2);
+        let mut progress = MixerProgress::new(pad);
         while keep_waiting() {
-            let position = pad
-                .query_position::<gstreamer::ClockTime>()
-                .map(|p| p.nseconds());
-            if position.is_some_and(|p| p >= target) {
+            if progress.position().is_some_and(|p| p >= target) {
                 return;
             }
-            if std::time::Instant::now() > give_up {
+            if progress.stalled(Self::STINGER_CLEAR_STALL) {
                 warn!(
-                    "Stinger on {}: mixer did not move past the clip in time, so a \
+                    "Stinger on {}: mixer stopped before passing the clip's end, so a \
                      take fired now may flash its last frame",
                     block_instance_id
                 );
@@ -460,6 +589,18 @@ impl AppState {
             }
             tokio::time::sleep(Self::STINGER_ANCHOR_POLL).await;
         }
+    }
+
+    /// Report a cut the clip may not have covered. The stinger carries on, so
+    /// a `StingerCompleted` still follows.
+    fn report_uncovered_cut(&self, flow: &FlowId, mixer: &str, source: &str, reason: &str) {
+        self.inner.events.broadcast(StromEvent::StingerFailed {
+            flow_id: *flow,
+            block_instance_id: mixer.to_string(),
+            source_block_id: source.to_string(),
+            reason: reason.to_string(),
+            still_running: true,
+        });
     }
 
     /// Hold the mixer's output thread just before the frame that carries the
@@ -479,18 +620,35 @@ impl AppState {
     /// whose interval contains the cut point. Blocking the mixer's src pad on
     /// the frame before it means the take is always applied first.
     ///
-    /// Returns `None` when there is nothing to anchor to, leaving the caller to
-    /// fall back to wall clock.
+    /// Once the clip has reached the mixer, this waits for the mixer however
+    /// far its output trails the clock, since cutting on wall clock instead
+    /// applies the cut to whichever frame the mixer is on: early in the clip,
+    /// or before the clip is on air at all. It gives up only if the output
+    /// stops advancing.
     async fn hold_mixer_before_cut(
         &self,
         flow_id: &FlowId,
         block_instance_id: &str,
+        dsk_index: usize,
         player: &Arc<crate::blocks::builtin::mediaplayer::MediaPlayerState>,
         cut_point_ms: u64,
         played_at: std::time::Instant,
-    ) -> Option<CutGuard> {
+    ) -> CutAnchor {
         let give_up =
             played_at + std::time::Duration::from_millis(cut_point_ms) + Self::STINGER_ANCHOR_GRACE;
+
+        // Watch from the start of the take: a clip running ahead of a lagging
+        // mixer delivers its cut frame long before the mixer reaches it.
+        let num_inputs = self
+            .get_vision_mixer_num_inputs(flow_id, block_instance_id)
+            .await;
+        let mut arrival = {
+            let pipelines = self.inner.pipelines.read().await;
+            pipelines
+                .get(flow_id)
+                .and_then(|manager| manager.dsk_pad(block_instance_id, dsk_index, num_inputs))
+                .and_then(ClipArrival::watch)
+        };
 
         // The offset is only known once the bridge has delivered a buffer.
         let offset = loop {
@@ -498,32 +656,33 @@ impl AppState {
                 break o;
             }
             if std::time::Instant::now() > give_up {
-                warn!(
-                    "Stinger on {}: clip never reported a stream offset, cutting on \
-                     wall clock",
-                    block_instance_id
-                );
-                return None;
+                return CutAnchor::NoClip;
             }
             tokio::time::sleep(Self::STINGER_ANCHOR_POLL).await;
         };
 
-        let (frame_ns, pad) = {
+        let Some((frame_ns, pad)) = ({
             let pipelines = self.inner.pipelines.read().await;
-            let manager = pipelines.get(flow_id)?;
-            (
-                manager.mixer_frame_duration_ns(block_instance_id)?,
-                manager.mixer_src_pad(block_instance_id)?,
-            )
+            pipelines.get(flow_id).and_then(|manager| {
+                Some((
+                    manager.mixer_frame_duration_ns(block_instance_id)?,
+                    manager.mixer_src_pad(block_instance_id)?,
+                ))
+            })
+        }) else {
+            return CutAnchor::Unanchored;
         };
 
         // Floor, not round: the frame that carries the cut point is the one
         // whose interval contains it, and rounding up is a frame late.
         let cut_at = offset.saturating_add((cut_point_ms as i64).saturating_mul(1_000_000));
         if cut_at < 0 {
-            return None;
+            return CutAnchor::Unanchored;
         }
         let cut_frame_pts = (cut_at as u64 / frame_ns) * frame_ns;
+        if let Some(arrival) = arrival.as_mut() {
+            arrival.cut_frame_pts = Some(cut_frame_pts);
+        }
         // Half a frame back from the preceding frame, so a pts landing slightly
         // off the grid still matches it rather than the cut frame itself.
         let hold_from_pts = cut_frame_pts
@@ -543,7 +702,7 @@ impl AppState {
         // the lock and the channel run once, on the buffer it holds, and the
         // probe removes itself there. It is installed for a single take.
         use gstreamer::prelude::PadExtManual;
-        let probe = pad.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+        let Some(probe) = pad.add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
             let Some(pts) = info.buffer().and_then(|b| b.pts()) else {
                 return gstreamer::PadProbeReturn::Ok;
             };
@@ -574,31 +733,75 @@ impl AppState {
                 waited.elapsed()
             );
             gstreamer::PadProbeReturn::Remove
-        })?;
+        }) else {
+            return CutAnchor::Unanchored;
+        };
 
-        match tokio::time::timeout(
-            give_up.saturating_duration_since(std::time::Instant::now()),
-            reached_rx,
-        )
-        .await
-        {
-            Ok(Ok(_)) => Some(CutGuard {
-                _release: release_tx,
-            }),
-            _ => {
-                // Never reached. Drop the sender first: a probe that fired just
-                // as the wait expired is blocked on it, and releasing it before
-                // removing the probe keeps the program output from stalling for
-                // the whole hold. Then cut on wall clock.
-                drop(release_tx);
-                pad.remove_probe(probe);
-                warn!(
-                    "Stinger on {}: mixer never reached the cut frame, cutting on \
-                     wall clock",
-                    block_instance_id
-                );
-                None
+        let mut reached_rx = reached_rx;
+        let mut progress = MixerProgress::new(pad.clone());
+        loop {
+            match tokio::time::timeout(Self::STINGER_ANCHOR_POLL, &mut reached_rx).await {
+                Ok(Ok(_)) => {
+                    let guard = CutGuard {
+                        _release: release_tx,
+                    };
+                    return CutAnchor::Held(guard, arrival);
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    progress.position();
+                    if progress.stalled(Self::STINGER_CUT_STALL) {
+                        break;
+                    }
+                }
             }
         }
+        // Never reached. Drop the sender first: a probe that fired just as the
+        // wait ended is blocked on it, and releasing it before removing the
+        // probe keeps the program output from stalling for the whole hold.
+        drop(release_tx);
+        pad.remove_probe(probe);
+        warn!(
+            "Stinger on {}: mixer stopped before the cut frame, cutting on wall clock",
+            block_instance_id
+        );
+        CutAnchor::Stalled
+    }
+}
+
+/// Tracks whether a mixer's output is still advancing.
+struct MixerProgress {
+    pad: gstreamer::Pad,
+    last: Option<u64>,
+    advanced_at: std::time::Instant,
+}
+
+impl MixerProgress {
+    fn new(pad: gstreamer::Pad) -> Self {
+        Self {
+            pad,
+            last: None,
+            advanced_at: std::time::Instant::now(),
+        }
+    }
+
+    /// The end of the last frame the mixer produced, on its timeline.
+    fn position(&mut self) -> Option<u64> {
+        use gstreamer::prelude::PadExtManual;
+        let position = self
+            .pad
+            .query_position::<gstreamer::ClockTime>()
+            .map(|p| p.nseconds());
+        if position.is_some() && position > self.last {
+            self.last = position;
+            self.advanced_at = std::time::Instant::now();
+        }
+        position
+    }
+
+    /// Whether the output has not advanced for `limit`, as of the last
+    /// `position`.
+    fn stalled(&self, limit: std::time::Duration) -> bool {
+        self.advanced_at.elapsed() > limit
     }
 }

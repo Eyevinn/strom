@@ -10052,7 +10052,7 @@
                   },
                   "still_running": {
                     "type": "boolean",
-                    "description": "True when the clip is still on air and the mixer is still claimed,\nwhich is the case when only the transition beneath failed. A client\nmust not treat that as the end of the stinger."
+                    "description": "True when the stinger is still running and a `StingerCompleted`\nfollows: the transition beneath failed, or the cut was made without\nthe clip covering it. A client must not treat that as the end of the\nstinger."
                   }
                 }
               },

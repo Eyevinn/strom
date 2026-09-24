@@ -713,16 +713,22 @@ async fn a_repeat_stinger_plays_forward_from_the_start() {
         .expect("second stinger must start");
 
     // Every frame in order, so a stale frame lasting one frame is still seen.
-    // A frame with no clip on it comes before the clip arrives, or is a late
-    // clip frame on a starved machine, and says nothing about which frame is
-    // on air. A dozen with the clip on them is well before it ends.
+    // Frames with no clip on them come before the clip arrives; once it has,
+    // one means the graphic blinked out. A dozen with the clip on them is well
+    // before it ends.
     let mut on_air = Vec::new();
+    let mut blinks = 0;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     while on_air.len() < 12 && tokio::time::Instant::now() < deadline {
         if let Some((pts, frame)) = pgm_sample(&running).await {
             let coverage = green_fraction(&frame);
-            if pts >= taken_at && coverage > 0.0 {
+            if pts < taken_at {
+                continue;
+            }
+            if coverage > 0.0 {
                 on_air.push(coverage);
+            } else if !on_air.is_empty() {
+                blinks += 1;
             }
         }
     }
@@ -743,6 +749,10 @@ async fn a_repeat_stinger_plays_forward_from_the_start() {
     assert!(
         drop_at.is_none(),
         "a repeat stinger must play forward; coverage was {shown:?}"
+    );
+    assert_eq!(
+        blinks, 0,
+        "the clip must stay on air until it ends; coverage was {shown:?}"
     );
 }
 
@@ -821,8 +831,9 @@ async fn a_stinger_outliving_its_flow_leaves_the_next_one_alone() {
 /// frame whose source has changed, coverage says which clip frame was on air.
 /// A cut point of 500 ms is clip frame 15 at 30 fps, which covers 16/30.
 ///
-/// Late is the defect: it leaks the incoming source down whatever the clip has
-/// not covered yet. Early by one is read, not real. Which clip frame the mixer
+/// Late leaks the incoming source down whatever the clip has not covered yet;
+/// early shows the switch before the clip covers it. Early by one is read, not
+/// real. Which clip frame the mixer
 /// composited into an output frame depends on the sub-frame phase between the
 /// clip and the output grid, and within about 1% of a clip frame boundary it
 /// shows the earlier one. That is a property of the picture this test reads,
@@ -853,7 +864,7 @@ async fn the_cut_lands_on_the_frame_the_cut_point_names() {
     const CUT_MS: u64 = 500;
     let expected = (CUT_MS / (FRAME_DUR_NS / 1_000_000)) as usize;
     let mut landed = Vec::new();
-    let mut unreadable = 0;
+    let mut reported = 0;
     for take in 0..TAKES {
         let (from, to) = if take % 2 == 0 { (0, 1) } else { (1, 0) };
         let mut rx = running.state.events().subscribe();
@@ -887,37 +898,48 @@ async fn the_cut_lands_on_the_frame_the_cut_point_names() {
             }
             was = Some(now_red);
         }
-        // A starved process occasionally composites a frame with no clip on
-        // it: the clip's buffer is late, and a stinger's keyed pad does not
-        // repeat its last frame. When that frame is the one the program
-        // changed on, it cannot say which clip frame was on air.
-        match changed_at.map(|cov| ((cov * FRAMES as f64).round() as usize).checked_sub(1)) {
-            Some(Some(frame)) => landed.push(Some(frame)),
-            Some(None) => unreadable += 1,
-            None => landed.push(None),
-        }
-
+        // A take whose clip was not at the mixer in time to cover the cut is
+        // reported. Any other take must cut under the clip: coverage of zero
+        // is the switch the stinger exists to hide.
+        let mut missed = false;
         wait_for_event(&mut rx, 8000, |e| match e {
+            strom_types::StromEvent::StingerFailed { .. } => {
+                missed = true;
+                None
+            }
             strom_types::StromEvent::StingerCompleted { .. } => Some(()),
             _ => None,
         })
         .await
         .expect("the stinger must finish");
+        if missed {
+            reported += 1;
+        } else {
+            landed.push(
+                changed_at.map(|cov| ((cov * FRAMES as f64).round() as usize).checked_sub(1)),
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let _ = std::fs::remove_file(&clip);
 
-    // A clip that never reaches the program at the cut would be unreadable on
-    // every take, so at most half may be.
+    // A clip that never reaches the mixer in time would be reported on every
+    // take, so at most half may be.
     assert!(
-        unreadable <= TAKES / 2,
-        "{unreadable} of {TAKES} takes changed the program on a frame with no \
-         clip on it; landed on {landed:?}"
+        reported <= TAKES / 2,
+        "{reported} of {TAKES} takes reported the clip missing the cut"
     );
     assert!(
-        landed.iter().all(|l| l.is_some_and(|f| f <= expected)),
-        "no take may cut later than clip frame {expected}; landed on {landed:?} \
-         ({unreadable} unreadable)"
+        !landed.contains(&Some(None)),
+        "no take may change the program on a frame with no clip on it without \
+         reporting it; landed on {landed:?}"
+    );
+    assert!(
+        landed.iter().all(|l| l
+            .flatten()
+            .is_some_and(|f| f + 1 >= expected && f <= expected)),
+        "every take must cut on clip frame {expected}, or read one early; landed \
+         on {landed:?} ({reported} reported the clip missing the cut)"
     );
 }
 
@@ -1242,8 +1264,9 @@ async fn under_transition_outlasting_the_clip_is_clamped_and_reported() {
          but 900 + {applied} does not"
     );
 
-    // And the stinger reports completion once the clip ends.
-    let completed = wait_for_event(&mut rx, 4000, |e| match e {
+    // And the stinger reports completion once the mixer is past the clip,
+    // which on a loaded machine trails the clock by seconds.
+    let completed = wait_for_event(&mut rx, 15000, |e| match e {
         strom_types::StromEvent::StingerCompleted {
             source_block_id, ..
         } => Some(source_block_id.clone()),
