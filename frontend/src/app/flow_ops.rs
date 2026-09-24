@@ -1,3 +1,4 @@
+use crate::properties::is_rtp_stats_block_def;
 use crate::state::AppMessage;
 use egui::Context;
 use strom_types::Flow;
@@ -103,7 +104,7 @@ impl StromApp {
     }
 
     /// Fetch RTP statistics and dynamic pads for the currently selected flow (if running).
-    /// RTP stats are only fetched if the flow has blocks that produce them (e.g., AES67 Input).
+    /// RTP stats are only fetched if the flow has blocks that can produce them.
     pub(super) fn fetch_rtp_stats_for_selected_flow(&self, ctx: &Context) {
         // Only fetch for selected flow if it's running
         let flow_id = match self.selected_flow_id {
@@ -124,7 +125,7 @@ impl StromApp {
             .map(|f| {
                 f.blocks
                     .iter()
-                    .any(|b| b.block_definition_id == "builtin.aes67_input")
+                    .any(|b| is_rtp_stats_block_def(&b.block_definition_id))
             })
             .unwrap_or(false);
 
