@@ -24,7 +24,7 @@ use strom_types::block::{
     BlockCategoriesResponse, BlockDefinition, BlockInstance, BlockListResponse, BlockResponse,
     CreateBlockRequest, ExposedProperty, ExternalPad, ExternalPads, PropertyMapping, PropertyType,
 };
-use strom_types::devtools::{DevToolsTarget, DevToolsTargets};
+use strom_types::devtools::{DevToolsLink, DevToolsTarget, DevToolsTargets};
 use strom_types::discovery::{
     AnnouncedStreamResponse, DeviceCategory, DeviceCountByCategory, DeviceDiscoveryStatus,
     DeviceResponse, DiscoveredStreamResponse, NdiDiscoveryStatus,
@@ -176,9 +176,8 @@ use utoipa::OpenApi;
         crate::api::websocket::websocket_handler,
         // Remote control of HTML source browsers
         crate::api::devtools::list_targets,
-        crate::api::devtools::open_target,
-        crate::api::devtools::proxy_ui,
-        crate::api::devtools::proxy_cdp,
+        crate::api::devtools::create_link,
+        crate::api::devtools::revoke_link,
     ),
     components(
         schemas(
@@ -191,6 +190,7 @@ use utoipa::OpenApi;
             PortEntry,
             PortState,
             PortSpan,
+            DevToolsLink,
             DevToolsTarget,
             DevToolsTargets,
             FlowResponse,
