@@ -254,13 +254,23 @@ impl AppState {
     }
 
     /// Every live reservation.
+    ///
+    /// Reconciles first, like every other way into the pool: an association
+    /// whose flow is gone must never be observable, or a caller reads a port
+    /// as in use by a flow that no longer exists.
     pub async fn list_port_reservations(&self) -> Result<Vec<PortReservation>, PortPoolError> {
-        self.inner.port_pool.read().await.list(Utc::now())
+        let live = self.live_flow_ids().await;
+        let mut pool = self.inner.port_pool.write().await;
+        pool.reconcile(&live, Utc::now());
+        pool.list(Utc::now())
     }
 
     /// One live reservation.
     pub async fn get_port_reservation(&self, id: Uuid) -> Result<PortReservation, PortPoolError> {
-        self.inner.port_pool.read().await.get(id, Utc::now())
+        let live = self.live_flow_ids().await;
+        let mut pool = self.inner.port_pool.write().await;
+        pool.reconcile(&live, Utc::now());
+        pool.get(id, Utc::now())
     }
 
     /// Grant or grow the reservation for `owner_id`.
@@ -310,7 +320,9 @@ impl AppState {
         ttl_secs: Option<u64>,
     ) -> anyhow::Result<Result<PortReservation, PortPoolError>> {
         let default_ttl = *self.inner.port_lease_ttl.lock();
+        let live = self.live_flow_ids().await;
         let mut pool = self.inner.port_pool.write().await;
+        pool.reconcile(&live, Utc::now());
         let outcome = pool.renew(id, ttl_secs, default_ttl, Utc::now());
         if outcome.is_ok() {
             self.save_port_reservations(&pool).await?;
@@ -341,7 +353,9 @@ impl AppState {
         flow_id: FlowId,
         ports: &[u16],
     ) -> anyhow::Result<Result<PortReservation, PortPoolError>> {
+        let live = self.live_flow_ids().await;
         let mut pool = self.inner.port_pool.write().await;
+        pool.reconcile(&live, Utc::now());
         let outcome = pool.assign(id, flow_id, ports, Utc::now());
         if outcome.is_ok() {
             self.save_port_reservations(&pool).await?;
@@ -355,7 +369,9 @@ impl AppState {
         id: Uuid,
         flow_id: FlowId,
     ) -> anyhow::Result<Result<(), PortPoolError>> {
+        let live = self.live_flow_ids().await;
         let mut pool = self.inner.port_pool.write().await;
+        pool.reconcile(&live, Utc::now());
         let outcome = pool.unassign(id, flow_id, Utc::now());
         if outcome.is_ok() {
             self.save_port_reservations(&pool).await?;

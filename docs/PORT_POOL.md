@@ -115,8 +115,9 @@ again for the same flow replaces what was recorded, so a caller can correct itse
 port the reservation does not hold is a `400`.
 
 The association is dropped when the caller releases it, or when the flow no longer exists — the
-pool reconciles against the current flow list at startup and whenever it is read or allocated
-from, so no hook in the flow lifecycle is needed.
+pool reconciles against the current flow list at startup and on every route that reads or changes
+it, so no hook in the flow lifecycle is needed and an association whose flow is gone is never
+observable.
 
 Nothing verifies that a flow actually binds the ports it was assigned. A caller that never
 assigns anything gets plain TTL behaviour and nothing breaks.

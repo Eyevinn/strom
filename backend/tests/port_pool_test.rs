@@ -34,9 +34,18 @@ async fn app_with_pool(
     ports: impl IntoIterator<Item = u16>,
     dir: &TempDir,
 ) -> Router {
+    app_with_pool_probing(state, ports, dir, false).await
+}
+
+async fn app_with_pool_probing(
+    state: &AppState,
+    ports: impl IntoIterator<Item = u16>,
+    dir: &TempDir,
+    probe: bool,
+) -> Router {
     let ports: BTreeSet<u16> = ports.into_iter().collect();
     state
-        .configure_port_pool(ports, PortReservationStore::new(dir.path()), 600, false)
+        .configure_port_pool(ports, PortReservationStore::new(dir.path()), 600, probe)
         .await
         .unwrap();
     state.load_from_storage().await.unwrap();
@@ -397,4 +406,119 @@ async fn the_pool_view_compacts_runs_and_lists_only_what_is_taken() {
     assert_eq!(pool["entries"].as_array().unwrap().len(), 2);
     assert_eq!(pool["entries"][0]["state"], json!("reserved"));
     assert_eq!(pool["entries"][0]["owner_id"], json!("prod-a"));
+}
+
+/// The round trip the issue specifies, in its order: the flow goes first, and
+/// its ports come back to the *reservation* — not to the pool, which only gets
+/// them once the reservation is given back too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ports_return_to_the_reservation_when_a_flow_goes_and_to_the_pool_when_it_is_released() {
+    gstreamer::init().unwrap();
+    let dir = TempDir::new().unwrap();
+    let state = new_state(&dir);
+    let app = app_with_pool(&state, 47100..=47109, &dir).await;
+
+    let flow = Flow::new("production");
+    let flow_id = flow.id;
+    state.upsert_flow(flow).await.unwrap();
+
+    let (_, a) = call(
+        &app,
+        Method::POST,
+        "/api/ports/reservations",
+        Some(json!({"owner_id": "prod-a", "count": 5})),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap().to_string();
+    let held = ports_of(&a);
+    call(
+        &app,
+        Method::POST,
+        &format!("/api/ports/reservations/{id}/assign"),
+        Some(json!({"flow_id": flow_id, "ports": [47100, 47101]})),
+    )
+    .await;
+
+    // The flow goes. Its ports are the owner's again — still held, still not free.
+    state.delete_flow(&flow_id).await.unwrap();
+    let (status, after) = call(
+        &app,
+        Method::GET,
+        &format!("/api/ports/reservations/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(
+        ports_of(&after),
+        held,
+        "the owner keeps its ports across flow churn"
+    );
+    assert!(
+        after["in_use"].as_array().unwrap().is_empty(),
+        "the association went with the flow"
+    );
+    let (_, pool) = call(&app, Method::GET, "/api/ports", None).await;
+    assert_eq!(pool["free"], json!(5), "{pool}");
+
+    // Only giving the reservation back puts them in the pool.
+    let (status, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/ports/reservations/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, pool) = call(&app, Method::GET, "/api/ports", None).await;
+    assert_eq!(pool["free"], json!(10), "{pool}");
+    assert!(pool["entries"].as_array().unwrap().is_empty());
+}
+
+/// The probe against a real socket rather than a stubbed answer: the point of
+/// it is that something *outside* Strom holding a number keeps that number out
+/// of a reservation, and only a real bind proves that path works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_port_held_by_another_process_is_skipped_and_marked_blocked() {
+    use std::net::{TcpListener, UdpSocket};
+
+    gstreamer::init().unwrap();
+    let dir = TempDir::new().unwrap();
+    let state = new_state(&dir);
+
+    // Take a port the OS says is free, and hold it for the length of the test.
+    // Asking for an ephemeral one rather than naming a number keeps this from
+    // failing on whatever else happens to be listening on the build machine.
+    let held = TcpListener::bind("0.0.0.0:0").unwrap();
+    let blocked = held.local_addr().unwrap().port();
+    let _also_udp = UdpSocket::bind(("0.0.0.0", blocked)).ok();
+
+    // A pool of exactly that port and the two after it.
+    let app = app_with_pool_probing(&state, blocked..=blocked + 2, &dir, true).await;
+
+    let (status, a) = call(
+        &app,
+        Method::POST,
+        "/api/ports/reservations",
+        Some(json!({"owner_id": "prod-a", "count": 2})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{a}");
+    assert_eq!(
+        ports_of(&a),
+        vec![blocked + 1, blocked + 2],
+        "the held port must not be handed out"
+    );
+
+    let (_, pool) = call(&app, Method::GET, "/api/ports", None).await;
+    let entry = pool["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["port"] == json!(blocked))
+        .unwrap_or_else(|| panic!("{blocked} missing from the pool view: {pool}"));
+    assert_eq!(entry["state"], json!("blocked"));
+    assert_eq!(pool["free"], json!(0), "two reserved, one blocked");
+
+    drop(held);
 }
