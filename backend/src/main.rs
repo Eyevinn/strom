@@ -381,6 +381,65 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Open Chromium's remote debugging port when the operator asked for it.
+    //
+    // This is what lets an operator drive an HTML source: log in to a page,
+    // click through a consent dialog, dismiss a cookie banner. The port speaks
+    // the Chrome DevTools Protocol, which is total control of the browser
+    // process, so it is off unless configured, and Chromium binds it to
+    // loopback. Reach it through the authenticated API, never by publishing
+    // the port.
+    //
+    // `persist-session-cookies` rides along: without it a login lands in a
+    // session cookie that Chromium keeps in memory only, so the next flow
+    // start is logged out again even with a warm profile. Chromium writes the
+    // cookie store on a timer, so a login survives a graceful restart but not
+    // a kill in the first half minute after it.
+    //
+    // gstcefsrc reads these switches once, when the first cefsrc initializes
+    // CEF for the whole process, and the flags are additive: the strom-full
+    // entrypoint already sets GST_CEF_CHROME_EXTRA_FLAGS in GPU mode, so
+    // compose with whatever is there rather than replacing it.
+    if let Some(debug_port) = config.cef_debug_port {
+        let mut flags: Vec<String> = std::env::var("GST_CEF_CHROME_EXTRA_FLAGS")
+            .ok()
+            .map(|existing| {
+                existing
+                    .split(',')
+                    .map(|f| f.trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let already_set = |flags: &[String], name: &str| {
+            flags
+                .iter()
+                .any(|f| f == name || f.starts_with(&format!("{}=", name)))
+        };
+
+        if already_set(&flags, "remote-debugging-port") {
+            info!(
+                "CEF remote debugging: keeping the port from GST_CEF_CHROME_EXTRA_FLAGS, \
+                 ignoring the configured {}",
+                debug_port
+            );
+        } else {
+            flags.push(format!("remote-debugging-port={}", debug_port));
+        }
+        if !already_set(&flags, "persist-session-cookies") {
+            flags.push("persist-session-cookies".to_string());
+        }
+
+        std::env::set_var("GST_CEF_CHROME_EXTRA_FLAGS", flags.join(","));
+        warn!(
+            "CEF remote debugging enabled on 127.0.0.1:{} - a session opened against any HTML \
+             source reaches every HTML source in this instance and every cookie the browser \
+             holds, so do not enable this where HTML sources belong to different customers",
+            debug_port
+        );
+    }
+
     // Determine if GUI should be enabled
     #[cfg(not(feature = "no-gui"))]
     let gui_enabled = !args.headless;
@@ -562,6 +621,7 @@ fn run_with_gui(
             auth_config,
             config.cors_allowed_origins.clone(),
             config.port,
+            devtools_config(&config),
         )
         .await;
 
@@ -694,6 +754,17 @@ fn run_headless_entry(
     }
 }
 
+/// The DevTools proxy's view of the configuration.
+///
+/// Whether the link it hands out says `ws://` or `wss://` follows this
+/// instance's own TLS, unless something in front of us says otherwise.
+fn devtools_config(config: &Config) -> strom::api::devtools::DevToolsConfig {
+    strom::api::devtools::DevToolsConfig {
+        debug_port: config.cef_debug_port,
+        tls: config.tls_cert.is_some() && config.tls_key.is_some(),
+    }
+}
+
 #[tokio::main]
 async fn run_headless(
     config: Config,
@@ -783,6 +854,7 @@ async fn run_headless(
         auth::AuthConfig::from_env(),
         config.cors_allowed_origins.clone(),
         config.port,
+        devtools_config(&config),
     )
     .await;
 

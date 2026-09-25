@@ -305,6 +305,140 @@
         }
       }
     },
+    "/api/devtools/cdp/{target_id}": {
+      "get": {
+        "tags": [
+          "devtools"
+        ],
+        "summary": "Carry the DevTools protocol between the operator's browser and Chromium.",
+        "operationId": "proxy_cdp",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "description": "Chromium target id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket connection upgraded"
+          },
+          "400": {
+            "description": "Malformed target id"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Remote control is disabled"
+          }
+        }
+      }
+    },
+    "/api/devtools/open/{target_id}": {
+      "get": {
+        "tags": [
+          "devtools"
+        ],
+        "summary": "Open DevTools against one page.",
+        "description": "This is the link an operator pastes into their own browser. It arrives\nauthenticated — by session, bearer token or `?auth_token=` — and leaves\nwith a session cookie, because what follows is the DevTools application\nfetching its own files and opening its own socket, and those requests carry\nnothing but cookies. The token already grants everything the session does,\nso this widens no one's access; it only makes it last a browser session.",
+        "operationId": "open_target",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "description": "Chromium target id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Redirect to the DevTools application"
+          },
+          "400": {
+            "description": "Malformed target id"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Remote control is disabled"
+          }
+        }
+      }
+    },
+    "/api/devtools/targets": {
+      "get": {
+        "tags": [
+          "devtools"
+        ],
+        "summary": "List the pages that `cefsrc` elements are currently rendering.",
+        "operationId": "list_targets",
+        "responses": {
+          "200": {
+            "description": "Pages available for remote control",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevToolsTargets"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "502": {
+            "description": "The DevTools endpoint did not answer"
+          }
+        }
+      }
+    },
+    "/api/devtools/ui/{path}": {
+      "get": {
+        "tags": [
+          "devtools"
+        ],
+        "summary": "Serve the DevTools application from Chromium.",
+        "description": "CEF ships the whole application and serves it under `/devtools/`, so this\nis a plain pass-through: no rewriting, and nothing fetched from the\ninternet, which matters for an instance that has none.",
+        "operationId": "proxy_ui",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "description": "File within the DevTools application",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A file of the DevTools application"
+          },
+          "400": {
+            "description": "Path outside the DevTools application"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "404": {
+            "description": "Remote control is disabled"
+          },
+          "502": {
+            "description": "The DevTools endpoint did not answer"
+          }
+        }
+      }
+    },
     "/api/discovery/announced": {
       "get": {
         "tags": [
@@ -5313,6 +5447,55 @@
           "path": {
             "type": "string",
             "description": "Path for new directory (relative to media root)"
+          }
+        }
+      },
+      "DevToolsTarget": {
+        "type": "object",
+        "description": "One browser page rendered by a `cefsrc` element.\n\nA CEF process hosts every `cefsrc` in the instance, so the targets of all\nHTML sources arrive in one list. The `id` is Chromium's, and it changes\nwhenever the page is recreated — it identifies a live page, not a block.",
+        "required": [
+          "id",
+          "title",
+          "url",
+          "open_path"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Chromium's target id for this page."
+          },
+          "open_path": {
+            "type": "string",
+            "description": "Path on this Strom instance that opens DevTools against this page.\nRelative, so it works whatever host or scheme the client reached us on."
+          },
+          "title": {
+            "type": "string",
+            "description": "The page's current title, as the document reports it."
+          },
+          "url": {
+            "type": "string",
+            "description": "The URL the page is currently showing."
+          }
+        }
+      },
+      "DevToolsTargets": {
+        "type": "object",
+        "description": "Every page currently rendered by a `cefsrc` element.",
+        "required": [
+          "enabled",
+          "targets"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the instance has a Chromium remote debugging port configured.\nWhen false the list is empty and no target can be opened."
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DevToolsTarget"
+            },
+            "description": "The pages available for remote control."
           }
         }
       },
@@ -11857,6 +12040,10 @@
     {
       "name": "websocket",
       "description": "WebSocket real-time communication"
+    },
+    {
+      "name": "devtools",
+      "description": "Remote control of the browsers behind HTML sources"
     }
   ]
 }

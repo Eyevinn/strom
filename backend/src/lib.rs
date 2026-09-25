@@ -74,7 +74,17 @@ pub async fn create_app_with_state_and_auth(
     state: AppState,
     auth_config: auth::AuthConfig,
 ) -> Router {
-    create_app_with_config(state, auth_config, Vec::new(), 0).await
+    create_app_with_config(
+        state,
+        auth_config,
+        Vec::new(),
+        0,
+        api::devtools::DevToolsConfig {
+            debug_port: None,
+            tls: false,
+        },
+    )
+    .await
 }
 
 /// Create the Axum application router with a given state, auth configuration, and CORS origins.
@@ -88,6 +98,7 @@ pub async fn create_app_with_config(
     auth_config: auth::AuthConfig,
     cors_allowed_origins: Vec<String>,
     port: u16,
+    devtools: api::devtools::DevToolsConfig,
 ) -> Router {
     // Note: GStreamer is already initialized in main.rs before this is called.
     // DO NOT call gst::init() here - it can corrupt internal state if pipelines
@@ -322,6 +333,14 @@ pub async fn create_app_with_config(
             "/flows/{flow_id}/blocks/{block_id}/player/goto",
             post(api::mediaplayer::goto_file),
         )
+        // Remote control of the Chromium browsers behind HTML sources
+        .route("/devtools/targets", get(api::devtools::list_targets))
+        .route(
+            "/devtools/open/{target_id}",
+            get(api::devtools::open_target),
+        )
+        .route("/devtools/ui/{*path}", get(api::devtools::proxy_ui))
+        .route("/devtools/cdp/{target_id}", get(api::devtools::proxy_cdp))
         // Logging
         .route("/log-level", get(api::logging::get_log_level))
         .route("/log-level", put(api::logging::set_log_level))
@@ -471,6 +490,7 @@ pub async fn create_app_with_config(
         .merge(protected_api_router)
         .fallback(api::not_found)
         .layer(Extension(auth_config.clone()))
+        .layer(Extension(devtools))
         .layer(Extension(mcp_sessions));
 
     // Build Swagger UI router behind authentication

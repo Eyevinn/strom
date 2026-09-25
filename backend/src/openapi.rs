@@ -24,6 +24,7 @@ use strom_types::block::{
     BlockCategoriesResponse, BlockDefinition, BlockInstance, BlockListResponse, BlockResponse,
     CreateBlockRequest, ExposedProperty, ExternalPad, ExternalPads, PropertyMapping, PropertyType,
 };
+use strom_types::devtools::{DevToolsTarget, DevToolsTargets};
 use strom_types::discovery::{
     AnnouncedStreamResponse, DeviceCategory, DeviceCountByCategory, DeviceDiscoveryStatus,
     DeviceResponse, DiscoveredStreamResponse, NdiDiscoveryStatus,
@@ -161,9 +162,16 @@ use utoipa::OpenApi;
         crate::api::probes::deactivate_probe,
         // WebSocket endpoint
         crate::api::websocket::websocket_handler,
+        // Remote control of HTML source browsers
+        crate::api::devtools::list_targets,
+        crate::api::devtools::open_target,
+        crate::api::devtools::proxy_ui,
+        crate::api::devtools::proxy_cdp,
     ),
     components(
         schemas(
+            DevToolsTarget,
+            DevToolsTargets,
             FlowResponse,
             FlowListResponse,
             FlowProperties,
@@ -315,7 +323,8 @@ use utoipa::OpenApi;
         (name = "discovery", description = "AES67 stream and device discovery endpoints"),
         (name = "media_player", description = "Media player control endpoints"),
         (name = "probes", description = "Buffer age probe endpoints"),
-        (name = "websocket", description = "WebSocket real-time communication")
+        (name = "websocket", description = "WebSocket real-time communication"),
+        (name = "devtools", description = "Remote control of the browsers behind HTML sources")
     ),
     info(
         title = "Strom API",

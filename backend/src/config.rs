@@ -19,6 +19,8 @@ struct ConfigFile {
     logging: LoggingConfig,
     #[serde(default)]
     discovery: DiscoveryConfig,
+    #[serde(default)]
+    cef: CefConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -78,6 +80,19 @@ struct StorageConfig {
     blocks_path: Option<PathBuf>,
     media_path: Option<PathBuf>,
     cef_cache_path: Option<PathBuf>,
+}
+
+/// CEF/Chromium settings for the `cefsrc` browsers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct CefConfig {
+    /// Chromium remote debugging port. Unset means no port is opened.
+    ///
+    /// The port carries the Chrome DevTools Protocol, which is full control of
+    /// the browser process: arbitrary JavaScript, arbitrary navigation
+    /// including `file://`, and every cookie. Chromium binds it to loopback;
+    /// keep it there and reach it through the authenticated API instead.
+    #[serde(default)]
+    debug_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -174,6 +189,8 @@ pub struct Config {
     pub media_path: PathBuf,
     /// Directory holding the CEF/Chromium profile used by `cefsrc`
     pub cef_cache_path: PathBuf,
+    /// Chromium remote debugging port for `cefsrc`, or `None` when disabled
+    pub cef_debug_port: Option<u16>,
     /// PostgreSQL database URL (if set, PostgreSQL is used instead of JSON files)
     /// Format: postgresql://user:password@host/database_name
     pub database_url: Option<String>,
@@ -246,6 +263,7 @@ impl Config {
             storage: StorageConfig::default(),
             logging: LoggingConfig::default(),
             discovery: DiscoveryConfig::default(),
+            cef: CefConfig::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -272,6 +290,12 @@ impl Config {
                 .parse()
                 .map_err(|_| anyhow::anyhow!("STROM_SERVER_PORT is not a valid port: {}", port))?;
             figment = figment.merge(Serialized::default("server.port", port));
+        }
+        if let Some(port) = strom_types::env::var_opt("STROM_CEF_DEBUG_PORT") {
+            let port: u16 = port.parse().map_err(|_| {
+                anyhow::anyhow!("STROM_CEF_DEBUG_PORT is not a valid port: {}", port)
+            })?;
+            figment = figment.merge(Serialized::default("cef.debug_port", port));
         }
         for (var, key) in SCALAR_ENV_VARS {
             if let Some(value) = strom_types::env::var_opt(var) {
@@ -335,6 +359,7 @@ impl Config {
             blocks_path: data_paths.blocks_path,
             media_path: data_paths.media_path,
             cef_cache_path: data_paths.cef_cache_path,
+            cef_debug_port: config_file.cef.debug_port,
             database_url: strom_types::env::non_blank(config_file.storage.database_url),
             log_file: non_blank_path(config_file.logging.log_file),
             log_level: strom_types::env::non_blank(config_file.logging.log_level),
@@ -385,6 +410,7 @@ impl Config {
             blocks_path: data_paths.blocks_path,
             media_path: data_paths.media_path,
             cef_cache_path: data_paths.cef_cache_path,
+            cef_debug_port: None,
             database_url,
             log_file: None,
             log_level: None,
@@ -434,6 +460,7 @@ impl Default for Config {
                 blocks_path: PathBuf::from("blocks.json"),
                 media_path: PathBuf::from("media"),
                 cef_cache_path: PathBuf::from("cef-cache"),
+                cef_debug_port: None,
                 database_url: None,
                 log_file: None,
                 log_level: None,

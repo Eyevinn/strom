@@ -13,6 +13,7 @@ pub const BUFFER_AGE_WARNING_THRESHOLD_MS: u64 = 3000;
 pub mod api;
 pub mod auth;
 pub mod block;
+pub mod devtools;
 pub mod discovery;
 pub mod effects;
 pub mod element;
