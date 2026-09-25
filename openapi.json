@@ -305,18 +305,18 @@
         }
       }
     },
-    "/api/devtools/cdp/{target_id}": {
-      "get": {
+    "/api/devtools/links/{key}": {
+      "delete": {
         "tags": [
           "devtools"
         ],
-        "summary": "Carry the DevTools protocol between the operator's browser and Chromium.",
-        "operationId": "proxy_cdp",
+        "summary": "Revoke a link before it expires.",
+        "operationId": "revoke_link",
         "parameters": [
           {
-            "name": "target_id",
+            "name": "key",
             "in": "path",
-            "description": "Chromium target id",
+            "description": "The key from the minted path",
             "required": true,
             "schema": {
               "type": "string"
@@ -324,52 +324,14 @@
           }
         ],
         "responses": {
-          "101": {
-            "description": "WebSocket connection upgraded"
-          },
-          "400": {
-            "description": "Malformed target id"
+          "204": {
+            "description": "The link is gone"
           },
           "401": {
             "description": "Authentication required"
           },
           "404": {
-            "description": "Remote control is disabled"
-          }
-        }
-      }
-    },
-    "/api/devtools/open/{target_id}": {
-      "get": {
-        "tags": [
-          "devtools"
-        ],
-        "summary": "Open DevTools against one page.",
-        "description": "This is the link an operator pastes into their own browser. It arrives\nauthenticated — by session, bearer token or `?auth_token=` — and leaves\nwith a session cookie, because what follows is the DevTools application\nfetching its own files and opening its own socket, and those requests carry\nnothing but cookies. The token already grants everything the session does,\nso this widens no one's access; it only makes it last a browser session.",
-        "operationId": "open_target",
-        "parameters": [
-          {
-            "name": "target_id",
-            "in": "path",
-            "description": "Chromium target id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "303": {
-            "description": "Redirect to the DevTools application"
-          },
-          "400": {
-            "description": "Malformed target id"
-          },
-          "401": {
-            "description": "Authentication required"
-          },
-          "404": {
-            "description": "Remote control is disabled"
+            "description": "No such link"
           }
         }
       }
@@ -401,19 +363,19 @@
         }
       }
     },
-    "/api/devtools/ui/{path}": {
-      "get": {
+    "/api/devtools/targets/{target_id}/link": {
+      "post": {
         "tags": [
           "devtools"
         ],
-        "summary": "Serve the DevTools application from Chromium.",
-        "description": "CEF ships the whole application and serves it under `/devtools/`, so this\nis a plain pass-through: no rewriting, and nothing fetched from the\ninternet, which matters for an instance that has none.",
-        "operationId": "proxy_ui",
+        "summary": "Mint a remote control link for one page.",
+        "description": "The caller authenticates as they would for any other endpoint; what comes\nback is a path anyone can open, so it is handed to a person, not published.",
+        "operationId": "create_link",
         "parameters": [
           {
-            "name": "path",
+            "name": "target_id",
             "in": "path",
-            "description": "File within the DevTools application",
+            "description": "Chromium target id",
             "required": true,
             "schema": {
               "type": "string"
@@ -422,19 +384,23 @@
         ],
         "responses": {
           "200": {
-            "description": "A file of the DevTools application"
+            "description": "A link that opens DevTools against this page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevToolsLink"
+                }
+              }
+            }
           },
           "400": {
-            "description": "Path outside the DevTools application"
+            "description": "Malformed target id"
           },
           "401": {
             "description": "Authentication required"
           },
           "404": {
             "description": "Remote control is disabled"
-          },
-          "502": {
-            "description": "The DevTools endpoint did not answer"
           }
         }
       }
@@ -5450,23 +5416,43 @@
           }
         }
       },
+      "DevToolsLink": {
+        "type": "object",
+        "description": "A minted remote control link.\n\nThe path is the whole credential: it names no target, carries no API token\nand spells out no address or port, so handing it over hands over exactly\nwhat it says and nothing more. It dies on its own if it goes unused.",
+        "required": [
+          "path",
+          "expires_in_seconds",
+          "warning"
+        ],
+        "properties": {
+          "expires_in_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long the link survives without being used. Each use starts it over.",
+            "minimum": 0
+          },
+          "path": {
+            "type": "string",
+            "description": "Path to open in a browser, relative to this Strom instance."
+          },
+          "warning": {
+            "type": "string",
+            "description": "What the holder of this link can actually reach. See\n[`REMOTE_CONTROL_WARNING`]."
+          }
+        }
+      },
       "DevToolsTarget": {
         "type": "object",
         "description": "One browser page rendered by a `cefsrc` element.\n\nA CEF process hosts every `cefsrc` in the instance, so the targets of all\nHTML sources arrive in one list. The `id` is Chromium's, and it changes\nwhenever the page is recreated — it identifies a live page, not a block.",
         "required": [
           "id",
           "title",
-          "url",
-          "open_path"
+          "url"
         ],
         "properties": {
           "id": {
             "type": "string",
             "description": "Chromium's target id for this page."
-          },
-          "open_path": {
-            "type": "string",
-            "description": "Path on this Strom instance that opens DevTools against this page.\nRelative, so it works whatever host or scheme the client reached us on."
           },
           "title": {
             "type": "string",

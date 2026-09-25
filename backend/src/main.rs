@@ -759,11 +759,11 @@ fn run_headless_entry(
 ///
 /// Whether the link it hands out says `ws://` or `wss://` follows this
 /// instance's own TLS, unless something in front of us says otherwise.
-fn devtools_config(config: &Config) -> strom::api::devtools::DevToolsConfig {
-    strom::api::devtools::DevToolsConfig {
+fn devtools_config(config: &Config) -> strom::api::devtools::DevToolsState {
+    strom::api::devtools::DevToolsState::new(strom::api::devtools::DevToolsConfig {
         debug_port: config.cef_debug_port,
         tls: config.tls_cert.is_some() && config.tls_key.is_some(),
-    }
+    })
 }
 
 #[tokio::main]

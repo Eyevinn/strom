@@ -79,10 +79,10 @@ pub async fn create_app_with_state_and_auth(
         auth_config,
         Vec::new(),
         0,
-        api::devtools::DevToolsConfig {
+        api::devtools::DevToolsState::new(api::devtools::DevToolsConfig {
             debug_port: None,
             tls: false,
-        },
+        }),
     )
     .await
 }
@@ -98,7 +98,7 @@ pub async fn create_app_with_config(
     auth_config: auth::AuthConfig,
     cors_allowed_origins: Vec<String>,
     port: u16,
-    devtools: api::devtools::DevToolsConfig,
+    devtools: api::devtools::DevToolsState,
 ) -> Router {
     // Note: GStreamer is already initialized in main.rs before this is called.
     // DO NOT call gst::init() here - it can corrupt internal state if pipelines
@@ -333,14 +333,15 @@ pub async fn create_app_with_config(
             "/flows/{flow_id}/blocks/{block_id}/player/goto",
             post(api::mediaplayer::goto_file),
         )
-        // Remote control of the Chromium browsers behind HTML sources
+        // Remote control of the Chromium browsers behind HTML sources.
+        // Minting a link is authenticated; opening one is not, because the
+        // key in the link is itself the credential (see api::devtools).
         .route("/devtools/targets", get(api::devtools::list_targets))
         .route(
-            "/devtools/open/{target_id}",
-            get(api::devtools::open_target),
+            "/devtools/targets/{target_id}/link",
+            post(api::devtools::create_link),
         )
-        .route("/devtools/ui/{*path}", get(api::devtools::proxy_ui))
-        .route("/devtools/cdp/{target_id}", get(api::devtools::proxy_cdp))
+        .route("/devtools/links/{key}", delete(api::devtools::revoke_link))
         // Logging
         .route("/log-level", get(api::logging::get_log_level))
         .route("/log-level", put(api::logging::set_log_level))
@@ -374,6 +375,15 @@ pub async fn create_app_with_config(
         .route("/mcp", post(api::mcp::mcp_post))
         .route("/mcp", get(api::mcp::mcp_get))
         .route("/mcp", delete(api::mcp::mcp_delete));
+
+    // Remote control of HTML sources - outside /api, because the key in the
+    // path is the credential and the DevTools application resolves its own
+    // files relative to it.
+    let devtools_router = Router::new()
+        .route("/{key}", get(api::devtools::open_link))
+        .route("/{key}/ui/{*path}", get(api::devtools::proxy_ui))
+        .route("/{key}/ws", get(api::devtools::proxy_cdp))
+        .layer(Extension(devtools.clone()));
 
     // Player/ingest pages (HTML) - outside /api
     let player_router = Router::new()
@@ -504,6 +514,7 @@ pub async fn create_app_with_config(
         .route("/health", get(health))
         .merge(swagger_router)
         .nest("/api", api_router)
+        .nest("/devtools", devtools_router)
         .nest("/player", player_router)
         .nest("/whep", whep_router)
         .nest("/whip", whip_router)

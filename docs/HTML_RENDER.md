@@ -238,6 +238,13 @@ docker run --rm -v $(pwd)/output:/export gstcefsrc-builder:amd64
 
 The build uses Ubuntu Questing to match the strom base image's glibc version.
 
+## HTML Input block
+
+An HTML source is a block: set the URL, the viewport size and the framerate,
+and pick whether the page's audio comes out as a second pad. Internally it is
+`cefsrc` feeding `cefdemux`, with `cefdemux` built only when audio is asked
+for. Raw `cefsrc` pipelines still work — the block just spares you the caps.
+
 ## Remote control (logging in to a page)
 
 An HTML source renders on the server, so a page behind a login shows its login
@@ -271,10 +278,24 @@ curl -H "Authorization: Bearer $STROM_API_KEY" \
   http://localhost:8080/api/devtools/targets
 ```
 
-Each entry carries an `open_path`. Open it in your own browser and DevTools
-comes up against that page; its screencast view is where you click and type.
-The link authenticates like the rest of the API, so an operator who is not
-already signed in can be handed one carrying `?auth_token=`.
+Mint a link for the one you want:
+
+```bash
+curl -X POST -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/targets/<target-id>/link
+```
+
+What comes back is a path and nothing else — one random key, no API token, no
+target id, no address or port:
+
+```json
+{"path": "/devtools/7f3c…", "expires_in_seconds": 1800, "warning": "…"}
+```
+
+Open it in your own browser and DevTools comes up against that page; its
+screencast view is where you click and type. The key is the credential, so the
+link is handed to a person rather than published, it dies after half an hour
+of disuse, and `DELETE /api/devtools/links/<key>` kills it sooner.
 
 A login survives a restart: the profile directory keeps the cookies, and Strom
 asks Chromium to persist session cookies too. Chromium writes them on a timer,

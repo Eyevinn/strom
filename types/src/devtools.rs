@@ -19,9 +19,23 @@ pub struct DevToolsTarget {
     pub title: String,
     /// The URL the page is currently showing.
     pub url: String,
-    /// Path on this Strom instance that opens DevTools against this page.
-    /// Relative, so it works whatever host or scheme the client reached us on.
-    pub open_path: String,
+}
+
+/// A minted remote control link.
+///
+/// The path is the whole credential: it names no target, carries no API token
+/// and spells out no address or port, so handing it over hands over exactly
+/// what it says and nothing more. It dies on its own if it goes unused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct DevToolsLink {
+    /// Path to open in a browser, relative to this Strom instance.
+    pub path: String,
+    /// How long the link survives without being used. Each use starts it over.
+    pub expires_in_seconds: u64,
+    /// What the holder of this link can actually reach. See
+    /// [`REMOTE_CONTROL_WARNING`].
+    pub warning: String,
 }
 
 /// Every page currently rendered by a `cefsrc` element.
