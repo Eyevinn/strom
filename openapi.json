@@ -4158,6 +4158,496 @@
         }
       }
     },
+    "/api/ports": {
+      "get": {
+        "tags": [
+          "ports"
+        ],
+        "summary": "Report the port pool.",
+        "description": "The configured ports as runs, how many are free, and every port that is not free with the reservation and flow holding it. Only ports that are reserved, assigned or blocked are listed, so the response is proportional to what is interesting rather than to pool size. Unlike the reservation routes this answers on a server with no pool configured, reporting `enabled: false`.",
+        "operationId": "get_pool",
+        "responses": {
+          "200": {
+            "description": "The pool, configured or not",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortPoolStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ports/reservations": {
+      "get": {
+        "tags": [
+          "ports"
+        ],
+        "summary": "List live reservations.",
+        "operationId": "list_reservations",
+        "responses": {
+          "200": {
+            "description": "Every reservation that has not lapsed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PortReservation"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ports"
+        ],
+        "summary": "Reserve ports.",
+        "description": "Reserves ports for `owner_id` until `ttl_secs` after the last request or renewal. The call is idempotent per owner: an owner that already holds a reservation gets it back, renewed, with a 200 instead of a 201, and its existing ports are never moved. A `count` larger than it holds adds ports, preferring ones that continue the block it already has; equal or smaller changes nothing but the expiry, since ports are given back by deleting the reservation rather than by shrinking it. `ports` is an explicit list and callers must not assume it is contiguous.",
+        "operationId": "create_reservation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReservationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The owner's existing reservation, renewed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortReservation"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "A new reservation was granted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortReservation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid owner_id, count or ttl_secs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not enough free ports",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Reservation could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ports/reservations/{id}": {
+      "get": {
+        "tags": [
+          "ports"
+        ],
+        "summary": "Get one reservation.",
+        "operationId": "get_reservation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Reservation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The reservation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortReservation"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live reservation with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "ports"
+        ],
+        "summary": "Release a reservation.",
+        "description": "Gives the ports back. Ports the owner has declared in use by a flow that still exists stay held until that flow is gone — a port returns to the pool only when no live reservation and no existing flow holds it.",
+        "operationId": "delete_reservation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Reservation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Reservation released"
+          },
+          "404": {
+            "description": "No live reservation with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Reservation could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ports/reservations/{id}/assign": {
+      "post": {
+        "tags": [
+          "ports"
+        ],
+        "summary": "Declare which ports a flow uses.",
+        "description": "Records that these ports of this reservation are used by that flow. The pool will not return them while the flow exists, so a reservation that lapses under a running pipeline releases only its idle ports. Replaces whatever was recorded for the same flow, so a caller can correct itself by assigning again. Nothing verifies that the flow actually binds them.",
+        "operationId": "assign_ports",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Reservation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignPortsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The reservation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortReservation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A port does not belong to this reservation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live reservation with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A port is already assigned to another flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Reservation could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ports/reservations/{id}/assign/{flow_id}": {
+      "delete": {
+        "tags": [
+          "ports"
+        ],
+        "summary": "Drop a flow's declaration.",
+        "description": "The ports go back to the reservation, never to the pool: an owner keeps its ports across any amount of flow churn.",
+        "operationId": "unassign_ports",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Reservation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Declaration dropped"
+          },
+          "404": {
+            "description": "No such reservation, or no ports declared for that flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Reservation could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ports/reservations/{id}/renew": {
+      "post": {
+        "tags": [
+          "ports"
+        ],
+        "summary": "Extend a reservation.",
+        "description": "Moves the reservation's expiry to now plus `ttl_secs`. A reservation that has already lapsed is gone: request it again with the same `owner_id` through `POST /api/ports/reservations` instead.",
+        "operationId": "renew_reservation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Reservation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional new lifetime",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenewReservationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The renewed reservation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortReservation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid ttl_secs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No live reservation with that id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Reservation could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sources": {
       "get": {
         "tags": [
@@ -4753,6 +5243,30 @@
           }
         }
       },
+      "AssignPortsRequest": {
+        "type": "object",
+        "description": "Tell the pool which of a reservation's ports a flow uses.\n\nReplaces whatever was recorded for that flow, so a caller can correct\nitself by assigning again.",
+        "required": [
+          "flow_id",
+          "ports"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The flow using them."
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Ports, all of which must belong to this reservation."
+          }
+        }
+      },
       "AuthStatusResponse": {
         "type": "object",
         "description": "Authentication status response.",
@@ -5313,6 +5827,35 @@
           "path": {
             "type": "string",
             "description": "Path for new directory (relative to media root)"
+          }
+        }
+      },
+      "CreateReservationRequest": {
+        "type": "object",
+        "description": "Ask for ports.",
+        "required": [
+          "owner_id",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many ports the owner wants to hold in total. Larger than it holds\nnow adds ports; equal or smaller leaves them alone.",
+            "minimum": 0
+          },
+          "owner_id": {
+            "type": "string",
+            "description": "Stable name of the owner, such as a production or instance id. A repeat\nrequest under the same name renews and returns the existing\nreservation rather than allocating a second one."
+          },
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Lifetime in seconds. Defaults to the server's configured TTL.",
+            "minimum": 0
           }
         }
       },
@@ -7385,6 +7928,190 @@
           }
         }
       },
+      "PortEntry": {
+        "type": "object",
+        "description": "A port that is not free, and who holds it.",
+        "required": [
+          "port",
+          "state"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The flow declared against it, when the state is `assigned`."
+          },
+          "owner_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owner holding it, when a reservation does."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The port.",
+            "minimum": 0
+          },
+          "reservation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The reservation holding it."
+          },
+          "state": {
+            "$ref": "#/components/schemas/PortState",
+            "description": "What it is doing."
+          }
+        }
+      },
+      "PortInUse": {
+        "type": "object",
+        "description": "One of a reservation's ports, and the flow using it.",
+        "required": [
+          "port",
+          "flow_id"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The flow the owner says uses it."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The port.",
+            "minimum": 0
+          }
+        }
+      },
+      "PortPoolStatus": {
+        "type": "object",
+        "description": "The pool, and everything in it that is not free.\n\n`entries` lists only ports that are reserved, assigned or blocked, so the\nresponse is proportional to what is interesting rather than to pool size —\na pool of nine hundred idle ports answers with an empty list.",
+        "required": [
+          "enabled",
+          "ports",
+          "total",
+          "free",
+          "entries"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether any ports are configured. Every reservation route answers 503\nwhile this is `false`."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortEntry"
+            },
+            "description": "Every port that is not free."
+          },
+          "free": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many no reservation holds and no probe has blocked.",
+            "minimum": 0
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortSpan"
+            },
+            "description": "The configured ports, as runs, ascending."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many ports the pool holds.",
+            "minimum": 0
+          }
+        }
+      },
+      "PortReservation": {
+        "type": "object",
+        "description": "Ports held by one owner.\n\n`ports` is an explicit list, ascending. Allocation prefers a contiguous run\nand growth prefers extending the existing one, but neither is guaranteed —\na port the operator left out of the pool, one another owner holds, or one\nfound blocked can put a hole anywhere. Callers must not assume contiguity.",
+        "required": [
+          "id",
+          "owner_id",
+          "ports",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "When the reservation was first granted (RFC 3339, UTC)."
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "When it lapses unless renewed (RFC 3339, UTC)."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Reservation identifier, used to renew, release and assign."
+          },
+          "in_use": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortInUse"
+            },
+            "description": "Which of `ports` the owner has told the pool are used by a flow."
+          },
+          "owner_id": {
+            "type": "string",
+            "description": "The owner's stable name. One reservation per owner; asking again\nreturns it."
+          },
+          "ports": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "The ports held, ascending."
+          }
+        }
+      },
+      "PortSpan": {
+        "type": "object",
+        "description": "A run of consecutive ports, for reading a pool back compactly.\n\nA display shape only: the pool is a set, and nothing in the model depends\non ports being contiguous.",
+        "required": [
+          "first",
+          "last"
+        ],
+        "properties": {
+          "first": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lowest port in the run.",
+            "minimum": 0
+          },
+          "last": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Highest port in the run, inclusive.",
+            "minimum": 0
+          }
+        }
+      },
+      "PortState": {
+        "type": "string",
+        "description": "What a port is doing.",
+        "enum": [
+          "reserved",
+          "assigned",
+          "blocked"
+        ]
+      },
       "Position": {
         "type": "object",
         "description": "Position in the visual editor",
@@ -7761,6 +8488,21 @@
           "old_path": {
             "type": "string",
             "description": "Current path (relative to media root)"
+          }
+        }
+      },
+      "RenewReservationRequest": {
+        "type": "object",
+        "description": "Extend a reservation's lifetime.",
+        "properties": {
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "New lifetime in seconds, counted from now. Defaults to the server's\nconfigured TTL.",
+            "minimum": 0
           }
         }
       },
@@ -11817,6 +12559,10 @@
     {
       "name": "Network",
       "description": "Network interface discovery endpoints"
+    },
+    {
+      "name": "ports",
+      "description": "Port numbers Strom administers and hands out"
     },
     {
       "name": "System",

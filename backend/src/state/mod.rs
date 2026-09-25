@@ -1,10 +1,13 @@
 //! Application state management.
 
+mod ports;
+
 use crate::affinity_manager::AffinityManager;
 use crate::blocks::BlockRegistry;
 use crate::discovery::DiscoveryService;
 use crate::events::EventBroadcaster;
 use crate::gst::{ElementDiscovery, PipelineError, PipelineManager};
+use crate::ports::{PortPool, PortReservationStore};
 use crate::ptp_monitor::PtpMonitor;
 use crate::sharing::ChannelRegistry;
 use crate::storage::{JsonFileStorage, Storage};
@@ -105,6 +108,15 @@ struct AppStateInner {
     /// per-flow entry is cleared on `stop_flow`; a fresh start sees an empty
     /// set, which matches the build-time element defaults (gates closed).
     mixer_solo_state: RwLock<HashMap<FlowId, HashMap<String, HashSet<String>>>>,
+    /// The port pool. One lock over the pool and its persistence, so an
+    /// allocation and its save cannot interleave with another.
+    port_pool: RwLock<PortPool>,
+    /// Where reservations are persisted. `None` until main configures it.
+    port_store: RwLock<Option<PortReservationStore>>,
+    /// Lifetime a reservation gets when the caller does not say.
+    port_lease_ttl: parking_lot::Mutex<u64>,
+    /// Whether to bind-probe a candidate before handing it out.
+    port_probe: parking_lot::Mutex<bool>,
 }
 
 /// Pick the ramp_ms that should apply to a single property in a batched
@@ -160,6 +172,12 @@ impl AppState {
                 gst_debug_filter: parking_lot::Mutex::new(String::new()),
                 default_gst_debug_filter: parking_lot::Mutex::new(String::new()),
                 mixer_solo_state: RwLock::new(HashMap::new()),
+                port_pool: RwLock::new(PortPool::new()),
+                port_store: RwLock::new(None),
+                port_lease_ttl: parking_lot::Mutex::new(
+                    strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS,
+                ),
+                port_probe: parking_lot::Mutex::new(true),
             }),
         }
     }

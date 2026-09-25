@@ -11,6 +11,7 @@ pub mod media;
 pub mod mediaplayer;
 pub mod network;
 pub mod osc;
+pub mod ports;
 pub mod probes;
 pub mod sdp_transform;
 pub mod system_clock;

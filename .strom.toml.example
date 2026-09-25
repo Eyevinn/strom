@@ -100,6 +100,50 @@ port = 8080
 # cef_cache_path = "/var/cache/strom/cef"
 
 # ============================================================================
+# Port Pool
+# ============================================================================
+[ports]
+# Port numbers Strom administers and hands out through /api/ports/reservations.
+# A caller that builds flows over the API reserves some under a stable owner id
+# and keeps them for as long as it lives, so several callers can share this
+# Strom without two flows binding the same number.
+#
+# Each entry is a range or a single port; both expand into one set, so a hole
+# is expressed by listing the pieces around it. Open every port inbound on the
+# firewall and publish it into the container.
+#
+# Empty (the default) switches the pool off entirely: the reservation routes
+# answer 503, and GET /api/ports reports enabled: false. Set this only on a
+# Strom that several callers share — on one that does not, a pool would only
+# narrow which ports its own flows may bind.
+#
+# Size it for the number of owners times what each reserves. Over-reserving is
+# the intended usage: an owner that holds 10 and uses 3 has headroom for what
+# it adds later.
+# Default: empty (no pool)
+# Env: STROM_PORTS=47100-47999 (comma-separated, same grammar)
+# ports = ["47100-47199", 47250, "47300-47399"]
+
+# How long a reservation lives when the caller does not say, in seconds.
+# Callers renew well inside this; it is the window in which a caller that dies
+# without releasing keeps its numbers.
+# Default: 600
+# Env: STROM_PORT_LEASE_TTL=600
+# lease_ttl_seconds = 600
+
+# Bind a candidate port (UDP and TCP) before handing it out, and skip it if
+# something outside Strom already holds it. Turns an intermittent flow-start
+# failure into a log line and a `blocked` state in GET /api/ports.
+#
+# It only sees its own network namespace. Under network_mode: host that is the
+# host's real port space and the answer means something; behind Docker bridge
+# networking with published ports it is not, and a conflict on the host stays
+# invisible — that, not cost, is the reason to turn it off.
+# Default: true
+# Env: STROM_PORT_PROBE_BEFORE_HANDOUT=false
+# probe_before_handout = true
+
+# ============================================================================
 # Logging Configuration
 # ============================================================================
 [logging]

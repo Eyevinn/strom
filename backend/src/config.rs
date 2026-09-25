@@ -19,6 +19,32 @@ struct ConfigFile {
     logging: LoggingConfig,
     #[serde(default)]
     discovery: DiscoveryConfig,
+    #[serde(default)]
+    ports: PortsConfig,
+}
+
+/// `[ports]` section: the port numbers Strom administers and hands out.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PortsConfig {
+    /// Each entry is a range (`"47100-47199"`) or a single port (`47250`), in
+    /// either case expanded into the pool. Empty switches the pool off: a
+    /// Strom nobody shares has no ports to administer, and a pool picked for
+    /// it by default would only narrow which ports its own flows may bind.
+    #[serde(default)]
+    ports: Vec<PortConfigEntry>,
+    /// Lifetime a reservation gets when the caller does not say.
+    lease_ttl_seconds: Option<u64>,
+    /// Whether to bind-probe a candidate port before handing it out.
+    probe_before_handout: Option<bool>,
+}
+
+/// One entry in the configured port pool. TOML keeps quoted ranges as strings
+/// and bare single ports as integers, so both forms must deserialize.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PortConfigEntry {
+    Port(u16),
+    Spec(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -197,6 +223,46 @@ pub struct Config {
     pub tls_cert: Option<PathBuf>,
     /// Path to TLS private key file (PEM format). Enables HTTPS when paired with tls_cert.
     pub tls_key: Option<PathBuf>,
+    /// Port numbers the pool may hand out. Empty switches the pool off.
+    pub pool_ports: std::collections::BTreeSet<u16>,
+    /// Lifetime a reservation gets when the caller does not say.
+    pub port_lease_ttl_seconds: u64,
+    /// Whether to bind-probe a candidate port before handing it out.
+    pub probe_before_handout: bool,
+}
+
+/// Expand the `[ports] ports` entries into the pool.
+///
+/// A range is notation: `"47100-47199"` and `47250` both land in the same set,
+/// which is what lets an operator punch a hole in a range by listing the
+/// pieces around it. An empty list means no pool at all — never a silent
+/// default range.
+fn pool_ports(entries: &[PortConfigEntry]) -> anyhow::Result<std::collections::BTreeSet<u16>> {
+    let mut ports = std::collections::BTreeSet::new();
+    for entry in entries {
+        let spec = match entry {
+            PortConfigEntry::Port(port) => port.to_string(),
+            PortConfigEntry::Spec(spec) => spec.trim().to_string(),
+        };
+        if spec.is_empty() {
+            continue;
+        }
+        let expanded = strom_types::ports::parse_port_spec(&spec)
+            .map_err(|e| anyhow::anyhow!("invalid ports.ports entry '{spec}': {e}"))?;
+        ports.extend(expanded);
+    }
+    Ok(ports)
+}
+
+fn port_lease_ttl(configured: Option<u64>) -> anyhow::Result<u64> {
+    let ttl = configured.unwrap_or(strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS);
+    if ttl == 0 || ttl > strom_types::ports::MAX_PORT_LEASE_TTL_SECS {
+        anyhow::bail!(
+            "ports.lease_ttl_seconds / STROM_PORT_LEASE_TTL must be between 1 and {}, got {ttl}",
+            strom_types::ports::MAX_PORT_LEASE_TTL_SECS
+        );
+    }
+    Ok(ttl)
 }
 
 /// A blank path is not a path. Blank environment variables are gone before
@@ -246,6 +312,7 @@ impl Config {
             storage: StorageConfig::default(),
             logging: LoggingConfig::default(),
             discovery: DiscoveryConfig::default(),
+            ports: PortsConfig::default(),
         }));
 
         // 2. Merge user config file if it exists
@@ -285,6 +352,27 @@ impl Config {
                     figment = figment.merge(Serialized::default(key, values));
                 }
             }
+        }
+
+        // 4d. Port pool settings, each named explicitly for the same reason.
+        if let Some(raw) = strom_types::env::var_opt("STROM_PORTS") {
+            let entries = split_list_env(&raw);
+            if !entries.is_empty() {
+                figment = figment.merge(Serialized::default("ports.ports", entries));
+            }
+        }
+        if let Some(ttl) = strom_types::env::var_opt("STROM_PORT_LEASE_TTL") {
+            let ttl: u64 = ttl
+                .parse()
+                .map_err(|_| anyhow::anyhow!("STROM_PORT_LEASE_TTL is not a number: {ttl}"))?;
+            figment = figment.merge(Serialized::default("ports.lease_ttl_seconds", ttl));
+        }
+        if let Some(probe) = strom_types::env::var_opt("STROM_PORT_PROBE_BEFORE_HANDOUT") {
+            let probe = matches!(
+                probe.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            );
+            figment = figment.merge(Serialized::default("ports.probe_before_handout", probe));
         }
 
         // 5. Merge CLI arguments (highest priority)
@@ -344,6 +432,9 @@ impl Config {
             cors_allowed_origins: config_file.server.cors_allowed_origins,
             tls_cert: non_blank_path(config_file.server.tls_cert),
             tls_key: non_blank_path(config_file.server.tls_key),
+            pool_ports: pool_ports(&config_file.ports.ports)?,
+            port_lease_ttl_seconds: port_lease_ttl(config_file.ports.lease_ttl_seconds)?,
+            probe_before_handout: config_file.ports.probe_before_handout.unwrap_or(true),
         })
     }
 
@@ -394,6 +485,9 @@ impl Config {
             cors_allowed_origins: Vec::new(),
             tls_cert: None,
             tls_key: None,
+            pool_ports: std::collections::BTreeSet::new(),
+            port_lease_ttl_seconds: strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS,
+            probe_before_handout: true,
         })
     }
 
@@ -443,6 +537,9 @@ impl Default for Config {
                 cors_allowed_origins: Vec::new(),
                 tls_cert: None,
                 tls_key: None,
+                pool_ports: std::collections::BTreeSet::new(),
+                port_lease_ttl_seconds: strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS,
+                probe_before_handout: true,
             }
         })
     }
@@ -792,6 +889,12 @@ data_dir = "{}"
             std::env::set_var(key, value);
             Self { key, original }
         }
+
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -912,6 +1015,44 @@ data_dir = "{}"
         let _ = std::env::set_current_dir(original_dir);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn documented_mixed_port_pool_config_loads() {
+        let _ports = EnvGuard::remove("STROM_PORTS");
+        let _ttl = EnvGuard::remove("STROM_PORT_LEASE_TTL");
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join(".strom.toml"),
+            r#"
+[ports]
+ports = ["47100-47199", 47250, "47300-47399"]
+lease_ttl_seconds = 600
+"#,
+        )
+        .unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        let result = Config::from_figment(None, None, None, None, None, None, None, None, None);
+
+        let _ = std::env::set_current_dir(original_dir);
+        let config = result.unwrap();
+        assert_eq!(config.pool_ports.len(), 201);
+        assert!(config.pool_ports.contains(&47100));
+        assert!(config.pool_ports.contains(&47250));
+        assert!(config.pool_ports.contains(&47399));
+    }
+
+    #[test]
+    fn port_lease_ttl_is_validated_during_config_loading() {
+        assert_eq!(
+            port_lease_ttl(None).unwrap(),
+            strom_types::ports::DEFAULT_PORT_LEASE_TTL_SECS
+        );
+        assert!(port_lease_ttl(Some(0)).is_err());
+        assert!(port_lease_ttl(Some(strom_types::ports::MAX_PORT_LEASE_TTL_SECS + 1)).is_err());
     }
 
     #[test]
