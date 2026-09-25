@@ -238,6 +238,48 @@ docker run --rm -v $(pwd)/output:/export gstcefsrc-builder:amd64
 
 The build uses Ubuntu Questing to match the strom base image's glibc version.
 
+## Remote control (logging in to a page)
+
+An HTML source renders on the server, so a page behind a login shows its login
+screen for as long as the flow runs. Strom can put Chromium's own DevTools in
+front of that browser, through its own port and its own authentication, so an
+operator can log in, clear a consent dialog or click a tab — in the browser that
+is actually on air. Nothing about the session is copied anywhere.
+
+> **This is a debugging tool, and it is instance-wide.** One browser process
+> serves every HTML source in a Strom instance. Whoever opens one of these links
+> reaches all of them, every page they are logged in to, and the files on the
+> host. Give the link only to someone you would trust with the instance itself.
+> To keep customers apart, run a Strom process per customer — that is an
+> orchestration choice, and there is no per-source isolation inside one process.
+
+Enable it with a port that nothing else on the host uses:
+
+```toml
+[cef]
+debug_port = 9222
+```
+
+or `STROM_CEF_DEBUG_PORT=9222`. Two Strom instances on one host need two
+different ports, the same way they already need two CEF profile directories.
+Chromium binds the port to loopback; leave it there and never publish it.
+
+With a flow running, ask which pages are available:
+
+```bash
+curl -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/targets
+```
+
+Each entry carries an `open_path`. Open it in your own browser and DevTools
+comes up against that page; its screencast view is where you click and type.
+The link authenticates like the rest of the API, so an operator who is not
+already signed in can be handed one carrying `?auth_token=`.
+
+A login survives a restart: the profile directory keeps the cookies, and Strom
+asks Chromium to persist session cookies too. Chromium writes them on a timer,
+so a login made seconds before the process is killed can still be lost.
+
 ## Limitations
 
 - **`strom-full` image only**: `cefsrc` comes from the gstcefsrc plugin, which Strom ships only in the `strom-full` image. The plain `strom` image and the native release builds (Linux, macOS, Windows) do not include it.
@@ -246,6 +288,7 @@ The build uses Ubuntu Questing to match the strom base image's glibc version.
 - **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
+- **No per-source isolation**: one CEF process serves every `cefsrc` in an instance, so they share one profile, one cookie jar and one debugging port
 
 ## References
 
