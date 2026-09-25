@@ -521,10 +521,14 @@ fn test_vp9_derived_target_bitrate_is_clamped_to_its_range() {
     )
     .expect("a derived value past its target's range must be clamped, not refused");
 
+    // vp9enc keeps the rate in whole kbps (libvpx's `rc_target_bitrate`), so
+    // the clamped maximum reads back rounded down to a multiple of 1000.
     let target: i32 = encoder.property("target-bitrate");
-    assert_eq!(
-        target, max,
-        "target-bitrate should be clamped to its maximum"
+    assert!(
+        target <= max && target > max - 1000,
+        "target-bitrate should be clamped to its maximum ({}), got {}",
+        max,
+        target
     );
 }
 
