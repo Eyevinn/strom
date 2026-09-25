@@ -27,6 +27,11 @@ interests you, open a GitHub issue or discussion.
 - **Undo/redo** and **drag-drop flow import** in the editor.
 - **Connection validation hints** — pre-flight checks for element compatibility and required
   properties before starting.
+- **Restart a flow on error** — `auto_restart` today only means "start again when the
+  backend starts". A supervised restart after a runtime error, with backoff, would need to
+  tell transient failures (a lost SRT peer, a network drop) from permanent ones (a wrong
+  video profile, raw video into an output that needs it encoded), so that a configuration
+  mistake stops with its message instead of looping.
 
 ## Encoding & integration
 
