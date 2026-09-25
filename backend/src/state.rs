@@ -1806,6 +1806,18 @@ impl AppState {
                 continue;
             }
 
+            // Remote control of an HTML source is read from the stored block
+            // when a link is minted, so storing it is the whole write. An
+            // operator turns it on to intervene in a page that is already on
+            // air, which is exactly when a restart is not an option. Handled
+            // before the `_block` rejection below.
+            if definition.id == crate::blocks::builtin::html_input::BLOCK_ID
+                && name == crate::blocks::builtin::html_input::REMOTE_CONTROL_PROPERTY
+            {
+                to_persist.push((name, value));
+                continue;
+            }
+
             // The `_block` element_id marker is a virtual element for properties that
             // get baked into the block at build time — they have no underlying element
             // to write to live.
