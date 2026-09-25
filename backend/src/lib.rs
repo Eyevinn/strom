@@ -341,6 +341,10 @@ pub async fn create_app_with_config(
             "/devtools/targets/{target_id}/link",
             post(api::devtools::create_link),
         )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/devtools/link",
+            post(api::devtools::create_block_link),
+        )
         .route("/devtools/links/{key}", delete(api::devtools::revoke_link))
         // Logging
         .route("/log-level", get(api::logging::get_log_level))

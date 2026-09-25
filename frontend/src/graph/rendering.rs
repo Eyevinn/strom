@@ -485,6 +485,13 @@ impl GraphEditor {
                     set_local_storage("open_ndi_picker", &block.id);
                 }
 
+                // Handle double-click to open remote control for HTML Input blocks
+                if node_response.double_clicked()
+                    && block.block_definition_id == "builtin.html_input"
+                {
+                    set_local_storage("open_html_devtools", &block.id);
+                }
+
                 // Handle double-click to open player for WHEP Output blocks
                 if node_response.double_clicked()
                     && block.block_definition_id == "builtin.whep_output"

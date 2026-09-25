@@ -938,6 +938,60 @@
         }
       }
     },
+    "/api/flows/{flow_id}/blocks/{block_id}/devtools/link": {
+      "post": {
+        "tags": [
+          "devtools"
+        ],
+        "summary": "Mint a remote control link for one HTML source.",
+        "description": "The block is the name an operator has for a page, so this is the endpoint a\nclient uses; the target id it resolves to is Chromium's business and\nchanges whenever the page is recreated.\n\nWhich page belongs to which block is decided by the URL, because that is\nall Chromium exposes about a browser. Two blocks pointing at the same URL\nare therefore indistinguishable, and this says so rather than guessing.",
+        "operationId": "create_block_link",
+        "parameters": [
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "description": "Block instance id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A link that opens DevTools against this page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevToolsLink"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "The block has remote control switched off"
+          },
+          "404": {
+            "description": "No such block, or it is not rendering a page yet"
+          },
+          "409": {
+            "description": "Another block is showing the same URL"
+          }
+        }
+      }
+    },
     "/api/flows/{flow_id}/blocks/{block_id}/dsk": {
       "post": {
         "tags": [

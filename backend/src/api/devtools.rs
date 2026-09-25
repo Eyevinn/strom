@@ -53,11 +53,12 @@
 //! separate Strom instances, which already get separate CEF profiles, and this
 //! must stay off.
 
+use crate::state::AppState;
 use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Extension, Path, RawQuery,
+        Extension, Path, RawQuery, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
@@ -70,6 +71,7 @@ use std::time::{Duration, Instant};
 use strom_types::devtools::{
     DevToolsLink, DevToolsTarget, DevToolsTargets, REMOTE_CONTROL_WARNING,
 };
+use strom_types::{FlowId, PropertyValue};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -383,6 +385,141 @@ pub async fn create_link(
     .into_response()
 }
 
+/// The block definition an HTML source is built from.
+const HTML_BLOCK: &str = "builtin.html_input";
+
+/// Two URLs naming the same page. Chromium reports what it navigated to, which
+/// is the operator's URL with a trailing slash added on an empty path, so a
+/// literal comparison would miss a page the operator would say is theirs.
+fn same_page(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
+/// Ask Chromium which pages exist right now.
+async fn page_targets(port: u16) -> Option<Vec<(String, String)>> {
+    let raw: Vec<serde_json::Value> = reqwest::get(format!("http://127.0.0.1:{}/json/list", port))
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some(
+        raw.into_iter()
+            .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+            .filter_map(|t| {
+                let id = t.get("id")?.as_str()?.to_string();
+                let url = t.get("url")?.as_str()?.to_string();
+                valid_target_id(&id).then_some((id, url))
+            })
+            .collect(),
+    )
+}
+
+/// Mint a remote control link for one HTML source.
+///
+/// The block is the name an operator has for a page, so this is the endpoint a
+/// client uses; the target id it resolves to is Chromium's business and
+/// changes whenever the page is recreated.
+///
+/// Which page belongs to which block is decided by the URL, because that is
+/// all Chromium exposes about a browser. Two blocks pointing at the same URL
+/// are therefore indistinguishable, and this says so rather than guessing.
+#[utoipa::path(
+    post,
+    path = "/api/flows/{flow_id}/blocks/{block_id}/devtools/link",
+    tag = "devtools",
+    params(
+        ("flow_id" = String, Path, description = "Flow id"),
+        ("block_id" = String, Path, description = "Block instance id")
+    ),
+    responses(
+        (status = 200, description = "A link that opens DevTools against this page", body = DevToolsLink),
+        (status = 401, description = "Authentication required"),
+        (status = 403, description = "The block has remote control switched off"),
+        (status = 404, description = "No such block, or it is not rendering a page yet"),
+        (status = 409, description = "Another block is showing the same URL")
+    )
+)]
+pub async fn create_block_link(
+    State(app): State<AppState>,
+    Extension(state): Extension<DevToolsState>,
+    Path((flow_id, block_id)): Path<(FlowId, String)>,
+) -> Response {
+    let Some(port) = state.config.debug_port else {
+        return disabled();
+    };
+
+    let Some(flow) = app.get_flow(&flow_id).await else {
+        return (StatusCode::NOT_FOUND, "Flow not found").into_response();
+    };
+    let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) else {
+        return (StatusCode::NOT_FOUND, "Block not found").into_response();
+    };
+    if block.block_definition_id != HTML_BLOCK {
+        return (
+            StatusCode::NOT_FOUND,
+            "Only an HTML source can be controlled remotely",
+        )
+            .into_response();
+    }
+
+    let allowed = matches!(
+        block.properties.get("remote_control"),
+        Some(PropertyValue::Bool(true))
+    );
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            "This HTML source has remote control switched off. Turn on its Remote Control \
+             property to hand out a link.",
+        )
+            .into_response();
+    }
+
+    let Some(PropertyValue::String(url)) = block.properties.get("url") else {
+        return (StatusCode::NOT_FOUND, "This block has no URL set").into_response();
+    };
+
+    let Some(targets) = page_targets(port).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            "No page is being rendered yet - is the flow running?",
+        )
+            .into_response();
+    };
+    let matching: Vec<_> = targets
+        .into_iter()
+        .filter(|(_, t_url)| same_page(t_url, url))
+        .collect();
+
+    match matching.len() {
+        0 => (
+            StatusCode::NOT_FOUND,
+            "This block is not rendering a page yet - is the flow running?",
+        )
+            .into_response(),
+        1 => {
+            let key = state.mint(matching.into_iter().next().unwrap().0);
+            info!(
+                "Minted a remote control link for block {}, valid for {:?}",
+                block_id, LINK_TTL
+            );
+            Json(DevToolsLink {
+                path: format!("/devtools/{}", key),
+                expires_in_seconds: LINK_TTL.as_secs(),
+                warning: REMOTE_CONTROL_WARNING.to_string(),
+            })
+            .into_response()
+        }
+        _ => (
+            StatusCode::CONFLICT,
+            "More than one HTML source is showing this URL, so which browser the link would \
+             open cannot be decided. Give them different URLs.",
+        )
+            .into_response(),
+    }
+}
+
 /// Revoke a link before it expires.
 #[utoipa::path(
     delete,
@@ -619,6 +756,13 @@ mod tests {
             s.resolve(&key).as_deref(),
             Some("4A8CD2F2840F8591A6277A7FFFDAB3A9")
         );
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_make_it_a_different_page() {
+        assert!(same_page("https://example.com", "https://example.com/"));
+        assert!(same_page("file:///demo/a.html", "file:///demo/a.html"));
+        assert!(!same_page("https://example.com/a", "https://example.com/b"));
     }
 
     #[test]
