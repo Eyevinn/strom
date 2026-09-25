@@ -106,6 +106,7 @@ impl PipelineManager {
             blocks: flow.blocks.clone(),
             block_definitions: HashMap::new(),
             volume_ramps: crate::gst::volume_ramp::VolumeRampManager::new(),
+            null_state_wedged: false,
         };
 
         // Expand blocks into GStreamer elements

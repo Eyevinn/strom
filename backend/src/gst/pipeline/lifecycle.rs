@@ -2,8 +2,54 @@ use super::{PipelineError, PipelineManager};
 use crate::gst::{rtp_hdrext, thread_priority};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::sync::mpsc;
+use std::time::Duration;
 use strom_types::PipelineState;
 use tracing::{error, info};
+
+/// How long teardown waits for `set_state(Null)` before giving up on it.
+pub(super) const NULL_STATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why [`run_with_deadline`] returned without a result.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum DeadlineError {
+    /// The closure was still running at the deadline. Its thread is detached.
+    TimedOut,
+    /// The closure panicked.
+    Panicked,
+}
+
+impl std::fmt::Display for DeadlineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeadlineError::TimedOut => write!(f, "state change did not complete in time"),
+            DeadlineError::Panicked => write!(f, "state change thread panicked"),
+        }
+    }
+}
+
+/// Run `f` on a dedicated OS thread and wait at most `deadline` for it.
+///
+/// A dedicated thread keeps GStreamer state changes off the tokio runtime.
+/// On timeout the thread is detached, not killed: whatever it holds stays
+/// alive until `f` returns, which for a wedged element is never.
+pub(super) fn run_with_deadline<T, F>(f: F, deadline: Duration) -> Result<T, DeadlineError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        // The receiver is gone once the deadline passed; nothing to report to.
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(deadline) {
+        Ok(value) => Ok(value),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(DeadlineError::TimedOut),
+        // The sender dropped without sending: the closure unwound.
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(DeadlineError::Panicked),
+    }
+}
 
 impl PipelineManager {
     /// Start the pipeline (set to PLAYING state).
@@ -221,12 +267,33 @@ impl PipelineManager {
         // from within a runtime" panics. Some GStreamer elements (e.g. whipserversrc)
         // internally call block_on() during state transitions, which is incompatible
         // with being called from within a tokio runtime context.
+        //
+        // Bounded: an element can park the transition for good (splitmuxsink
+        // waiting on a track that never arrives, holding a pad's stream lock).
+        // Past the deadline the thread is left behind with its pipeline, which
+        // leaks — but a wedged pipeline leaks either way, and the caller gets an
+        // answer instead of an HTTP handler that never returns.
         let pipeline = self.pipeline.clone();
-        let result = std::thread::spawn(move || pipeline.set_state(gst::State::Null))
-            .join()
-            .map_err(|_| PipelineError::StateChange("set_state thread panicked".to_string()))?
-            .map_err(|e| PipelineError::StateChange(format!("Failed to stop: {}", e)))?;
-        let _ = result;
+        match run_with_deadline(
+            move || pipeline.set_state(gst::State::Null),
+            NULL_STATE_TIMEOUT,
+        ) {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                return Err(PipelineError::StateChange(format!("Failed to stop: {}", e)));
+            }
+            Err(e) => {
+                if matches!(e, DeadlineError::TimedOut) {
+                    self.null_state_wedged = true;
+                    error!(
+                        "Pipeline '{}': set_state(NULL) did not complete within {}s — abandoning it, its resources will leak",
+                        self.flow_name,
+                        NULL_STATE_TIMEOUT.as_secs()
+                    );
+                }
+                return Err(PipelineError::StateChange(format!("Failed to stop: {}", e)));
+            }
+        }
 
         // Remove thread priority handler
         thread_priority::remove_thread_priority_handler(&self.pipeline);
@@ -255,5 +322,37 @@ impl PipelineManager {
         *self.cached_state.write().unwrap() = PipelineState::Paused;
 
         Ok(PipelineState::Paused)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn run_with_deadline_returns_the_result() {
+        assert_eq!(run_with_deadline(|| 42, Duration::from_secs(5)), Ok(42));
+    }
+
+    #[test]
+    fn run_with_deadline_gives_up_on_a_closure_that_outlives_it() {
+        let started = Instant::now();
+        let result = run_with_deadline(
+            || std::thread::sleep(Duration::from_secs(10)),
+            Duration::from_millis(100),
+        );
+        assert_eq!(result, Err(DeadlineError::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "returned after {:?}, should not wait for the closure",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn run_with_deadline_reports_a_panic() {
+        let result = run_with_deadline(|| -> u32 { panic!("boom") }, Duration::from_secs(5));
+        assert_eq!(result, Err(DeadlineError::Panicked));
     }
 }
