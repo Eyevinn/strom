@@ -22,8 +22,7 @@ use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockB
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::Mutex;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 
@@ -271,7 +270,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         ];
 
         // Create video output identity elements
-        let mut video_guards = Vec::new();
+        let mut video_slots = OutputSlots::default();
         for i in 0..num_video_tracks {
             let element_id = if num_video_tracks == 1 {
                 format!("{}:video_output", instance_id)
@@ -286,13 +285,12 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                     BlockBuildError::ElementCreation(format!("video identity {}: {}", i, e))
                 })?;
 
-            let guard = Arc::new(AtomicBool::new(false));
-            video_guards.push((identity.downgrade(), guard));
+            video_slots.push(&identity);
             elements.push((element_id, identity));
         }
 
         // Create audio output identity elements
-        let mut audio_guards = Vec::new();
+        let mut audio_slots = OutputSlots::default();
         for i in 0..num_audio_tracks {
             let element_id = format!("{}:audio_output_{}", instance_id, i);
 
@@ -303,8 +301,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                     BlockBuildError::ElementCreation(format!("audio identity {}: {}", i, e))
                 })?;
 
-            let guard = Arc::new(AtomicBool::new(false));
-            audio_guards.push((identity.downgrade(), guard));
+            audio_slots.push(&identity);
             elements.push((element_id, identity));
         }
 
@@ -317,6 +314,8 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
         let mode_label = if decode { "decode" } else { "passthrough" };
         let mode_label_owned = mode_label.to_string();
 
+        let video_slots = Mutex::new(video_slots);
+        let audio_slots = Mutex::new(audio_slots);
         demux_element.connect_pad_added(move |element, pad| {
             let caps = pad.current_caps().or_else(|| {
                 let query_caps = pad.query_caps(None);
@@ -351,102 +350,26 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 caps_name.as_deref().unwrap_or("unknown")
             );
 
-            if is_video {
-                for (weak_identity, guard) in &video_guards {
-                    if guard.swap(true, Ordering::SeqCst) {
-                        continue;
-                    }
-
-                    if let Some(identity) = weak_identity.upgrade() {
-                        if decode {
-                            // Decode mode: insert videoconvert between decodebin and identity
-                            if let Err(e) =
-                                link_decoded_video(element, pad, &identity, &instance_id_clone)
-                            {
-                                error!(
-                                    "MPEGTSSRT Input {}: Failed to link decoded video pad {}: {}",
-                                    instance_id_clone, pad_name, e
-                                );
-                                guard.store(false, Ordering::SeqCst);
-                                continue;
-                            }
-                        } else {
-                            // Passthrough mode: link directly
-                            if let Some(sink_pad) = identity.static_pad("sink") {
-                                if let Err(e) = pad.link(&sink_pad) {
-                                    error!(
-                                        "MPEGTSSRT Input {}: Failed to link video pad {}: {:?}",
-                                        instance_id_clone, pad_name, e
-                                    );
-                                    guard.store(false, Ordering::SeqCst);
-                                    continue;
-                                }
-                            }
-                        }
-                        info!(
-                            "MPEGTSSRT Input {}: Linked video pad {} -> {}",
-                            instance_id_clone,
-                            pad_name,
-                            identity.name()
-                        );
-                        return;
-                    }
+            let (slots, first_link, media) = match (is_video, is_audio, decode) {
+                (true, _, true) => (&video_slots, link_decoded_video as FirstLink, "video"),
+                (true, _, false) => (&video_slots, link_passthrough as FirstLink, "video"),
+                (_, true, true) => (&audio_slots, link_decoded_audio as FirstLink, "audio"),
+                (_, true, false) => (&audio_slots, link_passthrough as FirstLink, "audio"),
+                _ => {
+                    debug!(
+                        "MPEGTSSRT Input {}: Ignoring pad {} with caps {}",
+                        instance_id_clone,
+                        pad_name,
+                        caps_name.as_deref().unwrap_or("unknown")
+                    );
+                    return;
                 }
-                warn!(
-                    "MPEGTSSRT Input {}: No available video output for pad {}",
-                    instance_id_clone, pad_name
-                );
-            } else if is_audio {
-                for (weak_identity, guard) in &audio_guards {
-                    if guard.swap(true, Ordering::SeqCst) {
-                        continue;
-                    }
+            };
 
-                    if let Some(identity) = weak_identity.upgrade() {
-                        if decode {
-                            // Decode mode: insert audioconvert + audioresample
-                            if let Err(e) =
-                                link_decoded_audio(element, pad, &identity, &instance_id_clone)
-                            {
-                                error!(
-                                    "MPEGTSSRT Input {}: Failed to link decoded audio pad {}: {}",
-                                    instance_id_clone, pad_name, e
-                                );
-                                guard.store(false, Ordering::SeqCst);
-                                continue;
-                            }
-                        } else {
-                            // Passthrough mode: link directly
-                            if let Some(sink_pad) = identity.static_pad("sink") {
-                                if let Err(e) = pad.link(&sink_pad) {
-                                    error!(
-                                        "MPEGTSSRT Input {}: Failed to link audio pad {}: {:?}",
-                                        instance_id_clone, pad_name, e
-                                    );
-                                    guard.store(false, Ordering::SeqCst);
-                                    continue;
-                                }
-                            }
-                        }
-                        info!(
-                            "MPEGTSSRT Input {}: Linked audio pad {} -> {}",
-                            instance_id_clone,
-                            pad_name,
-                            identity.name()
-                        );
-                        return;
-                    }
-                }
+            if !link_to_output(slots, element, pad, first_link, media, &instance_id_clone) {
                 warn!(
-                    "MPEGTSSRT Input {}: No available audio output for pad {}",
-                    instance_id_clone, pad_name
-                );
-            } else {
-                debug!(
-                    "MPEGTSSRT Input {}: Ignoring pad {} with caps {}",
-                    instance_id_clone,
-                    pad_name,
-                    caps_name.as_deref().unwrap_or("unknown")
+                    "MPEGTSSRT Input {}: No available {} output for pad {}",
+                    instance_id_clone, media, pad_name
                 );
             }
         });
@@ -469,6 +392,175 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             pad_properties: HashMap::new(),
         })
     }
+}
+
+/// The outputs of one medium, in the order of their `identity` elements.
+#[derive(Default)]
+struct OutputSlots {
+    slots: Vec<OutputSlot>,
+    /// Links made so far, used to order `OutputSlot::linked_at`.
+    links: u64,
+}
+
+/// One output: the `identity` it ends in, and the pad a demuxer pad links into.
+///
+/// Only weak references: the slots live in the demuxer's `pad-added` closure,
+/// which the demuxer owns.
+struct OutputSlot {
+    identity: gst::glib::WeakRef<gst::Element>,
+    /// Where a demuxer pad links: the identity's sink pad in passthrough, the
+    /// head of the convert chain in decode mode. `None` until the first link
+    /// builds it. Its peer is the pad currently feeding this output.
+    target: Option<gst::glib::WeakRef<gst::Pad>>,
+    /// Value of `OutputSlots::links` when this output was last linked.
+    linked_at: u64,
+}
+
+impl OutputSlots {
+    fn push(&mut self, identity: &gst::Element) {
+        self.slots.push(OutputSlot {
+            identity: identity.downgrade(),
+            target: None,
+            linked_at: 0,
+        });
+    }
+}
+
+impl OutputSlot {
+    fn target(&self) -> Option<gst::Pad> {
+        self.target.as_ref().and_then(|t| t.upgrade())
+    }
+}
+
+/// Builds the first link from a demuxer pad into an output `identity`.
+type FirstLink = fn(&gst::Element, &gst::Pad, &gst::Element, &str) -> Result<(), String>;
+
+/// Link a demuxer pad to one of a medium's outputs. Returns `false` if none
+/// could take it.
+///
+/// A demuxer replaces its pad when a reconnecting caller's stream moves a PID
+/// or changes codec, and the two demuxers do it in opposite orders:
+/// - `decodebin` removes the old pad first, which unlinks it, so the output is
+///   free again. The new pad links into the chain the old one fed, which is
+///   still linked to the identity.
+/// - `tsdemux` adds the new pad first. With every output fed, the new pad takes
+///   the one linked longest ago; with several outputs of one medium that is a
+///   guess from pad order. The retiring pad's EOS is dropped, so it cannot end
+///   the output it no longer feeds.
+fn link_to_output(
+    slots: &Mutex<OutputSlots>,
+    element: &gst::Element,
+    pad: &gst::Pad,
+    first_link: FirstLink,
+    media: &str,
+    instance_id: &str,
+) -> bool {
+    let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
+    let state = &mut *guard;
+
+    // An output nothing feeds: never linked, or its feeder was removed.
+    for slot in state.slots.iter_mut() {
+        let Some(identity) = slot.identity.upgrade() else {
+            continue;
+        };
+        let result = match slot.target() {
+            Some(target) if target.peer().is_some() => continue,
+            Some(target) => pad
+                .link(&target)
+                .map(|_| ())
+                .map_err(|e| format!("{:?}", e)),
+            None => first_link(element, pad, &identity, instance_id),
+        };
+        if let Err(e) = result {
+            error!(
+                "MPEGTSSRT Input {}: Failed to link {} pad {}: {}",
+                instance_id,
+                media,
+                pad.name(),
+                e
+            );
+            continue;
+        }
+        slot.target = pad.peer().map(|p| p.downgrade());
+        state.links += 1;
+        slot.linked_at = state.links;
+        info!(
+            "MPEGTSSRT Input {}: Linked {} pad {} -> {}",
+            instance_id,
+            media,
+            pad.name(),
+            identity.name()
+        );
+        return true;
+    }
+
+    // Every output is fed: the replacement arrived before the pad it replaces
+    // was removed. Retire the feeder linked longest ago.
+    let retiring = state
+        .slots
+        .iter_mut()
+        .filter_map(|slot| {
+            let target = slot.target()?;
+            let feeder = target.peer()?;
+            Some((slot, target, feeder))
+        })
+        .min_by_key(|(slot, _, _)| slot.linked_at);
+    let Some((slot, target, feeder)) = retiring else {
+        return false;
+    };
+
+    // The retiring pad may still push its EOS from another thread before the
+    // unlink below; that EOS belongs to a stream this output no longer carries.
+    feeder.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, |_pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = &info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if event.type_() == gst::EventType::Eos {
+            gst::PadProbeReturn::Drop
+        } else {
+            gst::PadProbeReturn::Ok
+        }
+    });
+    let _ = feeder.unlink(&target);
+
+    if let Err(e) = pad.link(&target) {
+        error!(
+            "MPEGTSSRT Input {}: Failed to move {} output from pad {} to pad {}: {:?}",
+            instance_id,
+            media,
+            feeder.name(),
+            pad.name(),
+            e
+        );
+        let _ = feeder.link(&target);
+        return false;
+    }
+    state.links += 1;
+    slot.linked_at = state.links;
+    info!(
+        "MPEGTSSRT Input {}: Moved {} output from pad {} to pad {}",
+        instance_id,
+        media,
+        feeder.name(),
+        pad.name()
+    );
+    true
+}
+
+/// tsdemux pad -> identity, no conversion.
+fn link_passthrough(
+    _element: &gst::Element,
+    src_pad: &gst::Pad,
+    identity: &gst::Element,
+    _instance_id: &str,
+) -> Result<(), String> {
+    let sink_pad = identity
+        .static_pad("sink")
+        .ok_or("identity has no sink pad")?;
+    src_pad
+        .link(&sink_pad)
+        .map(|_| ())
+        .map_err(|e| format!("{:?}", e))
 }
 
 /// decodebin (raw) pad -> deinterlace -> identity
