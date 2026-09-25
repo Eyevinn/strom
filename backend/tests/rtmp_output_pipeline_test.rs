@@ -290,7 +290,7 @@ impl Harness {
     /// rather than the path that ships.
     fn finish_linking(&self) {
         let flow_id = strom_types::flow::FlowId::new_v4();
-        let events = EventBroadcaster::new(16);
+        let events = EventBroadcaster::with_capacity(16);
         for setup in self.setups.borrow_mut().drain(..) {
             setup(flow_id, events.clone());
         }

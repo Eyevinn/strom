@@ -28,6 +28,8 @@ fn new_state() -> AppState {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     )
 }
 
