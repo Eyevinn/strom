@@ -468,6 +468,31 @@ fn set_encoder_property(
     .map_err(|reason| BlockBuildError::InvalidProperty(format!("{}: {}", property_name, reason)))
 }
 
+/// Clamp a value the block derived from `bitrate` to its target's range.
+///
+/// A cap such as `max-bitrate`, or a kbps-to-bits/s conversion, can fall
+/// outside the range of the property it is written to even when the client's
+/// `bitrate` was in range. Refusing the flow over a number the operator never
+/// supplied is wrong, so derived values are clamped here; the client's own
+/// values still go through `set_encoder_property` and are refused (#769).
+fn clamp_to_property_range(encoder: &gst::Element, property_name: &str, value: u64) -> u64 {
+    let Some(pspec) = encoder.find_property(property_name) else {
+        return value;
+    };
+    let (min, max) = if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecUInt>() {
+        (u64::from(p.minimum()), u64::from(p.maximum()))
+    } else if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecInt>() {
+        (p.minimum().max(0) as u64, p.maximum().max(0) as u64)
+    } else if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecUInt64>() {
+        (p.minimum(), p.maximum())
+    } else if let Some(p) = pspec.downcast_ref::<gst::glib::ParamSpecInt64>() {
+        (p.minimum().max(0) as u64, p.maximum().max(0) as u64)
+    } else {
+        return value;
+    };
+    value.clamp(min, max.max(min))
+}
+
 /// Set encoder properties based on the encoder type.
 ///
 /// Values go in through their text form, which lets GStreamer's own deserializer
@@ -512,20 +537,25 @@ fn set_encoder_properties(
         } else {
             map_quality_preset_nvenc_old(quality_preset)
         };
-        set_encoder_property(encoder, "preset", preset_nick)?;
+        if encoder.has_property("preset") {
+            set_encoder_property(encoder, "preset", preset_nick)?;
+        }
 
-        // Rate control property name differs between nvautogpu* and regular nv* encoders
-        let rc_property = if encoder_name.starts_with("nvautogpu") {
-            "rate-control"
-        } else {
-            "rc-mode"
-        };
+        // Rate control is `rate-control` on some nv* encoders and `rc-mode` on
+        // others. Use whichever the element exposes: a name prefix covers only
+        // nvautogpu*, and the nvd3d11*/nvav1enc encoders we also select would
+        // otherwise fail the build on a property they lack (#769).
+        let rc_property = ["rate-control", "rc-mode"]
+            .into_iter()
+            .find(|name| encoder.has_property(name));
         let rc_nick = match rate_control {
             RateControl::CQP => "cqp",
             RateControl::VBR => "vbr",
             RateControl::CBR => "cbr",
         };
-        set_encoder_property(encoder, rc_property, rc_nick)?;
+        if let Some(rc_property) = rc_property {
+            set_encoder_property(encoder, rc_property, rc_nick)?;
+        }
 
         // NVENC defaults leave VBR excursions unconstrained: max-bitrate is
         // unset and vbv-buffer-size=0 ("NVENC default"), so single frames can
@@ -536,11 +566,14 @@ fn set_encoder_properties(
         // - vbv-buffer-size (kbits): 0.5 s worth of target bitrate, bounding
         //   how large any single frame can get
         if encoder.has_property("max-bitrate") {
-            let max_bitrate = bitrate.saturating_mul(12) / 10;
+            let max_bitrate =
+                clamp_to_property_range(encoder, "max-bitrate", u64::from(bitrate) * 12 / 10);
             set_encoder_property(encoder, "max-bitrate", &max_bitrate.to_string())?;
         }
         if encoder.has_property("vbv-buffer-size") {
-            set_encoder_property(encoder, "vbv-buffer-size", &(bitrate / 2).to_string())?;
+            let vbv_size =
+                clamp_to_property_range(encoder, "vbv-buffer-size", u64::from(bitrate / 2));
+            set_encoder_property(encoder, "vbv-buffer-size", &vbv_size.to_string())?;
         }
 
         // NVENC: Disable adaptive I-frame insertion to respect gop-size
@@ -652,7 +685,7 @@ fn set_encoder_properties(
     } else if encoder_name.starts_with("v4l2") {
         // V4L2 encoders (Raspberry Pi, embedded Linux)
         // V4L2 encoders use extra-controls structure for bitrate (bits per second)
-        let bitrate_bps = bitrate * 1000;
+        let bitrate_bps = bitrate.saturating_mul(1000);
         if encoder.has_property("extra-controls") {
             let controls = gst::Structure::builder("extra-controls")
                 .field("video_bitrate", bitrate_bps)
@@ -680,7 +713,8 @@ fn set_encoder_properties(
         // verified via `gst-inspect-1.0 vp9enc` on GStreamer 1.28:
         //   target-bitrate : Target bitrate (in bits/sec) ... Default: 256000
         // The block exposes bitrate in kbps so multiply by 1000.
-        let bitrate_bps = bitrate.saturating_mul(1000);
+        let bitrate_bps =
+            clamp_to_property_range(encoder, "target-bitrate", u64::from(bitrate) * 1000);
         set_encoder_property(encoder, "target-bitrate", &bitrate_bps.to_string())?;
         // VP9: cpu-used (0=slowest, 5=fastest for realtime)
         let cpu_used = map_quality_preset_vp9enc(quality_preset);
