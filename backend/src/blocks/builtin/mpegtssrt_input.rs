@@ -18,6 +18,7 @@
 //! Both `decodebin` and `tsdemux` have dynamic pads — uses `connect_pad_added`
 //! to link to identity elements based on caps (video/ or audio/).
 
+use super::tsdemux_anchor::TsDemuxAnchor;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -219,6 +220,20 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             srt_uri, latency, tsdemux_latency, ignore_pcr, keep_listening, auto_reconnect, wait_for_connection
         );
 
+        // With ignore-pcr, tsdemux keeps the time reference of the first PES it
+        // sees; a caller that connects with stale frames at its head is stamped
+        // into the future for the whole connection.
+        let anchor = if ignore_pcr {
+            let anchor = TsDemuxAnchor::new(instance_id);
+            if let Some(src_pad) = srtsrc.static_pad("src") {
+                anchor.watch_input(&src_pad);
+            }
+            anchor.watch_caller(&srtsrc);
+            Some(anchor)
+        } else {
+            None
+        };
+
         // Create demux/decode element
         // NOTE (2026-03-02): Using decodebin (v2) instead of decodebin3 because decodebin3
         // has known issues with MPEG-TS where it only exposes audio and skips video due to
@@ -233,6 +248,7 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
 
             // Catch tsdemux when decodebin creates it internally, and set its properties.
             let instance_for_deep = instance_id.to_string();
+            let anchor_for_deep = anchor.clone();
             element.connect("deep-element-added", false, move |args| {
                 let added: gst::Element = args[2].get().unwrap();
                 let factory = added.factory();
@@ -241,6 +257,9 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                         added.set_property("latency", tsdemux_latency);
                         if ignore_pcr && added.has_property("ignore-pcr") {
                             added.set_property("ignore-pcr", true);
+                        }
+                        if let Some(anchor) = &anchor_for_deep {
+                            anchor.watch_demuxer(&added);
                         }
                         info!(
                             "MPEGTSSRT Input {}: Set tsdemux latency={}ms, ignore-pcr={} (inside decodebin)",
@@ -261,6 +280,9 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             element.set_property("latency", tsdemux_latency);
             if ignore_pcr && element.has_property("ignore-pcr") {
                 element.set_property("ignore-pcr", true);
+            }
+            if let Some(anchor) = &anchor {
+                anchor.watch_demuxer(&element);
             }
             (id, element)
         };
