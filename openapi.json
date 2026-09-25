@@ -4454,7 +4454,7 @@
             }
           },
           "409": {
-            "description": "No port pool is configured on this server",
+            "description": "No port pool is configured, or a port is already assigned to another flow",
             "content": {
               "application/json": {
                 "schema": {
