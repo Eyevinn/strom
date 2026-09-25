@@ -5496,6 +5496,13 @@
               "$ref": "#/components/schemas/DevToolsTarget"
             },
             "description": "The pages available for remote control."
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What a client must tell the operator before handing them a link, in\nStrom's words rather than each client's own. Present whenever remote\ncontrol is enabled. See [`REMOTE_CONTROL_WARNING`]."
           }
         }
       },

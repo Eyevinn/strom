@@ -49,7 +49,7 @@ use axum::{
     Json,
 };
 use futures::{SinkExt, StreamExt};
-use strom_types::devtools::{DevToolsTarget, DevToolsTargets};
+use strom_types::devtools::{DevToolsTarget, DevToolsTargets, REMOTE_CONTROL_WARNING};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tower_sessions::Session;
 use tracing::{debug, error, info, warn};
@@ -136,6 +136,7 @@ pub async fn list_targets(Extension(config): Extension<DevToolsConfig>) -> Respo
     let Some(port) = config.debug_port else {
         return Json(DevToolsTargets {
             enabled: false,
+            warning: None,
             targets: Vec::new(),
         })
         .into_response();
@@ -160,6 +161,7 @@ pub async fn list_targets(Extension(config): Extension<DevToolsConfig>) -> Respo
                 debug!("DevTools endpoint on port {} did not answer: {}", port, e);
                 return Json(DevToolsTargets {
                     enabled: true,
+                    warning: Some(REMOTE_CONTROL_WARNING.to_string()),
                     targets: Vec::new(),
                 })
                 .into_response();
@@ -194,6 +196,7 @@ pub async fn list_targets(Extension(config): Extension<DevToolsConfig>) -> Respo
 
     Json(DevToolsTargets {
         enabled: true,
+        warning: Some(REMOTE_CONTROL_WARNING.to_string()),
         targets,
     })
     .into_response()

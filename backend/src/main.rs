@@ -433,9 +433,10 @@ fn main() -> anyhow::Result<()> {
 
         std::env::set_var("GST_CEF_CHROME_EXTRA_FLAGS", flags.join(","));
         warn!(
-            "CEF remote debugging enabled on 127.0.0.1:{} - a session opened against any HTML \
-             source reaches every HTML source in this instance and every cookie the browser \
-             holds, so do not enable this where HTML sources belong to different customers",
+            "CEF remote debugging enabled on 127.0.0.1:{} - this is a debugging tool. One \
+             browser process serves every HTML source in this instance, so a session opened \
+             against one of them reaches all of them, every page they are logged in to, and \
+             the files on this host. To keep customers apart, run a Strom process per customer",
             debug_port
         );
     }

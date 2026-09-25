@@ -31,6 +31,23 @@ pub struct DevToolsTargets {
     /// Whether the instance has a Chromium remote debugging port configured.
     /// When false the list is empty and no target can be opened.
     pub enabled: bool,
+    /// What a client must tell the operator before handing them a link, in
+    /// Strom's words rather than each client's own. Present whenever remote
+    /// control is enabled. See [`REMOTE_CONTROL_WARNING`].
+    pub warning: Option<String>,
     /// The pages available for remote control.
     pub targets: Vec<DevToolsTarget>,
 }
+
+/// What remote control actually grants, for any client that offers it.
+///
+/// One CEF process serves every `cefsrc` in a Strom instance, so a session
+/// opened against one HTML source is not confined to it. Isolating customers
+/// from each other is a matter of running a Strom process per customer, not
+/// something this API can do.
+pub const REMOTE_CONTROL_WARNING: &str = "Remote control is a debugging tool. \
+    One browser process serves every HTML source in this Strom instance, so \
+    whoever opens this link reaches all of them, every page they are logged in \
+    to, and the files on the host. Give it only to someone you would trust with \
+    the instance itself. To keep customers apart, run a Strom process per \
+    customer.";
