@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use strom::blocks::builtin::rtmp::{
     audio_plan, libav_package_hint, parse_rtmp_location, redact_location, rtmp_missing_message,
-    rtmp_package_hint, video_plan, AudioPlan, RtmpOutputBuilder,
+    rtmp_package_hint, video_plan, AudioPlan, RtmpOutputBuilder, RTMP_H264_PROFILES,
 };
 use strom::blocks::{BlockBuildContext, BlockBuilder};
 use strom_types::PropertyValue;
@@ -616,12 +616,44 @@ fn an_rtmps_location_reaches_the_sink_and_sets_its_scheme() {
 
 #[test]
 fn h264_video_is_accepted() {
-    assert_eq!(video_plan("video/x-h264"), Ok(()));
+    assert_eq!(video_plan("video/x-h264", None), Ok(()));
+}
+
+#[test]
+fn h264_in_a_profile_rtmp_receivers_take_is_accepted() {
+    for profile in RTMP_H264_PROFILES {
+        assert_eq!(
+            video_plan("video/x-h264", Some(profile)),
+            Ok(()),
+            "{} is on the list RTMP receivers accept",
+            profile
+        );
+    }
+}
+
+/// #783: `flvmux` publishes these without a complaint and the platform then
+/// rejects the stream, so the block is the only place that can say so.
+#[test]
+fn h264_in_a_profile_rtmp_receivers_refuse_is_refused_and_names_the_profile() {
+    for profile in ["high-4:4:4", "high-4:2:2", "high-10", "high-10-intra"] {
+        let message = video_plan("video/x-h264", Some(profile))
+            .expect_err("a profile outside High, Main and Baseline must be refused");
+        assert!(
+            message.contains(profile),
+            "the refusal must name the profile that arrived, got: {}",
+            message
+        );
+        assert!(
+            message.contains("builtin.videoenc's profile"),
+            "the refusal must name the property that fixes it, got: {}",
+            message
+        );
+    }
 }
 
 #[test]
 fn raw_video_is_refused_and_names_the_encoder_block() {
-    let message = video_plan("video/x-raw").expect_err("raw video must be refused");
+    let message = video_plan("video/x-raw", None).expect_err("raw video must be refused");
     assert!(
         message.contains("builtin.videoenc"),
         "the refusal must name the block to add, got: {}",
@@ -631,7 +663,7 @@ fn raw_video_is_refused_and_names_the_encoder_block() {
 
 #[test]
 fn other_video_codecs_are_refused_and_named() {
-    let message = video_plan("video/x-vp8").expect_err("VP8 must be refused");
+    let message = video_plan("video/x-vp8", None).expect_err("VP8 must be refused");
     assert!(
         message.contains("video/x-vp8"),
         "the refusal must name what arrived, got: {}",

@@ -26,8 +26,24 @@
 //!            → mixer_O sink pad           the pad placing the mono
 //!                                         on output channel D
 //!
-//!   mixer_O → caps_out_O → capssetter_out_O → queue_out_O → audio_out_O
+//!   mixer_O → caps_out_O → capssetter_out_O → fader_out_O (volume)
+//!           → [soft_clip_out_O (rglimiter)] → queue_out_O → audio_out_O
 //! ```
+//!
+//! An output bus sums every crosspoint routed to it, so a mix-minus return
+//! carries N-1 talkers at unity and goes over full scale long before any one
+//! of them does. `fader_out_O` and `soft_clip_out_O` are what it has to catch
+//! that: the fader brings the bus down so the sum fits, and the soft clipper
+//! after it puts a ceiling on what is left. The clipper comes second because
+//! it is only transparent on a signal that is already mostly below its knee.
+//!
+//! Both are off by default, and while they are off the bus is left alone down
+//! to its negotiation: `caps_out_O` pins `F32LE` only once one of them is
+//! engaged. That pin is the load-bearing part. An `audiomixer` saturates at
+//! the sum in a fixed-point format, so with the format left open whether a
+//! fan-in overload clipped inside the router or reached the output intact
+//! depended on what the next block negotiated — and neither stage can undo a
+//! sum that has already been saturated upstream of it.
 //!
 //! There is no queue on a crosspoint branch. A tee branch normally needs one
 //! so it cannot block its siblings, but every branch here ends on a
@@ -49,7 +65,7 @@ use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::routing::{self, Crosspoint, RoutingGains};
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Maximum number of input/output streams.
 const MAX_STREAMS: usize = 8;
@@ -110,6 +126,26 @@ const CROSSPOINT_PREFIX: &str = ":xp_";
 /// The `GstAudioConverter` option that maps a mixer sink pad's channels onto
 /// the mixer's output channels.
 const MIX_MATRIX_KEY: &str = "GstAudioConverter.mix-matrix";
+
+/// Name of the output fader property, in dB.
+pub const OUTPUT_FADER_PROPERTY: &str = "output_fader_db";
+
+/// Name of the output soft clipper property.
+pub const OUTPUT_SOFT_CLIP_PROPERTY: &str = "output_soft_clip_enabled";
+
+/// The element every output bus is soft-clipped by. GStreamer calls
+/// `rglimiter` a limiter, but it has no attack or release: it is a fixed
+/// transfer curve applied per sample — unity below -6 dBFS, a `tanh` knee
+/// above it, and an asymptote at full scale — which is a soft clipper. Nothing
+/// it emits can reach 0 dBFS whatever goes in.
+///
+/// Not `lsp-rs-limiter`, the true limiter `builtin.mixer` uses through
+/// `make_limiter_element`. That one rides gain on an envelope, and on speech
+/// its attack loses the transient it was pointed at: measured on a four-seat
+/// return 5 dB over, it still let 0.05% of samples past full scale at a -3 dB
+/// threshold and 0.0007% at -10 dB, where it also costs 7.5 dB of level. A
+/// ceiling that is usually held is not a ceiling on a headphone feed.
+const SOFT_CLIPPER_FACTORY: &str = "rglimiter";
 
 /// Element naming for a crosspoint. The wire format itself lives in
 /// `strom_types::routing`, shared with the graph editor.
@@ -290,6 +326,18 @@ impl BlockBuilder for LiveAudioRouterBuilder {
             DEFAULT_OUTPUT_BUFFER_MS,
         )
         .max(1);
+        let fader_db = output_fader_db(properties);
+        let soft_clip_enabled = parse_bool(
+            properties,
+            OUTPUT_SOFT_CLIP_PROPERTY,
+            routing::DEFAULT_OUTPUT_SOFT_CLIP_ENABLED,
+        );
+        // A bus with its fader down or its soft clipper on has to sum in
+        // float, and a bus with neither must negotiate as it did before:
+        // neither stage is any use after an `audiomixer` has already saturated
+        // the sum in a fixed-point format, and pinning a format nobody asked
+        // for would change what every existing flow negotiates.
+        let sum_in_float = soft_clip_enabled || fader_db != 0.0;
 
         // A matrix that has never been set gets the straight-through default,
         // so a router that has just been dropped in passes audio. An empty
@@ -339,15 +387,15 @@ impl BlockBuilder for LiveAudioRouterBuilder {
             // mix-matrix is only applied when the converter is not asked to do
             // positional mapping as well.
             let caps_id = format!("{instance_id}:caps_out_{out_idx}");
+            let mut bus_caps = gst::Caps::builder("audio/x-raw")
+                .field("channels", channels as i32)
+                .field("channel-mask", gst::Bitmask::new(0));
+            if sum_in_float {
+                bus_caps = bus_caps.field("format", "F32LE");
+            }
             let caps = gst::ElementFactory::make("capsfilter")
                 .name(&caps_id)
-                .property(
-                    "caps",
-                    gst::Caps::builder("audio/x-raw")
-                        .field("channels", channels as i32)
-                        .field("channel-mask", gst::Bitmask::new(0))
-                        .build(),
-                )
+                .property("caps", bus_caps.build())
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("caps_out: {e}")))?;
             elements.push((caps_id.clone(), caps));
@@ -357,6 +405,27 @@ impl BlockBuilder for LiveAudioRouterBuilder {
             let setter_id = format!("{instance_id}:capssetter_out_{out_idx}");
             let setter = make_capssetter(&setter_id, channels)?;
             elements.push((setter_id.clone(), setter));
+
+            // Headroom: bring the bus down so the sum fits, then cap what is
+            // left. The fader is a `volume`, which leaves samples untouched at
+            // unity, so it is always built. It takes no unsigned formats, but
+            // neither does any crosspoint `volume` in front of the mixer, so
+            // at unity it changes nothing about what the bus can negotiate.
+            let fader_id = format!("{instance_id}:fader_out_{out_idx}");
+            let fader = gst::ElementFactory::make("volume")
+                .name(&fader_id)
+                .property("volume", db_to_linear(fader_db))
+                .build()
+                .map_err(|e| BlockBuildError::ElementCreation(format!("fader_out: {e}")))?;
+            elements.push((fader_id.clone(), fader));
+
+            // The soft clipper is not. `rglimiter` accepts `F32LE` and nothing
+            // else, so leaving a disabled one in the chain would pin the whole
+            // output to float for a flow that never asked for it.
+            let clipper_id = format!("{instance_id}:soft_clip_out_{out_idx}");
+            if soft_clip_enabled {
+                elements.push((clipper_id.clone(), make_output_soft_clipper(&clipper_id)?));
+            }
 
             let queue_id = format!("{instance_id}:queue_out_{out_idx}");
             let queue = gst::ElementFactory::make("queue")
@@ -375,8 +444,23 @@ impl BlockBuilder for LiveAudioRouterBuilder {
             ));
             internal_links.push((
                 ElementPadRef::pad(&setter_id, "src"),
-                ElementPadRef::pad(&queue_id, "sink"),
+                ElementPadRef::pad(&fader_id, "sink"),
             ));
+            if soft_clip_enabled {
+                internal_links.push((
+                    ElementPadRef::pad(&fader_id, "src"),
+                    ElementPadRef::pad(&clipper_id, "sink"),
+                ));
+                internal_links.push((
+                    ElementPadRef::pad(&clipper_id, "src"),
+                    ElementPadRef::pad(&queue_id, "sink"),
+                ));
+            } else {
+                internal_links.push((
+                    ElementPadRef::pad(&fader_id, "src"),
+                    ElementPadRef::pad(&queue_id, "sink"),
+                ));
+            }
         }
 
         // ------------------------------------------------------------------
@@ -532,10 +616,13 @@ impl BlockBuilder for LiveAudioRouterBuilder {
         }
 
         info!(
-            "LiveAudioRouter '{}' built: {} crosspoints, {} open at build time",
+            "LiveAudioRouter '{}' built: {} crosspoints, {} open at build time, \
+             output fader {:.1} dB, soft clipper {}",
             instance_id,
             crosspoints,
-            gains.values().filter(|g| **g > 0.0).count()
+            gains.values().filter(|g| **g > 0.0).count(),
+            fader_db,
+            if soft_clip_enabled { "on" } else { "off" }
         );
 
         Ok(BlockBuildResult {
@@ -559,6 +646,46 @@ fn set_pad_placement(pad: &gst::Pad, out_channel: usize, out_channels: usize) {
     let mut config = gst::Structure::new_empty("GstAudioConverter");
     config.set(MIX_MATRIX_KEY, gst::Array::new(rows));
     pad.set_property("converter-config", &config);
+}
+
+/// The output soft clipper for one bus, built only where one was asked for.
+fn make_output_soft_clipper(id: &str) -> Result<gst::Element, BlockBuildError> {
+    gst::ElementFactory::make(SOFT_CLIPPER_FACTORY)
+        .name(id)
+        .property("enabled", true)
+        .build()
+        .map_err(|e| {
+            // gst-plugins-good is a hard dependency everywhere this runs, so a
+            // missing `rglimiter` is a broken install. Substituting a
+            // passthrough would leave the operator believing the return is
+            // protected when it is not.
+            error!("Live Audio Router: {SOFT_CLIPPER_FACTORY} is unavailable for {id}: {e}");
+            BlockBuildError::ElementCreation(format!(
+                "Live Audio Router: the output soft clipper needs the {SOFT_CLIPPER_FACTORY} element from \
+                 gst-plugins-good, which is not installed"
+            ))
+        })
+}
+
+/// dB to a linear `volume` coefficient.
+fn db_to_linear(db: f64) -> f64 {
+    10f64.powf(db / 20.0)
+}
+
+/// Read the output fader, clamped to the range the block advertises. A fader
+/// that boosts would add to the overload it exists to remove, so it stops at
+/// unity.
+fn output_fader_db(properties: &HashMap<String, PropertyValue>) -> f64 {
+    properties
+        .get(OUTPUT_FADER_PROPERTY)
+        .and_then(|v| match v {
+            PropertyValue::Float(f) => Some(*f),
+            PropertyValue::Int(i) => Some(*i as f64),
+            PropertyValue::UInt(u) => Some(*u as f64),
+            _ => None,
+        })
+        .unwrap_or(routing::DEFAULT_OUTPUT_FADER_DB)
+        .clamp(routing::MIN_OUTPUT_FADER_DB, routing::MAX_OUTPUT_FADER_DB)
 }
 
 /// capssetter fixing the channel-mask the way `builtin.audiorouter` does:
@@ -763,6 +890,54 @@ fn liveaudiorouter_definition() -> BlockDefinition {
         mapping: PropertyMapping {
             element_id: "_block".to_string(),
             property_name: "output_buffer_duration".to_string(),
+            transform: None,
+        },
+        live: false,
+        persist: None,
+    });
+
+    exposed_properties.push(ExposedProperty {
+        name: OUTPUT_FADER_PROPERTY.to_string(),
+        label: "Output Fader (dB)".to_string(),
+        description: format!(
+            "Master level of every output bus, in dB ({} to {}). An output sums every \
+             crosspoint routed to it, so two seats talking over each other in a mix-minus \
+             return can go over full scale when neither alone does. {:.0} dB with the soft \
+             clipper on is the starting point for a conversation, whatever the seat count: \
+             overlaps are short and almost always two voices. Construction-time only.",
+            routing::MIN_OUTPUT_FADER_DB,
+            routing::MAX_OUTPUT_FADER_DB,
+            routing::SUGGESTED_OUTPUT_FADER_DB,
+        ),
+        property_type: PropertyType::Float,
+        default_value: Some(PropertyValue::Float(routing::DEFAULT_OUTPUT_FADER_DB)),
+        mapping: PropertyMapping {
+            element_id: "_block".to_string(),
+            property_name: OUTPUT_FADER_PROPERTY.to_string(),
+            transform: None,
+        },
+        live: false,
+        persist: None,
+    });
+    exposed_properties.push(ExposedProperty {
+        name: OUTPUT_SOFT_CLIP_PROPERTY.to_string(),
+        label: "Output Soft Clipper".to_string(),
+        description: "Put a ceiling on every output bus so a fan-in overload cannot reach full \
+                      scale. Transparent below -6 dBFS and progressively rounds off peaks above \
+                      it, and it adds no latency. Unlike a limiter it does not turn the bus \
+                      down, so a bus driven hard into it distorts. The ceiling is full scale \
+                      itself, which leaves nothing for a lossy return leg to overshoot into, so \
+                      it catches the rare collision the output fader leaves rather than \
+                      replacing the fader. \
+                      Construction-time only."
+            .to_string(),
+        property_type: PropertyType::Bool,
+        default_value: Some(PropertyValue::Bool(
+            routing::DEFAULT_OUTPUT_SOFT_CLIP_ENABLED,
+        )),
+        mapping: PropertyMapping {
+            element_id: "_block".to_string(),
+            property_name: OUTPUT_SOFT_CLIP_PROPERTY.to_string(),
             transform: None,
         },
         live: false,

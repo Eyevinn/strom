@@ -30,7 +30,9 @@
 //! 2. H.264 plus AAC parses both and does NOT run a second audio encoder.
 //! 3. Raw video is refused without taking the audio side down with it, and
 //!    requests no `video` pad. This is the aggregator stall from the other
-//!    suite's point 2, proven at runtime rather than at build time.
+//!    suite's point 2, proven at runtime rather than at build time. The
+//!    refusal is the only error on the bus, posted by the block and naming
+//!    `builtin.videoenc`.
 //! 4. An input that is never fed requests no pad at all, for the same reason.
 
 use std::collections::HashMap;
@@ -198,6 +200,9 @@ impl Harness {
             .property(
                 "caps",
                 gst::Caps::builder("video/x-raw")
+                    // 8-bit 4:2:0, so x264enc picks High. Left open, it follows
+                    // videotestsrc's first format into a profile the block refuses.
+                    .field("format", "I420")
                     .field("width", 320i32)
                     .field("height", 240i32)
                     .field("framerate", gst::Fraction::new(25, 1))
@@ -215,6 +220,57 @@ impl Harness {
             .expect("add video source");
         gst::Element::link_many([&src, &caps, &enc]).expect("link video source");
         enc.link(&self.input("video_input")).expect("link to block");
+    }
+
+    /// Feed H.264 in the High 4:4:4 profile, which `x264enc` picks for a Y444
+    /// input: the case #783 is about, and one `flvmux` accepts without a word.
+    fn feed_h264_444(&self) {
+        let src = gst::ElementFactory::make("videotestsrc")
+            .property("num-buffers", 30i32)
+            .property("is-live", true)
+            .build()
+            .expect("videotestsrc");
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-raw")
+                    .field("format", "Y444")
+                    .field("width", 320i32)
+                    .field("height", 240i32)
+                    .field("framerate", gst::Fraction::new(25, 1))
+                    .build(),
+            )
+            .build()
+            .expect("capsfilter");
+        let enc = gst::ElementFactory::make("x264enc")
+            .property("key-int-max", 10u32)
+            .property_from_str("tune", "zerolatency")
+            .build()
+            .expect("x264enc");
+        self.pipeline
+            .add_many([&src, &caps, &enc])
+            .expect("add video source");
+        gst::Element::link_many([&src, &caps, &enc]).expect("link video source");
+        enc.link(&self.input("video_input")).expect("link to block");
+    }
+
+    /// Every error the bus carries over the next few seconds, as
+    /// (posting element's name, message).
+    fn collect_errors(&self, bus: &gst::Bus) -> Vec<(String, String)> {
+        let mut errors = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Some(msg) = bus.timed_pop_filtered(
+                gst::ClockTime::from_mseconds(100),
+                &[gst::MessageType::Error],
+            ) {
+                if let gst::MessageView::Error(err) = msg.view() {
+                    let source = msg.src().map(|s| s.name().to_string()).unwrap_or_default();
+                    errors.push((source, err.error().to_string()));
+                }
+            }
+        }
+        errors
     }
 
     /// Feed raw video into the video input, which the block must refuse.
@@ -418,6 +474,7 @@ fn raw_video_is_refused_without_taking_the_audio_side_down() {
     h.feed_raw_video();
     h.feed_raw_audio();
     h.finish_linking();
+    let bus = h.pipeline.bus().expect("pipeline bus");
     h.start();
 
     // The audio side must come up on its own.
@@ -434,6 +491,20 @@ fn raw_video_is_refused_without_taking_the_audio_side_down() {
     h.wait_until("the refused video pad to be released", |h| {
         h.mux_pads() == vec!["audio".to_string()]
     });
+
+    // The refusal fails the flow with the block's reason (#840). Before, the
+    // video input's src pad was left unlinked and the only error was the
+    // source's `Internal data stream error`, which says nothing about why.
+    let video_input = format!("{}:rtmp_video_input", INSTANCE);
+    let errors = h.collect_errors(&bus);
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected only the block's refusal on the bus, got: {:?}",
+        errors
+    );
+    assert_eq!(errors[0].0, video_input, "{:?}", errors);
+    assert!(errors[0].1.contains("builtin.videoenc"), "{:?}", errors);
 }
 
 #[test]
@@ -456,5 +527,45 @@ fn an_input_that_is_never_fed_requests_no_pad() {
         "an unconnected audio input must get no pad at all, which is what lets a \
          video-only flow work: an aggregator pad that never carries data stops \
          the muxer aggregating"
+    );
+}
+
+/// #783: H.264 that RTMP receivers refuse is refused here, by name, instead of
+/// publishing and being rejected by the platform with nothing in Strom saying so.
+#[test]
+fn h264_in_a_profile_rtmp_receivers_refuse_fails_the_flow_naming_the_profile() {
+    if !plugins_available() {
+        return;
+    }
+    let h = Harness::new();
+    h.feed_h264_444();
+    h.feed_raw_audio();
+    h.finish_linking();
+    let bus = h.pipeline.bus().expect("pipeline bus");
+    h.start();
+
+    h.wait_until("the audio chain", |h| h.has_child("aacparse"));
+    let errors = h.collect_errors(&bus);
+
+    assert!(
+        !h.has_child("h264parse"),
+        "a refused profile must not be linked into the muxer"
+    );
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected only the block's refusal on the bus, got: {:?}",
+        errors
+    );
+    assert_eq!(
+        errors[0].0,
+        format!("{}:rtmp_video_input", INSTANCE),
+        "{:?}",
+        errors
+    );
+    assert!(
+        errors[0].1.contains("high-4:4:4"),
+        "the refusal must name the profile that arrived: {:?}",
+        errors
     );
 }

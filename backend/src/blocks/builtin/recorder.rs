@@ -32,6 +32,7 @@
 //!
 //! Output files are written to: {media_path}/{output_dir}/{filename_prefix}_%05d.{ext}
 
+use super::refusal::{audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use chrono;
 use gst::glib::prelude::ToValue;
@@ -50,6 +51,7 @@ use tracing::{debug, error, info, warn};
 pub struct RecorderBuilder;
 
 // Default values
+const BLOCK_NAME: &str = "Recorder";
 const DEFAULT_OUTPUT_DIR: &str = "recordings";
 const DEFAULT_FILENAME_PREFIX: &str = "recording";
 const DEFAULT_CONTAINER: &str = "mp4";
@@ -858,19 +860,14 @@ impl BlockBuilder for RecorderBuilder {
                         ("h264parse", -1i32)
                     } else if caps_name == "video/x-h265" {
                         ("h265parse", -1i32)
-                    } else if caps_name == "video/x-raw" {
-                        warn!(
-                            "Recorder {}: received raw video — recorder only accepts pre-encoded video. Add an encoder block before the recorder.",
-                            instance_id_clone
-                        );
-                        give_pad_back();
-                        return gst::PadProbeReturn::Ok;
                     } else {
-                        warn!(
-                            "Recorder {}: unsupported video codec: {} (supported: H.264, H.265)",
-                            instance_id_clone, caps_name
-                        );
                         give_pad_back();
+                        if let Some(input) = pad.parent_element() {
+                            refuse_input(
+                                &input,
+                                &video_refusal(BLOCK_NAME, "H.264 or H.265", &caps_name),
+                            );
+                        }
                         return gst::PadProbeReturn::Ok;
                     };
 
@@ -1096,17 +1093,8 @@ impl BlockBuilder for RecorderBuilder {
                         splitmuxsink.release_request_pad(&sink_pad)
                     };
 
-                    // Only accept pre-encoded audio. Raw audio requires an encoder before the recorder.
-                    if caps_name == "audio/x-raw" {
-                        warn!(
-                            "Recorder {}: received raw audio — recorder only accepts pre-encoded audio. Add an encoder block before the recorder.",
-                            instance_id_clone
-                        );
-                        give_pad_back();
-                        return gst::PadProbeReturn::Ok;
-                    }
-
-                    // Insert the appropriate parser for the encoded format, or link directly.
+                    // Only accept pre-encoded audio. Raw audio requires an encoder before
+                    // the recorder, so raw falls through to the refusal below.
                     let parser_factory = match caps_name.as_str() {
                         "audio/mpeg" if mpegversion == 1 => Some("mpegaudioparse"),
                         "audio/mpeg" => Some("aacparse"), // mpegversion 2 or 4
@@ -1114,11 +1102,13 @@ impl BlockBuilder for RecorderBuilder {
                         "audio/x-dts" => Some("dcaparse"),
                         "audio/x-opus" => Some("opusparse"),
                         other => {
-                            warn!(
-                                "Recorder {}: unsupported audio codec: {} (supported: AAC, MP3, AC3, DTS, Opus)",
-                                instance_id_clone, other
-                            );
                             give_pad_back();
+                            if let Some(input) = pad.parent_element() {
+                                refuse_input(
+                                    &input,
+                                    &audio_refusal(BLOCK_NAME, "AAC, MP3, AC-3, DTS or Opus", other),
+                                );
+                            }
                             return gst::PadProbeReturn::Ok;
                         }
                     };
@@ -1544,7 +1534,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 fn recorder_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.recorder".to_string(),
-        name: "Recorder".to_string(),
+        name: BLOCK_NAME.to_string(),
         description: "Records audio/video streams to file. Supports MP4, MKV, and MPEG-TS containers with optional time/size-based file splitting.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![

@@ -36,6 +36,11 @@
 //! not AAC is refused with a message naming `builtin.audioenc`, since FLV cannot
 //! carry it whatever produced it.
 //!
+//! H.264 is also checked for its profile. `flvmux` takes any, but RTMP
+//! receivers take only the 8-bit 4:2:0 profiles, High and below
+//! (`RTMP_H264_PROFILES`). A 4:2:2, 4:4:4 or 10-bit stream would otherwise
+//! publish without a complaint here and be rejected by the platform.
+//!
 //! # Why the pads are reserved before the pipeline starts, not from the probes
 //!
 //! An aggregator's sink pad that never carries data means `flvmux` never
@@ -128,6 +133,7 @@
 //! refused with a message naming that block. See the audio section above for why
 //! the two sides differ.
 
+use super::refusal::refuse_input;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -563,11 +569,16 @@ impl BlockBuilder for RtmpOutputBuilder {
                 let caps_name = structure.name().to_string();
                 debug!("RTMP {}: video caps detected: {}", instance, caps_name);
 
-                let result = video_plan(&caps_name)
-                    .and_then(|()| build_video_chain(&bin, &mux, &video_slot, pad, &instance));
-                if let Err(e) = result {
-                    error!("RTMP {}: {}", instance, e);
+                let profile = structure.get::<&str>("profile").ok();
+                let result = video_plan(&caps_name, profile).and_then(|()| {
+                    build_video_chain(&bin, &mux, &video_slot, pad, &instance)
+                        .map_err(|e| format!("RTMP Output could not build its video chain: {}", e))
+                });
+                if let Err(reason) = result {
                     release_reserved_pad(&video_slot, &mux, "video", &instance);
+                    if let Some(input) = pad.parent_element() {
+                        refuse_input(&input, &reason);
+                    }
                 }
                 gst::PadProbeReturn::Ok
             });
@@ -605,18 +616,22 @@ impl BlockBuilder for RtmpOutputBuilder {
 
                 let mpegversion = structure.get::<i32>("mpegversion").unwrap_or(4);
                 let layer = structure.get::<i32>("layer").unwrap_or(3);
-                let result =
-                    audio_plan(&caps_name, mpegversion, layer).and_then(|plan| match plan {
+                let result = audio_plan(&caps_name, mpegversion, layer).and_then(|plan| {
+                    match plan {
                         AudioPlan::Encode => {
                             build_raw_audio_chain(&bin, &mux, &audio_slot, pad, &instance)
                         }
                         AudioPlan::Parse => {
                             build_aac_audio_chain(&bin, &mux, &audio_slot, pad, &instance)
                         }
-                    });
-                if let Err(e) = result {
-                    error!("RTMP {}: {}", instance, e);
+                    }
+                    .map_err(|e| format!("RTMP Output could not build its audio chain: {}", e))
+                });
+                if let Err(reason) = result {
                     release_reserved_pad(&audio_slot, &mux, "audio", &instance);
+                    if let Some(input) = pad.parent_element() {
+                        refuse_input(&input, &reason);
+                    }
                 }
                 gst::PadProbeReturn::Ok
             });
@@ -704,13 +719,42 @@ pub enum AudioPlan {
     Parse,
 }
 
+/// H.264 profiles RTMP receivers accept: the 8-bit 4:2:0 ones, High and below.
+///
+/// YouTube Live and Twitch both ask for High, Main or Baseline. `constrained-high`
+/// and `progressive-high` are subsets of High that any High decoder plays, so
+/// they are on the list too. `flvmux` itself accepts any profile, which is why
+/// the block has to look: the container cannot catch it.
+pub const RTMP_H264_PROFILES: &[&str] = &[
+    "constrained-baseline",
+    "baseline",
+    "main",
+    "high",
+    "progressive-high",
+    "constrained-high",
+];
+
 /// Decide what to do with video caps, or refuse with the operator-facing reason.
+///
+/// `profile` is the caps' `profile` field, `None` when upstream does not state
+/// one. An absent profile is accepted: nothing can be checked, and refusing
+/// would break every source that leaves the field out.
 ///
 /// Split out from the pad probe so the decision can be tested without a
 /// pipeline. The wiring it leads to still needs a running flow.
-pub fn video_plan(caps_name: &str) -> Result<(), String> {
+pub fn video_plan(caps_name: &str, profile: Option<&str>) -> Result<(), String> {
     match caps_name {
-        "video/x-h264" => Ok(()),
+        "video/x-h264" => match profile {
+            Some(p) if !RTMP_H264_PROFILES.contains(&p) => Err(format!(
+                "RTMP Output needs H.264 in the High, Main or Baseline profile, but its \
+                 video input is {}, which RTMP receivers such as YouTube Live and Twitch \
+                 refuse. Set builtin.videoenc's profile to auto or high; video that \
+                 arrives already encoded has to be decoded and re-encoded through \
+                 builtin.videoenc",
+                p
+            )),
+            _ => Ok(()),
+        },
         "video/x-raw" => Err(
             "RTMP Output needs H.264 video, but its video input is raw. \
                               Place a builtin.videoenc block before it and link its \

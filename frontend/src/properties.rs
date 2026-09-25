@@ -27,6 +27,15 @@ pub struct LivePropertyUpdate {
 /// Minimum interval between live property API calls for the same element+property.
 pub const LIVE_PROPERTY_DEBOUNCE_MS: u64 = 80;
 
+/// Block definition IDs whose running pipeline can report RTP jitterbuffer
+/// statistics via `GET /api/flows/{id}/rtp-stats`.
+pub const RTP_STATS_BLOCK_DEFINITION_IDS: &[&str] = &["builtin.aes67_input", "builtin.whip_input"];
+
+/// Returns true if the given block definition ID can report RTP statistics.
+pub fn is_rtp_stats_block_def(definition_id: &str) -> bool {
+    RTP_STATS_BLOCK_DEFINITION_IDS.contains(&definition_id)
+}
+
 /// Debounce state for a single element+property combination.
 /// Tracks when the last API call was sent and stores any pending update
 /// that was suppressed by the debounce interval (so the final value is
@@ -1215,16 +1224,15 @@ impl PropertyInspector {
                         }
                     }
 
-                    // Show RTP statistics for AES67 input blocks
-                    if definition.id == "builtin.aes67_input" {
+                    // Show RTP statistics for any block that reports them, plus a
+                    // hint for block types that can report them but have none yet
+                    let block_stats = rtp_stats.and_then(|s| {
+                        s.blocks.iter().find(|bs| bs.block_instance_id == block.id)
+                    });
+                    if block_stats.is_some() || is_rtp_stats_block_def(&definition.id) {
                         ui.separator();
                         ui.heading("📊 RTP Statistics");
                         ui.add_space(4.0);
-
-                        // Find RTP stats for this block
-                        let block_stats = rtp_stats.and_then(|s| {
-                            s.blocks.iter().find(|bs| bs.block_instance_id == block.id)
-                        });
 
                         if let Some(block_stats) = block_stats {
                             // Group stats by jitterbuffer/SSRC
@@ -1303,6 +1311,10 @@ impl PropertyInspector {
                                         });
                                 }
                             }
+                        } else if rtp_stats.is_some() {
+                            // Flow is running but this block has no jitterbuffer yet
+                            // (e.g. no stream received so far)
+                            ui.small("RTP statistics appear once a stream is received.");
                         } else {
                             ui.colored_label(
                                 Color32::from_rgb(200, 200, 100),

@@ -245,6 +245,10 @@ jobs:
   # by cargo, so nothing else in this workflow would notice a break in them.
   static-js:
     name: Static JS Tests
+    # Same reason as check-linux: a label event must not re-run what already
+    # passed. This job is the one dependabot keeps paying for, since its PRs get
+    # labelled after they open.
+    if: github.event.action != 'labeled'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

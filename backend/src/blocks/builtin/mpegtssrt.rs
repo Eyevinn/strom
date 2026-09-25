@@ -29,6 +29,7 @@
 //! Audio (encoded) -> identity -> [dynamic: parser based on codec] -> mpegtsmux
 //! ```
 
+use super::refusal::{audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -37,6 +38,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
+
+const BLOCK_NAME: &str = "MPEG-TS/SRT Output";
 
 /// Remove `streamheader` from the caps leaving `pad`.
 ///
@@ -360,184 +363,197 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
             let parser_inserted = Arc::new(AtomicBool::new(false));
 
             if let Some(src_pad) = video_input.static_pad("src") {
-                src_pad.add_probe(
-                    gst::PadProbeType::EVENT_DOWNSTREAM,
-                    move |pad, info| {
-                        // Only process CAPS events
-                        let event = match &info.data {
-                            Some(gst::PadProbeData::Event(event)) => event,
-                            _ => return gst::PadProbeReturn::Ok,
-                        };
+                src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+                    // Only process CAPS events
+                    let event = match &info.data {
+                        Some(gst::PadProbeData::Event(event)) => event,
+                        _ => return gst::PadProbeReturn::Ok,
+                    };
 
-                        if event.type_() != gst::EventType::Caps {
-                            return gst::PadProbeReturn::Ok;
-                        }
+                    if event.type_() != gst::EventType::Caps {
+                        return gst::PadProbeReturn::Ok;
+                    }
 
-                        // Only insert parser once
-                        if parser_inserted.swap(true, Ordering::SeqCst) {
-                            return gst::PadProbeReturn::Ok;
-                        }
+                    // Only insert parser once
+                    if parser_inserted.swap(true, Ordering::SeqCst) {
+                        return gst::PadProbeReturn::Ok;
+                    }
 
-                        // Get the caps from the event
-                        let caps = match event.view() {
-                            gst::EventView::Caps(caps_event) => caps_event.caps().to_owned(),
-                            _ => return gst::PadProbeReturn::Ok,
-                        };
+                    // Get the caps from the event
+                    let caps = match event.view() {
+                        gst::EventView::Caps(caps_event) => caps_event.caps().to_owned(),
+                        _ => return gst::PadProbeReturn::Ok,
+                    };
 
-                        let structure = match caps.structure(0) {
-                            Some(s) => s,
-                            None => {
-                                error!("MPEGTSSRT {}: No structure in video caps", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let caps_name = structure.name().to_string();
-                        debug!(
-                            "MPEGTSSRT {}: Video caps detected: {}",
-                            instance_id_clone, caps_name
-                        );
-
-                        // Determine which parser to use based on codec
-                        let (parser_factory, parser_name) = if caps_name == "video/x-h264" {
-                            ("h264parse", "h264parse")
-                        } else if caps_name == "video/x-h265" {
-                            ("h265parse", "h265parse")
-                        } else {
-                            warn!(
-                                "MPEGTSSRT {}: Unsupported video codec: {} (only H.264 and H.265 supported)",
-                                instance_id_clone, caps_name
-                            );
-                            return gst::PadProbeReturn::Ok;
-                        };
-
-                        // Get the elements we need
-                        let mux = match mux_weak_clone.upgrade() {
-                            Some(m) => m,
-                            None => {
-                                error!("MPEGTSSRT {}: mux element no longer exists", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        // Get the pipeline (parent of mux)
-                        let pipeline = match mux.parent() {
-                            Some(p) => p,
-                            None => {
-                                error!("MPEGTSSRT {}: mux has no parent", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let bin = match pipeline.downcast::<gst::Bin>() {
-                            Ok(b) => b,
-                            Err(_) => {
-                                error!("MPEGTSSRT {}: parent is not a Bin", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        // Create the parser with config-interval=1 for SPS/PPS insertion
-                        let parser_element_name = format!("{}:video_parser", instance_id_clone);
-                        let parser = match gst::ElementFactory::make(parser_factory)
-                            .name(&parser_element_name)
-                            .property("config-interval", 1i32)
-                            .build()
-                        {
-                            Ok(p) => p,
-                            Err(e) => {
-                                error!(
-                                    "MPEGTSSRT {}: Failed to create {}: {}",
-                                    instance_id_clone, parser_factory, e
-                                );
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        info!(
-                            "MPEGTSSRT {}: Inserting {} with config-interval=1 for video stream",
-                            instance_id_clone, parser_name
-                        );
-
-                        // Add parser to bin
-                        if let Err(e) = bin.add(&parser) {
-                            error!("MPEGTSSRT {}: Failed to add parser to bin: {}", instance_id_clone, e);
-                            return gst::PadProbeReturn::Ok;
-                        }
-
-                        // Sync state with parent
-                        if let Err(e) = parser.sync_state_with_parent() {
-                            error!("MPEGTSSRT {}: Failed to sync parser state: {}", instance_id_clone, e);
-                            return gst::PadProbeReturn::Ok;
-                        }
-
-                        // Get pads
-                        let parser_sink = match parser.static_pad("sink") {
-                            Some(p) => p,
-                            None => {
-                                error!("MPEGTSSRT {}: Parser has no sink pad", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let parser_src = match parser.static_pad("src") {
-                            Some(p) => p,
-                            None => {
-                                error!("MPEGTSSRT {}: Parser has no src pad", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        // Request a sink pad from mpegtsmux using the pad template
-                        // This lets mpegtsmux assign the appropriate PID automatically
-                        let pad_template = match mux.pad_template("sink_%d") {
-                            Some(t) => t,
-                            None => {
-                                error!(
-                                    "MPEGTSSRT {}: mpegtsmux has no sink_%d pad template",
-                                    instance_id_clone
-                                );
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let mux_sink = match mux.request_pad(&pad_template, None, None) {
-                            Some(p) => p,
-                            None => {
-                                error!(
-                                    "MPEGTSSRT {}: Failed to request pad from mpegtsmux",
-                                    instance_id_clone
-                                );
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        // Link: identity src -> parser sink
-                        if let Err(e) = pad.link(&parser_sink) {
+                    let structure = match caps.structure(0) {
+                        Some(s) => s,
+                        None => {
                             error!(
-                                "MPEGTSSRT {}: Failed to link identity to parser: {:?}",
-                                instance_id_clone, e
+                                "MPEGTSSRT {}: No structure in video caps",
+                                instance_id_clone
                             );
                             return gst::PadProbeReturn::Ok;
                         }
+                    };
 
-                        // Link: parser src -> mpegtsmux sink
-                        if let Err(e) = parser_src.link(&mux_sink) {
+                    let caps_name = structure.name().to_string();
+                    debug!(
+                        "MPEGTSSRT {}: Video caps detected: {}",
+                        instance_id_clone, caps_name
+                    );
+
+                    // Determine which parser to use based on codec
+                    let (parser_factory, parser_name) = if caps_name == "video/x-h264" {
+                        ("h264parse", "h264parse")
+                    } else if caps_name == "video/x-h265" {
+                        ("h265parse", "h265parse")
+                    } else {
+                        if let Some(input) = pad.parent_element() {
+                            refuse_input(
+                                &input,
+                                &video_refusal(BLOCK_NAME, "H.264 or H.265", &caps_name),
+                            );
+                        }
+                        return gst::PadProbeReturn::Ok;
+                    };
+
+                    // Get the elements we need
+                    let mux = match mux_weak_clone.upgrade() {
+                        Some(m) => m,
+                        None => {
                             error!(
-                                "MPEGTSSRT {}: Failed to link parser to mux: {:?}",
-                                instance_id_clone, e
+                                "MPEGTSSRT {}: mux element no longer exists",
+                                instance_id_clone
                             );
                             return gst::PadProbeReturn::Ok;
                         }
+                    };
 
-                        info!(
-                            "MPEGTSSRT {}: Video chain linked: identity -> {} -> mpegtsmux ({})",
-                            instance_id_clone, parser_name, mux_sink.name()
+                    // Get the pipeline (parent of mux)
+                    let pipeline = match mux.parent() {
+                        Some(p) => p,
+                        None => {
+                            error!("MPEGTSSRT {}: mux has no parent", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    let bin = match pipeline.downcast::<gst::Bin>() {
+                        Ok(b) => b,
+                        Err(_) => {
+                            error!("MPEGTSSRT {}: parent is not a Bin", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    // Create the parser with config-interval=1 for SPS/PPS insertion
+                    let parser_element_name = format!("{}:video_parser", instance_id_clone);
+                    let parser = match gst::ElementFactory::make(parser_factory)
+                        .name(&parser_element_name)
+                        .property("config-interval", 1i32)
+                        .build()
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!(
+                                "MPEGTSSRT {}: Failed to create {}: {}",
+                                instance_id_clone, parser_factory, e
+                            );
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    info!(
+                        "MPEGTSSRT {}: Inserting {} with config-interval=1 for video stream",
+                        instance_id_clone, parser_name
+                    );
+
+                    // Add parser to bin
+                    if let Err(e) = bin.add(&parser) {
+                        error!(
+                            "MPEGTSSRT {}: Failed to add parser to bin: {}",
+                            instance_id_clone, e
                         );
+                        return gst::PadProbeReturn::Ok;
+                    }
 
-                        gst::PadProbeReturn::Ok
-                    },
-                );
+                    // Sync state with parent
+                    if let Err(e) = parser.sync_state_with_parent() {
+                        error!(
+                            "MPEGTSSRT {}: Failed to sync parser state: {}",
+                            instance_id_clone, e
+                        );
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    // Get pads
+                    let parser_sink = match parser.static_pad("sink") {
+                        Some(p) => p,
+                        None => {
+                            error!("MPEGTSSRT {}: Parser has no sink pad", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    let parser_src = match parser.static_pad("src") {
+                        Some(p) => p,
+                        None => {
+                            error!("MPEGTSSRT {}: Parser has no src pad", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    // Request a sink pad from mpegtsmux using the pad template
+                    // This lets mpegtsmux assign the appropriate PID automatically
+                    let pad_template = match mux.pad_template("sink_%d") {
+                        Some(t) => t,
+                        None => {
+                            error!(
+                                "MPEGTSSRT {}: mpegtsmux has no sink_%d pad template",
+                                instance_id_clone
+                            );
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    let mux_sink = match mux.request_pad(&pad_template, None, None) {
+                        Some(p) => p,
+                        None => {
+                            error!(
+                                "MPEGTSSRT {}: Failed to request pad from mpegtsmux",
+                                instance_id_clone
+                            );
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    // Link: identity src -> parser sink
+                    if let Err(e) = pad.link(&parser_sink) {
+                        error!(
+                            "MPEGTSSRT {}: Failed to link identity to parser: {:?}",
+                            instance_id_clone, e
+                        );
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    // Link: parser src -> mpegtsmux sink
+                    if let Err(e) = parser_src.link(&mux_sink) {
+                        error!(
+                            "MPEGTSSRT {}: Failed to link parser to mux: {:?}",
+                            instance_id_clone, e
+                        );
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    info!(
+                        "MPEGTSSRT {}: Video chain linked: identity -> {} -> mpegtsmux ({})",
+                        instance_id_clone,
+                        parser_name,
+                        mux_sink.name()
+                    );
+
+                    gst::PadProbeReturn::Ok
+                });
             }
 
             info!(
@@ -703,18 +719,30 @@ impl BlockBuilder for MpegTsSrtOutputBuilder {
                             "Opus",
                         )
                     } else {
-                        error!(
-                            "MPEGTSSRT {}: Unsupported audio format: {} (track {})",
-                            instance_id_clone, caps_name, track_index
-                        );
+                        if let Some(input) = pad.parent_element() {
+                            let reason = audio_refusal(
+                                BLOCK_NAME,
+                                "raw, AAC, MP3, AC-3, DTS or Opus",
+                                &caps_name,
+                            );
+                            refuse_input(
+                                &input,
+                                &format!("{} (audio track {})", reason, track_index),
+                            );
+                        }
                         return gst::PadProbeReturn::Ok;
                     };
 
                     if let Err(e) = result {
-                        error!(
-                            "MPEGTSSRT {}: Failed to build audio chain (track {}): {}",
-                            instance_id_clone, track_index, e
-                        );
+                        if let Some(input) = pad.parent_element() {
+                            refuse_input(
+                                &input,
+                                &format!(
+                                    "{} could not build its audio chain (track {}): {}",
+                                    BLOCK_NAME, track_index, e
+                                ),
+                            );
+                        }
                     }
 
                     gst::PadProbeReturn::Ok
@@ -907,7 +935,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 fn mpegtssrt_output_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.mpegtssrt_output".to_string(),
-        name: "MPEG-TS/SRT Output".to_string(),
+        name: BLOCK_NAME.to_string(),
         description: "Muxes multiple audio/video streams to MPEG Transport Stream and outputs via SRT. Supports H.264, H.265, and DIRAC video codecs only (AV1 and VP9 are NOT supported by MPEG-TS standard). Auto-encodes raw audio to AAC. Optimized for UDP streaming with alignment=7.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
