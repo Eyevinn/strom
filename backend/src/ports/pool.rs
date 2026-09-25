@@ -37,12 +37,18 @@ pub enum PortPoolError {
     BadCount(u16),
     #[error("ttl_secs must be between 1 and {MAX_PORT_LEASE_TTL_SECS}, got {0}")]
     BadTtl(u64),
-    #[error("only {available} ports free in the pool, {requested} requested")]
-    Exhausted { requested: u16, available: u32 },
+    #[error("only {available} ports available for this reservation, {requested} requested")]
+    Exhausted {
+        requested: u16,
+        available: u16,
+        newly_blocked: Vec<u16>,
+    },
     #[error("port reservation not found")]
     NotFound,
     #[error("port {0} does not belong to this reservation")]
     NotInReservation(u16),
+    #[error("port {port} is already assigned to flow {flow_id}")]
+    AlreadyAssigned { port: u16, flow_id: FlowId },
     #[error(
         "no port pool is configured on this Strom; set ports.ports \
          or STROM_PORTS to the port numbers it may hand out"
@@ -284,7 +290,7 @@ impl PortPool {
         let grow_from =
             existing.and_then(|i| self.reservations[i].ports.iter().next_back().copied());
         let fresh = if wanted > 0 {
-            self.take_free(wanted, grow_from, probe, &mut newly_blocked)?
+            self.take_free(wanted, count, held, grow_from, probe, &mut newly_blocked)?
         } else {
             BTreeSet::new()
         };
@@ -378,6 +384,18 @@ impl PortPool {
             .ok_or(PortPoolError::NotFound)?;
         if let Some(stray) = ports.iter().find(|p| !reservation.ports.contains(p)) {
             return Err(PortPoolError::NotInReservation(*stray));
+        }
+        if let Some((port, assigned_flow)) = ports.iter().find_map(|port| {
+            reservation
+                .in_use
+                .get(port)
+                .filter(|assigned_flow| **assigned_flow != flow_id)
+                .map(|assigned_flow| (*port, *assigned_flow))
+        }) {
+            return Err(PortPoolError::AlreadyAssigned {
+                port,
+                flow_id: assigned_flow,
+            });
         }
         reservation.in_use.retain(|_, f| *f != flow_id);
         for port in ports {
@@ -496,6 +514,8 @@ impl PortPool {
     fn take_free(
         &mut self,
         wanted: usize,
+        requested: u16,
+        already_held: usize,
         grow_from: Option<u16>,
         probe: &mut dyn FnMut(u16) -> bool,
         newly_blocked: &mut Vec<u16>,
@@ -525,8 +545,9 @@ impl PortPool {
             // Nothing is committed: a failed request leaves the owner's
             // existing ports exactly as they were.
             return Err(PortPoolError::Exhausted {
-                requested: wanted as u16,
-                available: taken.len() as u32,
+                requested,
+                available: (already_held + taken.len()) as u16,
+                newly_blocked: std::mem::take(newly_blocked),
             });
         }
         Ok(taken)
@@ -696,7 +717,24 @@ mod tests {
             err,
             PortPoolError::Exhausted {
                 requested: 1,
-                available: 0
+                available: 0,
+                newly_blocked: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn exhaustion_reports_the_requested_total_and_total_available_to_the_owner() {
+        let mut p = pool();
+        reserve(&mut p, "a", 5, t0());
+        reserve(&mut p, "b", 13, t0());
+
+        assert_eq!(
+            p.reserve("a", 8, None, TTL, t0(), &mut open).unwrap_err(),
+            PortPoolError::Exhausted {
+                requested: 8,
+                available: 7,
+                newly_blocked: vec![]
             }
         );
     }
@@ -744,6 +782,36 @@ mod tests {
                 port: 102,
                 flow_id: flow
             }]
+        );
+    }
+
+    #[test]
+    fn assigning_a_port_held_by_another_flow_is_a_conflict_and_is_atomic() {
+        let mut p = pool();
+        let a = reserve(&mut p, "a", 4, t0());
+        let first = FlowId::new_v4();
+        let second = FlowId::new_v4();
+        p.assign(a.id, first, &[100, 101], t0()).unwrap();
+
+        assert_eq!(
+            p.assign(a.id, second, &[101, 102], t0()),
+            Err(PortPoolError::AlreadyAssigned {
+                port: 101,
+                flow_id: first,
+            })
+        );
+        assert_eq!(
+            p.get(a.id, t0()).unwrap().in_use,
+            vec![
+                PortInUse {
+                    port: 100,
+                    flow_id: first,
+                },
+                PortInUse {
+                    port: 101,
+                    flow_id: first,
+                },
+            ]
         );
     }
 
@@ -860,6 +928,29 @@ mod tests {
         assert!(out.is_err(), "pool is too small for 20 after a and b");
         let out = p.reserve("c", 2, None, TTL, t0(), &mut open_again).unwrap();
         assert_eq!(out.reservation.ports, vec![100, 101]);
+    }
+
+    #[test]
+    fn blocked_ports_are_reported_when_the_reservation_is_exhausted() {
+        let mut p = PortPool::with_ports(100..=102);
+        let mut probe = |port: u16| port == 102;
+
+        assert_eq!(
+            p.reserve("a", 2, None, TTL, t0(), &mut probe).unwrap_err(),
+            PortPoolError::Exhausted {
+                requested: 2,
+                available: 1,
+                newly_blocked: vec![100, 101],
+            }
+        );
+        let blocked: Vec<u16> = p
+            .status(t0())
+            .entries
+            .into_iter()
+            .filter(|entry| entry.state == PortState::Blocked)
+            .map(|entry| entry.port)
+            .collect();
+        assert_eq!(blocked, vec![100, 101]);
     }
 
     #[test]

@@ -39,7 +39,9 @@ fn pool_error(err: PortPoolError) -> ApiError {
         | PortPoolError::BadCount(_)
         | PortPoolError::BadTtl(_)
         | PortPoolError::NotInReservation(_) => StatusCode::BAD_REQUEST,
-        PortPoolError::Exhausted { .. } => StatusCode::CONFLICT,
+        PortPoolError::Exhausted { .. } | PortPoolError::AlreadyAssigned { .. } => {
+            StatusCode::CONFLICT
+        }
         PortPoolError::NotFound => StatusCode::NOT_FOUND,
         // Also 409: the route exists and the server understands it, there is
         // just no pool to serve it from. A client can treat it the same way it
@@ -249,7 +251,7 @@ pub async fn delete_reservation(
         (status = 200, description = "The reservation", body = PortReservation),
         (status = 400, description = "A port does not belong to this reservation", body = ErrorResponse),
         (status = 404, description = "No live reservation with that id", body = ErrorResponse),
-        (status = 409, description = "No port pool is configured on this server", body = ErrorResponse),
+        (status = 409, description = "No port pool is configured, or a port is already assigned to another flow", body = ErrorResponse),
         (status = 500, description = "Reservation could not be persisted", body = ErrorResponse)
     )
 )]

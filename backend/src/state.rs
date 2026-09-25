@@ -285,8 +285,9 @@ impl AppState {
         let probing = *self.inner.port_probe.lock();
         let mut pool = self.inner.port_pool.write().await;
         pool.reconcile(&live, Utc::now());
+        let mut candidate = pool.clone();
         let mut probe = |port: u16| !probing || crate::ports::pool::port_is_free_on_host(port);
-        let outcome = pool.reserve(
+        let outcome = candidate.reserve(
             owner_id,
             count,
             ttl_secs,
@@ -294,13 +295,20 @@ impl AppState {
             Utc::now(),
             &mut probe,
         );
+        let newly_blocked = match &outcome {
+            Ok(outcome) => outcome.newly_blocked.as_slice(),
+            Err(PortPoolError::Exhausted { newly_blocked, .. }) => newly_blocked.as_slice(),
+            Err(_) => &[],
+        };
+        for port in newly_blocked {
+            warn!(
+                "Port {port} is held by something outside Strom and will not be handed out; \
+                 remove it from the pool or free it on the host"
+            );
+        }
         if let Ok(outcome) = &outcome {
-            for port in &outcome.newly_blocked {
-                warn!(
-                    "Port {port} is held by something outside Strom and will not be handed out; \
-                     remove it from the pool or free it on the host"
-                );
-            }
+            self.save_port_reservations(&candidate).await?;
+            *pool = candidate;
             info!(
                 "Port reservation {} for '{}': {} ports ({:?})",
                 outcome.reservation.id,
@@ -308,7 +316,10 @@ impl AppState {
                 outcome.reservation.ports.len(),
                 outcome.how
             );
-            self.save_port_reservations(&pool).await?;
+        } else if matches!(outcome, Err(PortPoolError::Exhausted { .. })) {
+            // A failed allocation does not change reservations, but does keep
+            // the bind-probe results so status and later probes stay accurate.
+            *pool = candidate;
         }
         Ok(outcome)
     }
@@ -323,9 +334,11 @@ impl AppState {
         let live = self.live_flow_ids().await;
         let mut pool = self.inner.port_pool.write().await;
         pool.reconcile(&live, Utc::now());
-        let outcome = pool.renew(id, ttl_secs, default_ttl, Utc::now());
+        let mut candidate = pool.clone();
+        let outcome = candidate.renew(id, ttl_secs, default_ttl, Utc::now());
         if outcome.is_ok() {
-            self.save_port_reservations(&pool).await?;
+            self.save_port_reservations(&candidate).await?;
+            *pool = candidate;
         }
         Ok(outcome)
     }
@@ -338,10 +351,12 @@ impl AppState {
         let live = self.live_flow_ids().await;
         let mut pool = self.inner.port_pool.write().await;
         pool.reconcile(&live, Utc::now());
-        let outcome = pool.release(id, Utc::now());
+        let mut candidate = pool.clone();
+        let outcome = candidate.release(id, Utc::now());
         if outcome.is_ok() {
+            self.save_port_reservations(&candidate).await?;
+            *pool = candidate;
             info!("Port reservation {id} released");
-            self.save_port_reservations(&pool).await?;
         }
         Ok(outcome)
     }
@@ -356,9 +371,11 @@ impl AppState {
         let live = self.live_flow_ids().await;
         let mut pool = self.inner.port_pool.write().await;
         pool.reconcile(&live, Utc::now());
-        let outcome = pool.assign(id, flow_id, ports, Utc::now());
+        let mut candidate = pool.clone();
+        let outcome = candidate.assign(id, flow_id, ports, Utc::now());
         if outcome.is_ok() {
-            self.save_port_reservations(&pool).await?;
+            self.save_port_reservations(&candidate).await?;
+            *pool = candidate;
         }
         Ok(outcome)
     }
@@ -372,9 +389,11 @@ impl AppState {
         let live = self.live_flow_ids().await;
         let mut pool = self.inner.port_pool.write().await;
         pool.reconcile(&live, Utc::now());
-        let outcome = pool.unassign(id, flow_id, Utc::now());
+        let mut candidate = pool.clone();
+        let outcome = candidate.unassign(id, flow_id, Utc::now());
         if outcome.is_ok() {
-            self.save_port_reservations(&pool).await?;
+            self.save_port_reservations(&candidate).await?;
+            *pool = candidate;
         }
         Ok(outcome)
     }
@@ -3107,6 +3126,93 @@ fn parse_gst_level(s: &str) -> Result<gstreamer::DebugLevel, String> {
             "Invalid GStreamer debug level '{}': expected 0-7 or 9",
             n
         )),
+    }
+}
+
+#[cfg(test)]
+mod port_pool_persistence_tests {
+    use super::*;
+    use crate::storage::JsonFileStorage;
+    use std::collections::BTreeSet;
+    use tempfile::TempDir;
+
+    fn new_state(temp_dir: &TempDir) -> AppState {
+        gstreamer::init().expect("gstreamer init failed in test");
+        AppState::new(
+            JsonFileStorage::new(temp_dir.path().join("flows.json")),
+            temp_dir.path().join("blocks.json"),
+            temp_dir.path().join("media"),
+            vec![],
+            "all".to_string(),
+            vec![],
+        )
+    }
+
+    async fn snapshot(state: &AppState) -> Vec<PortReservation> {
+        state.inner.port_pool.read().await.snapshot()
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_rolls_back_every_reservation_mutation() {
+        let temp_dir = TempDir::new().unwrap();
+        let state = new_state(&temp_dir);
+        state
+            .configure_port_pool(
+                BTreeSet::from([47100, 47101, 47102]),
+                PortReservationStore::new(temp_dir.path().join("valid-store")),
+                600,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let reservation = state
+            .reserve_ports("owner", 2, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .reservation;
+        let flow = Flow::new("live flow");
+        let flow_id = flow.id;
+        state.inner.flows.write().await.insert(flow_id, flow);
+        state
+            .assign_ports(reservation.id, flow_id, &[47100])
+            .await
+            .unwrap()
+            .unwrap();
+        let before = snapshot(&state).await;
+
+        // Making the would-be store directory a regular file forces every
+        // atomic save to fail before it can replace the persisted state.
+        let blocker = temp_dir.path().join("not-a-directory");
+        tokio::fs::write(&blocker, "block store creation")
+            .await
+            .unwrap();
+        *state.inner.port_store.write().await = Some(PortReservationStore::new(&blocker));
+
+        assert!(state.reserve_ports("other", 1, None).await.is_err());
+        assert_eq!(snapshot(&state).await, before);
+
+        assert!(state
+            .renew_port_reservation(reservation.id, Some(1_200))
+            .await
+            .is_err());
+        assert_eq!(snapshot(&state).await, before);
+
+        assert!(state
+            .assign_ports(reservation.id, flow_id, &[47101])
+            .await
+            .is_err());
+        assert_eq!(snapshot(&state).await, before);
+
+        assert!(state.unassign_ports(reservation.id, flow_id).await.is_err());
+        assert_eq!(snapshot(&state).await, before);
+
+        assert!(state
+            .release_port_reservation(reservation.id)
+            .await
+            .is_err());
+        assert_eq!(snapshot(&state).await, before);
     }
 }
 
