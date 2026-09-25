@@ -51,6 +51,14 @@ CI runs the same checks on every pull request — format, clippy, tests, and a f
 - Update docs only where they are navigational — don't add code-describing docs (see [How this project is built](#how-this-project-is-built)).
 - Ensure all CI checks pass.
 
+### Draft pull requests
+
+A draft is fine for as long as someone is working on it. When it goes quiet, it gets asked about:
+
+- **After 2 weeks without activity**, the draft gets a comment asking whether it should stay open. Activity means new work: commits written in that time, or discussion on the PR. A rebase does not count, since it only moves the same commits forward.
+- **Any reply keeps it open.** If no one replies within another week, it is closed.
+- **Closing is not deleting.** The branch is kept, and the PR can be reopened at any time.
+
 ## Review
 
 Reviews are handled by our Claude Code with human oversight. Address the feedback it raises; once the change is sound and CI is green, it can be merged.
