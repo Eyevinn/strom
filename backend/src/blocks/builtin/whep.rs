@@ -1156,6 +1156,29 @@ fn build_whepserversink(
         );
     }
 
+    // Zero the processing deadline on whepserversink's input appsinks.
+    //
+    // Each input ends in a syncing appsink that only hands buffers to the
+    // per-viewer session pipelines, so BaseSink's default 20 ms deadline buys
+    // nothing. It is still added to the pipeline latency, which the appsink
+    // waits out and then forwards to the session's appsrc, where webrtcbin's
+    // clocksync waits for PTS + that latency + the encoder's. For raw audio
+    // the Opus framing lands on top of the wait: ~20 ms per viewer.
+    if let Ok(bin) = whepserversink.clone().downcast::<gst::Bin>() {
+        bin.connect("deep-element-added", false, |args| {
+            let owner: gst::Bin = args[0].get().ok()?;
+            let parent: gst::Bin = args[1].get().ok()?;
+            let added: gst::Element = args[2].get().ok()?;
+            if parent == owner
+                && added.factory().is_some_and(|f| f.name() == "appsink")
+                && added.has_property("processing-deadline")
+            {
+                added.set_property("processing-deadline", 0u64);
+            }
+            None
+        });
+    }
+
     // Configure audio/video caps based on which media types are enabled.
     // Video caps will be set dynamically when we detect the input codec.
     if !has_audio {
@@ -2442,7 +2465,7 @@ fn whep_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "ts_offset_ms".to_string(),
                 label: "TS Offset (ms)".to_string(),
-                description: "Timestamp offset for playout timing. A negative value (e.g. -200) makes this output release buffers earlier than the pipeline latency dictates. A/V sync is maintained — only the playout point shifts. Useful for multiview outputs that should display with minimal delay.".to_string(),
+                description: "Shifts the clock wait at this output's input. A negative value releases buffers to the WebRTC sessions earlier, but each viewer's session still waits out the full pipeline latency, so viewers gain far less than the offset (-30 ms measured about 8 ms). A/V sync is maintained.".to_string(),
                 property_type: PropertyType::Int,
                 default_value: Some(PropertyValue::Int(0)),
                 mapping: PropertyMapping {
