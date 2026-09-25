@@ -41,7 +41,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # QR code generation (pure Rust, zero dependencies, WASM-compatible)
 qrcodegen = "1.8"
 # Base64 encoding for thumbnail storage (cross-platform)
-base64 = "0.22"
+base64 = "0.23"
 
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

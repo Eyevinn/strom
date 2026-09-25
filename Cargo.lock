@@ -6630,7 +6630,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-server",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bcrypt",
  "cairo-rs",
  "chrono",
@@ -6705,7 +6705,7 @@ dependencies = [
 name = "strom-frontend"
 version = "0.6.10"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "console_error_panic_hook",
  "eframe",
