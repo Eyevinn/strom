@@ -30,7 +30,9 @@
 //! 2. H.264 plus AAC parses both and does NOT run a second audio encoder.
 //! 3. Raw video is refused without taking the audio side down with it, and
 //!    requests no `video` pad. This is the aggregator stall from the other
-//!    suite's point 2, proven at runtime rather than at build time.
+//!    suite's point 2, proven at runtime rather than at build time. The
+//!    refusal is the only error on the bus, posted by the block and naming
+//!    `builtin.videoenc`.
 //! 4. An input that is never fed requests no pad at all, for the same reason.
 
 use std::collections::HashMap;
@@ -418,6 +420,7 @@ fn raw_video_is_refused_without_taking_the_audio_side_down() {
     h.feed_raw_video();
     h.feed_raw_audio();
     h.finish_linking();
+    let bus = h.pipeline.bus().expect("pipeline bus");
     h.start();
 
     // The audio side must come up on its own.
@@ -434,6 +437,32 @@ fn raw_video_is_refused_without_taking_the_audio_side_down() {
     h.wait_until("the refused video pad to be released", |h| {
         h.mux_pads() == vec!["audio".to_string()]
     });
+
+    // The refusal fails the flow with the block's reason (#840). Before, the
+    // video input's src pad was left unlinked and the only error was the
+    // source's `Internal data stream error`, which says nothing about why.
+    let video_input = format!("{}:rtmp_video_input", INSTANCE);
+    let mut errors = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(100),
+            &[gst::MessageType::Error],
+        ) {
+            if let gst::MessageView::Error(err) = msg.view() {
+                let source = msg.src().map(|s| s.name().to_string()).unwrap_or_default();
+                errors.push((source, err.error().to_string()));
+            }
+        }
+    }
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected only the block's refusal on the bus, got: {:?}",
+        errors
+    );
+    assert_eq!(errors[0].0, video_input, "{:?}", errors);
+    assert!(errors[0].1.contains("builtin.videoenc"), "{:?}", errors);
 }
 
 #[test]

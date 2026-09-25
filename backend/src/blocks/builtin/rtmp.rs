@@ -128,6 +128,7 @@
 //! refused with a message naming that block. See the audio section above for why
 //! the two sides differ.
 
+use super::refusal::refuse_input;
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -563,11 +564,15 @@ impl BlockBuilder for RtmpOutputBuilder {
                 let caps_name = structure.name().to_string();
                 debug!("RTMP {}: video caps detected: {}", instance, caps_name);
 
-                let result = video_plan(&caps_name)
-                    .and_then(|()| build_video_chain(&bin, &mux, &video_slot, pad, &instance));
-                if let Err(e) = result {
-                    error!("RTMP {}: {}", instance, e);
+                let result = video_plan(&caps_name).and_then(|()| {
+                    build_video_chain(&bin, &mux, &video_slot, pad, &instance)
+                        .map_err(|e| format!("RTMP Output could not build its video chain: {}", e))
+                });
+                if let Err(reason) = result {
                     release_reserved_pad(&video_slot, &mux, "video", &instance);
+                    if let Some(input) = pad.parent_element() {
+                        refuse_input(&input, &reason);
+                    }
                 }
                 gst::PadProbeReturn::Ok
             });
@@ -605,18 +610,22 @@ impl BlockBuilder for RtmpOutputBuilder {
 
                 let mpegversion = structure.get::<i32>("mpegversion").unwrap_or(4);
                 let layer = structure.get::<i32>("layer").unwrap_or(3);
-                let result =
-                    audio_plan(&caps_name, mpegversion, layer).and_then(|plan| match plan {
+                let result = audio_plan(&caps_name, mpegversion, layer).and_then(|plan| {
+                    match plan {
                         AudioPlan::Encode => {
                             build_raw_audio_chain(&bin, &mux, &audio_slot, pad, &instance)
                         }
                         AudioPlan::Parse => {
                             build_aac_audio_chain(&bin, &mux, &audio_slot, pad, &instance)
                         }
-                    });
-                if let Err(e) = result {
-                    error!("RTMP {}: {}", instance, e);
+                    }
+                    .map_err(|e| format!("RTMP Output could not build its audio chain: {}", e))
+                });
+                if let Err(reason) = result {
                     release_reserved_pad(&audio_slot, &mux, "audio", &instance);
+                    if let Some(input) = pad.parent_element() {
+                        refuse_input(&input, &reason);
+                    }
                 }
                 gst::PadProbeReturn::Ok
             });

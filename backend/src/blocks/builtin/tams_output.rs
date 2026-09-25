@@ -16,6 +16,7 @@
 //! Only pre-encoded material is accepted — raw video/audio is rejected (add an
 //! encoder block upstream). See `docs/archive/TAMS_INTEGRATION_PLAN.md`.
 
+use super::refusal::{accept_input, audio_refusal, refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use crate::client_auth::AuthMethod;
 use crate::osc::SatProvider;
@@ -37,6 +38,7 @@ use uuid::Uuid;
 
 pub struct TamsOutputBuilder;
 
+const BLOCK_NAME: &str = "TAMS Output";
 const DEFAULT_SEGMENT_SECS: u64 = 2;
 const DEFAULT_NUM_VIDEO_TRACKS: usize = 1;
 const DEFAULT_NUM_AUDIO_TRACKS: usize = 1;
@@ -574,18 +576,13 @@ fn build_flow_chain(
                 Essence::Video => match caps_name.as_str() {
                     "video/x-h264" => ("h264parse", "video/h264"),
                     "video/x-h265" => ("h265parse", "video/h265"),
-                    "video/x-raw" => {
-                        warn!(
-                            "TAMS Output {}: raw video rejected — add an encoder upstream",
-                            instance_id_owned
-                        );
-                        return gst::PadProbeReturn::Ok;
-                    }
                     other => {
-                        warn!(
-                            "TAMS Output {}: unsupported video codec {} (H.264/H.265 only)",
-                            instance_id_owned, other
-                        );
+                        if let Some(input) = pad.parent_element() {
+                            refuse_input(
+                                &input,
+                                &video_refusal(BLOCK_NAME, "H.264 or H.265", other),
+                            );
+                        }
                         return gst::PadProbeReturn::Ok;
                     }
                 },
@@ -596,18 +593,13 @@ fn build_flow_chain(
                         "audio/mpeg" => ("aacparse", "audio/aac"),
                         "audio/x-opus" => ("opusparse", "audio/opus"),
                         "audio/x-ac3" => ("ac3parse", "audio/ac3"),
-                        "audio/x-raw" => {
-                            warn!(
-                                "TAMS Output {}: raw audio rejected — add an encoder upstream",
-                                instance_id_owned
-                            );
-                            return gst::PadProbeReturn::Ok;
-                        }
                         other => {
-                            warn!(
-                                "TAMS Output {}: unsupported audio codec {}",
-                                instance_id_owned, other
-                            );
+                            if let Some(input) = pad.parent_element() {
+                                refuse_input(
+                                    &input,
+                                    &audio_refusal(BLOCK_NAME, "MP3, AAC, Opus or AC-3", other),
+                                );
+                            }
                             return gst::PadProbeReturn::Ok;
                         }
                     }
@@ -674,6 +666,10 @@ fn build_flow_chain(
             // Linked successfully — now consume the one-shot guard so subsequent
             // Caps events (renegotiation) don't re-insert a second parser.
             parser_inserted.store(true, Ordering::SeqCst);
+            // A refused first Caps event silenced this input; this one was usable.
+            if let Some(input) = pad.parent_element() {
+                accept_input(&input);
+            }
             info!(
                 "TAMS Output {}: {} chain linked via {}",
                 instance_id_owned,
@@ -994,7 +990,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 fn tams_output_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.tams_output".to_string(),
-        name: "TAMS Output".to_string(),
+        name: BLOCK_NAME.to_string(),
         description: "Records pre-encoded video/audio into a TAMS store (Time-Addressable Media Store) via an Eyevinn TAMS Gateway. Either separate single-essence MP4 flows or one muxed MPEG-TS flow.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![

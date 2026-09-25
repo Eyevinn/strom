@@ -25,6 +25,7 @@ pub mod mpegtssrt;
 pub mod mpegtssrt_input;
 pub mod ndi;
 pub mod recorder;
+pub(crate) mod refusal;
 pub mod rtmp;
 pub mod spectrum;
 pub mod tams_output;

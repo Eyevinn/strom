@@ -27,6 +27,7 @@
 //! Audio (other)   -> identity -> efpmux
 //! ```
 
+use super::refusal::{refuse_input, video_refusal};
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -35,6 +36,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
+
+const BLOCK_NAME: &str = "EFP/SRT Output";
 
 /// Read a track-count property, returning `None` when it is absent, not a
 /// number, or negative, so the caller applies its own default.
@@ -295,171 +298,178 @@ impl BlockBuilder for EfpSrtOutputBuilder {
             let parser_inserted = Arc::new(AtomicBool::new(false));
 
             if let Some(src_pad) = video_input.static_pad("src") {
-                src_pad.add_probe(
-                    gst::PadProbeType::EVENT_DOWNSTREAM,
-                    move |pad, info| {
-                        let event = match &info.data {
-                            Some(gst::PadProbeData::Event(event)) => event,
-                            _ => return gst::PadProbeReturn::Ok,
-                        };
+                src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+                    let event = match &info.data {
+                        Some(gst::PadProbeData::Event(event)) => event,
+                        _ => return gst::PadProbeReturn::Ok,
+                    };
 
-                        if event.type_() != gst::EventType::Caps {
+                    if event.type_() != gst::EventType::Caps {
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    if parser_inserted.swap(true, Ordering::SeqCst) {
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    let caps = match event.view() {
+                        gst::EventView::Caps(caps_event) => caps_event.caps().to_owned(),
+                        _ => return gst::PadProbeReturn::Ok,
+                    };
+
+                    let structure = match caps.structure(0) {
+                        Some(s) => s,
+                        None => {
+                            error!("EFPSRT {}: No structure in video caps", instance_id_clone);
                             return gst::PadProbeReturn::Ok;
                         }
+                    };
 
-                        if parser_inserted.swap(true, Ordering::SeqCst) {
-                            return gst::PadProbeReturn::Ok;
-                        }
+                    let caps_name = structure.name().to_string();
+                    debug!(
+                        "EFPSRT {}: Video caps detected: {}",
+                        instance_id_clone, caps_name
+                    );
 
-                        let caps = match event.view() {
-                            gst::EventView::Caps(caps_event) => caps_event.caps().to_owned(),
-                            _ => return gst::PadProbeReturn::Ok,
-                        };
-
-                        let structure = match caps.structure(0) {
-                            Some(s) => s,
-                            None => {
-                                error!("EFPSRT {}: No structure in video caps", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let caps_name = structure.name().to_string();
-                        debug!(
-                            "EFPSRT {}: Video caps detected: {}",
-                            instance_id_clone, caps_name
-                        );
-
-                        let (parser_factory, parser_name) = if caps_name == "video/x-h264" {
-                            ("h264parse", "h264parse")
-                        } else if caps_name == "video/x-h265" {
-                            ("h265parse", "h265parse")
-                        } else {
-                            warn!(
-                                "EFPSRT {}: Unsupported video codec: {} (only H.264 and H.265 supported)",
-                                instance_id_clone, caps_name
+                    let (parser_factory, parser_name) = if caps_name == "video/x-h264" {
+                        ("h264parse", "h264parse")
+                    } else if caps_name == "video/x-h265" {
+                        ("h265parse", "h265parse")
+                    } else {
+                        if let Some(input) = pad.parent_element() {
+                            refuse_input(
+                                &input,
+                                &video_refusal(BLOCK_NAME, "H.264 or H.265", &caps_name),
                             );
-                            return gst::PadProbeReturn::Ok;
-                        };
+                        }
+                        return gst::PadProbeReturn::Ok;
+                    };
 
-                        let mux = match mux_weak_clone.upgrade() {
-                            Some(m) => m,
-                            None => {
-                                error!("EFPSRT {}: mux element no longer exists", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let pipeline = match mux.parent() {
-                            Some(p) => p,
-                            None => {
-                                error!("EFPSRT {}: mux has no parent", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let bin = match pipeline.downcast::<gst::Bin>() {
-                            Ok(b) => b,
-                            Err(_) => {
-                                error!("EFPSRT {}: parent is not a Bin", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let parser_element_name = format!("{}:video_parser", instance_id_clone);
-                        let parser = match gst::ElementFactory::make(parser_factory)
-                            .name(&parser_element_name)
-                            .property("config-interval", 1i32)
-                            .build()
-                        {
-                            Ok(p) => p,
-                            Err(e) => {
-                                error!(
-                                    "EFPSRT {}: Failed to create {}: {}",
-                                    instance_id_clone, parser_factory, e
-                                );
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        info!(
-                            "EFPSRT {}: Inserting {} with config-interval=1 for video stream",
-                            instance_id_clone, parser_name
-                        );
-
-                        if let Err(e) = bin.add(&parser) {
-                            error!("EFPSRT {}: Failed to add parser to bin: {}", instance_id_clone, e);
+                    let mux = match mux_weak_clone.upgrade() {
+                        Some(m) => m,
+                        None => {
+                            error!("EFPSRT {}: mux element no longer exists", instance_id_clone);
                             return gst::PadProbeReturn::Ok;
                         }
+                    };
 
-                        if let Err(e) = parser.sync_state_with_parent() {
-                            error!("EFPSRT {}: Failed to sync parser state: {}", instance_id_clone, e);
+                    let pipeline = match mux.parent() {
+                        Some(p) => p,
+                        None => {
+                            error!("EFPSRT {}: mux has no parent", instance_id_clone);
                             return gst::PadProbeReturn::Ok;
                         }
+                    };
 
-                        let parser_sink = match parser.static_pad("sink") {
-                            Some(p) => p,
-                            None => {
-                                error!("EFPSRT {}: Parser has no sink pad", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
+                    let bin = match pipeline.downcast::<gst::Bin>() {
+                        Ok(b) => b,
+                        Err(_) => {
+                            error!("EFPSRT {}: parent is not a Bin", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
 
-                        let parser_src = match parser.static_pad("src") {
-                            Some(p) => p,
-                            None => {
-                                error!("EFPSRT {}: Parser has no src pad", instance_id_clone);
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        // Request a sink pad from efpmux
-                        let pad_template = match mux.pad_template("sink_%u") {
-                            Some(t) => t,
-                            None => {
-                                error!(
-                                    "EFPSRT {}: efpmux has no sink_%u pad template",
-                                    instance_id_clone
-                                );
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        let mux_sink = match mux.request_pad(&pad_template, None, None) {
-                            Some(p) => p,
-                            None => {
-                                error!(
-                                    "EFPSRT {}: Failed to request pad from efpmux",
-                                    instance_id_clone
-                                );
-                                return gst::PadProbeReturn::Ok;
-                            }
-                        };
-
-                        if let Err(e) = pad.link(&parser_sink) {
+                    let parser_element_name = format!("{}:video_parser", instance_id_clone);
+                    let parser = match gst::ElementFactory::make(parser_factory)
+                        .name(&parser_element_name)
+                        .property("config-interval", 1i32)
+                        .build()
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
                             error!(
-                                "EFPSRT {}: Failed to link identity to parser: {:?}",
-                                instance_id_clone, e
+                                "EFPSRT {}: Failed to create {}: {}",
+                                instance_id_clone, parser_factory, e
                             );
                             return gst::PadProbeReturn::Ok;
                         }
+                    };
 
-                        if let Err(e) = parser_src.link(&mux_sink) {
-                            error!(
-                                "EFPSRT {}: Failed to link parser to mux: {:?}",
-                                instance_id_clone, e
-                            );
-                            return gst::PadProbeReturn::Ok;
-                        }
+                    info!(
+                        "EFPSRT {}: Inserting {} with config-interval=1 for video stream",
+                        instance_id_clone, parser_name
+                    );
 
-                        info!(
-                            "EFPSRT {}: Video chain linked: identity -> {} -> efpmux ({})",
-                            instance_id_clone, parser_name, mux_sink.name()
+                    if let Err(e) = bin.add(&parser) {
+                        error!(
+                            "EFPSRT {}: Failed to add parser to bin: {}",
+                            instance_id_clone, e
                         );
+                        return gst::PadProbeReturn::Ok;
+                    }
 
-                        gst::PadProbeReturn::Ok
-                    },
-                );
+                    if let Err(e) = parser.sync_state_with_parent() {
+                        error!(
+                            "EFPSRT {}: Failed to sync parser state: {}",
+                            instance_id_clone, e
+                        );
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    let parser_sink = match parser.static_pad("sink") {
+                        Some(p) => p,
+                        None => {
+                            error!("EFPSRT {}: Parser has no sink pad", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    let parser_src = match parser.static_pad("src") {
+                        Some(p) => p,
+                        None => {
+                            error!("EFPSRT {}: Parser has no src pad", instance_id_clone);
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    // Request a sink pad from efpmux
+                    let pad_template = match mux.pad_template("sink_%u") {
+                        Some(t) => t,
+                        None => {
+                            error!(
+                                "EFPSRT {}: efpmux has no sink_%u pad template",
+                                instance_id_clone
+                            );
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    let mux_sink = match mux.request_pad(&pad_template, None, None) {
+                        Some(p) => p,
+                        None => {
+                            error!(
+                                "EFPSRT {}: Failed to request pad from efpmux",
+                                instance_id_clone
+                            );
+                            return gst::PadProbeReturn::Ok;
+                        }
+                    };
+
+                    if let Err(e) = pad.link(&parser_sink) {
+                        error!(
+                            "EFPSRT {}: Failed to link identity to parser: {:?}",
+                            instance_id_clone, e
+                        );
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    if let Err(e) = parser_src.link(&mux_sink) {
+                        error!(
+                            "EFPSRT {}: Failed to link parser to mux: {:?}",
+                            instance_id_clone, e
+                        );
+                        return gst::PadProbeReturn::Ok;
+                    }
+
+                    info!(
+                        "EFPSRT {}: Video chain linked: identity -> {} -> efpmux ({})",
+                        instance_id_clone,
+                        parser_name,
+                        mux_sink.name()
+                    );
+
+                    gst::PadProbeReturn::Ok
+                });
             }
 
             info!(
@@ -808,7 +818,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 fn efpsrt_output_definition() -> BlockDefinition {
     BlockDefinition {
         id: "builtin.efpsrt_output".to_string(),
-        name: "EFP/SRT Output".to_string(),
+        name: BLOCK_NAME.to_string(),
         description: "Muxes multiple audio/video streams using EFP (Elastic Frame Protocol) and outputs via SRT. Supports H.264, H.265 video and Opus audio natively. Auto-encodes raw audio to Opus. Other formats are transported as private data.".to_string(),
         category: "Outputs".to_string(),
         exposed_properties: vec![
