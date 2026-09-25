@@ -25,6 +25,21 @@ fn is_encoder_available(encoder_name: &str) -> bool {
         .is_some()
 }
 
+/// Like `is_encoder_available`, but a skip is a failure when CI sets
+/// `STROM_REQUIRE_GST_PLUGINS`: a test that skips passes green and guards nothing.
+fn require_element(element_name: &str) -> bool {
+    if is_encoder_available(element_name) {
+        return true;
+    }
+    assert!(
+        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
+        "STROM_REQUIRE_GST_PLUGINS is set but {} is missing",
+        element_name
+    );
+    println!("{} not available, skipping test", element_name);
+    false
+}
+
 #[test]
 fn test_codec_parsing_default() {
     let properties = HashMap::new();
@@ -408,6 +423,109 @@ fn test_encoder_property_setting_nvenc() {
             rc_property
         );
     }
+}
+
+/// #769: the v4l2 branch multiplied the client's kbps by 1000 in plain `u32`
+/// arithmetic, so a bitrate above 4_294_967 panicked in a debug build before any
+/// property was set. `identity` has none of the properties the branch touches,
+/// so only the arithmetic runs.
+#[test]
+fn test_v4l2_bitrate_past_u32_bits_per_second_does_not_panic() {
+    init_gst();
+
+    let encoder = gst::ElementFactory::make("identity")
+        .build()
+        .expect("Should create identity");
+
+    set_encoder_properties(
+        &encoder,
+        "v4l2h264enc",
+        5_000_000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+        60,
+    )
+    .expect("a bitrate past u32 bits/s must not fail the v4l2 branch");
+}
+
+/// #769: the NVENC branch set `preset` and a rate-control property picked by
+/// name prefix, both unguarded, so an `nv*` encoder exposing other names could
+/// not build at all. `x264enc` stands in for such an element: it has `bitrate`
+/// but none of `preset`, `rc-mode` or `rate-control`.
+#[test]
+fn test_nvenc_branch_skips_properties_the_element_lacks() {
+    init_gst();
+
+    if !require_element("x264enc") {
+        return;
+    }
+
+    let encoder = gst::ElementFactory::make("x264enc")
+        .build()
+        .expect("Should create x264enc");
+    for name in ["preset", "rc-mode", "rate-control"] {
+        assert!(
+            !encoder.has_property(name),
+            "the stand-in must lack {} for this test to mean anything",
+            name
+        );
+    }
+
+    set_encoder_properties(
+        &encoder,
+        "nvd3d11h264enc",
+        4000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+        60,
+    )
+    .expect("a property the element lacks must be skipped, not fail the build");
+
+    let bitrate: u32 = encoder.property("bitrate");
+    assert_eq!(bitrate, 4000, "Bitrate should still be set");
+}
+
+/// #769: vp9enc's `target-bitrate` is in bits/s, derived from the client's
+/// kbps. A bitrate whose bits/s form is past the element's range was refused
+/// over a number the operator never supplied; it is clamped to the range.
+#[test]
+fn test_vp9_derived_target_bitrate_is_clamped_to_its_range() {
+    init_gst();
+
+    if !require_element("vp9enc") {
+        return;
+    }
+
+    let encoder = gst::ElementFactory::make("vp9enc")
+        .build()
+        .expect("Should create vp9enc");
+    let pspec = encoder
+        .find_property("target-bitrate")
+        .expect("vp9enc has target-bitrate");
+    let max = pspec
+        .downcast_ref::<gst::glib::ParamSpecInt>()
+        .expect("vp9enc target-bitrate is a gint")
+        .maximum();
+
+    // 2_200_000 kbps is 2.2e9 bits/s, past gint's maximum.
+    set_encoder_properties(
+        &encoder,
+        "vp9enc",
+        2_200_000,
+        "medium",
+        "zerolatency",
+        RateControl::VBR,
+        60,
+    )
+    .expect("a derived value past its target's range must be clamped, not refused");
+
+    let target: i32 = encoder.property("target-bitrate");
+    assert_eq!(
+        target, max,
+        "target-bitrate should be clamped to its maximum"
+    );
 }
 
 /// Test GOP size property compatibility
