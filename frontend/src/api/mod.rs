@@ -3,6 +3,7 @@
 mod auth;
 mod blocks;
 mod compositor;
+mod devtools;
 mod discovery;
 mod elements;
 mod flows;

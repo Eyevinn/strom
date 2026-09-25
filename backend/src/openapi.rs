@@ -177,6 +177,7 @@ use utoipa::OpenApi;
         // Remote control of HTML source browsers
         crate::api::devtools::list_targets,
         crate::api::devtools::create_link,
+        crate::api::devtools::create_block_link,
         crate::api::devtools::revoke_link,
     ),
     components(

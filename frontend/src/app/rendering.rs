@@ -1583,6 +1583,30 @@ impl StromApp {
                             self.status = "Ingest URL copied to clipboard".to_string();
                         }
 
+                        // Handle remote control of an HTML source. Both
+                        // buttons need a link from the server first; which one
+                        // was pressed decides what happens when it arrives.
+                        if let Some((flow_id, block_id)) = result.devtools_qr_requested {
+                            if self.qr_inline.as_ref().is_some_and(|(bid, _)| bid == &block_id) {
+                                self.qr_inline = None;
+                            } else {
+                                self.request_devtools_link(
+                                    ui.ctx(),
+                                    flow_id,
+                                    block_id,
+                                    crate::app::devtools_links::LinkPurpose::Qr,
+                                );
+                            }
+                        }
+                        if let Some((flow_id, block_id)) = result.devtools_open_requested {
+                            self.request_devtools_link(
+                                ui.ctx(),
+                                flow_id,
+                                block_id,
+                                crate::app::devtools_links::LinkPurpose::Open,
+                            );
+                        }
+
                         // Handle QR code toggle for WHEP player
                         if let Some(endpoint_id) = result.show_qr_whep {
                             let server_hostname = self.system_info.as_ref().map(|s| s.hostname.as_str());

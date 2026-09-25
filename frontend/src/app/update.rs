@@ -1390,6 +1390,7 @@ impl eframe::App for StromApp {
             // Poll thumbnail blocks in running flows
             self.poll_block_thumbnails(ui.ctx());
             self.check_block_thumbnails(ui.ctx());
+            self.check_devtools_links(ui.ctx());
         }
 
         // Periodically fetch system clock state while the Clocks page is visible.
@@ -1469,6 +1470,20 @@ impl eframe::App for StromApp {
         if let Some(block_id) = get_local_storage("open_ndi_picker") {
             remove_local_storage("open_ndi_picker");
             self.show_ndi_picker_for_block = Some(block_id);
+        }
+
+        // Check for remote control open signal (double-click on HTML Input)
+        if let Some(block_id) = get_local_storage("open_html_devtools") {
+            remove_local_storage("open_html_devtools");
+
+            if let Some(flow_id) = self.current_flow().map(|f| f.id) {
+                self.request_devtools_link(
+                    ui.ctx(),
+                    flow_id,
+                    block_id,
+                    crate::app::devtools_links::LinkPurpose::Open,
+                );
+            }
         }
 
         // Check for WHEP player open signal (double-click on WHEP Output)

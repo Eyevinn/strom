@@ -355,6 +355,25 @@ fn html_input_definition() -> BlockDefinition {
                 live: false,
                 persist: None,
             },
+            ExposedProperty {
+                name: "remote_control".to_string(),
+                label: "Remote Control".to_string(),
+                description: "Allow an operator to be handed a link that drives this page \
+                              remotely - to log in, clear a consent dialog, click a tab. The \
+                              instance also needs a CEF debug port configured. A session \
+                              opened this way reaches every HTML source in the instance, not \
+                              only this one."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(false)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "remote_control".to_string(),
+                    transform: None,
+                },
+                live: true,
+                persist: None,
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![],
