@@ -368,12 +368,34 @@ fn tap(h: &Harness, instance: &str, output: usize) {
         .property("sync", false)
         .build()
         .expect("fakesink");
-    h.pipeline.add_many([&level, &sink]).expect("add tap");
+    // Pin the tap to float. With a fader or soft clipper engaged the block
+    // pins `F32LE` on the bus itself, but with both off it deliberately leaves
+    // the format open (see the module header on `caps_out_O`), and nothing
+    // else here fixes it: `level` accepts S16LE through F64LE and `fakesink`
+    // takes anything. The bus then sums in whatever those negotiate, and an
+    // `audiomixer` summing in a fixed-point format saturates - a fan-in
+    // overload reads exactly 0.0 dBFS instead of the sum. That is a property
+    // of the tap, not of the router, so these tests measured the runner's
+    // negotiation rather than the block. Asking for float here makes what is
+    // measured the same on every machine.
+    let tap_format = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "F32LE")
+                .build(),
+        )
+        .build()
+        .expect("tap capsfilter");
+    h.pipeline
+        .add_many([&tap_format, &level, &sink])
+        .expect("add tap");
+    tap_format.link(&level).expect("link tap format");
     level.link(&sink).expect("link tap");
     h.elements
         .get(&format!("{instance}:queue_out_{output}"))
         .unwrap_or_else(|| panic!("no queue_out_{output}"))
-        .link(&level)
+        .link(&tap_format)
         .expect("link output to level");
 }
 
