@@ -14,6 +14,7 @@ pub mod api;
 pub mod auth;
 pub mod block;
 pub mod clock_health;
+pub mod devtools;
 pub mod discovery;
 pub mod effects;
 pub mod element;
