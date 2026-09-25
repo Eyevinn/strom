@@ -24,8 +24,21 @@ updates:
       # pass CI on its own. Grouping that class would block every safe bump
       # behind it. Minor and major bumps keep coming one pull request at a time,
       # where they can be read and reverted individually.
+      #
+      # GStreamer is excluded and keeps arriving one crate at a time. It is the
+      # core dependency, its bumps deserve reading on their own, and it is the
+      # family most able to break the build from a patch release: the first
+      # grouped run (#861) failed to compile because gstreamer-video 0.25.4
+      # calls a gstreamer-video-sys signature that its own declared floor,
+      # 0.25.2, does not have. Cargo cannot see that, so no resolution avoids
+      # it - and grouped, it parked twenty working bumps behind one broken
+      # crate. Excluding is not ignoring: these still come as pull requests,
+      # just individually, where one can be closed without holding the rest.
       cargo-patch:
         patterns:
           - "*"
+        exclude-patterns:
+          - "gstreamer*"
+          - "gst-plugin*"
         update-types:
           - "patch"
