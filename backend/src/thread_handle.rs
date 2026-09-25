@@ -145,6 +145,14 @@ mod sys {
             ptype: *mut libc::natural_t,
         ) -> libc::kern_return_t;
 
+        #[cfg(test)]
+        pub fn mach_port_get_refs(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+            right: libc::natural_t,
+            refs: *mut libc::natural_t,
+        ) -> libc::kern_return_t;
+
         pub static mach_task_self_: libc::mach_port_t;
     }
 }
@@ -162,6 +170,80 @@ pub(crate) fn mach_port_name_is_allocated(name: libc::mach_port_t) -> bool {
     kr == libc::KERN_SUCCESS
 }
 
+/// User references held on `name`, counting both the send right and the dead
+/// name it becomes; `None` if the name is not allocated in this task at all.
+///
+/// This is what a release test should measure. Asking only whether the name is
+/// still *allocated* cannot tell a leaked reference from a name the kernel has
+/// already recycled to an unrelated port, and under `cargo test` it races every
+/// other test thread to allocate one.
+///
+/// Both rights are inspected because these tests take their handle from a
+/// thread that has already exited, which turns the send right into a dead name:
+/// asking only for `MACH_PORT_RIGHT_SEND` reports 0 for a name holding two
+/// perfectly good references.
+///
+/// The larger of the two is the answer, not their sum. Across the send-to-dead
+/// transition the kernel reports the same references under both rights for a
+/// while, so summing double-counts them - measured, as a `before` of 4 on a
+/// name holding two references. Every state reports the true count under at
+/// least one right and never more than it under either, so the maximum is
+/// stable whichever side of the transition the read lands on.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn mach_port_user_refs(name: libc::mach_port_t) -> Option<u32> {
+    const MACH_PORT_RIGHT_SEND: libc::natural_t = 0;
+    const MACH_PORT_RIGHT_DEAD_NAME: libc::natural_t = 4;
+
+    let count = |right| {
+        let mut refs: libc::natural_t = 0;
+        // SAFETY: `refs` is a valid out parameter; the call only inspects `name`.
+        let kr = unsafe { sys::mach_port_get_refs(sys::mach_task_self_, name, right, &mut refs) };
+        (kr == libc::KERN_SUCCESS).then_some(refs)
+    };
+
+    match (
+        count(MACH_PORT_RIGHT_SEND),
+        count(MACH_PORT_RIGHT_DEAD_NAME),
+    ) {
+        (None, None) => None,
+        (send, dead) => Some(send.unwrap_or(0).max(dead.unwrap_or(0))),
+    }
+}
+
+/// A handle to a thread that has since exited, plus a second reference on the
+/// same port.
+///
+/// The second handle is the test's keepalive: while it lives the name cannot
+/// be freed, so it cannot be recycled either, and a reference count read
+/// against it means exactly one thing.
+///
+/// Returns once the port has settled into a dead name. `join()` only says the
+/// thread's closure finished; the kernel turns its send right into a dead name
+/// slightly later, and while that is in flight `mach_port_get_refs` reports
+/// unstable counts - measured, a name holding two references reading 3 and 4.
+/// After the transition the state no longer changes, so every count a test
+/// takes from here is comparable to every other.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn handle_and_keepalive_from_finished_thread() -> (ThreadHandle, ThreadHandle) {
+    const MACH_PORT_TYPE_DEAD_NAME: libc::natural_t = 0x0010_0000;
+
+    let handles = std::thread::spawn(|| (ThreadHandle::current(), ThreadHandle::current()))
+        .join()
+        .unwrap();
+    let name = handles.0.mach_port();
+
+    for _ in 0..10_000 {
+        let mut ptype: libc::natural_t = 0;
+        // SAFETY: `ptype` is a valid out parameter; the call only inspects `name`.
+        let kr = unsafe { sys::mach_port_type(sys::mach_task_self_, name, &mut ptype) };
+        if kr == libc::KERN_SUCCESS && ptype & MACH_PORT_TYPE_DEAD_NAME != 0 {
+            return handles;
+        }
+        std::thread::yield_now();
+    }
+    panic!("port name {name:#x} never became a dead name after its thread exited");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,7 +257,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn handle_keeps_the_port_name_allocated_after_the_thread_exits() {
-        let handle = std::thread::spawn(ThreadHandle::current).join().unwrap();
+        let (handle, keepalive) = handle_and_keepalive_from_finished_thread();
         let name = handle.mach_port();
 
         assert!(
@@ -184,13 +266,17 @@ mod tests {
             name
         );
 
+        let before = mach_port_user_refs(name).expect("name allocated while both handles live");
         drop(handle);
+        let after = mach_port_user_refs(name).expect("keepalive still names the port");
 
-        assert!(
-            !mach_port_name_is_allocated(name),
-            "port name {:#x} is still allocated after the last handle was dropped: the reference leaked",
+        assert_eq!(
+            after,
+            before - 1,
+            "dropping the handle did not release its reference on name {:#x}",
             name
         );
+        drop(keepalive);
     }
 
     /// Cloning a handle must not double-release the reference, and the port
@@ -199,18 +285,27 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn a_clone_keeps_the_port_alive_after_the_original_is_dropped() {
-        let handle = std::thread::spawn(ThreadHandle::current).join().unwrap();
+        let (handle, keepalive) = handle_and_keepalive_from_finished_thread();
         let name = handle.mach_port();
+        let before = mach_port_user_refs(name).expect("name allocated while both handles live");
         let clone = handle.clone();
 
         drop(handle);
-        assert!(
-            mach_port_name_is_allocated(name),
-            "dropping one clone released the shared port reference"
+        assert_eq!(
+            mach_port_user_refs(name),
+            Some(before),
+            "dropping one clone released the shared port reference for name {:#x}",
+            name
         );
 
         drop(clone);
-        assert!(!mach_port_name_is_allocated(name));
+        assert_eq!(
+            mach_port_user_refs(name),
+            Some(before - 1),
+            "the last clone did not release the reference on name {:#x}",
+            name
+        );
+        drop(keepalive);
     }
 
     /// The calling thread's own handle must name the same port the platform's

@@ -212,12 +212,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn a_registered_thread_keeps_its_port_name_after_exiting() {
-        use crate::thread_handle::mach_port_name_is_allocated;
+        use crate::thread_handle::{
+            handle_and_keepalive_from_finished_thread, mach_port_name_is_allocated,
+            mach_port_user_refs,
+        };
 
         let registry = ThreadRegistry::new();
-        let handle = handle_from_finished_thread();
+        let (handle, keepalive) = handle_and_keepalive_from_finished_thread();
         let name = handle.mach_port();
         let thread_id = handle.id();
+        let before = mach_port_user_refs(name).expect("name allocated while handles live");
 
         registry.register(handle, "elem".to_string(), Uuid::new_v4(), None, None);
 
@@ -229,11 +233,13 @@ mod tests {
 
         registry.unregister(thread_id);
 
-        assert!(
-            !mach_port_name_is_allocated(name),
+        assert_eq!(
+            mach_port_user_refs(name),
+            Some(before - 1),
             "unregister leaked the port reference for name {:#x}",
             name
         );
+        drop(keepalive);
     }
 
     /// `get_all` hands out clones that the sampler holds across its mach calls,
@@ -242,12 +248,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn a_snapshot_outlives_a_concurrent_unregister() {
-        use crate::thread_handle::mach_port_name_is_allocated;
+        use crate::thread_handle::{
+            handle_and_keepalive_from_finished_thread, mach_port_name_is_allocated,
+            mach_port_user_refs,
+        };
 
         let registry = ThreadRegistry::new();
-        let handle = handle_from_finished_thread();
+        let (handle, keepalive) = handle_and_keepalive_from_finished_thread();
         let name = handle.mach_port();
         let thread_id = handle.id();
+        let before = mach_port_user_refs(name).expect("name allocated while handles live");
         registry.register(handle, "elem".to_string(), Uuid::new_v4(), None, None);
 
         let snapshot = registry.get_all();
@@ -260,7 +270,13 @@ mod tests {
         );
 
         drop(snapshot);
-        assert!(!mach_port_name_is_allocated(name));
+        assert_eq!(
+            mach_port_user_refs(name),
+            Some(before - 1),
+            "dropping the last snapshot leaked the reference for name {:#x}",
+            name
+        );
+        drop(keepalive);
     }
 
     /// Every unregister path releases the reference, including dropping the
@@ -268,47 +284,58 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn every_removal_path_releases_the_port_reference() {
-        use crate::thread_handle::mach_port_name_is_allocated;
+        use crate::thread_handle::{
+            handle_and_keepalive_from_finished_thread, mach_port_user_refs,
+        };
 
         let flow_id = Uuid::new_v4();
 
         // unregister_flow
         let registry = ThreadRegistry::new();
-        let handle = handle_from_finished_thread();
+        let (handle, keepalive) = handle_and_keepalive_from_finished_thread();
         let name = handle.mach_port();
+        let before = mach_port_user_refs(name).expect("name allocated while handles live");
         registry.register(handle, "elem".to_string(), flow_id, None, None);
         registry.unregister_flow(&flow_id);
-        assert!(
-            !mach_port_name_is_allocated(name),
+        assert_eq!(
+            mach_port_user_refs(name),
+            Some(before - 1),
             "unregister_flow leaked the reference for name {:#x}",
             name
         );
+        drop(keepalive);
 
         // Dropping the registry.
         let registry = ThreadRegistry::new();
-        let handle = handle_from_finished_thread();
+        let (handle, keepalive) = handle_and_keepalive_from_finished_thread();
         let name = handle.mach_port();
+        let before = mach_port_user_refs(name).expect("name allocated while handles live");
         registry.register(handle, "elem".to_string(), flow_id, None, None);
         drop(registry);
-        assert!(
-            !mach_port_name_is_allocated(name),
+        assert_eq!(
+            mach_port_user_refs(name),
+            Some(before - 1),
             "dropping the registry leaked the reference for name {:#x}",
             name
         );
+        drop(keepalive);
 
         // Re-registering the same thread must not leak the displaced entry.
         let registry = ThreadRegistry::new();
-        let handle = handle_from_finished_thread();
+        let (handle, keepalive) = handle_and_keepalive_from_finished_thread();
         let name = handle.mach_port();
         let thread_id = handle.id();
+        let before = mach_port_user_refs(name).expect("name allocated while handles live");
         registry.register(handle.clone(), "first".to_string(), flow_id, None, None);
         registry.register(handle, "second".to_string(), flow_id, None, None);
         assert_eq!(registry.len(), 1);
         registry.unregister(thread_id);
-        assert!(
-            !mach_port_name_is_allocated(name),
+        assert_eq!(
+            mach_port_user_refs(name),
+            Some(before - 1),
             "overwriting an entry leaked the reference for name {:#x}",
             name
         );
+        drop(keepalive);
     }
 }
