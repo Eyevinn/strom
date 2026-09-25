@@ -41,6 +41,16 @@ const DEFAULT_WIDTH: u64 = 1920;
 const DEFAULT_HEIGHT: u64 = 1080;
 const DEFAULT_FRAMERATE: u64 = 30;
 
+/// This block's definition id.
+pub const BLOCK_ID: &str = "builtin.html_input";
+
+/// The property that decides whether a link may be minted for this block.
+///
+/// It maps to `_block` because nothing in the pipeline reads it: the API reads
+/// it from the stored block when an operator asks for a link. Storing it is
+/// therefore the whole write, which is why it can change on a running flow.
+pub const REMOTE_CONTROL_PROPERTY: &str = "remote_control";
+
 /// HTML input block builder.
 pub struct HtmlInputBuilder;
 
@@ -257,7 +267,7 @@ pub fn get_blocks() -> Vec<BlockDefinition> {
 
 fn html_input_definition() -> BlockDefinition {
     BlockDefinition {
-        id: "builtin.html_input".to_string(),
+        id: BLOCK_ID.to_string(),
         name: "HTML Input".to_string(),
         description: "Renders a web page as a video source through Chromium, with the page's \
                       audio as an optional second output. Needs the gstcefsrc plugin, which \
@@ -356,7 +366,7 @@ fn html_input_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
-                name: "remote_control".to_string(),
+                name: REMOTE_CONTROL_PROPERTY.to_string(),
                 label: "Remote Control".to_string(),
                 description: "Allow an operator to be handed a link that drives this page \
                               remotely - to log in, clear a consent dialog, click a tab. The \
@@ -368,7 +378,7 @@ fn html_input_definition() -> BlockDefinition {
                 default_value: Some(PropertyValue::Bool(false)),
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
-                    property_name: "remote_control".to_string(),
+                    property_name: REMOTE_CONTROL_PROPERTY.to_string(),
                     transform: None,
                 },
                 live: true,

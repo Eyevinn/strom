@@ -385,9 +385,6 @@ pub async fn create_link(
     .into_response()
 }
 
-/// The block definition an HTML source is built from.
-const HTML_BLOCK: &str = "builtin.html_input";
-
 /// Two URLs naming the same page. Chromium reports what it navigated to, which
 /// is the operator's URL with a trailing slash added on an empty path, so a
 /// literal comparison would miss a page the operator would say is theirs.
@@ -455,7 +452,7 @@ pub async fn create_block_link(
     let Some(block) = flow.blocks.iter().find(|b| b.id == block_id) else {
         return (StatusCode::NOT_FOUND, "Block not found").into_response();
     };
-    if block.block_definition_id != HTML_BLOCK {
+    if block.block_definition_id != crate::blocks::builtin::html_input::BLOCK_ID {
         return (
             StatusCode::NOT_FOUND,
             "Only an HTML source can be controlled remotely",
