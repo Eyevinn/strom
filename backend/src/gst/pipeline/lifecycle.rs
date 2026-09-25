@@ -352,7 +352,11 @@ mod tests {
 
     #[test]
     fn run_with_deadline_reports_a_panic() {
-        let result = run_with_deadline(|| -> u32 { panic!("boom") }, Duration::from_secs(5));
+        // Generous on purpose: the channel only disconnects once the panic
+        // hook has run, and with RUST_BACKTRACE set (as in CI) that hook
+        // symbolicates a debug binary first, which took over 5 s under a
+        // loaded parallel test run. The call returns as soon as it unwinds.
+        let result = run_with_deadline(|| -> u32 { panic!("boom") }, Duration::from_secs(120));
         assert_eq!(result, Err(DeadlineError::Panicked));
     }
 }
