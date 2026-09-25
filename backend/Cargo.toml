@@ -67,7 +67,7 @@ gst-plugins-lsp = { git = "https://github.com/srperens/lsp-plugins-rs", tag = "v
 gst-plugin-efp = { git = "https://github.com/Eyevinn/efp", tag = "v0.4.0", package = "gst-plugin-efp", optional = true }
 
 # Encoding
-base64 = "0.22"
+base64 = "0.23"
 
 # Error handling
 anyhow = "1.0"
