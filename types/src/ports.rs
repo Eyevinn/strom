@@ -166,7 +166,7 @@ pub struct PortSpan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct PortPoolStatus {
-    /// Whether any ports are configured. Every reservation route answers 409
+    /// Whether any ports are configured. Every reservation route answers 503
     /// while this is `false`.
     pub enabled: bool,
     /// The configured ports, as runs, ascending.

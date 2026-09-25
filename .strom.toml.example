@@ -113,7 +113,7 @@ port = 8080
 # firewall and publish it into the container.
 #
 # Empty (the default) switches the pool off entirely: the reservation routes
-# answer 409, and GET /api/ports reports enabled: false. Set this only on a
+# answer 503, and GET /api/ports reports enabled: false. Set this only on a
 # Strom that several callers share — on one that does not, a pool would only
 # narrow which ports its own flows may bind.
 #

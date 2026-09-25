@@ -4201,7 +4201,7 @@
               }
             }
           },
-          "409": {
+          "503": {
             "description": "No port pool is configured on this server",
             "content": {
               "application/json": {
@@ -4262,7 +4262,7 @@
             }
           },
           "409": {
-            "description": "Not enough free ports, or no pool configured",
+            "description": "Not enough free ports",
             "content": {
               "application/json": {
                 "schema": {
@@ -4273,6 +4273,16 @@
           },
           "500": {
             "description": "Reservation could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
             "content": {
               "application/json": {
                 "schema": {
@@ -4324,7 +4334,7 @@
               }
             }
           },
-          "409": {
+          "503": {
             "description": "No port pool is configured on this server",
             "content": {
               "application/json": {
@@ -4369,8 +4379,8 @@
               }
             }
           },
-          "409": {
-            "description": "No port pool is configured on this server",
+          "500": {
+            "description": "Reservation could not be persisted",
             "content": {
               "application/json": {
                 "schema": {
@@ -4379,8 +4389,8 @@
               }
             }
           },
-          "500": {
-            "description": "Reservation could not be persisted",
+          "503": {
+            "description": "No port pool is configured on this server",
             "content": {
               "application/json": {
                 "schema": {
@@ -4454,7 +4464,7 @@
             }
           },
           "409": {
-            "description": "No port pool is configured, or a port is already assigned to another flow",
+            "description": "A port is already assigned to another flow",
             "content": {
               "application/json": {
                 "schema": {
@@ -4465,6 +4475,16 @@
           },
           "500": {
             "description": "Reservation could not be persisted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No port pool is configured on this server",
             "content": {
               "application/json": {
                 "schema": {
@@ -4520,8 +4540,8 @@
               }
             }
           },
-          "409": {
-            "description": "No port pool is configured on this server",
+          "500": {
+            "description": "Reservation could not be persisted",
             "content": {
               "application/json": {
                 "schema": {
@@ -4530,8 +4550,8 @@
               }
             }
           },
-          "500": {
-            "description": "Reservation could not be persisted",
+          "503": {
+            "description": "No port pool is configured on this server",
             "content": {
               "application/json": {
                 "schema": {
@@ -4605,8 +4625,8 @@
               }
             }
           },
-          "409": {
-            "description": "No port pool is configured on this server",
+          "500": {
+            "description": "Reservation could not be persisted",
             "content": {
               "application/json": {
                 "schema": {
@@ -4615,8 +4635,8 @@
               }
             }
           },
-          "500": {
-            "description": "Reservation could not be persisted",
+          "503": {
+            "description": "No port pool is configured on this server",
             "content": {
               "application/json": {
                 "schema": {
@@ -7985,7 +8005,7 @@
         "properties": {
           "enabled": {
             "type": "boolean",
-            "description": "Whether any ports are configured. Every reservation route answers 409\nwhile this is `false`."
+            "description": "Whether any ports are configured. Every reservation route answers 503\nwhile this is `false`."
           },
           "entries": {
             "type": "array",

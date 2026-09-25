@@ -213,6 +213,28 @@ async fn a_flow_association_survives_the_reservation_and_ends_with_the_flow() {
     assert_eq!(status, StatusCode::OK, "{assigned}");
     assert_eq!(assigned["in_use"].as_array().unwrap().len(), 2);
 
+    // A different flow cannot take an assigned port; this is a conflict,
+    // distinct from an unconfigured pool's 503.
+    let other = Flow::new("other production");
+    let other_id = other.id;
+    state.upsert_flow(other).await.unwrap();
+    let (status, err) = call(
+        &app,
+        Method::POST,
+        &format!("/api/ports/reservations/{id}/assign"),
+        Some(json!({"flow_id": other_id, "ports": [47100]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{err}");
+    let (_, after) = call(
+        &app,
+        Method::GET,
+        &format!("/api/ports/reservations/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(after["in_use"], assigned["in_use"]);
+
     // A port the reservation does not hold is a 400.
     let (status, err) = call(
         &app,
@@ -318,7 +340,7 @@ async fn unassigning_returns_ports_to_the_owner_and_survives_a_restart() {
 /// A Strom nobody configured a pool on is a first-class answer, not a gap: the
 /// routes exist and say what is missing, and `GET /api/ports` answers anyway.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_unconfigured_server_answers_409_and_reports_a_disabled_pool() {
+async fn an_unconfigured_server_answers_503_and_reports_a_disabled_pool() {
     gstreamer::init().unwrap();
     let dir = TempDir::new().unwrap();
     let state = new_state(&dir);
@@ -359,7 +381,11 @@ async fn an_unconfigured_server_answers_409_and_reports_a_disabled_pool() {
     ];
     for (method, uri, body) in routes {
         let (status, err) = call(&app, method.clone(), &uri, body).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{method} {uri}: {err}");
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{method} {uri}: {err}"
+        );
         // The body names the setting to change, not just the failure.
         let message = err["error"].as_str().unwrap_or_default();
         assert!(message.contains("STROM_PORTS"), "{method} {uri}: {message}");

@@ -22,7 +22,7 @@ apart, and a pool would only narrow which ports its own flows may bind.
 Nothing here changes behaviour for anyone who does not ask for it.
 
 1. **Operator** — with no ports configured the feature is off. The reservation routes answer
-   `409` and nothing else in Strom behaves differently.
+   `503` and nothing else in Strom behaves differently.
 2. **Caller** — with a pool configured, a client that never calls the reservation API is
    unaffected. Someone typing `srt://:5000?mode=listener` into the GUI notices nothing.
 3. **Flow** — telling the pool which ports a flow uses is a separate, optional call.
@@ -80,12 +80,12 @@ All of them sit under Strom's normal API authentication.
 | Method | Path | Body | Answer |
 |---|---|---|---|
 | `GET` | `/api/ports` | | 200 the pool, configured or not |
-| `POST` | `/api/ports/reservations` | `{"owner_id": "...", "count": 10, "ttl_secs"?: 600}` | 201 new, 200 the owner's existing reservation renewed, 400 bad input, 409 not enough free ports or no pool |
+| `POST` | `/api/ports/reservations` | `{"owner_id": "...", "count": 10, "ttl_secs"?: 600}` | 201 new, 200 the owner's existing reservation renewed, 400 bad input, 409 not enough free ports, 503 no pool |
 | `GET` | `/api/ports/reservations` | | 200 `[reservation]`, live ones only |
 | `GET` | `/api/ports/reservations/{id}` | | 200, 404 |
 | `POST` | `/api/ports/reservations/{id}/renew` | `{"ttl_secs"?: 600}` or empty | 200, 404 |
 | `DELETE` | `/api/ports/reservations/{id}` | | 204, 404 |
-| `POST` | `/api/ports/reservations/{id}/assign` | `{"flow_id": "...", "ports": [47100, 47101]}` | 200, 400 a port is not in this reservation, 404 |
+| `POST` | `/api/ports/reservations/{id}/assign` | `{"flow_id": "...", "ports": [47100, 47101]}` | 200, 400 a port is not in this reservation, 404, 409 a port is assigned to another flow |
 | `DELETE` | `/api/ports/reservations/{id}/assign/{flow_id}` | | 204, 404 |
 
 A reservation:
@@ -112,7 +112,7 @@ reservation, not by shrinking it.
 `POST .../assign` records "these ports of this reservation are used by that flow". The pool will
 not return those ports while the flow exists, which is what makes invariant 4 work. Assigning
 again for the same flow replaces what was recorded, so a caller can correct itself. Assigning a
-port the reservation does not hold is a `400`.
+port the reservation does not hold is a `400`; a port assigned to another flow is a `409`.
 
 The association is dropped when the caller releases it, or when the flow no longer exists — the
 pool reconciles against the current flow list at startup and on every route that reads or changes
@@ -145,9 +145,11 @@ read that off a status code:
 interesting rather than to pool size — a pool of nine hundred idle ports answers with an empty
 list.
 
-Every reservation route answers `409` while no pool is configured, with the setting to change in
-the body. A client can treat that the same way it treats an exhausted pool: carry on without
-reserved ports.
+Every reservation route answers `503` while no pool is configured, with the setting to change in
+the body. `409` means the configured pool cannot satisfy the allocation or a port is already
+assigned to another flow. Clients can use `GET /api/ports` to inspect configuration and capacity;
+a disabled pool requires operator configuration, while a conflict requires changing the request
+or waiting for ports to become available.
 
 ## Probing before handing out
 
@@ -176,6 +178,10 @@ directory, **not** through the flow storage backend. Port numbers are host-local
 PostgreSQL serving two Strom nodes would conflate two different hosts' port spaces and hand the
 same numbers to both. Without persistence a restart would drop every owner's reservation and the
 next request could hand out different numbers than the clients are already configured to dial.
+
+If an existing reservations file cannot be read or parsed (including an empty or truncated file),
+Strom refuses to start and leaves the file untouched. Restore or repair it before restarting.
+A missing file is normal on first startup.
 
 ## Known limitations
 

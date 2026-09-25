@@ -45,17 +45,16 @@ impl PortReservationStore {
     /// Every persisted reservation, lapsed ones included — what they still
     /// hold is decided by the pool, against the current flow list.
     ///
-    /// A missing or empty file is an empty set, not an error.
+    /// Only a missing file is an empty set. An unreadable or malformed file
+    /// must fail startup so existing reservations cannot be overwritten.
     pub async fn load(&self) -> Result<Vec<PortReservation>> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
-        }
-        let text = fs::read_to_string(&self.path)
-            .await
-            .with_context(|| format!("reading {}", self.path.display()))?;
-        if text.trim().is_empty() {
-            return Ok(Vec::new());
-        }
+        let text = match fs::read_to_string(&self.path).await {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err).with_context(|| format!("reading {}", self.path.display()));
+            }
+        };
         let file: FileFormat = serde_json::from_str(&text)
             .with_context(|| format!("parsing {}", self.path.display()))?;
         Ok(file.reservations)

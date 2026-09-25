@@ -6,7 +6,7 @@
 //! under a running pipeline.
 //!
 //! The pool is off until an operator configures ports. A server with none says
-//! so rather than hiding: the reservation routes answer `409` with the setting
+//! so rather than hiding: the reservation routes answer `503` with the setting
 //! to change in the body, and `GET /api/ports` answers `200` either way with
 //! `enabled: false`. A client can tell a Strom that will never hand out ports
 //! from one that is briefly unhappy, and from an older Strom with no pool
@@ -43,10 +43,8 @@ fn pool_error(err: PortPoolError) -> ApiError {
             StatusCode::CONFLICT
         }
         PortPoolError::NotFound => StatusCode::NOT_FOUND,
-        // Also 409: the route exists and the server understands it, there is
-        // just no pool to serve it from. A client can treat it the same way it
-        // treats an exhausted pool — carry on without reserved ports.
-        PortPoolError::NotConfigured => StatusCode::CONFLICT,
+        // Configuration is unavailable, distinct from allocation conflicts.
+        PortPoolError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
     };
     (status, Json(ErrorResponse::new(err.to_string())))
 }
@@ -88,7 +86,7 @@ pub async fn get_pool(State(state): State<AppState>) -> Json<PortPoolStatus> {
     tag = "ports",
     responses(
         (status = 200, description = "Every reservation that has not lapsed", body = Vec<PortReservation>),
-        (status = 409, description = "No port pool is configured on this server", body = ErrorResponse)
+        (status = 503, description = "No port pool is configured on this server", body = ErrorResponse)
     )
 )]
 pub async fn list_reservations(
@@ -119,7 +117,8 @@ pub async fn list_reservations(
         (status = 201, description = "A new reservation was granted", body = PortReservation),
         (status = 200, description = "The owner's existing reservation, renewed", body = PortReservation),
         (status = 400, description = "Invalid owner_id, count or ttl_secs", body = ErrorResponse),
-        (status = 409, description = "Not enough free ports, or no pool configured", body = ErrorResponse),
+        (status = 409, description = "Not enough free ports", body = ErrorResponse),
+        (status = 503, description = "No port pool is configured on this server", body = ErrorResponse),
         (status = 500, description = "Reservation could not be persisted", body = ErrorResponse)
     )
 )]
@@ -148,7 +147,7 @@ pub async fn create_reservation(
     responses(
         (status = 200, description = "The reservation", body = PortReservation),
         (status = 404, description = "No live reservation with that id", body = ErrorResponse),
-        (status = 409, description = "No port pool is configured on this server", body = ErrorResponse)
+        (status = 503, description = "No port pool is configured on this server", body = ErrorResponse)
     )
 )]
 pub async fn get_reservation(
@@ -176,7 +175,7 @@ pub async fn get_reservation(
         (status = 200, description = "The renewed reservation", body = PortReservation),
         (status = 400, description = "Invalid ttl_secs", body = ErrorResponse),
         (status = 404, description = "No live reservation with that id", body = ErrorResponse),
-        (status = 409, description = "No port pool is configured on this server", body = ErrorResponse),
+        (status = 503, description = "No port pool is configured on this server", body = ErrorResponse),
         (status = 500, description = "Reservation could not be persisted", body = ErrorResponse)
     )
 )]
@@ -219,7 +218,7 @@ pub async fn renew_reservation(
     responses(
         (status = 204, description = "Reservation released"),
         (status = 404, description = "No live reservation with that id", body = ErrorResponse),
-        (status = 409, description = "No port pool is configured on this server", body = ErrorResponse),
+        (status = 503, description = "No port pool is configured on this server", body = ErrorResponse),
         (status = 500, description = "Reservation could not be persisted", body = ErrorResponse)
     )
 )]
@@ -251,7 +250,8 @@ pub async fn delete_reservation(
         (status = 200, description = "The reservation", body = PortReservation),
         (status = 400, description = "A port does not belong to this reservation", body = ErrorResponse),
         (status = 404, description = "No live reservation with that id", body = ErrorResponse),
-        (status = 409, description = "No port pool is configured, or a port is already assigned to another flow", body = ErrorResponse),
+        (status = 409, description = "A port is already assigned to another flow", body = ErrorResponse),
+        (status = 503, description = "No port pool is configured on this server", body = ErrorResponse),
         (status = 500, description = "Reservation could not be persisted", body = ErrorResponse)
     )
 )]
@@ -282,7 +282,7 @@ pub async fn assign_ports(
     responses(
         (status = 204, description = "Declaration dropped"),
         (status = 404, description = "No such reservation, or no ports declared for that flow", body = ErrorResponse),
-        (status = 409, description = "No port pool is configured on this server", body = ErrorResponse),
+        (status = 503, description = "No port pool is configured on this server", body = ErrorResponse),
         (status = 500, description = "Reservation could not be persisted", body = ErrorResponse)
     )
 )]
