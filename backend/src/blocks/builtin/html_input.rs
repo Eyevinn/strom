@@ -40,7 +40,7 @@ use strom_types::{block::StreamMode, block::*, element::ElementPadRef, PropertyV
 use tracing::info;
 
 /// The page shown by a block nobody has configured yet.
-const DEFAULT_URL: &str = "https://example.com";
+const DEFAULT_URL: &str = "https://github.com/Eyevinn/strom/pull/879";
 const DEFAULT_WIDTH: u64 = 1920;
 const DEFAULT_HEIGHT: u64 = 1080;
 const DEFAULT_FRAMERATE: u64 = 30;
