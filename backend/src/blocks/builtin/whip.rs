@@ -19,6 +19,7 @@ use crate::gst::keyframe_request;
 use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{
     ActivityStamp, SessionActivity, SessionCleanupRequest, StallSide, WhipEndpointConfig,
+    DECODE_GRACE,
 };
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -711,6 +712,10 @@ pub fn build_whipserversrc(
 /// How long a session may go without producing usable media before the watchdog
 /// tears it down; see `SessionActivity::idle`.
 const INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+// A session is not judged until `DECODE_GRACE` has passed, so a timeout inside
+// it would never reap a session that decodes nothing.
+const _: () = assert!(DECODE_GRACE.as_millis() < INACTIVITY_TIMEOUT.as_millis());
 
 /// How often the watchdog re-checks its stop flag while waiting.
 const WATCHDOG_POLL: std::time::Duration = std::time::Duration::from_millis(250);

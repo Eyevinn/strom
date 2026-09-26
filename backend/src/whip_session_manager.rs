@@ -526,8 +526,8 @@ const PENDING_CLEANUP_TTL: Duration = Duration::from_secs(30);
 /// from the session's *first* buffer, so a session that spent a minute
 /// negotiating still gets the full grace once media starts. It has to stay under
 /// the watchdog's `INACTIVITY_TIMEOUT` for the watchdog to reap a session that
-/// never decodes at all.
-const DECODE_GRACE: Duration = Duration::from_secs(5);
+/// never decodes at all, which `whip.rs` asserts at compile time.
+pub(crate) const DECODE_GRACE: Duration = Duration::from_secs(5);
 
 /// How much staler `output` must be than `ingress` before a reap is blamed on
 /// the flow rather than on the publisher; see `StallSide`. It moves the label
