@@ -1453,6 +1453,38 @@ fn build_whipclientsink(
         });
     }
 
+    // Zero the processing deadline on whipclientsink's input appsinks.
+    //
+    // Each input ends in a syncing appsink that only hands buffers to the
+    // session pipeline, so BaseSink's default 20 ms deadline buys nothing. It
+    // is still added to the pipeline latency, which the appsink waits out and
+    // then forwards to the session's appsrc, where webrtcbin's clocksync waits
+    // for it again. A flow adopts the largest latency any sink reports, so
+    // the deadline would also delay every other sink in the flow.
+    //
+    // The cost: the deadline is slack against a stall in a thread upstream of
+    // a queue, and without it buffers delayed by such a stall leave off beat.
+    // In the block's own streaming thread a deadline only shifts the wait.
+    // WHIP Input relayed straight into WHIP Output is the shape that pays;
+    // mixers and routers pace their own output.
+    //
+    // webrtcsink creates these appsinks when a pad is requested, which happens
+    // when the flow links the block, so the handler has to be in place now.
+    if let Ok(bin) = whipclientsink.clone().downcast::<gst::Bin>() {
+        bin.connect("deep-element-added", false, |args| {
+            let owner: gst::Bin = args[0].get().ok()?;
+            let parent: gst::Bin = args[1].get().ok()?;
+            let added: gst::Element = args[2].get().ok()?;
+            if parent == owner
+                && added.factory().is_some_and(|f| f.name() == "appsink")
+                && added.has_property("processing-deadline")
+            {
+                added.set_property("processing-deadline", 0u64);
+            }
+            None
+        });
+    }
+
     debug!(
         "WHIP Output (whipclientsink) configured: endpoint={}, stun={:?}, turn={:?}, ice_transport_policy={}",
         whip_endpoint, stun_server, turn_server, ice_transport_policy
