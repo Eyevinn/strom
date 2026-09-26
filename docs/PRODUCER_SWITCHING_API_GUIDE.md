@@ -232,8 +232,12 @@ delivered a frame to the mixer:
 //                       ^live ^live  ^^^^ frozen 7.7s   ^never delivered
 ```
 
-A live 30 fps source sits in the tens of milliseconds. Anything past a second or so is a
-source that has stopped, and `null` is one that has never delivered a frame at all. The
+Read the age against the source's normal frame interval. A 30 fps camera or contributor
+sits in the tens of milliseconds, so a few hundred milliseconds already means it has
+stopped. A source that only sends a frame when its picture changes — a web graphic on a
+static page, a screen share of a still slide — legitimately ages for seconds between
+frames, so no single threshold fits every input. `null` is an input that has never
+delivered a frame at all. The
 counter is stamped from the mixer's own input pads, so it covers every kind of input, and
 it measures what actually determines the picture.
 
