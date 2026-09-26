@@ -64,6 +64,9 @@ impl StatsCollector {
         let stats = match block.block_definition_id.as_str() {
             "builtin.aes67_input" => Self::collect_aes67_input_stats(pipeline, &block.id),
             "builtin.whip_input" => Self::collect_whip_input_stats(block, whip_sessions),
+            crate::blocks::builtin::audio_bridge::INPUT_BLOCK_ID => {
+                Self::collect_audio_bridge_stats(pipeline, &block.id)
+            }
             "builtin.aes67_output" => {
                 // AES67 output doesn't have jitterbuffer stats, could add other stats later
                 vec![]
@@ -92,6 +95,24 @@ impl StatsCollector {
             stats,
             collected_at: now,
         })
+    }
+
+    /// Collect statistics for an Audio Bridge Input: its backlog, gaps and
+    /// time-scaling, and the stalls it saw in its input.
+    fn collect_audio_bridge_stats(pipeline: &gst::Pipeline, instance_id: &str) -> Vec<Statistic> {
+        let name = format!(
+            "{}:{}",
+            instance_id,
+            crate::blocks::builtin::audio_bridge::BRIDGE_ELEMENT
+        );
+        pipeline
+            .by_name(&name)
+            .and_then(|e| {
+                e.downcast::<crate::gst::audio_bridge::src::AudioBridgeSrc>()
+                    .ok()
+            })
+            .map(|bridge| bridge.stats().to_statistics())
+            .unwrap_or_default()
     }
 
     /// Collect statistics for AES67 Input block (RTP jitterbuffer stats).

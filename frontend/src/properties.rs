@@ -27,9 +27,14 @@ pub struct LivePropertyUpdate {
 /// Minimum interval between live property API calls for the same element+property.
 pub const LIVE_PROPERTY_DEBOUNCE_MS: u64 = 80;
 
-/// Block definition IDs whose running pipeline can report RTP jitterbuffer
-/// statistics via `GET /api/flows/{id}/rtp-stats`.
-pub const RTP_STATS_BLOCK_DEFINITION_IDS: &[&str] = &["builtin.aes67_input", "builtin.whip_input"];
+/// Block definition IDs whose running pipeline can report statistics via
+/// `GET /api/flows/{id}/rtp-stats`: RTP jitterbuffer statistics, and the
+/// Audio Bridge Input's backlog and dropouts.
+pub const RTP_STATS_BLOCK_DEFINITION_IDS: &[&str] = &[
+    "builtin.aes67_input",
+    "builtin.whip_input",
+    strom_types::audio_bridge::INPUT_BLOCK_ID,
+];
 
 /// Returns true if the given block definition ID can report RTP statistics.
 pub fn is_rtp_stats_block_def(definition_id: &str) -> bool {

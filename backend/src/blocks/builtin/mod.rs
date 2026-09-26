@@ -1,6 +1,7 @@
 //! Built-in block definitions organized by protocol/function.
 
 pub mod aes67;
+pub mod audio_bridge;
 pub mod audioanalyzer;
 pub mod audioenc;
 pub mod audioformat;
@@ -82,6 +83,7 @@ pub fn get_all_builtin_blocks() -> Vec<BlockDefinition> {
 
     // Add Inter-pipeline blocks
     blocks.extend(inter::get_blocks());
+    blocks.extend(audio_bridge::get_blocks());
 
     // Add Latency blocks
     blocks.extend(latency::get_blocks());
@@ -166,6 +168,8 @@ pub fn get_builder(block_definition_id: &str) -> Option<Arc<dyn BlockBuilder>> {
         "builtin.local_input" => Some(Arc::new(devicesrc::LocalInputBuilder)),
         "builtin.inter_output" => Some(Arc::new(inter::InterOutputBuilder)),
         "builtin.inter_input" => Some(Arc::new(inter::InterInputBuilder)),
+        audio_bridge::OUTPUT_BLOCK_ID => Some(Arc::new(audio_bridge::AudioBridgeOutputBuilder)),
+        audio_bridge::INPUT_BLOCK_ID => Some(Arc::new(audio_bridge::AudioBridgeInputBuilder)),
         "builtin.latency" => Some(Arc::new(latency::LatencyBuilder)),
         "builtin.loudness" => Some(Arc::new(loudness::LoudnessBuilder)),
         "builtin.media_player" => Some(Arc::new(mediaplayer::MediaPlayerBuilder)),

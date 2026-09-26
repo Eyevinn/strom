@@ -11,6 +11,7 @@ pub const DEFAULT_PORT: u16 = 8080;
 pub const BUFFER_AGE_WARNING_THRESHOLD_MS: u64 = 3000;
 
 pub mod api;
+pub mod audio_bridge;
 pub mod auth;
 pub mod block;
 pub mod discovery;
