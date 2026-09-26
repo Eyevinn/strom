@@ -10,7 +10,7 @@
 <body style="display: flex; flex-direction: column; align-items: center;">
     <div class="container">
         <div style="position: relative; margin-bottom: 8px;">
-            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v16</span>
+            <span style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); color: #666; font-size: 0.7em;">v17</span>
             <h1 style="text-align: center; margin: 0;">WHEP Player at <span id="hostAddress"></span></h1>
             <a href="/player/whep-streams" style="color: #888; font-size: 0.9em; position: absolute; right: 0; top: 50%; transform: translateY(-50%);">All streams</a>
         </div>
@@ -117,7 +117,7 @@
         let availableVideoTracks = []; // Multi-video: tracks received so far
         let selectedVideoIndex = 0;    // Which track index is currently routed to the video element
         // Listener mute/volume. Audio plays from the video element when the
-        // stream has video and one audio track, and from the audio element
+        // stream has one video and one audio track, and from the audio element
         // otherwise, so both are kept in step with these.
         let earMuted = true;
         let earVolume = 1;
@@ -458,9 +458,11 @@
                     // needs the controls or it can never be heard.
                     setElementClass('audioControls', 'active', hasAudio);
                     hasAudioStream = hasAudio;
-                    if (hasVideo && !multiAudio) {
+                    if (hasVideo && !multiAudio && !multiVideo) {
                         // Audio is on the video element now, clear the
-                        // separate audio element
+                        // separate audio element. With several video tracks
+                        // the video element gets a video-only stream, so the
+                        // audio stays on the audio element.
                         document.getElementById('audio').srcObject = null;
                     }
                     // Re-enumerate devices now that we have an active media
