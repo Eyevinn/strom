@@ -200,49 +200,23 @@ fn qos_class_for(priority: ThreadPriority) -> Option<QosClass> {
 /// that *has* an explicit class inherits it.
 #[cfg(target_os = "macos")]
 fn set_current_thread_qos(priority: ThreadPriority) -> Result<(), String> {
-    let Some(preferred) = qos_class_for(priority) else {
+    let Some(class) = qos_class_for(priority) else {
         debug!("Thread priority set to Normal (QoS class left as inherited)");
         return Ok(());
     };
 
-    // A task can be running under a QoS clamp — launchd jobs get one, and so
-    // does anything spawned by an already-clamped parent. A class above the
-    // clamp is refused with EPERM rather than quietly lowered, and
-    // USER_INTERACTIVE is the one that gets refused in practice.
-    // USER_INITIATED is still a performance-core class, so fall back to it
-    // instead of leaving the thread with no class at all.
-    let class = match try_set_qos(preferred) {
-        Ok(()) => preferred,
-        Err(rc) if preferred == QosClass::UserInteractive && rc == libc::EPERM => {
-            try_set_qos(QosClass::UserInitiated).map_err(|rc2| {
-                format!(
-                    "pthread_set_qos_class_self_np({:?}) failed: errno {}, \
-                     and the {:?} fallback failed: errno {}",
-                    preferred,
-                    rc,
-                    QosClass::UserInitiated,
-                    rc2
-                )
-            })?;
-            debug!(
-                "QoS class {:?} refused (EPERM, task is clamped); fell back to {:?}",
-                preferred,
-                QosClass::UserInitiated
-            );
-            QosClass::UserInitiated
-        }
-        Err(rc) => {
-            return Err(format!(
-                "pthread_set_qos_class_self_np({:?}) failed: errno {}",
-                preferred, rc
-            ))
-        }
-    };
+    try_set_qos(class).map_err(|rc| {
+        format!(
+            "pthread_set_qos_class_self_np({:?}) failed: errno {}",
+            class, rc
+        )
+    })?;
 
-    // Read it back rather than trusting the return code. A thread that has had
+    // Read it back rather than trusting the return code: a thread that has had
     // its scheduling parameters set directly can end up UNSPECIFIED with the
-    // call still reporting success, and a silently unplaced thread is exactly
-    // the failure this module exists to prevent.
+    // call still reporting success. This confirms the class was recorded, not
+    // where the thread runs — a task-level clamp (a background launch, App
+    // Nap) overrides the class and it still reads back as set.
     match current_thread_qos() {
         Ok((actual, _)) if actual == class => {
             debug!("Thread QoS class set to {:?}", class);
@@ -422,6 +396,14 @@ fn set_nice_value(nice: i32) -> Result<(), String> {
     }
 }
 
+/// Remedy appended to the once-per-flow failure warning. Only Linux gates
+/// elevated priority on a capability the operator can grant.
+#[cfg(target_os = "linux")]
+const ELEVATION_HINT: &str =
+    " Elevated priority needs CAP_SYS_NICE (grant with: sudo setcap cap_sys_nice+ep <binary>).";
+#[cfg(not(target_os = "linux"))]
+const ELEVATION_HINT: &str = "";
+
 /// Set up a sync handler on the pipeline bus to configure thread priorities
 /// and register threads with the thread registry.
 ///
@@ -503,10 +485,9 @@ pub fn setup_thread_priority_handler(
                             Err(e) => {
                                 if state_clone.record_failure(e.clone()) {
                                     warn!(
-                                        "Failed to set {:?} priority for streaming thread {} (element: {}, pipeline: {}): {}. \
-                                         Elevated priority needs CAP_SYS_NICE (grant with: sudo setcap cap_sys_nice+ep <binary>). \
+                                        "Failed to set {:?} priority for streaming thread {} (element: {}, pipeline: {}): {}.{} \
                                          Continuing at normal priority; further failures for this flow are logged at debug.",
-                                        state_clone.requested, thread_id, owner, flow_name, e
+                                        state_clone.requested, thread_id, owner, flow_name, e, ELEVATION_HINT
                                     );
                                 } else {
                                     debug!(
@@ -881,9 +862,9 @@ mod tests {
 
     /// `High` must leave the thread in `USER_INITIATED`.
     ///
-    /// This is the guard for the whole change: dropping the QoS call, or
-    /// reinstating a `pthread_setschedparam` call on the same thread, leaves
-    /// the thread `UNSPECIFIED` and this assertion fails.
+    /// Without the QoS call the thread reads back `DEFAULT`; with a
+    /// `pthread_setschedparam` call on the same thread it reads back
+    /// `UNSPECIFIED`. Either fails this assertion.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_high_priority_thread_is_user_initiated() {
@@ -895,8 +876,7 @@ mod tests {
             assert_eq!(
                 class,
                 QosClass::UserInitiated,
-                "pipeline threads must carry an explicit QoS class; \
-                 UNSPECIFIED means they are not pinned to the performance cluster"
+                "pipeline threads must carry an explicit performance-core QoS class"
             );
             assert_eq!(
                 relative, 0,
@@ -905,24 +885,16 @@ mod tests {
         });
     }
 
-    /// `Realtime` asks for the maximum band, but `USER_INTERACTIVE` is refused
-    /// with EPERM when the task runs under a QoS clamp (a launchd job, or a
-    /// child of an already-clamped process), so the thread may legitimately
-    /// land on the `USER_INITIATED` fallback. Either way it must end up in a
-    /// performance-core band and never `UNSPECIFIED`.
+    /// `Realtime` is an explicit request for the maximum band.
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_realtime_thread_lands_in_a_performance_band() {
+    fn macos_realtime_thread_is_user_interactive() {
         on_fresh_thread(|| {
             set_current_thread_priority(ThreadPriority::Realtime)
-                .expect("Realtime should fall back rather than fail");
+                .expect("Realtime should be settable without privileges");
 
             let (class, _) = current_thread_qos().expect("QoS class should read back");
-            assert!(
-                matches!(class, QosClass::UserInteractive | QosClass::UserInitiated),
-                "Realtime landed in {:?}, which is not a performance-core band",
-                class
-            );
+            assert_eq!(class, QosClass::UserInteractive);
         });
     }
 
