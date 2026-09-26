@@ -76,14 +76,14 @@ use axum::{
     Json,
 };
 use futures::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use strom_types::devtools::{
     DevToolsLink, DevToolsLinkSummary, DevToolsLinks, DevToolsRevokedLinks, DevToolsTarget,
     DevToolsTargets, REMOTE_CONTROL_WARNING, SCREENCAST_CONTROL_WARNING,
 };
-use strom_types::FlowId;
+use strom_types::{Flow, FlowId};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
@@ -885,9 +885,21 @@ async fn page_targets(port: u16) -> Option<Vec<PageTarget>> {
 
 /// Every HTML source in the instance, because one CEF process serves them all.
 async fn html_sources(app: &AppState) -> Vec<HtmlSource> {
-    app.get_flows()
-        .await
+    let running: HashSet<FlowId> = app.pipelines_read().await.keys().copied().collect();
+    html_sources_in(app.get_flows().await, &running)
+}
+
+/// The HTML sources in the flows that are running.
+///
+/// A stopped flow renders nothing, so its blocks can never own a page. Left
+/// in, each one looks like a source whose page has not been found yet, and
+/// the "one page left over, one source left over" rule in
+/// [`resolve_target`] then refuses every cross-origin redirect in the
+/// instance.
+fn html_sources_in(flows: Vec<Flow>, running: &HashSet<FlowId>) -> Vec<HtmlSource> {
+    flows
         .into_iter()
+        .filter(|flow| running.contains(&flow.id))
         .flat_map(|flow| {
             let flow_id = flow.id;
             let flow_name = flow.name;
@@ -979,7 +991,11 @@ pub async fn create_block_link(
 
     let sources = html_sources(&app).await;
     let Some(want) = sources.iter().find(|s| s.is(&flow_id, &block_id)) else {
-        return (StatusCode::NOT_FOUND, "Block not found").into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            "This block is not rendering a page - is the flow running?",
+        )
+            .into_response();
     };
 
     match resolve_target(&targets, &sources, want) {
@@ -1835,6 +1851,45 @@ mod tests {
         assert_eq!(
             resolve_target(&targets, &sources, &sources[0]),
             Resolution::Unknown
+        );
+    }
+
+    fn html_flow(name: &str, url: &str) -> Flow {
+        let mut flow = Flow::new(name);
+        flow.blocks.push(
+            serde_json::from_value(serde_json::json!({
+                "id": format!("{}-html", name),
+                "block_definition_id": crate::blocks::builtin::html_input::BLOCK_ID,
+                "properties": { "url": url, "remote_control": true },
+                "position": { "x": 0.0, "y": 0.0 }
+            }))
+            .expect("a valid block"),
+        );
+        flow
+    }
+
+    #[test]
+    fn a_stopped_flow_does_not_stop_a_redirect_from_resolving() {
+        // The page asked for google.com and landed on www.google.com - a
+        // different origin, so only the sole-survivor rule can place it. Two
+        // stopped flows with HTML blocks used to count as sources still
+        // looking for their page, and the link was refused.
+        let live = html_flow("live", "google.com");
+        let stopped_a = html_flow("stopped-a", "file:///tmp/tall.html");
+        let stopped_b = html_flow("stopped-b", "file:///tmp/busy.html");
+        let running: HashSet<FlowId> = [live.id].into_iter().collect();
+
+        let sources = html_sources_in(vec![stopped_a, live.clone(), stopped_b], &running);
+        assert_eq!(sources.len(), 1, "only the running flow renders anything");
+
+        let targets = vec![target("AAAA", "https://www.google.com/")];
+        let want = sources
+            .iter()
+            .find(|s| s.flow_id == live.id)
+            .expect("the live block is a source");
+        assert_eq!(
+            resolve_target(&targets, &sources, want),
+            Resolution::Target("AAAA".to_string())
         );
     }
 
