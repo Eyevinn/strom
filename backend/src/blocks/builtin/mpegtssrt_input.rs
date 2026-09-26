@@ -17,6 +17,9 @@
 //!
 //! Both `decodebin` and `tsdemux` have dynamic pads — uses `connect_pad_added`
 //! to link to identity elements based on caps (video/ or audio/).
+//!
+//! In decode mode the `decodebin` starts with its state locked and joins the
+//! pipeline when SRT data first arrives (see `prepare_idle_decodebin`).
 
 use crate::blocks::{BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder};
 use gstreamer as gst;
@@ -251,6 +254,9 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
                 None
             });
 
+            prepare_idle_decodebin(&element);
+            activate_decodebin_on_first_data(&srtsrc, &element, instance_id);
+
             (id, element)
         } else {
             let id = format!("{}:tsdemux", instance_id);
@@ -469,6 +475,71 @@ impl BlockBuilder for MpegTsSrtInputBuilder {
             pad_properties: HashMap::new(),
         })
     }
+}
+
+/// Keep an SRT input with no peer from holding the pipeline out of PLAYING.
+///
+/// A `decodebin` cannot complete READY->PAUSED until data arrives and it can
+/// typefind, and a pipeline with any child still ASYNC never completes its own
+/// transition. A listener whose caller has not connected (or a caller whose
+/// listener is not up) delivers no data.
+/// - Locked state keeps the decodebin out of the pipeline's state changes
+///   until `activate_decodebin_on_first_data` brings it in.
+/// - `async-handling` makes the decodebin absorb its own ASYNC once unlocked,
+///   so activating it in a running pipeline cannot pull that pipeline back
+///   out of PLAYING while it typefinds.
+fn prepare_idle_decodebin(decodebin: &gst::Element) {
+    decodebin.set_property("async-handling", true);
+    decodebin.set_locked_state(true);
+}
+
+/// Unlock the decodebin when `srtsrc` is about to push its first data.
+///
+/// `srtsrc` pushes STREAM_START as soon as its streaming task starts, peer or
+/// no peer, and nothing else until it has read data. Every later event (the
+/// SEGMENT, or a STREAM_START retried ahead of it) precedes the first buffer,
+/// so the decodebin is activated from the streaming thread before any buffer
+/// can reach its stopped decoder. Activation happens once; after that the
+/// decodebin stays in the pipeline across caller disconnects and reconnects.
+fn activate_decodebin_on_first_data(
+    srtsrc: &gst::Element,
+    decodebin: &gst::Element,
+    instance_id: &str,
+) {
+    let Some(src_pad) = srtsrc.static_pad("src") else {
+        warn!(
+            "MPEGTSSRT Input {}: srtsrc has no src pad; decodebin left unlocked",
+            instance_id
+        );
+        decodebin.set_locked_state(false);
+        return;
+    };
+
+    let decodebin_weak = decodebin.downgrade();
+    let instance_id = instance_id.to_string();
+    let startup_stream_start_seen = AtomicBool::new(false);
+    src_pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+        let is_stream_start = matches!(info.data, Some(gst::PadProbeData::Event(ref e)) if e.type_() == gst::EventType::StreamStart);
+        if is_stream_start && !startup_stream_start_seen.swap(true, Ordering::SeqCst) {
+            return gst::PadProbeReturn::Ok;
+        }
+
+        let Some(decodebin) = decodebin_weak.upgrade() else {
+            return gst::PadProbeReturn::Remove;
+        };
+        decodebin.set_locked_state(false);
+        match decodebin.sync_state_with_parent() {
+            Ok(()) => info!(
+                "MPEGTSSRT Input {}: SRT data arriving, activated decodebin",
+                instance_id
+            ),
+            Err(e) => error!(
+                "MPEGTSSRT Input {}: failed to sync decodebin with pipeline state: {}",
+                instance_id, e
+            ),
+        }
+        gst::PadProbeReturn::Remove
+    });
 }
 
 /// decodebin (raw) pad -> deinterlace -> identity
