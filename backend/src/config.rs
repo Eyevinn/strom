@@ -93,6 +93,16 @@ struct CefConfig {
     /// keep it there and reach it through the authenticated API instead.
     #[serde(default)]
     debug_port: Option<u16>,
+    /// Serve the Chromium DevTools application instead of the remote control
+    /// page, and stop filtering the protocol.
+    ///
+    /// The remote control page needs a picture, clicks and keystrokes, and the
+    /// proxy allows nothing else. DevTools needs the whole protocol, which is
+    /// arbitrary JavaScript, arbitrary navigation including `file://`, and
+    /// every cookie in the profile - so turning this on makes a link full
+    /// control of the browser and of what it can read on this host.
+    #[serde(default)]
+    full_devtools: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -191,6 +201,9 @@ pub struct Config {
     pub cef_cache_path: PathBuf,
     /// Chromium remote debugging port for `cefsrc`, or `None` when disabled
     pub cef_debug_port: Option<u16>,
+    /// Hand out the Chromium DevTools application rather than the restricted
+    /// remote control page. See `CefConfig::full_devtools`.
+    pub cef_full_devtools: bool,
     /// PostgreSQL database URL (if set, PostgreSQL is used instead of JSON files)
     /// Format: postgresql://user:password@host/database_name
     pub database_url: Option<String>,
@@ -297,6 +310,13 @@ impl Config {
             })?;
             figment = figment.merge(Serialized::default("cef.debug_port", port));
         }
+        if let Some(value) = strom_types::env::var_opt("STROM_CEF_FULL_DEVTOOLS") {
+            let on = matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+            figment = figment.merge(Serialized::default("cef.full_devtools", on));
+        }
         for (var, key) in SCALAR_ENV_VARS {
             if let Some(value) = strom_types::env::var_opt(var) {
                 figment = figment.merge(Serialized::default(key, value));
@@ -360,6 +380,7 @@ impl Config {
             media_path: data_paths.media_path,
             cef_cache_path: data_paths.cef_cache_path,
             cef_debug_port: config_file.cef.debug_port,
+            cef_full_devtools: config_file.cef.full_devtools,
             database_url: strom_types::env::non_blank(config_file.storage.database_url),
             log_file: non_blank_path(config_file.logging.log_file),
             log_level: strom_types::env::non_blank(config_file.logging.log_level),
@@ -411,6 +432,7 @@ impl Config {
             media_path: data_paths.media_path,
             cef_cache_path: data_paths.cef_cache_path,
             cef_debug_port: None,
+            cef_full_devtools: false,
             database_url,
             log_file: None,
             log_level: None,
@@ -461,6 +483,7 @@ impl Default for Config {
                 media_path: PathBuf::from("media"),
                 cef_cache_path: PathBuf::from("cef-cache"),
                 cef_debug_port: None,
+                cef_full_devtools: false,
                 database_url: None,
                 log_file: None,
                 log_level: None,

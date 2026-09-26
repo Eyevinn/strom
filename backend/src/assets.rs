@@ -27,6 +27,12 @@ pub struct WhipAssets;
 #[folder = "static/webrtc/"]
 pub struct WebrtcAssets;
 
+/// The remote control page, served under `/devtools/<key>` in place of the
+/// Chromium DevTools application.
+#[derive(RustEmbed)]
+#[folder = "static/remote-control/"]
+pub struct RemoteControlAssets;
+
 /// Embedded icon assets (favicons, app icons, etc.)
 #[derive(RustEmbed)]
 #[folder = "../assets/"]

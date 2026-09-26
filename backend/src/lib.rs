@@ -82,6 +82,7 @@ pub async fn create_app_with_state_and_auth(
         api::devtools::DevToolsState::new(api::devtools::DevToolsConfig {
             debug_port: None,
             tls: false,
+            full_devtools: false,
         }),
     )
     .await

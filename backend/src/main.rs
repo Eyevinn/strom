@@ -403,6 +403,20 @@ fn main() -> anyhow::Result<()> {
     // CEF for the whole process, and the flags are additive: the strom-full
     // entrypoint already sets GST_CEF_CHROME_EXTRA_FLAGS in GPU mode, so
     // compose with whatever is there rather than replacing it.
+    // Minting a link is reached through the authenticated API, so with no
+    // authentication configured there is no door in front of it at all:
+    // anyone who can reach the HTTP port could mint one. Rather than open the
+    // debug port and rely on a lock that is not fitted, do not open it.
+    if config.cef_debug_port.is_some() && !auth::AuthConfig::is_configured_in_env() {
+        error!(
+            "CEF remote debugging is configured but authentication is not, so minting a \
+             remote control link would take no credentials at all. Remote control is \
+             disabled. Set STROM_ADMIN_USER together with STROM_ADMIN_PASSWORD_HASH, or \
+             STROM_API_KEY, and start again to use it"
+        );
+        config.cef_debug_port = None;
+    }
+
     if let Some(debug_port) = config.cef_debug_port {
         let mut flags: Vec<String> = std::env::var("GST_CEF_CHROME_EXTRA_FLAGS")
             .ok()
@@ -815,6 +829,7 @@ fn devtools_config(config: &Config) -> strom::api::devtools::DevToolsState {
     strom::api::devtools::DevToolsState::new(strom::api::devtools::DevToolsConfig {
         debug_port: config.cef_debug_port,
         tls: config.tls_cert.is_some() && config.tls_key.is_some(),
+        full_devtools: config.cef_full_devtools,
     })
 }
 
