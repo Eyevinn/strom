@@ -186,8 +186,8 @@ on whether a PiP is involved.
 | anything → anything | `cut` (or `duration_ms: 0`) | One-frame switch. Verified: last frame of the old look, next frame the new look, nothing between. |
 | input → input | `fade` | A true dissolve. Frames mid-transition show both pictures blended. |
 | PiP → PiP, **no shared sources** | `fade` | A true dissolve between the two compositions. |
-| PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box to its new one — going from a four-box to that source full frame reads as a zoom-in, with the other tiles covered as the box grows. Reported back as `actual_transition_type: "morph"`. |
-| either bus is a PiP | any animated type other than `fade` | Downgraded to `fade`. The server logs the downgrade; the HTTP response reports the transition that actually ran in `actual_transition_type`. Master-FX takes keep their full-frame effect on top of the fade. |
+| PiP → anything, **sharing a source** | `fade` | **Not a dissolve.** The shared source animates from its old box and crop to its new ones — going from a four-box to that source full frame reads as a zoom-in, with the other tiles covered as the box grows, and a punch-in taken to the plain source reads as a zoom-out. Reported back as `actual_transition_type: "morph"`. |
+| either bus is a PiP | any animated type other than `fade` | Downgraded to `fade`, which becomes a `morph` when a source is shared. The server logs the downgrade; the HTTP response reports the transition that actually ran in `actual_transition_type`. Master-FX takes keep their full-frame effect on top of the fade. |
 
 The engine animates pads, not pictures: a source present in both the outgoing and
 incoming composition is treated as *moving*, and only sources exclusive to one side

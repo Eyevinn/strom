@@ -149,7 +149,10 @@ pub struct TransitionResponse {
     pub transition_type: String,
     /// The transition type that was actually executed. Differs from
     /// `transition_type` when the engine downgraded the request — e.g.
-    /// Slide/Push across heterogeneous PiP/input sources downgrades to "fade".
+    /// Slide/Push across heterogeneous PiP/input sources downgrades to "fade" —
+    /// and reads "morph" when a PiP-aware take moved or re-cropped a source
+    /// present on both sides instead of dissolving it. "morph" is a report
+    /// only, not an accepted request type.
     pub actual_transition_type: String,
     /// Duration of the transition in milliseconds
     pub duration_ms: u64,
