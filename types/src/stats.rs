@@ -55,6 +55,19 @@ impl StatValue {
             StatValue::TimestampNs(v) => format!("{}", v),
         }
     }
+
+    /// Format the value for display, followed by `unit` when one is given.
+    ///
+    /// `DurationNs` picks its own unit as it scales and `Bool` reads as
+    /// Yes/No, so neither takes one.
+    pub fn format_with_unit(&self, unit: Option<&str>) -> String {
+        let value = self.format();
+        match (self, unit) {
+            (StatValue::DurationNs(_) | StatValue::Bool(_), _) => value,
+            (_, Some(unit)) if !unit.is_empty() => format!("{} {}", value, unit),
+            _ => value,
+        }
+    }
 }
 
 /// Metadata about a statistic.
@@ -83,6 +96,13 @@ pub struct Statistic {
     pub value: StatValue,
     /// Metadata about this statistic
     pub metadata: StatMetadata,
+}
+
+impl Statistic {
+    /// Format the value for display with the unit from its metadata.
+    pub fn format_value(&self) -> String {
+        self.value.format_with_unit(self.metadata.unit.as_deref())
+    }
 }
 
 /// Statistics for a single block instance.
@@ -276,4 +296,89 @@ pub struct FlowStatsAvailability {
     /// Error message if stats are not available
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stat(value: StatValue, unit: Option<&str>) -> Statistic {
+        Statistic {
+            id: "test".to_string(),
+            value,
+            metadata: StatMetadata {
+                display_name: "Test".to_string(),
+                description: String::new(),
+                unit: unit.map(str::to_string),
+                category: None,
+            },
+        }
+    }
+
+    #[test]
+    fn numeric_values_show_their_unit() {
+        assert_eq!(
+            stat(StatValue::Float(40.0), Some("ms")).format_value(),
+            "40.00 ms"
+        );
+        assert_eq!(
+            stat(StatValue::Counter(1234), Some("packets")).format_value(),
+            "1234 packets"
+        );
+        assert_eq!(
+            stat(StatValue::Gauge(-5), Some("ms")).format_value(),
+            "-5 ms"
+        );
+    }
+
+    #[test]
+    fn duration_keeps_its_own_unit() {
+        assert_eq!(
+            stat(StatValue::DurationNs(2_500_000), Some("ns")).format_value(),
+            "2.50 ms"
+        );
+    }
+
+    #[test]
+    fn bool_takes_no_unit() {
+        assert_eq!(
+            stat(StatValue::Bool(true), Some("flag")).format_value(),
+            "Yes"
+        );
+        // /rtp-stats sends Bool statistics with an empty unit, not null
+        assert_eq!(stat(StatValue::Bool(false), Some("")).format_value(), "No");
+    }
+
+    #[test]
+    fn missing_or_empty_unit_shows_bare_value() {
+        assert_eq!(stat(StatValue::Counter(7), None).format_value(), "7");
+        assert_eq!(stat(StatValue::Counter(7), Some("")).format_value(), "7");
+    }
+
+    #[test]
+    fn jitterbuffer_stats_read_with_units() {
+        let stats = RtpJitterbufferStats {
+            num_pushed: 100,
+            avg_jitter_ns: 1_500_000,
+            latency_ms: 200,
+            rtx_count: 3,
+            ..Default::default()
+        };
+        let formatted: Vec<(String, String)> = stats
+            .to_statistics()
+            .iter()
+            .map(|s| (s.id.clone(), s.format_value()))
+            .collect();
+        let get = |id: &str| {
+            formatted
+                .iter()
+                .find(|(i, _)| i == id)
+                .map(|(_, v)| v.as_str())
+                .unwrap()
+        };
+        assert_eq!(get("num_pushed"), "100 packets");
+        assert_eq!(get("avg_jitter_ns"), "1.50 ms");
+        assert_eq!(get("latency_ms"), "200 ms");
+        assert_eq!(get("rtx_count"), "3 requests");
+    }
 }
