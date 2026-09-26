@@ -550,13 +550,23 @@ fn main() -> anyhow::Result<()> {
         config.cef_debug_port = (effective_port != 0).then_some(effective_port);
 
         if let Some(port) = config.cef_debug_port {
-            warn!(
-                "CEF remote debugging enabled on 127.0.0.1:{} - this is a debugging tool. One \
-                 browser process serves every HTML source in this instance, so a session opened \
-                 against one of them reaches all of them, every page they are logged in to, and \
-                 the files on this host. To keep customers apart, run a Strom process per customer",
-                port
-            );
+            if config.cef_full_devtools {
+                warn!(
+                    "CEF remote debugging enabled on 127.0.0.1:{} with full DevTools - a remote \
+                     control link is full control of the browser. One browser process serves \
+                     every HTML source in this instance, so a session opened against one of them \
+                     reaches all of them, every page they are logged in to, and the files on this \
+                     host. To keep customers apart, run a Strom process per customer",
+                    port
+                );
+            } else {
+                warn!(
+                    "CEF remote debugging enabled on 127.0.0.1:{} - remote control links carry \
+                     the page's picture and input only. The port itself is full control of the \
+                     browser to anything on this host that can reach loopback; never publish it",
+                    port
+                );
+            }
         }
     }
 
