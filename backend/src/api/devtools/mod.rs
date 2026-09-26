@@ -15,9 +15,10 @@
 //!
 //! Strom serves its own page under the key and terminates the WebSocket
 //! itself, so the operator gets the rendered page, and clicks and keystrokes
-//! go back into it. The proxy forwards only [`SCREENCAST_METHODS`] and
-//! answers everything else with a protocol error, so the link is what it
-//! looks like rather than what the debug port would otherwise be.
+//! go back into it, along with a way back through the pages it has already
+//! shown. The proxy forwards only what [`filter`] allows and answers
+//! everything else with a protocol error, so the link is what it looks like
+//! rather than what the debug port would otherwise be.
 //!
 //! Terminating the socket is also what keeps the browser's `Origin` check out
 //! of the picture: Chromium rejects WebSocket origins it does not know
@@ -60,6 +61,8 @@
 //! instance. For HTML sources belonging to different customers the isolation
 //! has to come from separate Strom instances, which already get separate CEF
 //! profiles, and this must stay off.
+
+mod filter;
 
 use crate::state::AppState;
 use axum::{
@@ -110,66 +113,12 @@ pub struct DevToolsConfig {
     /// unfiltered, instead of the remote control page.
     ///
     /// Off, a link carries the page: its picture, and clicks and keystrokes
-    /// into it, because [`SCREENCAST_METHODS`] is all the proxy forwards. On,
+    /// into it, because [`filter`] is all the proxy forwards. On,
     /// a link carries the whole Chrome DevTools Protocol, which is arbitrary
     /// JavaScript, navigation to `file://` and every cookie in the profile.
     /// The two cannot be combined: DevTools needs the domains the filter
     /// exists to refuse, so this is the escape hatch, not a richer mode.
     pub full_devtools: bool,
-}
-
-/// What a remote control session may ask Chromium to do.
-///
-/// A picture, and a way to click and type into it. Everything outside this
-/// list — `Runtime.evaluate`, `Page.navigate`, `Storage.getCookies`, the whole
-/// `Network` and `Debugger` domains — is what turns a link into control of
-/// this host, so the proxy refuses it rather than trusting the page not to
-/// ask. The page we serve is only the first user of the link; the filter is
-/// what makes the link safe to hand to a second one.
-pub const SCREENCAST_METHODS: &[&str] = &[
-    "Input.dispatchKeyEvent",
-    "Input.dispatchMouseEvent",
-    "Input.insertText",
-    "Page.enable",
-    "Page.screencastFrameAck",
-    "Page.startScreencast",
-    "Page.stopScreencast",
-];
-
-/// The protocol's own shape for "no", so the client sees a refusal against the
-/// command it sent rather than a socket that silently swallows things.
-fn cdp_refusal(id: Option<i64>, message: &str) -> String {
-    serde_json::json!({
-        "id": id,
-        "error": { "code": -32601, "message": message }
-    })
-    .to_string()
-}
-
-/// Whether one message from the client may be forwarded, or the refusal to
-/// send back in its place.
-fn screencast_allows(raw: &str) -> Result<(), String> {
-    let Ok(message) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return Err(cdp_refusal(None, "Not a DevTools protocol message"));
-    };
-    let id = message.get("id").and_then(serde_json::Value::as_i64);
-    let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
-        return Err(cdp_refusal(
-            id,
-            "A remote control session sends commands, nothing else",
-        ));
-    };
-    if !SCREENCAST_METHODS.contains(&method) {
-        return Err(cdp_refusal(
-            id,
-            &format!(
-                "{} is not available over a remote control link, which carries the page's \
-                 picture, clicks and keystrokes only",
-                method
-            ),
-        ));
-    }
-    Ok(())
 }
 
 /// What to tell an operator this link hands over, which depends on whether the
@@ -195,6 +144,8 @@ struct Link {
     /// The page the link was minted against, so a listing says which browser
     /// the operator would be revoking.
     target_url: String,
+    /// The HTML source the link was minted for.
+    source: LinkSource,
     /// When the key dies if nobody uses it before then.
     expires: Instant,
     /// Fires when the link is revoked or expires.
@@ -221,6 +172,40 @@ impl Link {
 pub struct DevToolsState {
     pub config: DevToolsConfig,
     links: Arc<Mutex<HashMap<String, Link>>>,
+}
+
+/// The HTML source a link was minted for, as the session page presents it.
+#[derive(Clone, Debug)]
+struct LinkSource {
+    /// The page the block was pointed at, which the session's home button
+    /// navigates to. The client asks for it by name and never supplies it.
+    home_url: String,
+    flow_name: String,
+    block_name: String,
+}
+
+impl LinkSource {
+    /// What the proxy tells the page before anything else, so its header can
+    /// say which source is under control. Not a Chromium event: the name is
+    /// ours, and nothing Chromium sends can collide with it.
+    fn context_message(&self) -> String {
+        serde_json::json!({
+            "method": "Strom.context",
+            "params": {
+                "flow": self.flow_name,
+                "block": self.block_name,
+                "home": self.home_url,
+            }
+        })
+        .to_string()
+    }
+}
+
+/// What a session opened on a link needs to run.
+struct Session {
+    target_id: String,
+    source: LinkSource,
+    cancelled: broadcast::Receiver<()>,
 }
 
 /// What a caller gets back when a link is minted: the credential, and the
@@ -259,7 +244,7 @@ impl DevToolsState {
     ///
     /// Two v4 UUIDs, hyphens dropped: 244 random bits from the same source a
     /// token crate would use, without taking a dependency for it.
-    fn mint(&self, target_id: String, target_url: String) -> MintedLink {
+    fn mint(&self, target_id: String, target_url: String, source: LinkSource) -> MintedLink {
         let key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let id = Uuid::new_v4().simple().to_string();
         let (cancel, _) = broadcast::channel(1);
@@ -271,6 +256,7 @@ impl DevToolsState {
                 id: id.clone(),
                 target_id,
                 target_url,
+                source,
                 expires: Instant::now() + LINK_TTL,
                 cancel,
             },
@@ -292,18 +278,23 @@ impl DevToolsState {
         Some(link.target_id.clone())
     }
 
-    /// Resolve a key to its target and a signal that fires when the link dies.
+    /// Resolve a key to its target, its home page, and a signal that fires
+    /// when the link dies.
     ///
     /// A session holds the signal for as long as it is open, so revoking or
     /// expiring the link ends the session rather than only refusing the next
     /// one.
-    fn open_session(&self, key: &str) -> Option<(String, broadcast::Receiver<()>)> {
+    fn open_session(&self, key: &str) -> Option<Session> {
         let mut links = self.links.lock().unwrap();
         let now = Instant::now();
         Self::sweep(&mut links, now);
         let link = links.get_mut(key)?;
         link.expires = now + LINK_TTL;
-        Some((link.target_id.clone(), link.cancel.subscribe()))
+        Some(Session {
+            target_id: link.target_id.clone(),
+            source: link.source.clone(),
+            cancelled: link.cancel.subscribe(),
+        })
     }
 
     /// Revoke one link by its non-secret id, ending any session open on it.
@@ -630,8 +621,13 @@ pub async fn list_targets(Extension(state): Extension<DevToolsState>) -> Respons
 }
 
 /// Build the answer for a successful mint.
-fn minted(state: &DevToolsState, target_id: String, target_url: String) -> Response {
-    let minted = state.mint(target_id, target_url);
+fn minted(
+    state: &DevToolsState,
+    target_id: String,
+    target_url: String,
+    source: LinkSource,
+) -> Response {
+    let minted = state.mint(target_id, target_url, source);
     // The key is the credential, so it is never logged - only the id is.
     info!(
         "Minted remote control link {}, valid for {:?}",
@@ -699,16 +695,16 @@ pub async fn create_link(
         s.remote_control
             && resolve_target(&targets, &sources, s) == Resolution::Target(target.id.clone())
     });
-    if owner.is_none() {
+    let Some(owner) = owner else {
         return (
             StatusCode::FORBIDDEN,
             "No HTML source with remote control switched on is rendering this page. Turn on \
              the Remote Control property of the block that renders it to hand out a link.",
         )
             .into_response();
-    }
+    };
 
-    minted(&state, target.id, target.url)
+    minted(&state, target.id, target.url, owner.link_source())
 }
 
 /// Two URLs naming the same page. Chromium reports what it navigated to, which
@@ -760,9 +756,20 @@ struct HtmlSource {
     /// is showing now.
     url: String,
     remote_control: bool,
+    flow_name: String,
+    /// The block's own name, or its id when it has none.
+    block_name: String,
 }
 
 impl HtmlSource {
+    fn link_source(&self) -> LinkSource {
+        LinkSource {
+            home_url: self.url.clone(),
+            flow_name: self.flow_name.clone(),
+            block_name: self.block_name.clone(),
+        }
+    }
+
     fn is(&self, flow_id: &FlowId, block_id: &str) -> bool {
         self.flow_id == *flow_id && self.block_id == block_id
     }
@@ -883,6 +890,7 @@ async fn html_sources(app: &AppState) -> Vec<HtmlSource> {
         .into_iter()
         .flat_map(|flow| {
             let flow_id = flow.id;
+            let flow_name = flow.name;
             flow.blocks
                 .into_iter()
                 .filter(|b| b.block_definition_id == crate::blocks::builtin::html_input::BLOCK_ID)
@@ -894,6 +902,8 @@ async fn html_sources(app: &AppState) -> Vec<HtmlSource> {
                     remote_control: crate::blocks::builtin::html_input::remote_control_enabled(
                         &b.properties,
                     ),
+                    flow_name: flow_name.clone(),
+                    block_name: b.name.clone().unwrap_or_else(|| b.id.clone()),
                     block_id: b.id,
                 })
                 .collect::<Vec<_>>()
@@ -979,7 +989,7 @@ pub async fn create_block_link(
                 .find(|t| t.id == target_id)
                 .map(|t| t.url.clone())
                 .unwrap_or_else(|| want.url.clone());
-            minted(&state, target_id, url)
+            minted(&state, target_id, url, want.link_source())
         }
         Resolution::Unknown => (
             StatusCode::NOT_FOUND,
@@ -1187,13 +1197,16 @@ pub async fn proxy_cdp(
     // expire ends this session too — otherwise revocation would only refuse
     // the *next* one, and whoever already had the socket would keep control of
     // the browser for as long as they cared to hold it.
-    let Some((target_id, cancelled)) = state.open_session(&key) else {
+    let Some(session) = state.open_session(&key) else {
         return no_such_link();
     };
 
-    let upstream = format!("ws://127.0.0.1:{}/devtools/page/{}", port, target_id);
+    let upstream = format!(
+        "ws://127.0.0.1:{}/devtools/page/{}",
+        port, session.target_id
+    );
     let full_devtools = state.config.full_devtools;
-    ws.on_upgrade(move |socket| pump(socket, upstream, target_id, cancelled, full_devtools))
+    ws.on_upgrade(move |socket| pump(socket, upstream, session, full_devtools))
 }
 
 /// Shuttle messages both ways until either side hangs up, or the link dies.
@@ -1204,13 +1217,12 @@ pub async fn proxy_cdp(
 /// acknowledgement is the flow control, so a slow link costs frame rate rather
 /// than an unbounded queue — which is what makes this usable over the
 /// internet. Nothing here needs to know that; it just must not buffer.
-async fn pump(
-    client: WebSocket,
-    upstream_url: String,
-    target_id: String,
-    mut cancelled: broadcast::Receiver<()>,
-    full_devtools: bool,
-) {
+async fn pump(client: WebSocket, upstream_url: String, session: Session, full_devtools: bool) {
+    let Session {
+        target_id,
+        source,
+        mut cancelled,
+    } = session;
     let (upstream, _) = match tokio_tungstenite::connect_async(&upstream_url).await {
         Ok(pair) => pair,
         Err(e) => {
@@ -1228,20 +1240,36 @@ async fn pump(
     // of this pump, so it travels the same way Chromium's own answers do.
     let (refusals, mut refused) = tokio::sync::mpsc::unbounded_channel::<String>();
 
+    // Our page is the client in filtered mode, and its header names the
+    // source. The DevTools application would have no use for this.
+    if !full_devtools
+        && client_tx
+            .send(Message::Text(source.context_message().into()))
+            .await
+            .is_err()
+    {
+        return;
+    }
+
     let to_upstream = async {
         while let Some(Ok(msg)) = client_rx.next().await {
             let forwarded = match msg {
                 Message::Text(t) => {
-                    if !full_devtools {
-                        if let Err(refusal) = screencast_allows(t.as_str()) {
-                            debug!("Refused a method a remote control link does not carry");
-                            if refusals.send(refusal).is_err() {
-                                break;
+                    if full_devtools {
+                        WsMessage::Text(t.as_str().into())
+                    } else {
+                        match filter::allows(t.as_str(), &source.home_url) {
+                            Ok(filter::Forward::AsIs) => WsMessage::Text(t.as_str().into()),
+                            Ok(filter::Forward::Rewritten(text)) => WsMessage::Text(text.into()),
+                            Err(refusal) => {
+                                debug!("Refused a method a remote control link does not carry");
+                                if refusals.send(refusal).is_err() {
+                                    break;
+                                }
+                                continue;
                             }
-                            continue;
                         }
                     }
-                    WsMessage::Text(t.as_str().into())
                 }
                 // The protocol is text. A filtered session has no reason to
                 // send anything else, and a binary frame cannot be checked
@@ -1327,7 +1355,13 @@ mod tests {
             block_id: block_id.to_string(),
             url: url.to_string(),
             remote_control: true,
+            flow_name: "Flow".to_string(),
+            block_name: block_id.to_string(),
         }
+    }
+
+    fn link_source(url: &str) -> LinkSource {
+        source("html", url).link_source()
     }
 
     #[test]
@@ -1383,6 +1417,7 @@ mod tests {
         let minted = s.mint(
             "4A8CD2F2840F8591A6277A7FFFDAB3A9".to_string(),
             "https://example.com/".to_string(),
+            link_source("https://example.com/"),
         );
         // The key is what a client sees, so it must not spell out the target.
         assert!(valid_key(&minted.key));
@@ -1407,8 +1442,16 @@ mod tests {
     #[test]
     fn keys_are_not_guessable_from_each_other() {
         let s = state();
-        let a = s.mint("AAAA".to_string(), "https://a.example".to_string());
-        let b = s.mint("AAAA".to_string(), "https://a.example".to_string());
+        let a = s.mint(
+            "AAAA".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
+        let b = s.mint(
+            "AAAA".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
         assert_ne!(a.key, b.key);
         assert_ne!(a.id, b.id);
     }
@@ -1424,7 +1467,11 @@ mod tests {
     #[test]
     fn a_revoked_key_stops_working() {
         let s = state();
-        let minted = s.mint("ABCD".to_string(), "https://a.example".to_string());
+        let minted = s.mint(
+            "ABCD".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
         assert!(s.revoke_by_id(&minted.id));
         assert!(s.resolve(&minted.key).is_none());
         // Revoking twice is not an error the caller can act on differently.
@@ -1434,7 +1481,11 @@ mod tests {
     #[test]
     fn an_expired_key_is_gone_even_before_anyone_asks() {
         let s = state();
-        let minted = s.mint("ABCD".to_string(), "https://a.example".to_string());
+        let minted = s.mint(
+            "ABCD".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
         {
             let mut links = s.links.lock().unwrap();
             links.get_mut(&minted.key).unwrap().expires = Instant::now() - Duration::from_secs(1);
@@ -1446,7 +1497,11 @@ mod tests {
     #[test]
     fn using_a_key_pushes_its_expiry_out() {
         let s = state();
-        let minted = s.mint("ABCD".to_string(), "https://a.example".to_string());
+        let minted = s.mint(
+            "ABCD".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
         let first = s.links.lock().unwrap().get(&minted.key).unwrap().expires;
         std::thread::sleep(Duration::from_millis(5));
         assert!(s.resolve(&minted.key).is_some());
@@ -1461,8 +1516,15 @@ mod tests {
         // Without this, revocation only closes the door to *new* sessions and
         // whoever already holds the socket keeps control of the browser.
         let s = state();
-        let minted = s.mint("ABCD".to_string(), "https://a.example".to_string());
-        let (_target, mut cancelled) = s.open_session(&minted.key).expect("session opens");
+        let minted = s.mint(
+            "ABCD".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
+        let mut cancelled = s
+            .open_session(&minted.key)
+            .expect("session opens")
+            .cancelled;
 
         assert!(s.revoke_by_id(&minted.id));
 
@@ -1475,10 +1537,18 @@ mod tests {
     #[tokio::test]
     async fn revoking_everything_ends_every_open_session() {
         let s = state();
-        let a = s.mint("A".to_string(), "https://a.example".to_string());
-        let b = s.mint("B".to_string(), "https://b.example".to_string());
-        let (_, mut first) = s.open_session(&a.key).expect("session opens");
-        let (_, mut second) = s.open_session(&b.key).expect("session opens");
+        let a = s.mint(
+            "A".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
+        let b = s.mint(
+            "B".to_string(),
+            "https://b.example".to_string(),
+            link_source("https://b.example"),
+        );
+        let mut first = s.open_session(&a.key).expect("session opens").cancelled;
+        let mut second = s.open_session(&b.key).expect("session opens").cancelled;
 
         assert_eq!(s.revoke_all(), 2);
 
@@ -1496,8 +1566,15 @@ mod tests {
         // The TTL has to bite on a socket that is already open, the same way
         // revocation does - otherwise an established session never expires.
         let s = state();
-        let minted = s.mint("ABCD".to_string(), "https://a.example".to_string());
-        let (_, mut cancelled) = s.open_session(&minted.key).expect("session opens");
+        let minted = s.mint(
+            "ABCD".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
+        let mut cancelled = s
+            .open_session(&minted.key)
+            .expect("session opens")
+            .cancelled;
         {
             let mut links = s.links.lock().unwrap();
             links.get_mut(&minted.key).unwrap().expires = Instant::now() - Duration::from_secs(1);
@@ -1512,7 +1589,11 @@ mod tests {
     #[test]
     fn a_listing_names_links_without_handing_the_key_back() {
         let s = state();
-        let minted = s.mint("ABCD".to_string(), "https://a.example/login".to_string());
+        let minted = s.mint(
+            "ABCD".to_string(),
+            "https://a.example/login".to_string(),
+            link_source("https://a.example/login"),
+        );
         let listed = s.list();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, minted.id);
@@ -1757,85 +1838,17 @@ mod tests {
         );
     }
 
-    fn command(method: &str) -> String {
-        serde_json::json!({ "id": 7, "method": method, "params": {} }).to_string()
-    }
-
     #[test]
-    fn a_link_carries_the_picture_and_the_input_for_it() {
-        for method in SCREENCAST_METHODS {
-            assert!(
-                screencast_allows(&command(method)).is_ok(),
-                "{} is what the page needs to work",
-                method
-            );
-        }
-    }
-
-    #[test]
-    fn a_link_does_not_carry_the_rest_of_the_protocol() {
-        // Each of these is on its own enough to turn a link into control of
-        // the host: script execution, navigation to the filesystem, the
-        // cookie jar, the network, and the debugger.
-        for method in [
-            "Runtime.evaluate",
-            "Runtime.callFunctionOn",
-            "Page.navigate",
-            "Page.captureSnapshot",
-            "Storage.getCookies",
-            "Network.getAllCookies",
-            "Network.setRequestInterception",
-            "Debugger.enable",
-            "Target.createTarget",
-            "Browser.getVersion",
-            "DOM.getDocument",
-            "Emulation.setDeviceMetricsOverride",
-        ] {
-            let refused = screencast_allows(&command(method))
-                .expect_err(&format!("{} must not be forwarded", method));
-            assert!(
-                refused.contains(method),
-                "the refusal has to name what was refused, got {}",
-                refused
-            );
-        }
-    }
-
-    #[test]
-    fn a_near_miss_is_not_waved_through() {
-        // Substring matching would let all of these past.
-        for method in [
-            "Page.startScreencastEvil",
-            "XPage.enable",
-            "page.enable",
-            "Page.Enable",
-            "Input.dispatchMouseEvent.extra",
-        ] {
-            assert!(
-                screencast_allows(&command(method)).is_err(),
-                "{} is not on the list",
-                method
-            );
-        }
-    }
-
-    #[test]
-    fn a_refusal_answers_the_command_that_was_sent() {
-        let refused = screencast_allows(&command("Runtime.evaluate")).unwrap_err();
-        let parsed: serde_json::Value = serde_json::from_str(&refused).expect("valid JSON");
-        // A client matches answers to commands by id; an answer without one is
-        // an answer it will wait for forever.
-        assert_eq!(parsed["id"], 7);
-        assert_eq!(parsed["error"]["code"], -32601);
-    }
-
-    #[test]
-    fn anything_that_is_not_a_command_is_refused() {
-        assert!(screencast_allows("not json at all").is_err());
-        assert!(screencast_allows("{}").is_err());
-        assert!(screencast_allows(r#"{"id":1}"#).is_err());
-        // A response, not a command - the client has no business sending one.
-        assert!(screencast_allows(r#"{"id":1,"result":{}}"#).is_err());
+    fn the_page_is_told_which_source_it_controls() {
+        let mut src = source("block-id", "https://a.example/login");
+        src.flow_name = "Studio A".to_string();
+        src.block_name = "Scoreboard".to_string();
+        let sent: serde_json::Value =
+            serde_json::from_str(&src.link_source().context_message()).expect("valid JSON");
+        assert_eq!(sent["method"], "Strom.context");
+        assert_eq!(sent["params"]["flow"], "Studio A");
+        assert_eq!(sent["params"]["block"], "Scoreboard");
+        assert_eq!(sent["params"]["home"], "https://a.example/login");
     }
 
     #[test]

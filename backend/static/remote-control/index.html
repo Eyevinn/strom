@@ -1,16 +1,17 @@
 <!DOCTYPE html>
-<!-- Strom remote control page, version 1 -->
+<!-- Strom remote control page, version 2 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Strom remote control</title>
+<title>Strom HTML remote control</title>
 <style>
   :root {
     color-scheme: dark;
     --bg: #14161a;
     --panel: #1c1f26;
+    --field: #111317;
     --line: #2b303b;
     --text: #e7e9ee;
     --muted: #9aa3b2;
@@ -27,14 +28,15 @@
     display: flex;
     flex-direction: column;
   }
-  header {
+  header, nav {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 16px;
+    gap: 10px;
+    padding: 8px 16px;
     background: var(--panel);
     border-bottom: 1px solid var(--line);
     flex: none;
+    min-width: 0;
   }
   .dot {
     width: 9px; height: 9px; border-radius: 50%;
@@ -42,10 +44,44 @@
   }
   .dot.live { background: var(--ok); }
   .dot.gone { background: var(--bad); }
-  .title { font-weight: 600; }
-  .status { color: var(--muted); }
+  .title { font-weight: 600; white-space: nowrap; }
+  .source {
+    color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0;
+  }
+  .source b { color: var(--text); font-weight: 500; }
   .spacer { flex: 1; }
-  .hint { color: var(--muted); font-size: 12px; }
+  .status { color: var(--muted); white-space: nowrap; }
+  nav button {
+    flex: none;
+    min-width: 34px; height: 30px;
+    padding: 0 8px;
+    background: var(--field);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+  }
+  nav button:disabled { color: var(--muted); opacity: 0.5; cursor: default; }
+  #address {
+    flex: 1;
+    min-width: 0;
+    height: 30px;
+    line-height: 28px;
+    padding: 0 10px;
+    background: var(--field);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    user-select: all;
+  }
+  #keyboard { display: none; }
+  @media (pointer: coarse) {
+    #keyboard { display: inline-block; }
+  }
   main {
     flex: 1;
     display: flex;
@@ -62,6 +98,12 @@
     border: 1px solid var(--line);
     border-radius: 4px;
     cursor: default;
+    /* The finger belongs to the remote page: no scrolling, zooming or
+       long-press menu on ours. */
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
   }
   #screen.live { display: block; }
   #message {
@@ -70,24 +112,45 @@
     color: var(--muted);
   }
   #message strong { color: var(--text); display: block; margin-bottom: 6px; }
+  /* Receives the phone's on-screen keyboard. Kept on screen and at 16px so
+     iOS neither refuses to focus it nor zooms the page when it does. */
+  #typing {
+    position: fixed;
+    left: 0; bottom: 0;
+    width: 1px; height: 1px;
+    opacity: 0;
+    font-size: 16px;
+    border: 0; padding: 0;
+    resize: none;
+  }
   @media (max-width: 600px) {
-    header { flex-wrap: wrap; gap: 6px 10px; }
-    .hint { width: 100%; }
+    header, nav { padding: 6px 10px; gap: 6px; }
+    main { padding: 6px; }
+    .status { display: none; }
   }
 </style>
 </head>
 <body>
 <header>
   <span class="dot" id="dot"></span>
-  <span class="title">Remote control</span>
-  <span class="status" id="status">Connecting…</span>
+  <span class="title">Strom HTML remote control</span>
+  <span class="source" id="source"></span>
   <span class="spacer"></span>
-  <span class="hint">Click and type as if the page were yours. Paste works.</span>
+  <span class="status" id="status">Connecting…</span>
 </header>
+<nav>
+  <button id="back" title="Back" aria-label="Back" disabled>&#8592;</button>
+  <button id="forward" title="Forward" aria-label="Forward" disabled>&#8594;</button>
+  <button id="reload" title="Reload" aria-label="Reload">&#8635;</button>
+  <button id="home" title="Back to the page this source is set to" aria-label="Home">&#8962;</button>
+  <div id="address" title=""></div>
+  <button id="keyboard" title="Show the keyboard" aria-label="Keyboard">&#9000;</button>
+</nav>
 <main>
-  <img id="screen" alt="The page being rendered">
+  <img id="screen" alt="The page being rendered" draggable="false">
   <div id="message"><strong>Connecting to the page…</strong>If nothing appears, the flow may have stopped.</div>
 </main>
+<textarea id="typing" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Type into the page"></textarea>
 <script>
 (() => {
   "use strict";
@@ -96,6 +159,11 @@
   const message = document.getElementById("message");
   const statusText = document.getElementById("status");
   const dot = document.getElementById("dot");
+  const sourceText = document.getElementById("source");
+  const address = document.getElementById("address");
+  const backButton = document.getElementById("back");
+  const forwardButton = document.getElementById("forward");
+  const typing = document.getElementById("typing");
 
   // The key is already in our own path, so the socket needs no address of its
   // own: whatever host reached this page reaches the socket too.
@@ -106,6 +174,8 @@
   let nextId = 1;
   let metadata = { pageScaleFactor: 1, offsetTop: 0 };
   let closedForGood = false;
+  let history = { currentIndex: -1, entries: [] };
+  const pending = new Map();
 
   function setState(kind, text) {
     statusText.textContent = text;
@@ -122,10 +192,53 @@
     screen.classList.remove("live");
   }
 
-  function send(method, params) {
+  function send(method, params, onResult) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify({ id: nextId++, method: method, params: params || {} }));
+    const id = nextId++;
+    if (onResult) pending.set(id, onResult);
+    socket.send(JSON.stringify({ id: id, method: method, params: params || {} }));
   }
+
+  // --- Which source this is, and where it is -------------------------------
+
+  function showSource(params) {
+    sourceText.innerHTML = "";
+    const flow = document.createElement("b");
+    flow.textContent = params.flow || "";
+    const block = document.createElement("b");
+    block.textContent = params.block || "";
+    sourceText.append(flow, " › ", block);
+    document.title = (params.block || "HTML") + " – Strom HTML remote control";
+    document.getElementById("home").title = "Back to " + (params.home || "the page this source is set to");
+  }
+
+  function showAddress(url) {
+    address.textContent = url || "";
+    address.title = url || "";
+  }
+
+  function refreshHistory() {
+    send("Page.getNavigationHistory", {}, (result) => {
+      history = result;
+      const entry = history.entries[history.currentIndex];
+      if (entry) showAddress(entry.url);
+      backButton.disabled = history.currentIndex <= 0;
+      forwardButton.disabled = history.currentIndex >= history.entries.length - 1;
+    });
+  }
+
+  function step(delta) {
+    const entry = history.entries[history.currentIndex + delta];
+    if (entry) send("Page.navigateToHistoryEntry", { entryId: entry.id });
+  }
+
+  backButton.addEventListener("click", () => step(-1));
+  forwardButton.addEventListener("click", () => step(1));
+  document.getElementById("reload").addEventListener("click", () => send("Page.reload", {}));
+  // The proxy fills in the address; the page never gets to choose one.
+  document.getElementById("home").addEventListener("click", () => send("Strom.goHome", {}));
+
+  // --- Pointer input ---------------------------------------------------------
 
   // Alt, Ctrl, Meta, Shift - the bitmask the protocol expects.
   function modifiers(ev) {
@@ -134,17 +247,22 @@
 
   const BUTTONS = ["left", "middle", "right", "back", "forward"];
 
+  // Screen pixels to page pixels along each axis.
+  function scale() {
+    const rect = screen.getBoundingClientRect();
+    if (!rect.width || !rect.height || !screen.naturalWidth) return null;
+    const zoom = metadata.pageScaleFactor || 1;
+    return { rect: rect, x: screen.naturalWidth / rect.width / zoom, y: screen.naturalHeight / rect.height / zoom };
+  }
+
   // The picture is the viewport, so a point on it is a point in the page once
   // the display scaling and any pinch zoom are divided out.
   function pointIn(ev) {
-    const rect = screen.getBoundingClientRect();
-    if (!rect.width || !rect.height || !screen.naturalWidth) return null;
-    const scaleX = screen.naturalWidth / rect.width;
-    const scaleY = screen.naturalHeight / rect.height;
-    const zoom = metadata.pageScaleFactor || 1;
+    const s = scale();
+    if (!s) return null;
     return {
-      x: ((ev.clientX - rect.left) * scaleX) / zoom,
-      y: ((ev.clientY - rect.top) * scaleY) / zoom - (metadata.offsetTop || 0),
+      x: (ev.clientX - s.rect.left) * s.x,
+      y: (ev.clientY - s.rect.top) * s.y - (metadata.offsetTop || 0),
     };
   }
 
@@ -163,14 +281,78 @@
     send("Input.dispatchMouseEvent", params);
   }
 
-  screen.addEventListener("mousedown", (ev) => { ev.preventDefault(); screen.focus(); mouse("mousePressed", ev); });
-  screen.addEventListener("mouseup", (ev) => { ev.preventDefault(); mouse("mouseReleased", ev); });
-  screen.addEventListener("mousemove", (ev) => mouse("mouseMoved", ev));
+  // A touch screen fires compatibility mouse events after touches. They are
+  // ignored for a moment after any touch so a tap is not sent twice.
+  let lastTouch = 0;
+  const fromTouch = () => Date.now() - lastTouch < 800;
+
+  screen.addEventListener("mousedown", (ev) => { if (fromTouch()) return; ev.preventDefault(); mouse("mousePressed", ev); });
+  screen.addEventListener("mouseup", (ev) => { if (fromTouch()) return; ev.preventDefault(); mouse("mouseReleased", ev); });
+  screen.addEventListener("mousemove", (ev) => { if (fromTouch()) return; mouse("mouseMoved", ev); });
   screen.addEventListener("contextmenu", (ev) => ev.preventDefault());
   screen.addEventListener("wheel", (ev) => {
     ev.preventDefault();
-    mouse("mouseWheel", ev, { deltaX: -ev.deltaX, deltaY: -ev.deltaY });
+    // Lines and pages to pixels, roughly as a browser would.
+    const unit = ev.deltaMode === 1 ? 40 : ev.deltaMode === 2 ? 800 : 1;
+    // The protocol takes the DOM's sign: positive deltaY scrolls down.
+    mouse("mouseWheel", ev, { deltaX: ev.deltaX * unit, deltaY: ev.deltaY * unit });
   }, { passive: false });
+
+  // One finger: a tap is a click, a drag scrolls the page under it.
+  const TAP_SLOP = 8;
+  let touch = null;
+
+  screen.addEventListener("pointerdown", (ev) => {
+    if (ev.pointerType === "mouse") return;
+    ev.preventDefault();
+    lastTouch = Date.now();
+    if (touch) return; // a second finger; the first one keeps control
+    touch = { id: ev.pointerId, startX: ev.clientX, startY: ev.clientY, lastX: ev.clientX, lastY: ev.clientY, dragging: false };
+    screen.setPointerCapture(ev.pointerId);
+  });
+
+  screen.addEventListener("pointermove", (ev) => {
+    if (!touch || ev.pointerId !== touch.id) return;
+    ev.preventDefault();
+    lastTouch = Date.now();
+    if (!touch.dragging &&
+        Math.hypot(ev.clientX - touch.startX, ev.clientY - touch.startY) > TAP_SLOP) {
+      touch.dragging = true;
+    }
+    if (!touch.dragging) return;
+    const s = scale();
+    if (s) {
+      // The content follows the finger, so the scroll runs against it.
+      const dx = (touch.lastX - ev.clientX) * s.x;
+      const dy = (touch.lastY - ev.clientY) * s.y;
+      const at = pointIn({ clientX: touch.startX, clientY: touch.startY });
+      if (at) {
+        send("Input.dispatchMouseEvent", {
+          type: "mouseWheel", x: at.x, y: at.y, modifiers: 0,
+          button: "none", buttons: 0, clickCount: 0, deltaX: dx, deltaY: dy,
+        });
+      }
+    }
+    touch.lastX = ev.clientX;
+    touch.lastY = ev.clientY;
+  });
+
+  function endTouch(ev, cancelled) {
+    if (!touch || ev.pointerId !== touch.id) return;
+    ev.preventDefault();
+    lastTouch = Date.now();
+    if (!cancelled && !touch.dragging) {
+      const tap = { clientX: touch.startX, clientY: touch.startY, button: 0, buttons: 0, detail: 1 };
+      mouse("mouseMoved", tap);
+      mouse("mousePressed", Object.assign({}, tap, { buttons: 1 }));
+      mouse("mouseReleased", tap);
+    }
+    touch = null;
+  }
+  screen.addEventListener("pointerup", (ev) => endTouch(ev, false));
+  screen.addEventListener("pointercancel", (ev) => endTouch(ev, true));
+
+  // --- Keyboard --------------------------------------------------------------
 
   function keyEvent(type, ev, text) {
     const code = ev.keyCode || 0;
@@ -191,19 +373,42 @@
     send("Input.dispatchKeyEvent", params);
   }
 
+  // Keys that carry a character of their own besides the printable ones.
+  const KEY_TEXT = { Enter: "\r", Tab: "\t" };
+
   window.addEventListener("keydown", (ev) => {
     // Leave the browser's own paste alone; the paste event below carries the
     // text, which is what a password manager needs to work.
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) return;
-    ev.preventDefault();
     const printable = ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey;
-    keyEvent(printable ? "keyDown" : "rawKeyDown", ev, printable ? ev.key : undefined);
+    // A phone's keyboard types into the hidden field; its characters arrive
+    // as input events below, which also carry predictive text and dictation.
+    if (ev.target === typing && (printable || ev.isComposing || ev.key === "Unidentified")) return;
+    ev.preventDefault();
+    const text = printable ? ev.key : KEY_TEXT[ev.key];
+    keyEvent(text ? "keyDown" : "rawKeyDown", ev, text);
   });
 
   window.addEventListener("keyup", (ev) => {
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) return;
+    if (ev.target === typing && ev.key.length === 1) return;
     ev.preventDefault();
     keyEvent("keyUp", ev);
+  });
+
+  typing.addEventListener("input", (ev) => {
+    if (ev.data && (!ev.inputType || ev.inputType.startsWith("insert"))) {
+      send("Input.insertText", { text: ev.data });
+    }
+    typing.value = "";
+  });
+
+  document.getElementById("keyboard").addEventListener("click", () => {
+    if (document.activeElement === typing) {
+      typing.blur();
+    } else {
+      typing.focus();
+    }
   });
 
   window.addEventListener("paste", (ev) => {
@@ -213,6 +418,8 @@
     send("Input.insertText", { text: text });
   });
 
+  // --- Connection ------------------------------------------------------------
+
   function connect() {
     setState("", "Connecting…");
     socket = new WebSocket(wsUrl);
@@ -221,6 +428,7 @@
       setState("live", "Connected");
       send("Page.enable");
       send("Page.startScreencast", { format: "jpeg", quality: 80, everyNthFrame: 1 });
+      refreshHistory();
     };
 
     socket.onmessage = (event) => {
@@ -239,6 +447,20 @@
         // acknowledgement is the flow control: a slow link costs frame rate
         // and never builds a queue.
         send("Page.screencastFrameAck", { sessionId: msg.params.sessionId });
+      } else if (msg.method === "Strom.context") {
+        showSource(msg.params || {});
+      } else if (msg.method === "Page.frameNavigated") {
+        const frame = msg.params && msg.params.frame;
+        if (frame && !frame.parentId) {
+          showAddress(frame.url);
+          refreshHistory();
+        }
+      } else if (msg.method === "Page.navigatedWithinDocument") {
+        refreshHistory();
+      } else if (msg.id && pending.has(msg.id)) {
+        const onResult = pending.get(msg.id);
+        pending.delete(msg.id);
+        if (msg.result) onResult(msg.result);
       } else if (msg.error) {
         setState("warn", msg.error.message || "Refused");
       }

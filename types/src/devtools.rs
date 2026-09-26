@@ -96,14 +96,15 @@ pub struct DevToolsTargets {
 
 /// What a remote control link grants when the protocol is filtered.
 ///
-/// The proxy allows the screencast and input methods and nothing else, so the
-/// link is what it appears to be: the page's picture, and clicks and
-/// keystrokes into it. That is not nothing - the page is on air - but it is
-/// not the host.
+/// The proxy allows the screencast, input and history methods and nothing
+/// else, so the link is what it appears to be: the page's picture, clicks and
+/// keystrokes into it, and a way back through where it has been. That is not
+/// nothing - the page is on air - but it is not the host.
 pub const SCREENCAST_CONTROL_WARNING: &str = "This link shows the page as it \
-    is being rendered and sends your clicks and keystrokes to it. Whoever \
-    holds it can see and change what that source is putting on air, until the \
-    link expires or is revoked.";
+    is being rendered and sends your clicks and keystrokes to it, and can step \
+    it back, forward, or to the page the source is set to. Whoever holds it \
+    can see and change what that source is putting on air, until the link \
+    expires or is revoked.";
 
 /// What remote control actually grants, for any client that offers it.
 ///

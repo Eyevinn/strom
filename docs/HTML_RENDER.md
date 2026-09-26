@@ -297,9 +297,12 @@ token, no target id, no address or port:
 ```
 
 Open the path in your own browser and the page appears; click and type into it
-as if it were yours, and paste works for a password manager. The key in the
-path is the credential, so the link is handed to a person rather than
-published, and it dies after half an hour of disuse.
+as if it were yours, and paste works for a password manager. On a phone, tap to
+click, drag to scroll, and use the keyboard button to type. Back, forward,
+reload and a home button that returns to the block's URL are there too; typing
+in an address is not, because from inside your network that would reach anything
+the server can. The key in the path is the credential, so the link is handed to
+a person rather than published, and it dies after half an hour of disuse.
 
 The `id` is not a credential — it is the name you use to take the link back:
 
