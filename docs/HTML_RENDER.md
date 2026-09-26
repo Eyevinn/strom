@@ -248,19 +248,23 @@ for. Raw `cefsrc` pipelines still work — the block just spares you the caps.
 ## Remote control (logging in to a page)
 
 An HTML source renders on the server, so a page behind a login shows its login
-screen for as long as the flow runs. Strom can put Chromium's own DevTools in
-front of that browser, through its own port and its own authentication, so an
+screen for as long as the flow runs. Strom can hand out a link that shows that
+page as it is being rendered and passes clicks and keystrokes back to it, so an
 operator can log in, clear a consent dialog or click a tab — in the browser that
 is actually on air. Nothing about the session is copied anywhere.
 
-> **This is a debugging tool, and it is instance-wide.** One browser process
-> serves every HTML source in a Strom instance. Whoever opens one of these links
-> reaches all of them, every page they are logged in to, and the files on the
-> host. Give the link only to someone you would trust with the instance itself.
-> To keep customers apart, run a Strom process per customer — that is an
-> orchestration choice, and there is no per-source isolation inside one process.
+The link carries the page and nothing else. Chromium's debug protocol is how
+this works underneath, and that protocol is full control of the browser
+process, so the proxy forwards only what a picture and an input device need and
+refuses the rest.
 
-Enable it with a port that nothing else on the host uses:
+> **A link is still worth guarding.** Whoever holds it sees and can type into a
+> page that is on air, until it expires or you revoke it.
+
+Remote control needs Strom's own authentication configured. With none, minting
+a link would take no credentials at all, so Strom refuses to open the debug
+port and says so at startup. Enable it with a port that nothing else on the
+host uses:
 
 ```toml
 [cef]
@@ -292,10 +296,10 @@ token, no target id, no address or port:
 {"id": "4b1e…", "path": "/devtools/7f3c…", "expires_in_seconds": 1800, "warning": "…"}
 ```
 
-Open the path in your own browser and DevTools comes up against that page; its
-screencast view is where you click and type. The key in the path is the
-credential, so the link is handed to a person rather than published, and it
-dies after half an hour of disuse.
+Open the path in your own browser and the page appears; click and type into it
+as if it were yours, and paste works for a password manager. The key in the
+path is the credential, so the link is handed to a person rather than
+published, and it dies after half an hour of disuse.
 
 The `id` is not a credential — it is the name you use to take the link back:
 
@@ -319,6 +323,30 @@ emergency stop, so it has to reach whoever is holding the socket.
 A login survives a restart: the profile directory keeps the cookies, and Strom
 asks Chromium to persist session cookies too. Chromium writes them on a timer,
 so a login made seconds before the process is killed can still be lost.
+
+### Full DevTools
+
+For troubleshooting a page rather than operating it, Strom can serve Chromium's
+DevTools application instead, with the protocol unfiltered:
+
+```toml
+[cef]
+debug_port = 9222
+full_devtools = true
+```
+
+or `STROM_CEF_FULL_DEVTOOLS=1`. This is not a richer version of the same thing.
+DevTools needs exactly the parts of the protocol the filter exists to refuse,
+so the two cannot be combined.
+
+> **With this on, a link is control of the host, and it is instance-wide.** It
+> runs arbitrary JavaScript, navigates anywhere including `file://`, and reads
+> every cookie in the profile. One browser process serves every HTML source in
+> a Strom instance, so a link reaches all of them, every page they are logged
+> in to, and the files this process can read. Give it only to someone you would
+> trust with the instance itself. To keep customers apart, run a Strom process
+> per customer — that is an orchestration choice, and there is no per-source
+> isolation inside one process.
 
 ## Limitations
 

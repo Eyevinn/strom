@@ -94,6 +94,17 @@ pub struct DevToolsTargets {
     pub targets: Vec<DevToolsTarget>,
 }
 
+/// What a remote control link grants when the protocol is filtered.
+///
+/// The proxy allows the screencast and input methods and nothing else, so the
+/// link is what it appears to be: the page's picture, and clicks and
+/// keystrokes into it. That is not nothing - the page is on air - but it is
+/// not the host.
+pub const SCREENCAST_CONTROL_WARNING: &str = "This link shows the page as it \
+    is being rendered and sends your clicks and keystrokes to it. Whoever \
+    holds it can see and change what that source is putting on air, until the \
+    link expires or is revoked.";
+
 /// What remote control actually grants, for any client that offers it.
 ///
 /// One CEF process serves every `cefsrc` in a Strom instance, so a session

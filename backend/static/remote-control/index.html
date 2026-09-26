@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<!-- Strom remote control page, version 1 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Strom remote control</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #14161a;
+    --panel: #1c1f26;
+    --line: #2b303b;
+    --text: #e7e9ee;
+    --muted: #9aa3b2;
+    --ok: #4ec9a5;
+    --warn: #e0a34a;
+    --bad: #e06c75;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    flex: none;
+  }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--muted); flex: none;
+  }
+  .dot.live { background: var(--ok); }
+  .dot.gone { background: var(--bad); }
+  .title { font-weight: 600; }
+  .status { color: var(--muted); }
+  .spacer { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; }
+  main {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    min-height: 0;
+  }
+  #screen {
+    max-width: 100%;
+    max-height: 100%;
+    display: none;
+    background: #000;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    cursor: default;
+  }
+  #screen.live { display: block; }
+  #message {
+    max-width: 30rem;
+    text-align: center;
+    color: var(--muted);
+  }
+  #message strong { color: var(--text); display: block; margin-bottom: 6px; }
+  @media (max-width: 600px) {
+    header { flex-wrap: wrap; gap: 6px 10px; }
+    .hint { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <span class="title">Remote control</span>
+  <span class="status" id="status">Connecting…</span>
+  <span class="spacer"></span>
+  <span class="hint">Click and type as if the page were yours. Paste works.</span>
+</header>
+<main>
+  <img id="screen" alt="The page being rendered">
+  <div id="message"><strong>Connecting to the page…</strong>If nothing appears, the flow may have stopped.</div>
+</main>
+<script>
+(() => {
+  "use strict";
+
+  const screen = document.getElementById("screen");
+  const message = document.getElementById("message");
+  const statusText = document.getElementById("status");
+  const dot = document.getElementById("dot");
+
+  // The key is already in our own path, so the socket needs no address of its
+  // own: whatever host reached this page reaches the socket too.
+  const base = location.pathname.replace(/\/+$/, "");
+  const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + base + "/ws";
+
+  let socket = null;
+  let nextId = 1;
+  let metadata = { pageScaleFactor: 1, offsetTop: 0 };
+  let closedForGood = false;
+
+  function setState(kind, text) {
+    statusText.textContent = text;
+    dot.className = "dot" + (kind ? " " + kind : "");
+  }
+
+  function show(title, detail) {
+    message.innerHTML = "";
+    const strong = document.createElement("strong");
+    strong.textContent = title;
+    message.appendChild(strong);
+    message.appendChild(document.createTextNode(detail || ""));
+    message.style.display = "";
+    screen.classList.remove("live");
+  }
+
+  function send(method, params) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ id: nextId++, method: method, params: params || {} }));
+  }
+
+  // Alt, Ctrl, Meta, Shift - the bitmask the protocol expects.
+  function modifiers(ev) {
+    return (ev.altKey ? 1 : 0) | (ev.ctrlKey ? 2 : 0) | (ev.metaKey ? 4 : 0) | (ev.shiftKey ? 8 : 0);
+  }
+
+  const BUTTONS = ["left", "middle", "right", "back", "forward"];
+
+  // The picture is the viewport, so a point on it is a point in the page once
+  // the display scaling and any pinch zoom are divided out.
+  function pointIn(ev) {
+    const rect = screen.getBoundingClientRect();
+    if (!rect.width || !rect.height || !screen.naturalWidth) return null;
+    const scaleX = screen.naturalWidth / rect.width;
+    const scaleY = screen.naturalHeight / rect.height;
+    const zoom = metadata.pageScaleFactor || 1;
+    return {
+      x: ((ev.clientX - rect.left) * scaleX) / zoom,
+      y: ((ev.clientY - rect.top) * scaleY) / zoom - (metadata.offsetTop || 0),
+    };
+  }
+
+  function mouse(type, ev, extra) {
+    const at = pointIn(ev);
+    if (!at) return;
+    const params = Object.assign({
+      type: type,
+      x: at.x,
+      y: at.y,
+      modifiers: modifiers(ev),
+      button: type === "mouseMoved" && !ev.buttons ? "none" : (BUTTONS[ev.button] || "left"),
+      buttons: ev.buttons || 0,
+      clickCount: type === "mouseMoved" ? 0 : (ev.detail || 1),
+    }, extra || {});
+    send("Input.dispatchMouseEvent", params);
+  }
+
+  screen.addEventListener("mousedown", (ev) => { ev.preventDefault(); screen.focus(); mouse("mousePressed", ev); });
+  screen.addEventListener("mouseup", (ev) => { ev.preventDefault(); mouse("mouseReleased", ev); });
+  screen.addEventListener("mousemove", (ev) => mouse("mouseMoved", ev));
+  screen.addEventListener("contextmenu", (ev) => ev.preventDefault());
+  screen.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    mouse("mouseWheel", ev, { deltaX: -ev.deltaX, deltaY: -ev.deltaY });
+  }, { passive: false });
+
+  function keyEvent(type, ev, text) {
+    const code = ev.keyCode || 0;
+    const params = {
+      type: type,
+      modifiers: modifiers(ev),
+      key: ev.key,
+      code: ev.code,
+      windowsVirtualKeyCode: code,
+      nativeVirtualKeyCode: code,
+      autoRepeat: !!ev.repeat,
+      location: ev.location || 0,
+    };
+    if (text) {
+      params.text = text;
+      params.unmodifiedText = text.toLowerCase();
+    }
+    send("Input.dispatchKeyEvent", params);
+  }
+
+  window.addEventListener("keydown", (ev) => {
+    // Leave the browser's own paste alone; the paste event below carries the
+    // text, which is what a password manager needs to work.
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) return;
+    ev.preventDefault();
+    const printable = ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey;
+    keyEvent(printable ? "keyDown" : "rawKeyDown", ev, printable ? ev.key : undefined);
+  });
+
+  window.addEventListener("keyup", (ev) => {
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) return;
+    ev.preventDefault();
+    keyEvent("keyUp", ev);
+  });
+
+  window.addEventListener("paste", (ev) => {
+    const text = ev.clipboardData && ev.clipboardData.getData("text");
+    if (!text) return;
+    ev.preventDefault();
+    send("Input.insertText", { text: text });
+  });
+
+  function connect() {
+    setState("", "Connecting…");
+    socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+      setState("live", "Connected");
+      send("Page.enable");
+      send("Page.startScreencast", { format: "jpeg", quality: 80, everyNthFrame: 1 });
+    };
+
+    socket.onmessage = (event) => {
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch (e) {
+        return;
+      }
+      if (msg.method === "Page.screencastFrame") {
+        metadata = msg.params.metadata || metadata;
+        screen.src = "data:image/jpeg;base64," + msg.params.data;
+        screen.classList.add("live");
+        message.style.display = "none";
+        // Chromium waits for this before sending the next frame, so the
+        // acknowledgement is the flow control: a slow link costs frame rate
+        // and never builds a queue.
+        send("Page.screencastFrameAck", { sessionId: msg.params.sessionId });
+      } else if (msg.error) {
+        setState("warn", msg.error.message || "Refused");
+      }
+    };
+
+    socket.onclose = () => {
+      if (closedForGood) return;
+      setState("gone", "Disconnected");
+      show("The session ended.", "The link may have expired or been revoked, or the flow stopped. Ask for a new link.");
+    };
+
+    socket.onerror = () => {
+      setState("gone", "Connection failed");
+    };
+  }
+
+  window.addEventListener("beforeunload", () => {
+    closedForGood = true;
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

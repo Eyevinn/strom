@@ -11,47 +11,55 @@
 //! stays there: everything here goes through Strom's own port, the same way
 //! WHEP and WHIP are fronted.
 //!
-//! Three things are proxied, and they are all Chromium's own:
+//! # What a link carries
 //!
-//! - `/json/list`, to find the pages,
-//! - `/devtools/*`, the DevTools application, which CEF serves itself,
-//! - the per-page WebSocket carrying the protocol.
+//! Strom serves its own page under the key and terminates the WebSocket
+//! itself, so the operator gets the rendered page, and clicks and keystrokes
+//! go back into it. The proxy forwards only [`SCREENCAST_METHODS`] and
+//! answers everything else with a protocol error, so the link is what it
+//! looks like rather than what the debug port would otherwise be.
 //!
-//! Strom terminates the WebSocket and opens its own to Chromium. That is what
-//! keeps the browser's `Origin` check out of the picture: Chromium rejects
-//! WebSocket origins it does not know (`--remote-allow-origins`), but our
-//! connection carries no origin at all.
+//! Terminating the socket is also what keeps the browser's `Origin` check out
+//! of the picture: Chromium rejects WebSocket origins it does not know
+//! (`--remote-allow-origins`), but our own connection carries no origin.
 //!
 //! # The link is a capability, and it says nothing else
 //!
-//! Minting a link needs Strom's own authentication. The link itself is one
-//! opaque key and nothing more — no API token, no Chromium target id, no
-//! internal address or port. It is meant to be pasted into a browser or read
-//! off a phone screen, so anything in it is something the operator cannot
-//! avoid handing over with it.
+//! Minting a link needs Strom's own authentication, and with no
+//! authentication configured the debug port is never opened at all — a door
+//! with no lock is worse than no door. The link itself is one opaque key and
+//! nothing more: no API token, no Chromium target id, no internal address or
+//! port. It is meant to be pasted into a browser or read off a phone screen,
+//! so anything in it is something the operator cannot avoid handing over
+//! with it.
 //!
-//! The key is the credential for everything under `/devtools/<key>`: the
-//! DevTools application, its files, and the protocol socket. It expires on its
-//! own after [`LINK_TTL`] of disuse and can be revoked before that. The only
-//! address that appears is the host the operator themselves reached us on,
-//! taken from their own request, because the DevTools application has to be
-//! told where to open its socket.
+//! The key is the credential for everything under `/devtools/<key>`. It
+//! expires on its own after [`LINK_TTL`] of disuse and can be revoked before
+//! that, and either one also ends a session that is already open — otherwise
+//! revocation would close the door on the next visitor while the one already
+//! inside stayed.
 //!
-//! # This is an instance-wide privilege, not a per-source one
+//! Even filtered, a link is not nothing: whoever holds it sees and can type
+//! into a page that is on air, for as long as it lives.
 //!
-//! One CEF process serves every `cefsrc` in the instance, so there is one
-//! debug port and one cookie jar, and each HTML source is a target on that
-//! port. A key decides which page a session *starts* on; it bounds nothing
-//! after that. From any target the protocol reaches every cookie in the
-//! profile (`Storage.getCookies`), navigates that page anywhere including
-//! `file://`, and runs whatever JavaScript it likes.
+//! # The escape hatch, and why it is one
 //!
-//! So whoever holds a key can reach every HTML source in the instance and
-//! everything the browser has ever logged in to. That is fine for an operator
-//! running their own instance, and wrong for an instance whose HTML sources
-//! belong to different customers: there the isolation has to come from
-//! separate Strom instances, which already get separate CEF profiles, and this
-//! must stay off.
+//! `cef.full_devtools` serves Chromium's DevTools application instead and
+//! stops filtering. It cannot be a richer mode of the same thing, because
+//! DevTools needs precisely the domains the filter exists to refuse:
+//! `Runtime`, `Debugger`, `DOM`, `Network`. With it on, a key runs arbitrary
+//! JavaScript, navigates anywhere including `file://`, and reads every cookie
+//! in the profile.
+//!
+//! That is also instance-wide. One CEF process serves every `cefsrc`, so
+//! there is one debug port and one cookie jar, and a key decides which page a
+//! session *starts* on while bounding nothing after that. So with the hatch
+//! open, whoever holds a key reaches every HTML source in the instance,
+//! everything the browser has ever logged in to, and the files this process
+//! can read. That is a debugging setting for an operator on their own
+//! instance. For HTML sources belonging to different customers the isolation
+//! has to come from separate Strom instances, which already get separate CEF
+//! profiles, and this must stay off.
 
 use crate::state::AppState;
 use axum::{
@@ -61,7 +69,7 @@ use axum::{
         Extension, Path, RawQuery, State,
     },
     http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     Json,
 };
 use futures::{SinkExt, StreamExt};
@@ -70,7 +78,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use strom_types::devtools::{
     DevToolsLink, DevToolsLinkSummary, DevToolsLinks, DevToolsRevokedLinks, DevToolsTarget,
-    DevToolsTargets, REMOTE_CONTROL_WARNING,
+    DevToolsTargets, REMOTE_CONTROL_WARNING, SCREENCAST_CONTROL_WARNING,
 };
 use strom_types::FlowId;
 use tokio::sync::broadcast;
@@ -98,6 +106,80 @@ pub struct DevToolsConfig {
     /// DevTools application is told to open `ws://` or `wss://` back to us —
     /// it will refuse a plaintext socket from a page served over HTTPS.
     pub tls: bool,
+    /// Hand out the Chromium DevTools application, with the protocol
+    /// unfiltered, instead of the remote control page.
+    ///
+    /// Off, a link carries the page: its picture, and clicks and keystrokes
+    /// into it, because [`SCREENCAST_METHODS`] is all the proxy forwards. On,
+    /// a link carries the whole Chrome DevTools Protocol, which is arbitrary
+    /// JavaScript, navigation to `file://` and every cookie in the profile.
+    /// The two cannot be combined: DevTools needs the domains the filter
+    /// exists to refuse, so this is the escape hatch, not a richer mode.
+    pub full_devtools: bool,
+}
+
+/// What a remote control session may ask Chromium to do.
+///
+/// A picture, and a way to click and type into it. Everything outside this
+/// list — `Runtime.evaluate`, `Page.navigate`, `Storage.getCookies`, the whole
+/// `Network` and `Debugger` domains — is what turns a link into control of
+/// this host, so the proxy refuses it rather than trusting the page not to
+/// ask. The page we serve is only the first user of the link; the filter is
+/// what makes the link safe to hand to a second one.
+pub const SCREENCAST_METHODS: &[&str] = &[
+    "Input.dispatchKeyEvent",
+    "Input.dispatchMouseEvent",
+    "Input.insertText",
+    "Page.enable",
+    "Page.screencastFrameAck",
+    "Page.startScreencast",
+    "Page.stopScreencast",
+];
+
+/// The protocol's own shape for "no", so the client sees a refusal against the
+/// command it sent rather than a socket that silently swallows things.
+fn cdp_refusal(id: Option<i64>, message: &str) -> String {
+    serde_json::json!({
+        "id": id,
+        "error": { "code": -32601, "message": message }
+    })
+    .to_string()
+}
+
+/// Whether one message from the client may be forwarded, or the refusal to
+/// send back in its place.
+fn screencast_allows(raw: &str) -> Result<(), String> {
+    let Ok(message) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Err(cdp_refusal(None, "Not a DevTools protocol message"));
+    };
+    let id = message.get("id").and_then(serde_json::Value::as_i64);
+    let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
+        return Err(cdp_refusal(
+            id,
+            "A remote control session sends commands, nothing else",
+        ));
+    };
+    if !SCREENCAST_METHODS.contains(&method) {
+        return Err(cdp_refusal(
+            id,
+            &format!(
+                "{} is not available over a remote control link, which carries the page's \
+                 picture, clicks and keystrokes only",
+                method
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// What to tell an operator this link hands over, which depends on whether the
+/// protocol is filtered.
+fn link_warning(config: &DevToolsConfig) -> String {
+    if config.full_devtools {
+        REMOTE_CONTROL_WARNING.to_string()
+    } else {
+        SCREENCAST_CONTROL_WARNING.to_string()
+    }
 }
 
 /// One minted link.
@@ -507,7 +589,7 @@ pub async fn list_targets(Extension(state): Extension<DevToolsState>) -> Respons
             debug!("DevTools endpoint on port {} did not answer: {}", port, e);
             return Json(DevToolsTargets {
                 enabled: true,
-                warning: Some(REMOTE_CONTROL_WARNING.to_string()),
+                warning: Some(link_warning(&state.config)),
                 targets: Vec::new(),
             })
             .into_response();
@@ -541,7 +623,7 @@ pub async fn list_targets(Extension(state): Extension<DevToolsState>) -> Respons
 
     Json(DevToolsTargets {
         enabled: true,
-        warning: Some(REMOTE_CONTROL_WARNING.to_string()),
+        warning: Some(link_warning(&state.config)),
         targets,
     })
     .into_response()
@@ -559,7 +641,7 @@ fn minted(state: &DevToolsState, target_id: String, target_url: String) -> Respo
         id: minted.id,
         path: format!("/devtools/{}", minted.key),
         expires_in_seconds: LINK_TTL.as_secs(),
-        warning: REMOTE_CONTROL_WARNING.to_string(),
+        warning: link_warning(&state.config),
     })
     .into_response()
 }
@@ -1005,6 +1087,25 @@ pub async fn open_link(
         return no_such_link();
     }
 
+    if !state.config.full_devtools {
+        // Our own page, served from under the key. It needs no address of its
+        // own - the socket is one path along from wherever this was reached -
+        // so nothing on this path has to trust a forwarded header.
+        return match crate::assets::RemoteControlAssets::get("index.html") {
+            Some(page) => {
+                Html(String::from_utf8_lossy(page.data.as_ref()).into_owned()).into_response()
+            }
+            None => {
+                error!("The remote control page is missing from this binary");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "The remote control page is missing from this build",
+                )
+                    .into_response()
+            }
+        };
+    }
+
     let Some(host) = client_host(&headers) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -1047,6 +1148,14 @@ pub async fn proxy_ui(
     let Some(port) = state.config.debug_port else {
         return disabled();
     };
+    if !state.config.full_devtools {
+        return (
+            StatusCode::NOT_FOUND,
+            "This instance does not serve the DevTools application. A remote control link \
+             carries the page itself; set cef.full_devtools to serve DevTools instead.",
+        )
+            .into_response();
+    }
     if !valid_key(&key) || state.resolve(&key).is_none() {
         return no_such_link();
     }
@@ -1083,7 +1192,8 @@ pub async fn proxy_cdp(
     };
 
     let upstream = format!("ws://127.0.0.1:{}/devtools/page/{}", port, target_id);
-    ws.on_upgrade(move |socket| pump(socket, upstream, target_id, cancelled))
+    let full_devtools = state.config.full_devtools;
+    ws.on_upgrade(move |socket| pump(socket, upstream, target_id, cancelled, full_devtools))
 }
 
 /// Shuttle messages both ways until either side hangs up, or the link dies.
@@ -1099,6 +1209,7 @@ async fn pump(
     upstream_url: String,
     target_id: String,
     mut cancelled: broadcast::Receiver<()>,
+    full_devtools: bool,
 ) {
     let (upstream, _) = match tokio_tungstenite::connect_async(&upstream_url).await {
         Ok(pair) => pair,
@@ -1113,11 +1224,34 @@ async fn pump(
     let (mut client_tx, mut client_rx) = client.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
 
+    // A refusal has to reach the client, whose sink belongs to the other half
+    // of this pump, so it travels the same way Chromium's own answers do.
+    let (refusals, mut refused) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     let to_upstream = async {
         while let Some(Ok(msg)) = client_rx.next().await {
             let forwarded = match msg {
-                Message::Text(t) => WsMessage::Text(t.as_str().into()),
-                Message::Binary(b) => WsMessage::Binary(b),
+                Message::Text(t) => {
+                    if !full_devtools {
+                        if let Err(refusal) = screencast_allows(t.as_str()) {
+                            debug!("Refused a method a remote control link does not carry");
+                            if refusals.send(refusal).is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                    WsMessage::Text(t.as_str().into())
+                }
+                // The protocol is text. A filtered session has no reason to
+                // send anything else, and a binary frame cannot be checked
+                // against the list, so it does not go.
+                Message::Binary(b) => {
+                    if !full_devtools {
+                        continue;
+                    }
+                    WsMessage::Binary(b)
+                }
                 Message::Close(_) => break,
                 // Chromium answers our pings; the client's are ours to answer,
                 // and axum has already done it.
@@ -1130,12 +1264,20 @@ async fn pump(
     };
 
     let to_client = async {
-        while let Some(Ok(msg)) = upstream_rx.next().await {
-            let forwarded = match msg {
-                WsMessage::Text(t) => Message::Text(t.as_str().into()),
-                WsMessage::Binary(b) => Message::Binary(b),
-                WsMessage::Close(_) => break,
-                WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_) => continue,
+        loop {
+            let forwarded = tokio::select! {
+                incoming = upstream_rx.next() => match incoming {
+                    Some(Ok(WsMessage::Text(t))) => Message::Text(t.as_str().into()),
+                    Some(Ok(WsMessage::Binary(b))) => Message::Binary(b),
+                    Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_))) => {
+                        continue
+                    }
+                    Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
+                },
+                refusal = refused.recv() => match refusal {
+                    Some(text) => Message::Text(text.into()),
+                    None => break,
+                },
             };
             if client_tx.send(forwarded).await.is_err() {
                 break;
@@ -1168,6 +1310,7 @@ mod tests {
         DevToolsState::new(DevToolsConfig {
             debug_port: Some(9222),
             tls: false,
+            full_devtools: false,
         })
     }
 
@@ -1213,6 +1356,7 @@ mod tests {
         let plain = DevToolsConfig {
             debug_port: Some(9222),
             tls: false,
+            full_devtools: false,
         };
         let mut headers = HeaderMap::new();
         assert!(!client_is_secure(&headers, &plain));
@@ -1228,6 +1372,7 @@ mod tests {
         let tls = DevToolsConfig {
             debug_port: Some(9222),
             tls: true,
+            full_devtools: false,
         };
         assert!(!client_is_secure(&headers, &tls));
     }
@@ -1610,5 +1755,109 @@ mod tests {
             resolve_target(&targets, &sources, &sources[0]),
             Resolution::Unknown
         );
+    }
+
+    fn command(method: &str) -> String {
+        serde_json::json!({ "id": 7, "method": method, "params": {} }).to_string()
+    }
+
+    #[test]
+    fn a_link_carries_the_picture_and_the_input_for_it() {
+        for method in SCREENCAST_METHODS {
+            assert!(
+                screencast_allows(&command(method)).is_ok(),
+                "{} is what the page needs to work",
+                method
+            );
+        }
+    }
+
+    #[test]
+    fn a_link_does_not_carry_the_rest_of_the_protocol() {
+        // Each of these is on its own enough to turn a link into control of
+        // the host: script execution, navigation to the filesystem, the
+        // cookie jar, the network, and the debugger.
+        for method in [
+            "Runtime.evaluate",
+            "Runtime.callFunctionOn",
+            "Page.navigate",
+            "Page.captureSnapshot",
+            "Storage.getCookies",
+            "Network.getAllCookies",
+            "Network.setRequestInterception",
+            "Debugger.enable",
+            "Target.createTarget",
+            "Browser.getVersion",
+            "DOM.getDocument",
+            "Emulation.setDeviceMetricsOverride",
+        ] {
+            let refused = screencast_allows(&command(method))
+                .expect_err(&format!("{} must not be forwarded", method));
+            assert!(
+                refused.contains(method),
+                "the refusal has to name what was refused, got {}",
+                refused
+            );
+        }
+    }
+
+    #[test]
+    fn a_near_miss_is_not_waved_through() {
+        // Substring matching would let all of these past.
+        for method in [
+            "Page.startScreencastEvil",
+            "XPage.enable",
+            "page.enable",
+            "Page.Enable",
+            "Input.dispatchMouseEvent.extra",
+        ] {
+            assert!(
+                screencast_allows(&command(method)).is_err(),
+                "{} is not on the list",
+                method
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_answers_the_command_that_was_sent() {
+        let refused = screencast_allows(&command("Runtime.evaluate")).unwrap_err();
+        let parsed: serde_json::Value = serde_json::from_str(&refused).expect("valid JSON");
+        // A client matches answers to commands by id; an answer without one is
+        // an answer it will wait for forever.
+        assert_eq!(parsed["id"], 7);
+        assert_eq!(parsed["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn anything_that_is_not_a_command_is_refused() {
+        assert!(screencast_allows("not json at all").is_err());
+        assert!(screencast_allows("{}").is_err());
+        assert!(screencast_allows(r#"{"id":1}"#).is_err());
+        // A response, not a command - the client has no business sending one.
+        assert!(screencast_allows(r#"{"id":1,"result":{}}"#).is_err());
+    }
+
+    #[test]
+    fn the_remote_control_page_is_in_the_binary() {
+        // open_link serves this; without it a link opens on an error page and
+        // the whole feature is dead in a release build.
+        assert!(crate::assets::RemoteControlAssets::get("index.html").is_some());
+    }
+
+    #[test]
+    fn the_warning_says_which_of_the_two_modes_this_is() {
+        let filtered = DevToolsConfig {
+            debug_port: Some(9222),
+            tls: false,
+            full_devtools: false,
+        };
+        let unfiltered = DevToolsConfig {
+            full_devtools: true,
+            ..filtered
+        };
+        assert_eq!(link_warning(&filtered), SCREENCAST_CONTROL_WARNING);
+        assert_eq!(link_warning(&unfiltered), REMOTE_CONTROL_WARNING);
+        assert_ne!(link_warning(&filtered), link_warning(&unfiltered));
     }
 }
