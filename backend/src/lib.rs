@@ -505,6 +505,8 @@ pub async fn create_app_with_config(
                     header::ACCEPT,
                     header::COOKIE,
                     HeaderName::from_static("mcp-session-id"),
+                    // A WHIP PATCH carries the session's ETag back in If-Match.
+                    header::IF_MATCH,
                 ])
                 // This list replaces any Access-Control-Expose-Headers a handler
                 // sets, so it must carry what the WHIP/WHEP proxies expose: a

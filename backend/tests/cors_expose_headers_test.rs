@@ -2,7 +2,9 @@
 //! responses, but the app-wide CORS layer replaces that header with its own
 //! list on any request carrying an `Origin`. Whatever a cross-origin client must
 //! read therefore has to be in the layer's list: above all `Location`, the
-//! session resource the client needs to end its session.
+//! session resource the client needs to end its session. The layer also answers
+//! preflights, so a header a client must send (`If-Match`) has to be in its
+//! allowed list.
 
 use axum::{
     body::Body,
@@ -69,5 +71,39 @@ async fn whep_post_exposes_proxy_headers_cross_origin() {
         missing(&exposed).is_empty(),
         "WHEP POST hides {:?} from other origins; exposed: {exposed:?}",
         missing(&exposed)
+    );
+}
+
+#[tokio::test]
+async fn whip_patch_preflight_allows_if_match() {
+    let response = create_test_app()
+        .await
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/whip/no-such-endpoint/resource/no-such-resource")
+                .header(header::ORIGIN, "https://studio.example.com")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "content-type,if-match",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let allowed = response
+        .headers()
+        .get_all(header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(",")
+        .to_ascii_lowercase();
+    assert!(
+        allowed.split(',').any(|h| h.trim() == "if-match"),
+        "WHIP PATCH preflight refuses If-Match from other origins; allowed: {allowed:?}"
     );
 }
