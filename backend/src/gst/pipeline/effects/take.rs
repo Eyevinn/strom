@@ -20,6 +20,10 @@ impl PipelineManager {
     /// dist + multiview compositors; otherwise runs a standard single-pad
     /// transition on the mv mixer.
     ///
+    /// `from_input`/`to_input` are only consulted for a block that registered
+    /// no overlay state (a plain compositor). They are required in that case
+    /// and ignored otherwise.
+    ///
     /// Returns `(was_ftb_cancelled, old_pgm, new_pgm, actual_kind)`. The two
     /// middle elements are `None` when the corresponding bus is a PiP source.
     /// `actual_kind` is the transition that actually ran — differs from
@@ -28,15 +32,15 @@ impl PipelineManager {
     pub fn trigger_transition(
         &self,
         block_instance_id: &str,
-        from_input: usize,
-        to_input: usize,
+        from_input: Option<usize>,
+        to_input: Option<usize>,
         transition_type: &str,
         duration_ms: u64,
     ) -> Result<(bool, Option<usize>, Option<usize>, String), PipelineError> {
         use crate::gst::transitions::{TransitionController, TransitionType};
 
         debug!(
-            "Triggering {} transition on {} from input {} to {} ({}ms)",
+            "Triggering {} transition on {} from input {:?} to {:?} ({}ms)",
             transition_type, block_instance_id, from_input, to_input, duration_ms
         );
 
@@ -55,17 +59,41 @@ impl PipelineManager {
             .as_ref()
             .map(|s| s.num_inputs)
             .unwrap_or(usize::MAX);
+
+        // Without overlay state the request indices are the only thing naming
+        // the pads to animate, so an omitted one leaves the take
+        // underspecified rather than merely redundant.
+        if overlay_state.is_none() && (from_input.is_none() || to_input.is_none()) {
+            return Err(PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "from_input/to_input".to_string(),
+                reason: "block has no live PGM/PVW state: both indices are required".to_string(),
+            });
+        }
+
         // When overlay state is missing entirely, fall back to the request-
         // provided indices. When state exists but reports None (PiP on bus),
         // pass None through so the PiP-aware branch below handles it.
         let old_pgm: Option<usize> = match overlay_state.as_ref() {
             Some(s) => s.pgm_input(),
-            None => Some(from_input),
+            None => from_input,
         };
         let new_pgm: Option<usize> = match overlay_state.as_ref() {
             Some(s) => s.pvw_input(),
-            None => Some(to_input),
+            None => to_input,
         };
+
+        // The vision mixer page sends indices on every take, so a disagreement
+        // is routine rather than a fault — debug, not warn.
+        if overlay_state.is_some()
+            && (from_input.is_some_and(|i| Some(i) != old_pgm)
+                || to_input.is_some_and(|i| Some(i) != new_pgm))
+        {
+            debug!(
+                "Discarding client indices {:?} -> {:?} on {}: bus state says {:?} -> {:?}",
+                from_input, to_input, block_instance_id, old_pgm, new_pgm
+            );
+        }
 
         // Auto-cancel FTB if active. Zone-border underlays need no special
         // handling here: they are regular pads driven by the take paths
@@ -455,8 +483,8 @@ impl PipelineManager {
 
         // Single-input transition only. Multi-source compositions are now
         // expressed as PiPs which are handled by the PiP-aware branch above.
-        let from = old_pgm.unwrap_or(from_input);
-        let to = new_pgm.unwrap_or(to_input);
+        let from = old_pgm.or(from_input).unwrap_or(0);
+        let to = new_pgm.or(to_input).unwrap_or(0);
         let controller = TransitionController::new(mixer.clone(), canvas_width, canvas_height);
 
         // Shader transitions need the FX engine — downgrade to Fade when it
