@@ -1462,6 +1462,12 @@ fn build_whipclientsink(
     // for it again. A flow adopts the largest latency any sink reports, so
     // the deadline would also delay every other sink in the flow.
     //
+    // The cost: the deadline is slack against a stall in a thread upstream of
+    // a queue, and without it buffers delayed by such a stall leave off beat.
+    // In the block's own streaming thread a deadline only shifts the wait.
+    // WHIP Input relayed straight into WHIP Output is the shape that pays;
+    // mixers and routers pace their own output.
+    //
     // webrtcsink creates these appsinks when a pad is requested, which happens
     // when the flow links the block, so the handler has to be in place now.
     if let Ok(bin) = whipclientsink.clone().downcast::<gst::Bin>() {
