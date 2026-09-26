@@ -285,17 +285,36 @@ curl -X POST -H "Authorization: Bearer $STROM_API_KEY" \
   http://localhost:8080/api/devtools/targets/<target-id>/link
 ```
 
-What comes back is a path and nothing else — one random key, no API token, no
-target id, no address or port:
+What comes back is a path, an id, and nothing else — one random key, no API
+token, no target id, no address or port:
 
 ```json
-{"path": "/devtools/7f3c…", "expires_in_seconds": 1800, "warning": "…"}
+{"id": "4b1e…", "path": "/devtools/7f3c…", "expires_in_seconds": 1800, "warning": "…"}
 ```
 
-Open it in your own browser and DevTools comes up against that page; its
-screencast view is where you click and type. The key is the credential, so the
-link is handed to a person rather than published, it dies after half an hour
-of disuse, and `DELETE /api/devtools/links/<key>` kills it sooner.
+Open the path in your own browser and DevTools comes up against that page; its
+screencast view is where you click and type. The key in the path is the
+credential, so the link is handed to a person rather than published, and it
+dies after half an hour of disuse.
+
+The `id` is not a credential — it is the name you use to take the link back:
+
+```bash
+# What is still live, without handing any key back out
+curl -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/links
+
+# Kill one link, and any session already open on it
+curl -X DELETE -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/links/<id>
+
+# Kill all of them
+curl -X DELETE -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/links
+```
+
+Revoking ends sessions that are already open, not just the next one — it is the
+emergency stop, so it has to reach whoever is holding the socket.
 
 A login survives a restart: the profile directory keeps the cookies, and Strom
 asks Chromium to persist session cookies too. Chromium writes them on a timer,

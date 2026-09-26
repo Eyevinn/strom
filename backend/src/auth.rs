@@ -12,7 +12,7 @@ pub use strom_types::auth::{LoginRequest, LoginResponse};
 use tower_sessions::Session;
 use tracing::warn;
 
-pub(crate) const SESSION_USER_KEY: &str = "user_authenticated";
+const SESSION_USER_KEY: &str = "user_authenticated";
 
 /// Whether this cookie session has completed a successful login.
 ///

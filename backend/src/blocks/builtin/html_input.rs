@@ -6,9 +6,13 @@
 //! actually exposes an audio pad.
 //!
 //! ```text
-//! cefsrc -> capsfilter -> cefdemux -> video -> videoconvert -> video_output -> [video_out]
-//!                                  -> audio -> audioconvert -> audioresample -> audio_output -> [audio_out]
+//! cefsrc -> capsfilter -> cefdemux -> video -> queue -> videoconvert -> video_output -> [video_out]
+//!                                  -> audio -> queue -> audioconvert -> audioresample -> audio_output -> [audio_out]
 //! ```
+//!
+//! Both branches of the split get a queue: they leave `cefdemux` on one
+//! streaming thread, so without them a sink that blocks on one branch blocks
+//! the other with it.
 //!
 //! Video only skips `cefdemux` entirely:
 //!
@@ -51,6 +55,21 @@ pub const BLOCK_ID: &str = "builtin.html_input";
 /// therefore the whole write, which is why it can change on a running flow.
 pub const REMOTE_CONTROL_PROPERTY: &str = "remote_control";
 
+/// The property holding the page to render.
+pub const URL_PROPERTY: &str = "url";
+
+/// Largest viewport this block will negotiate, per side.
+///
+/// The caps field is a signed 32-bit integer, so an unbounded `u64` would wrap
+/// into a negative width and fail negotiation with an error that says nothing
+/// about the number the operator typed. 16384 is past any real page and well
+/// inside Chromium's own texture limits.
+const MAX_DIMENSION: u64 = 16384;
+
+/// Largest framerate this block will negotiate. Chromium caps rendering far
+/// below this; the bound exists so the value survives the cast to `i32`.
+const MAX_FRAMERATE: u64 = 1000;
+
 /// HTML input block builder.
 pub struct HtmlInputBuilder;
 
@@ -64,7 +83,40 @@ fn stream_mode(properties: &HashMap<String, PropertyValue>) -> StreamMode {
         .unwrap_or(StreamMode::Video)
 }
 
-fn uint_property(properties: &HashMap<String, PropertyValue>, name: &str, fallback: u64) -> u64 {
+/// The page this block renders, with the same fallback the pipeline uses.
+///
+/// A block nobody has edited has no `url` property at all, and renders
+/// [`DEFAULT_URL`]. Anything asking "what page is this block showing?" has to
+/// give the same answer as `build`, so both go through here.
+pub fn url(properties: &HashMap<String, PropertyValue>) -> String {
+    properties
+        .get(URL_PROPERTY)
+        .and_then(|v| match v {
+            PropertyValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| DEFAULT_URL.to_string())
+}
+
+/// Whether this block's operator has allowed a remote control link for it.
+pub fn remote_control_enabled(properties: &HashMap<String, PropertyValue>) -> bool {
+    matches!(
+        properties.get(REMOTE_CONTROL_PROPERTY),
+        Some(PropertyValue::Bool(true))
+    )
+}
+
+/// A viewport or framerate number, or the default when it is not one.
+///
+/// Out-of-range is treated the same way as zero or the wrong type: fall back
+/// to the default rather than fail the flow. `max` keeps the value inside
+/// `i32`, which is what the caps field is.
+fn uint_property(
+    properties: &HashMap<String, PropertyValue>,
+    name: &str,
+    fallback: u64,
+    max: u64,
+) -> u64 {
     properties
         .get(name)
         .and_then(|v| match v {
@@ -72,7 +124,7 @@ fn uint_property(properties: &HashMap<String, PropertyValue>, name: &str, fallba
             PropertyValue::Int(i) if *i > 0 => Some(*i as u64),
             _ => None,
         })
-        .filter(|n| *n > 0)
+        .filter(|n| *n > 0 && *n <= max)
         .unwrap_or(fallback)
 }
 
@@ -124,16 +176,10 @@ impl BlockBuilder for HtmlInputBuilder {
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         let mode = stream_mode(properties);
-        let url = properties
-            .get("url")
-            .and_then(|v| match v {
-                PropertyValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| DEFAULT_URL.to_string());
-        let width = uint_property(properties, "width", DEFAULT_WIDTH);
-        let height = uint_property(properties, "height", DEFAULT_HEIGHT);
-        let framerate = uint_property(properties, "framerate", DEFAULT_FRAMERATE);
+        let url = url(properties);
+        let width = uint_property(properties, "width", DEFAULT_WIDTH, MAX_DIMENSION);
+        let height = uint_property(properties, "height", DEFAULT_HEIGHT, MAX_DIMENSION);
+        let framerate = uint_property(properties, "framerate", DEFAULT_FRAMERATE, MAX_FRAMERATE);
 
         info!(
             "Building HTML Input block instance: {} ({}x{}@{} mode={})",
@@ -201,14 +247,26 @@ impl BlockBuilder for HtmlInputBuilder {
                 ElementPadRef::pad(format!("{}:cefdemux", instance_id), "sink"),
             ));
 
+            // Both branches leave cefdemux on its one streaming thread, so
+            // each needs a queue of its own: without them a downstream sink
+            // that blocks on one branch blocks the other with it. This is the
+            // shape gstcefsrc's own documented pipeline uses. Default
+            // properties - there is no latency requirement here that would
+            // justify overriding them.
+            let audioqueue = make("queue")?;
             let audioconvert = make("audioconvert")?;
             let audioresample = make("audioresample")?;
             let audio_output = make("identity")?;
+            elements.push((format!("{}:audioqueue", instance_id), audioqueue));
             elements.push((format!("{}:audioconvert", instance_id), audioconvert));
             elements.push((format!("{}:audioresample", instance_id), audioresample));
             elements.push((format!("{}:audio_output", instance_id), audio_output));
             internal_links.push((
                 ElementPadRef::pad(format!("{}:cefdemux", instance_id), "audio"),
+                ElementPadRef::pad(format!("{}:audioqueue", instance_id), "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(format!("{}:audioqueue", instance_id), "src"),
                 ElementPadRef::pad(format!("{}:audioconvert", instance_id), "sink"),
             ));
             internal_links.push((
@@ -220,7 +278,15 @@ impl BlockBuilder for HtmlInputBuilder {
                 ElementPadRef::pad(format!("{}:audio_output", instance_id), "sink"),
             ));
 
-            (format!("{}:cefdemux", instance_id), "video")
+            // The video side of the split needs the same treatment.
+            let videoqueue = make("queue")?;
+            elements.push((format!("{}:videoqueue", instance_id), videoqueue));
+            internal_links.push((
+                ElementPadRef::pad(format!("{}:cefdemux", instance_id), "video"),
+                ElementPadRef::pad(format!("{}:videoqueue", instance_id), "sink"),
+            ));
+
+            (format!("{}:videoqueue", instance_id), "src")
         } else {
             (format!("{}:capsfilter", instance_id), "src")
         };
@@ -463,10 +529,16 @@ mod tests {
             ("height", PropertyValue::Int(-1)),
             ("framerate", PropertyValue::String("thirty".to_string())),
         ]);
-        assert_eq!(uint_property(&p, "width", DEFAULT_WIDTH), DEFAULT_WIDTH);
-        assert_eq!(uint_property(&p, "height", DEFAULT_HEIGHT), DEFAULT_HEIGHT);
         assert_eq!(
-            uint_property(&p, "framerate", DEFAULT_FRAMERATE),
+            uint_property(&p, "width", DEFAULT_WIDTH, MAX_DIMENSION),
+            DEFAULT_WIDTH
+        );
+        assert_eq!(
+            uint_property(&p, "height", DEFAULT_HEIGHT, MAX_DIMENSION),
+            DEFAULT_HEIGHT
+        );
+        assert_eq!(
+            uint_property(&p, "framerate", DEFAULT_FRAMERATE, MAX_FRAMERATE),
             DEFAULT_FRAMERATE
         );
     }
@@ -474,6 +546,82 @@ mod tests {
     #[test]
     fn an_int_viewport_is_accepted_as_written() {
         let p = props(&[("width", PropertyValue::Int(1280))]);
-        assert_eq!(uint_property(&p, "width", DEFAULT_WIDTH), 1280);
+        assert_eq!(
+            uint_property(&p, "width", DEFAULT_WIDTH, MAX_DIMENSION),
+            1280
+        );
+    }
+
+    #[test]
+    fn a_viewport_too_large_for_the_caps_field_falls_back() {
+        // The caps field is an i32. Left unbounded, 3_000_000_000 casts to a
+        // negative width and the flow fails to start on a negotiation error
+        // that says nothing about the number that was typed.
+        let p = props(&[
+            ("width", PropertyValue::UInt(3_000_000_000)),
+            ("height", PropertyValue::UInt(u64::from(u32::MAX))),
+            ("framerate", PropertyValue::UInt(1 << 40)),
+        ]);
+        let width = uint_property(&p, "width", DEFAULT_WIDTH, MAX_DIMENSION);
+        let height = uint_property(&p, "height", DEFAULT_HEIGHT, MAX_DIMENSION);
+        let framerate = uint_property(&p, "framerate", DEFAULT_FRAMERATE, MAX_FRAMERATE);
+        assert_eq!(width, DEFAULT_WIDTH);
+        assert_eq!(height, DEFAULT_HEIGHT);
+        assert_eq!(framerate, DEFAULT_FRAMERATE);
+        // What the capsfilter is actually handed stays positive.
+        assert!(width as i32 > 0 && height as i32 > 0 && framerate as i32 > 0);
+    }
+
+    #[test]
+    fn the_largest_accepted_viewport_survives_the_cast() {
+        let p = props(&[
+            ("width", PropertyValue::UInt(MAX_DIMENSION)),
+            ("height", PropertyValue::UInt(MAX_DIMENSION)),
+        ]);
+        assert_eq!(
+            uint_property(&p, "width", DEFAULT_WIDTH, MAX_DIMENSION) as i32,
+            MAX_DIMENSION as i32
+        );
+        assert_eq!(
+            uint_property(&p, "height", DEFAULT_HEIGHT, MAX_DIMENSION) as i32,
+            MAX_DIMENSION as i32
+        );
+    }
+
+    #[test]
+    fn an_unedited_block_renders_the_default_url() {
+        // The pipeline falls back to DEFAULT_URL, so anything asking which
+        // page a block shows has to give the same answer - a block dropped on
+        // the canvas and left alone has no `url` property at all.
+        assert_eq!(url(&props(&[])), DEFAULT_URL);
+        assert_eq!(
+            url(&props(&[("url", PropertyValue::String("   ".to_string()))])),
+            DEFAULT_URL
+        );
+        assert_eq!(
+            url(&props(&[(
+                "url",
+                PropertyValue::String("https://example.org/a".to_string())
+            )])),
+            "https://example.org/a"
+        );
+    }
+
+    #[test]
+    fn remote_control_is_off_unless_it_is_the_bool_true() {
+        assert!(!remote_control_enabled(&props(&[])));
+        assert!(!remote_control_enabled(&props(&[(
+            REMOTE_CONTROL_PROPERTY,
+            PropertyValue::Bool(false)
+        )])));
+        // A string is not a switch, however true it reads.
+        assert!(!remote_control_enabled(&props(&[(
+            REMOTE_CONTROL_PROPERTY,
+            PropertyValue::String("true".to_string())
+        )])));
+        assert!(remote_control_enabled(&props(&[(
+            REMOTE_CONTROL_PROPERTY,
+            PropertyValue::Bool(true)
+        )])));
     }
 }
