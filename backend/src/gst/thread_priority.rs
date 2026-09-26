@@ -173,12 +173,15 @@ extern "C" {
 /// "the user started this and is waiting for the result" — is both the correct
 /// description of a live media pipeline and one band below the UI, which keeps
 /// the P cores while leaving the interface responsive. `Realtime` is an
-/// explicit request for the maximum, so it does take `USER_INTERACTIVE`.
+/// explicit request for the maximum, so it does take `USER_INTERACTIVE`. In a
+/// process that is not a foreground app, such as the headless server, the
+/// kernel schedules `USER_INTERACTIVE` at the same priority as
+/// `USER_INITIATED`, so there `Realtime` and `High` behave the same.
 #[cfg(target_os = "macos")]
 fn qos_class_for(priority: ThreadPriority) -> Option<QosClass> {
     match priority {
-        // Normal means "do not touch this thread's scheduling"; leaving the
-        // class alone lets it keep whatever it inherited.
+        // Normal means "do not touch this thread's scheduling", so the
+        // thread keeps whatever class it already has.
         ThreadPriority::Normal => None,
         ThreadPriority::High => Some(QosClass::UserInitiated),
         ThreadPriority::Realtime => Some(QosClass::UserInteractive),
@@ -193,15 +196,14 @@ fn qos_class_for(priority: ThreadPriority) -> Option<QosClass> {
 /// its own gets `QOS_CLASS_DEFAULT`, so a GStreamer streaming thread spawned
 /// from a tokio worker would otherwise never be placed deliberately at all.
 ///
-/// Calling it there also reaches the element-internal worker threads that never
-/// post a `StreamStatus` message of their own — libx264's frame threads, for
-/// example. Those are created from the streaming thread during caps
-/// negotiation, which happens after `Enter`, and a thread created by a thread
-/// that *has* an explicit class inherits it.
+/// Only the calling thread is classified. Threads it creates do not inherit
+/// the class: an encoder's own worker pool (libx264 with more than one thread,
+/// SVT-AV1) is created from the streaming thread and still runs at
+/// `QOS_CLASS_DEFAULT`, and macOS has no call that sets another thread's class.
 #[cfg(target_os = "macos")]
 fn set_current_thread_qos(priority: ThreadPriority) -> Result<(), String> {
     let Some(class) = qos_class_for(priority) else {
-        debug!("Thread priority set to Normal (QoS class left as inherited)");
+        debug!("Thread priority set to Normal (QoS class left unchanged)");
         return Ok(());
     };
 
@@ -898,8 +900,8 @@ mod tests {
         });
     }
 
-    /// `Normal` means "do not touch this thread's scheduling" — including its
-    /// QoS class, which it should keep inheriting from its creator.
+    /// `Normal` means "do not touch this thread's scheduling", including its
+    /// QoS class.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_normal_priority_leaves_qos_class_alone() {
