@@ -330,8 +330,14 @@ fn feed(h: &Harness, instance: &str, input: usize, tones: &[(f64, f64)]) {
 
     // Several channels: interleave them into one stream first. This is the
     // test's own plumbing, not the block's.
+    //
+    // Start its output at the first input buffer. Left at the default, a live
+    // aggregator's first deadline can pass before the sources' caps reach it.
+    // It then aggregates without an output format, and `audiointerleave`,
+    // unlike `audiomixer`, cannot invent one: it posts "not negotiated".
     let il = gst::ElementFactory::make("audiointerleave")
         .property("channel-positions-from-input", false)
+        .property_from_str("start-time-selection", "first")
         .build()
         .expect("audiointerleave");
     let cf = gst::ElementFactory::make("capsfilter")
@@ -359,15 +365,6 @@ fn raw_caps(channels: usize) -> gst::Caps {
 
 /// Attach a `level` to one output pad of the block.
 fn tap(h: &Harness, instance: &str, output: usize) {
-    let level = gst::ElementFactory::make("level")
-        .property("post-messages", true)
-        .property("interval", 50_000_000u64)
-        .build()
-        .expect("level");
-    let sink = gst::ElementFactory::make("fakesink")
-        .property("sync", false)
-        .build()
-        .expect("fakesink");
     // Pin the tap to float. With a fader or soft clipper engaged the block
     // pins `F32LE` on the bus itself, but with both off it deliberately leaves
     // the format open (see the module header on `caps_out_O`), and nothing
@@ -378,11 +375,25 @@ fn tap(h: &Harness, instance: &str, output: usize) {
     // of the tap, not of the router, so these tests measured the runner's
     // negotiation rather than the block. Asking for float here makes what is
     // measured the same on every machine.
+    tap_as(h, instance, output, "F32LE");
+}
+
+/// Attach a `level` that only takes `format` to one output pad of the block.
+fn tap_as(h: &Harness, instance: &str, output: usize, format: &str) {
+    let level = gst::ElementFactory::make("level")
+        .property("post-messages", true)
+        .property("interval", 50_000_000u64)
+        .build()
+        .expect("level");
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .expect("fakesink");
     let tap_format = gst::ElementFactory::make("capsfilter")
         .property(
             "caps",
             gst::Caps::builder("audio/x-raw")
-                .field("format", "F32LE")
+                .field("format", format)
                 .build(),
         )
         .build()
@@ -648,6 +659,99 @@ fn closing_every_crosspoint_silences_the_output_without_a_silence_source() {
     assert!(
         after.iter().all(|p| is_silent(*p)),
         "an all-closed routing must be silent, got {after:?}"
+    );
+}
+
+// ============================================================================
+// An input that connects after the bus has started
+// ============================================================================
+
+/// Play a one-in, one-out router whose consumer takes only `format`, let the
+/// bus negotiate before any input has reached it, and only then connect a
+/// source. Returns the peaks of the stereo output.
+///
+/// `force_live` makes the bus produce from the start, so with nothing
+/// connected it has to choose an output format without an input to take it
+/// from. In a flow that happens whenever an input joins later than the flow
+/// starts. In the rest of this file it happens by timing: a bus that times
+/// out before the first input's caps arrive negotiates the same way.
+fn late_input_peaks(instance: &str, format: &str) -> Vec<f64> {
+    let properties = props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"]}"#.to_string()),
+        ),
+    ]);
+
+    let h = assemble(instance, &properties);
+    tap_as(&h, instance, 0, format);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let mixer_src = h.elements[&format!("{instance}:mixer_0")]
+        .static_pad("src")
+        .expect("mixer src pad");
+    let bus = h.pipeline.bus().expect("pipeline bus");
+    let start = Instant::now();
+    while mixer_src.current_caps().is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the bus never negotiated its output with no input connected"
+        );
+        if let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(10),
+            &[gst::MessageType::Error],
+        ) {
+            if let gst::MessageView::Error(e) = msg.view() {
+                panic!(
+                    "pipeline error from {:?} before any input was connected: {}",
+                    e.src().map(|s| s.path_string()),
+                    e.error()
+                );
+            }
+        }
+    }
+
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property("freq", 440.0)
+        .property("volume", 0.5)
+        .build()
+        .expect("audiotestsrc");
+    let mono = gst::ElementFactory::make("capsfilter")
+        .property("caps", raw_caps(1))
+        .build()
+        .expect("capsfilter");
+    h.pipeline.add_many([&src, &mono]).expect("add source");
+    src.link(&mono).expect("link source");
+    mono.link(&h.elements[&format!("{instance}:identity_in_0")])
+        .expect("link input");
+    mono.sync_state_with_parent().expect("sync capsfilter");
+    src.sync_state_with_parent().expect("sync source");
+
+    observe_peaks(&h.pipeline, 2, Duration::from_secs(2))
+}
+
+#[test]
+fn an_input_that_joins_after_the_bus_started_reaches_a_float_consumer() {
+    let peaks = late_input_peaks("late_f32", "F32LE");
+    assert!(
+        !is_silent(peaks[0]) && is_silent(peaks[1]),
+        "a late input must reach output channel 0 of an F32LE-only consumer, got {peaks:?}"
+    );
+}
+
+#[test]
+fn an_input_that_joins_after_the_bus_started_reaches_an_integer_consumer() {
+    let peaks = late_input_peaks("late_s16", "S16LE");
+    assert!(
+        !is_silent(peaks[0]) && is_silent(peaks[1]),
+        "a late input must reach output channel 0 of an S16LE-only consumer, got {peaks:?}"
     );
 }
 
