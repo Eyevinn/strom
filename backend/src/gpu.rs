@@ -470,11 +470,13 @@ fn sysctl_string(name: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..end]).into_owned())
 }
 
-/// Apply tuning properties to a freshly created video conversion element.
+/// Apply tuning properties to a freshly created video conversion or scaling
+/// element.
 ///
-/// `videoconvert` ships with `n-threads=1`, so a 1080p colour conversion runs
-/// on a single core however many the machine has. Every call site that builds a
-/// conversion element from [`VideoConvertMode::element_name`] routes through
+/// `videoconvert` and `videoscale` ship with `n-threads=1`, so a 1080p colour
+/// conversion or resize runs on a single core however many the machine has.
+/// Every call site that builds a conversion element from
+/// [`VideoConvertMode::element_name`], and every `videoscale`, routes through
 /// here, so the default is set in exactly one place.
 ///
 /// This is macOS-only on purpose. The thread count above is an Apple-silicon
@@ -484,8 +486,8 @@ fn sysctl_string(name: &str) -> Option<String> {
 pub fn configure_video_convert(element: &gst::Element) {
     #[cfg(target_os = "macos")]
     {
-        // Only plain `videoconvert` carries the property; `autovideoconvert` is
-        // a bin with nothing to forward it to.
+        // Only plain `videoconvert` and `videoscale` carry the property;
+        // `autovideoconvert` is a bin with nothing to forward it to.
         if element.has_property("n-threads") {
             element.set_property("n-threads", video_convert_threads());
         }
