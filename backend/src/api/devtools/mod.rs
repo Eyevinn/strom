@@ -177,6 +177,8 @@ pub struct DevToolsState {
 /// The HTML source a link was minted for, as the session page presents it.
 #[derive(Clone, Debug)]
 struct LinkSource {
+    flow_id: FlowId,
+    block_id: String,
     /// The page the block was pointed at, which the session's home button
     /// navigates to. The client asks for it by name and never supplies it.
     home_url: String,
@@ -764,6 +766,8 @@ struct HtmlSource {
 impl HtmlSource {
     fn link_source(&self) -> LinkSource {
         LinkSource {
+            flow_id: self.flow_id,
+            block_id: self.block_id.clone(),
             home_url: self.url.clone(),
             flow_name: self.flow_name.clone(),
             block_name: self.block_name.clone(),
@@ -909,8 +913,10 @@ fn html_sources_in(flows: Vec<Flow>, running: &HashSet<FlowId>) -> Vec<HtmlSourc
                 .map(move |b| HtmlSource {
                     flow_id,
                     // A block with no `url` property still renders the block's
-                    // default, so ask the block rather than the stored map.
-                    url: crate::blocks::builtin::html_input::url(&b.properties),
+                    // default, and a bare address is rendered as https://, so
+                    // ask the block rather than the stored map.
+                    url: crate::blocks::builtin::html_input::checked_url(&b.properties)
+                        .unwrap_or_else(|_| crate::blocks::builtin::html_input::url(&b.properties)),
                     remote_control: crate::blocks::builtin::html_input::remote_control_enabled(
                         &b.properties,
                     ),
@@ -1199,6 +1205,7 @@ pub async fn proxy_ui(
 /// Carry the DevTools protocol between the operator's browser and Chromium.
 pub async fn proxy_cdp(
     ws: WebSocketUpgrade,
+    State(app): State<AppState>,
     Extension(state): Extension<DevToolsState>,
     Path(key): Path<String>,
 ) -> Response {
@@ -1222,7 +1229,45 @@ pub async fn proxy_cdp(
         port, session.target_id
     );
     let full_devtools = state.config.full_devtools;
-    ws.on_upgrade(move |socket| pump(socket, upstream, session, full_devtools))
+    ws.on_upgrade(move |socket| pump(socket, upstream, session, full_devtools, app))
+}
+
+/// Make an address the block's own URL, and answer the command that asked.
+///
+/// This writes the block's configuration from a link, which is what the
+/// operator asked for: the page they have logged in to or clicked through to
+/// becomes where the source starts, and stays so across a restart. The address
+/// has already been through the same check as any other URL for this block.
+async fn set_home(app: &AppState, source: &mut LinkSource, id: Option<i64>, url: String) -> String {
+    let properties = HashMap::from([(
+        crate::blocks::builtin::html_input::URL_PROPERTY.to_string(),
+        strom_types::PropertyValue::String(url.clone()),
+    )]);
+    let result = app
+        .update_block_properties(&source.flow_id, &source.block_id, properties, None, None)
+        .await;
+    let refused = match result {
+        Ok((_, rejected)) => rejected.into_values().next(),
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(reason) = refused {
+        warn!(
+            "Remote control could not set the start page of block {}: {}",
+            source.block_id, reason
+        );
+        return filter::refusal(id, &reason);
+    }
+
+    info!(
+        "Remote control set the start page of block {} in flow {}",
+        source.block_id, source.flow_id
+    );
+    app.events()
+        .broadcast(strom_types::StromEvent::FlowUpdated {
+            flow_id: source.flow_id,
+        });
+    source.home_url = url.clone();
+    serde_json::json!({ "id": id, "result": { "url": url } }).to_string()
 }
 
 /// Shuttle messages both ways until either side hangs up, or the link dies.
@@ -1233,10 +1278,16 @@ pub async fn proxy_cdp(
 /// acknowledgement is the flow control, so a slow link costs frame rate rather
 /// than an unbounded queue — which is what makes this usable over the
 /// internet. Nothing here needs to know that; it just must not buffer.
-async fn pump(client: WebSocket, upstream_url: String, session: Session, full_devtools: bool) {
+async fn pump(
+    client: WebSocket,
+    upstream_url: String,
+    session: Session,
+    full_devtools: bool,
+    app: AppState,
+) {
     let Session {
         target_id,
-        source,
+        mut source,
         mut cancelled,
     } = session;
     let (upstream, _) = match tokio_tungstenite::connect_async(&upstream_url).await {
@@ -1277,6 +1328,13 @@ async fn pump(client: WebSocket, upstream_url: String, session: Session, full_de
                         match filter::allows(t.as_str(), &source.home_url) {
                             Ok(filter::Forward::AsIs) => WsMessage::Text(t.as_str().into()),
                             Ok(filter::Forward::Rewritten(text)) => WsMessage::Text(text.into()),
+                            Ok(filter::Forward::SetHome { id, url }) => {
+                                let answer = set_home(&app, &mut source, id, url).await;
+                                if refusals.send(answer).is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
                             Err(refusal) => {
                                 debug!("Refused a method a remote control link does not carry");
                                 if refusals.send(refusal).is_err() {

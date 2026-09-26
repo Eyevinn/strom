@@ -259,7 +259,14 @@ process, so the proxy forwards only what a picture and an input device need and
 refuses the rest.
 
 > **A link is still worth guarding.** Whoever holds it sees and can type into a
-> page that is on air, until it expires or you revoke it.
+> page that is on air, can point it at any http, https or data address, and can
+> make that the block's URL, until the link expires or you revoke it. From
+> inside your network an http address reaches whatever the server can.
+
+An HTML source renders http, https and data URLs only, whether set on the block
+or reached through a link. A bare address such as `example.com` is read as
+`https://`. Everything else — `file:`, `chrome:`, `view-source:`, `javascript:`
+and the rest — is refused.
 
 Remote control needs Strom's own authentication configured. With none, minting
 a link would take no credentials at all, so Strom refuses to open the debug
@@ -299,10 +306,11 @@ token, no target id, no address or port:
 Open the path in your own browser and the page appears; click and type into it
 as if it were yours, and paste works for a password manager. On a phone, tap to
 click, drag to scroll, and use the keyboard button to type. Back, forward,
-reload and a home button that returns to the block's URL are there too; typing
-in an address is not, because from inside your network that would reach anything
-the server can. The key in the path is the credential, so the link is handed to
-a person rather than published, and it dies after half an hour of disuse.
+reload and a home button that returns to the block's URL are there, and the
+address bar takes any http, https or data address. The pin button makes the page
+you are on the block's URL, so the source starts there from then on. The key in
+the path is the credential, so the link is handed to a person rather than
+published, and it dies after half an hour of disuse.
 
 The `id` is not a credential — it is the name you use to take the link back:
 

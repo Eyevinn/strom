@@ -211,6 +211,17 @@ impl PipelineManager {
             return Ok(());
         }
 
+        // HTML Input: cefsrc loads a new URL into a running browser, but does
+        // not flag the property as mutable in PLAYING.
+        if crate::blocks::builtin::html_input::try_apply_live_url(
+            element,
+            element_id,
+            property_name,
+            value,
+        ) {
+            return Ok(());
+        }
+
         // Live Audio Router: `routing_matrix` is one JSON string describing the
         // gain of every crosspoint, and each crosspoint is its own `volume`
         // element. One property write therefore fans out to many elements —

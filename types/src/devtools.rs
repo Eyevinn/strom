@@ -96,15 +96,18 @@ pub struct DevToolsTargets {
 
 /// What a remote control link grants when the protocol is filtered.
 ///
-/// The proxy allows the screencast, input and history methods and nothing
-/// else, so the link is what it appears to be: the page's picture, clicks and
-/// keystrokes into it, and a way back through where it has been. That is not
-/// nothing - the page is on air - but it is not the host.
+/// The proxy allows the screencast, input and navigation methods and nothing
+/// else, and navigation only to http, https and data addresses, so the link
+/// never reaches the filesystem or the browser's own pages. That is not
+/// nothing - the page is on air, and the network the server sits on is in
+/// reach - but it is not the host.
 pub const SCREENCAST_CONTROL_WARNING: &str = "This link shows the page as it \
-    is being rendered and sends your clicks and keystrokes to it, and can step \
-    it back, forward, or to the page the source is set to. Whoever holds it \
-    can see and change what that source is putting on air, until the link \
-    expires or is revoked.";
+    is being rendered and sends your clicks and keystrokes to it. It can take \
+    the page to any http, https or data address and make that the page the \
+    source starts on. From inside your network that reaches whatever this \
+    server can, and a data address runs script of the holder's choosing. \
+    Whoever holds it can see and change what that source is putting on air, \
+    until the link expires or is revoked.";
 
 /// What remote control actually grants, for any client that offers it.
 ///

@@ -1858,6 +1858,27 @@ impl AppState {
                 continue;
             }
 
+            // An HTML source renders only what `normalize_url` allows, and the
+            // same check has to hold for a page changed on air as for one the
+            // flow started with.
+            let value = if definition.id == crate::blocks::builtin::html_input::BLOCK_ID
+                && name == crate::blocks::builtin::html_input::URL_PROPERTY
+            {
+                let PropertyValue::String(raw) = &value else {
+                    rejected.insert(name, "value must be a string".to_string());
+                    continue;
+                };
+                match crate::blocks::builtin::html_input::normalize_url(raw) {
+                    Ok(url) => PropertyValue::String(url),
+                    Err(reason) => {
+                        rejected.insert(name, reason);
+                        continue;
+                    }
+                }
+            } else {
+                value
+            };
+
             // The `_block` element_id marker is a virtual element for properties that
             // get baked into the block at build time — they have no underlying element
             // to write to live.

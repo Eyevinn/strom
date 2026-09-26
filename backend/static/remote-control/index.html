@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom remote control page, version 2 -->
+<!-- Strom remote control page, version 3 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -69,15 +69,15 @@
     flex: 1;
     min-width: 0;
     height: 30px;
-    line-height: 28px;
     padding: 0 10px;
     background: var(--field);
     border: 1px solid var(--line);
     border-radius: 4px;
-    color: var(--muted);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    user-select: all;
+    color: var(--text);
+    /* 16px keeps iOS from zooming the page when the field takes focus. */
+    font: 16px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
+  #address:focus { outline: 1px solid var(--ok); }
   #keyboard { display: none; }
   @media (pointer: coarse) {
     #keyboard { display: inline-block; }
@@ -124,9 +124,11 @@
     resize: none;
   }
   @media (max-width: 600px) {
-    header, nav { padding: 6px 10px; gap: 6px; }
+    header, nav { padding: 6px 10px; gap: 6px; flex-wrap: wrap; }
+    .spacer { display: none; }
+    .status { width: 100%; font-size: 12px; }
+    #address { order: 10; flex-basis: 100%; }
     main { padding: 6px; }
-    .status { display: none; }
   }
 </style>
 </head>
@@ -143,7 +145,12 @@
   <button id="forward" title="Forward" aria-label="Forward" disabled>&#8594;</button>
   <button id="reload" title="Reload" aria-label="Reload">&#8635;</button>
   <button id="home" title="Back to the page this source is set to" aria-label="Home">&#8962;</button>
-  <div id="address" title=""></div>
+  <form id="go" style="display:contents">
+    <input id="address" type="text" inputmode="url" enterkeyhint="go"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+           aria-label="Address" placeholder="https://">
+  </form>
+  <button id="pin" title="Make this page where the source starts" aria-label="Set as start page">&#128204;</button>
   <button id="keyboard" title="Show the keyboard" aria-label="Keyboard">&#9000;</button>
 </nav>
 <main>
@@ -212,10 +219,33 @@
     document.getElementById("home").title = "Back to " + (params.home || "the page this source is set to");
   }
 
+  let currentUrl = "";
+
   function showAddress(url) {
-    address.textContent = url || "";
-    address.title = url || "";
+    currentUrl = url || "";
+    // Leave the field alone while someone is typing in it.
+    if (document.activeElement !== address) address.value = currentUrl;
+    address.title = currentUrl;
   }
+
+  // The proxy checks the address and refuses anything but http, https and
+  // data; a bare address is read as https.
+  document.getElementById("go").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const url = address.value.trim();
+    if (!url) return;
+    address.blur();
+    send("Page.navigate", { url: url }, () => {});
+  });
+  address.addEventListener("blur", () => { address.value = currentUrl; });
+
+  document.getElementById("pin").addEventListener("click", () => {
+    if (!currentUrl) return;
+    send("Strom.setHome", { url: currentUrl }, (result) => {
+      setState("live", "Start page set");
+      document.getElementById("home").title = "Back to " + result.url;
+    });
+  });
 
   function refreshHistory() {
     send("Page.getNavigationHistory", {}, (result) => {
@@ -377,6 +407,7 @@
   const KEY_TEXT = { Enter: "\r", Tab: "\t" };
 
   window.addEventListener("keydown", (ev) => {
+    if (ev.target === address) return;
     // Leave the browser's own paste alone; the paste event below carries the
     // text, which is what a password manager needs to work.
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) return;
@@ -390,6 +421,7 @@
   });
 
   window.addEventListener("keyup", (ev) => {
+    if (ev.target === address) return;
     if ((ev.ctrlKey || ev.metaKey) && (ev.key === "v" || ev.key === "V")) return;
     if (ev.target === typing && ev.key.length === 1) return;
     ev.preventDefault();
@@ -412,6 +444,7 @@
   });
 
   window.addEventListener("paste", (ev) => {
+    if (ev.target === address) return;
     const text = ev.clipboardData && ev.clipboardData.getData("text");
     if (!text) return;
     ev.preventDefault();
@@ -461,6 +494,7 @@
         const onResult = pending.get(msg.id);
         pending.delete(msg.id);
         if (msg.result) onResult(msg.result);
+        else if (msg.error) setState("warn", msg.error.message || "Refused");
       } else if (msg.error) {
         setState("warn", msg.error.message || "Refused");
       }

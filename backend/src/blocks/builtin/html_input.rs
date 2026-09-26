@@ -98,6 +98,90 @@ pub fn url(properties: &HashMap<String, PropertyValue>) -> String {
         .unwrap_or_else(|| DEFAULT_URL.to_string())
 }
 
+/// The schemes an HTML source may render, and a remote control session may
+/// navigate to.
+///
+/// An allowlist, not a list of what to refuse: `file:` is not the only way to
+/// the filesystem (`view-source:file://` gets there too), and Chromium keeps
+/// its own `chrome:`, `devtools:` and `chrome-extension:` pages behind schemes
+/// of their own. Anything not named here is refused, including schemes that
+/// do not exist yet.
+pub const ALLOWED_SCHEMES: &[&str] = &["http", "https", "data"];
+
+/// A URL this block may render, in the form it will be handed to Chromium.
+///
+/// A bare address such as `example.com` or `example.com:8080/page` is read as
+/// `https://`, the way a browser's address bar would. Everything else must
+/// name one of [`ALLOWED_SCHEMES`], and `http(s)` must name a host. The error
+/// says what was refused in words an operator can act on.
+pub fn normalize_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Err("The URL is empty".to_string());
+    }
+    if url.chars().any(char::is_control) {
+        return Err("The URL contains control characters".to_string());
+    }
+
+    // `name:` is a scheme unless what follows the colon is a port number, as
+    // in `localhost:8080`.
+    let scheme = url.split_once(':').and_then(|(prefix, rest)| {
+        let mut chars = prefix.chars();
+        let is_scheme = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        let is_port = rest.starts_with(|c: char| c.is_ascii_digit());
+        (is_scheme && !is_port).then(|| (prefix.to_ascii_lowercase(), rest))
+    });
+
+    let Some((scheme, rest)) = scheme else {
+        return normalize_url(&format!("https://{}", url));
+    };
+    if !ALLOWED_SCHEMES.contains(&scheme.as_str()) {
+        return Err(format!(
+            "{}: URLs are not allowed. An HTML source renders http, https and data URLs only.",
+            scheme
+        ));
+    }
+    if scheme != "data" {
+        let host = rest.strip_prefix("//").unwrap_or("");
+        if host.is_empty() || host.starts_with(['/', '?', '#']) {
+            return Err(format!("{} names no host", url));
+        }
+    }
+    Ok(format!("{}:{}", scheme, rest))
+}
+
+/// The page this block renders, checked against [`ALLOWED_SCHEMES`].
+pub fn checked_url(properties: &HashMap<String, PropertyValue>) -> Result<String, String> {
+    normalize_url(&url(properties))
+}
+
+/// Load a new page into a running HTML source.
+///
+/// `cefsrc` loads a new `url` into a running browser, but its property does
+/// not carry `GST_PARAM_MUTABLE_PLAYING`, so the generic live-write path
+/// refuses it. Returns `true` when the write was this block's and has been
+/// applied; the caller then skips the generic path. The value has already been
+/// through [`normalize_url`] in `update_block_properties`.
+///
+/// Coupling note: the element id tail mirrors the `cefsrc` name in `build`.
+pub fn try_apply_live_url(
+    element: &gst::Element,
+    element_id: &str,
+    prop_name: &str,
+    value: &PropertyValue,
+) -> bool {
+    if prop_name != URL_PROPERTY || !element_id.ends_with(":cefsrc") {
+        return false;
+    }
+    let PropertyValue::String(url) = value else {
+        return false;
+    };
+    element.set_property(URL_PROPERTY, url);
+    info!("Loaded {} into HTML source {}", url, element_id);
+    true
+}
+
 /// Whether this block's operator has allowed a remote control link for it.
 pub fn remote_control_enabled(properties: &HashMap<String, PropertyValue>) -> bool {
     matches!(
@@ -176,7 +260,7 @@ impl BlockBuilder for HtmlInputBuilder {
         _ctx: &BlockBuildContext,
     ) -> Result<BlockBuildResult, BlockBuildError> {
         let mode = stream_mode(properties);
-        let url = url(properties);
+        let url = checked_url(properties).map_err(BlockBuildError::InvalidProperty)?;
         let width = uint_property(properties, "width", DEFAULT_WIDTH, MAX_DIMENSION);
         let height = uint_property(properties, "height", DEFAULT_HEIGHT, MAX_DIMENSION);
         let framerate = uint_property(properties, "framerate", DEFAULT_FRAMERATE, MAX_FRAMERATE);
@@ -344,7 +428,8 @@ fn html_input_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "url".to_string(),
                 label: "URL".to_string(),
-                description: "Page to render (http://, https://, file:// or data:)".to_string(),
+                description: "Page to render: an http://, https:// or data: URL. A bare address is read as https://."
+                    .to_string(),
                 property_type: PropertyType::String,
                 default_value: Some(PropertyValue::String(DEFAULT_URL.to_string())),
                 mapping: PropertyMapping {
@@ -608,6 +693,64 @@ mod tests {
             )])),
             "https://example.org/a"
         );
+    }
+
+    #[test]
+    fn only_http_https_and_data_are_rendered() {
+        for ok in [
+            "https://example.com",
+            "http://example.com/a?b#c",
+            "HTTPS://example.com",
+            "data:text/html,<h1>hi</h1>",
+        ] {
+            assert!(normalize_url(ok).is_ok(), "{} should be allowed", ok);
+        }
+        for refused in [
+            "file:///etc/passwd",
+            "FILE:///etc/passwd",
+            "view-source:file:///etc/passwd",
+            "chrome://settings",
+            "chrome-extension://abc/page.html",
+            "devtools://devtools/bundled/inspector.html",
+            "javascript:alert(1)",
+            "blob:https://example.com/uuid",
+            "filesystem:https://example.com/temporary/x",
+            "about:blank",
+            "https:///etc/passwd",
+            "https://",
+            "",
+            "   ",
+            "https://example.com/\u{0}",
+        ] {
+            assert!(
+                normalize_url(refused).is_err(),
+                "{:?} must be refused",
+                refused
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_address_is_read_as_https() {
+        assert_eq!(normalize_url("example.com").unwrap(), "https://example.com");
+        assert_eq!(
+            normalize_url(" localhost:8080/page ").unwrap(),
+            "https://localhost:8080/page"
+        );
+        assert_eq!(
+            normalize_url("example.com:443").unwrap(),
+            "https://example.com:443"
+        );
+    }
+
+    #[test]
+    fn a_refused_url_fails_the_build_with_the_reason() {
+        let properties = props(&[(
+            "url",
+            PropertyValue::String("file:///etc/passwd".to_string()),
+        )]);
+        let refused = checked_url(&properties).unwrap_err();
+        assert!(refused.contains("file:"), "got {}", refused);
     }
 
     #[test]

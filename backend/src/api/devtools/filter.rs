@@ -1,28 +1,29 @@
 //! What a remote control session may say to Chromium.
 //!
-//! A link carries the page: its picture, clicks and keystrokes into it, and a
-//! way back through what it has already shown. Everything outside that —
-//! `Runtime.evaluate`, `Page.navigate`, `Storage.getCookies`, the whole
-//! `Network` and `Debugger` domains — is what turns a link into control of
-//! this host, so the proxy refuses it rather than trusting the page not to
-//! ask. The page we serve is only the first user of the link; this filter is
+//! A link carries the page: its picture, clicks and keystrokes into it, its
+//! history, and navigation to an address an HTML source is allowed to render
+//! (see [`normalize_url`]). Everything outside that — `Runtime.evaluate`,
+//! `Storage.getCookies`, the whole `Network` and `Debugger` domains, and any
+//! `file:` or `chrome:` page — is what turns a link into control of this host,
+//! so the proxy refuses it rather than trusting the page not to ask. The page we serve is only the first user of the link; this filter is
 //! what makes the link safe to hand to a second one.
 
+use crate::blocks::builtin::html_input::normalize_url;
 use serde_json::{json, Value};
 
 /// The methods a remote control session may send, as Chromium names them.
 ///
-/// Navigation is limited to pages the browser has already been on, plus the
-/// one the block was pointed at (see [`GO_HOME`]). An address the client
-/// chooses is not on this list: from inside the network, `http` alone reaches
-/// admin interfaces and metadata services that the link's holder could then
-/// read off the screencast.
+/// `Page.navigate` goes only to an address [`normalize_url`] accepts, so never
+/// to the filesystem or Chromium's own pages. It still reaches whatever this
+/// server reaches over http, and a `data:` page runs script of the client's
+/// choosing, which is why the link's warning says so.
 pub const REMOTE_CONTROL_METHODS: &[&str] = &[
     "Input.dispatchKeyEvent",
     "Input.dispatchMouseEvent",
     "Input.insertText",
     "Page.enable",
     "Page.getNavigationHistory",
+    "Page.navigate",
     "Page.navigateToHistoryEntry",
     "Page.reload",
     "Page.screencastFrameAck",
@@ -34,6 +35,11 @@ pub const REMOTE_CONTROL_METHODS: &[&str] = &[
 /// and the proxy supplies the address. The client never gets to choose one.
 pub const GO_HOME: &str = "Strom.goHome";
 
+/// Not a Chromium method: make an address the block's own URL, so the page the
+/// operator has reached becomes where the source starts. The proxy performs it
+/// against Strom, not Chromium.
+pub const SET_HOME: &str = "Strom.setHome";
+
 /// What to send to Chromium in place of a message the client sent.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Forward {
@@ -42,11 +48,14 @@ pub enum Forward {
     /// A message rebuilt from the client's, carrying only what the filter
     /// allows.
     Rewritten(String),
+    /// Not for Chromium: set the block's URL to this checked address and
+    /// answer the command with this id.
+    SetHome { id: Option<i64>, url: String },
 }
 
 /// The protocol's own shape for "no", so the client sees a refusal against the
 /// command it sent rather than a socket that silently swallows things.
-fn refusal(id: Option<i64>, message: &str) -> String {
+pub fn refusal(id: Option<i64>, message: &str) -> String {
     json!({
         "id": id,
         "error": { "code": -32601, "message": message }
@@ -89,6 +98,20 @@ pub fn allows(raw: &str, home_url: &str) -> Result<Forward, String> {
                     .to_string(),
             ))
         }
+        "Page.navigate" | SET_HOME => {
+            let Some(raw) = params.and_then(|p| p.get("url")).and_then(Value::as_str) else {
+                return Err(refusal(id, &format!("{} needs a url", method)));
+            };
+            let url = normalize_url(raw).map_err(|reason| refusal(id, &reason))?;
+            if method == SET_HOME {
+                return Ok(Forward::SetHome { id, url });
+            }
+            // Only the address goes through: frameId would aim at a subframe,
+            // and nothing else the method takes is needed.
+            Ok(Forward::Rewritten(
+                json!({ "id": id, "method": method, "params": { "url": url } }).to_string(),
+            ))
+        }
         "Page.navigateToHistoryEntry" => {
             let Some(entry_id) = params
                 .and_then(|p| p.get("entryId"))
@@ -106,7 +129,7 @@ pub fn allows(raw: &str, home_url: &str) -> Result<Forward, String> {
             id,
             &format!(
                 "{} is not available over a remote control link, which carries the page's \
-                 picture, clicks, keystrokes and history only",
+                 picture, clicks, keystrokes and navigation only",
                 method
             ),
         )),
@@ -126,14 +149,19 @@ mod tests {
     fn rewritten(raw: &str) -> Value {
         match allows(raw, HOME).expect("allowed") {
             Forward::Rewritten(text) => serde_json::from_str(&text).expect("valid JSON"),
-            Forward::AsIs => panic!("expected a rewrite of {}", raw),
+            other => panic!("expected a rewrite of {}, got {:?}", raw, other),
         }
     }
 
     #[test]
     fn a_link_carries_the_picture_the_input_and_the_history() {
         for method in REMOTE_CONTROL_METHODS {
-            let raw = json!({ "id": 7, "method": method, "params": { "entryId": 3 } }).to_string();
+            let raw = json!({
+                "id": 7,
+                "method": method,
+                "params": { "entryId": 3, "url": "https://example.com" }
+            })
+            .to_string();
             assert!(
                 allows(&raw, HOME).is_ok(),
                 "{} is what the page needs to work",
@@ -145,12 +173,11 @@ mod tests {
     #[test]
     fn a_link_does_not_carry_the_rest_of_the_protocol() {
         // Each of these is on its own enough to turn a link into control of
-        // the host: script execution, navigation to an address of the
-        // client's choosing, the cookie jar, the network, and the debugger.
+        // the host: script execution, the cookie jar, the network, and the
+        // debugger.
         for method in [
             "Runtime.evaluate",
             "Runtime.callFunctionOn",
-            "Page.navigate",
             "Page.addScriptToEvaluateOnNewDocument",
             "Page.captureSnapshot",
             "Storage.getCookies",
@@ -200,6 +227,50 @@ mod tests {
         assert_eq!(sent["method"], "Page.navigate");
         // Whatever the client put in, the address is ours.
         assert_eq!(sent["params"], json!({ "url": HOME }));
+    }
+
+    #[test]
+    fn navigation_goes_only_where_an_html_source_may_render() {
+        for (raw, sent) in [
+            ("https://example.com/a", "https://example.com/a"),
+            ("example.com", "https://example.com"),
+            ("data:text/html,hi", "data:text/html,hi"),
+        ] {
+            let message = json!({
+                "id": 3,
+                "method": "Page.navigate",
+                "params": { "url": raw, "frameId": "child", "referrer": "https://x.example" }
+            });
+            let forwarded = rewritten(&message.to_string());
+            assert_eq!(forwarded["params"], json!({ "url": sent }));
+        }
+        for raw in [
+            "file:///etc/passwd",
+            "view-source:file:///etc/passwd",
+            "chrome://settings",
+            "devtools://devtools/bundled/inspector.html",
+            "javascript:alert(1)",
+        ] {
+            let message = json!({ "id": 3, "method": "Page.navigate", "params": { "url": raw } });
+            let refused = allows(&message.to_string(), HOME)
+                .expect_err(&format!("{} must not be reached", raw));
+            let parsed: Value = serde_json::from_str(&refused).expect("valid JSON");
+            assert_eq!(parsed["id"], 3);
+        }
+    }
+
+    #[test]
+    fn setting_home_is_checked_and_handed_to_strom() {
+        let message = json!({ "id": 8, "method": SET_HOME, "params": { "url": "example.com/x" } });
+        assert_eq!(
+            allows(&message.to_string(), HOME),
+            Ok(Forward::SetHome {
+                id: Some(8),
+                url: "https://example.com/x".to_string()
+            })
+        );
+        let message = json!({ "id": 8, "method": SET_HOME, "params": { "url": "file:///etc" } });
+        assert!(allows(&message.to_string(), HOME).is_err());
     }
 
     #[test]

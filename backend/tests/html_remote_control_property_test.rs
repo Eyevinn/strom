@@ -171,3 +171,59 @@ async fn a_remote_control_value_that_is_not_a_bool_is_refused() {
         block.properties.get("remote_control")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_url_outside_http_https_and_data_is_refused_on_air() {
+    // The URL is live, and a remote control link can set it, so the allowlist
+    // has to hold here as well as when the flow is built - otherwise a page
+    // changed on air could be pointed at the filesystem.
+    gstreamer::init().unwrap();
+    let state = new_state();
+    let flow = html_flow();
+    let flow_id = flow.id;
+    state.upsert_flow(flow).await.expect("upsert_flow");
+
+    for url in [
+        "file:///etc/passwd",
+        "view-source:file:///etc/passwd",
+        "chrome://settings",
+    ] {
+        let (_current, rejected) = state
+            .update_block_properties(
+                &flow_id,
+                "html1",
+                HashMap::from([(
+                    strom::blocks::builtin::html_input::URL_PROPERTY.to_string(),
+                    PropertyValue::String(url.to_string()),
+                )]),
+                None,
+                None,
+            )
+            .await
+            .expect("update_block_properties");
+
+        let reason = rejected
+            .get(strom::blocks::builtin::html_input::URL_PROPERTY)
+            .unwrap_or_else(|| panic!("{} must be refused", url));
+        assert!(
+            reason.contains("http, https and data"),
+            "the reason has to say what is allowed, got {}",
+            reason
+        );
+    }
+
+    let stored = state.get_flow(&flow_id).await.expect("flow present");
+    let block = stored
+        .blocks
+        .iter()
+        .find(|b| b.id == "html1")
+        .expect("html block");
+    assert!(
+        matches!(
+            block.properties.get("url"),
+            Some(PropertyValue::String(u)) if u == "https://example.com"
+        ),
+        "a refused URL must not be stored, got {:?}",
+        block.properties.get("url")
+    );
+}
