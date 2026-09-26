@@ -410,7 +410,7 @@ class WhepConnection {
                 throw new Error('WHEP request failed: ' + response.status + ' ' + (errorText || response.statusText));
             }
 
-            this.resourceUrl = response.headers.get('Location');
+            this.resourceUrl = resolveResourceUrl(response.headers.get('Location'), this.endpoint);
             const answerSdp = await response.text();
 
             this._log('Received SDP answer', 'success');
