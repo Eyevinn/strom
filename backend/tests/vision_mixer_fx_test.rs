@@ -3,10 +3,10 @@
 //! Builds a real vision mixer flow on the GPU (OpenGL) backend, starts it,
 //! and exercises the FX surface: FX slot presence, applying looks (input +
 //! master), shader wipe takes and master-FX takes. Runs on software GL
-//! (llvmpipe) — skips when the environment cannot actually create a GL
-//! context (probed like `shader_validation_test`; merely having the GL
-//! plugins installed is not enough, as headless CI runners show).
+//! (llvmpipe) in CI — skips only where no GL context can be created at all,
+//! which `STROM_REQUIRE_GL` turns into a failure on the jobs that render.
 
+use serial_test::serial;
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
@@ -18,9 +18,9 @@ use tempfile::NamedTempFile;
 const BLOCK_ID: &str = "vmfx";
 
 /// Probe whether this environment can actually render through GL: the GL
-/// plugins being installed is not enough — on headless CI runners the
-/// elements exist but no GL context can be created, and a GPU pipeline
-/// builds, starts and then silently never produces a frame. Same probe as
+/// plugins being installed is not enough — where no context can be created a
+/// GPU pipeline builds, starts and then silently never produces a frame. Same
+/// probe as
 /// `shader_validation_test`: a trivial shader-free GL run must reach EOS
 /// (no `glshader` in the probe — a shader compile bug must fail the test,
 /// not skip it).
@@ -58,14 +58,12 @@ fn gl_environment_available() -> bool {
 
 /// Skip unless GL actually works — but only where skipping is legitimate.
 ///
-/// A headless Linux runner has the GL elements installed and still cannot create
-/// a context, so this test can only ever run where one exists. That makes the skip
-/// path the normal path on Linux, and a silent one: a real GL regression on a
-/// platform that *can* render would slip through as a green 0.05 s pass.
+/// A skip is silent: a real GL regression on a platform that *can* render would
+/// slip through as a green 0.05 s pass.
 ///
-/// `STROM_REQUIRE_GL=1` turns the skip into a failure. CI sets it on the macOS job,
-/// which is the one platform whose runner renders, so that job cannot quietly stop
-/// exercising the FX engine.
+/// `STROM_REQUIRE_GL=1` turns the skip into a failure. CI sets it on both test
+/// jobs — Linux renders through llvmpipe under Xvfb, macOS natively — so neither
+/// can quietly stop exercising the FX engine.
 fn gl_available_or_required() -> bool {
     if gl_environment_available() {
         return true;
@@ -106,7 +104,10 @@ fn build_vm_flow() -> Flow {
     flow
 }
 
+// Rendering through llvmpipe costs whole cores, so two of these at once on a
+// 4-core CI runner leave neither pipeline enough to keep up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn vision_mixer_fx_engine_end_to_end() {
     gstreamer::init().unwrap();
 
@@ -283,6 +284,7 @@ async fn vision_mixer_fx_engine_end_to_end() {
 /// asserts mid-wipe frames contain a substantial amount of BOTH sources
 /// (i.e. the wipe actually animates instead of switching).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(gl)]
 async fn wipe_between_letterboxed_sources_animates() {
     use gstreamer::prelude::*;
     gstreamer::init().unwrap();
@@ -427,45 +429,60 @@ async fn wipe_between_letterboxed_sources_animates() {
         .downcast::<gstreamer_app::AppSink>()
         .expect("appsink type");
 
-    // Fraction of pixels that are white-ish / red-ish in a frame.
-    let fractions_of = |sample: &gstreamer::Sample| -> (f64, f64) {
-        let caps = sample.caps().expect("caps");
-        let s = caps.structure(0).unwrap();
-        let w = s.get::<i32>("width").unwrap() as usize;
-        let h = s.get::<i32>("height").unwrap() as usize;
-        let format = s.get::<&str>("format").unwrap().to_string();
-        let buffer = sample.buffer().expect("buffer");
-        let map = buffer.map_readable().expect("map");
-        // RGBA or BGRx-ish 4-byte formats: identify R/B channel offsets.
-        let (ri, gi, bi) = match format.as_str() {
-            "RGBA" | "RGBx" => (0usize, 1usize, 2usize),
-            "BGRA" | "BGRx" => (2, 1, 0),
-            other => panic!("unexpected PGM format {}", other),
-        };
-        // Sample every STRIDE-th pixel rather than all of them. These are flat
-        // colour fields, so the fractions are unchanged, but the scan runs in a
-        // sixteenth of the time — and this loop runs unoptimised under `cargo
-        // test`, between two pulls from an appsink set to `max-buffers=1
-        // drop=true`. A slow scan there is not merely slow: the wipe being
-        // measured lasts two seconds, and a scan that outlasts it makes the
-        // observer skip from the frame before the wipe to the frame after it and
-        // conclude the wipe never animated.
-        const STRIDE: usize = 4;
-        let mut white = 0u64;
-        let mut red = 0u64;
-        let mut total = 0u64;
-        for px in map.chunks_exact(4).take(w * h).step_by(STRIDE) {
-            let (r, g, b) = (px[ri], px[gi], px[bi]);
-            if r > 200 && g > 200 && b > 200 {
-                white += 1;
-            } else if r > 200 && g < 80 && b < 80 {
-                red += 1;
+    // Every program frame the mixer renders, as (white fraction, red fraction).
+    //
+    // A pull loop cannot answer "did the wipe animate": the appsink is
+    // `max-buffers=1 drop=true`, so it hands back whatever is current when asked
+    // and discards the rest. Under llvmpipe in CI one scan costs more than the
+    // frame interval, and a 2 s wipe then reads as the picture before it followed
+    // by the picture after it — a hard cut. A probe sees what the mixer actually
+    // produced, whatever the runner's speed.
+    let series: std::sync::Arc<std::sync::Mutex<Vec<(f64, f64)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_pad = appsink.static_pad("sink").expect("appsink sink pad");
+    let recorder = series.clone();
+    sink_pad
+        .add_probe(gstreamer::PadProbeType::BUFFER, move |pad, info| {
+            let Some(buffer) = info.buffer() else {
+                return gstreamer::PadProbeReturn::Ok;
+            };
+            let Some(caps) = pad.current_caps() else {
+                return gstreamer::PadProbeReturn::Ok;
+            };
+            let s = caps.structure(0).unwrap();
+            let w = s.get::<i32>("width").unwrap() as usize;
+            let h = s.get::<i32>("height").unwrap() as usize;
+            // RGBA or BGRx-ish 4-byte formats: identify R/B channel offsets.
+            let (ri, gi, bi) = match s.get::<&str>("format").unwrap() {
+                "RGBA" | "RGBx" => (0usize, 1usize, 2usize),
+                "BGRA" | "BGRx" => (2, 1, 0),
+                other => panic!("unexpected PGM format {}", other),
+            };
+            let map = buffer.map_readable().expect("map");
+            // One pixel in 64. The sources are flat colour fields, so the
+            // fractions are unchanged, and this loop runs unoptimised on the
+            // streaming thread — a full scan here would throttle the pipeline
+            // it is measuring.
+            const STRIDE: usize = 64;
+            let (mut white, mut red, mut total) = (0u64, 0u64, 0u64);
+            for px in map.chunks_exact(4).take(w * h).step_by(STRIDE) {
+                let (r, g, b) = (px[ri], px[gi], px[bi]);
+                if r > 200 && g > 200 && b > 200 {
+                    white += 1;
+                } else if r > 200 && g < 80 && b < 80 {
+                    red += 1;
+                }
+                total += 1;
             }
-            total += 1;
-        }
-        let total = total.max(1) as f64;
-        (white as f64 / total, red as f64 / total)
-    };
+            let total = total.max(1) as f64;
+            recorder
+                .lock()
+                .unwrap()
+                .push((white as f64 / total, red as f64 / total));
+            gstreamer::PadProbeReturn::Ok
+        })
+        .expect("probe on pgm_out");
+    let last_frame = || series.lock().unwrap().last().copied();
 
     // Debug aid: verify the source branches are actually linked.
     for name in ["vmfx:queue_0", "vmfx:queue_1"] {
@@ -483,62 +500,54 @@ async fn wipe_between_letterboxed_sources_animates() {
     // frame happens to arrive first.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let (w0, r0) = loop {
-        if let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) {
-            let f = fractions_of(&s);
-            if f.0 > 0.5 {
-                break f;
+        match last_frame() {
+            Some(f) if f.0 > 0.5 => break f,
+            last => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "PGM never settled on a mostly-white picture within 30s, last frame {:?}",
+                    last
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "PGM never settled on a mostly-white picture within 30s, last frame white={:.2} red={:.2}",
-                f.0,
-                f.1
-            );
-        } else {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "no PGM frame within 30s of start"
-            );
         }
     };
     assert!(w0 > 0.5, "PGM should start mostly white, got {}", w0);
     assert!(r0 < 0.05, "no red expected before take, got {}", r0);
 
-    // Watch a wipe to completion: pull every PGM frame, record whether any
-    // frame showed a substantial amount of BOTH sources (the wipe animated
-    // rather than hard-switching), and stop once the picture settles on the
-    // incoming source. Watching the whole window instead of sampling at
-    // fixed wall-clock offsets keeps the test honest on slow runners, where
-    // a single "mid-wipe" sample can land after the wipe already finished.
-    let observe_wipe = |incoming_is_red: bool| -> (bool, f64, f64) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut saw_both = false;
+    // Watch a wipe to completion: wait for the picture to settle on the incoming
+    // source, then ask the recorded frames whether any of them showed a
+    // substantial amount of BOTH sources — the wipe animated rather than
+    // hard-switching. Only frames rendered after the mark count, so an earlier
+    // wipe's animation cannot satisfy a later one.
+    let observe_wipe = |mark: usize, incoming_is_red: bool| -> (bool, f64, f64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut last = (0.0, 0.0);
-        while std::time::Instant::now() < deadline {
-            let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) else {
-                continue;
-            };
-            let f = fractions_of(&s);
-            if f.0 > 0.10 && f.1 > 0.10 {
-                saw_both = true;
+        loop {
+            if let Some(f) = last_frame() {
+                last = f;
+                let (incoming, outgoing) = if incoming_is_red {
+                    (f.1, f.0)
+                } else {
+                    (f.0, f.1)
+                };
+                if incoming > 0.5 && outgoing < 0.05 {
+                    break;
+                }
             }
-            last = f;
-            let (incoming, outgoing) = if incoming_is_red {
-                (f.1, f.0)
-            } else {
-                (f.0, f.1)
-            };
-            // Settled on the incoming source after animating — done. (A
-            // hard-switch regression never sets saw_both and runs out the
-            // deadline, failing the animation assert below.)
-            if saw_both && incoming > 0.5 && outgoing < 0.05 {
+            if std::time::Instant::now() >= deadline {
                 break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        let saw_both = series.lock().unwrap()[mark..]
+            .iter()
+            .any(|(w, r)| *w > 0.10 && *r > 0.10);
         (saw_both, last.0, last.1)
     };
 
     // --- classic orientation: 2.40:1 -> 2.34:1 (outgoing does not cover) ---
+    let mark = series.lock().unwrap().len();
     manager
         .trigger_transition(BLOCK_ID, 0, 1, "wipe_left", 2000)
         .expect("wipe 0->1");
@@ -548,7 +557,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     manager
         .update_vision_mixer_after_take(BLOCK_ID, Some(1), Some(0), 2)
         .expect("after take 0->1");
-    let (animated, w_end, r_end) = observe_wipe(true);
+    let (animated, w_end, r_end) = observe_wipe(mark, true);
     eprintln!(
         "classic wipe: animated={} end white={:.2} red={:.2}",
         animated, w_end, r_end
@@ -565,13 +574,14 @@ async fn wipe_between_letterboxed_sources_animates() {
     );
 
     // --- inverted orientation: 2.34:1 -> 2.40:1 (outgoing covers) ---
+    let mark = series.lock().unwrap().len();
     manager
         .trigger_transition(BLOCK_ID, 1, 0, "wipe_left", 2000)
         .expect("wipe 1->0");
     manager
         .update_vision_mixer_after_take(BLOCK_ID, Some(0), Some(1), 2)
         .expect("after take 1->0");
-    let (animated2, w_end2, r_end2) = observe_wipe(false);
+    let (animated2, w_end2, r_end2) = observe_wipe(mark, false);
     eprintln!(
         "inverted wipe: animated={} end white={:.2} red={:.2}",
         animated2, w_end2, r_end2

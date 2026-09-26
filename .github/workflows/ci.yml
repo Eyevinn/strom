@@ -139,11 +139,26 @@ jobs:
       - name: Run Clippy on backend
         run: cargo clippy --package strom --all-targets --features efp,nvidia -- -D warnings
 
+      # The GL elements live in gstreamer1.0-gl, which is not in the cached
+      # package list above — that list is shared verbatim with the build jobs,
+      # which never load a plugin. The runner has a /dev/dri card node but no
+      # render node, so EGL cannot initialize; GL works through GLX against an
+      # Xvfb display on Mesa's llvmpipe. Vision mixer auto-selection still picks
+      # the CPU backend there (has_hardware_gl rejects llvmpipe), so only tests
+      # that ask for the GPU backend change behaviour.
+      - name: Install GL stack for GPU tests
+        run: sudo apt-get install -y gstreamer1.0-gl libgl1-mesa-dri libglx-mesa0 xvfb
+
       - name: Run tests on backend
-        run: cargo test --package strom --features efp,nvidia
+        run: xvfb-run -a --server-args="-screen 0 1280x720x24" cargo test --package strom --features efp,nvidia
         env:
           # Turn a missing-element skip into a failure — see plugins_available().
           STROM_REQUIRE_GST_PLUGINS: 1
+          # Same for a GL skip — see gl_available_or_required(). With Xvfb and
+          # llvmpipe in place this job renders, so a skip would mean GL broke.
+          STROM_REQUIRE_GL: 1
+          LIBGL_ALWAYS_SOFTWARE: 1
+          GALLIUM_DRIVER: llvmpipe
 
       - name: Run tests on shared types
         run: cargo test --package strom-types
