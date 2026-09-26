@@ -699,12 +699,65 @@ fn make_capssetter(id: &str, channels: usize) -> Result<gst::Element, BlockBuild
     let caps = gst::Caps::builder("audio/x-raw")
         .field("channel-mask", gst::Bitmask::new(channel_mask))
         .build();
-    gst::ElementFactory::make("capssetter")
+    let setter = gst::ElementFactory::make("capssetter")
         .name(id)
         .property("caps", &caps)
         .property("join", true)
         .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("capssetter: {e}")))
+        .map_err(|e| BlockBuildError::ElementCreation(format!("capssetter: {e}")))?;
+    answer_caps_queries_from_downstream(&setter);
+    Ok(setter)
+}
+
+/// Make a caps query through `setter` report what its downstream accepts.
+///
+/// `capssetter` answers an upstream caps query with the query's own filter,
+/// or ANY, never with anything from downstream. The bus mixer reads its
+/// output format from that query whenever it negotiates before any input has
+/// caps: always when an input joins after the flow started, and whenever the
+/// mixer's first timeout beats the first input. It then picks a format blind
+/// (S32LE at 44100 Hz), and a consumer that takes one format and does not
+/// convert refuses it with `not-negotiated`. Reporting downstream here keeps
+/// that pick to a format the consumer accepts.
+fn answer_caps_queries_from_downstream(setter: &gst::Element) {
+    let Some(sink) = setter.static_pad("sink") else {
+        return;
+    };
+    // Fires per query, never per buffer. The setter is looked up through the
+    // pad rather than captured, so the probe holds no reference to it.
+    sink.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |pad, info| {
+        let Some(gst::PadProbeData::Query(query)) = info.data.as_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::QueryViewMut::Caps(q) = query.view_mut() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Some(setter) = pad.parent_element() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let Some(src) = setter.static_pad("src") else {
+            return gst::PadProbeReturn::Ok;
+        };
+
+        // What downstream takes once the setter has stamped its fields, with
+        // those fields opened again: the setter overwrites them, so upstream
+        // may carry any value.
+        let stamped = setter.property::<gst::Caps>("caps");
+        let mut accepted = src
+            .peer_query_caps(None)
+            .intersect_with_mode(&stamped, gst::CapsIntersectMode::First);
+        for s in accepted.make_mut().iter_mut() {
+            for field in stamped.iter().flat_map(|st| st.fields()) {
+                s.remove_field(field);
+            }
+        }
+        let result = match q.filter() {
+            Some(filter) => filter.intersect_with_mode(&accepted, gst::CapsIntersectMode::First),
+            None => accepted,
+        };
+        q.set_result(&result);
+        gst::PadProbeReturn::Handled
+    });
 }
 
 // ============================================================================
