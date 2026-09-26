@@ -15,17 +15,27 @@ use super::mixer_layout::{
 /// Name the animated PiP-aware take `outgoing` → `incoming` produces.
 ///
 /// The animated path is not always a dissolve: a source present in both
-/// compositions animates position+size instead of cross-fading, so a four-up
-/// taken to that participant full frame reads as a zoom, and reports "morph".
+/// compositions animates position, size and crop instead of cross-fading, so
+/// a four-up taken to that participant full frame, or a punch-in taken back
+/// to the plain source, reads as a zoom and reports "morph". `outgoing_crops`
+/// and `incoming_crops` are each side's per-input crop, empty for an input;
+/// they are keyed by input index, which is the pad index on the dist compositor.
 fn animated_kind(
     outgoing: &[crate::gst::transitions::PadTarget],
     incoming: &[crate::gst::transitions::PadTarget],
+    outgoing_crops: &strom_types::vision_mixer::PipTransforms,
+    incoming_crops: &strom_types::vision_mixer::PipTransforms,
 ) -> &'static str {
     use crate::gst::transitions::{plan_transition, PadAction};
     let moves = plan_transition(outgoing, incoming)
         .iter()
         .any(|(_, action)| matches!(action, PadAction::Morph { .. }));
-    if moves {
+    let recrops = incoming.iter().any(|t| {
+        outgoing.iter().any(|o| o.pad_idx == t.pad_idx)
+            && outgoing_crops.get(&t.pad_idx).copied().unwrap_or_default()
+                != incoming_crops.get(&t.pad_idx).copied().unwrap_or_default()
+    });
+    if moves || recrops {
         "morph"
     } else {
         "fade"
@@ -392,7 +402,19 @@ impl PipelineManager {
                 let actual_kind = if is_cut {
                     "cut".to_string()
                 } else {
-                    animated_kind(&old_dist_targets, &new_dist_targets).to_string()
+                    let old_pgm_crops = old_pgm_pip
+                        .map(|p| state.pip_transforms(p))
+                        .unwrap_or_default();
+                    let new_pgm_crops = new_pgm_pip
+                        .map(|p| state.pip_transforms(p))
+                        .unwrap_or_default();
+                    animated_kind(
+                        &old_dist_targets,
+                        &new_dist_targets,
+                        &old_pgm_crops,
+                        &new_pgm_crops,
+                    )
+                    .to_string()
                 };
                 return Ok((was_ftb, old_pgm, new_pgm_swap, actual_kind));
             }
@@ -524,6 +546,11 @@ impl PipelineManager {
 mod tests {
     use super::animated_kind;
     use crate::gst::transitions::PadTarget;
+    use strom_types::vision_mixer::{PipTransforms, SourceCrop};
+
+    fn none() -> PipTransforms {
+        PipTransforms::new()
+    }
 
     fn pad(idx: usize, x: i32, y: i32, w: i32, h: i32) -> PadTarget {
         PadTarget {
@@ -542,7 +569,7 @@ mod tests {
         // Nothing is shared between the two looks, so every pad cross-fades.
         let old = vec![pad(0, 0, 0, 640, 720), pad(1, 640, 0, 640, 720)];
         let new = vec![pad(2, 0, 0, 640, 720), pad(3, 640, 0, 640, 720)];
-        assert_eq!(animated_kind(&old, &new), "fade");
+        assert_eq!(animated_kind(&old, &new, &none(), &none()), "fade");
     }
 
     #[test]
@@ -552,7 +579,7 @@ mod tests {
         // dissolve.
         let old = vec![pad(0, 0, 0, 640, 360), pad(1, 640, 0, 640, 360)];
         let new = vec![pad(1, 0, 0, 1280, 720)];
-        assert_eq!(animated_kind(&old, &new), "morph");
+        assert_eq!(animated_kind(&old, &new, &none(), &none()), "morph");
     }
 
     #[test]
@@ -561,6 +588,26 @@ mod tests {
         // the visible change is input 1 fading out and input 2 fading in.
         let old = vec![pad(0, 0, 0, 640, 360), pad(1, 640, 0, 640, 360)];
         let new = vec![pad(0, 0, 0, 640, 360), pad(2, 640, 0, 640, 360)];
-        assert_eq!(animated_kind(&old, &new), "fade");
+        assert_eq!(animated_kind(&old, &new, &none(), &none()), "fade");
+    }
+
+    #[test]
+    fn shared_source_whose_crop_eases_reports_morph() {
+        // A 2x punch-in on input 1 taken back to input 1 uncropped: the box
+        // stays full frame but the crop animates out, so the audience sees a
+        // zoom-out, not a dissolve.
+        let full = vec![pad(1, 0, 0, 1280, 720)];
+        let mut punched = none();
+        punched.insert(
+            1,
+            SourceCrop {
+                left: 0.25,
+                top: 0.25,
+                right: 0.25,
+                bottom: 0.25,
+            },
+        );
+        assert_eq!(animated_kind(&full, &full, &punched, &none()), "morph");
+        assert_eq!(animated_kind(&full, &full, &punched, &punched), "fade");
     }
 }

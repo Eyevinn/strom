@@ -11942,7 +11942,7 @@
         "properties": {
           "actual_transition_type": {
             "type": "string",
-            "description": "The transition type that was actually executed. Differs from\n`transition_type` when the engine downgraded the request — e.g.\nSlide/Push across heterogeneous PiP/input sources downgrades to \"fade\"."
+            "description": "The transition type that was actually executed. Differs from\n`transition_type` when the engine downgraded the request — e.g.\nSlide/Push across heterogeneous PiP/input sources downgrades to \"fade\" —\nand reads \"morph\" when a PiP-aware take moved or re-cropped a source\npresent on both sides instead of dissolving it. \"morph\" is a report\nonly, not an accepted request type."
           },
           "duration_ms": {
             "type": "integer",
