@@ -89,15 +89,22 @@ impl super::StromApp {
                 continue;
             };
 
-            let server_hostname = self.system_info.as_ref().map(|s| s.hostname.as_str());
             // base_url ends in /api; the link is served from the server root.
             let server_base = self.api.base_url().trim_end_matches("/api").to_string();
-            let url =
-                super::make_external_url(&format!("{}{}", server_base, path), server_hostname);
+            let url = format!("{}{}", server_base, path);
 
             match purpose {
+                // Opened in this browser, so the address it already reaches
+                // the server on is the right one. Rewriting it to the server's
+                // hostname breaks wherever that name does not resolve here,
+                // such as a container id.
                 "open" => ctx.open_url(egui::OpenUrl::new_tab(&url)),
-                _ => self.qr_inline = Some((block_id, url)),
+                // A QR code is for another device, where localhost is wrong.
+                _ => {
+                    let server_hostname = self.system_info.as_ref().map(|s| s.hostname.as_str());
+                    let url = super::make_external_url(&url, server_hostname);
+                    self.qr_inline = Some((block_id, url));
+                }
             }
         }
     }
