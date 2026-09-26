@@ -122,3 +122,50 @@ async fn the_viewport_still_needs_a_restart() {
         "width is not live and must say so rather than appearing to take effect"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remote_control_value_that_is_not_a_bool_is_refused() {
+    // Storing the value is the whole write, so this is the only place that can
+    // check it. Persisting a string would report the switch as applied and
+    // then read back as "off" when a link is asked for - the operator flips it
+    // on, is refused anyway, and nothing says why.
+    gstreamer::init().unwrap();
+    let state = new_state();
+    let flow = html_flow();
+    let flow_id = flow.id;
+    state.upsert_flow(flow).await.expect("upsert_flow");
+
+    let (_current, rejected) = state
+        .update_block_properties(
+            &flow_id,
+            "html1",
+            HashMap::from([(
+                strom::blocks::builtin::html_input::REMOTE_CONTROL_PROPERTY.to_string(),
+                PropertyValue::String("true".to_string()),
+            )]),
+            None,
+            None,
+        )
+        .await
+        .expect("update_block_properties");
+
+    assert!(
+        rejected.contains_key(strom::blocks::builtin::html_input::REMOTE_CONTROL_PROPERTY),
+        "a non-boolean must be refused rather than silently stored"
+    );
+
+    let stored = state.get_flow(&flow_id).await.expect("flow present");
+    let block = stored
+        .blocks
+        .iter()
+        .find(|b| b.id == "html1")
+        .expect("html block");
+    assert!(
+        matches!(
+            block.properties.get("remote_control"),
+            Some(PropertyValue::Bool(false))
+        ),
+        "the refused value must not have overwritten the switch, got {:?}",
+        block.properties.get("remote_control")
+    );
+}

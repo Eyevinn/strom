@@ -18,6 +18,11 @@ pub enum LinkPurpose {
     Open,
 }
 
+/// Where the spawned request leaves its answer for a later frame to pick up.
+///
+/// The pending set carries the flow and block themselves, so nothing ever has
+/// to be parsed back out of this string - a block id is caller-supplied over
+/// the API and may contain anything, underscores included.
 fn storage_key(flow_id: FlowId, block_id: &str) -> String {
     format!("devtools_link_{}_{}", flow_id, block_id)
 }
@@ -31,11 +36,12 @@ impl super::StromApp {
         block_id: String,
         purpose: LinkPurpose,
     ) {
-        let key = storage_key(flow_id, &block_id);
-        if self.devtools_link_pending.contains(&key) {
+        let pending = (flow_id, block_id.clone());
+        if self.devtools_link_pending.contains(&pending) {
             return;
         }
-        self.devtools_link_pending.insert(key.clone());
+        self.devtools_link_pending.insert(pending);
+        let key = storage_key(flow_id, &block_id);
 
         let api = self.api.clone();
         let ctx = ctx.clone();
@@ -60,13 +66,14 @@ impl super::StromApp {
 
     /// Pick up links the server has handed back.
     pub(super) fn check_devtools_links(&mut self, ctx: &Context) {
-        let pending: Vec<String> = self.devtools_link_pending.iter().cloned().collect();
+        let pending: Vec<(FlowId, String)> = self.devtools_link_pending.iter().cloned().collect();
 
-        for key in pending {
+        for (flow_id, block_id) in pending {
+            let key = storage_key(flow_id, &block_id);
             let err_key = format!("{}_err", key);
             if let Some(message) = get_local_storage(&err_key) {
                 remove_local_storage(&err_key);
-                self.devtools_link_pending.remove(&key);
+                self.devtools_link_pending.remove(&(flow_id, block_id));
                 self.status = format!("Remote control link: {}", message);
                 continue;
             }
@@ -75,16 +82,12 @@ impl super::StromApp {
                 continue;
             };
             remove_local_storage(&key);
-            self.devtools_link_pending.remove(&key);
+            self.devtools_link_pending
+                .remove(&(flow_id, block_id.clone()));
 
             let Some((purpose, path)) = value.split_once('|') else {
                 continue;
             };
-            // The block id is the tail of the storage key, after the flow id.
-            let block_id = key
-                .rsplit_once('_')
-                .map(|(_, b)| b.to_string())
-                .unwrap_or_default();
 
             let server_hostname = self.system_info.as_ref().map(|s| s.hostname.as_str());
             // base_url ends in /api; the link is served from the server root.

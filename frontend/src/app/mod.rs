@@ -775,8 +775,10 @@ pub struct StromApp {
     block_thumbnail_loading: std::collections::HashSet<(strom_types::FlowId, String)>,
     /// Block ID and URL to show as inline QR code in the properties panel
     qr_inline: Option<(String, String)>,
-    /// Remote control links the server has been asked for but not yet answered.
-    devtools_link_pending: std::collections::HashSet<String>,
+    /// Remote control links the server has been asked for but not yet answered,
+    /// by the block that asked. Kept as the pair rather than a formatted key so
+    /// nothing has to parse a block id back out of a string.
+    devtools_link_pending: std::collections::HashSet<(strom_types::FlowId, String)>,
     /// QR code texture cache (for properties popup)
     qr_cache: crate::qr::QrCache,
     /// Current recording filename per recorder block (flow_id, block_id) -> filename

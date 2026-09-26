@@ -24,7 +24,10 @@ use strom_types::block::{
     BlockCategoriesResponse, BlockDefinition, BlockInstance, BlockListResponse, BlockResponse,
     CreateBlockRequest, ExposedProperty, ExternalPad, ExternalPads, PropertyMapping, PropertyType,
 };
-use strom_types::devtools::{DevToolsLink, DevToolsTarget, DevToolsTargets};
+use strom_types::devtools::{
+    DevToolsLink, DevToolsLinkSummary, DevToolsLinks, DevToolsRevokedLinks, DevToolsTarget,
+    DevToolsTargets,
+};
 use strom_types::discovery::{
     AnnouncedStreamResponse, DeviceCategory, DeviceCountByCategory, DeviceDiscoveryStatus,
     DeviceResponse, DiscoveredStreamResponse, NdiDiscoveryStatus,
@@ -166,11 +169,16 @@ use utoipa::OpenApi;
         crate::api::devtools::list_targets,
         crate::api::devtools::create_link,
         crate::api::devtools::create_block_link,
+        crate::api::devtools::list_links,
+        crate::api::devtools::revoke_all_links,
         crate::api::devtools::revoke_link,
     ),
     components(
         schemas(
             DevToolsLink,
+            DevToolsLinkSummary,
+            DevToolsLinks,
+            DevToolsRevokedLinks,
             DevToolsTarget,
             DevToolsTargets,
             FlowResponse,

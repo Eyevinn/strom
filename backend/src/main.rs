@@ -304,8 +304,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Load configuration early to get log_file setting
-    let config = Config::from_figment(
+    // Load configuration early to get log_file setting.
+    // Mutable because the CEF debug port is resolved against the flags already
+    // in the environment further down, and the proxy has to follow the port
+    // that is really in force.
+    let mut config = Config::from_figment(
         args.port,
         args.data_dir.clone(),
         args.flows_path.clone(),
@@ -412,33 +415,82 @@ fn main() -> anyhow::Result<()> {
             })
             .unwrap_or_default();
 
-        let already_set = |flags: &[String], name: &str| {
-            flags
-                .iter()
-                .any(|f| f == name || f.starts_with(&format!("{}=", name)))
+        let flag_value = |flags: &[String], name: &str| -> Option<Option<String>> {
+            flags.iter().find_map(|f| {
+                if f == name {
+                    Some(None)
+                } else {
+                    f.strip_prefix(&format!("{}=", name))
+                        .map(|v| Some(v.to_string()))
+                }
+            })
         };
 
-        if already_set(&flags, "remote-debugging-port") {
-            info!(
-                "CEF remote debugging: keeping the port from GST_CEF_CHROME_EXTRA_FLAGS, \
-                 ignoring the configured {}",
+        // Whatever port Chromium ends up listening on is the one the proxy has
+        // to dial. An operator who put the flag in GST_CEF_CHROME_EXTRA_FLAGS
+        // themselves keeps it - but then the configured value is not where the
+        // browser is, and a proxy pointed at the configured value would answer
+        // "no pages" forever with nothing to say why.
+        let effective_port = match flag_value(&flags, "remote-debugging-port") {
+            Some(Some(existing)) => match existing.parse::<u16>() {
+                Ok(port) => {
+                    if port != debug_port {
+                        warn!(
+                            "CEF remote debugging: GST_CEF_CHROME_EXTRA_FLAGS already sets \
+                             remote-debugging-port={}, so that is the port in use and the \
+                             configured {} is ignored",
+                            port, debug_port
+                        );
+                    }
+                    port
+                }
+                Err(_) => {
+                    warn!(
+                        "CEF remote debugging: GST_CEF_CHROME_EXTRA_FLAGS sets \
+                         remote-debugging-port={}, which is not a port. Remote control is \
+                         disabled - fix the flag or remove it to use the configured {}",
+                        existing, debug_port
+                    );
+                    0
+                }
+            },
+            // The bare flag without a value leaves Chromium to pick a port,
+            // and it never tells us which. Nothing can be proxied to that.
+            Some(None) => {
+                warn!(
+                    "CEF remote debugging: GST_CEF_CHROME_EXTRA_FLAGS sets \
+                     remote-debugging-port with no port, so the port Chromium picks is \
+                     unknown and remote control is disabled. Give the flag a port, or \
+                     remove it to use the configured {}",
+                    debug_port
+                );
+                0
+            }
+            None => {
+                flags.push(format!("remote-debugging-port={}", debug_port));
                 debug_port
-            );
-        } else {
-            flags.push(format!("remote-debugging-port={}", debug_port));
-        }
-        if !already_set(&flags, "persist-session-cookies") {
+            }
+        };
+
+        if flag_value(&flags, "persist-session-cookies").is_none() {
             flags.push("persist-session-cookies".to_string());
         }
 
         std::env::set_var("GST_CEF_CHROME_EXTRA_FLAGS", flags.join(","));
-        warn!(
-            "CEF remote debugging enabled on 127.0.0.1:{} - this is a debugging tool. One \
-             browser process serves every HTML source in this instance, so a session opened \
-             against one of them reaches all of them, every page they are logged in to, and \
-             the files on this host. To keep customers apart, run a Strom process per customer",
-            debug_port
-        );
+
+        // The proxy follows the port that is actually in force, never the
+        // configured one, so the two cannot disagree.
+        config.cef_debug_port = (effective_port != 0).then_some(effective_port);
+
+        if let Some(port) = config.cef_debug_port {
+            warn!(
+                "CEF remote debugging enabled on 127.0.0.1:{} - this is a debugging tool. One \
+                 browser process serves every HTML source in this instance, so a session opened \
+                 against one of them reaches all of them, every page they are logged in to, and \
+                 the files on this host. To keep customers apart, run a Strom process per customer",
+                port
+            );
+        }
     }
 
     // Determine if GUI should be enabled

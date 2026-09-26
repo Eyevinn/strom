@@ -305,18 +305,67 @@
         }
       }
     },
-    "/api/devtools/links/{key}": {
+    "/api/devtools/links": {
+      "get": {
+        "tags": [
+          "devtools"
+        ],
+        "summary": "List the links that are alive right now.",
+        "description": "Without this an operator who has lost track of a link can only wait out its\nTTL or restart the instance, and one link is control of every browser in it.\nThe key is never in the answer — it is the credential, and the point of the\nlisting is to revoke a link, not to recover one.",
+        "operationId": "list_links",
+        "responses": {
+          "200": {
+            "description": "The live remote control links",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevToolsLinks"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          }
+        }
+      },
       "delete": {
         "tags": [
           "devtools"
         ],
-        "summary": "Revoke a link before it expires.",
+        "summary": "Revoke every link at once, and end every session open on one.",
+        "description": "The panic button: one call after which nobody is driving any browser in\nthis instance, whether or not anyone still knows which links exist.",
+        "operationId": "revoke_all_links",
+        "responses": {
+          "200": {
+            "description": "How many links were revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevToolsRevokedLinks"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          }
+        }
+      }
+    },
+    "/api/devtools/links/{id}": {
+      "delete": {
+        "tags": [
+          "devtools"
+        ],
+        "summary": "Revoke a link before it expires, and end any session already open on it.",
+        "description": "Takes the link's non-secret id, not its key: an operator revoking a link\nthey handed out should not have to keep a copy of the credential to do it,\nand the id is the only part of a link that is safe to write down.",
         "operationId": "revoke_link",
         "parameters": [
           {
-            "name": "key",
+            "name": "id",
             "in": "path",
-            "description": "The key from the minted path",
+            "description": "The link's non-secret id, as returned when it was minted",
             "required": true,
             "schema": {
               "type": "string"
@@ -325,7 +374,7 @@
         ],
         "responses": {
           "204": {
-            "description": "The link is gone"
+            "description": "The link is gone, and so is any session on it"
           },
           "401": {
             "description": "Authentication required"
@@ -369,7 +418,7 @@
           "devtools"
         ],
         "summary": "Mint a remote control link for one page.",
-        "description": "The caller authenticates as they would for any other endpoint; what comes\nback is a path anyone can open, so it is handed to a person, not published.",
+        "description": "The caller authenticates as they would for any other endpoint; what comes\nback is a path anyone can open, so it is handed to a person, not published.\n\nNaming Chromium's target directly does not get around the block's Remote\nControl switch: the target still has to be one that some HTML source with\nthe switch on resolves to, by the same rule [`create_block_link`] uses. The\ntwo endpoints are different ways of naming the same page, so they cannot be\nallowed to disagree about whether it may be opened.",
         "operationId": "create_link",
         "parameters": [
           {
@@ -399,8 +448,11 @@
           "401": {
             "description": "Authentication required"
           },
+          "403": {
+            "description": "No HTML source with remote control on is rendering this page"
+          },
           "404": {
-            "description": "Remote control is disabled"
+            "description": "Remote control is disabled, or no such page"
           }
         }
       }
@@ -944,7 +996,7 @@
           "devtools"
         ],
         "summary": "Mint a remote control link for one HTML source.",
-        "description": "The block is the name an operator has for a page, so this is the endpoint a\nclient uses; the target id it resolves to is Chromium's business and\nchanges whenever the page is recreated.\n\nWhich page belongs to which block is decided by the URL, because that is\nall Chromium exposes about a browser. Two blocks pointing at the same URL\nare therefore indistinguishable, and this says so rather than guessing.",
+        "description": "The block is the name an operator has for a page, so this is the endpoint a\nclient uses; the target id it resolves to is Chromium's business and\nchanges whenever the page is recreated.\n\nWhich page belongs to which block is decided from the URL, because that is\nall Chromium exposes about a browser — see [`resolve_target`] for how far\nthat stretches once the page has navigated. Two blocks that cannot be told\napart are refused with a reason rather than guessed between.",
         "operationId": "create_block_link",
         "parameters": [
           {
@@ -5474,6 +5526,7 @@
         "type": "object",
         "description": "A minted remote control link.\n\nThe path is the whole credential: it names no target, carries no API token\nand spells out no address or port, so handing it over hands over exactly\nwhat it says and nothing more. It dies on its own if it goes unused.",
         "required": [
+          "id",
           "path",
           "expires_in_seconds",
           "warning"
@@ -5485,13 +5538,72 @@
             "description": "How long the link survives without being used. Each use starts it over.",
             "minimum": 0
           },
+          "id": {
+            "type": "string",
+            "description": "A name for this link that is not the credential.\n\nSafe to show, store and log. It is what `DELETE /api/devtools/links/{id}`\ntakes, so a link can be revoked without anyone having to keep the key."
+          },
           "path": {
             "type": "string",
-            "description": "Path to open in a browser, relative to this Strom instance."
+            "description": "Path to open in a browser, relative to this Strom instance.\n\nThis one *is* the credential — everything under it is reachable by\nwhoever holds it, so it is handed to a person, never logged or stored."
           },
           "warning": {
             "type": "string",
             "description": "What the holder of this link can actually reach. See\n[`REMOTE_CONTROL_WARNING`]."
+          }
+        }
+      },
+      "DevToolsLinkSummary": {
+        "type": "object",
+        "description": "One live link, as an operator sees it when reviewing what is outstanding.\n\nDeliberately without the key: the point of a listing is to let someone who\nhas lost track of a link kill it, not to hand the credential back out.",
+        "required": [
+          "id",
+          "target_url",
+          "expires_in_seconds"
+        ],
+        "properties": {
+          "expires_in_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds left before it expires on its own. Every use starts it over.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "The non-secret id, for revoking this link."
+          },
+          "target_url": {
+            "type": "string",
+            "description": "The page this link was minted against, so the operator can tell which\nbrowser they are about to cut off."
+          }
+        }
+      },
+      "DevToolsLinks": {
+        "type": "object",
+        "description": "Every remote control link that is currently alive.",
+        "required": [
+          "links"
+        ],
+        "properties": {
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DevToolsLinkSummary"
+            },
+            "description": "The live links, soonest to expire first."
+          }
+        }
+      },
+      "DevToolsRevokedLinks": {
+        "type": "object",
+        "description": "How many links a bulk revoke ended.",
+        "required": [
+          "revoked"
+        ],
+        "properties": {
+          "revoked": {
+            "type": "integer",
+            "description": "Links that were live and are now gone, together with any session that\nwas open on them.",
+            "minimum": 0
           }
         }
       },

@@ -345,7 +345,9 @@ pub async fn create_app_with_config(
             "/flows/{flow_id}/blocks/{block_id}/devtools/link",
             post(api::devtools::create_block_link),
         )
-        .route("/devtools/links/{key}", delete(api::devtools::revoke_link))
+        .route("/devtools/links", get(api::devtools::list_links))
+        .route("/devtools/links", delete(api::devtools::revoke_all_links))
+        .route("/devtools/links/{id}", delete(api::devtools::revoke_link))
         // Logging
         .route("/log-level", get(api::logging::get_log_level))
         .route("/log-level", put(api::logging::set_log_level))
@@ -564,7 +566,7 @@ pub async fn create_app_with_config(
                 tracing::info_span!(
                     "http",
                     method = %req.method(),
-                    path = %req.uri().path(),
+                    path = %api::devtools::redact_path(req.uri().path()),
                     peer = %peer.map_or_else(|| "unknown".to_string(), |a| a.to_string()),
                 )
             }),

@@ -1814,6 +1814,15 @@ impl AppState {
             if definition.id == crate::blocks::builtin::html_input::BLOCK_ID
                 && name == crate::blocks::builtin::html_input::REMOTE_CONTROL_PROPERTY
             {
+                // Storing it is the whole write, so this is the only place
+                // that can check it. Anything but a bool would be persisted,
+                // reported as applied, and then read back as "off" when a link
+                // is asked for - an operator flipping the switch and being
+                // refused anyway, with nothing saying why.
+                if !matches!(value, PropertyValue::Bool(_)) {
+                    rejected.insert(name, "value must be a boolean".to_string());
+                    continue;
+                }
                 to_persist.push((name, value));
                 continue;
             }
