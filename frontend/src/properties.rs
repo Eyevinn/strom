@@ -133,6 +133,10 @@ pub struct BlockInspectorResult {
     pub whip_ingest_url: Option<String>,
     /// Copy WHIP ingest URL to clipboard - contains endpoint_id
     pub copy_whip_url_requested: Option<String>,
+    /// Remote control link requested for an HTML source, to show as a QR code
+    pub devtools_qr_requested: Option<(FlowId, String)>,
+    /// Remote control link requested for an HTML source, to open in a tab
+    pub devtools_open_requested: Option<(FlowId, String)>,
     /// Show QR code for WHEP player URL - contains endpoint_id
     pub show_qr_whep: Option<String>,
     /// Show QR code for WHIP ingest URL - contains endpoint_id
@@ -654,6 +658,86 @@ impl PropertyInspector {
                                 Some((srt_uri.clone(), network_caching_ms));
                         }
                     });
+                }
+            }
+
+            // Remote control for HTML sources. The link is minted by the
+            // server on demand rather than derived here: only the server knows
+            // which browser this block is rendering, and the link is
+            // short-lived, so there is nothing to precompute.
+            if definition.id == "builtin.html_input" {
+                let allowed = matches!(
+                    block.properties.get("remote_control"),
+                    Some(PropertyValue::Bool(true))
+                );
+
+                ui.add_space(4.0);
+                if let Some(flow_id) = flow_id {
+                    ui.add_enabled_ui(allowed, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(egui_phosphor::regular::QR_CODE)
+                                .on_hover_text("Show a QR code to open this page from a phone")
+                                .clicked()
+                            {
+                                result.devtools_qr_requested =
+                                    Some((flow_id, block_id.clone()));
+                            }
+                            if ui
+                                .button(format!(
+                                    "{} Remote control",
+                                    egui_phosphor::regular::ARROW_SQUARE_OUT
+                                ))
+                                .on_hover_text(
+                                    "Open this page in a browser tab and click in it - the \
+                                     page that is on air, so a login lands where it is needed",
+                                )
+                                .clicked()
+                            {
+                                result.devtools_open_requested =
+                                    Some((flow_id, block_id.clone()));
+                            }
+                        });
+                    });
+                    if !allowed {
+                        ui.label(
+                            egui::RichText::new(
+                                "Turn on Remote Control above to hand out a link.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                    }
+                } else {
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.button(format!(
+                            "{} Remote control",
+                            egui_phosphor::regular::ARROW_SQUARE_OUT
+                        ))
+                        .on_hover_text("Start the flow to control the page");
+                    });
+                }
+
+                // The minted link arrives a frame or two later and lands here.
+                if let Some((_, ref url)) =
+                    qr_inline.as_ref().filter(|(bid, _)| bid == &block_id)
+                {
+                    ui.add_space(4.0);
+                    if let Some(texture) = qr_cache.get_or_create(ui.ctx(), url) {
+                        ui.image(egui::load::SizedTexture::new(
+                            texture.id(),
+                            egui::vec2(200.0, 200.0),
+                        ));
+                    }
+                    ui.label(egui::RichText::new(url.as_str()).monospace().small());
+                    ui.label(
+                        egui::RichText::new(
+                            "Anyone with this link reaches every HTML source in this Strom \
+                             instance. It expires after 30 minutes unused.",
+                        )
+                        .weak()
+                        .small(),
+                    );
                 }
             }
 

@@ -238,6 +238,116 @@ docker run --rm -v $(pwd)/output:/export gstcefsrc-builder:amd64
 
 The build uses Ubuntu Questing to match the strom base image's glibc version.
 
+## HTML Input block
+
+An HTML source is a block: set the URL, the viewport size and the framerate,
+and pick whether the page's audio comes out as a second pad. Internally it is
+`cefsrc` feeding `cefdemux`, with `cefdemux` built only when audio is asked
+for. Raw `cefsrc` pipelines still work — the block just spares you the caps.
+
+## Remote control (logging in to a page)
+
+An HTML source renders on the server, so a page behind a login shows its login
+screen for as long as the flow runs. Strom can hand out a link that shows that
+page as it is being rendered and passes clicks and keystrokes back to it, so an
+operator can log in, clear a consent dialog or click a tab — in the browser that
+is actually on air. Nothing about the session is copied anywhere.
+
+The link carries the page and nothing else. Chromium's debug protocol is how
+this works underneath, and that protocol is full control of the browser
+process, so the proxy forwards only what a picture and an input device need and
+refuses the rest.
+
+> **A link is still worth guarding.** Whoever holds it sees and can type into a
+> page that is on air, until it expires or you revoke it.
+
+Remote control needs Strom's own authentication configured. With none, minting
+a link would take no credentials at all, so Strom refuses to open the debug
+port and says so at startup. Enable it with a port that nothing else on the
+host uses:
+
+```toml
+[cef]
+debug_port = 9222
+```
+
+or `STROM_CEF_DEBUG_PORT=9222`. Two Strom instances on one host need two
+different ports, the same way they already need two CEF profile directories.
+Chromium binds the port to loopback; leave it there and never publish it.
+
+With a flow running, ask which pages are available:
+
+```bash
+curl -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/targets
+```
+
+Mint a link for the one you want:
+
+```bash
+curl -X POST -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/targets/<target-id>/link
+```
+
+What comes back is a path, an id, and nothing else — one random key, no API
+token, no target id, no address or port:
+
+```json
+{"id": "4b1e…", "path": "/devtools/7f3c…", "expires_in_seconds": 1800, "warning": "…"}
+```
+
+Open the path in your own browser and the page appears; click and type into it
+as if it were yours, and paste works for a password manager. The key in the
+path is the credential, so the link is handed to a person rather than
+published, and it dies after half an hour of disuse.
+
+The `id` is not a credential — it is the name you use to take the link back:
+
+```bash
+# What is still live, without handing any key back out
+curl -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/links
+
+# Kill one link, and any session already open on it
+curl -X DELETE -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/links/<id>
+
+# Kill all of them
+curl -X DELETE -H "Authorization: Bearer $STROM_API_KEY" \
+  http://localhost:8080/api/devtools/links
+```
+
+Revoking ends sessions that are already open, not just the next one — it is the
+emergency stop, so it has to reach whoever is holding the socket.
+
+A login survives a restart: the profile directory keeps the cookies, and Strom
+asks Chromium to persist session cookies too. Chromium writes them on a timer,
+so a login made seconds before the process is killed can still be lost.
+
+### Full DevTools
+
+For troubleshooting a page rather than operating it, Strom can serve Chromium's
+DevTools application instead, with the protocol unfiltered:
+
+```toml
+[cef]
+debug_port = 9222
+full_devtools = true
+```
+
+or `STROM_CEF_FULL_DEVTOOLS=1`. This is not a richer version of the same thing.
+DevTools needs exactly the parts of the protocol the filter exists to refuse,
+so the two cannot be combined.
+
+> **With this on, a link is control of the host, and it is instance-wide.** It
+> runs arbitrary JavaScript, navigates anywhere including `file://`, and reads
+> every cookie in the profile. One browser process serves every HTML source in
+> a Strom instance, so a link reaches all of them, every page they are logged
+> in to, and the files this process can read. Give it only to someone you would
+> trust with the instance itself. To keep customers apart, run a Strom process
+> per customer — that is an orchestration choice, and there is no per-source
+> isolation inside one process.
+
 ## Limitations
 
 - **`strom-full` image only**: `cefsrc` comes from the gstcefsrc plugin, which Strom ships only in the `strom-full` image. The plain `strom` image and the native release builds (Linux, macOS, Windows) do not include it.
@@ -246,6 +356,7 @@ The build uses Ubuntu Questing to match the strom base image's glibc version.
 - **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
+- **No per-source isolation**: one CEF process serves every `cefsrc` in an instance, so they share one profile, one cookie jar and one debugging port
 
 ## References
 

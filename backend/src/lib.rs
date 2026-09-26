@@ -74,7 +74,18 @@ pub async fn create_app_with_state_and_auth(
     state: AppState,
     auth_config: auth::AuthConfig,
 ) -> Router {
-    create_app_with_config(state, auth_config, Vec::new(), 0).await
+    create_app_with_config(
+        state,
+        auth_config,
+        Vec::new(),
+        0,
+        api::devtools::DevToolsState::new(api::devtools::DevToolsConfig {
+            debug_port: None,
+            tls: false,
+            full_devtools: false,
+        }),
+    )
+    .await
 }
 
 /// Create the Axum application router with a given state, auth configuration, and CORS origins.
@@ -88,6 +99,7 @@ pub async fn create_app_with_config(
     auth_config: auth::AuthConfig,
     cors_allowed_origins: Vec<String>,
     port: u16,
+    devtools: api::devtools::DevToolsState,
 ) -> Router {
     // Note: GStreamer is already initialized in main.rs before this is called.
     // DO NOT call gst::init() here - it can corrupt internal state if pipelines
@@ -322,6 +334,21 @@ pub async fn create_app_with_config(
             "/flows/{flow_id}/blocks/{block_id}/player/goto",
             post(api::mediaplayer::goto_file),
         )
+        // Remote control of the Chromium browsers behind HTML sources.
+        // Minting a link is authenticated; opening one is not, because the
+        // key in the link is itself the credential (see api::devtools).
+        .route("/devtools/targets", get(api::devtools::list_targets))
+        .route(
+            "/devtools/targets/{target_id}/link",
+            post(api::devtools::create_link),
+        )
+        .route(
+            "/flows/{flow_id}/blocks/{block_id}/devtools/link",
+            post(api::devtools::create_block_link),
+        )
+        .route("/devtools/links", get(api::devtools::list_links))
+        .route("/devtools/links", delete(api::devtools::revoke_all_links))
+        .route("/devtools/links/{id}", delete(api::devtools::revoke_link))
         // Logging
         .route("/log-level", get(api::logging::get_log_level))
         .route("/log-level", put(api::logging::set_log_level))
@@ -355,6 +382,15 @@ pub async fn create_app_with_config(
         .route("/mcp", post(api::mcp::mcp_post))
         .route("/mcp", get(api::mcp::mcp_get))
         .route("/mcp", delete(api::mcp::mcp_delete));
+
+    // Remote control of HTML sources - outside /api, because the key in the
+    // path is the credential and the DevTools application resolves its own
+    // files relative to it.
+    let devtools_router = Router::new()
+        .route("/{key}", get(api::devtools::open_link))
+        .route("/{key}/ui/{*path}", get(api::devtools::proxy_ui))
+        .route("/{key}/ws", get(api::devtools::proxy_cdp))
+        .layer(Extension(devtools.clone()));
 
     // Player/ingest pages (HTML) - outside /api
     let player_router = Router::new()
@@ -471,6 +507,7 @@ pub async fn create_app_with_config(
         .merge(protected_api_router)
         .fallback(api::not_found)
         .layer(Extension(auth_config.clone()))
+        .layer(Extension(devtools))
         .layer(Extension(mcp_sessions));
 
     // Build Swagger UI router behind authentication
@@ -484,6 +521,7 @@ pub async fn create_app_with_config(
         .route("/health", get(health))
         .merge(swagger_router)
         .nest("/api", api_router)
+        .nest("/devtools", devtools_router)
         .nest("/player", player_router)
         .nest("/whep", whep_router)
         .nest("/whip", whip_router)
@@ -529,7 +567,7 @@ pub async fn create_app_with_config(
                 tracing::info_span!(
                     "http",
                     method = %req.method(),
-                    path = %req.uri().path(),
+                    path = %api::devtools::redact_path(req.uri().path()),
                     peer = %peer.map_or_else(|| "unknown".to_string(), |a| a.to_string()),
                 )
             }),

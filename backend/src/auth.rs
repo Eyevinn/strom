@@ -39,6 +39,17 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
+    /// Whether any authentication method is configured, without building the
+    /// configuration or warning about anything.
+    ///
+    /// The remote control interlock has to know this before the real
+    /// configuration is built, and [`AuthConfig::from_env`] warns as it goes,
+    /// so the rule for "authentication is on" lives here and both use it.
+    pub fn is_configured_in_env() -> bool {
+        strom_types::env::var_opt("STROM_ADMIN_USER").is_some()
+            || strom_types::env::var_opt("STROM_API_KEY").is_some()
+    }
+
     pub fn from_env() -> Self {
         // A blank value is not a credential. Without this an empty
         // STROM_API_KEY enables authentication and then accepts the empty
@@ -50,7 +61,7 @@ impl AuthConfig {
         let api_key = strom_types::env::var_opt("STROM_API_KEY");
 
         // Authentication is enabled if any method is configured
-        let enabled = admin_user.is_some() || api_key.is_some();
+        let enabled = Self::is_configured_in_env();
 
         if admin_user.is_some() && admin_password_hash.is_none() {
             if api_key.is_some() {

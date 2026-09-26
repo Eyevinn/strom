@@ -304,8 +304,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Load configuration early to get log_file setting
-    let config = Config::from_figment(
+    // Load configuration early to get log_file setting.
+    // Mutable because the CEF debug port is resolved against the flags already
+    // in the environment further down, and the proxy has to follow the port
+    // that is really in force.
+    let mut config = Config::from_figment(
         args.port,
         args.data_dir.clone(),
         args.flows_path.clone(),
@@ -378,6 +381,129 @@ fn main() -> anyhow::Result<()> {
             }
             std::env::set_var("GST_CEF_CACHE_LOCATION", &config.cef_cache_path);
             info!("CEF cache directory: {}", config.cef_cache_path.display());
+        }
+    }
+
+    // Open Chromium's remote debugging port when the operator asked for it.
+    //
+    // This is what lets an operator drive an HTML source: log in to a page,
+    // click through a consent dialog, dismiss a cookie banner. The port speaks
+    // the Chrome DevTools Protocol, which is total control of the browser
+    // process, so it is off unless configured, and Chromium binds it to
+    // loopback. Reach it through the authenticated API, never by publishing
+    // the port.
+    //
+    // `persist-session-cookies` rides along: without it a login lands in a
+    // session cookie that Chromium keeps in memory only, so the next flow
+    // start is logged out again even with a warm profile. Chromium writes the
+    // cookie store on a timer, so a login survives a graceful restart but not
+    // a kill in the first half minute after it.
+    //
+    // gstcefsrc reads these switches once, when the first cefsrc initializes
+    // CEF for the whole process, and the flags are additive: the strom-full
+    // entrypoint already sets GST_CEF_CHROME_EXTRA_FLAGS in GPU mode, so
+    // compose with whatever is there rather than replacing it.
+    // Minting a link is reached through the authenticated API, so with no
+    // authentication configured there is no door in front of it at all:
+    // anyone who can reach the HTTP port could mint one. Rather than open the
+    // debug port and rely on a lock that is not fitted, do not open it.
+    if config.cef_debug_port.is_some() && !auth::AuthConfig::is_configured_in_env() {
+        error!(
+            "CEF remote debugging is configured but authentication is not, so minting a \
+             remote control link would take no credentials at all. Remote control is \
+             disabled. Set STROM_ADMIN_USER together with STROM_ADMIN_PASSWORD_HASH, or \
+             STROM_API_KEY, and start again to use it"
+        );
+        config.cef_debug_port = None;
+    }
+
+    if let Some(debug_port) = config.cef_debug_port {
+        let mut flags: Vec<String> = std::env::var("GST_CEF_CHROME_EXTRA_FLAGS")
+            .ok()
+            .map(|existing| {
+                existing
+                    .split(',')
+                    .map(|f| f.trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let flag_value = |flags: &[String], name: &str| -> Option<Option<String>> {
+            flags.iter().find_map(|f| {
+                if f == name {
+                    Some(None)
+                } else {
+                    f.strip_prefix(&format!("{}=", name))
+                        .map(|v| Some(v.to_string()))
+                }
+            })
+        };
+
+        // Whatever port Chromium ends up listening on is the one the proxy has
+        // to dial. An operator who put the flag in GST_CEF_CHROME_EXTRA_FLAGS
+        // themselves keeps it - but then the configured value is not where the
+        // browser is, and a proxy pointed at the configured value would answer
+        // "no pages" forever with nothing to say why.
+        let effective_port = match flag_value(&flags, "remote-debugging-port") {
+            Some(Some(existing)) => match existing.parse::<u16>() {
+                Ok(port) => {
+                    if port != debug_port {
+                        warn!(
+                            "CEF remote debugging: GST_CEF_CHROME_EXTRA_FLAGS already sets \
+                             remote-debugging-port={}, so that is the port in use and the \
+                             configured {} is ignored",
+                            port, debug_port
+                        );
+                    }
+                    port
+                }
+                Err(_) => {
+                    warn!(
+                        "CEF remote debugging: GST_CEF_CHROME_EXTRA_FLAGS sets \
+                         remote-debugging-port={}, which is not a port. Remote control is \
+                         disabled - fix the flag or remove it to use the configured {}",
+                        existing, debug_port
+                    );
+                    0
+                }
+            },
+            // The bare flag without a value leaves Chromium to pick a port,
+            // and it never tells us which. Nothing can be proxied to that.
+            Some(None) => {
+                warn!(
+                    "CEF remote debugging: GST_CEF_CHROME_EXTRA_FLAGS sets \
+                     remote-debugging-port with no port, so the port Chromium picks is \
+                     unknown and remote control is disabled. Give the flag a port, or \
+                     remove it to use the configured {}",
+                    debug_port
+                );
+                0
+            }
+            None => {
+                flags.push(format!("remote-debugging-port={}", debug_port));
+                debug_port
+            }
+        };
+
+        if flag_value(&flags, "persist-session-cookies").is_none() {
+            flags.push("persist-session-cookies".to_string());
+        }
+
+        std::env::set_var("GST_CEF_CHROME_EXTRA_FLAGS", flags.join(","));
+
+        // The proxy follows the port that is actually in force, never the
+        // configured one, so the two cannot disagree.
+        config.cef_debug_port = (effective_port != 0).then_some(effective_port);
+
+        if let Some(port) = config.cef_debug_port {
+            warn!(
+                "CEF remote debugging enabled on 127.0.0.1:{} - this is a debugging tool. One \
+                 browser process serves every HTML source in this instance, so a session opened \
+                 against one of them reaches all of them, every page they are logged in to, and \
+                 the files on this host. To keep customers apart, run a Strom process per customer",
+                port
+            );
         }
     }
 
@@ -562,6 +688,7 @@ fn run_with_gui(
             auth_config,
             config.cors_allowed_origins.clone(),
             config.port,
+            devtools_config(&config),
         )
         .await;
 
@@ -694,6 +821,18 @@ fn run_headless_entry(
     }
 }
 
+/// The DevTools proxy's view of the configuration.
+///
+/// Whether the link it hands out says `ws://` or `wss://` follows this
+/// instance's own TLS, unless something in front of us says otherwise.
+fn devtools_config(config: &Config) -> strom::api::devtools::DevToolsState {
+    strom::api::devtools::DevToolsState::new(strom::api::devtools::DevToolsConfig {
+        debug_port: config.cef_debug_port,
+        tls: config.tls_cert.is_some() && config.tls_key.is_some(),
+        full_devtools: config.cef_full_devtools,
+    })
+}
+
 #[tokio::main]
 async fn run_headless(
     config: Config,
@@ -783,6 +922,7 @@ async fn run_headless(
         auth::AuthConfig::from_env(),
         config.cors_allowed_origins.clone(),
         config.port,
+        devtools_config(&config),
     )
     .await;
 

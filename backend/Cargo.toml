@@ -121,8 +121,12 @@ parking_lot = "0.12"
 # Network interface discovery
 network-interface = "2.0"
 
-# HTTP client for test harness
+# HTTP client for test harness, and for proxying the CEF DevTools endpoint
 reqwest.workspace = true
+
+# WebSocket client for the CEF DevTools proxy (same version axum's ws uses)
+tokio-tungstenite = "0.29"
+
 
 # Terminal UI for test harness
 crossterm = "0.29"
