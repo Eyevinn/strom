@@ -330,8 +330,14 @@ fn feed(h: &Harness, instance: &str, input: usize, tones: &[(f64, f64)]) {
 
     // Several channels: interleave them into one stream first. This is the
     // test's own plumbing, not the block's.
+    //
+    // Start its output at the first input buffer. Left at the default, a live
+    // aggregator's first deadline can pass before the sources' caps reach it.
+    // It then aggregates without an output format, and `audiointerleave`,
+    // unlike `audiomixer`, cannot invent one: it posts "not negotiated".
     let il = gst::ElementFactory::make("audiointerleave")
         .property("channel-positions-from-input", false)
+        .property_from_str("start-time-selection", "first")
         .build()
         .expect("audiointerleave");
     let cf = gst::ElementFactory::make("capsfilter")
