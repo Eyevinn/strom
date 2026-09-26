@@ -407,7 +407,11 @@ impl SessionActivity {
     /// The grace holds even if the output stamp has moved. After a takeover the
     /// displaced session's frames already inside the slot's chain still cross
     /// the tee after `new` reset the stamp, and those must not start the clock
-    /// on a newcomer whose own decoder has not produced anything yet.
+    /// on a newcomer whose own decoder has not produced anything yet. The grace
+    /// covers that tail only while it is short: nothing flushes the slot's
+    /// appsrc, so a chain that had fallen behind can drain up to
+    /// `APPSRC_MAX_TIME` of the predecessor's media, and a newcomer that decodes
+    /// nothing reads as live until it ends.
     ///
     /// Otherwise it is the staler of the two stamps: a session is usable only
     /// while both move, and a publisher going away freezes `ingress` first while
