@@ -424,8 +424,9 @@ fn formats_of(s: &gst::StructureRef) -> Vec<VideoFormat> {
 }
 
 /// Penalty for a candidate deeper than the input, set above every other
-/// penalty combined so that a same-or-shallower format always wins when one
-/// exists — while still allowing a deeper one when it is the only option.
+/// penalty except [`SCORE_COLOR_LOSS`] combined, so that a same-or-shallower
+/// format always wins when one exists — while still allowing a deeper one when
+/// it is the only option.
 ///
 /// This is the one place the scoring deliberately parts company with
 /// `videoconvert`. Feeding `vtenc_h264_hw` from RGBA, the encoder offers
@@ -436,6 +437,16 @@ fn formats_of(s: &gst::StructureRef) -> Vec<VideoFormat> {
 /// UYVY. Widening cannot add information, and it doubles the bytes touched on
 /// every frame.
 const SCORE_DEPTH_INCREASE: u32 = 128;
+
+/// Penalty for converting a colour input to greyscale, set above every other
+/// penalty combined, depth increase included.
+///
+/// A grey format has no chroma planes, so the subsampling terms read zero for
+/// it and would otherwise score RGBA to GRAY8 as cheaper than RGBA to I420.
+/// That is a real choice, not a corner case: `x264enc` under `profile=high`
+/// offers GRAY8 beside the 4:2:0 formats, because High permits 4:0:0.
+/// `videoconvert` weighs the same loss as `SCORE_COLOR_LOSS`, its largest.
+const SCORE_COLOR_LOSS: u32 = 512;
 
 /// How much a conversion to `out` costs, in the spirit of `videoconvert`'s own
 /// scoring: identity is free, and each way the output can represent less than
@@ -472,6 +483,9 @@ fn conversion_loss(in_format: Option<VideoFormat>, out: VideoFormat) -> u32 {
     }
     if o.has_palette() && !i.has_palette() {
         loss += 64;
+    }
+    if o.is_gray() && !i.is_gray() {
+        loss += SCORE_COLOR_LOSS;
     }
 
     let depth = |info: &VideoFormatInfo| info.depth().iter().copied().max().unwrap_or(8);
@@ -588,6 +602,29 @@ mod tests {
             .copied()
             .expect("menu is not empty");
         assert_eq!(best, VideoFormat::Argb64Be);
+    }
+
+    /// From colour, every colour target must beat greyscale, including a
+    /// 16-bit one. The menu is what `x264enc` offers under `profile=high`,
+    /// plus a deeper colour format.
+    #[test]
+    fn dropping_colour_costs_more_than_any_colour_target() {
+        init();
+        for input in [VideoFormat::Rgba, VideoFormat::Y42b, VideoFormat::I420] {
+            let grey = conversion_loss(Some(input), VideoFormat::Gray8);
+            for colour in [
+                VideoFormat::I420,
+                VideoFormat::Yv12,
+                VideoFormat::Nv12,
+                VideoFormat::Ayuv64,
+            ] {
+                let loss = conversion_loss(Some(input), colour);
+                assert!(
+                    grey > loss,
+                    "{input:?}: GRAY8 scored {grey}, {colour:?} scored {loss}"
+                );
+            }
+        }
     }
 
     #[test]
