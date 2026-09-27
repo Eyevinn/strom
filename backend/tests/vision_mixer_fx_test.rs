@@ -581,7 +581,11 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
         return;
     }
 
+    // Its own block id: mixer state is registered per block id, and the
+    // other tests in this file run in parallel under BLOCK_ID.
+    const PIP_BLOCK_ID: &str = "vmfx_pip";
     let mut flow = build_vm_flow();
+    flow.blocks[0].id = PIP_BLOCK_ID.to_string();
     for (k, v) in [
         ("num_pips", "1"),
         ("initial_pgm_source", "pip:0"),
@@ -610,7 +614,7 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
 
     let mixer = manager
         .pipeline()
-        .by_name(&format!("{}:mixer", BLOCK_ID))
+        .by_name(&format!("{}:mixer", PIP_BLOCK_ID))
         .expect("mixer in pipeline");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while mixer.query_position::<gstreamer::ClockTime>().is_none() {
@@ -621,7 +625,7 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
     assert!(
-        manager.vision_mixer_fx_available(BLOCK_ID),
+        manager.vision_mixer_fx_available(PIP_BLOCK_ID),
         "FX slots missing from GPU pipeline"
     );
 
@@ -637,10 +641,10 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
         },
     );
     manager
-        .apply_vision_mixer_pip_config(BLOCK_ID, 0, Some(1), vec![], crop)
+        .apply_vision_mixer_pip_config(PIP_BLOCK_ID, 0, Some(1), vec![], crop)
         .expect("pip config");
 
-    let result = manager.trigger_transition(BLOCK_ID, 0, 1, "glitch_cut", 200);
+    let result = manager.trigger_transition(PIP_BLOCK_ID, 0, 1, "glitch_cut", 200);
 
     manager.stop().expect("stop");
     strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);
