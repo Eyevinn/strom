@@ -239,6 +239,7 @@ impl PipelineManager {
                     pvw_underlay,
                 );
 
+                let mut master_fx_ran = None;
                 if is_cut {
                     // Snap apply: hide everything in the region, then set new active pads.
                     if let Some(p) = new_pgm_pip {
@@ -365,16 +366,22 @@ impl PipelineManager {
 
                     // Master-FX takes keep their full-frame envelope on the
                     // PiP path too — the pad animation underneath is the
-                    // fade above, but the glitch/flash/punch still lands.
+                    // morph above, but the glitch/flash/punch still lands,
+                    // and it is what the take reports.
                     if let Some(TransitionType::MasterFx(kind)) = parsed {
                         if self.vision_mixer_fx_available(block_instance_id) {
                             if let Ok(now) = dist_controller.current_stream_time(&self.pipeline) {
-                                let _ = self.apply_master_envelope(
-                                    block_instance_id,
-                                    kind,
-                                    now,
-                                    duration_ms,
-                                );
+                                if self
+                                    .apply_master_envelope(
+                                        block_instance_id,
+                                        kind,
+                                        now,
+                                        duration_ms,
+                                    )
+                                    .is_ok()
+                                {
+                                    master_fx_ran = Some(kind);
+                                }
                             }
                         }
                     }
@@ -401,6 +408,8 @@ impl PipelineManager {
                 );
                 let actual_kind = if is_cut {
                     "cut".to_string()
+                } else if let Some(kind) = master_fx_ran {
+                    TransitionType::MasterFx(kind).to_string()
                 } else {
                     let old_pgm_crops = old_pgm_pip
                         .map(|p| state.pip_transforms(p))

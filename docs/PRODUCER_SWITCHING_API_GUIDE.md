@@ -192,7 +192,8 @@ cross-fade. If you want a genuine dissolve out of a multi-box layout, take to a
 composition that shares no inputs with it, or use a cut.
 
 `actual_transition_type` in the take response always names what ran — `cut`, `fade`,
-or `morph` — so a control surface can label the move without replaying this table.
+`morph`, or the effect for a master-FX take such as `glitch_cut` — so a control surface
+can label the move without replaying this table.
 
 ---
 
