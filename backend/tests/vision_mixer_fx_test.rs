@@ -567,3 +567,85 @@ async fn wipe_between_letterboxed_sources_animates() {
     main_loop.quit();
     main_loop_thread.join().expect("main loop thread");
 }
+
+/// A master-FX take out of a PiP runs the take through the PiP-aware path,
+/// which animates the pads and lays the full-frame envelope over them. The
+/// envelope is what lands on air, so the take must report the effect, as the
+/// plain-input path does — not the pad morph underneath it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn master_fx_take_out_of_a_pip_reports_the_effect() {
+    use gstreamer::prelude::*;
+    gstreamer::init().unwrap();
+
+    if !gl_available_or_required() {
+        return;
+    }
+
+    let mut flow = build_vm_flow();
+    for (k, v) in [
+        ("num_pips", "1"),
+        ("initial_pgm_source", "pip:0"),
+        ("initial_pvw_source", "input:1"),
+    ] {
+        flow.blocks[0].properties.insert(
+            k.to_string(),
+            strom_types::PropertyValue::String(v.to_string()),
+        );
+    }
+
+    let temp_file = NamedTempFile::new().unwrap();
+    let registry = BlockRegistry::new(temp_file.path());
+    let mut manager = PipelineManager::new(
+        &flow,
+        EventBroadcaster::new(10, false, false),
+        &registry,
+        vec![],
+        "all".to_string(),
+        None,
+        std::env::temp_dir(),
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    )
+    .expect("build GPU pipeline");
+    manager.start().expect("start GPU pipeline");
+
+    let mixer = manager
+        .pipeline()
+        .by_name(&format!("{}:mixer", BLOCK_ID))
+        .expect("mixer in pipeline");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while mixer.query_position::<gstreamer::ClockTime>().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mixer never produced output (position query still failing after 30s)"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        manager.vision_mixer_fx_available(BLOCK_ID),
+        "FX slots missing from GPU pipeline"
+    );
+
+    // PiP 0: input 1 full frame, punched in 2x.
+    let mut crop = strom_types::vision_mixer::PipTransforms::new();
+    crop.insert(
+        1,
+        strom_types::vision_mixer::SourceCrop {
+            left: 0.25,
+            top: 0.25,
+            right: 0.25,
+            bottom: 0.25,
+        },
+    );
+    manager
+        .apply_vision_mixer_pip_config(BLOCK_ID, 0, Some(1), vec![], crop)
+        .expect("pip config");
+
+    let result = manager.trigger_transition(BLOCK_ID, 0, 1, "glitch_cut", 200);
+
+    manager.stop().expect("stop");
+    strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);
+    drop(manager);
+
+    let (_, _, _, kind) = result.expect("glitch take out of a PiP");
+    assert_eq!(kind, "glitch_cut");
+}
