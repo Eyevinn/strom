@@ -35,6 +35,8 @@ pub struct ExpandedPipeline {
     pub whip_endpoints: Vec<WhipEndpointInfo>,
     /// WHIP endpoint configs for session manager registration
     pub whip_endpoint_configs: Vec<(String, WhipEndpointConfig)>,
+    /// Per-block liveness reporters for the block health scan
+    pub block_liveness: Vec<(String, std::sync::Arc<dyn crate::blocks::BlockLiveness>)>,
 }
 
 /// Expand block instances into GStreamer elements using BlockBuilder trait.
@@ -211,6 +213,8 @@ pub async fn expand_blocks(
         );
     }
 
+    let block_liveness = ctx.take_block_liveness();
+
     debug!(
         "Block expansion complete: {} GStreamer elements, {} links, {} bus message handlers, {} element setups, {} elements with pad properties, {} WHEP endpoints, {} WHIP endpoints",
         gst_elements.len(),
@@ -231,6 +235,7 @@ pub async fn expand_blocks(
         whep_endpoints,
         whip_endpoints,
         whip_endpoint_configs,
+        block_liveness,
     })
 }
 
