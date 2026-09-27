@@ -719,6 +719,14 @@ fn make_capssetter(id: &str, channels: usize) -> Result<gst::Element, BlockBuild
 /// (S32LE at 44100 Hz), and a consumer that takes one format and does not
 /// convert refuses it with `not-negotiated`. Reporting downstream here keeps
 /// that pick to a format the consumer accepts.
+///
+/// The mixer fixes its output from the first entry of the answer, and also
+/// passes the answer on to its own inputs. So downstream's rates come first,
+/// for a consumer that cannot resample, followed by the same caps with any
+/// rate: a rate that a downstream mixer has locked must not refuse a later
+/// input at another rate, which the mixer resamples. Within each, float comes
+/// first when downstream accepts it, because a consumer that converts lists
+/// its own output format first, and that would sum the bus in fixed point.
 fn answer_caps_queries_from_downstream(setter: &gst::Element) {
     let Some(sink) = setter.static_pad("sink") else {
         return;
@@ -751,10 +759,22 @@ fn answer_caps_queries_from_downstream(setter: &gst::Element) {
                 s.remove_field(field);
             }
         }
-        let result = match q.filter() {
-            Some(filter) => filter.intersect_with_mode(&accepted, gst::CapsIntersectMode::First),
-            None => accepted,
-        };
+        let mut any_rate = accepted.clone();
+        for s in any_rate.make_mut().iter_mut() {
+            s.remove_field("rate");
+        }
+        let float = gst::Caps::builder("audio/x-raw")
+            .field("format", gst::List::new(["F32LE", "F64LE"]))
+            .build();
+        let mut result = gst::Caps::new_empty();
+        for caps in [accepted, any_rate] {
+            let caps = match q.filter() {
+                Some(filter) => filter.intersect_with_mode(&caps, gst::CapsIntersectMode::First),
+                None => caps,
+            };
+            result.merge(caps.intersect_with_mode(&float, gst::CapsIntersectMode::First));
+            result.merge(caps);
+        }
         q.set_result(&result);
         gst::PadProbeReturn::Handled
     });
