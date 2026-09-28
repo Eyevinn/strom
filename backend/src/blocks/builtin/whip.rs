@@ -1231,7 +1231,12 @@ pub fn create_whipserversrc_for_session(
     })
 }
 
-/// Keeps a session's video PTS moving forward from one RTP frame to the next.
+/// How far behind the previous frame's PTS a new frame's may be and still be
+/// treated as landing on it. A run released on one PTS falls behind by 1 ns
+/// per frame already moved; a frame interval is over 8 ms at up to 120 fps.
+const MAX_PTS_NUDGE_NS: u64 = 1_000_000;
+
+/// Gives each of a session's video frames its own PTS when several arrive on one.
 ///
 /// The session's jitterbuffer can release a run of packets from different
 /// frames all on one PTS, as it does when a publisher joins a slot. The
@@ -1240,9 +1245,12 @@ pub fn create_whipserversrc_for_session(
 /// stream has no framerate to derive one from, and the vision mixer's
 /// compositor fails the whole flow on a frame without a timestamp.
 ///
-/// Packets of one frame keep their shared PTS. A new frame gets at least 1 ns
-/// more than the one before it: WebRTC video has no B-frames, so arrival order
-/// is presentation order. Only the appsink's streaming thread touches it.
+/// Packets of one frame keep their shared PTS. A new frame whose PTS is at
+/// most [`MAX_PTS_NUDGE_NS`] behind the previous frame's is moved 1 ns past it.
+/// Any other PTS passes through: a larger step back is real timing (a B-frame,
+/// sent before the frame it precedes, or a step in the sender's clock), and
+/// holding later frames behind a PTS far ahead would freeze the seat. Only the
+/// appsink's streaming thread touches it.
 struct VideoPtsOrder {
     /// RTP timestamp of the last frame, `u64::MAX` before the first.
     last_rtptime: AtomicU64,
@@ -1263,11 +1271,9 @@ impl VideoPtsOrder {
         if last_rtptime == u64::from(rtptime) {
             return last_pts;
         }
-        let pts = if last_rtptime == u64::MAX {
-            pts
-        } else {
-            pts.max(last_pts + 1)
-        };
+        let duplicate =
+            last_rtptime != u64::MAX && pts <= last_pts && last_pts - pts <= MAX_PTS_NUDGE_NS;
+        let pts = if duplicate { last_pts + 1 } else { pts };
         self.last_rtptime
             .store(u64::from(rtptime), Ordering::Relaxed);
         self.last_pts.store(pts, Ordering::Relaxed);
@@ -2473,11 +2479,10 @@ mod tests {
         );
     }
 
-    /// A session's jitterbuffer can release packets of several frames on one
-    /// PTS. Each frame must still reach the slot with its own, increasing PTS,
-    /// and the packets of one frame with a shared one.
-    #[test]
-    fn video_frames_on_one_pts_reach_the_slot_in_order() {
+    /// Bridge RTP video packets, given as (RTP timestamp, PTS in ms), through
+    /// one session's `forward_sample_to_slot` and return the PTS each reached
+    /// the slot with, in ns.
+    fn bridge_video_packets(packets: &[(u32, u64)]) -> Vec<u64> {
         use gst_rtp::prelude::RTPBufferExt;
         let _ = gst::init();
 
@@ -2495,7 +2500,13 @@ mod tests {
             .field("clock-rate", 90000i32)
             .field("encoding-name", "H264")
             .build();
-        let packet = |rtptime: u32, pts_ms: u64| {
+        let ts_offset = AtomicI64::new(0);
+        let no_main_pipeline = gst::glib::WeakRef::new();
+        let session_finished = AtomicBool::new(false);
+        let order = VideoPtsOrder::new();
+
+        let mut out = Vec::new();
+        for &(rtptime, pts_ms) in packets {
             let mut buffer = gst::Buffer::new_rtp_with_sizes(4, 0, 0).unwrap();
             {
                 let buffer = buffer.get_mut().unwrap();
@@ -2503,26 +2514,9 @@ mod tests {
                 let mut rtp = gst_rtp::RTPBuffer::from_buffer_writable(buffer).unwrap();
                 rtp.set_timestamp(rtptime);
             }
-            gst::Sample::builder().buffer(&buffer).caps(&caps).build()
-        };
-        let ts_offset = AtomicI64::new(0);
-        let no_main_pipeline = gst::glib::WeakRef::new();
-        let session_finished = AtomicBool::new(false);
-        let order = VideoPtsOrder::new();
-
-        // Two packets of frame A, then frames B and C released on A's PTS,
-        // then frame D on its own later PTS.
-        let packets = [
-            packet(1000, 1000),
-            packet(1000, 1000),
-            packet(4000, 1000),
-            packet(7000, 1000),
-            packet(10000, 1100),
-        ];
-        let mut out = Vec::new();
-        for sample in &packets {
+            let sample = gst::Sample::builder().buffer(&buffer).caps(&caps).build();
             forward_sample_to_slot(
-                sample,
+                &sample,
                 &appsrc,
                 &session_finished,
                 &ts_offset,
@@ -2537,6 +2531,23 @@ mod tests {
             out.push(pulled.buffer().unwrap().pts().unwrap().nseconds());
         }
         pipeline.set_state(gst::State::Null).unwrap();
+        out
+    }
+
+    /// A session's jitterbuffer can release packets of several frames on one
+    /// PTS. Each frame must still reach the slot with its own, increasing PTS,
+    /// and the packets of one frame with a shared one.
+    #[test]
+    fn video_frames_on_one_pts_reach_the_slot_in_order() {
+        // Two packets of frame A, then frames B and C released on A's PTS,
+        // then frame D on its own later PTS.
+        let out = bridge_video_packets(&[
+            (1000, 1000),
+            (1000, 1000),
+            (4000, 1000),
+            (7000, 1000),
+            (10000, 1100),
+        ]);
 
         let ms = 1_000_000;
         assert_eq!(out[0], 1000 * ms);
@@ -2544,5 +2555,47 @@ mod tests {
         assert!(out[2] > out[1], "frame B must follow frame A: {:?}", out);
         assert!(out[3] > out[2], "frame C must follow frame B: {:?}", out);
         assert_eq!(out[4], 1100 * ms, "a frame already in order keeps its PTS");
+    }
+
+    /// An encoder with B-frames sends a frame after the one it precedes, so
+    /// its PTS is a frame or more behind the previous packet's. It must keep
+    /// that PTS: moving it past the later frame bunches the decoded video.
+    #[test]
+    fn video_b_frames_keep_their_pts() {
+        // Decode order I P B B P, 33 ms per frame: display order I B B P P.
+        let out = bridge_video_packets(&[
+            (0, 1000),
+            (9000, 1100),
+            (3000, 1033),
+            (6000, 1066),
+            (18000, 1200),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(
+            out,
+            vec![1000 * ms, 1100 * ms, 1033 * ms, 1066 * ms, 1200 * ms],
+            "B-frames must reach the slot with their own PTS"
+        );
+    }
+
+    /// One frame with a PTS far ahead of the rest must not hold back the
+    /// frames after it, or the seat freezes until real time catches up.
+    #[test]
+    fn video_frame_far_ahead_does_not_hold_back_later_frames() {
+        let out = bridge_video_packets(&[
+            (0, 1000),
+            (3000, 1033),
+            (6000, 10_000),
+            (9000, 1100),
+            (12000, 1133),
+        ]);
+
+        let ms = 1_000_000;
+        assert_eq!(
+            out,
+            vec![1000 * ms, 1033 * ms, 10_000 * ms, 1100 * ms, 1133 * ms],
+            "frames after an outlier must keep their own PTS"
+        );
     }
 }
