@@ -155,7 +155,7 @@ fn errors_after_feeding<B: BlockBuilder>(
     gst::Element::link_many([&src, &filter, &input_element]).expect("link source to block");
 
     let flow_id = strom_types::flow::FlowId::new_v4();
-    let events = EventBroadcaster::new(16);
+    let events = EventBroadcaster::with_capacity(16);
     for setup in ctx.take_element_setups() {
         setup(flow_id, events.clone());
     }

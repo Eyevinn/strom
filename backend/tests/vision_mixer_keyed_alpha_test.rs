@@ -276,7 +276,7 @@ fn run_flow(block_id: &str, output_format: &str) -> Measured {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
 
     let flow = build_flow(block_id, output_format);
     let mut manager = PipelineManager::new(

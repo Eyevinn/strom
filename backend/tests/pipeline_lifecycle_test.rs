@@ -58,7 +58,7 @@ async fn test_pipeline_cleanup_after_stop_and_drop() {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
     let media_path = std::env::temp_dir();
 
     let flow = build_test_flow("lifecycle_test");
@@ -123,7 +123,7 @@ async fn test_leak_detection_catches_circular_reference() {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
     let media_path = std::env::temp_dir();
 
     let flow = build_test_flow("leak_detection_test");
@@ -187,6 +187,8 @@ async fn test_delete_running_flow_releases_pipeline() {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     );
 
     let flow = build_test_flow("delete_running_flow_test");

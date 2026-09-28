@@ -71,7 +71,7 @@ async fn test_start_disables_hdrext_aggregation_on_depayloaders() {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
 
     let flow = build_depayloader_flow("hdrext_aggregation_test");
 

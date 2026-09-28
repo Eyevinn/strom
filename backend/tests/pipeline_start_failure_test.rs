@@ -78,7 +78,7 @@ async fn test_start_fails_when_pipeline_cannot_reach_playing() {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
     let media_path = std::env::temp_dir();
 
     let flow = build_failing_flow("start_failure_test");
@@ -113,7 +113,7 @@ async fn test_start_succeeds_for_healthy_pipeline() {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
     let media_path = std::env::temp_dir();
 
     let mut flow = build_failing_flow("start_success_test");

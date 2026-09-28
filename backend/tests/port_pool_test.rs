@@ -26,6 +26,8 @@ fn new_state(dir: &TempDir) -> AppState {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     )
 }
 

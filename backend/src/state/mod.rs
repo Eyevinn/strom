@@ -133,6 +133,7 @@ fn resolve_ramp_ms(
 
 impl AppState {
     /// Create new application state with the given storage backend.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         storage: impl Storage + 'static,
         blocks_path: impl Into<PathBuf>,
@@ -140,8 +141,10 @@ impl AppState {
         ice_servers: Vec<String>,
         ice_transport_policy: String,
         sap_multicast_addresses: Vec<String>,
+        structured_events: bool,
+        include_high_frequency_events: bool,
     ) -> Self {
-        let events = EventBroadcaster::default();
+        let events = EventBroadcaster::new(100, structured_events, include_high_frequency_events);
         let affinity_manager = AffinityManager::new();
         let num_cores = affinity_manager.num_cores();
         Self {
@@ -353,6 +356,7 @@ impl AppState {
     }
 
     /// Create new application state with JSON file storage.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_json_storage(
         flows_path: impl AsRef<std::path::Path>,
         blocks_path: impl Into<PathBuf>,
@@ -360,6 +364,8 @@ impl AppState {
         ice_servers: Vec<String>,
         ice_transport_policy: String,
         sap_multicast_addresses: Vec<String>,
+        structured_events: bool,
+        include_high_frequency_events: bool,
     ) -> Self {
         Self::new(
             JsonFileStorage::new(flows_path),
@@ -368,6 +374,8 @@ impl AppState {
             ice_servers,
             ice_transport_policy,
             sap_multicast_addresses,
+            structured_events,
+            include_high_frequency_events,
         )
     }
 
@@ -375,6 +383,7 @@ impl AppState {
     ///
     /// This is an async function that returns a Result because it needs to
     /// connect to the database and run migrations.
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_postgres_storage(
         database_url: &str,
         blocks_path: impl Into<PathBuf>,
@@ -382,6 +391,8 @@ impl AppState {
         ice_servers: Vec<String>,
         ice_transport_policy: String,
         sap_multicast_addresses: Vec<String>,
+        structured_events: bool,
+        include_high_frequency_events: bool,
     ) -> anyhow::Result<Self> {
         use crate::storage::PostgresStorage;
 
@@ -395,6 +406,8 @@ impl AppState {
             ice_servers,
             ice_transport_policy,
             sap_multicast_addresses,
+            structured_events,
+            include_high_frequency_events,
         ))
     }
 
@@ -2873,6 +2886,8 @@ impl Default for AppState {
             vec!["stun:stun.l.google.com:19302".to_string()],
             "all".to_string(),
             vec!["239.255.255.255".to_string(), "224.2.127.254".to_string()],
+            false,
+            false,
         )
     }
 }
@@ -2939,6 +2954,8 @@ mod mixer_solo_intent_tests {
             vec![],
             "all".to_string(),
             vec![],
+            false,
+            false,
         )
     }
 
