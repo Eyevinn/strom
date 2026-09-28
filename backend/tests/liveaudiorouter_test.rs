@@ -1051,10 +1051,10 @@ fn observe_input_warnings(
                 e.error(),
                 e.debug()
             ),
-            gst::MessageView::Warning(w) => {
-                if w.src().map(|s| s.name()).as_deref() == Some(source.as_str()) {
-                    warnings.push(w.error().to_string());
-                }
+            gst::MessageView::Warning(w)
+                if w.src().map(|s| s.name()).as_deref() == Some(source.as_str()) =>
+            {
+                warnings.push(w.error().to_string());
             }
             _ => {}
         }
