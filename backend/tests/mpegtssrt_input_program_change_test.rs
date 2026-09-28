@@ -184,7 +184,7 @@ fn buffers_across_pid_change(decode: bool) -> (u64, u64, Option<String>) {
     for setup in ctx.take_element_setups() {
         setup(
             uuid::Uuid::new_v4(),
-            strom::events::EventBroadcaster::new(16),
+            strom::events::EventBroadcaster::with_capacity(16),
         );
     }
 
