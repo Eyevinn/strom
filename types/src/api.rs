@@ -1306,7 +1306,8 @@ pub struct VisionMixerState {
     /// compositor repeats its last frame, so a source that stopped looks the
     /// same on air as one that is motionless. It measures arrival, not display:
     /// an input whose timestamps jump backwards freezes on air for the length
-    /// of the jump while its age stays low.
+    /// of the jump while its age stays low. Every input ageing together means
+    /// the mixer's output stalled, not that every source stopped.
     #[serde(default)]
     pub input_media_age_ms: Vec<Option<u64>>,
 }
