@@ -68,7 +68,7 @@ fn build_flow() -> Flow {
 fn build_manager(registry: &BlockRegistry) -> PipelineManager {
     PipelineManager::new(
         &build_flow(),
-        EventBroadcaster::new(10),
+        EventBroadcaster::with_capacity(10),
         registry,
         vec![],
         "all".to_string(),

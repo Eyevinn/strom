@@ -67,7 +67,7 @@ fn start_vm(block_id: &str, num_inputs: u64) -> (PipelineManager, NamedTempFile)
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
 
     let flow = build_vm_flow(block_id, num_inputs);
     let mut manager = PipelineManager::new(
