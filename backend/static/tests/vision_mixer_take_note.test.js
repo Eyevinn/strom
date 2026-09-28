@@ -41,6 +41,14 @@ test('a fade that morphed is not called a downgrade', () => {
     assert.doesNotMatch(note, /downgrad/);
 });
 
+test('the morph note fits a punch-in, where the box stays put and the crop changes', () => {
+    for (const requested of ['fade', 'slide_left']) {
+        const note = takeStatusNote(requested, 'morph');
+        assert.match(note, /zoom/);
+        assert.doesNotMatch(note, /slid/);
+    }
+});
+
 for (const requested of ['slide_left', 'push_left', 'wipe_left']) {
     test(`a ${requested} that morphed says it was downgraded`, () => {
         assert.match(takeStatusNote(requested, 'morph'), /downgraded to morph/);
