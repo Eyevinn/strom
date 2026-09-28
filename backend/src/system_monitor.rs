@@ -290,15 +290,6 @@ impl SystemMonitor {
     }
 }
 
-impl Default for SystemMonitor {
-    fn default() -> Self {
-        let num_cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        Self::new(num_cores)
-    }
-}
-
 impl Drop for SystemMonitor {
     fn drop(&mut self) {
         // Signal the background thread to stop

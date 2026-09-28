@@ -1222,13 +1222,6 @@ impl TransitionController {
         Ok(cs)
     }
 
-    /// Clean up completed transitions.
-    pub fn cleanup_old_transitions(&self) {
-        if let Ok(mut transitions) = self.active_transitions.lock() {
-            transitions.clear();
-        }
-    }
-
     /// Animate a single input's properties to target values.
     ///
     /// Smoothly animates position (xpos, ypos) and size (width, height) from
