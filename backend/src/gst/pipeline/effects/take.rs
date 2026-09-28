@@ -71,6 +71,16 @@ impl PipelineManager {
             transition_type, block_instance_id, from_input, to_input, duration_ms
         );
 
+        // Refuse an unknown name before anything changes: the FTB cancel and
+        // FX reset below must not happen for a take that never runs.
+        let trans_type = transition_type.parse::<TransitionType>().map_err(|_| {
+            PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "transition_type".to_string(),
+                reason: format!("Unknown transition type: {}", transition_type),
+            }
+        })?;
+
         // Find the mixer element for this block
         let mixer_id = format!("{}:mixer", block_instance_id);
         let mixer = self
@@ -140,21 +150,12 @@ impl PipelineManager {
                     .get(&mv_comp_id)
                     .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-                // Unknown names are refused here as on the plain path below,
-                // rather than run as a fade and reported as one.
-                let parsed = transition_type.parse::<TransitionType>().map_err(|_| {
-                    PipelineError::InvalidProperty {
-                        element: block_instance_id.to_string(),
-                        property: "transition_type".to_string(),
-                        reason: format!("Unknown transition type: {}", transition_type),
-                    }
-                })?;
-                let is_cut = duration_ms == 0 || matches!(parsed, TransitionType::Cut);
+                let is_cut = duration_ms == 0 || matches!(trans_type, TransitionType::Cut);
                 // Explicit position animation across heterogeneous Source kinds
                 // (input ↔ PiP) isn't supported yet — Slide/Push/Dip-to-Black
                 // silently degrade to Fade in this branch. Surface that in the
                 // log so operators don't think the requested transition ran.
-                if !is_cut && !matches!(parsed, TransitionType::Fade | TransitionType::Cut) {
+                if !is_cut && !matches!(trans_type, TransitionType::Fade | TransitionType::Cut) {
                     info!(
                         "PiP-aware Take on {}: transition '{}' downgraded to Fade ({}ms) — non-Fade transitions across PiPs not supported yet",
                         block_instance_id, transition_type, duration_ms
@@ -373,7 +374,7 @@ impl PipelineManager {
                     // PiP path too — the pad animation underneath is the
                     // morph above, but the glitch/flash/punch still lands,
                     // and it is what the take reports.
-                    if let TransitionType::MasterFx(kind) = parsed {
+                    if let TransitionType::MasterFx(kind) = trans_type {
                         if self.vision_mixer_fx_available(block_instance_id) {
                             if let Ok(now) = dist_controller.current_stream_time(&self.pipeline) {
                                 if self
@@ -447,15 +448,6 @@ impl PipelineManager {
             canvas_width,
             canvas_height,
         );
-
-        // Parse transition type
-        let trans_type = transition_type.parse::<TransitionType>().map_err(|_| {
-            PipelineError::InvalidProperty {
-                element: block_instance_id.to_string(),
-                property: "transition_type".to_string(),
-                reason: format!("Unknown transition type: {}", transition_type),
-            }
-        })?;
 
         // Single-input transition only. Multi-source compositions are now
         // expressed as PiPs which are handled by the PiP-aware branch above.
