@@ -138,18 +138,21 @@ impl PipelineManager {
                     .get(&mv_comp_id)
                     .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-                let parsed = transition_type.parse::<TransitionType>().ok();
-                let is_cut = duration_ms == 0 || matches!(parsed, Some(TransitionType::Cut));
+                // Unknown names are refused here as on the plain path below,
+                // rather than run as a fade and reported as one.
+                let parsed = transition_type.parse::<TransitionType>().map_err(|_| {
+                    PipelineError::InvalidProperty {
+                        element: block_instance_id.to_string(),
+                        property: "transition_type".to_string(),
+                        reason: format!("Unknown transition type: {}", transition_type),
+                    }
+                })?;
+                let is_cut = duration_ms == 0 || matches!(parsed, TransitionType::Cut);
                 // Explicit position animation across heterogeneous Source kinds
                 // (input ↔ PiP) isn't supported yet — Slide/Push/Dip-to-Black
                 // silently degrade to Fade in this branch. Surface that in the
                 // log so operators don't think the requested transition ran.
-                if !is_cut
-                    && !matches!(
-                        parsed,
-                        Some(TransitionType::Fade) | Some(TransitionType::Cut)
-                    )
-                {
+                if !is_cut && !matches!(parsed, TransitionType::Fade | TransitionType::Cut) {
                     info!(
                         "PiP-aware Take on {}: transition '{}' downgraded to Fade ({}ms) — non-Fade transitions across PiPs not supported yet",
                         block_instance_id, transition_type, duration_ms
@@ -368,7 +371,7 @@ impl PipelineManager {
                     // PiP path too — the pad animation underneath is the
                     // morph above, but the glitch/flash/punch still lands,
                     // and it is what the take reports.
-                    if let Some(TransitionType::MasterFx(kind)) = parsed {
+                    if let TransitionType::MasterFx(kind) = parsed {
                         if self.vision_mixer_fx_available(block_instance_id) {
                             if let Ok(now) = dist_controller.current_stream_time(&self.pipeline) {
                                 if self
