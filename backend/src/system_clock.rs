@@ -7,6 +7,8 @@
 //! [`SystemClockError::Unsupported`].
 
 use strom_types::api::SystemClockInfo;
+use strom_types::clock_health::{assess_clock_health, ClockHealthLevel};
+use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub enum SystemClockError {
@@ -92,4 +94,28 @@ pub fn read_system_clock_info() -> Result<SystemClockInfo, SystemClockError> {
     // we need strom to report clock discipline on those platforms, we report
     // `Unsupported` and let the API layer surface a 501.
     Err(SystemClockError::Unsupported)
+}
+
+/// Warn once at startup when the system clock is poorly disciplined, and say
+/// how to fix it.
+///
+/// Flows on the Realtime or TAI pipeline clocks, and TAMS segment timestamps,
+/// inherit whatever the host clock is doing. The Clocks panel shows the same
+/// verdict, but only to someone who opens it.
+pub fn log_clock_discipline() {
+    let info = match read_system_clock_info() {
+        Ok(info) => info,
+        Err(e) => {
+            debug!("Skipping system clock check: {}", e);
+            return;
+        }
+    };
+
+    let health = assess_clock_health(&info);
+    if health.level > ClockHealthLevel::Healthy {
+        warn!(
+            "System clock is poorly disciplined: {}",
+            health.findings.join(" ")
+        );
+    }
 }

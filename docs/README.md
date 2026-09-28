@@ -12,6 +12,7 @@ Common questions are answered in the [FAQ](FAQ.md).
 - [DOCKER_GPU_SETUP.md](DOCKER_GPU_SETUP.md) — NVIDIA GPU acceleration (NVENC/NVDEC, CUDA-GL interop, container toolkit).
 - [AUTHENTICATION.md](AUTHENTICATION.md) — session login and API keys.
 - [POSTGRESQL.md](POSTGRESQL.md) — PostgreSQL storage backend for production.
+- [PORT_POOL.md](PORT_POOL.md) — port numbers Strom hands out to callers sharing one instance.
 
 ## Using Strom
 

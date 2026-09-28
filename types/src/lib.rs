@@ -13,6 +13,7 @@ pub const BUFFER_AGE_WARNING_THRESHOLD_MS: u64 = 3000;
 pub mod api;
 pub mod auth;
 pub mod block;
+pub mod clock_health;
 pub mod discovery;
 pub mod effects;
 pub mod element;
@@ -22,6 +23,7 @@ pub mod flow;
 pub mod mediaplayer;
 pub mod mixer;
 pub mod network;
+pub mod ports;
 pub mod routing;
 pub mod state;
 pub mod stats;
@@ -50,6 +52,10 @@ pub use events::StromEvent;
 pub use flow::{CpuAffinity, Flow, FlowId, ThreadPriority, ThreadPriorityStatus};
 pub use network::{
     Ipv4AddressInfo, Ipv6AddressInfo, NetworkInterfaceInfo, NetworkInterfacesResponse,
+};
+pub use ports::{
+    AssignPortsRequest, CreateReservationRequest, PortEntry, PortInUse, PortPoolStatus,
+    PortReservation, PortSpan, PortState, RenewReservationRequest,
 };
 pub use state::PipelineState;
 pub use stats::{

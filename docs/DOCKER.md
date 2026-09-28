@@ -47,6 +47,7 @@ full list and the CLI equivalents):
 | `STROM_ADMIN_USER` / `STROM_ADMIN_PASSWORD_HASH` / `STROM_API_KEY` | Authentication — see [AUTHENTICATION.md](AUTHENTICATION.md) |
 | `STROM_SERVER_ICE_SERVERS` | STUN/TURN servers for WebRTC |
 | `STROM_SERVER_ICE_TRANSPORT_POLICY` | `all` (default) or `relay` to force WebRTC through TURN |
+| `STROM_PORTS` | Port numbers the pool hands out to callers (unset = pool off) — see [PORT_POOL.md](PORT_POOL.md) |
 | `STROM_TLS_CERT` / `STROM_TLS_KEY` | Built-in TLS (PEM) |
 | `RUST_LOG` | Logging level (default `info`) |
 

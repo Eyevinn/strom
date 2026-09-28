@@ -551,6 +551,7 @@ fn run_with_gui(
         // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
         // without it, so say so at startup rather than at first flow start.
         strom::gst::ice_preflight::log_ice_availability();
+        strom::system_clock::log_clock_discipline();
 
         // Start GLib main loop in background thread for bus watch callbacks
         start_glib_main_loop();
@@ -588,6 +589,20 @@ fn run_with_gui(
                 config.include_high_frequency_events,
             )
         };
+        state
+            .configure_port_pool(
+                config.pool_ports.clone(),
+                strom::ports::PortReservationStore::new(
+                    config
+                        .flows_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new(".")),
+                ),
+                config.port_lease_ttl_seconds,
+                config.probe_before_handout,
+            )
+            .await
+            .expect("failed to configure port pool");
         state
             .load_from_storage()
             .await
@@ -782,6 +797,7 @@ async fn run_headless(
     // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
     // without it, so say so at startup rather than at first flow start.
     strom::gst::ice_preflight::log_ice_availability();
+    strom::system_clock::log_clock_discipline();
 
     // Start GLib main loop in background thread for bus watch callbacks
     start_glib_main_loop();
@@ -816,6 +832,19 @@ async fn run_headless(
             config.include_high_frequency_events,
         )
     };
+    state
+        .configure_port_pool(
+            config.pool_ports.clone(),
+            strom::ports::PortReservationStore::new(
+                config
+                    .flows_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new(".")),
+            ),
+            config.port_lease_ttl_seconds,
+            config.probe_before_handout,
+        )
+        .await?;
     state.load_from_storage().await?;
 
     // Store the log reload handle so log levels can be changed at runtime
