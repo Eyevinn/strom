@@ -2,10 +2,9 @@
 //! aspect-fitted in its new shape on the GPU (OpenGL) vision mixer.
 //!
 //! Builds a real vision mixer flow through `PipelineManager` with a white
-//! 1280x720 source on input 0, switches that source to 720x1280, and
-//! measures the white area of PGM. A portrait source on a 1280x720 canvas is
-//! pillarboxed to about a third of the width; stretched to the first source's
-//! size, PGM stays entirely white.
+//! source on input 0 and measures the white area of PGM. A 720x1280 source on
+//! a 1280x720 canvas is pillarboxed to about a third of the width; stretched,
+//! PGM is entirely white.
 
 use gstreamer::prelude::*;
 use std::collections::HashMap;
@@ -14,8 +13,6 @@ use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
 use tempfile::NamedTempFile;
-
-const BLOCK_ID: &str = "vmresize";
 
 /// Same probe as `vision_mixer_fx_test`: a trivial GL run must reach EOS.
 /// Having the GL plugins installed is not enough on headless runners.
@@ -74,10 +71,27 @@ fn elem(id: &str, ty: &str, props: Vec<(&str, PV)>) -> strom_types::Element {
     }
 }
 
-fn build_flow() -> Flow {
+const LANDSCAPE: (i32, i32) = (1280, 720);
+const PORTRAIT: (i32, i32) = (720, 1280);
+
+fn source_caps((width, height): (i32, i32)) -> gstreamer::Caps {
+    gstreamer::Caps::builder("video/x-raw")
+        .field("width", width)
+        .field("height", height)
+        .field("framerate", gstreamer::Fraction::new(30, 1))
+        .build()
+}
+
+/// A 720x1280 source aspect-fitted on 1280x720 covers 405/1280 of the width.
+fn pillarboxed(white: f64) -> bool {
+    (0.25..0.40).contains(&white)
+}
+
+/// Mixer state is global per block id, so each test needs its own.
+fn build_flow(block_id: &str, first_shape: (i32, i32)) -> Flow {
     let mut flow = Flow::new("vm_source_resize");
     flow.blocks.push(strom_types::BlockInstance {
-        id: BLOCK_ID.to_string(),
+        id: block_id.to_string(),
         block_definition_id: "builtin.vision_mixer".to_string(),
         name: None,
         properties: {
@@ -111,10 +125,7 @@ fn build_flow() -> Flow {
     flow.elements.push(elem(
         "caps0",
         "capsfilter",
-        vec![(
-            "caps",
-            PV::String("video/x-raw,width=1280,height=720,framerate=30/1".into()),
-        )],
+        vec![("caps", PV::String(source_caps(first_shape).to_string()))],
     ));
     flow.elements.push(elem(
         "pgmsink",
@@ -126,14 +137,11 @@ fn build_flow() -> Flow {
         ],
     ));
     for (from, to) in [
-        ("src0:src", "caps0:sink"),
-        ("caps0:src", "vmresize:video_in_0"),
-        ("vmresize:pgm_out", "pgmsink:sink"),
+        ("src0:src".to_string(), "caps0:sink".to_string()),
+        ("caps0:src".to_string(), format!("{block_id}:video_in_0")),
+        (format!("{block_id}:pgm_out"), "pgmsink:sink".to_string()),
     ] {
-        flow.links.push(strom_types::Link {
-            from: from.to_string(),
-            to: to.to_string(),
-        });
+        flow.links.push(strom_types::Link { from, to });
     }
     flow
 }
@@ -183,70 +191,151 @@ fn wait_for_pgm(appsink: &gstreamer_app::AppSink, what: &str, done: impl Fn(f64)
     );
 }
 
+/// A running GPU vision mixer flow and the glib main loop its geometry
+/// refresh needs: the mixer re-fits a pad's rect from an idle callback on the
+/// default main context, which only runs while a main loop does. The server
+/// has one.
+struct Running {
+    manager: PipelineManager,
+    appsink: gstreamer_app::AppSink,
+    main_loop: gstreamer::glib::MainLoop,
+    main_loop_thread: std::thread::JoinHandle<()>,
+    _registry_file: NamedTempFile,
+}
+
+impl Running {
+    fn start(flow: Flow) -> Running {
+        let main_loop = gstreamer::glib::MainLoop::new(None, false);
+        let main_loop_thread = {
+            let ml = main_loop.clone();
+            std::thread::spawn(move || ml.run())
+        };
+        let registry_file = NamedTempFile::new().unwrap();
+        let registry = BlockRegistry::new(registry_file.path());
+        let events = EventBroadcaster::with_capacity(10);
+        let mut manager = PipelineManager::new(
+            &flow,
+            events,
+            &registry,
+            vec![],
+            "all".to_string(),
+            None,
+            std::env::temp_dir(),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("build GPU vision mixer pipeline");
+        manager.start().expect("start GPU vision mixer pipeline");
+        let appsink = manager
+            .pipeline()
+            .by_name("pgmsink")
+            .expect("appsink in pipeline")
+            .downcast::<gstreamer_app::AppSink>()
+            .expect("appsink type");
+        Running {
+            manager,
+            appsink,
+            main_loop,
+            main_loop_thread,
+            _registry_file: registry_file,
+        }
+    }
+
+    fn element(&self, name: &str) -> gstreamer::Element {
+        self.manager
+            .pipeline()
+            .by_name(name)
+            .unwrap_or_else(|| panic!("{name} in pipeline"))
+    }
+
+    fn set_source_shape(&self, shape: (i32, i32)) {
+        self.element("caps0")
+            .set_property("caps", source_caps(shape));
+    }
+
+    fn stop(mut self) {
+        self.manager.stop().expect("stop");
+        drop(self.manager);
+        self.main_loop.quit();
+        self.main_loop_thread.join().expect("main loop thread");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_switched_to_portrait_is_pillarboxed() {
     gstreamer::init().unwrap();
     if !gl_available_or_required() {
         return;
     }
-
-    // The mixer re-fits a pad's rect from an idle callback on the default main
-    // context, so it only runs while a main loop does. The server has one.
-    let main_loop = gstreamer::glib::MainLoop::new(None, false);
-    let main_loop_thread = {
-        let ml = main_loop.clone();
-        std::thread::spawn(move || ml.run())
-    };
-
-    let flow = build_flow();
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::with_capacity(10);
-    let mut manager = PipelineManager::new(
-        &flow,
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
-    .expect("build GPU vision mixer pipeline");
-    manager.start().expect("start GPU vision mixer pipeline");
-
-    let appsink = manager
-        .pipeline()
-        .by_name("pgmsink")
-        .expect("appsink in pipeline")
-        .downcast::<gstreamer_app::AppSink>()
-        .expect("appsink type");
+    let running = Running::start(build_flow("vmresize", LANDSCAPE));
 
     // A 16:9 source fills the 16:9 canvas.
-    let before = wait_for_pgm(&appsink, "the landscape source filling PGM", |f| f > 0.95);
+    let before = wait_for_pgm(&running.appsink, "the landscape source filling PGM", |f| {
+        f > 0.95
+    });
     eprintln!("landscape: white={:.2}", before);
 
-    // The source turns portrait. Aspect-fitted, 720x1280 on 1280x720 covers
-    // 405/1280 of the width: about 0.32 of the frame.
-    manager
-        .pipeline()
-        .by_name("caps0")
-        .expect("caps0")
-        .set_property(
-            "caps",
-            gstreamer::Caps::builder("video/x-raw")
-                .field("width", 720i32)
-                .field("height", 1280i32)
-                .field("framerate", gstreamer::Fraction::new(30, 1))
-                .build(),
-        );
-    let after = wait_for_pgm(&appsink, "the portrait source pillarboxed", |f| {
-        (0.25..0.40).contains(&f)
-    });
+    running.set_source_shape(PORTRAIT);
+    let after = wait_for_pgm(
+        &running.appsink,
+        "the portrait source pillarboxed",
+        pillarboxed,
+    );
     eprintln!("portrait: white={:.2}", after);
 
-    manager.stop().expect("stop");
-    drop(manager);
-    main_loop.quit();
-    main_loop_thread.join().expect("main loop thread");
+    running.stop();
+}
+
+/// The first fit runs before the mixer's output has negotiated its size, so
+/// it must use the configured PGM size, not a default canvas.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_portrait_from_the_start_is_pillarboxed() {
+    gstreamer::init().unwrap();
+    if !gl_available_or_required() {
+        return;
+    }
+    let running = Running::start(build_flow("vmresize_first", PORTRAIT));
+    let white = wait_for_pgm(
+        &running.appsink,
+        "the portrait source pillarboxed",
+        pillarboxed,
+    );
+    eprintln!("portrait from the start: white={:.2}", white);
+    running.stop();
+}
+
+/// The mixer pad stores new caps only after its event probes return. A
+/// streaming thread held up there must not leave the old shape in place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_switch_fits_when_caps_are_stored_late() {
+    gstreamer::init().unwrap();
+    if !gl_available_or_required() {
+        return;
+    }
+    let block_id = "vmresize_late";
+    let running = Running::start(build_flow(block_id, LANDSCAPE));
+    wait_for_pgm(&running.appsink, "the landscape source filling PGM", |f| {
+        f > 0.95
+    });
+
+    running
+        .element(&format!("{block_id}:mixer"))
+        .static_pad("sink_0")
+        .expect("mixer sink_0")
+        .add_probe(gstreamer::PadProbeType::EVENT_DOWNSTREAM, |_, info| {
+            if let Some(gstreamer::PadProbeData::Event(ev)) = &info.data {
+                if ev.type_() == gstreamer::EventType::Caps {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+
+    running.set_source_shape(PORTRAIT);
+    let white = wait_for_pgm(
+        &running.appsink,
+        "the portrait source pillarboxed",
+        pillarboxed,
+    );
+    eprintln!("portrait, caps stored late: white={:.2}", white);
+    running.stop();
 }

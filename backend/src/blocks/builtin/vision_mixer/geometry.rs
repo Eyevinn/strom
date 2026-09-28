@@ -23,12 +23,12 @@ use crate::gst::pipeline::effects::{
 };
 use crate::gst::underlay::UnderlayCtx;
 
-/// Install CAPS event probes on every input video sink pad of the dist and
-/// multiview compositors. Each caps arrival/change triggers a full geometry
-/// refresh from the current overlay state.
+/// Watch the caps of every input video sink pad of the dist and multiview
+/// compositors. Each caps arrival/change triggers a full geometry refresh
+/// from the current overlay state.
 ///
 /// Must run after linking (request pads exist). Elements are captured as
-/// `WeakRef`s in the probe closures — pads own their probes, and a strong
+/// `WeakRef`s in the handlers — pads own their handlers, and a strong
 /// element reference would create a cycle that leaks the pipeline.
 pub fn install_caps_probes(
     block_id: &str,
@@ -55,66 +55,36 @@ pub fn install_caps_probes(
         let block_id = block_id.to_string();
         let mixer_weak = mixer.downgrade();
         let mv_weak = mv_comp.downgrade();
-        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
-            if let Some(gst::PadProbeData::Event(ev)) = &info.data {
-                if let gst::EventView::Caps(caps_event) = ev.view() {
-                    // Defer the refresh to the glib main loop instead of
-                    // running it inline: sibling branches negotiate
-                    // concurrently on their own streaming threads, and two
-                    // probes of the same input firing simultaneously can each
-                    // miss the other's caps, leaving that input's thumbnail
-                    // stretched forever. Serialized on the main context, the
-                    // last refresh always sees every negotiated pad.
-                    refresh_once_stored(
-                        block_id.clone(),
-                        mixer_weak.clone(),
-                        mv_weak.clone(),
-                        pad.downgrade(),
-                        caps_event.caps_owned(),
-                        MAX_CAPS_STORE_WAITS,
-                    );
-                }
+        // `notify::caps` fires once the pad has stored the new caps; a caps
+        // EVENT probe fires before, so a refresh queued from one can read the
+        // old size and leave the rect in the old shape.
+        pad.connect_notify(Some("caps"), move |pad, _| {
+            // Caps are cleared on deactivation; nothing to fit.
+            if pad.current_caps().is_none() {
+                return;
             }
-            gst::PadProbeReturn::Ok
+            // Defer the refresh to the glib main loop instead of running it
+            // inline: sibling branches negotiate concurrently on their own
+            // streaming threads, and two notifies of the same input firing
+            // simultaneously can each miss the other's caps, leaving that
+            // input's thumbnail stretched forever. Serialized on the main
+            // context, the last refresh always sees every negotiated pad.
+            let block_id = block_id.clone();
+            let mixer_weak = mixer_weak.clone();
+            let mv_weak = mv_weak.clone();
+            gst::glib::idle_add_once(move || {
+                // Pipeline teardown in progress → nothing to refresh.
+                let (Some(mixer), Some(mv_comp)) = (mixer_weak.upgrade(), mv_weak.upgrade()) else {
+                    return;
+                };
+                refresh_geometry(&block_id, &mixer, &mv_comp);
+            });
         });
     }
     debug!(
-        "Vision mixer {}: installed {} caps probes for reactive geometry",
+        "Vision mixer {}: watching caps on {} pads for reactive geometry",
         block_id, installed
     );
-}
-
-/// Main-loop turns to wait for a pad to store caps it was sent.
-const MAX_CAPS_STORE_WAITS: u32 = 1000;
-
-/// Refresh geometry once `pad` holds `caps`.
-///
-/// A pad stores caps only after its probes return, and the main loop runs on
-/// its own thread, so a refresh queued from the probe can run first. It would
-/// read the old size, find no input changed, and leave the rect in the old
-/// shape. Requeue until the caps are stored; if they never are (refused),
-/// refresh anyway after `waits` turns.
-fn refresh_once_stored(
-    block_id: String,
-    mixer_weak: gst::glib::WeakRef<gst::Element>,
-    mv_weak: gst::glib::WeakRef<gst::Element>,
-    pad_weak: gst::glib::WeakRef<gst::Pad>,
-    caps: gst::Caps,
-    waits: u32,
-) {
-    gst::glib::idle_add_once(move || {
-        // Pipeline teardown in progress → nothing to refresh.
-        let (Some(mixer), Some(mv_comp), Some(pad)) =
-            (mixer_weak.upgrade(), mv_weak.upgrade(), pad_weak.upgrade())
-        else {
-            return;
-        };
-        if waits > 0 && pad.current_caps().as_ref() != Some(&caps) {
-            refresh_once_stored(block_id, mixer_weak, mv_weak, pad_weak, caps, waits - 1);
-            return;
-        }
-        refresh_geometry(&block_id, &mixer, &mv_comp);
-    });
 }
 
 /// Read the UNCROPPED source `(width, height)` feeding a sink pad. On the
@@ -160,12 +130,10 @@ fn refresh_geometry(block_id: &str, mixer: &gst::Element, mv_comp: &gst::Element
         }
     }
 
-    // Dist canvas size from the mixer's negotiated output caps.
-    let (cw, ch) = pad_caps_dims_src(mixer).unwrap_or_else(|| {
-        strom_types::parse_resolution_string(vision_mixer::DEFAULT_PGM_RESOLUTION)
-            .map(|(w, h)| (w as i32, h as i32))
-            .expect("DEFAULT_PGM_RESOLUTION must be valid")
-    });
+    // Dist canvas size from the mixer's negotiated output caps, or the PGM
+    // size it is built to produce: the first refresh can run before the
+    // output has negotiated, and no later one runs unless an input changes.
+    let (cw, ch) = pad_caps_dims_src(mixer).unwrap_or((state.pgm_w as i32, state.pgm_h as i32));
     let fallback = if ch > 0 {
         cw as f64 / ch as f64
     } else {
