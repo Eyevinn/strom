@@ -112,6 +112,8 @@ async fn stopping_a_flow_removes_no_more_bus_watches_than_it_added() {
         vec![],
         "all".to_string(),
         vec![],
+        false,
+        false,
     );
 
     let flow = build_flow_with_a_media_player("bus_signal_watch_balance");

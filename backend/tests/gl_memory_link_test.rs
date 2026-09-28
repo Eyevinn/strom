@@ -51,7 +51,7 @@ fn build_manager(flow: &Flow) -> PipelineManager {
 
     let temp_file = NamedTempFile::new().unwrap();
     let registry = BlockRegistry::new(temp_file.path());
-    let events = EventBroadcaster::new(10);
+    let events = EventBroadcaster::with_capacity(10);
 
     PipelineManager::new(
         flow,
