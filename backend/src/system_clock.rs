@@ -6,7 +6,8 @@
 //! different or unavailable, so `read_system_clock_info` returns
 //! [`SystemClockError::Unsupported`].
 
-use strom_types::api::SystemClockInfo;
+use strom_types::api::{SystemClockInfo, CHRONY_SETUP_HINT};
+use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub enum SystemClockError {
@@ -92,4 +93,95 @@ pub fn read_system_clock_info() -> Result<SystemClockInfo, SystemClockError> {
     // we need strom to report clock discipline on those platforms, we report
     // `Unsupported` and let the API layer surface a 501.
     Err(SystemClockError::Unsupported)
+}
+
+/// Max error above which the kernel is too unsure of the time to trust it.
+const MAX_ERROR_LIMIT_US: i64 = 500_000;
+
+/// Warn once at startup when the system clock is poorly disciplined, and say
+/// how to fix it.
+///
+/// Flows on the Realtime or TAI pipeline clocks, and TAMS segment timestamps,
+/// inherit whatever the host clock is doing. The Clocks panel shows the same
+/// problem, but only to someone who opens it.
+pub fn log_clock_discipline() {
+    let info = match read_system_clock_info() {
+        Ok(info) => info,
+        Err(e) => {
+            debug!("Skipping system clock check: {}", e);
+            return;
+        }
+    };
+
+    let problems = discipline_problems(&info);
+    if !problems.is_empty() {
+        warn!(
+            "System clock is poorly disciplined: {}. {}",
+            problems.join("; "),
+            CHRONY_SETUP_HINT
+        );
+    }
+}
+
+/// What is wrong with the clock discipline, in words for the startup log.
+///
+/// Empty means the clock is fit for timestamping.
+fn discipline_problems(info: &SystemClockInfo) -> Vec<String> {
+    let mut problems = Vec::new();
+    if !info.synchronized {
+        problems.push("the kernel reports the clock as not synchronized".to_string());
+    }
+    if info.tai_offset_sec == 0 {
+        problems.push("TAI-UTC offset is 0, so CLOCK_TAI is 37 s wrong".to_string());
+    }
+    if info.max_error_us > MAX_ERROR_LIMIT_US {
+        problems.push(format!(
+            "max error estimate is {} ms",
+            info.max_error_us / 1000
+        ));
+    }
+
+    problems
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chrony_with_leap_table() -> SystemClockInfo {
+        SystemClockInfo {
+            tai_offset_sec: 37,
+            state: "ok".into(),
+            synchronized: true,
+            max_error_us: 4_785,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn well_disciplined_clock_has_no_problems() {
+        assert!(discipline_problems(&chrony_with_leap_table()).is_empty());
+    }
+
+    #[test]
+    fn timesyncd_clock_reports_leap_table_and_max_error() {
+        let info = SystemClockInfo {
+            tai_offset_sec: 0,
+            max_error_us: 940_000,
+            ..chrony_with_leap_table()
+        };
+        let problems = discipline_problems(&info);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("TAI-UTC offset is 0"));
+        assert!(problems[1].contains("940 ms"));
+    }
+
+    #[test]
+    fn unsynchronized_clock_is_reported() {
+        let info = SystemClockInfo {
+            synchronized: false,
+            ..chrony_with_leap_table()
+        };
+        assert_eq!(discipline_problems(&info).len(), 1);
+    }
 }

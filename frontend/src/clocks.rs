@@ -496,6 +496,8 @@ fn assess_clock_health(info: &strom_types::api::SystemClockInfo) -> ClockHealth 
 
     if findings.is_empty() {
         findings.push("No issues detected. Clock looks well disciplined.".into());
+    } else if level > HealthLevel::Healthy {
+        findings.push(strom_types::api::CHRONY_SETUP_HINT.into());
     }
 
     ClockHealth { level, findings }

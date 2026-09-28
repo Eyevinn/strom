@@ -857,6 +857,15 @@ pub struct SystemClockInfo {
     pub last_update: Option<u64>,
 }
 
+/// Where to point an operator whose system clock is poorly disciplined.
+///
+/// Shown in the Clocks panel and logged at startup. The script lives in the
+/// repository and is bundled in the Docker image.
+pub const CHRONY_SETUP_HINT: &str =
+    "Fix on Debian/Ubuntu: `sudo bash scripts/setup/ntp/install-chrony.sh` \
+     installs chrony with multi-source sync and the TAI/UTC leap table. \
+     In the Docker image the script is at /app/scripts/setup/ntp/.";
+
 /// Authentication status response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
