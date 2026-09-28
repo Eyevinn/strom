@@ -345,7 +345,7 @@ mod tests {
             stat(StatValue::Bool(true), Some("flag")).format_value(),
             "Yes"
         );
-        // /rtp-stats sends Bool statistics with an empty unit, not null
+        // An empty unit counts as none
         assert_eq!(stat(StatValue::Bool(false), Some("")).format_value(), "No");
     }
 
