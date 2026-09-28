@@ -67,7 +67,7 @@
 mod builder;
 mod definition;
 mod elements;
-pub(crate) use elements::make_audiomixer;
+pub(crate) use elements::{drop_input_eos, make_audiomixer};
 mod metering;
 mod properties;
 #[cfg(test)]
