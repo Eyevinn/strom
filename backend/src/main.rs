@@ -498,6 +498,7 @@ fn run_with_gui(
         // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
         // without it, so say so at startup rather than at first flow start.
         strom::gst::ice_preflight::log_ice_availability();
+        strom::system_clock::log_clock_discipline();
 
         // Start GLib main loop in background thread for bus watch callbacks
         start_glib_main_loop();
@@ -725,6 +726,7 @@ async fn run_headless(
     // Report WebRTC ICE availability. WHIP/WHEP blocks refuse to build
     // without it, so say so at startup rather than at first flow start.
     strom::gst::ice_preflight::log_ice_availability();
+    strom::system_clock::log_clock_discipline();
 
     // Start GLib main loop in background thread for bus watch callbacks
     start_glib_main_loop();

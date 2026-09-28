@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::list_navigator::{list_navigator, ListItem};
 use crate::ptp_monitor::{PtpStatsData, PtpStatsStore};
+use strom_types::clock_health::{assess_clock_health, ClockHealthLevel};
 
 /// Clocks page state.
 pub struct ClocksPage {
@@ -430,77 +431,6 @@ const TIP_MAX_ERR: &str = "Kernel's worst-case error estimate. Behaves as a sawt
     what time it is.\n\
     • A frozen value that never resets = daemon dead or never started.";
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum HealthLevel {
-    Healthy,
-    Degraded,
-    Bad,
-}
-
-struct ClockHealth {
-    level: HealthLevel,
-    findings: Vec<String>,
-}
-
-fn assess_clock_health(info: &strom_types::api::SystemClockInfo) -> ClockHealth {
-    let mut level = HealthLevel::Healthy;
-    let mut findings = Vec::new();
-    let bump = |to: HealthLevel, level: &mut HealthLevel| {
-        if to > *level {
-            *level = to;
-        }
-    };
-
-    if !info.synchronized || info.state == "error" {
-        bump(HealthLevel::Bad, &mut level);
-        findings.push(
-            "Kernel reports the clock is NOT synchronized — discipline source missing or failing."
-                .into(),
-        );
-    }
-
-    if info.tai_offset_sec == 0 {
-        bump(HealthLevel::Degraded, &mut level);
-        findings.push(
-            "TAI − UTC offset is 0. The discipline daemon has not configured leap seconds, \
-             so CLOCK_TAI cannot be trusted as a global time source. \
-             Expected value as of 2026 is 37 s."
-                .into(),
-        );
-    } else if info.tai_offset_sec != 37 {
-        findings.push(format!(
-            "TAI − UTC offset is {} s (expected 37 as of 2026). \
-             OK if your discipline source is authoritative on leap seconds.",
-            info.tai_offset_sec
-        ));
-    }
-
-    let max_err_ms = info.max_error_us as f64 / 1000.0;
-    if max_err_ms > 500.0 {
-        bump(HealthLevel::Degraded, &mut level);
-        findings.push(format!(
-            "Max error estimate is {:.0} ms — kernel is uncertain about sync quality. \
-             A healthy disciplined clock stays under 100 ms.",
-            max_err_ms
-        ));
-    }
-
-    let offset_us_abs = info.offset_ns.abs() as f64 / 1000.0;
-    if offset_us_abs > 1000.0 {
-        bump(HealthLevel::Degraded, &mut level);
-        findings.push(format!(
-            "Current offset is {:.0} µs (>1 ms) — large correction in flight, sync is drifting.",
-            offset_us_abs
-        ));
-    }
-
-    if findings.is_empty() {
-        findings.push("No issues detected. Clock looks well disciplined.".into());
-    }
-
-    ClockHealth { level, findings }
-}
-
 /// Render the kernel system-clock panel (TAI offset, NTP discipline, etc.).
 fn render_system_clock_panel(
     ui: &mut Ui,
@@ -536,18 +466,20 @@ fn render_system_clock_panel(
 
     let health = assess_clock_health(info);
     let (health_color, health_text) = match health.level {
-        HealthLevel::Healthy => (Color32::from_rgb(100, 255, 100), "Healthy"),
-        HealthLevel::Degraded => (Color32::from_rgb(255, 200, 100), "Degraded"),
-        HealthLevel::Bad => (Color32::from_rgb(255, 120, 100), "Unsynced"),
+        ClockHealthLevel::Healthy => (Color32::from_rgb(100, 255, 100), "Healthy"),
+        ClockHealthLevel::Degraded => (Color32::from_rgb(255, 200, 100), "Degraded"),
+        ClockHealthLevel::Bad => (Color32::from_rgb(255, 120, 100), "Unsynced"),
     };
     let health_findings = health.findings.clone();
     let health_summary = match health.level {
-        HealthLevel::Healthy => "All checks pass.",
-        HealthLevel::Degraded => {
+        ClockHealthLevel::Healthy => "All checks pass.",
+        ClockHealthLevel::Degraded => {
             "Clock is being disciplined but at least one metric is outside the healthy range. \
              See details below."
         }
-        HealthLevel::Bad => "Clock is not synchronized. Media timestamps will not be reliable.",
+        ClockHealthLevel::Bad => {
+            "Clock is not synchronized. Media timestamps will not be reliable."
+        }
     };
 
     ui.horizontal(|ui| {
