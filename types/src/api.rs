@@ -857,14 +857,6 @@ pub struct SystemClockInfo {
     pub last_update: Option<u64>,
 }
 
-/// Where to point an operator whose system clock is poorly disciplined.
-///
-/// Shown in the Clocks panel and logged at startup.
-pub const CHRONY_SETUP_HINT: &str =
-    "The Strom repository has setup scripts that configure NTP for \
-     broadcast use (chrony with multiple sources and the TAI/UTC leap table). \
-     Run them on the host.";
-
 /// Authentication status response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
