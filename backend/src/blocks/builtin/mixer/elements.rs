@@ -2,7 +2,7 @@ use crate::blocks::BlockBuildError;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::sync::OnceLock;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use super::properties::db_to_linear;
 use super::EQ_BAND_TYPE_BELL;
@@ -123,6 +123,33 @@ pub(super) fn make_rate_pin(name: &str, rate: u32) -> Result<gst::Element, Block
         )
         .build()
         .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter {}: {}", name, e)))
+}
+
+/// Keep an input's EOS off a force-live bus built by [`make_audiomixer`].
+///
+/// A live source that gives up pushes EOS: `ndisrc` after its receive timeout,
+/// `srtsrc` when its caller leaves with `keep-listening` off. `audiomixer`
+/// counts an EOS pad as ready, and `ignore-inactive-pads` makes it skip every
+/// pad that has never had a buffer. So when the ended input is the only one
+/// that ever carried audio, every pad the bus still looks at is ready and it
+/// stops waiting for the clock: it emits silence as fast as it can, minutes of
+/// timestamps per second. Consumers that sync then sit on a backlog, and audio
+/// from a source that joins later is stamped behind the bus and dropped.
+///
+/// Without the EOS the ended input reads as an idle one, which the bus already
+/// covers with silence on its latency timeout. Call this only for a force-live
+/// bus: without force-live, a bus is meant to end when its inputs do.
+pub(crate) fn drop_input_eos(pad: &gst::Pad, input: String) {
+    pad.add_probe(
+        gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_, info| match info.event() {
+            Some(event) if event.type_() == gst::EventType::Eos => {
+                info!("{} ended; its bus keeps running without it", input);
+                gst::PadProbeReturn::Drop
+            }
+            _ => gst::PadProbeReturn::Ok,
+        },
+    );
 }
 
 /// Create a gate element, falling back to identity passthrough if unavailable.
