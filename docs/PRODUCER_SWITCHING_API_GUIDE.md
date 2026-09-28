@@ -247,6 +247,11 @@ than the one it already holds. The tile then freezes for the length of the jump 
 age still reads live, and afterwards plays that much behind. A frozen tile with a young
 age is this case.
 
+Every input ageing together is not every source dropping out. The mixer takes in frames
+only as fast as it puts them out, so when whatever consumes the program stalls (a
+recorder or an output that stops taking frames), all inputs age in step and recover
+together when it clears. Look at the output, not the sources.
+
 Recovery is automatic: when the source resumes, its tile picks up in place with no
 operator action and no layout change, and the age drops back to single-frame values.
 
