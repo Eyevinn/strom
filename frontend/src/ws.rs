@@ -10,7 +10,6 @@ use crate::state::{AppMessage, ConnectionState};
 /// WebSocket client for connecting to the backend event stream.
 pub struct WebSocketClient {
     url: String,
-    connected: bool,
     /// Optional auth token for authentication
     auth_token: Option<String>,
 }
@@ -21,7 +20,6 @@ impl WebSocketClient {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
-            connected: false,
             auth_token: None,
         }
     }
@@ -31,7 +29,6 @@ impl WebSocketClient {
     pub fn new_with_auth(url: impl Into<String>, auth_token: Option<String>) -> Self {
         Self {
             url: url.into(),
-            connected: false,
             auth_token,
         }
     }
@@ -69,8 +66,6 @@ impl WebSocketClient {
                 Self::native_connection_loop(url, tx, ctx).await;
             });
         }
-
-        self.connected = true;
     }
 }
 
