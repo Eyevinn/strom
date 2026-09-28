@@ -14332,7 +14332,7 @@
               "format": "int64",
               "minimum": 0
             },
-            "description": "Milliseconds since each input last delivered a frame to the mixer\n(length = configured `num_inputs`). `None` for an input that has never\ndelivered one. A value that keeps growing marks a frozen input: the\ncompositor repeats its last frame, so a source that stopped looks the\nsame on air as one that is motionless."
+            "description": "Milliseconds since each input last delivered a frame to the mixer\n(length = configured `num_inputs`). `None` for an input that has never\ndelivered one. A value that keeps growing marks a frozen input: the\ncompositor repeats its last frame, so a source that stopped looks the\nsame on air as one that is motionless. It measures arrival, not display:\nan input whose timestamps jump backwards freezes on air for the length\nof the jump while its age stays low."
           },
           "input_resolutions": {
             "type": "array",

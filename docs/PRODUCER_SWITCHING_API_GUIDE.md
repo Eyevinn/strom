@@ -239,8 +239,13 @@ stopped. A source that only sends a frame when its picture changes — a web gra
 static page, a screen share of a still slide — legitimately ages for seconds between
 frames, so no single threshold fits every input. `null` is an input that has never
 delivered a frame at all. The
-counter is stamped from the mixer's own input pads, so it covers every kind of input, and
-it measures what actually determines the picture.
+counter is stamped from the mixer's own input pads, so it covers every kind of input.
+
+It measures frames arriving, not frames shown. When a source's timestamps jump backwards,
+as when an encoder restarts its clock mid-stream, the mixer throws away every frame older
+than the one it already holds. The tile then freezes for the length of the jump while the
+age still reads live, and afterwards plays that much behind. A frozen tile with a young
+age is this case.
 
 Recovery is automatic: when the source resumes, its tile picks up in place with no
 operator action and no layout change, and the age drops back to single-frame values.

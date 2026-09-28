@@ -1314,7 +1314,9 @@ pub struct VisionMixerState {
     /// (length = configured `num_inputs`). `None` for an input that has never
     /// delivered one. A value that keeps growing marks a frozen input: the
     /// compositor repeats its last frame, so a source that stopped looks the
-    /// same on air as one that is motionless.
+    /// same on air as one that is motionless. It measures arrival, not display:
+    /// an input whose timestamps jump backwards freezes on air for the length
+    /// of the jump while its age stays low.
     #[serde(default)]
     pub input_media_age_ms: Vec<Option<u64>>,
 }
