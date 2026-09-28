@@ -80,14 +80,6 @@ impl MeterDataStore {
             }
         })
     }
-
-    /// Remove stale meter data entries (older than TTL).
-    /// Can be called periodically to clean up memory.
-    #[allow(dead_code)]
-    pub fn expire_stale(&mut self) {
-        self.data
-            .retain(|_, v| v.updated_at.elapsed() < METER_DATA_TTL);
-    }
 }
 
 /// Convert dB value to a 0.0-1.0 range for visualization.

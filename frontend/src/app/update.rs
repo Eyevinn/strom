@@ -1094,7 +1094,6 @@ impl eframe::App for StromApp {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         self.flows.clear();
-                        self.ws_client = None;
                         self.connection_state = ConnectionState::Disconnected;
                         self.check_auth_status(ui.ctx().clone());
                     }
@@ -1117,7 +1116,6 @@ impl eframe::App for StromApp {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         self.flows.clear();
-                        self.ws_client = None;
                         self.connection_state = ConnectionState::Disconnected;
                         self.check_auth_status(ui.ctx().clone());
                     }
