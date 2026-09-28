@@ -1,4 +1,5 @@
-//! Keeps the profile a WHEP viewer offers from blocking pre-encoded video.
+//! Keeps the profile and level a WHEP viewer offers from blocking pre-encoded
+//! video.
 //!
 //! webrtcsink copies the viewer's offered profile onto the capsfilters around
 //! that viewer's payloader: the one directly upstream (the encoder filter)
@@ -7,6 +8,13 @@
 //! answers with that payload type, so a High profile stream fails at those
 //! filters with `not-negotiated` on its first keyframe. Browsers decode it
 //! regardless, so the profile fields are removed.
+//!
+//! The encoder filter also gets the offered level and every level below it.
+//! Chrome offers level 3.1 on every H.264 payload type, so 1080p (level 4) and
+//! 720p at 50/60 fps (level 3.2) fail the same way. Chrome decodes those too,
+//! so `level` is removed as well. That sends above the level the viewer
+//! declared, which RFC 6184 forbids even with `level-asymmetry-allowed=1`; the
+//! alternative is no pre-encoded H.264 above 720p30 for any Chrome viewer.
 //!
 //! webrtcsink sets a viewer's filter caps after `payloader-setup`, from
 //! `connect_input_stream`, so each filter is watched with `notify::caps`
@@ -22,6 +30,7 @@ use tracing::info;
 const PROFILE_FIELDS: &[&str] = &[
     "profile-level-id",
     "profile",
+    "level",
     "profile-id",
     "tier-flag",
     "level-id",

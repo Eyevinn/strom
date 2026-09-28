@@ -1,10 +1,12 @@
-//! A WHEP viewer must get pre-encoded H.264 whatever profile its offer names.
+//! A WHEP viewer must get pre-encoded H.264 whatever profile and level its
+//! offer names.
 //!
 //! Browsers offer H.264 Baseline first, and the WHEP Output block answers with
 //! that payload type whatever profile the encoder produces. webrtcsink puts the
-//! offered profile on the capsfilter in front of the viewer's payloader, where
-//! a High profile stream fails with `not-negotiated` at its first keyframe
-//! unless the block strips it.
+//! offered profile and level on the capsfilter in front of the viewer's
+//! payloader, where a High profile stream, or one above the offered level 3.1,
+//! fails with `not-negotiated` at its first keyframe unless the block strips
+//! them.
 //!
 //! webrtcsink sets a viewer's streams up in `HashMap` order, so the strip has
 //! to hold when the video stream is set up first. A video-only offer makes that
@@ -139,10 +141,19 @@ fn post_offer(port: u16) -> String {
     response.lines().next().unwrap_or_default().to_string()
 }
 
-/// Build the WHEP Output block with one video track, feed it `profile` H.264,
-/// connect one video-only viewer and return how many buffers that viewer's
-/// payloader pushed, plus anything that went wrong along the way.
-fn viewer_payloaded_buffers(profile: &str) -> (usize, Vec<String>) {
+/// What one viewer got from the block.
+struct Viewer {
+    /// Buffers the viewer's payloader pushed.
+    payloaded: usize,
+    /// The level the encoder produced, from the parsed stream's caps.
+    level: Option<String>,
+    /// Anything that went wrong along the way.
+    problems: Vec<String>,
+}
+
+/// Build the WHEP Output block with one video track, feed it `profile` H.264
+/// at `width`x`height` and `fps`, and connect one video-only viewer.
+fn viewer_payloaded_buffers(profile: &str, width: i32, height: i32, fps: i32) -> Viewer {
     let mut props: HashMap<String, PropertyValue> = HashMap::new();
     props.insert("num_audio_tracks".to_string(), PropertyValue::Int(0));
     props.insert("num_video_tracks".to_string(), PropertyValue::Int(1));
@@ -182,9 +193,9 @@ fn viewer_payloaded_buffers(profile: &str) -> (usize, Vec<String>) {
         .property(
             "caps",
             gst::Caps::builder("video/x-raw")
-                .field("width", 320i32)
-                .field("height", 240i32)
-                .field("framerate", gst::Fraction::new(30, 1))
+                .field("width", width)
+                .field("height", height)
+                .field("framerate", gst::Fraction::new(fps, 1))
                 .build(),
         )
         .build()
@@ -292,10 +303,20 @@ fn viewer_payloaded_buffers(profile: &str) -> (usize, Vec<String>) {
         }
     }
 
+    let level = parse
+        .static_pad("src")
+        .and_then(|pad| pad.current_caps())
+        .and_then(|caps| {
+            caps.structure(0)
+                .and_then(|s| s.get::<String>("level").ok())
+        });
     let _ = pipeline.set_state(gst::State::Null);
-    let count = payloaded.load(Ordering::Relaxed);
     let problems = problems.lock().unwrap().clone();
-    (count, problems)
+    Viewer {
+        payloaded: payloaded.load(Ordering::Relaxed),
+        level,
+        problems,
+    }
 }
 
 #[test]
@@ -303,12 +324,36 @@ fn baseline_offer_gets_high_profile_video() {
     if !plugins_available() {
         return;
     }
-    let (count, problems) = viewer_payloaded_buffers("high");
+    let viewer = viewer_payloaded_buffers("high", 320, 240, 30);
     assert!(
-        count > 0,
+        viewer.payloaded > 0,
         "a viewer offering H.264 Baseline got no High profile video \
          (payloaded {} buffers; {:?})",
-        count,
-        problems
+        viewer.payloaded,
+        viewer.problems
+    );
+}
+
+/// 720p at 60 fps is level 3.2, one step above the 3.1 every Chrome H.264
+/// payload type offers.
+#[test]
+fn level_3_1_offer_gets_720p60_video() {
+    if !plugins_available() {
+        return;
+    }
+    let viewer = viewer_payloaded_buffers("high", 1280, 720, 60);
+    assert_eq!(
+        viewer.level.as_deref(),
+        Some("3.2"),
+        "the encoder has to produce a level above the offered 3.1 for this \
+         test to mean anything ({:?})",
+        viewer.problems
+    );
+    assert!(
+        viewer.payloaded > 0,
+        "a viewer offering H.264 level 3.1 got no level 3.2 video \
+         (payloaded {} buffers; {:?})",
+        viewer.payloaded,
+        viewer.problems
     );
 }
