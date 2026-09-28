@@ -35,6 +35,14 @@ pub const REMOTE_CONTROL_METHODS: &[&str] = &[
 /// and the proxy supplies the address. The client never gets to choose one.
 pub const GO_HOME: &str = "Strom.goHome";
 
+/// Not a Chromium method: show another of the session's windows - its page, or
+/// a popup it opened. The proxy checks the target is one of those.
+pub const SWITCH_PAGE: &str = "Strom.switchPage";
+
+/// Not a Chromium method: close one of the session's popups. The page the link
+/// was minted for cannot be closed this way.
+pub const CLOSE_PAGE: &str = "Strom.closePage";
+
 /// Not a Chromium method: make an address the block's own URL, so the page the
 /// operator has reached becomes where the source starts. The proxy performs it
 /// against Strom, not Chromium.
@@ -51,6 +59,20 @@ pub enum Forward {
     /// Not for Chromium: set the block's URL to this checked address and
     /// answer the command with this id.
     SetHome { id: Option<i64>, url: String },
+    /// Not for Chromium as it stands: go back to the session's own page, and
+    /// navigate it to the block's URL.
+    GoHome { id: Option<i64> },
+    /// Not for Chromium: show this target instead, if it is the session's.
+    SwitchPage { id: Option<i64>, target: String },
+    /// Not for Chromium: close this target, if it is one of the session's
+    /// popups.
+    ClosePage { id: Option<i64>, target: String },
+}
+
+/// The navigation [`GO_HOME`] stands for, once the session is back on its own
+/// page.
+pub fn go_home_message(id: Option<i64>, home_url: &str) -> String {
+    json!({ "id": id, "method": "Page.navigate", "params": { "url": home_url } }).to_string()
 }
 
 /// The protocol's own shape for "no", so the client sees a refusal against the
@@ -66,9 +88,7 @@ pub fn refusal(id: Option<i64>, message: &str) -> String {
 /// Whether one message from the client may be forwarded, and in what form, or
 /// the refusal to send back in its place.
 ///
-/// `home_url` is the page the link was minted for, which [`GO_HOME`] navigates
-/// to.
-pub fn allows(raw: &str, home_url: &str) -> Result<Forward, String> {
+pub fn allows(raw: &str) -> Result<Forward, String> {
     let Ok(message) = serde_json::from_str::<Value>(raw) else {
         return Err(refusal(None, "Not a DevTools protocol message"));
     };
@@ -82,10 +102,21 @@ pub fn allows(raw: &str, home_url: &str) -> Result<Forward, String> {
     let params = message.get("params");
 
     match method {
-        GO_HOME => Ok(Forward::Rewritten(
-            json!({ "id": id, "method": "Page.navigate", "params": { "url": home_url } })
-                .to_string(),
-        )),
+        GO_HOME => Ok(Forward::GoHome { id }),
+        SWITCH_PAGE | CLOSE_PAGE => {
+            let Some(target) = params
+                .and_then(|p| p.get("targetId"))
+                .and_then(Value::as_str)
+            else {
+                return Err(refusal(id, &format!("{} needs a targetId", method)));
+            };
+            let target = target.to_string();
+            Ok(if method == SWITCH_PAGE {
+                Forward::SwitchPage { id, target }
+            } else {
+                Forward::ClosePage { id, target }
+            })
+        }
         // Page.reload also takes scriptToEvaluateOnLoad, which is arbitrary
         // JavaScript. Only the cache flag goes through.
         "Page.reload" => {
@@ -147,7 +178,7 @@ mod tests {
     }
 
     fn rewritten(raw: &str) -> Value {
-        match allows(raw, HOME).expect("allowed") {
+        match allows(raw).expect("allowed") {
             Forward::Rewritten(text) => serde_json::from_str(&text).expect("valid JSON"),
             other => panic!("expected a rewrite of {}, got {:?}", raw, other),
         }
@@ -163,7 +194,7 @@ mod tests {
             })
             .to_string();
             assert!(
-                allows(&raw, HOME).is_ok(),
+                allows(&raw).is_ok(),
                 "{} is what the page needs to work",
                 method
             );
@@ -189,8 +220,8 @@ mod tests {
             "DOM.getDocument",
             "Emulation.setDeviceMetricsOverride",
         ] {
-            let refused = allows(&command(method), HOME)
-                .expect_err(&format!("{} must not be forwarded", method));
+            let refused =
+                allows(&command(method)).expect_err(&format!("{} must not be forwarded", method));
             assert!(
                 refused.contains(method),
                 "the refusal has to name what was refused, got {}",
@@ -211,7 +242,7 @@ mod tests {
             "Strom.goHomeTo",
         ] {
             assert!(
-                allows(&command(method), HOME).is_err(),
+                allows(&command(method)).is_err(),
                 "{} is not on the list",
                 method
             );
@@ -219,14 +250,36 @@ mod tests {
     }
 
     #[test]
-    fn going_home_navigates_to_the_page_the_link_was_minted_for() {
+    fn going_home_takes_no_address_from_the_client() {
         let raw = json!({ "id": 9, "method": GO_HOME, "params": { "url": "file:///etc/passwd" } })
             .to_string();
-        let sent = rewritten(&raw);
-        assert_eq!(sent["id"], 9);
+        assert_eq!(allows(&raw), Ok(Forward::GoHome { id: Some(9) }));
+        // The address is the proxy's, whatever the client put in.
+        let sent: Value = serde_json::from_str(&go_home_message(Some(9), HOME)).unwrap();
         assert_eq!(sent["method"], "Page.navigate");
-        // Whatever the client put in, the address is ours.
         assert_eq!(sent["params"], json!({ "url": HOME }));
+    }
+
+    #[test]
+    fn switching_and_closing_name_a_target_for_the_proxy_to_check() {
+        let switch = json!({ "id": 3, "method": SWITCH_PAGE, "params": { "targetId": "ABCD" } });
+        assert_eq!(
+            allows(&switch.to_string()),
+            Ok(Forward::SwitchPage {
+                id: Some(3),
+                target: "ABCD".to_string()
+            })
+        );
+        let close = json!({ "id": 4, "method": CLOSE_PAGE, "params": { "targetId": "ABCD" } });
+        assert_eq!(
+            allows(&close.to_string()),
+            Ok(Forward::ClosePage {
+                id: Some(4),
+                target: "ABCD".to_string()
+            })
+        );
+        let bare = json!({ "id": 5, "method": SWITCH_PAGE, "params": {} });
+        assert!(allows(&bare.to_string()).is_err());
     }
 
     #[test]
@@ -252,8 +305,8 @@ mod tests {
             "javascript:alert(1)",
         ] {
             let message = json!({ "id": 3, "method": "Page.navigate", "params": { "url": raw } });
-            let refused = allows(&message.to_string(), HOME)
-                .expect_err(&format!("{} must not be reached", raw));
+            let refused =
+                allows(&message.to_string()).expect_err(&format!("{} must not be reached", raw));
             let parsed: Value = serde_json::from_str(&refused).expect("valid JSON");
             assert_eq!(parsed["id"], 3);
         }
@@ -263,14 +316,14 @@ mod tests {
     fn setting_home_is_checked_and_handed_to_strom() {
         let message = json!({ "id": 8, "method": SET_HOME, "params": { "url": "example.com/x" } });
         assert_eq!(
-            allows(&message.to_string(), HOME),
+            allows(&message.to_string()),
             Ok(Forward::SetHome {
                 id: Some(8),
                 url: "https://example.com/x".to_string()
             })
         );
         let message = json!({ "id": 8, "method": SET_HOME, "params": { "url": "file:///etc" } });
-        assert!(allows(&message.to_string(), HOME).is_err());
+        assert!(allows(&message.to_string()).is_err());
     }
 
     #[test]
@@ -297,12 +350,12 @@ mod tests {
         assert_eq!(sent["params"], json!({ "entryId": 12 }));
 
         let without = json!({ "id": 5, "method": "Page.navigateToHistoryEntry", "params": {} });
-        assert!(allows(&without.to_string(), HOME).is_err());
+        assert!(allows(&without.to_string()).is_err());
     }
 
     #[test]
     fn a_refusal_answers_the_command_that_was_sent() {
-        let refused = allows(&command("Runtime.evaluate"), HOME).unwrap_err();
+        let refused = allows(&command("Runtime.evaluate")).unwrap_err();
         let parsed: Value = serde_json::from_str(&refused).expect("valid JSON");
         // A client matches answers to commands by id; an answer without one is
         // an answer it will wait for forever.
@@ -312,10 +365,10 @@ mod tests {
 
     #[test]
     fn anything_that_is_not_a_command_is_refused() {
-        assert!(allows("not json at all", HOME).is_err());
-        assert!(allows("{}", HOME).is_err());
-        assert!(allows(r#"{"id":1}"#, HOME).is_err());
+        assert!(allows("not json at all").is_err());
+        assert!(allows("{}").is_err());
+        assert!(allows(r#"{"id":1}"#).is_err());
         // A response, not a command - the client has no business sending one.
-        assert!(allows(r#"{"id":1,"result":{}}"#, HOME).is_err());
+        assert!(allows(r#"{"id":1,"result":{}}"#).is_err());
     }
 }

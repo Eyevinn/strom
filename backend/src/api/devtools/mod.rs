@@ -63,19 +63,17 @@
 //! profiles, and this must stay off.
 
 mod filter;
+mod pages;
+mod session;
 
 use crate::state::AppState;
 use axum::{
     body::Body,
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Extension, Path, RawQuery, State,
-    },
+    extract::{ws::WebSocketUpgrade, Extension, Path, RawQuery, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     Json,
 };
-use futures::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -85,7 +83,6 @@ use strom_types::devtools::{
 };
 use strom_types::{Flow, FlowId};
 use tokio::sync::broadcast;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -560,56 +557,32 @@ pub async fn list_targets(Extension(state): Extension<DevToolsState>) -> Respons
         .into_response();
     };
 
-    let raw: Vec<serde_json::Value> = match devtools_client()
-        .get(format!("http://127.0.0.1:{}/json/list", port))
-        .send()
-        .await
-    {
-        Ok(response) => match response.json().await {
-            Ok(json) => json,
-            Err(e) => {
-                error!("DevTools target list was not JSON: {}", e);
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    "DevTools endpoint returned garbage",
-                )
-                    .into_response();
-            }
-        },
-        Err(e) => {
-            // No cefsrc has started yet, so CEF has not initialized and
-            // nothing is listening. That is ordinary, not a fault.
-            debug!("DevTools endpoint on port {} did not answer: {}", port, e);
-            return Json(DevToolsTargets {
-                enabled: true,
-                warning: Some(link_warning(&state.config)),
-                targets: Vec::new(),
-            })
-            .into_response();
-        }
+    // No cefsrc has started yet, so CEF has not initialized and nothing is
+    // listening. That is ordinary, not a fault.
+    let Some(all) = pages::all_targets(port).await else {
+        debug!("DevTools endpoint on port {} did not answer", port);
+        return Json(DevToolsTargets {
+            enabled: true,
+            warning: Some(link_warning(&state.config)),
+            targets: Vec::new(),
+        })
+        .into_response();
     };
 
-    let targets = raw
+    // Popups belong to the page that opened it, and a link to that page shows
+    // them; listed on their own they would look like HTML sources.
+    let targets = all
         .into_iter()
-        .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+        .filter(|t| t.kind == "page" && t.opener.is_none())
         .filter_map(|t| {
-            let id = t.get("id")?.as_str()?.to_string();
-            if !valid_target_id(&id) {
+            if !valid_target_id(&t.id) {
                 warn!("Ignoring DevTools target with an unexpected id shape");
                 return None;
             }
             Some(DevToolsTarget {
-                title: t
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                url: t
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                id,
+                id: t.id,
+                title: t.title,
+                url: t.url,
             })
         })
         .collect();
@@ -867,21 +840,17 @@ fn resolve_target(targets: &[PageTarget], sources: &[HtmlSource], want: &HtmlSou
 
 /// Ask Chromium which pages exist right now.
 async fn page_targets(port: u16) -> Option<Vec<PageTarget>> {
-    let raw: Vec<serde_json::Value> = devtools_client()
-        .get(format!("http://127.0.0.1:{}/json/list", port))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
+    // A popup is a page too, but it is not what any HTML source renders: it
+    // belongs to the page that opened it. Counted as a page, it would look
+    // like a source's page that no block can be matched to.
+    let targets = pages::all_targets(port).await?;
     Some(
-        raw.into_iter()
-            .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
-            .filter_map(|t| {
-                let id = t.get("id")?.as_str()?.to_string();
-                let url = t.get("url")?.as_str()?.to_string();
-                valid_target_id(&id).then_some(PageTarget { id, url })
+        targets
+            .into_iter()
+            .filter(|t| t.kind == "page" && t.opener.is_none() && valid_target_id(&t.id))
+            .map(|t| PageTarget {
+                id: t.id,
+                url: t.url,
             })
             .collect(),
     )
@@ -1224,184 +1193,8 @@ pub async fn proxy_cdp(
         return no_such_link();
     };
 
-    let upstream = format!(
-        "ws://127.0.0.1:{}/devtools/page/{}",
-        port, session.target_id
-    );
     let full_devtools = state.config.full_devtools;
-    ws.on_upgrade(move |socket| pump(socket, upstream, session, full_devtools, app))
-}
-
-/// Make an address the block's own URL, and answer the command that asked.
-///
-/// This writes the block's configuration from a link, which is what the
-/// operator asked for: the page they have logged in to or clicked through to
-/// becomes where the source starts, and stays so across a restart. The address
-/// has already been through the same check as any other URL for this block.
-async fn set_home(app: &AppState, source: &mut LinkSource, id: Option<i64>, url: String) -> String {
-    let properties = HashMap::from([(
-        crate::blocks::builtin::html_input::URL_PROPERTY.to_string(),
-        strom_types::PropertyValue::String(url.clone()),
-    )]);
-    let result = app
-        .update_block_properties(&source.flow_id, &source.block_id, properties, None, None)
-        .await;
-    let refused = match result {
-        Ok((_, rejected)) => rejected.into_values().next(),
-        Err(e) => Some(e.to_string()),
-    };
-    if let Some(reason) = refused {
-        warn!(
-            "Remote control could not set the start page of block {}: {}",
-            source.block_id, reason
-        );
-        return filter::refusal(id, &reason);
-    }
-
-    info!(
-        "Remote control set the start page of block {} in flow {}",
-        source.block_id, source.flow_id
-    );
-    app.events()
-        .broadcast(strom_types::StromEvent::FlowUpdated {
-            flow_id: source.flow_id,
-        });
-    source.home_url = url.clone();
-    serde_json::json!({ "id": id, "result": { "url": url } }).to_string()
-}
-
-/// Shuttle messages both ways until either side hangs up, or the link dies.
-///
-/// The protocol is text in both directions, and the screencast rides the same
-/// socket as everything else: Chromium sends a JPEG per changed frame and
-/// waits for the client to acknowledge it before sending the next. That
-/// acknowledgement is the flow control, so a slow link costs frame rate rather
-/// than an unbounded queue — which is what makes this usable over the
-/// internet. Nothing here needs to know that; it just must not buffer.
-async fn pump(
-    client: WebSocket,
-    upstream_url: String,
-    session: Session,
-    full_devtools: bool,
-    app: AppState,
-) {
-    let Session {
-        target_id,
-        mut source,
-        mut cancelled,
-    } = session;
-    let (upstream, _) = match tokio_tungstenite::connect_async(&upstream_url).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!("Could not reach DevTools for target {}: {}", target_id, e);
-            return;
-        }
-    };
-
-    debug!("DevTools session open for target {}", target_id);
-
-    let (mut client_tx, mut client_rx) = client.split();
-    let (mut upstream_tx, mut upstream_rx) = upstream.split();
-
-    // A refusal has to reach the client, whose sink belongs to the other half
-    // of this pump, so it travels the same way Chromium's own answers do.
-    let (refusals, mut refused) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-    // Our page is the client in filtered mode, and its header names the
-    // source. The DevTools application would have no use for this.
-    if !full_devtools
-        && client_tx
-            .send(Message::Text(source.context_message().into()))
-            .await
-            .is_err()
-    {
-        return;
-    }
-
-    let to_upstream = async {
-        while let Some(Ok(msg)) = client_rx.next().await {
-            let forwarded = match msg {
-                Message::Text(t) => {
-                    if full_devtools {
-                        WsMessage::Text(t.as_str().into())
-                    } else {
-                        match filter::allows(t.as_str(), &source.home_url) {
-                            Ok(filter::Forward::AsIs) => WsMessage::Text(t.as_str().into()),
-                            Ok(filter::Forward::Rewritten(text)) => WsMessage::Text(text.into()),
-                            Ok(filter::Forward::SetHome { id, url }) => {
-                                let answer = set_home(&app, &mut source, id, url).await;
-                                if refusals.send(answer).is_err() {
-                                    break;
-                                }
-                                continue;
-                            }
-                            Err(refusal) => {
-                                debug!("Refused a method a remote control link does not carry");
-                                if refusals.send(refusal).is_err() {
-                                    break;
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                }
-                // The protocol is text. A filtered session has no reason to
-                // send anything else, and a binary frame cannot be checked
-                // against the list, so it does not go.
-                Message::Binary(b) => {
-                    if !full_devtools {
-                        continue;
-                    }
-                    WsMessage::Binary(b)
-                }
-                Message::Close(_) => break,
-                // Chromium answers our pings; the client's are ours to answer,
-                // and axum has already done it.
-                Message::Ping(_) | Message::Pong(_) => continue,
-            };
-            if upstream_tx.send(forwarded).await.is_err() {
-                break;
-            }
-        }
-    };
-
-    let to_client = async {
-        loop {
-            let forwarded = tokio::select! {
-                incoming = upstream_rx.next() => match incoming {
-                    Some(Ok(WsMessage::Text(t))) => Message::Text(t.as_str().into()),
-                    Some(Ok(WsMessage::Binary(b))) => Message::Binary(b),
-                    Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_))) => {
-                        continue
-                    }
-                    Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => break,
-                },
-                refusal = refused.recv() => match refusal {
-                    Some(text) => Message::Text(text.into()),
-                    None => break,
-                },
-            };
-            if client_tx.send(forwarded).await.is_err() {
-                break;
-            }
-        }
-    };
-
-    tokio::select! {
-        _ = to_upstream => {}
-        _ = to_client => {}
-        // Revoked or expired. A closed channel means the link is gone too:
-        // the sender lives in the table entry, so dropping the entry is
-        // itself the signal.
-        _ = cancelled.recv() => {
-            info!(
-                "Remote control link revoked or expired; closing the session on target {}",
-                target_id
-            );
-        }
-    }
-
-    debug!("DevTools session closed for target {}", target_id);
+    ws.on_upgrade(move |socket| session::pump(socket, port, session, full_devtools, app))
 }
 
 #[cfg(test)]

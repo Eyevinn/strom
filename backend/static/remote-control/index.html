@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom remote control page, version 3 -->
+<!-- Strom remote control page, version 4 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -78,6 +78,34 @@
     font: 16px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   #address:focus { outline: 1px solid var(--ok); }
+  #tabs {
+    display: none;
+    gap: 6px;
+    padding: 6px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+    flex: none;
+  }
+  #tabs.shown { display: flex; }
+  .tab {
+    display: flex; align-items: center; gap: 6px;
+    max-width: 16rem;
+    padding: 3px 4px 3px 10px;
+    background: var(--field);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--muted);
+    white-space: nowrap;
+    cursor: pointer;
+    flex: none;
+  }
+  .tab.current { color: var(--text); border-color: var(--ok); }
+  .tab span { overflow: hidden; text-overflow: ellipsis; }
+  .tab button {
+    background: none; border: 0; color: var(--muted);
+    font: inherit; cursor: pointer; padding: 0 6px;
+  }
   #keyboard { display: none; }
   @media (pointer: coarse) {
     #keyboard { display: inline-block; }
@@ -153,6 +181,7 @@
   <button id="pin" title="Make this page where the source starts" aria-label="Set as start page">&#128204;</button>
   <button id="keyboard" title="Show the keyboard" aria-label="Keyboard">&#9000;</button>
 </nav>
+<div id="tabs" aria-label="Windows"></div>
 <main>
   <img id="screen" alt="The page being rendered" draggable="false">
   <div id="message"><strong>Connecting to the page…</strong>If nothing appears, the flow may have stopped.</div>
@@ -182,6 +211,7 @@
   let metadata = { pageScaleFactor: 1, offsetTop: 0 };
   let closedForGood = false;
   let history = { currentIndex: -1, entries: [] };
+  const tabs = document.getElementById("tabs");
   const pending = new Map();
 
   function setState(kind, text) {
@@ -246,6 +276,45 @@
       document.getElementById("home").title = "Back to " + result.url;
     });
   });
+
+  // The page, and any popups it opened - a login window, typically. The proxy
+  // decides which windows these are and switches to a new one by itself.
+  function showPages(params) {
+    const pages = params.pages || [];
+    tabs.innerHTML = "";
+    tabs.classList.toggle("shown", pages.length > 1);
+    for (const page of pages) {
+      const tab = document.createElement("div");
+      tab.className = "tab" + (page.id === params.current ? " current" : "");
+      let label = page.popup ? "Popup" : "Page";
+      try { label += ": " + new URL(page.url).host; } catch (e) {}
+      const text = document.createElement("span");
+      text.textContent = label;
+      tab.title = (page.title ? page.title + " - " : "") + page.url;
+      tab.appendChild(text);
+      tab.addEventListener("click", () => send("Strom.switchPage", { targetId: page.id }));
+      if (page.popup) {
+        const close = document.createElement("button");
+        close.textContent = "\u00d7";
+        close.title = "Close this popup";
+        close.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          send("Strom.closePage", { targetId: page.id });
+        });
+        tab.appendChild(close);
+      }
+      tabs.appendChild(tab);
+    }
+  }
+
+  // Everything that belongs to one window starts over on another.
+  function startScreencast() {
+    metadata = { pageScaleFactor: 1, offsetTop: 0 };
+    history = { currentIndex: -1, entries: [] };
+    send("Page.enable");
+    send("Page.startScreencast", { format: "jpeg", quality: 80, everyNthFrame: 1 });
+    refreshHistory();
+  }
 
   function refreshHistory() {
     send("Page.getNavigationHistory", {}, (result) => {
@@ -459,9 +528,7 @@
 
     socket.onopen = () => {
       setState("live", "Connected");
-      send("Page.enable");
-      send("Page.startScreencast", { format: "jpeg", quality: 80, everyNthFrame: 1 });
-      refreshHistory();
+      startScreencast();
     };
 
     socket.onmessage = (event) => {
@@ -480,6 +547,11 @@
         // acknowledgement is the flow control: a slow link costs frame rate
         // and never builds a queue.
         send("Page.screencastFrameAck", { sessionId: msg.params.sessionId });
+      } else if (msg.method === "Strom.pages") {
+        showPages(msg.params || {});
+      } else if (msg.method === "Strom.switched") {
+        pending.clear();
+        startScreencast();
       } else if (msg.method === "Strom.context") {
         showSource(msg.params || {});
       } else if (msg.method === "Page.frameNavigated") {
