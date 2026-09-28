@@ -91,10 +91,6 @@ pub type BusMessageConnectFn = Box<
     dyn FnOnce(&gst::Bus, FlowId, EventBroadcaster) -> gst::glib::SignalHandlerId + Send + Sync,
 >;
 
-/// Legacy type alias for backward compatibility
-#[deprecated(note = "Use BusMessageConnectFn instead")]
-pub type BusWatchSetupFn = BusMessageConnectFn;
-
 /// Function type for setting up block-specific GLib element signal handlers.
 ///
 /// Called at pipeline start with the flow ID and event broadcaster.
@@ -223,20 +219,6 @@ impl BlockBuildContext {
     /// Get the session thread config for installing thread priority on session pipelines.
     pub fn session_thread_config(&self) -> SessionThreadConfig {
         self.session_thread_config.clone()
-    }
-
-    /// Register a dynamically created webrtcbin (called from consumer-added callbacks).
-    pub fn register_dynamic_webrtcbin(
-        &self,
-        block_id: &str,
-        consumer_id: &str,
-        webrtcbin: gst::Element,
-    ) {
-        let mut store = self.dynamic_webrtcbins.lock().unwrap();
-        store
-            .entry(block_id.to_string())
-            .or_default()
-            .push((consumer_id.to_string(), webrtcbin));
     }
 
     /// Get the configured ICE servers.

@@ -309,20 +309,6 @@ impl PipelineManager {
 
         Ok(PipelineState::Null)
     }
-
-    /// Pause the pipeline.
-    pub fn pause(&self) -> Result<PipelineState, PipelineError> {
-        info!("Pausing pipeline: {}", self.flow_name);
-
-        self.pipeline
-            .set_state(gst::State::Paused)
-            .map_err(|e| PipelineError::StateChange(format!("Failed to pause: {}", e)))?;
-
-        // Update cached state
-        *self.cached_state.write().unwrap() = PipelineState::Paused;
-
-        Ok(PipelineState::Paused)
-    }
 }
 
 #[cfg(test)]
