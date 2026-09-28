@@ -368,10 +368,13 @@ impl Config {
             figment = figment.merge(Serialized::default("ports.lease_ttl_seconds", ttl));
         }
         if let Some(probe) = strom_types::env::var_opt("STROM_PORT_PROBE_BEFORE_HANDOUT") {
-            let probe = matches!(
-                probe.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            );
+            let probe = match probe.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => anyhow::bail!(
+                    "STROM_PORT_PROBE_BEFORE_HANDOUT must be true or false, got {probe}"
+                ),
+            };
             figment = figment.merge(Serialized::default("ports.probe_before_handout", probe));
         }
 
@@ -1043,6 +1046,22 @@ lease_ttl_seconds = 600
         assert!(config.pool_ports.contains(&47100));
         assert!(config.pool_ports.contains(&47250));
         assert!(config.pool_ports.contains(&47399));
+    }
+
+    #[test]
+    #[serial]
+    fn an_unrecognised_probe_setting_fails_config_loading() {
+        let _ports = EnvGuard::remove("STROM_PORTS");
+        let _ttl = EnvGuard::remove("STROM_PORT_LEASE_TTL");
+        let _probe = EnvGuard::set("STROM_PORT_PROBE_BEFORE_HANDOUT", "maybe");
+        let err =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("STROM_PORT_PROBE_BEFORE_HANDOUT"));
+
+        let _probe = EnvGuard::set("STROM_PORT_PROBE_BEFORE_HANDOUT", "off");
+        let config =
+            Config::from_figment(None, None, None, None, None, None, None, None, None).unwrap();
+        assert!(!config.probe_before_handout);
     }
 
     #[test]

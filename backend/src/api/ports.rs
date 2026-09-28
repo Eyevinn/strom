@@ -42,7 +42,7 @@ fn pool_error(err: PortPoolError) -> ApiError {
         PortPoolError::Exhausted { .. } | PortPoolError::AlreadyAssigned { .. } => {
             StatusCode::CONFLICT
         }
-        PortPoolError::NotFound => StatusCode::NOT_FOUND,
+        PortPoolError::NotFound | PortPoolError::FlowNotFound(_) => StatusCode::NOT_FOUND,
         // Configuration is unavailable, distinct from allocation conflicts.
         PortPoolError::NotConfigured => StatusCode::SERVICE_UNAVAILABLE,
     };
@@ -249,7 +249,7 @@ pub async fn delete_reservation(
     responses(
         (status = 200, description = "The reservation", body = PortReservation),
         (status = 400, description = "A port does not belong to this reservation", body = ErrorResponse),
-        (status = 404, description = "No live reservation with that id", body = ErrorResponse),
+        (status = 404, description = "No live reservation with that id, or no flow with that id", body = ErrorResponse),
         (status = 409, description = "A port is already assigned to another flow", body = ErrorResponse),
         (status = 503, description = "No port pool is configured on this server", body = ErrorResponse),
         (status = 500, description = "Reservation could not be persisted", body = ErrorResponse)

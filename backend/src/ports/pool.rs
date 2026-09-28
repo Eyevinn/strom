@@ -45,6 +45,8 @@ pub enum PortPoolError {
     },
     #[error("port reservation not found")]
     NotFound,
+    #[error("flow {0} does not exist")]
+    FlowNotFound(FlowId),
     #[error("port {0} does not belong to this reservation")]
     NotInReservation(u16),
     #[error("port {port} is already assigned to flow {flow_id}")]

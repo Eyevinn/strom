@@ -4454,7 +4454,7 @@
             }
           },
           "404": {
-            "description": "No live reservation with that id",
+            "description": "No live reservation with that id, or no flow with that id",
             "content": {
               "application/json": {
                 "schema": {

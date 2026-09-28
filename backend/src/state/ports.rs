@@ -195,6 +195,11 @@ impl AppState {
         let live = self.live_flow_ids().await;
         let mut pool = self.inner.port_pool.write().await;
         pool.reconcile(&live, Utc::now());
+        // An association with a flow that does not exist would be dropped by
+        // the next reconcile, so accepting it would be a success in name only.
+        if pool.is_enabled() && !live.contains(&flow_id) {
+            return Ok(Err(PortPoolError::FlowNotFound(flow_id)));
+        }
         let mut candidate = pool.clone();
         let outcome = candidate.assign(id, flow_id, ports, Utc::now());
         if outcome.is_ok() {

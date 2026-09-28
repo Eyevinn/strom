@@ -245,6 +245,25 @@ async fn a_flow_association_survives_the_reservation_and_ends_with_the_flow() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
 
+    // A flow that does not exist is a 404, not an association the next
+    // reconcile would silently drop.
+    let (status, err) = call(
+        &app,
+        Method::POST,
+        &format!("/api/ports/reservations/{id}/assign"),
+        Some(json!({"flow_id": uuid::Uuid::new_v4(), "ports": [47102]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{err}");
+    let (_, after) = call(
+        &app,
+        Method::GET,
+        &format!("/api/ports/reservations/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(after["in_use"], assigned["in_use"]);
+
     // Deleting the reservation leaves the in-use ports held, not free.
     let (status, _) = call(
         &app,
