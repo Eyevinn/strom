@@ -26,6 +26,8 @@ use strom_types::{block::*, element::ElementPadRef, PropertyValue, *};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+mod profile_filter;
+
 /// WHEP Input block builder.
 pub struct WHEPInputBuilder;
 
@@ -1326,146 +1328,8 @@ fn build_whepserversink(
         None
     });
 
-    // WORKAROUND #2: Fix H.264 profile-level-id mismatch blocking video flow.
-    //
-    // Problem: webrtcsink creates capsfilters downstream of the payloader with
-    // profile-level-id from the browser's SDP (e.g. 42001f = Baseline). When the
-    // actual H.264 stream has a different profile (e.g. high-4:4:4 = f40028),
-    // rtph264pay queries downstream, sees only baseline is acceptable, and
-    // negotiation fails with NOT_NEGOTIATED.
-    //
-    // There are two cases:
-    //   1. Discovery pipeline: the output_filter capsfilter already exists at
-    //      payloader-setup time → we strip profile-level-id immediately.
-    //   2. Consumer session: the pay_filter capsfilter is created later in
-    //      connect_input_stream → we use element-added + notify::caps to strip
-    //      profile-level-id synchronously when the capsfilter's caps are set,
-    //      before negotiation occurs.
-    whepserversink.connect("payloader-setup", false, |values| {
-        let consumer_id = values[1].get::<String>().unwrap_or_default();
-        let payloader = values[3].get::<gst::Element>().unwrap();
-
-        info!(
-            "WHEP Output: payloader-setup fired: consumer_id={}, payloader={} (factory={})",
-            consumer_id,
-            payloader.name(),
-            payloader.factory().map(|f| f.name().to_string()).unwrap_or_else(|| "unknown".to_string())
-        );
-
-        // Helper: walk downstream capsfilters from a pad and strip profile fields
-        fn strip_downstream_capsfilters(start_pad: &gst::Pad, consumer_id: &str) -> u32 {
-            let mut count = 0u32;
-            let mut next_pad = start_pad.peer();
-            while let Some(peer) = next_pad {
-                if let Some(element) = peer.parent_element() {
-                    let is_capsfilter = element
-                        .factory()
-                        .map(|f| f.name().as_str() == "capsfilter")
-                        .unwrap_or(false);
-                    if is_capsfilter {
-                        let caps: gst::Caps = element.property("caps");
-                        if let Some(s) = caps.structure(0) {
-                            if s.has_field("profile-level-id")
-                                || s.has_field("profile")
-                                || s.has_field("profile-id")
-                                || s.has_field("tier-flag")
-                                || s.has_field("level-id")
-                                || s.has_field("tx-mode")
-                            {
-                                let mut new_caps = gst::Caps::new_empty();
-                                for i in 0..caps.size() {
-                                    if let Some(structure) = caps.structure(i) {
-                                        let mut ns = structure.to_owned();
-                                        ns.remove_field("profile-level-id");
-                                        ns.remove_field("profile");
-                                        ns.remove_field("profile-id");
-                                        ns.remove_field("tier-flag");
-                                        ns.remove_field("level-id");
-                                        ns.remove_field("tx-mode");
-                                        new_caps.merge_structure(ns);
-                                    }
-                                }
-                                info!(
-                                    "WHEP Output: Stripped profile from capsfilter {} for {}: {:?}",
-                                    element.name(),
-                                    consumer_id,
-                                    new_caps
-                                );
-                                element.set_property("caps", &new_caps);
-                                count += 1;
-                            }
-                        }
-                    }
-                    next_pad = element.static_pad("src").and_then(|p| p.peer());
-                } else {
-                    break;
-                }
-            }
-            count
-        }
-
-        if let Some(src_pad) = payloader.static_pad("src") {
-            // Case 1: Strip any capsfilters that already exist downstream (discovery).
-            strip_downstream_capsfilters(&src_pad, &consumer_id);
-        }
-
-        // Case 2: For consumer sessions, connect_input_stream creates a second
-        // capsfilter (pay_filter) AFTER payloader-setup and sets it with SDP caps
-        // including profile-level-id. We intercept this by watching for new
-        // capsfilters added to the session pipeline and stripping profile-level-id
-        // from their caps via notify::caps (fires synchronously during set_property,
-        // BEFORE any caps negotiation occurs).
-        if consumer_id != "discovery" {
-            if let Some(parent) = payloader.parent() {
-                if let Ok(bin) = parent.downcast::<gst::Bin>() {
-                    let consumer_id_bin = consumer_id.clone();
-                    bin.connect_element_added(move |_bin, element| {
-                        let is_capsfilter = element
-                            .factory()
-                            .map(|f| f.name().as_str() == "capsfilter")
-                            .unwrap_or(false);
-                        if !is_capsfilter {
-                            return;
-                        }
-                        let cid = consumer_id_bin.clone();
-                        element.connect_notify(Some("caps"), move |el, _| {
-                            let caps: gst::Caps = el.property("caps");
-                            if let Some(s) = caps.structure(0) {
-                                if s.has_field("profile-level-id")
-                                    || s.has_field("profile")
-                                    || s.has_field("profile-id")
-                                    || s.has_field("tier-flag")
-                                    || s.has_field("level-id")
-                                    || s.has_field("tx-mode")
-                                {
-                                    let mut new_caps = gst::Caps::new_empty();
-                                    for i in 0..caps.size() {
-                                        if let Some(structure) = caps.structure(i) {
-                                            let mut ns = structure.to_owned();
-                                            ns.remove_field("profile-level-id");
-                                            ns.remove_field("profile");
-                                            ns.remove_field("profile-id");
-                                            ns.remove_field("tier-flag");
-                                            ns.remove_field("level-id");
-                                            ns.remove_field("tx-mode");
-                                            new_caps.merge_structure(ns);
-                                        }
-                                    }
-                                    info!(
-                                        "WHEP Output: notify::caps stripped profile from {} for {}: {:?}",
-                                        el.name(), cid, new_caps
-                                    );
-                                    el.set_property("caps", &new_caps);
-                                }
-                            }
-                        });
-                    });
-                }
-            }
-        }
-
-        Some(false.to_value())
-    });
+    // WORKAROUND #2: a viewer's offered profile must not block the stream.
+    profile_filter::install(&whepserversink);
 
     // Handle consumer-removed to clean up webrtcbin from stats storage
     let dynamic_webrtcbin_store_remove = ctx.dynamic_webrtcbin_store();
