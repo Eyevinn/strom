@@ -20,6 +20,7 @@ wiring, and a pointer to `ROLE_REVIEW.md` or `ROLE_FIX.md`.
 | `REVIEW.md` | Reviewing a pull request. |
 | `TRIAGE.md` | Triaging an issue. |
 | `FIX.md` | Turning an approved design into a PR. |
+| `DEPS.md` | The implementation stage, before it picks an issue. The monthly dependency round. |
 | `SUMMARY.md` | Writing the run summary. Every run, last. |
 | `board.sh` | Reporting the state of the open board before implementing anything. |
 | `verify-citations.sh` | Before posting anything that cites code, or that has a length ceiling. |
@@ -247,6 +248,25 @@ which is exactly when it gets "simplified" away.
   else**, which is why class C is exempt from the 14-day closure.
 - **Class B and class C are distinct** because "no evidence yet" and "evidence that needs a
   human to fire it" call for different things from the reader.
+
+### Reasoning behind `DEPS.md`
+
+- **Dependabot version updates were switched off because they cost more than they gave.** In
+  the month before, they opened 17 pull requests, of which 5 were merged. Each one re-resolved
+  `Cargo.lock` on its own, so they conflicted with each other and every rebase cost another CI
+  run. Security updates are a separate Dependabot feature and still arrive as they happen.
+- **One round a month keeps the lockfile from rotting** without a stream of pull requests.
+  Falling far behind is its own risk: a security fix then lands on top of a year of breaking
+  changes.
+- **A breaking compatible release is held back, not worked around.** The first grouped
+  Dependabot run failed because gstreamer-video 0.25.4 called a gstreamer-video-sys symbol its
+  own declared floor did not have. Code bent around that would have to be unbent when upstream
+  fixed it.
+- **GStreamer, glib, egui and wgpu are listed, never bumped.** They are the core of the
+  backend and the frontend, they move as families, and a 0.x minor bump in them is a migration (egui-phosphor 0.13
+  existed only to follow egui to 0.35 and could never pass CI on its own).
+- **Each requirement bump is its own commit** so the maintainer can drop one without redoing
+  the round.
 
 ## Changing the protocol
 

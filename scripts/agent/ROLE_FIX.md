@@ -30,6 +30,9 @@ structure and its two lanes, the PR classes and the required body. Write the run
 If one of them is missing, say so in the summary and stop. Do not reconstruct the protocol
 from memory.
 
+Before you pick an issue, `DEPS.md` says whether this run is the monthly dependency round.
+If it is, that round is this run's one new PR.
+
 Run `board.sh` before you pick anything. It reports the board and leaves the judgements to
 you; three of its findings are binding, and `FIX.md` names them.
 
