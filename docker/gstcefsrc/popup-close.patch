@@ -1,0 +1,20 @@
+diff --git a/gstcefsrc.cc b/gstcefsrc.cc
+index eba5b28..267312b 100644
+--- a/gstcefsrc.cc
++++ b/gstcefsrc.cc
+@@ -474,6 +474,15 @@ class BrowserClient :
+ 
+     virtual void OnBeforeClose(CefRefPtr<CefBrowser> browser) override
+     {
++      // A popup the page opened shares this client, so its closing arrives
++      // here too. Treating that as this source's browser closing left
++      // src->browser null while the page kept running, and stop() then never
++      // closed it: the page outlived its element, still logged in and still
++      // on the network.
++      if (!src->browser || !browser->IsSame(src->browser)) {
++        GST_DEBUG_OBJECT (src, "A popup closed; the page stays open");
++        return;
++      }
+       src->browser = nullptr;
+       g_mutex_lock (&src->state_lock);
+       src->state = CEF_SRC_CLOSED;

@@ -86,6 +86,12 @@ RUN git init gstcefsrc && \
     git fetch --depth 1 origin "${GSTCEFSRC_REF}" && \
     git checkout FETCH_HEAD
 
+# Strom's patch: a popup the page opens shares the element's CEF client, and
+# its closing was taken for the element's own browser closing. The page then
+# outlived its element on stop, still logged in and on the network.
+COPY popup-close.patch /build/popup-close.patch
+RUN cd /build/gstcefsrc && git apply /build/popup-close.patch
+
 WORKDIR /build/gstcefsrc
 
 # Build gstcefsrc
