@@ -584,10 +584,22 @@ impl RoutingMatrixEditor {
                             folded_inputs.insert(in_idx);
                         }
                     }
-                    for _ in 0..out_ch_count {
+                    for out_ch in 0..out_ch_count {
                         // A folded stream still shows whether it is routed at
                         // all, so nothing is hidden without a trace.
-                        ui.label("");
+                        if folded {
+                            Self::show_folded_indicator(
+                                ui,
+                                routing,
+                                in_idx,
+                                in_ch_count,
+                                out_idx,
+                                out_ch,
+                                cell_size,
+                            );
+                        } else {
+                            ui.label("");
+                        }
                     }
                     ui.end_row();
 
@@ -678,10 +690,12 @@ impl RoutingMatrixEditor {
                 }
                 ui.end_row();
 
-                // Header row 2: Channel numbers, minus the folded streams
+                // Header row 2: Channel numbers. A folded stream keeps the one
+                // column its indicator sits in.
                 ui.label(""); // Empty corner cell
                 for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs) {
                     let visible = if folded_inputs.contains(&in_idx) {
+                        ui.label("");
                         0
                     } else {
                         in_ch_count
@@ -707,10 +721,21 @@ impl RoutingMatrixEditor {
                     // Row label
                     ui.label(egui::RichText::new(format!("Out {}", out_ch)).small());
 
-                    // A dot for each input channel, minus the folded streams
+                    // A dot for each input channel. A folded stream shows
+                    // one indicator instead, so it is not hidden without a
+                    // trace.
                     for (in_idx, &in_ch_count) in input_channels.iter().enumerate().take(num_inputs)
                     {
                         let visible = if folded_inputs.contains(&in_idx) {
+                            Self::show_folded_indicator(
+                                ui,
+                                routing,
+                                in_idx,
+                                in_ch_count,
+                                out_idx,
+                                out_ch,
+                                cell_size,
+                            );
                             0
                         } else {
                             in_ch_count
@@ -733,6 +758,42 @@ impl RoutingMatrixEditor {
                     ui.end_row();
                 }
             });
+    }
+
+    /// The cell a folded input stream leaves for one output channel: a ring
+    /// when any of the stream's channels is routed there, and nothing when
+    /// none is. A ring rather than a dot, because it cannot be clicked —
+    /// unfolding the stream is how its crosspoints are edited.
+    fn show_folded_indicator(
+        ui: &mut Ui,
+        routing: &RoutingGains,
+        in_idx: usize,
+        in_ch_count: usize,
+        out_idx: usize,
+        out_ch: usize,
+        cell_size: f32,
+    ) {
+        let routed = (0..in_ch_count)
+            .map(|in_ch| Crosspoint::new(in_idx, in_ch, out_idx, out_ch))
+            .filter(|crosspoint| routing.contains_key(crosspoint))
+            .count();
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(cell_size, cell_size), egui::Sense::hover());
+        if routed == 0 {
+            return;
+        }
+        if ui.is_rect_visible(rect) {
+            let color = ui.style().visuals.widgets.inactive.fg_stroke.color;
+            ui.painter().circle_stroke(
+                rect.center(),
+                (cell_size * 0.32).max(2.5),
+                egui::Stroke::new(1.5_f32, color),
+            );
+        }
+        response.on_hover_text(format!(
+            "In {in_idx}: {routed} of {in_ch_count} channel(s) routed to Out {out_ch}\n\
+             Unfold the input to edit"
+        ));
     }
 
     /// One crosspoint cell.
