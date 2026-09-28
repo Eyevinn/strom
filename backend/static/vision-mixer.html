@@ -1239,7 +1239,7 @@
             <span class="conn-dot" id="wsDot" title="WebSocket control">WS</span>
         </div>
         <span class="status-text" id="statusText">Connecting...</span>
-        <span class="shortcut-hint">v2.40-zone-capacity | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
+        <span class="shortcut-hint">v2.41-take-note | 1-9,0 = PVW | Space = AUTO | X = CUT | F = FTB | M = Hide</span>
     </div>
 
     <!-- Server-injected configuration (safe JSON encoding) -->
@@ -1421,6 +1421,22 @@
         }
 
         // ---- Transitions ----
+        // What the status line adds after a take: nothing when the requested
+        // transition ran, otherwise what ran instead. "morph" (a shared source
+        // moving into its new box) is how a fade between compositions sharing
+        // a source always looks, so only a fade is spared the downgrade note;
+        // a slide, push or wipe that morphed did not run.
+        function takeStatusNote(requested, actual) {
+            const req = requested.toLowerCase();
+            if (!actual || actual === req) return '';
+            if (actual === 'morph') {
+                return req === 'fade'
+                    ? ' (ran as a move: a shared source slid into its new box)'
+                    : ' (downgraded to morph: a shared source slid into its new box)';
+            }
+            return ' (downgraded to ' + actual + ')';
+        }
+
         function doTake(type, durationMs) {
             if (transitioning) return;
             // FTB is auto-cancelled server-side when a transition is triggered
@@ -1449,16 +1465,7 @@
             }).then(r => {
                 // Bus state is reconciled via the VisionMixerStateChanged WS event
                 // broadcast right after the take.
-                // "morph" is what any take between compositions sharing a
-                // source does (the source moves into its new box), not a
-                // downgrade, so name it plainly.
-                const actual = r.actual_transition_type;
-                const note = (!actual || actual === type.toLowerCase())
-                    ? ''
-                    : actual === 'morph'
-                        ? ' (ran as a move: a shared source slid into its new box)'
-                        : ' (' + r.message + ' — downgraded to ' + actual + ')';
-                setStatus(r.message + note);
+                setStatus(r.message + takeStatusNote(type, r.actual_transition_type));
                 setTimeout(() => {
                     transitioning = false;
                     document.getElementById('autoBtn').classList.remove('active');
