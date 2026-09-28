@@ -46,8 +46,8 @@ Open every port inbound on the firewall and publish it into the container:
 docker run -d -e STROM_PORTS=47100-47199 -p 8080:8080 -p 47100-47199:47100-47199/udp ...
 ```
 
-Size the pool for the number of owners times what each reserves. Over-reserving is the intended
-usage, not waste: an owner that holds 10 and uses 3 has headroom for what it adds later.
+Size the pool for the number of owners times what each reserves. A reservation can grow but not
+shrink, so an owner reserves for what it may add later.
 
 ## Model
 

@@ -117,9 +117,8 @@ port = 8080
 # Strom that several callers share — on one that does not, a pool would only
 # narrow which ports its own flows may bind.
 #
-# Size it for the number of owners times what each reserves. Over-reserving is
-# the intended usage: an owner that holds 10 and uses 3 has headroom for what
-# it adds later.
+# Size it for the number of owners times what each reserves. A reservation can
+# grow but not shrink, so an owner reserves for what it may add later.
 # Default: empty (no pool)
 # Env: STROM_PORTS=47100-47999 (comma-separated, same grammar)
 # ports = ["47100-47199", 47250, "47300-47399"]
