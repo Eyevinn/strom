@@ -1602,10 +1602,15 @@
                 if (type === 'stinger') durationMs = (r.duration_ms || 0) + 300;
                 // Bus state is reconciled via the VisionMixerStateChanged WS event
                 // broadcast right after the take.
+                // "morph" is what any take between compositions sharing a
+                // source does (the source moves into its new box), not a
+                // downgrade, so name it plainly.
                 const actual = r.actual_transition_type;
-                const note = (actual && actual !== type.toLowerCase())
-                    ? ' (' + r.message + ' — downgraded to ' + actual + ')'
-                    : '';
+                const note = (!actual || actual === type.toLowerCase())
+                    ? ''
+                    : actual === 'morph'
+                        ? ' (ran as a move: a shared source slid into its new box)'
+                        : ' (' + r.message + ' — downgraded to ' + actual + ')';
                 setStatus(r.message + note);
                 setTimeout(() => {
                     transitioning = false;
