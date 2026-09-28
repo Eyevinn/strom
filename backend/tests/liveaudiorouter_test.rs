@@ -330,8 +330,14 @@ fn feed(h: &Harness, instance: &str, input: usize, tones: &[(f64, f64)]) {
 
     // Several channels: interleave them into one stream first. This is the
     // test's own plumbing, not the block's.
+    //
+    // Start its output at the first input buffer. Left at the default, a live
+    // aggregator's first deadline can pass before the sources' caps reach it.
+    // It then aggregates without an output format, and `audiointerleave`,
+    // unlike `audiomixer`, cannot invent one: it posts "not negotiated".
     let il = gst::ElementFactory::make("audiointerleave")
         .property("channel-positions-from-input", false)
+        .property_from_str("start-time-selection", "first")
         .build()
         .expect("audiointerleave");
     let cf = gst::ElementFactory::make("capsfilter")
@@ -359,15 +365,6 @@ fn raw_caps(channels: usize) -> gst::Caps {
 
 /// Attach a `level` to one output pad of the block.
 fn tap(h: &Harness, instance: &str, output: usize) {
-    let level = gst::ElementFactory::make("level")
-        .property("post-messages", true)
-        .property("interval", 50_000_000u64)
-        .build()
-        .expect("level");
-    let sink = gst::ElementFactory::make("fakesink")
-        .property("sync", false)
-        .build()
-        .expect("fakesink");
     // Pin the tap to float. With a fader or soft clipper engaged the block
     // pins `F32LE` on the bus itself, but with both off it deliberately leaves
     // the format open (see the module header on `caps_out_O`), and nothing
@@ -378,11 +375,34 @@ fn tap(h: &Harness, instance: &str, output: usize) {
     // of the tap, not of the router, so these tests measured the runner's
     // negotiation rather than the block. Asking for float here makes what is
     // measured the same on every machine.
+    tap_as(h, instance, output, "F32LE");
+}
+
+/// Attach a `level` that only takes `format` to one output pad of the block.
+fn tap_as(h: &Harness, instance: &str, output: usize, format: &str) {
+    let queue = h
+        .elements
+        .get(&format!("{instance}:queue_out_{output}"))
+        .unwrap_or_else(|| panic!("no queue_out_{output}"));
+    tap_after(h, queue, format);
+}
+
+/// Attach a `level` that only takes `format` after `upstream`.
+fn tap_after(h: &Harness, upstream: &gst::Element, format: &str) {
+    let level = gst::ElementFactory::make("level")
+        .property("post-messages", true)
+        .property("interval", 50_000_000u64)
+        .build()
+        .expect("level");
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .expect("fakesink");
     let tap_format = gst::ElementFactory::make("capsfilter")
         .property(
             "caps",
             gst::Caps::builder("audio/x-raw")
-                .field("format", "F32LE")
+                .field("format", format)
                 .build(),
         )
         .build()
@@ -392,11 +412,7 @@ fn tap(h: &Harness, instance: &str, output: usize) {
         .expect("add tap");
     tap_format.link(&level).expect("link tap format");
     level.link(&sink).expect("link tap");
-    h.elements
-        .get(&format!("{instance}:queue_out_{output}"))
-        .unwrap_or_else(|| panic!("no queue_out_{output}"))
-        .link(&tap_format)
-        .expect("link output to level");
+    upstream.link(&tap_format).expect("link output to level");
 }
 
 /// Highest per-channel peak seen on `level` messages within `timeout`,
@@ -648,6 +664,264 @@ fn closing_every_crosspoint_silences_the_output_without_a_silence_source() {
     assert!(
         after.iter().all(|p| is_silent(*p)),
         "an all-closed routing must be silent, got {after:?}"
+    );
+}
+
+// ============================================================================
+// An input that connects after the bus has started
+// ============================================================================
+
+/// Play a one-in, one-out router whose consumer takes only `format`, let the
+/// bus negotiate before any input has reached it, and only then connect a
+/// source. Returns the peaks of the stereo output.
+///
+/// `force_live` makes the bus produce from the start, so with nothing
+/// connected it has to choose an output format without an input to take it
+/// from. In a flow that happens whenever an input joins later than the flow
+/// starts. In the rest of this file it happens by timing: a bus that times
+/// out before the first input's caps arrive negotiates the same way.
+fn late_input_peaks(instance: &str, format: &str) -> Vec<f64> {
+    let h = assemble(instance, &late_input_router());
+    tap_as(&h, instance, 0, format);
+    play_then_connect_late_input(&h, instance, &[])
+}
+
+/// One mono input routed to channel 0 of one stereo output.
+fn late_input_router() -> HashMap<String, PropertyValue> {
+    props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(2)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"]}"#.to_string()),
+        ),
+    ])
+}
+
+/// Set `h` playing, wait until the bus and every pad in `also_negotiated`
+/// have caps, then connect a 48 kHz source to input 0. Returns the peaks of
+/// the stereo output.
+fn play_then_connect_late_input(
+    h: &Harness,
+    instance: &str,
+    also_negotiated: &[gst::Pad],
+) -> Vec<f64> {
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let mixer_src = h.elements[&format!("{instance}:mixer_0")]
+        .static_pad("src")
+        .expect("mixer src pad");
+    let bus = h.pipeline.bus().expect("pipeline bus");
+    let start = Instant::now();
+    while mixer_src.current_caps().is_none()
+        || also_negotiated.iter().any(|p| p.current_caps().is_none())
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the output never negotiated with no input connected"
+        );
+        if let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(10),
+            &[gst::MessageType::Error],
+        ) {
+            if let gst::MessageView::Error(e) = msg.view() {
+                panic!(
+                    "pipeline error from {:?} before any input was connected: {}",
+                    e.src().map(|s| s.path_string()),
+                    e.error()
+                );
+            }
+        }
+    }
+
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .property("freq", 440.0)
+        .property("volume", 0.5)
+        .build()
+        .expect("audiotestsrc");
+    let mono = gst::ElementFactory::make("capsfilter")
+        .property("caps", raw_caps(1))
+        .build()
+        .expect("capsfilter");
+    h.pipeline.add_many([&src, &mono]).expect("add source");
+    src.link(&mono).expect("link source");
+    mono.link(&h.elements[&format!("{instance}:identity_in_0")])
+        .expect("link input");
+    mono.sync_state_with_parent().expect("sync capsfilter");
+    src.sync_state_with_parent().expect("sync source");
+
+    observe_peaks(&h.pipeline, 2, Duration::from_secs(2))
+}
+
+#[test]
+fn an_input_that_joins_after_the_bus_started_reaches_a_float_consumer() {
+    let peaks = late_input_peaks("late_f32", "F32LE");
+    assert!(
+        !is_silent(peaks[0]) && is_silent(peaks[1]),
+        "a late input must reach output channel 0 of an F32LE-only consumer, got {peaks:?}"
+    );
+}
+
+#[test]
+fn an_input_that_joins_after_the_bus_started_reaches_an_integer_consumer() {
+    let peaks = late_input_peaks("late_s16", "S16LE");
+    assert!(
+        !is_silent(peaks[0]) && is_silent(peaks[1]),
+        "a late input must reach output channel 0 of an S16LE-only consumer, got {peaks:?}"
+    );
+}
+
+#[test]
+fn a_late_input_reaches_a_consumer_that_converts_format_but_not_rate() {
+    // An encoder-shaped consumer: it converts the sample format, has no
+    // resampler, and takes 48 kHz only. A bus that picks its rate blind
+    // must pick one this consumer takes.
+    let instance = "late_rate";
+    let h = assemble(instance, &late_input_router());
+    // No dither, so the unrouted channel stays digital silence.
+    let convert = gst::ElementFactory::make("audioconvert")
+        .property_from_str("dithering", "none")
+        .build()
+        .expect("audioconvert");
+    h.pipeline.add(&convert).expect("add audioconvert");
+    h.elements[&format!("{instance}:queue_out_0")]
+        .link(&convert)
+        .expect("link output to audioconvert");
+    let rate = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("rate", 48000i32)
+                .build(),
+        )
+        .build()
+        .expect("capsfilter");
+    h.pipeline.add(&rate).expect("add rate filter");
+    convert.link(&rate).expect("link rate filter");
+    tap_after(&h, &rate, "S16LE");
+
+    let peaks = play_then_connect_late_input(&h, instance, &[]);
+    assert!(
+        !is_silent(peaks[0]) && is_silent(peaks[1]),
+        "a late input must reach a 48 kHz-only consumer, got {peaks:?}"
+    );
+}
+
+#[test]
+fn a_late_input_reaches_a_mixer_that_locked_its_rate_on_the_router() {
+    // The router's bus negotiates blind at 44100 Hz and a mixer after it
+    // locks to that. A 48 kHz input that joins later must be resampled by
+    // the router, not refused because the downstream rate was passed back
+    // to the router's inputs.
+    let instance = "late_mix";
+    let h = assemble(instance, &late_input_router());
+    let mixer = gst::ElementFactory::make("audiomixer")
+        .build()
+        .expect("audiomixer");
+    let convert = gst::ElementFactory::make("audioconvert")
+        .build()
+        .expect("audioconvert");
+    let level = gst::ElementFactory::make("level")
+        .property("post-messages", true)
+        .property("interval", 50_000_000u64)
+        .build()
+        .expect("level");
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .expect("fakesink");
+    h.pipeline
+        .add_many([&mixer, &convert, &level, &sink])
+        .expect("add downstream mixer");
+    h.elements[&format!("{instance}:queue_out_0")]
+        .link(&mixer)
+        .expect("link output to mixer");
+    gst::Element::link_many([&mixer, &convert, &level, &sink]).expect("link downstream");
+
+    let locked = mixer.static_pad("src").expect("mixer src pad");
+    let peaks = play_then_connect_late_input(&h, instance, &[locked]);
+    assert!(
+        !is_silent(peaks[0]) && is_silent(peaks[1]),
+        "a late 48 kHz input must reach channel 0 through the downstream mixer, got {peaks:?}"
+    );
+}
+
+// ============================================================================
+// A consumer that converts
+// ============================================================================
+
+/// Feed one input with `feed_input`, send the output through `audioconvert`
+/// to an S16LE-only `level`, the shape of an encoder after the router, and
+/// return the format the bus mixes in once audio arrives.
+fn bus_format_before_a_converting_consumer(
+    instance: &str,
+    feed_input: impl FnOnce(&Harness),
+) -> String {
+    let h = assemble(instance, &late_input_router());
+    feed_input(&h);
+    let convert = gst::ElementFactory::make("audioconvert")
+        .build()
+        .expect("audioconvert");
+    h.pipeline.add(&convert).expect("add audioconvert");
+    h.elements[&format!("{instance}:queue_out_0")]
+        .link(&convert)
+        .expect("link output to audioconvert");
+    tap_after(&h, &convert, "S16LE");
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let peaks = observe_peaks(&h.pipeline, 2, Duration::from_secs(2));
+    assert!(
+        !is_silent(peaks[0]),
+        "no audio through the converting consumer: {peaks:?}"
+    );
+    let caps = h.elements[&format!("{instance}:mixer_0")]
+        .static_pad("src")
+        .expect("mixer src pad")
+        .current_caps()
+        .expect("bus caps");
+    caps.structure(0)
+        .and_then(|s| s.get::<String>("format").ok())
+        .expect("bus format")
+}
+
+#[test]
+fn a_consumer_that_converts_to_integer_leaves_a_float_bus_in_float() {
+    let format = bus_format_before_a_converting_consumer("conv_f32", |h| {
+        feed(h, "conv_f32", 0, &[(440.0, 0.5)]);
+    });
+    assert_eq!(
+        format, "F32LE",
+        "the bus must sum in float when its consumer accepts float, not in the consumer's output format"
+    );
+}
+
+#[test]
+fn a_consumer_that_converts_to_integer_gets_a_float_bus_from_an_integer_input() {
+    let format = bus_format_before_a_converting_consumer("conv_s16", |h| {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .property("freq", 440.0)
+            .property("volume", 0.5)
+            .build()
+            .expect("audiotestsrc");
+        let s16 = gst::ElementFactory::make("capsfilter")
+            .property("caps", s16_caps())
+            .build()
+            .expect("capsfilter");
+        h.pipeline.add_many([&src, &s16]).expect("add source");
+        gst::Element::link_many([&src, &s16, &h.elements["conv_s16:identity_in_0"]])
+            .expect("link input");
+    });
+    assert_eq!(
+        format, "F32LE",
+        "the bus must sum in float whenever its consumer accepts float, whatever the input format"
     );
 }
 
