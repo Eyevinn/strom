@@ -570,28 +570,6 @@ jobs:
           echo "D:\gstreamer\1.0\msvc_x86_64\bin" >> $env:GITHUB_PATH
           echo "PKG_CONFIG_PATH=D:\gstreamer\1.0\msvc_x86_64\lib\pkgconfig" >> $env:GITHUB_ENV
 
-      # An element can be in the registry and still fail to load: the registry
-      # lists the plugin, and its DLL's own dependencies are only resolved at
-      # creation. The tests then fail 20 minutes in with nothing but "Failed to
-      # load element factory". Loading the plugins here puts the real error in
-      # front of the reader.
-      - name: Check GStreamer plugins load
-        env:
-          GST_DEBUG: GST_PLUGIN_LOADING:4
-        run: |
-          failed=""
-          for element in srtsink srtsrc x264enc mpegtsmux; do
-            echo "::group::$element"
-            gst-inspect-1.0 "$element" > inspect.txt 2>&1 || failed="$failed $element"
-            grep -iE "fail|error|could not|not found" inspect.txt | head -40 || true
-            tail -15 inspect.txt
-            echo "::endgroup::"
-          done
-          if [ -n "$failed" ]; then
-            echo "::error::GStreamer elements that do not load:$failed"
-            exit 1
-          fi
-
       - name: Download frontend dist
         uses: actions/download-artifact@v8
         with:
@@ -612,6 +590,20 @@ jobs:
 
       - name: Run tests
         run: |
+          # Git Bash puts its own /mingw64/bin first in PATH, and that holds a
+          # different OpenSSL under the same DLL names GStreamer's plugins link
+          # against. A test binary resolves a plugin's dependencies through
+          # PATH, so gstsrt.dll picked up Git's libcrypto and failed with "The
+          # specified procedure could not be found" (gst-inspect-1.0 does not
+          # show it: Windows searches the program's own directory first).
+          gst_bin=/d/gstreamer/1.0/msvc_x86_64/bin
+          while IFS= read -r dir; do
+            if [ "$dir" = "$gst_bin" ]; then break; fi
+            for dll in "$gst_bin"/*.dll; do
+              if [ -e "$dir/${dll##*/}" ]; then echo "shadows GStreamer: $dir/${dll##*/}"; fi
+            done
+          done < <(echo "$PATH" | tr ':' '\n')
+          export PATH="$gst_bin:$PATH"
           cargo test --package strom --features nvidia
           cargo test --package strom-types
         env:
