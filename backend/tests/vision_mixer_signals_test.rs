@@ -207,3 +207,42 @@ async fn punch_in_taken_to_plain_input_reports_morph() {
     let (_, _, _, kind) = result.expect("take");
     assert_eq!(kind, "morph");
 }
+
+/// A take out of a PiP with a name the mixer does not know ("morph" is a
+/// report, never a request) must be refused like one between plain inputs,
+/// not run as a fade and reported as one. The buses stay where they were.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_transition_out_of_a_pip_is_refused() {
+    let block_id = "vmsig_unknown";
+    let flow = build_flow(
+        block_id,
+        2,
+        2,
+        &[
+            ("num_pips", "1"),
+            ("initial_pgm_source", "pip:0"),
+            ("initial_pvw_source", "input:1"),
+        ],
+    );
+    let mut manager = start(&flow, block_id).await;
+    manager
+        .apply_vision_mixer_pip_config(block_id, 0, Some(1), vec![], PipTransforms::new())
+        .expect("pip config");
+
+    let result = manager.trigger_transition(block_id, 0, 1, "morph", 500);
+    let s = strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_id)
+        .expect("overlay state registered");
+    let (pgm_pip, pvw_input) = (s.pgm_pip(), s.pvw_input());
+
+    let _ = manager.stop();
+    strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);
+
+    let err = result.expect_err("an unknown name must be refused");
+    assert!(
+        err.to_string().contains("Unknown transition type: morph"),
+        "unexpected error: {}",
+        err
+    );
+    assert_eq!(pgm_pip, Some(0), "program must stay on the PiP");
+    assert_eq!(pvw_input, Some(1), "preview must stay on input 1");
+}
