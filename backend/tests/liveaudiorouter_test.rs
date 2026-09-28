@@ -1021,6 +1021,114 @@ fn a_source_that_stops_does_not_stall_the_other_inputs() {
 }
 
 // ============================================================================
+// Declared versus negotiated channel counts — the guard for #785
+// ============================================================================
+
+/// Warnings the block's input `identity_in_{input}` posts within `timeout`.
+/// Returns early on the first one. Any pipeline error fails the test, as in
+/// `observe_peaks`.
+fn observe_input_warnings(
+    pipeline: &gst::Pipeline,
+    instance: &str,
+    input: usize,
+    timeout: Duration,
+) -> Vec<String> {
+    let bus = pipeline.bus().expect("pipeline bus");
+    let source = format!("{instance}:identity_in_{input}");
+    let mut warnings = Vec::new();
+    let start = Instant::now();
+
+    while start.elapsed() < timeout && warnings.is_empty() {
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(remaining.as_millis() as u64))
+        else {
+            break;
+        };
+        match msg.view() {
+            gst::MessageView::Error(e) => panic!(
+                "pipeline error from {:?}: {} ({:?})",
+                e.src().map(|s| s.path_string()),
+                e.error(),
+                e.debug()
+            ),
+            gst::MessageView::Warning(w) => {
+                if w.src().map(|s| s.name()).as_deref() == Some(source.as_str()) {
+                    warnings.push(w.error().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    warnings
+}
+
+#[test]
+fn an_input_carrying_fewer_channels_than_declared_is_reported() {
+    // Declared stereo, fed mono. The router must not resize its grid to the
+    // stream, but it must tell the operator which property disagrees.
+    let properties = props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(2)),
+        ("output_0_channels", PropertyValue::UInt(1)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"]}"#.to_string()),
+        ),
+    ]);
+
+    let h = assemble("live", &properties);
+    feed(&h, "live", 0, &[(440.0, 0.5)]);
+    tap(&h, "live", 0);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let warnings = observe_input_warnings(&h.pipeline, "live", 0, Duration::from_secs(3));
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a mono stream on an input declared with 2 channels must post one warning \
+         from identity_in_0, got {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("input_0_channels") && warnings[0].contains("carries 1 channel"),
+        "the warning must name the property to change and the negotiated count, got {:?}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn an_input_carrying_the_declared_channels_is_not_reported() {
+    // The counterpart: a stream that matches its declaration stays quiet, so
+    // the warning above cannot be satisfied by warning on every input.
+    let properties = props(&[
+        ("num_inputs", PropertyValue::UInt(1)),
+        ("num_outputs", PropertyValue::UInt(1)),
+        ("input_0_channels", PropertyValue::UInt(1)),
+        ("output_0_channels", PropertyValue::UInt(1)),
+        (
+            "routing_matrix",
+            PropertyValue::String(r#"{"i0c0":["o0c0"]}"#.to_string()),
+        ),
+    ]);
+
+    let h = assemble("live", &properties);
+    feed(&h, "live", 0, &[(440.0, 0.5)]);
+    tap(&h, "live", 0);
+    h.pipeline
+        .set_state(gst::State::Playing)
+        .expect("set Playing");
+
+    let warnings = observe_input_warnings(&h.pipeline, "live", 0, Duration::from_secs(2));
+    assert!(
+        warnings.is_empty(),
+        "an input whose stream matches its declared channel count must not warn, got {warnings:?}"
+    );
+}
+
+// ============================================================================
 // Fades — why a crosspoint is a `volume` element and not a matrix coefficient
 // ============================================================================
 
