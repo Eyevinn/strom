@@ -798,10 +798,21 @@ async fn gpu_mixer_reports_media_age_per_input() {
         .by_name("valve1")
         .expect("valve1")
         .set_property("drop", true);
-    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    // Frames already queued past the valve keep reaching the mixer for a
+    // while, longer on a loaded runner, so wait for the gap instead of a
+    // fixed time.
     let s = strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(AGE_BLOCK_ID)
         .expect("overlay state registered");
-    let a: Vec<Option<u64>> = (0..s.num_inputs).map(|i| s.input_media_age_ms(i)).collect();
+    let read =
+        || -> Vec<Option<u64>> { (0..s.num_inputs).map(|i| s.input_media_age_ms(i)).collect() };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut a = read();
+    while !matches!((a[0], a[1]), (Some(live), Some(stalled)) if stalled >= live + 1500)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        a = read();
+    }
 
     manager.stop().expect("stop");
     strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);
