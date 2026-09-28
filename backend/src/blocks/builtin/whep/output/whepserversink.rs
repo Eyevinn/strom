@@ -215,6 +215,12 @@ pub(super) fn build_whepserversink(
     // waits out and then forwards to the session's appsrc, where webrtcbin's
     // clocksync waits for PTS + that latency + the encoder's. For raw audio
     // the Opus framing lands on top of the wait: ~20 ms per viewer.
+    //
+    // The cost: the deadline is slack against a stall in a thread upstream of
+    // a queue, and without it buffers delayed by such a stall leave off beat.
+    // In the block's own streaming thread a deadline only shifts the wait.
+    // WHIP Input relayed straight into WHEP Output is the shape that pays;
+    // mixers and routers pace their own output.
     if let Ok(bin) = whepserversink.clone().downcast::<gst::Bin>() {
         bin.connect("deep-element-added", false, |args| {
             let owner: gst::Bin = args[0].get().ok()?;

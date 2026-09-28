@@ -55,7 +55,7 @@ pub(crate) fn whep_output_definition() -> BlockDefinition {
             ExposedProperty {
                 name: "ts_offset_ms".to_string(),
                 label: "TS Offset (ms)".to_string(),
-                description: "Shifts the clock wait at this output's input. A negative value releases buffers to the WebRTC sessions earlier, but each viewer's session still waits out the full pipeline latency, so viewers gain far less than the offset (-30 ms measured about 8 ms). A/V sync is maintained.".to_string(),
+                description: "Shifts the clock wait at this output's input. A negative value releases buffers to the WebRTC sessions earlier, but each viewer's session still waits out the full pipeline latency, so viewers gain far less than the offset. A/V sync is maintained.".to_string(),
                 property_type: PropertyType::Int,
                 default_value: Some(PropertyValue::Int(0)),
                 mapping: PropertyMapping {
