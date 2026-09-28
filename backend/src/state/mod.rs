@@ -1106,11 +1106,10 @@ impl AppState {
                     whip_info.block_id,
                     whip_info.mode
                 );
-                // Register with port=0 placeholder; actual ports are per-session
                 if let Err(e) = self
                     .inner
                     .whip_registry
-                    .register(whip_info.endpoint_id.clone(), 0, whip_info.mode)
+                    .register(whip_info.endpoint_id.clone(), whip_info.mode)
                     .await
                 {
                     error!("Endpoint conflict registering WHIP endpoint: {}", e);
