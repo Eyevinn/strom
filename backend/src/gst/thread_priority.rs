@@ -2,6 +2,13 @@
 //!
 //! This module provides functionality to set thread priorities on GStreamer's
 //! internal streaming threads using the bus sync handler mechanism.
+//!
+//! On macOS it sets a QoS class on those threads instead of a pthread
+//! priority. On Apple Silicon the QoS class — not the priority — is what
+//! decides whether a thread is eligible for a performance (P) core, so without
+//! it a video streaming thread can be scheduled onto an efficiency core with
+//! nothing to signal that it happened. The two settings are mutually exclusive
+//! on macOS; see [`set_current_thread_priority`] for why.
 
 use crate::thread_handle::ThreadHandle;
 use crate::thread_registry::ThreadRegistry;
@@ -67,23 +74,196 @@ impl ThreadPriorityState {
     }
 }
 
-/// Set thread priority for the current thread.
+/// Configure the calling thread's scheduling for the requested level.
 ///
-/// Returns Ok(()) if priority was set successfully, Err with description otherwise.
+/// Linux and Windows set a pthread/Win32 priority. macOS instead sets a QoS
+/// class, because on Apple Silicon that — not the priority — is what decides
+/// whether the thread is eligible for a performance (P) core.
+///
+/// The two are mutually exclusive on macOS, in both orders, so this is a
+/// replacement rather than an addition:
+///
+/// * `pthread_setschedparam` first, then `pthread_set_qos_class_self_np` ->
+///   the QoS call is refused with `EPERM` and the thread stays `UNSPECIFIED`.
+/// * QoS class first, then `pthread_setschedparam` -> the priority call
+///   silently resets the class back to `UNSPECIFIED`.
+///
+/// (Both verified directly on macOS 15 / M2.) Since only the QoS class governs
+/// core placement, that is the one worth having, and macOS does not call the
+/// priority API at all.
+///
+/// Returns Ok(()) if the thread was configured, Err with description otherwise.
 pub fn set_current_thread_priority(priority: ThreadPriority) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        set_current_thread_qos(priority)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        match priority {
+            ThreadPriority::Normal => {
+                // Normal priority - nothing to do
+                debug!("Thread priority set to Normal (no change)");
+                Ok(())
+            }
+            ThreadPriority::High => set_high_priority(),
+            ThreadPriority::Realtime => set_realtime_priority(),
+        }
+    }
+}
+
+/// macOS quality-of-service classes, as defined in `<sys/qos.h>`.
+///
+/// Kept as our own enum rather than `libc::qos_class_t` because libc only
+/// exposes that type through a `pub(crate)` module tree, and because we need
+/// `PartialEq` and a total conversion from the raw value for the readback test.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum QosClass {
+    UserInteractive = 0x21,
+    UserInitiated = 0x19,
+    Default = 0x15,
+    Utility = 0x11,
+    Background = 0x09,
+    Unspecified = 0x00,
+}
+
+#[cfg(target_os = "macos")]
+impl QosClass {
+    /// Convert a raw `qos_class_t`. Unknown values map to `Unspecified` — the
+    /// kernel only ever returns one of the six documented classes, so this is
+    /// a total conversion rather than a lossy one.
+    fn from_raw(raw: u32) -> Self {
+        match raw {
+            0x21 => QosClass::UserInteractive,
+            0x19 => QosClass::UserInitiated,
+            0x15 => QosClass::Default,
+            0x11 => QosClass::Utility,
+            0x09 => QosClass::Background,
+            _ => QosClass::Unspecified,
+        }
+    }
+}
+
+// `pthread_set_qos_class_self_np` / `pthread_get_qos_class_np` from
+// <pthread/qos.h>. The libc crate carries these but only inside its
+// `pub(crate)` `new::apple` module tree, so they are not reachable as
+// `libc::*`; declaring them here avoids depending on that internal layout.
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: libc::c_int)
+        -> libc::c_int;
+    fn pthread_get_qos_class_np(
+        thread: libc::pthread_t,
+        qos_class: *mut u32,
+        relative_priority: *mut libc::c_int,
+    ) -> libc::c_int;
+}
+
+/// The QoS class a given [`ThreadPriority`] maps to on macOS.
+///
+/// `High` maps to `USER_INITIATED` rather than `USER_INTERACTIVE`: both are
+/// scheduled on performance cores (only `BACKGROUND` is confined to the
+/// efficiency cluster), but `USER_INTERACTIVE` is the band Apple reserves for
+/// main-thread UI work, and Strom's own native GUI runs there. Encoder threads
+/// saturate every core they are given, so putting them in the same band as the
+/// GUI makes the GUI compete with them at equal priority. `USER_INITIATED` —
+/// "the user started this and is waiting for the result" — is both the correct
+/// description of a live media pipeline and one band below the UI, which keeps
+/// the P cores while leaving the interface responsive. `Realtime` is an
+/// explicit request for the maximum, so it does take `USER_INTERACTIVE`. In a
+/// process that is not a foreground app, such as the headless server, the
+/// kernel schedules `USER_INTERACTIVE` at the same priority as
+/// `USER_INITIATED`, so there `Realtime` and `High` behave the same.
+#[cfg(target_os = "macos")]
+fn qos_class_for(priority: ThreadPriority) -> Option<QosClass> {
     match priority {
-        ThreadPriority::Normal => {
-            // Normal priority - nothing to do
-            debug!("Thread priority set to Normal (no change)");
+        // Normal means "do not touch this thread's scheduling", so the
+        // thread keeps whatever class it already has.
+        ThreadPriority::Normal => None,
+        ThreadPriority::High => Some(QosClass::UserInitiated),
+        ThreadPriority::Realtime => Some(QosClass::UserInteractive),
+    }
+}
+
+/// Set the macOS QoS class of the calling thread.
+///
+/// This has to run *on* the streaming thread, which is why it is called from
+/// the bus `StreamStatus::Enter` handler and the session pad probe rather than
+/// from wherever the pipeline is built: a thread that never sets a class of
+/// its own gets `QOS_CLASS_DEFAULT`, so a GStreamer streaming thread spawned
+/// from a tokio worker would otherwise never be placed deliberately at all.
+///
+/// Only the calling thread is classified. Threads it creates do not inherit
+/// the class: an encoder's own worker pool (libx264 with more than one thread,
+/// SVT-AV1) is created from the streaming thread and still runs at
+/// `QOS_CLASS_DEFAULT`, and macOS has no call that sets another thread's class.
+#[cfg(target_os = "macos")]
+fn set_current_thread_qos(priority: ThreadPriority) -> Result<(), String> {
+    let Some(class) = qos_class_for(priority) else {
+        debug!("Thread priority set to Normal (QoS class left unchanged)");
+        return Ok(());
+    };
+
+    try_set_qos(class).map_err(|rc| {
+        format!(
+            "pthread_set_qos_class_self_np({:?}) failed: errno {}",
+            class, rc
+        )
+    })?;
+
+    // Read it back rather than trusting the return code: a thread that has had
+    // its scheduling parameters set directly can end up UNSPECIFIED with the
+    // call still reporting success. This confirms the class was recorded, not
+    // where the thread runs — a task-level clamp (a background launch, App
+    // Nap) overrides the class and it still reads back as set.
+    match current_thread_qos() {
+        Ok((actual, _)) if actual == class => {
+            debug!("Thread QoS class set to {:?}", class);
             Ok(())
         }
-        ThreadPriority::High => set_high_priority(),
-        ThreadPriority::Realtime => set_realtime_priority(),
+        Ok((actual, _)) => Err(format!(
+            "QoS class requested {:?} but thread reads back as {:?}",
+            class, actual
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Set the calling thread's QoS class, returning the raw errno on failure.
+///
+/// Relative priority 0 = the top of the band; the argument must be <= 0.
+#[cfg(target_os = "macos")]
+fn try_set_qos(class: QosClass) -> Result<(), libc::c_int> {
+    let rc = unsafe { pthread_set_qos_class_self_np(class as u32, 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(rc)
+    }
+}
+
+/// Read back the calling thread's QoS class and relative priority.
+#[cfg(target_os = "macos")]
+fn current_thread_qos() -> Result<(QosClass, i32), String> {
+    let mut raw: u32 = 0;
+    let mut relative: libc::c_int = 0;
+    let rc = unsafe { pthread_get_qos_class_np(libc::pthread_self(), &mut raw, &mut relative) };
+    if rc == 0 {
+        Ok((QosClass::from_raw(raw), relative as i32))
+    } else {
+        Err(format!("pthread_get_qos_class_np failed: errno {}", rc))
     }
 }
 
 /// Set high priority (elevated but not realtime).
 /// Uses nice value or increased thread priority.
+///
+/// Not built on macOS: there the QoS class replaces this entirely, and calling
+/// it would make the QoS class unsettable. See [`set_current_thread_priority`].
+#[cfg(not(target_os = "macos"))]
 fn set_high_priority() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -127,23 +307,7 @@ fn set_high_priority() -> Result<(), String> {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        use thread_priority::{set_current_thread_priority, ThreadPriority as TpThreadPriority};
-
-        match set_current_thread_priority(TpThreadPriority::Crossplatform(
-            80u8.try_into()
-                .map_err(|e| format!("Invalid priority value: {}", e))?,
-        )) {
-            Ok(()) => {
-                debug!("Thread priority set to High (macOS crossplatform 80)");
-                Ok(())
-            }
-            Err(e) => Err(format!("Failed to set high priority on macOS: {}", e)),
-        }
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         warn!("High thread priority not supported on this platform");
         Ok(())
@@ -151,6 +315,9 @@ fn set_high_priority() -> Result<(), String> {
 }
 
 /// Set realtime priority (SCHED_FIFO on Linux).
+///
+/// Not built on macOS, for the same reason as [`set_high_priority`].
+#[cfg(not(target_os = "macos"))]
 fn set_realtime_priority() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -205,21 +372,7 @@ fn set_realtime_priority() -> Result<(), String> {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        // macOS doesn't support SCHED_FIFO directly, use highest possible priority
-        use thread_priority::{set_current_thread_priority, ThreadPriority as TpThreadPriority};
-
-        match set_current_thread_priority(TpThreadPriority::Max) {
-            Ok(()) => {
-                info!("Thread priority set to Realtime (macOS Max)");
-                Ok(())
-            }
-            Err(e) => Err(format!("Failed to set realtime priority on macOS: {}", e)),
-        }
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         Err("Realtime thread priority not supported on this platform".to_string())
     }
@@ -244,6 +397,14 @@ fn set_nice_value(nice: i32) -> Result<(), String> {
         }
     }
 }
+
+/// Remedy appended to the once-per-flow failure warning. Only Linux gates
+/// elevated priority on a capability the operator can grant.
+#[cfg(target_os = "linux")]
+const ELEVATION_HINT: &str =
+    " Elevated priority needs CAP_SYS_NICE (grant with: sudo setcap cap_sys_nice+ep <binary>).";
+#[cfg(not(target_os = "linux"))]
+const ELEVATION_HINT: &str = "";
 
 /// Set up a sync handler on the pipeline bus to configure thread priorities
 /// and register threads with the thread registry.
@@ -326,10 +487,9 @@ pub fn setup_thread_priority_handler(
                             Err(e) => {
                                 if state_clone.record_failure(e.clone()) {
                                     warn!(
-                                        "Failed to set {:?} priority for streaming thread {} (element: {}, pipeline: {}): {}. \
-                                         Elevated priority needs CAP_SYS_NICE (grant with: sudo setcap cap_sys_nice+ep <binary>). \
+                                        "Failed to set {:?} priority for streaming thread {} (element: {}, pipeline: {}): {}.{} \
                                          Continuing at normal priority; further failures for this flow are logged at debug.",
-                                        state_clone.requested, thread_id, owner, flow_name, e
+                                        state_clone.requested, thread_id, owner, flow_name, e, ELEVATION_HINT
                                     );
                                 } else {
                                     debug!(
@@ -693,5 +853,80 @@ mod tests {
         // Normal priority should always succeed
         let result = set_current_thread_priority(ThreadPriority::Normal);
         assert!(result.is_ok());
+    }
+
+    /// Each case runs on its own thread: a QoS class sticks to the thread that
+    /// set it, and libtest reuses its worker threads between tests.
+    #[cfg(target_os = "macos")]
+    fn on_fresh_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::spawn(f).join().expect("test thread panicked")
+    }
+
+    /// `High` must leave the thread in `USER_INITIATED`.
+    ///
+    /// Without the QoS call the thread reads back `DEFAULT`; with a
+    /// `pthread_setschedparam` call on the same thread it reads back
+    /// `UNSPECIFIED`. Either fails this assertion.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_high_priority_thread_is_user_initiated() {
+        on_fresh_thread(|| {
+            set_current_thread_priority(ThreadPriority::High)
+                .expect("High priority should be settable without privileges");
+
+            let (class, relative) = current_thread_qos().expect("QoS class should read back");
+            assert_eq!(
+                class,
+                QosClass::UserInitiated,
+                "pipeline threads must carry an explicit performance-core QoS class"
+            );
+            assert_eq!(
+                relative, 0,
+                "relative priority should be the top of the band"
+            );
+        });
+    }
+
+    /// `Realtime` is an explicit request for the maximum band.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_realtime_thread_is_user_interactive() {
+        on_fresh_thread(|| {
+            set_current_thread_priority(ThreadPriority::Realtime)
+                .expect("Realtime should be settable without privileges");
+
+            let (class, _) = current_thread_qos().expect("QoS class should read back");
+            assert_eq!(class, QosClass::UserInteractive);
+        });
+    }
+
+    /// `Normal` means "do not touch this thread's scheduling", including its
+    /// QoS class.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_normal_priority_leaves_qos_class_alone() {
+        on_fresh_thread(|| {
+            let (before, _) = current_thread_qos().expect("QoS class should read back");
+            set_current_thread_priority(ThreadPriority::Normal).expect("Normal always succeeds");
+            let (after, _) = current_thread_qos().expect("QoS class should read back");
+            assert_eq!(before, after);
+        });
+    }
+
+    /// Every documented `qos_class_t` value round-trips, so the readback above
+    /// cannot pass by accident through the unknown-value fallback.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_qos_class_round_trips_from_raw() {
+        for class in [
+            QosClass::UserInteractive,
+            QosClass::UserInitiated,
+            QosClass::Default,
+            QosClass::Utility,
+            QosClass::Background,
+            QosClass::Unspecified,
+        ] {
+            assert_eq!(QosClass::from_raw(class as u32), class);
+        }
     }
 }
