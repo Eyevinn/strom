@@ -37,6 +37,10 @@ use strom_types::mediaplayer::{
 use strom_types::network::{
     Ipv4AddressInfo, Ipv6AddressInfo, NetworkInterfaceInfo, NetworkInterfacesResponse,
 };
+use strom_types::ports::{
+    AssignPortsRequest, CreateReservationRequest, PortEntry, PortInUse, PortPoolStatus,
+    PortReservation, PortSpan, PortState, RenewReservationRequest,
+};
 use strom_types::stats::{BlockStats, StatMetadata, StatValue, Statistic};
 use strom_types::whep::{IceServer, IceServersResponse, WhepStreamInfo, WhepStreamsResponse};
 use utoipa::openapi::schema::{Discriminator, Schema};
@@ -97,6 +101,14 @@ use utoipa::OpenApi;
         crate::api::gst_launch::parse_gst_launch,
         crate::api::gst_launch::export_gst_launch,
         crate::api::network::list_interfaces,
+        crate::api::ports::get_pool,
+        crate::api::ports::list_reservations,
+        crate::api::ports::create_reservation,
+        crate::api::ports::get_reservation,
+        crate::api::ports::renew_reservation,
+        crate::api::ports::delete_reservation,
+        crate::api::ports::assign_ports,
+        crate::api::ports::unassign_ports,
         crate::api::version::get_version,
         crate::api::system_clock::get_system_clock,
         crate::api::logging::get_log_level,
@@ -164,6 +176,15 @@ use utoipa::OpenApi;
     ),
     components(
         schemas(
+            PortReservation,
+            PortInUse,
+            CreateReservationRequest,
+            RenewReservationRequest,
+            AssignPortsRequest,
+            PortPoolStatus,
+            PortEntry,
+            PortState,
+            PortSpan,
             FlowResponse,
             FlowListResponse,
             FlowProperties,
@@ -306,6 +327,7 @@ use utoipa::OpenApi;
         (name = "blocks", description = "Reusable block management endpoints"),
         (name = "gst-launch", description = "gst-launch-1.0 import/export endpoints"),
         (name = "Network", description = "Network interface discovery endpoints"),
+        (name = "ports", description = "Port numbers Strom administers and hands out"),
         (name = "System", description = "System information endpoints"),
         (name = "Media", description = "Media file management endpoints"),
         (name = "auth", description = "Authentication endpoints"),
