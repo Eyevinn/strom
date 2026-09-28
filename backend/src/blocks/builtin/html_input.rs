@@ -37,7 +37,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom_types::{block::StreamMode, block::*, element::ElementPadRef, PropertyValue, *};
-use tracing::info;
+use tracing::{info, warn};
 
 /// The page shown by a block nobody has configured yet.
 const DEFAULT_URL: &str = "https://github.com/Eyevinn/strom/pull/879";
@@ -57,6 +57,68 @@ pub const REMOTE_CONTROL_PROPERTY: &str = "remote_control";
 
 /// The property holding the page to render.
 pub const URL_PROPERTY: &str = "url";
+
+/// The `cefsrc` property, from Strom's gstcefsrc build, that gives a browser its
+/// own cookies, storage and cache instead of the process-wide ones.
+const ISOLATED_CONTEXT_PROPERTY: &str = "isolated-context";
+
+/// The `cefsrc` property naming the directory an isolated context persists in.
+const CONTEXT_CACHE_PATH_PROPERTY: &str = "context-cache-path";
+
+/// The `cefsrc` property that keeps session cookies in a persisted context.
+/// Most logins are session cookies, so without it a flow restart logs out.
+const PERSIST_SESSION_COOKIES_PROPERTY: &str = "persist-session-cookies";
+
+/// The property naming a browser profile several HTML sources may share.
+///
+/// Empty gives the block a profile of its own. Blocks given the same name share
+/// cookies and storage - a login made in one is seen by the others. Strom knows
+/// nothing about who owns a flow, so a caller serving several customers has to
+/// make the names its own, for instance by prefixing them with a tenant id.
+pub const BROWSER_PROFILE_PROPERTY: &str = "browser_profile";
+
+/// Where a block's browser profile lives, under the CEF cache directory.
+///
+/// Each profile is a directory of its own directly under the cache root -
+/// Chromium only accepts a profile there, and silently keeps one in memory
+/// anywhere deeper. It lasts as long as the cache directory does: across flow
+/// restarts, and in the Docker image until the container is replaced. A block with no
+/// profile name gets one derived from its flow and block ids; a named profile
+/// lives under a different prefix, so no name can land on a block's own.
+/// Every byte outside `[A-Za-z0-9_-]` is escaped, so distinct names never map
+/// to the same directory and none can climb out of the cache root.
+pub fn profile_dir(
+    cache_root: &std::path::Path,
+    properties: &HashMap<String, PropertyValue>,
+) -> std::path::PathBuf {
+    let text = |key: &str| match properties.get(key) {
+        Some(PropertyValue::String(s)) => s.trim().to_string(),
+        _ => String::new(),
+    };
+    let name = text(BROWSER_PROFILE_PROPERTY);
+    let leaf = if name.is_empty() {
+        format!(
+            "strom-block-{}-{}",
+            escape_profile_name(&text("_flow_id")),
+            escape_profile_name(&text("_block_id"))
+        )
+    } else {
+        format!("strom-named-{}", escape_profile_name(&name))
+    };
+    cache_root.join(leaf)
+}
+
+fn escape_profile_name(name: &str) -> String {
+    name.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+                (b as char).to_string()
+            } else {
+                format!("~{:02x}", b)
+            }
+        })
+        .collect()
+}
 
 /// Largest viewport this block will negotiate, per side.
 ///
@@ -298,6 +360,53 @@ impl BlockBuilder for HtmlInputBuilder {
         let cefsrc = make("cefsrc")?;
         cefsrc.set_property("url", &url);
 
+        // Every cefsrc in the process shares one browser context by default:
+        // one cookie jar and one local storage for every HTML source on this
+        // Strom, whichever flow - and on a shared Strom, whichever customer -
+        // it belongs to. A plugin with isolated-context gives this block its
+        // own. Older plugins lack the property and keep sharing.
+        if cefsrc.find_property(ISOLATED_CONTEXT_PROPERTY).is_some() {
+            cefsrc.set_property(ISOLATED_CONTEXT_PROPERTY, true);
+            // Chromium only persists a context inside its root cache path;
+            // without one the context stays in memory, isolated all the same.
+            match std::env::var_os("GST_CEF_CACHE_LOCATION") {
+                Some(root) => {
+                    let dir = profile_dir(std::path::Path::new(&root), properties);
+                    if let Err(e) = std::fs::create_dir_all(&dir) {
+                        warn!(
+                            "HTML Input block {}: could not create browser profile {}: {} - \
+                             the page keeps its session in memory only",
+                            instance_id,
+                            dir.display(),
+                            e
+                        );
+                    } else {
+                        cefsrc.set_property(
+                            CONTEXT_CACHE_PATH_PROPERTY,
+                            dir.to_string_lossy().as_ref(),
+                        );
+                        if cefsrc
+                            .find_property(PERSIST_SESSION_COOKIES_PROPERTY)
+                            .is_some()
+                        {
+                            cefsrc.set_property(PERSIST_SESSION_COOKIES_PROPERTY, true);
+                        }
+                    }
+                }
+                None => warn!(
+                    "HTML Input block {}: no CEF cache directory, so its browser profile is \
+                     kept in memory and a login does not survive a flow restart",
+                    instance_id
+                ),
+            }
+        } else {
+            warn!(
+                "HTML Input block {}: this gstcefsrc has no {} property, so the page shares \
+                 cookies and storage with every other HTML source in this Strom",
+                instance_id, ISOLATED_CONTEXT_PROPERTY
+            );
+        }
+
         // cefsrc renders at whatever size is negotiated downstream, so this
         // capsfilter is the page's viewport. BGRA is what cefsrc produces and
         // what cefdemux accepts; converting happens after the split.
@@ -511,6 +620,23 @@ fn html_input_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "stream_mode".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: BROWSER_PROFILE_PROPERTY.to_string(),
+                label: "Browser Profile".to_string(),
+                description: "Cookies and storage this page keeps, and so what it stays \
+                              logged in to. Empty gives this source a profile of its own. \
+                              Sources given the same name share one."
+                    .to_string(),
+                property_type: PropertyType::String,
+                default_value: Some(PropertyValue::String(String::new())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: BROWSER_PROFILE_PROPERTY.to_string(),
                     transform: None,
                 },
                 live: false,
@@ -751,6 +877,63 @@ mod tests {
         )]);
         let refused = checked_url(&properties).unwrap_err();
         assert!(refused.contains("file:"), "got {}", refused);
+    }
+
+    #[test]
+    fn every_block_gets_a_profile_of_its_own() {
+        let root = std::path::Path::new("/cache");
+        let block = |flow: &str, id: &str| {
+            profile_dir(
+                root,
+                &props(&[
+                    ("_flow_id", PropertyValue::String(flow.to_string())),
+                    ("_block_id", PropertyValue::String(id.to_string())),
+                ]),
+            )
+        };
+        // Block ids are only unique within a flow, so the flow is part of it.
+        assert_ne!(block("flow-a", "html"), block("flow-b", "html"));
+        assert_ne!(block("flow-a", "html"), block("flow-a", "html2"));
+        assert_eq!(block("flow-a", "html"), block("flow-a", "html"));
+        assert_eq!(
+            block("flow-a", "html").parent(),
+            Some(std::path::Path::new("/cache"))
+        );
+    }
+
+    #[test]
+    fn a_named_profile_is_shared_and_kept_apart_from_every_other() {
+        let root = std::path::Path::new("/cache");
+        let named = |name: &str| {
+            profile_dir(
+                root,
+                &props(&[
+                    ("_flow_id", PropertyValue::String("f".to_string())),
+                    ("_block_id", PropertyValue::String("b".to_string())),
+                    (
+                        BROWSER_PROFILE_PROPERTY,
+                        PropertyValue::String(name.to_string()),
+                    ),
+                ]),
+            )
+        };
+        assert_eq!(named("tenant-1/login"), named("tenant-1/login"));
+        // Escaping keeps names that differ only in punctuation apart.
+        assert_ne!(named("tenant-1/login"), named("tenant-1_login"));
+        assert_ne!(named("a~2fb"), named("a/b"));
+        // A name cannot land on a block's own profile, or climb out.
+        assert_ne!(
+            named("strom-block-f-b"),
+            profile_dir(
+                root,
+                &props(&[
+                    ("_flow_id", PropertyValue::String("f".to_string())),
+                    ("_block_id", PropertyValue::String("b".to_string())),
+                ])
+            )
+        );
+        let escaped = named("../../etc");
+        assert_eq!(escaped.parent(), Some(std::path::Path::new("/cache")));
     }
 
     #[test]

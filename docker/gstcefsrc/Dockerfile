@@ -92,6 +92,13 @@ RUN git init gstcefsrc && \
 COPY popup-close.patch /build/popup-close.patch
 RUN cd /build/gstcefsrc && git apply /build/popup-close.patch
 
+# Strom's patch: an isolated request context per cefsrc, so HTML sources in one
+# process stop sharing cookies, storage and cache (isolated-context,
+# context-cache-path, persist-session-cookies). Upstream creates every browser
+# in the global context.
+COPY isolated-context.patch /build/isolated-context.patch
+RUN cd /build/gstcefsrc && git apply /build/isolated-context.patch
+
 WORKDIR /build/gstcefsrc
 
 # Build gstcefsrc
