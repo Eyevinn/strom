@@ -14,6 +14,7 @@ use gstreamer::glib;
 use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use gstreamer_base as gst_base;
+use gstreamer_base::prelude::*;
 use gstreamer_base::subclass::prelude::*;
 use gstreamer_video as gst_video;
 use gstreamer_video::subclass::prelude::*;
@@ -49,6 +50,9 @@ pub(super) const PATH_UNNEGOTIATED: &str = "unnegotiated";
 pub(super) const PATH_VIMAGE: &str = "vimage";
 /// Value of `conversion-path` while `GstVideoConverter` is in use.
 pub(super) const PATH_FALLBACK: &str = "fallback";
+/// Value of `conversion-path` while both pads carry the same caps and
+/// buffers go through untouched.
+pub(super) const PATH_PASSTHROUGH: &str = "passthrough";
 
 /// Which of the two conversion engines the negotiated caps resolved to.
 enum Path {
@@ -56,6 +60,8 @@ enum Path {
     VImage(Plan),
     /// It does not, so run `GstVideoConverter` exactly as `videoconvert` would.
     Fallback(gst_video::VideoConverter),
+    /// Nothing to convert: `BaseTransform` hands buffers straight on.
+    Passthrough,
 }
 
 impl Path {
@@ -63,6 +69,7 @@ impl Path {
         match self {
             Path::VImage(_) => PATH_VIMAGE,
             Path::Fallback(_) => PATH_FALLBACK,
+            Path::Passthrough => PATH_PASSTHROUGH,
         }
     }
 }
@@ -110,7 +117,7 @@ impl ObjectImpl for VImageConvert {
                     .nick("Conversion path")
                     .blurb(
                         "Which engine the negotiated caps resolved to: \
-                         \"vimage\", \"fallback\", or \"unnegotiated\"",
+                         \"vimage\", \"fallback\", \"passthrough\", or \"unnegotiated\"",
                     )
                     .default_value(Some(PATH_UNNEGOTIATED))
                     .read_only()
@@ -165,8 +172,11 @@ impl ElementImpl for VImageConvert {
             // The full raw format set, matching `videoconvert`: whatever
             // vImage declines still has the fallback behind it, so narrowing
             // the templates would only turn a slower conversion into a failed
-            // link.
-            let caps = gst_video::VideoCapsBuilder::new().build();
+            // link. Any caps features are accepted too, as in `videoconvert`;
+            // `transform_caps` limits those it cannot map to passthrough.
+            let mut caps = gst_video::VideoCapsBuilder::new().build();
+            caps.make_mut()
+                .append(gst_video::VideoCapsBuilder::new().any_features().build());
             vec![
                 gst::PadTemplate::new(
                     "sink",
@@ -195,24 +205,29 @@ impl BaseTransformImpl for VImageConvert {
     const TRANSFORM_IP_ON_PASSTHROUGH: bool = false;
 
     /// Advertise the incoming caps unchanged first, then a copy with every
-    /// convertible field dropped.
+    /// convertible field dropped from the structures this element can map.
     ///
     /// Order matters: with the unchanged caps first, a peer that would accept
     /// them wins the intersection and `BaseTransform` goes passthrough instead
-    /// of converting a frame into its own format.
+    /// of converting a frame into its own format. Structures in memory it
+    /// cannot map, GL for one, are offered unchanged only, so they can pass
+    /// through but never convert.
     fn transform_caps(
         &self,
         _direction: gst::PadDirection,
         caps: &gst::Caps,
         filter: Option<&gst::Caps>,
     ) -> Option<gst::Caps> {
-        let mut relaxed = caps.copy();
+        let mut relaxed = gst::Caps::new_empty();
         {
             let relaxed = relaxed.make_mut();
-            for idx in 0..relaxed.size() {
-                if let Some(s) = relaxed.structure_mut(idx) {
-                    s.remove_fields(CONVERTIBLE_FIELDS);
+            for (s, features) in caps.iter_with_features() {
+                if !is_system_memory(features) {
+                    continue;
                 }
+                let mut s = s.to_owned();
+                s.remove_fields(CONVERTIBLE_FIELDS);
+                relaxed.append_structure_full(s, Some(features.to_owned()));
             }
         }
 
@@ -288,15 +303,15 @@ impl BaseTransformImpl for VImageConvert {
     }
 }
 
-impl VideoFilterImpl for VImageConvert {
-    fn set_info(
+impl VImageConvert {
+    /// Pick the engine for a real conversion: vImage where [`Plan::build`]
+    /// finds a path, `GstVideoConverter` otherwise.
+    fn conversion_path(
         &self,
-        incaps: &gst::Caps,
         in_info: &VideoInfo,
-        outcaps: &gst::Caps,
         out_info: &VideoInfo,
-    ) -> Result<(), gst::LoggableError> {
-        let path = match Plan::build(in_info, out_info) {
+    ) -> Result<Path, gst::LoggableError> {
+        Ok(match Plan::build(in_info, out_info) {
             Some(plan) => {
                 gst::info!(
                     CAT,
@@ -330,6 +345,25 @@ impl VideoFilterImpl for VImageConvert {
                 );
                 Path::Fallback(converter)
             }
+        })
+    }
+}
+
+impl VideoFilterImpl for VImageConvert {
+    fn set_info(
+        &self,
+        incaps: &gst::Caps,
+        in_info: &VideoInfo,
+        outcaps: &gst::Caps,
+        out_info: &VideoInfo,
+    ) -> Result<(), gst::LoggableError> {
+        // `BaseTransform` decides passthrough before it calls this, and then
+        // never asks for a frame to be transformed.
+        let path = if self.obj().is_passthrough() {
+            gst::info!(CAT, imp = self, "passthrough for {}", incaps);
+            Path::Passthrough
+        } else {
+            self.conversion_path(in_info, out_info)?
         };
 
         *self.state.lock().unwrap() = Some(path);
@@ -352,10 +386,21 @@ impl VideoFilterImpl for VImageConvert {
                 gst::FlowError::Error
             })?,
             Path::Fallback(converter) => converter.frame_ref(inframe, outframe),
+            Path::Passthrough => return Err(gst::FlowError::NotNegotiated),
         }
 
         Ok(gst::FlowSuccess::Ok)
     }
+}
+
+/// Whether frames with these caps features can be mapped and converted here:
+/// system memory, interlaced or not.
+fn is_system_memory(features: &gst::CapsFeaturesRef) -> bool {
+    !features.is_any()
+        && features.iter().all(|f| {
+            f == gst::CAPS_FEATURE_MEMORY_SYSTEM_MEMORY
+                || f == gst_video::CAPS_FEATURE_FORMAT_INTERLACED
+        })
 }
 
 /// Fixate an integer field towards the input's value, adding it outright when
