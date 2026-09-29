@@ -15,15 +15,20 @@
 //! packet or two — 0 files, or a single fragment that never closed.
 //!
 //! Fix: a `queue` per leg between the parser and `splitmuxsink`, giving every sink
-//! pad its own streaming thread. This test reproduces that topology (a single
-//! `tsdemux` task feeding both a video and an audio `splitmuxsink` pad) and
-//! asserts that recording actually completes. Remove the queues and it stalls
-//! until the watchdog below fires.
+//! pad its own streaming thread. This test builds the real recorder block and
+//! feeds it the way `mpegtssrt_input(decode=false)` does — one `tsdemux` task
+//! into both inputs — and asserts that recording actually completes. Remove the
+//! recorder's queues and it stalls until the watchdog below fires.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use strom::blocks::builtin::recorder::RecorderBuilder;
+use strom::blocks::{BlockBuildContext, BlockBuilder};
+use strom::events::EventBroadcaster;
+use strom_types::PropertyValue;
 
 /// Long enough for a healthy run (which finishes in ~1s) to never flake, short
 /// enough that a reintroduced deadlock fails the suite promptly.
@@ -39,6 +44,8 @@ const REQUIRED_ELEMENTS: &[&str] = &[
     "h264parse",
     "aacparse",
     "splitmuxsink",
+    "mp4mux",
+    "identity",
 ];
 
 /// Skipping on a missing element passes green and guards nothing, so CI sets
@@ -167,16 +174,54 @@ fn write_test_transport_stream(path: &std::path::Path) -> Result<(), String> {
     run_to_eos(&pipeline)
 }
 
-/// Record `ts_path` through the recorder's topology: one `tsdemux` streaming task
-/// feeding both `splitmuxsink` sink pads, with or without the per-leg queue.
+/// Record `ts_path` through the real recorder block, fed the way
+/// `mpegtssrt_input(decode=false)` feeds it: `tsdemux` pads linked into one
+/// static `identity` per medium, so a single demuxer streaming task pushes into
+/// both recorder inputs.
 ///
 /// Returns (file count, total bytes) of the produced fragments.
 fn record_transport_stream(
     ts_path: &std::path::Path,
-    out_dir: &std::path::Path,
-    use_queues: bool,
+    media_root: &std::path::Path,
 ) -> Result<(usize, u64), String> {
+    let instance_id = "rec";
+    let mut props: HashMap<String, PropertyValue> = HashMap::new();
+    props.insert("container".to_string(), PropertyValue::String("mp4".into()));
+    props.insert("num_video_tracks".to_string(), PropertyValue::UInt(1));
+    props.insert("num_audio_tracks".to_string(), PropertyValue::UInt(1));
+    // Split partway through so a healthy run yields several fragments; a run
+    // that stalls after the first GOP yields zero or one.
+    props.insert("max_size_time_secs".to_string(), PropertyValue::UInt(2));
+    props.insert(
+        "output_dir".to_string(),
+        PropertyValue::String("recordings".into()),
+    );
+    props.insert(
+        "filename_prefix".to_string(),
+        PropertyValue::String("segment".into()),
+    );
+    props.insert(
+        "_media_path".to_string(),
+        PropertyValue::String(media_root.to_string_lossy().to_string()),
+    );
+
+    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let built = RecorderBuilder
+        .build(instance_id, &props, &ctx)
+        .map_err(|e| format!("recorder block failed to build: {e}"))?;
+
     let pipeline = gst::Pipeline::new();
+    let mut by_id: HashMap<String, gst::Element> = HashMap::new();
+    for (id, element) in &built.elements {
+        pipeline.add(element).map_err(|e| e.to_string())?;
+        by_id.insert(id.clone(), element.clone());
+    }
+    let recorder_input = |name: &str| {
+        by_id
+            .get(&format!("{instance_id}:{name}"))
+            .cloned()
+            .ok_or_else(|| format!("recorder exposes no {name}"))
+    };
 
     let src = gst::ElementFactory::make("filesrc")
         .property("location", ts_path.to_str().expect("path is valid UTF-8"))
@@ -185,125 +230,52 @@ fn record_transport_stream(
     let demux = gst::ElementFactory::make("tsdemux")
         .build()
         .map_err(|e| e.to_string())?;
-    let splitmux = gst::ElementFactory::make("splitmuxsink")
-        .property(
-            "location",
-            out_dir
-                .join("segment%05d.mp4")
-                .to_str()
-                .expect("path is valid UTF-8"),
-        )
-        // Split partway through so a healthy run yields several fragments; a run
-        // that stalls after the first GOP yields zero or one.
-        .property("max-size-time", 2_000_000_000u64)
+    // The passthrough outputs of mpegtssrt_input: plain identities, no queue.
+    let video_out = gst::ElementFactory::make("identity")
         .build()
         .map_err(|e| e.to_string())?;
-
+    let audio_out = gst::ElementFactory::make("identity")
+        .build()
+        .map_err(|e| e.to_string())?;
     pipeline
-        .add_many([&src, &demux, &splitmux])
+        .add_many([&src, &demux, &video_out, &audio_out])
         .map_err(|e| e.to_string())?;
     src.link(&demux).map_err(|e| e.to_string())?;
+    video_out
+        .link(&recorder_input("video_input_0")?)
+        .map_err(|e| e.to_string())?;
+    audio_out
+        .link(&recorder_input("audio_input_0")?)
+        .map_err(|e| e.to_string())?;
 
-    // tsdemux exposes its streams dynamically, exactly as it does behind
-    // mpegtssrt_input in passthrough mode.
     let (err_tx, err_rx) = mpsc::channel::<String>();
-    let pipeline_weak = pipeline.downgrade();
-    let splitmux_weak = splitmux.downgrade();
+    let video_weak = video_out.downgrade();
+    let audio_weak = audio_out.downgrade();
     demux.connect_pad_added(move |_demux, pad| {
-        let Some(pipeline) = pipeline_weak.upgrade() else {
-            return;
-        };
-        let Some(splitmux) = splitmux_weak.upgrade() else {
-            return;
-        };
-
-        let report = |msg: String| {
-            let _ = err_tx.send(msg);
-        };
-
-        let Some(caps) = pad.current_caps() else {
-            report("demux pad exposed without caps".to_string());
-            return;
-        };
-        let Some(structure) = caps.structure(0) else {
-            report("demux pad caps had no structure".to_string());
-            return;
-        };
-        let media_type = structure.name();
-
-        let (parser_factory, sink_pad_name) = if media_type.starts_with("video/x-h264") {
-            ("h264parse", "video")
-        } else if media_type.starts_with("audio/mpeg") {
-            ("aacparse", "audio_%u")
+        let media_type = pad
+            .current_caps()
+            .and_then(|c| c.structure(0).map(|s| s.name().to_string()))
+            .unwrap_or_default();
+        let target = if media_type.starts_with("video/") {
+            video_weak.upgrade()
+        } else if media_type.starts_with("audio/") {
+            audio_weak.upgrade()
         } else {
-            // Not a stream this recorder handles.
             return;
         };
-
-        let parser = match gst::ElementFactory::make(parser_factory).build() {
-            Ok(p) => p,
-            Err(e) => {
-                report(format!("failed to create {parser_factory}: {e}"));
-                return;
-            }
-        };
-        if let Err(e) = pipeline.add(&parser) {
-            report(format!("failed to add {parser_factory}: {e}"));
-            return;
-        }
-        if let Err(e) = parser.sync_state_with_parent() {
-            report(format!("failed to sync {parser_factory} state: {e}"));
-            return;
-        }
-
-        // The element whose src pad feeds splitmuxsink: the parser directly, or
-        // the queue that decouples this leg onto its own streaming thread.
-        let tail = if use_queues {
-            let queue = match gst::ElementFactory::make("queue").build() {
-                Ok(q) => q,
-                Err(e) => {
-                    report(format!("failed to create queue: {e}"));
-                    return;
-                }
-            };
-            if let Err(e) = pipeline.add(&queue) {
-                report(format!("failed to add queue: {e}"));
-                return;
-            }
-            if let Err(e) = queue.sync_state_with_parent() {
-                report(format!("failed to sync queue state: {e}"));
-                return;
-            }
-            if let Err(e) = parser.link(&queue) {
-                report(format!("failed to link {parser_factory} to queue: {e}"));
-                return;
-            }
-            queue
-        } else {
-            parser.clone()
-        };
-
-        let Some(parser_sink) = parser.static_pad("sink") else {
-            report(format!("{parser_factory} has no sink pad"));
+        let Some(sink) = target.and_then(|t| t.static_pad("sink")) else {
             return;
         };
-        if let Err(e) = pad.link(&parser_sink) {
-            report(format!("failed to link demux to {parser_factory}: {e:?}"));
-            return;
-        }
-
-        let Some(mux_pad) = splitmux.request_pad_simple(sink_pad_name) else {
-            report(format!("splitmuxsink refused a {sink_pad_name} pad"));
-            return;
-        };
-        let Some(tail_src) = tail.static_pad("src") else {
-            report("tail element has no src pad".to_string());
-            return;
-        };
-        if let Err(e) = tail_src.link(&mux_pad) {
-            report(format!("failed to link into splitmuxsink: {e:?}"));
+        if let Err(e) = pad.link(&sink) {
+            let _ = err_tx.send(format!("failed to link demux {media_type} pad: {e:?}"));
         }
     });
+
+    // The pipeline manager runs these after linking, before PLAYING; they
+    // request the splitmuxsink pads for the connected tracks.
+    for setup in ctx.take_element_setups() {
+        setup(uuid::Uuid::new_v4(), EventBroadcaster::with_capacity(16));
+    }
 
     let run_result = run_to_eos(&pipeline);
 
@@ -315,7 +287,8 @@ fn record_transport_stream(
 
     let mut files = 0usize;
     let mut bytes = 0u64;
-    for entry in std::fs::read_dir(out_dir).map_err(|e| e.to_string())? {
+    let dir = media_root.join("recordings");
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
         if metadata.is_file() {
@@ -327,8 +300,8 @@ fn record_transport_stream(
 }
 
 /// A recorder fed by a single demuxer streaming task must record both legs to
-/// completion. Without a queue per leg the two `splitmuxsink` sink pads deadlock
-/// on that shared thread and this times out.
+/// completion. Without its queue per leg the two `splitmuxsink` sink pads
+/// deadlock on that shared thread and this times out.
 #[test]
 fn records_video_and_audio_from_a_single_demux_thread() {
     gst::init().expect("failed to initialize GStreamer");
@@ -338,22 +311,17 @@ fn records_video_and_audio_from_a_single_demux_thread() {
         return;
     }
 
-    let tmp = std::env::temp_dir().join(format!("strom-recorder-threading-{}", std::process::id()));
-    let out_dir = tmp.join("segments");
-    std::fs::create_dir_all(&out_dir).expect("failed to create temp output directory");
-    let ts_path = tmp.join("source.ts");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ts_path = tmp.path().join("source.ts");
 
     let result = (|| -> Result<(usize, u64), String> {
         write_test_transport_stream(&ts_path)?;
-        record_transport_stream(&ts_path, &out_dir, true)
+        record_transport_stream(&ts_path, tmp.path())
     })();
 
-    let cleanup = std::fs::remove_dir_all(&tmp);
-
     let (files, bytes) = result.unwrap_or_else(|e| {
-        panic!("recording with a queue per leg failed: {e}");
+        panic!("recording from a single demux thread failed: {e}");
     });
-    cleanup.expect("failed to clean up temp directory");
 
     // A healthy 5s recording split every 2s yields multiple non-empty fragments.
     assert!(
