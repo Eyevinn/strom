@@ -2,6 +2,47 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.6.11] - 2026-09-29
+
+### Added
+- Ports: a port pool — reserve port numbers from a Strom-administered set (#852, #890)
+- Logging: optional structured event logging and a JSON stdout format (#789)
+- GStreamer: give pipeline threads a macOS QoS class so they run on P cores (#723)
+- Live Audio Router: output bus headroom and a ceiling (#795)
+- Stats: WHIP Input jitterbuffer stats per seat (#793)
+- Frontend: show RTP statistics for any block that reports them (#857)
+- Clocks: point to the chrony setup script when the clock is poorly disciplined (#888)
+- Live Audio Router: warn when an input's negotiated channels differ from its declaration (#889)
+
+### Changed
+- Outputs: fail the flow with the block's reason when it refuses an input (#869)
+- RTMP Output: refuse H.264 in a profile RTMP receivers reject (#871)
+- Video Encoder: default to the codec's 8-bit 4:2:0 profile (#850)
+
+### Fixed
+- MPEG-TS/SRT Input: relink an output when the demuxer replaces its pad (#877)
+- Pipeline: bound the `set_state(NULL)` join in stop and drop (#874)
+- Properties: read enum properties on elements and pads as their nick (#875)
+- Live Audio Router: show the bus its consumer's format before input (#881)
+- Vision Mixer: reject a PiP zone whose sources exceed its capacity (#808)
+- Frontend: show units and a generic heading in the block statistics panel (#882)
+- Video Encoder: close out the bitrate overflow panic and the unchecked preset/rate-control properties #821 left, and clamp derived values instead of refusing them (#769, #876)
+
+### Performance
+- Video Format: thread the scaling step, so a resize to or from 4K no longer runs on one core (#731)
+
+### CI
+- Windows: put GStreamer's DLLs ahead of Git's in the test PATH (#892)
+- Stop Static JS Tests re-running on every label event (#858)
+- Dependencies: security updates only from Dependabot, monthly otherwise; group cargo patch bumps, excluding GStreamer; drop the unused tower-http `fs` feature (#859, #860, #866, #891)
+- Tests: stabilise the mach port, `run_with_deadline` and live audio router tests (#870, #873, #878)
+
+### Documentation
+- The output block input convention (#867)
+- How quiet draft PRs are handled (#872)
+
+---
+
 ## [0.6.10] - 2026-09-22
 
 ### Added
@@ -75,6 +116,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Vision Mixer: producer switching guide for the HTTP API (#798)
 - Hardware requirements and sizing doc (WIP) (#736)
 - Note publishing to YouTube Live and Twitch as an idea (#776)
+- WHIP: drop the stale `=true` from the `drop-on-latency` comment (#829)
 - Agent: move role, budget, priority order and review reasoning into the repo, and tighten the PR and onward-message rules (#751, #761, #773, #774, #775, #779, #780, #781, #801)
 
 ### Dependencies
@@ -160,6 +202,9 @@ All notable changes to the Strom GStreamer Flow Engine project.
 ### Fixed
 - Vision Mixer: glitch, roll and punch transitions left driver-dependent residual artifacts after completion — transition envelopes now settle to an exact identity pass (#639)
 - Frontend: keep `wgpu` out of the WASM build after the eframe 0.34.2 default-feature regression (#639)
+
+### Documentation
+- README: link to the hosted Open Live platform (#638)
 
 ---
 
@@ -254,6 +299,10 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - SRT: don't synthesize a phantom caller on an idle listener (#585)
 - Properties: coerce int/uint values for `gdouble`/`gfloat` properties (#586)
 - Build: isolate the WASM target dir to avoid a cargo lock deadlock (#591)
+- Tests: shrink the volume-ramp buffer size to stabilise mid-fade samples (#581)
+
+### CI
+- Raise the Check (Linux) timeout from 15 to 25 minutes (#584)
 
 ### Performance
 - Skip absent elements in block property read-back (#601)
@@ -262,7 +311,8 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Add an operator-facing Vision Mixer user guide (#593)
 
 ### Dependencies
-- Bump reqwest (#597), garde (#596), serde_json (#598), mdns-sd (#599), gstreamer-controller (#574), tower-http (#575), egui_extras (#576), gst-plugin-webrtc (#573), rand (#572)
+- Bump reqwest (#597), garde (#596), serde_json (#598), mdns-sd (#599), gstreamer-controller (#574), tower-http (#575), egui_extras (#576), gst-plugin-webrtc (#573), rand (#572), mdns-sd (#577)
+- `cargo update` patch bumps across the tree (#580)
 
 ---
 
@@ -284,6 +334,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Audio Mixer: smooth volume/mute via GstController (anti-zipper, anti-click) and honor `ramp_ms` on mute toggles with a cancel-guard (#539, #540)
 - Patched DeckLink plugin with synchronized capture group support (#554)
 - chrony NTP install script and runbook (#547)
+- DeckLink Input: expose `video-format` and `drop-no-signal-frames`; EFP over SRT: apply the Opus defaults and scale bitrate by channel count; DeckLink probe tooling (#541)
 
 ### Changed
 - Merge per-media DeckLink blocks into a single Input/Output block (#546)
@@ -299,6 +350,12 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Vision mixer: use GPU-aware videoconvert in the CPU pipeline (#534)
 - NVIDIA setup: apply cgroupfs + dev-char workarounds for the NVML cgroup-reload bug (#536)
 - Buffer age: show external pad label instead of internal "sink" (#535)
+
+### CI
+- Cache and verify the Zig tarball, switch to a mirror, install cargo-zigbuild from a prebuilt binary (#550)
+
+### Documentation
+- chrony NTP sync quality notes and a generic `[CLIENT]` log tag (#533)
 
 ### Dependencies
 - Bump sysinfo (#559), tower-http (#561), gst-plugin-inter (#560), gst-plugin-audiofx (#558), gstreamer-app (#557), utoipa (#542), egui (#545), tokio (#544), rustls (#543)
@@ -335,6 +392,10 @@ All notable changes to the Strom GStreamer Flow Engine project.
 
 ### Fixed
 - Unblock preroll on mpegtssrt output (`async=false`) (#504)
+- CEF: interim gstcefsrc downgrades to work around the MemoryInfra SIGILL, superseded by the shim in #508 (#505, #506, #507)
+
+### Dependencies
+- Bump rustls-webpki to 0.103.12 (#514)
 
 ---
 
