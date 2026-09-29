@@ -7,11 +7,11 @@
 //! across its own thread pool.
 //!
 //! The element registered here, `stromvimageconvert`, is a drop-in for
-//! `videoconvert` and `videoconvertscale`. It exposes the same `n-threads`
-//! property, so [`crate::gpu::configure_video_convert`] reaches it unchanged,
-//! and it never fails a conversion `videoconvert` would have managed: format
-//! pairs without a vImage path — and every resize — run on
-//! `GstVideoConverter`, which is the code `videoconvert` itself is built on.
+//! `videoconvert`. It exposes the same `n-threads` property, so
+//! [`crate::gpu::configure_video_convert`] reaches it unchanged, and it never
+//! fails a conversion `videoconvert` would have managed: format pairs without
+//! a vImage path run on `GstVideoConverter`, which is the code `videoconvert`
+//! itself is built on. Like `videoconvert`, it does not resize.
 //!
 //! Registration is static and idempotent; see [`register`].
 
@@ -70,8 +70,7 @@ gst::plugin_define!(
 ///
 /// Returns whether `stromvimageconvert` is available afterwards. A `false`
 /// here is not fatal: [`crate::gpu::detect_convert_mode`] treats it as "stay
-/// on `videoconvert`", which is exactly the behaviour before this element
-/// existed.
+/// on `videoconvert`".
 ///
 /// Callers must have initialised GStreamer first.
 pub fn register() -> bool {

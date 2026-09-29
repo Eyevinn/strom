@@ -215,8 +215,8 @@ fn aa_control() {
     experiment("aa-control", &arm, &arm, NV12_TAIL, seed);
 }
 
-/// The same comparison against *stock* `videoconvert`, which is what this ran
-/// on before #726 raised the thread count. Only here to complete the table;
+/// The same comparison against *stock* `videoconvert`, at its default of one
+/// thread. Only here to complete the table;
 /// the number that matters for this change is [`ab_vimage`].
 #[test]
 #[ignore = "measurement harness, not a test; see the module docs to run it"]

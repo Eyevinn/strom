@@ -237,6 +237,11 @@ fn vimage_output_matches_videoconvert() {
             .fps(gst::Fraction::new(30, 1))
             .build()
             .expect("output info");
+        // Through caps, as the element receives them: that fills in the
+        // default chroma siting, which the builder leaves unknown.
+        let in_info = VideoInfo::from_caps(&in_info.to_caps().expect("in caps")).expect("in info");
+        let out_info =
+            VideoInfo::from_caps(&out_info.to_caps().expect("out caps")).expect("out info");
 
         assert!(
             Plan::build(&in_info, &out_info).is_some(),
@@ -338,35 +343,203 @@ fn unsupported_pair_falls_back_and_still_converts() {
     }
 }
 
-/// A resize has no vImage path, but the element still has to do it — this is
-/// the case `videoformat.rs` hits whenever a resolution is set.
+/// The reverse direction, decoded Y'CbCr into RGB, checked against the colours
+/// the frame was made from rather than against `videoconvert`: the two
+/// upsample chroma differently (vImage repeats each sample, `videoconvert`
+/// interpolates for some formats and not others), so they part by tens of
+/// levels at every hard colour edge while both being right. Flat colours have
+/// no edges, and a wrong permute map or chroma plane still misses by far more
+/// than rounding.
 #[test]
-fn resize_goes_through_the_fallback_and_produces_the_requested_size() {
+fn yuv_to_rgb_recovers_the_source_colours() {
     init();
 
-    let in_info = VideoInfo::builder(VideoFormat::Rgba, 128, 64)
+    const COLOURS: [[u8; 3]; 5] = [
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+        [200, 150, 40],
+        [128, 128, 128],
+    ];
+    const MAX_ERROR: i32 = 3;
+    let (width, height) = (128, 64);
+
+    let pairs: &[(VideoFormat, VideoFormat)] = &[
+        (VideoFormat::Nv12, VideoFormat::Rgba),
+        (VideoFormat::Nv12, VideoFormat::Bgra),
+        (VideoFormat::I420, VideoFormat::Argb),
+        (VideoFormat::Yv12, VideoFormat::Abgr),
+        (VideoFormat::Uyvy, VideoFormat::Bgrx),
+        (VideoFormat::Yuy2, VideoFormat::Rgba),
+    ];
+
+    for &(src, dst) in pairs {
+        let in_info = VideoInfo::builder(src, width, height)
+            .fps(gst::Fraction::new(30, 1))
+            .build()
+            .expect("input info");
+        let out_info = VideoInfo::builder(dst, width, height)
+            .fps(gst::Fraction::new(30, 1))
+            .build()
+            .expect("output info");
+
+        for colour in COLOURS {
+            let ours = convert_one(
+                super::ELEMENT_NAME,
+                &in_info.to_caps().expect("input caps"),
+                &out_info.to_caps().expect("output caps"),
+                &flat_source(&in_info, colour),
+            );
+            assert_eq!(
+                ours.path.as_deref(),
+                Some(PATH_VIMAGE),
+                "{src:?} -> {dst:?} did not take the vImage path"
+            );
+
+            let frame = gst_video::VideoFrameRef::from_buffer_ref_readable(
+                ours.buffer.as_ref(),
+                &ours.info,
+            )
+            .expect("map output");
+            let data = frame.plane_data(0).expect("packed plane");
+            let stride = frame.plane_stride()[0] as usize;
+            let format_info = ours.info.format_info();
+            let offsets = format_info.poffset();
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let px = y * stride + x * 4;
+                    for (c, &want) in colour.iter().enumerate() {
+                        let got = data[px + offsets[c] as usize];
+                        assert!(
+                            (got as i32 - want as i32).abs() <= MAX_ERROR,
+                            "{src:?} -> {dst:?}: {colour:?} came back with component {c} \
+                             = {got} at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A flat frame of one RGB colour in `info`'s format, made by `videoconvert`.
+fn flat_source(info: &VideoInfo, colour: [u8; 3]) -> gst::Buffer {
+    let rgba = VideoInfo::builder(VideoFormat::Rgba, info.width(), info.height())
+        .fps(gst::Fraction::new(30, 1))
+        .build()
+        .expect("rgba info");
+    let mut buffer = gst::Buffer::with_size(rgba.size()).expect("allocate");
+    {
+        let mut map = buffer.get_mut().unwrap().map_writable().expect("map");
+        for px in map.as_mut_slice().chunks_exact_mut(4) {
+            px[..3].copy_from_slice(&colour);
+            px[3] = 255;
+        }
+    }
+    convert_one(
+        "videoconvert",
+        &rgba.to_caps().expect("rgba caps"),
+        &info.to_caps().expect("caps"),
+        &buffer,
+    )
+    .buffer
+}
+
+/// At HD sizes, caps without a `chroma-site` field mean left-cosited chroma,
+/// which vImage does not write. The element must label its output with the
+/// centred siting it produces, and then match `videoconvert` given that label.
+#[test]
+fn hd_output_is_labelled_with_the_siting_vimage_writes() {
+    init();
+
+    let in_info = VideoInfo::builder(VideoFormat::Rgba, 1920, 1080)
         .fps(gst::Fraction::new(30, 1))
         .build()
         .expect("input info");
-    let out_info = VideoInfo::builder(VideoFormat::I420, 64, 32)
+    let in_caps = in_info.to_caps().expect("input caps");
+    let input = packed_rgb_buffer(&in_info);
+
+    for dst in [VideoFormat::Nv12, VideoFormat::I420, VideoFormat::Uyvy] {
+        let ours = convert_one(
+            super::ELEMENT_NAME,
+            &in_caps,
+            &gst::Caps::builder("video/x-raw")
+                .field("format", dst.to_str())
+                .build(),
+            &input,
+        );
+        assert_eq!(
+            ours.info.chroma_site(),
+            gst_video::VideoChromaSite::JPEG,
+            "RGBA -> {dst:?} at 1080p was not labelled with centred chroma"
+        );
+        assert_eq!(ours.path.as_deref(), Some(PATH_VIMAGE));
+
+        let labelled = ours.info.to_caps().expect("output caps");
+        let reference = convert_one("videoconvert", &in_caps, &labelled, &input);
+        assert_frames_match(
+            &format!("Rgba -> {dst:?} at 1080p"),
+            &ours.info,
+            &ours.buffer,
+            &reference.buffer,
+            MAX_DELTA,
+        );
+    }
+}
+
+/// A siting the peer insists on is not vImage's, so it has to go to the
+/// fallback, which resamples to it.
+#[test]
+fn a_pinned_cosited_siting_takes_the_fallback() {
+    init();
+
+    let in_info = VideoInfo::builder(VideoFormat::Rgba, 1920, 1080)
         .fps(gst::Fraction::new(30, 1))
         .build()
-        .expect("output info");
-
-    assert!(
-        Plan::build(&in_info, &out_info).is_none(),
-        "a resize must not take the vImage path"
-    );
-
+        .expect("input info");
     let ours = convert_one(
         super::ELEMENT_NAME,
-        &in_info.to_caps().expect("in caps"),
-        &out_info.to_caps().expect("out caps"),
+        &in_info.to_caps().expect("input caps"),
+        &gst::Caps::builder("video/x-raw")
+            .field("format", "NV12")
+            .field("chroma-site", "mpeg2")
+            .build(),
         &packed_rgb_buffer(&in_info),
     );
+    assert_eq!(ours.info.chroma_site(), gst_video::VideoChromaSite::MPEG2);
     assert_eq!(ours.path.as_deref(), Some(PATH_FALLBACK));
-    assert_eq!((ours.info.width(), ours.info.height()), (64, 32));
-    assert_eq!(ours.info.format(), VideoFormat::I420);
+}
+
+/// The 4:2:0 shuffles copy chroma bytes as they are, so the output must keep
+/// the input's siting, and a peer that insists on another one has to get the
+/// fallback. Centred input at 1080p, where the default is cosited, so keeping
+/// the input's siting and taking the default cannot be confused.
+#[test]
+fn a_chroma_copy_keeps_the_input_siting() {
+    init();
+
+    let in_info = VideoInfo::builder(VideoFormat::I420, 1920, 1080)
+        .fps(gst::Fraction::new(30, 1))
+        .chroma_site(gst_video::VideoChromaSite::JPEG)
+        .build()
+        .expect("input info");
+    let in_caps = in_info.to_caps().expect("input caps");
+    let input = source_buffer(&in_info);
+
+    let unconstrained = gst::Caps::builder("video/x-raw")
+        .field("format", "NV12")
+        .build();
+    let ours = convert_one(super::ELEMENT_NAME, &in_caps, &unconstrained, &input);
+    assert_eq!(ours.info.chroma_site(), gst_video::VideoChromaSite::JPEG);
+    assert_eq!(ours.path.as_deref(), Some(PATH_VIMAGE));
+
+    let cosited = gst::Caps::builder("video/x-raw")
+        .field("format", "NV12")
+        .field("chroma-site", "mpeg2")
+        .build();
+    let ours = convert_one(super::ELEMENT_NAME, &in_caps, &cosited, &input);
+    assert_eq!(ours.info.chroma_site(), gst_video::VideoChromaSite::MPEG2);
+    assert_eq!(ours.path.as_deref(), Some(PATH_FALLBACK));
 }
 
 /// `gpu::configure_video_convert` reaches the element only through

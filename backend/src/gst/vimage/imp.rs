@@ -1,6 +1,6 @@
 //! The `stromvimageconvert` element.
 //!
-//! A drop-in replacement for `videoconvert`/`videoconvertscale` that runs the
+//! A drop-in replacement for `videoconvert` that runs the
 //! conversion through Accelerate's vImage where vImage has a direct path, and
 //! through `GstVideoConverter` — the very code `videoconvert` runs — where it
 //! does not. Both are chosen once per caps negotiation, so the streaming path
@@ -26,7 +26,7 @@ pub(super) static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
         super::ELEMENT_NAME,
         gst::DebugColorFlags::empty(),
-        Some("vImage-backed video converter and scaler"),
+        Some("vImage-backed video converter"),
     )
 });
 
@@ -34,16 +34,13 @@ pub(super) static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 /// raising it off 1 means the same thing here as it does there.
 const DEFAULT_N_THREADS: u32 = 1;
 
-/// Fields a conversion is allowed to change. Everything else — framerate above
-/// all — has to survive untouched, because this element cannot alter it.
-const CONVERTIBLE_FIELDS: [&str; 6] = [
-    "format",
-    "colorimetry",
-    "chroma-site",
-    "width",
-    "height",
-    "pixel-aspect-ratio",
-];
+/// Fields a conversion is allowed to change. Everything else has to survive
+/// untouched, size included: like `videoconvert`, this element does not
+/// resize. Offering to would let a `videoscale` ahead of it negotiate
+/// passthrough and hand the resize over, and this element has no
+/// `add-borders`, so a portrait source would be stretched rather than
+/// letterboxed.
+const CONVERTIBLE_FIELDS: [&str; 3] = ["format", "colorimetry", "chroma-site"];
 
 /// Value of the read-only `conversion-path` property before any caps have
 /// been negotiated.
@@ -153,8 +150,8 @@ impl ElementImpl for VImageConvert {
     fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
         static METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
-                "vImage video converter and scaler",
-                "Filter/Converter/Video/Scaler",
+                "vImage video converter",
+                "Filter/Converter/Video",
                 "Converts video formats through Accelerate/vImage on macOS, \
                  falling back to GstVideoConverter for pairs vImage cannot do",
                 "Strom contributors",
@@ -165,7 +162,7 @@ impl ElementImpl for VImageConvert {
 
     fn pad_templates() -> &'static [gst::PadTemplate] {
         static TEMPLATES: LazyLock<Vec<gst::PadTemplate>> = LazyLock::new(|| {
-            // The full raw format set, matching `videoconvertscale`: whatever
+            // The full raw format set, matching `videoconvert`: whatever
             // vImage declines still has the fallback behind it, so narrowing
             // the templates would only turn a slower conversion into a failed
             // link.
@@ -230,9 +227,9 @@ impl BaseTransformImpl for VImageConvert {
 
     /// Pin the other pad's caps, preferring no conversion at all.
     ///
-    /// Format is chosen by the loss score in [`conversion_loss`]; size and
-    /// pixel aspect ratio are pulled towards the input so that a stage asked
-    /// only to convert does not silently rescale.
+    /// Format is chosen by the loss score in [`conversion_loss`], chroma siting
+    /// by [`fixate_chroma_site`], and pixel aspect ratio is pulled towards the
+    /// input.
     fn fixate_caps(
         &self,
         _direction: gst::PadDirection,
@@ -269,6 +266,7 @@ impl BaseTransformImpl for VImageConvert {
                 } else {
                     s.set("pixel-aspect-ratio", par);
                 }
+                fixate_chroma_site(s, in_s, in_format);
             }
         }
         result.fixate();
@@ -406,6 +404,45 @@ fn choose_format(othercaps: &gst::Caps, in_format: Option<VideoFormat>) -> gst::
     let mut caps = gst::Caps::new_empty();
     caps.make_mut().append_structure_full(structure, features);
     caps
+}
+
+/// Label the chroma siting this element will actually write.
+///
+/// vImage averages each chroma sample from the pixels around it, which is
+/// centred siting (`jpeg`). Caps without a `chroma-site` field default to
+/// left-cosited (`mpeg2`) at HD sizes, and the encoders carry that label into
+/// the stream, so an unlabelled RGB-to-Y'CbCr output would tell the player
+/// the colour sits half a pixel from where it is. A Y'CbCr input keeps
+/// its own siting, since the chroma is copied, not resampled. A siting the
+/// peer insists on is left alone; [`Plan::build`] then declines vImage and
+/// `GstVideoConverter` resamples to it.
+fn fixate_chroma_site(
+    s: &mut gst::StructureRef,
+    in_s: &gst::StructureRef,
+    in_format: Option<VideoFormat>,
+) {
+    let out_format = s
+        .get::<&str>("format")
+        .ok()
+        .and_then(|f| f.parse::<VideoFormat>().ok());
+    let (Some(in_format), Some(out_format)) = (in_format, out_format) else {
+        return;
+    };
+    let out = VideoFormatInfo::from_format(out_format);
+    let subsampled = out.w_sub().iter().chain(out.h_sub()).any(|&n| n > 0);
+    if !out.is_yuv() || !subsampled {
+        return;
+    }
+    let target = match in_s.get::<&str>("chroma-site") {
+        Ok(site) => site.to_owned(),
+        Err(_) if VideoFormatInfo::from_format(in_format).is_rgb() => "jpeg".to_owned(),
+        Err(_) => return,
+    };
+    if s.has_field("chroma-site") {
+        s.fixate_field_str("chroma-site", &target);
+    } else {
+        s.set("chroma-site", target);
+    }
 }
 
 /// Every video format a caps structure's `format` field allows.
