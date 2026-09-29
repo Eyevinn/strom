@@ -9,8 +9,24 @@ use tracing::{debug, info, warn};
 use super::elements::*;
 use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
-use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR};
+use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR, MIXER_SAMPLE_RATE};
 use strom_types::mixer::{DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS};
+
+/// Follow a bus mixer with its rate pin. Returns the pin's id: the bus's
+/// output now leaves from there.
+fn push_rate_pin(
+    mixer_id: &str,
+    elements: &mut Vec<(String, gst::Element)>,
+    internal_links: &mut Vec<(ElementPadRef, ElementPadRef)>,
+) -> Result<String, BlockBuildError> {
+    let pin_id = format!("{}_rate", mixer_id);
+    elements.push((pin_id.clone(), make_rate_pin(&pin_id)?));
+    internal_links.push((
+        ElementPadRef::pad(mixer_id, "src"),
+        ElementPadRef::pad(&pin_id, "sink"),
+    ));
+    Ok(pin_id)
+}
 
 /// Mixer block builder.
 pub struct MixerBuilder;
@@ -128,6 +144,7 @@ impl BlockBuilder for MixerBuilder {
         let audiomixer =
             make_audiomixer(&mixer_id, force_live, latency_ms, min_upstream_latency_ms)?;
         elements.push((mixer_id.clone(), audiomixer.clone()));
+        let mixer_out_id = push_rate_pin(&mixer_id, &mut elements, &mut internal_links)?;
 
         // ========================================================================
         // Main bus processing: comp → EQ → limiter
@@ -242,7 +259,7 @@ impl BlockBuilder for MixerBuilder {
 
         // Link: mixer → main_comp → main_eq → main_limiter → main_volume → main_level → main_out_tee
         internal_links.push((
-            ElementPadRef::pad(&mixer_id, "src"),
+            ElementPadRef::pad(&mixer_out_id, "src"),
             ElementPadRef::pad(&main_comp_id, "sink"),
         ));
         internal_links.push((
@@ -285,6 +302,7 @@ impl BlockBuilder for MixerBuilder {
             min_upstream_latency_ms,
         )?;
         elements.push((solo_mixer_id.clone(), solo_mixer));
+        let solo_out_id = push_rate_pin(&solo_mixer_id, &mut elements, &mut internal_links)?;
 
         // Gates feeding monitor_mixer
         let solo_to_mon_id = format!("{}:solo_to_mon", instance_id);
@@ -328,6 +346,7 @@ impl BlockBuilder for MixerBuilder {
             min_upstream_latency_ms,
         )?;
         elements.push((monitor_mixer_id.clone(), monitor_mixer));
+        let monitor_out_id = push_rate_pin(&monitor_mixer_id, &mut elements, &mut internal_links)?;
 
         // Monitor master volume (driven by `monitor_fader` exposed property)
         let monitor_master_vol_id = format!("{}:monitor_master_vol", instance_id);
@@ -364,7 +383,7 @@ impl BlockBuilder for MixerBuilder {
         //                                                   ├→ monitor_mixer → monitor_master_vol → monitor_level → monitor_out_tee
         //   main_out_tee→ main_to_mon  → main_to_mon_queue ─┘
         internal_links.push((
-            ElementPadRef::pad(&solo_mixer_id, "src"),
+            ElementPadRef::pad(&solo_out_id, "src"),
             ElementPadRef::pad(&solo_to_mon_id, "sink"),
         ));
         internal_links.push((
@@ -388,7 +407,7 @@ impl BlockBuilder for MixerBuilder {
             ElementPadRef::element(&monitor_mixer_id),
         ));
         internal_links.push((
-            ElementPadRef::pad(&monitor_mixer_id, "src"),
+            ElementPadRef::pad(&monitor_out_id, "src"),
             ElementPadRef::pad(&monitor_master_vol_id, "sink"),
         ));
         internal_links.push((
@@ -412,6 +431,7 @@ impl BlockBuilder for MixerBuilder {
                 min_upstream_latency_ms,
             )?;
             elements.push((aux_mixer_id.clone(), aux_mixer));
+            let aux_out_id = push_rate_pin(&aux_mixer_id, &mut elements, &mut internal_links)?;
 
             let aux_fader = get_float_prop(properties, &format!("aux{}_fader", aux + 1), 1.0);
             let aux_mute = get_bool_prop(properties, &format!("aux{}_mute", aux + 1), false);
@@ -451,7 +471,7 @@ impl BlockBuilder for MixerBuilder {
 
             // Link: aux_mixer → aux_volume → aux_level → aux_out_tee
             internal_links.push((
-                ElementPadRef::pad(&aux_mixer_id, "src"),
+                ElementPadRef::pad(&aux_out_id, "src"),
                 ElementPadRef::pad(&aux_volume_id, "sink"),
             ));
             internal_links.push((
@@ -515,6 +535,7 @@ impl BlockBuilder for MixerBuilder {
                 min_upstream_latency_ms,
             )?;
             elements.push((sg_mixer_id.clone(), sg_mixer));
+            let sg_out_id = push_rate_pin(&sg_mixer_id, &mut elements, &mut internal_links)?;
 
             let sg_fader = get_float_prop(properties, &format!("group{}_fader", sg + 1), 1.0);
             let sg_mute = get_bool_prop(properties, &format!("group{}_mute", sg + 1), false);
@@ -566,7 +587,7 @@ impl BlockBuilder for MixerBuilder {
             // Link: group_mixer → group_volume → group_level → group_out_tee
             //        group_out_tee → queue → main audiomixer
             internal_links.push((
-                ElementPadRef::pad(&sg_mixer_id, "src"),
+                ElementPadRef::pad(&sg_out_id, "src"),
                 ElementPadRef::pad(&sg_volume_id, "sink"),
             ));
             internal_links.push((
@@ -669,10 +690,23 @@ impl BlockBuilder for MixerBuilder {
                 })?;
             elements.push((convert_id.clone(), convert));
 
-            // capsfilter to ensure F32LE stereo format for LV2 plugins
+            // audioresample: the buses run at MIXER_SAMPLE_RATE, so a source at
+            // another rate is converted here rather than refused.
+            let resample_id = format!("{}:resample_{}", instance_id, ch);
+            let resample = gst::ElementFactory::make("audioresample")
+                .name(&resample_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("audioresample ch{}: {}", ch_num, e))
+                })?;
+            elements.push((resample_id.clone(), resample));
+
+            // capsfilter to ensure F32LE stereo format for LV2 plugins, at the
+            // buses' rate
             let caps_id = format!("{}:caps_{}", instance_id, ch);
             let caps = gst::Caps::builder("audio/x-raw")
                 .field("format", "F32LE")
+                .field("rate", MIXER_SAMPLE_RATE)
                 .field("channels", 2i32)
                 .field("layout", "interleaved")
                 .build();
@@ -987,11 +1021,15 @@ impl BlockBuilder for MixerBuilder {
             // ----------------------------------------------------------------
             // Main chain links
             // ----------------------------------------------------------------
-            // Chain: convert → caps → gain → hpf → gate → comp → eq → level → pre_fader_tee
+            // Chain: convert → resample → caps → gain → hpf → gate → comp → eq → level → pre_fader_tee
             // The channel `level` element sits pre-fader (after EQ/dynamics, before
             // pan/fader/mute) so the meter reflects the signal hitting the fader.
             internal_links.push((
                 ElementPadRef::pad(&convert_id, "src"),
+                ElementPadRef::pad(&resample_id, "sink"),
+            ));
+            internal_links.push((
+                ElementPadRef::pad(&resample_id, "src"),
                 ElementPadRef::pad(&caps_id, "sink"),
             ));
             internal_links.push((

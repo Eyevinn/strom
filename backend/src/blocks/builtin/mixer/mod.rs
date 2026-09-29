@@ -19,7 +19,7 @@
 //!
 //! Pipeline structure per channel:
 //! ```text
-//! input_N → audioconvert → capsfilter(F32LE) → gain → hpf → gate → compressor → EQ →
+//! input_N → audioconvert → audioresample → capsfilter(F32LE, 48 kHz) → gain → hpf → gate → compressor → EQ →
 //!           level_N → pre_fader_tee → audiopanorama_N → volume_N → post_fader_tee →
 //!           routing_tee_N → [group or main audiomixer]
 //!
@@ -37,6 +37,9 @@
 //! fader regardless of fader position or mute. Bus meters (`main_level`,
 //! `monitor_level`, `auxN_level`, `groupN_level`) sit on the bus output,
 //! post-master.
+//!
+//! Every bus mixer (main, monitor, solo, aux, group) is followed by a
+//! `<mixer>_rate` capsfilter that pins it to `MIXER_SAMPLE_RATE`.
 //!
 //! Main bus: audiomixer → main_comp → main_eq → main_limiter → main_volume → main_level → main_out_tee
 //!
@@ -68,6 +71,13 @@ mod tests;
 use strom_types::mixer::{
     DEFAULT_CHANNELS, MAX_AUX_BUSES, MAX_CHANNELS, MAX_GROUPS, MIN_KNEE_LINEAR,
 };
+/// Sample rate every bus inside the mixer runs at. The buses feed one another
+/// (aux and group AFL into solo, solo and main into monitor), and an
+/// audiomixer cannot resample, so they must agree on one rate. Left free, a
+/// bus with no input yet fixates to audiomixer's default of 44100 while one
+/// with a pinned consumer settles at that consumer's rate, and from then on
+/// no channel can link.
+const MIXER_SAMPLE_RATE: i32 = 48_000;
 /// Level meter interval in nanoseconds (100ms)
 const METER_INTERVAL_NS: u64 = 100_000_000;
 /// EQ band type for Peaking/Bell filter (lsp-rs-equalizer enum value)
