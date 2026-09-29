@@ -242,10 +242,11 @@ impl BaseTransformImpl for VImageConvert {
 
     /// Pin the other pad's caps, preferring no conversion at all.
     ///
-    /// A peer that accepts the input unchanged gets it unchanged. Otherwise
-    /// format is chosen by the loss score in [`conversion_loss`], chroma siting
-    /// by [`fixate_chroma_site`], and a pixel aspect ratio the peer constrains
-    /// is pulled towards the input.
+    /// Format is chosen by the loss score in [`conversion_loss`], chroma
+    /// siting by [`fixate_chroma_site`], and a pixel aspect ratio the peer
+    /// constrains is pulled towards the input. A field the input leaves out
+    /// is written only when the peer asks for it; `set_info` passes frames
+    /// through when that field's value is the input's default.
     fn fixate_caps(
         &self,
         _direction: gst::PadDirection,
@@ -257,15 +258,6 @@ impl BaseTransformImpl for VImageConvert {
             othercaps.fixate();
             return othercaps;
         };
-
-        // A peer that takes the input as it is gets it as it is. Filling in
-        // a field the input left out, such as the pixel aspect ratio a
-        // camera omits, would make the two sides differ and cost a copy of
-        // every frame instead of a passthrough.
-        if othercaps.can_intersect(caps) {
-            gst::debug!(CAT, imp = self, "peer accepts {} unchanged", caps);
-            return caps.clone();
-        }
 
         let in_format = in_s
             .get::<&str>("format")
@@ -365,8 +357,14 @@ impl VideoFilterImpl for VImageConvert {
         outcaps: &gst::Caps,
         out_info: &VideoInfo,
     ) -> Result<(), gst::LoggableError> {
-        // `BaseTransform` decides passthrough before it calls this, and then
-        // never asks for a frame to be transformed.
+        // `BaseTransform` sets passthrough before it calls this when the caps
+        // are equal, and then never asks for a frame to be transformed. Caps
+        // that differ only by a field one side leaves at its default, such
+        // as `pixel-aspect-ratio=1/1`, describe the same frames, so those
+        // pass through too.
+        if in_info == out_info {
+            self.obj().set_passthrough(true);
+        }
         let path = if self.obj().is_passthrough() {
             gst::info!(CAT, imp = self, "passthrough for {}", incaps);
             Path::Passthrough
