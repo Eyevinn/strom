@@ -26,6 +26,7 @@ All notable changes to the Strom GStreamer Flow Engine project.
 - Live Audio Router: show the bus its consumer's format before input (#881)
 - Vision Mixer: reject a PiP zone whose sources exceed its capacity (#808)
 - Frontend: show units and a generic heading in the block statistics panel (#882)
+- Video Encoder: close out the bitrate overflow panic and the unchecked preset/rate-control properties #821 left, and clamp derived values instead of refusing them (#769, #876)
 
 ### Performance
 - Video Format: thread the scaling step, so a resize to or from 4K no longer runs on one core (#731)
