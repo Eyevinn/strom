@@ -346,8 +346,6 @@ mod ts_passthrough_idle {
 /// track still leaves a large, valid, single-stream recording.
 mod unfed_track {
     use super::*;
-    use strom::blocks::BlockRegistry;
-    use strom::gst::pipeline::PipelineManager;
 
     /// The muxers and demuxers are per-container, so they are checked where
     /// they are used rather than in `REQUIRED` — but through the same assert.
@@ -646,8 +644,6 @@ mod unfed_track {
         }
 
         let media_root = tempfile::tempdir().expect("tempdir");
-        let registry_file = tempfile::NamedTempFile::new().expect("registry file");
-        let registry = BlockRegistry::new(registry_file.path());
 
         let mut props: HashMap<String, PropertyValue> = HashMap::new();
         props.insert(
@@ -750,17 +746,9 @@ mod unfed_track {
         let events = EventBroadcaster::with_capacity(16);
         let mut event_rx = events.subscribe();
 
-        let mut manager = PipelineManager::new(
-            &flow,
-            events,
-            &registry,
-            vec![],
-            "all".to_string(),
-            None,
-            media_root.path().to_path_buf(),
-            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-        )
-        .expect("PipelineManager builds");
+        let mut manager =
+            common::manager::build_with(&flow, events, media_root.path().to_path_buf())
+                .expect("PipelineManager builds");
 
         manager.start().expect("pipeline starts");
 

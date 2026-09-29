@@ -15,14 +15,13 @@
 //! `rtph264depay` ships in `gstreamer1.0-plugins-good`, installed in every
 //! Linux CI job, so this runs rather than skipping.
 
+pub mod common;
+
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
-use strom::gst::pipeline::PipelineManager;
 use strom::gst::rtp_hdrext;
 use strom_types::{Flow, Link};
-use tempfile::NamedTempFile;
 
 /// `fakesrc → rtph264depay → fakesink`.
 ///
@@ -69,23 +68,12 @@ async fn test_start_disables_hdrext_aggregation_on_depayloaders() {
         return;
     }
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
     let events = EventBroadcaster::with_capacity(10);
 
     let flow = build_depayloader_flow("hdrext_aggregation_test");
 
-    let mut manager = PipelineManager::new(
-        &flow,
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
-    .expect("Failed to create PipelineManager");
+    let mut manager = common::manager::build_with(&flow, events, std::env::temp_dir())
+        .expect("Failed to create PipelineManager");
 
     // start() may fail — nothing feeds the depayloader real RTP — but
     // install() runs before any state change, which is what we are asserting.

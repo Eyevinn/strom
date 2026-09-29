@@ -21,33 +21,14 @@
 //! `vision_mixer_overlay` covers the other thing a failed start used to leak:
 //! the vision mixer's overlay timer thread.
 
+pub mod common;
+
 use gstreamer::prelude::ObjectExt;
 use std::collections::HashMap;
 use strom::blocks::builtin::mediaplayer::{MediaPlayerKey, MEDIA_PLAYER_REGISTRY};
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::{Flow, Link, PropertyValue};
-use tempfile::NamedTempFile;
 
 const MEDIA_PLAYER_BLOCK_ID: &str = "player";
-
-/// An `AppState` on throwaway storage. The temp files back its flow and block
-/// storage and must outlive it.
-fn new_app_state() -> (AppState, [NamedTempFile; 2]) {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage_file.path()),
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
-    (state, [storage_file, blocks_file])
-}
 
 /// A flow with a Media Player block and a chain that can never reach PLAYING.
 ///
@@ -125,7 +106,7 @@ fn build_flow_that_starts(name: &str) -> Flow {
 async fn failed_start_unregisters_the_flows_media_players() {
     gstreamer::init().unwrap();
 
-    let (state, _files) = new_app_state();
+    let state = common::state::new();
 
     let flow = build_flow_that_cannot_start("failed_start_teardown");
     let flow_id = flow.id;
@@ -176,7 +157,7 @@ async fn failed_start_unregisters_the_flows_media_players() {
 async fn teardown_releases_the_media_players_internal_pipeline() {
     gstreamer::init().unwrap();
 
-    let (state, _files) = new_app_state();
+    let state = common::state::new();
 
     let flow = build_flow_that_starts("teardown_releases_internal_pipeline");
     let flow_id = flow.id;
@@ -317,7 +298,7 @@ mod vision_mixer_overlay {
         // if nothing has probed for it — `main` does this at startup.
         strom::gpu::detect_gpu_capabilities();
 
-        let (state, _files) = new_app_state();
+        let state = common::state::new();
 
         let timers_before = overlay::overlay_timers_running();
 
