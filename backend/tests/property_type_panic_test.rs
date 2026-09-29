@@ -14,11 +14,8 @@
 pub mod common;
 
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::{PipelineError, PipelineManager};
 use strom_types::{Flow, Link, PropertyValue};
-use tempfile::NamedTempFile;
 
 /// `videotestsrc` ships in gstreamer-plugins-base, which the CI job installs,
 /// so these tests run there rather than skipping green.
@@ -60,19 +57,7 @@ fn one_property(name: &str, value: PropertyValue) -> HashMap<String, PropertyVal
 
 /// Build the pipeline the way `start_flow` does.
 fn build(flow: &Flow) -> Result<PipelineManager, PipelineError> {
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-
-    PipelineManager::new(
-        flow,
-        EventBroadcaster::with_capacity(10),
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
+    common::manager::build(flow)
 }
 
 fn expect_invalid_property(flow: &Flow, expected_property: &str) -> String {
