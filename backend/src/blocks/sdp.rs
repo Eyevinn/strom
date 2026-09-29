@@ -374,6 +374,19 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// An AES67 output block instance with the given properties.
+    fn aes67_block(properties: HashMap<String, PropertyValue>) -> BlockInstance {
+        BlockInstance {
+            id: "block_0".to_string(),
+            block_definition_id: "builtin.aes67_output".to_string(),
+            name: None,
+            properties,
+            position: strom_types::block::Position { x: 0.0, y: 0.0 },
+            runtime_data: None,
+            computed_external_pads: None,
+        }
+    }
+
     #[test]
     fn test_parse_audio_caps_44100_mono() {
         gst::init().unwrap();
@@ -418,15 +431,7 @@ mod tests {
 
     #[test]
     fn test_generate_sdp_default_values() {
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties: HashMap::new(),
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(HashMap::new());
 
         let sdp =
             generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
@@ -447,15 +452,7 @@ mod tests {
         let mut properties = HashMap::new();
         properties.insert("payload_type".to_string(), PropertyValue::Int(98));
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp =
             generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
@@ -469,15 +466,7 @@ mod tests {
         let mut properties = HashMap::new();
         properties.insert("payload_type".to_string(), PropertyValue::Int(200));
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp =
             generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
@@ -495,15 +484,7 @@ mod tests {
         );
         properties.insert("port".to_string(), PropertyValue::Int(6000));
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp = generate_aes67_output_sdp(
             &block,
@@ -526,15 +507,7 @@ mod tests {
 
     #[test]
     fn test_generate_sdp_with_44100_mono() {
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties: HashMap::new(),
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(HashMap::new());
 
         // Test with audiotestsrc defaults: 44.1kHz mono
         let sdp = generate_aes67_output_sdp(
@@ -560,15 +533,7 @@ mod tests {
             PropertyValue::String("16".to_string()),
         );
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp =
             generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
@@ -586,15 +551,7 @@ mod tests {
             PropertyValue::String("24".to_string()),
         );
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp =
             generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
@@ -611,15 +568,7 @@ mod tests {
             PropertyValue::String("4.0".to_string()),
         );
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp =
             generate_aes67_output_sdp(&block, "Test Stream", None, None, None, None, None, false);
@@ -651,15 +600,7 @@ mod tests {
         );
         properties.insert("port".to_string(), PropertyValue::Int(5008));
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp = generate_aes67_output_sdp(
             &block,
@@ -709,15 +650,7 @@ mod tests {
             PropertyValue::String("192.168.1.100".to_string()),
         );
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp = generate_aes67_output_sdp(
             &block,
@@ -745,15 +678,7 @@ mod tests {
             PropertyValue::String("239.69.11.44".to_string()),
         );
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp = generate_aes67_output_sdp(
             &block,
@@ -781,15 +706,7 @@ mod tests {
         );
         properties.insert("ttl".to_string(), PropertyValue::Int(64));
 
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties,
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(properties);
 
         let sdp = generate_aes67_output_sdp(
             &block,
@@ -808,194 +725,125 @@ mod tests {
 
     // RFC 7273 clock signaling tests
 
-    #[test]
-    fn test_ts_refclk_ptp() {
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Ptp,
-            ptp_domain: Some(42),
+    fn clock(clock_type: GStreamerClockType) -> FlowProperties {
+        FlowProperties {
+            clock_type,
             ..Default::default()
-        };
-
-        let ts_refclk = generate_ts_refclk(Some(&props), Some("AA-BB-CC-FF-FE-DD-EE-FF"));
-        assert_eq!(
-            ts_refclk,
-            "a=ts-refclk:ptp=IEEE1588-2008:AA-BB-CC-FF-FE-DD-EE-FF:42"
-        );
+        }
     }
 
     #[test]
-    fn test_ts_refclk_ptp_default_domain() {
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Ptp,
-            ptp_domain: None,
-            ..Default::default()
-        };
-
-        let ts_refclk = generate_ts_refclk(Some(&props), None);
-        assert_eq!(
-            ts_refclk,
-            "a=ts-refclk:ptp=IEEE1588-2008:00-00-00-FF-FE-00-00-00:0"
-        );
+    fn test_ts_refclk() {
+        let cases: Vec<(&str, Option<FlowProperties>, Option<&str>, &str)> = vec![
+            (
+                "ptp with grandmaster and domain",
+                Some(FlowProperties {
+                    ptp_domain: Some(42),
+                    ..clock(GStreamerClockType::Ptp)
+                }),
+                Some("AA-BB-CC-FF-FE-DD-EE-FF"),
+                "a=ts-refclk:ptp=IEEE1588-2008:AA-BB-CC-FF-FE-DD-EE-FF:42",
+            ),
+            (
+                "ptp without grandmaster or domain",
+                Some(clock(GStreamerClockType::Ptp)),
+                None,
+                "a=ts-refclk:ptp=IEEE1588-2008:00-00-00-FF-FE-00-00-00:0",
+            ),
+            (
+                "ntp with server",
+                Some(FlowProperties {
+                    ntp_server: Some("ntp.example.com".to_string()),
+                    ..clock(GStreamerClockType::Ntp)
+                }),
+                None,
+                "a=ts-refclk:ntp=ntp.example.com",
+            ),
+            (
+                "ntp without server",
+                Some(clock(GStreamerClockType::Ntp)),
+                None,
+                "a=ts-refclk:ntp=/traceable/",
+            ),
+            (
+                "monotonic",
+                Some(clock(GStreamerClockType::Monotonic)),
+                None,
+                "a=ts-refclk:local",
+            ),
+            (
+                "tai",
+                Some(clock(GStreamerClockType::Tai)),
+                None,
+                "a=ts-refclk:local",
+            ),
+            ("no flow properties", None, None, "a=ts-refclk:local"),
+        ];
+        for (name, props, clock_id, expected) in cases {
+            assert_eq!(
+                generate_ts_refclk(props.as_ref(), clock_id),
+                expected,
+                "{}",
+                name
+            );
+        }
     }
 
     #[test]
-    fn test_ts_refclk_ntp_with_server() {
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Ntp,
-            ntp_server: Some("ntp.example.com".to_string()),
-            ..Default::default()
-        };
-
-        let ts_refclk = generate_ts_refclk(Some(&props), None);
-        assert_eq!(ts_refclk, "a=ts-refclk:ntp=ntp.example.com");
-    }
-
-    #[test]
-    fn test_ts_refclk_ntp_traceable() {
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Ntp,
-            ntp_server: None,
-            ..Default::default()
-        };
-
-        let ts_refclk = generate_ts_refclk(Some(&props), None);
-        assert_eq!(ts_refclk, "a=ts-refclk:ntp=/traceable/");
-    }
-
-    #[test]
-    fn test_ts_refclk_local() {
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Monotonic,
-            ..Default::default()
-        };
-
-        let ts_refclk = generate_ts_refclk(Some(&props), None);
-        assert_eq!(ts_refclk, "a=ts-refclk:local");
-    }
-
-    #[test]
-    fn test_ts_refclk_no_properties() {
-        let ts_refclk = generate_ts_refclk(None, None);
-        assert_eq!(ts_refclk, "a=ts-refclk:local");
-    }
-
-    #[test]
-    fn test_mediaclk_ptp() {
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Ptp,
-            ..Default::default()
-        };
-        let mediaclk = generate_mediaclk(Some(&props));
-        assert_eq!(mediaclk, "a=mediaclk:direct=0");
-    }
-
-    #[test]
-    fn test_mediaclk_ntp() {
-        // NTP uses default base_time (not direct timing), so mediaclk is sender.
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Ntp,
-            ntp_server: Some("pool.ntp.org".to_string()),
-            ..Default::default()
-        };
-        let mediaclk = generate_mediaclk(Some(&props));
-        assert_eq!(mediaclk, "a=mediaclk:sender");
-    }
-
-    #[test]
-    fn test_mediaclk_monotonic() {
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Monotonic,
-            ..Default::default()
-        };
-        let mediaclk = generate_mediaclk(Some(&props));
-        assert_eq!(mediaclk, "a=mediaclk:sender");
-    }
-
-    #[test]
-    fn test_mediaclk_realtime() {
-        // Realtime uses default base_time, so the media clock is free-running.
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Realtime,
-            ..Default::default()
-        };
-        let mediaclk = generate_mediaclk(Some(&props));
-        assert_eq!(mediaclk, "a=mediaclk:sender");
-    }
-
-    #[test]
-    fn test_mediaclk_tai_default() {
-        // TAI without explicit direct_media_timing defaults to off.
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Tai,
-            ..Default::default()
-        };
-        let mediaclk = generate_mediaclk(Some(&props));
-        assert_eq!(mediaclk, "a=mediaclk:sender");
-    }
-
-    #[test]
-    fn test_mediaclk_tai_direct_opt_in() {
-        // TAI with direct_media_timing=Some(true) → direct=0
-        // (use case: AES67 with system TAI disciplined via ptp4l/phc2sys).
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Tai,
-            direct_media_timing: Some(true),
-            ..Default::default()
-        };
-        let mediaclk = generate_mediaclk(Some(&props));
-        assert_eq!(mediaclk, "a=mediaclk:direct=0");
-    }
-
-    #[test]
-    fn test_mediaclk_ptp_default_is_direct() {
-        // PTP defaults to direct=0 (AES67 / RFC 7273 contract).
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Ptp,
-            ..Default::default()
-        };
-        let mediaclk = generate_mediaclk(Some(&props));
-        assert_eq!(mediaclk, "a=mediaclk:direct=0");
-    }
-
-    #[test]
-    fn test_mediaclk_ptp_explicit_off() {
-        // PTP with direct_media_timing=Some(false) → sender (explicit override).
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Ptp,
-            direct_media_timing: Some(false),
-            ..Default::default()
-        };
-        let mediaclk = generate_mediaclk(Some(&props));
-        assert_eq!(mediaclk, "a=mediaclk:sender");
-    }
-
-    #[test]
-    fn test_ts_refclk_tai() {
-        let props = FlowProperties {
-            clock_type: GStreamerClockType::Tai,
-            ..Default::default()
-        };
-        let ts_refclk = generate_ts_refclk(Some(&props), None);
-        assert_eq!(ts_refclk, "a=ts-refclk:local");
-    }
-
-    #[test]
-    fn test_mediaclk_no_properties() {
-        let mediaclk = generate_mediaclk(None);
-        assert_eq!(mediaclk, "a=mediaclk:sender");
+    fn test_mediaclk() {
+        let direct = "a=mediaclk:direct=0";
+        let sender = "a=mediaclk:sender";
+        let cases: Vec<(&str, Option<FlowProperties>, &str)> = vec![
+            // PTP defaults to direct=0 (AES67 / RFC 7273 contract)
+            ("ptp default", Some(clock(GStreamerClockType::Ptp)), direct),
+            (
+                "ptp explicit off",
+                Some(FlowProperties {
+                    direct_media_timing: Some(false),
+                    ..clock(GStreamerClockType::Ptp)
+                }),
+                sender,
+            ),
+            // Other clocks use the default base_time, so the media clock is
+            // free-running
+            (
+                "ntp",
+                Some(FlowProperties {
+                    ntp_server: Some("pool.ntp.org".to_string()),
+                    ..clock(GStreamerClockType::Ntp)
+                }),
+                sender,
+            ),
+            (
+                "monotonic",
+                Some(clock(GStreamerClockType::Monotonic)),
+                sender,
+            ),
+            (
+                "realtime",
+                Some(clock(GStreamerClockType::Realtime)),
+                sender,
+            ),
+            ("tai default", Some(clock(GStreamerClockType::Tai)), sender),
+            // TAI opt-in: AES67 with system TAI disciplined via ptp4l/phc2sys
+            (
+                "tai direct opt-in",
+                Some(FlowProperties {
+                    direct_media_timing: Some(true),
+                    ..clock(GStreamerClockType::Tai)
+                }),
+                direct,
+            ),
+            ("no flow properties", None, sender),
+        ];
+        for (name, props, expected) in cases {
+            assert_eq!(generate_mediaclk(props.as_ref()), expected, "{}", name);
+        }
     }
 
     #[test]
     fn test_generate_sdp_with_ptp_clock() {
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties: HashMap::new(),
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(HashMap::new());
 
         let flow_props = FlowProperties {
             clock_type: GStreamerClockType::Ptp,
@@ -1020,15 +868,7 @@ mod tests {
 
     #[test]
     fn test_generate_sdp_with_ntp_clock() {
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties: HashMap::new(),
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(HashMap::new());
 
         let flow_props = FlowProperties {
             clock_type: GStreamerClockType::Ntp,
@@ -1054,15 +894,7 @@ mod tests {
 
     #[test]
     fn test_generate_sdp_with_monotonic_clock() {
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties: HashMap::new(),
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(HashMap::new());
 
         let flow_props = FlowProperties {
             clock_type: GStreamerClockType::Monotonic,
@@ -1087,15 +919,7 @@ mod tests {
 
     #[test]
     fn test_generate_sdp_with_ravenna_extensions() {
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties: HashMap::new(),
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(HashMap::new());
 
         let flow_props = FlowProperties {
             clock_type: GStreamerClockType::Ptp,
@@ -1130,15 +954,7 @@ mod tests {
 
     #[test]
     fn test_generate_sdp_without_ravenna_extensions() {
-        let block = BlockInstance {
-            id: "block_0".to_string(),
-            block_definition_id: "builtin.aes67_output".to_string(),
-            name: None,
-            properties: HashMap::new(),
-            position: strom_types::block::Position { x: 0.0, y: 0.0 },
-            runtime_data: None,
-            computed_external_pads: None,
-        };
+        let block = aes67_block(HashMap::new());
 
         let flow_props = FlowProperties {
             clock_type: GStreamerClockType::Ptp,
