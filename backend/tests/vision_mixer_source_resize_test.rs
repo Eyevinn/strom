@@ -1,5 +1,6 @@
-//! Regression test: a source that changes shape mid-stream must be
-//! aspect-fitted in its new shape on the GPU (OpenGL) vision mixer.
+//! Regression tests: a source that changes shape mid-stream must be
+//! aspect-fitted in its new shape on the GPU (OpenGL) vision mixer, also
+//! across takes and Fade to Black, and Fade to Black must play out in full.
 //!
 //! Builds a real vision mixer flow through `PipelineManager` with a white
 //! source on input 0 and measures the white area of PGM. A 720x1280 source on
@@ -302,6 +303,42 @@ impl Running {
             .set_property("caps", source_caps(shape));
     }
 
+    /// The dist mixer's position: the clock its keyframes and PGM frame
+    /// times are in.
+    fn position(&self, block_id: &str) -> gstreamer::ClockTime {
+        self.element(&format!("{block_id}:mixer"))
+            .query_position::<gstreamer::ClockTime>()
+            .expect("mixer position")
+    }
+
+    /// Wait until the dist mixer's pad for `input` has stored caps `width`
+    /// wide, and return the mixer's position then.
+    fn wait_for_input_width(
+        &self,
+        block_id: &str,
+        input: usize,
+        width: i32,
+    ) -> gstreamer::ClockTime {
+        let pad = self
+            .element(&format!("{block_id}:mixer"))
+            .static_pad(&format!("sink_{input}"))
+            .expect("mixer sink pad");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let stored = pad
+                .current_caps()
+                .and_then(|c| c.structure(0).and_then(|s| s.get::<i32>("width").ok()));
+            if stored == Some(width) {
+                return self.position(block_id);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "input {input} never reached the mixer {width} wide, caps width {stored:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn stop(mut self) {
         self.manager.stop().expect("stop");
         drop(self.manager);
@@ -404,38 +441,50 @@ async fn source_resized_during_a_fade_is_fitted_after_it() {
         f > 0.95
     });
 
-    // Fade from white (input 0) to red (input 1) over 2 s. The red source
-    // turns 4:3 at 600 ms.
+    // Fade from white (input 0) to red (input 1) over 4 s. The red source
+    // turns 4:3 about a second in, by the mixer's clock: a throttled mixer
+    // catches up in bursts and runs ahead of the wall clock.
+    let start = running.position(block_id);
     running
         .manager
-        .trigger_transition(block_id, 0, 1, "fade", 2000)
+        .trigger_transition(block_id, 0, 1, "fade", 4000)
         .expect("fade");
     running
         .manager
         .update_vision_mixer_after_take(block_id, Some(1), Some(0), 2)
         .expect("after take");
-    let start = std::time::Instant::now();
-    let mut resized = false;
-    let mut mid_fade = Vec::new();
-    while start.elapsed() < std::time::Duration::from_millis(1000) {
-        if !resized && start.elapsed() > std::time::Duration::from_millis(600) {
-            running.set_input_shape(1, (960, 720));
-            resized = true;
+    while running.position(block_id) < start + gstreamer::ClockTime::from_mseconds(800) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    running.set_input_shape(1, (960, 720));
+    let resized = running.wait_for_input_width(block_id, 1, 960);
+
+    // A cut drops green (white to red) from over 200 to 0 between two
+    // frames; the 4 s fade moves it a few levels a frame. Frames are
+    // compared with each other, not placed on the wall clock, so the check
+    // holds however far the mixer drifts from real time.
+    let mut greens = Vec::new();
+    while let Some(s) = running
+        .appsink
+        .try_pull_sample(gstreamer::ClockTime::from_seconds(5))
+    {
+        if s.buffer().and_then(|b| b.pts()).expect("PGM pts") <= resized {
+            continue;
         }
-        if let Some(s) = running
-            .appsink
-            .try_pull_sample(gstreamer::ClockTime::from_mseconds(200))
-        {
-            if start.elapsed() > std::time::Duration::from_millis(750) {
-                mid_fade.push(mean_green(&s));
-            }
+        let green = mean_green(&s);
+        greens.push(green);
+        if green < 20.0 {
+            break;
         }
     }
-    // Still blending: some white left. A cut shows red and black only.
+    let largest_step = greens
+        .windows(2)
+        .map(|w| w[0] - w[1])
+        .fold(0.0f64, f64::max);
     assert!(
-        !mid_fade.is_empty() && mid_fade.iter().all(|g| *g > 30.0),
+        greens.len() > 2 && greens[0] > 60.0 && largest_step < 40.0,
         "the fade was cut short after the resize, mean green {:?}",
-        mid_fade
+        greens
     );
 
     // 4:3 red on 16:9: pillarbox bars cover a quarter of PGM.
@@ -466,9 +515,10 @@ async fn source_switched_during_ftb_is_pillarboxed_after_it() {
         .manager
         .fade_to_black(block_id, 200)
         .expect("FTB on");
-    wait_for_pgm(&running.appsink, "black", |f| f < 0.05);
+    wait_for_pgm_by(&running.appsink, "black", black_fraction, |f| f > 0.95);
     running.set_source_shape(PORTRAIT);
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    running.wait_for_input_width(block_id, 0, PORTRAIT.0);
+    let start = running.position(block_id);
     running
         .manager
         .fade_to_black(block_id, 1000)
@@ -476,17 +526,18 @@ async fn source_switched_during_ftb_is_pillarboxed_after_it() {
 
     // The source is grey while it fades back in, so count lit pixels: every
     // frame of the fade-in must already show it pillarboxed, not stretched.
-    let start = std::time::Instant::now();
+    let fade_end = start + gstreamer::ClockTime::from_seconds(1);
     let mut fade_in = Vec::new();
-    while start.elapsed() < std::time::Duration::from_millis(900) {
-        if let Some(s) = running
-            .appsink
-            .try_pull_sample(gstreamer::ClockTime::from_mseconds(200))
-        {
-            let lit = 1.0 - black_fraction(&s);
-            if lit > 0.05 {
-                fade_in.push(lit);
-            }
+    while let Some(s) = running
+        .appsink
+        .try_pull_sample(gstreamer::ClockTime::from_seconds(5))
+    {
+        if s.buffer().and_then(|b| b.pts()).expect("PGM pts") > fade_end {
+            break;
+        }
+        let lit = 1.0 - black_fraction(&s);
+        if lit > 0.05 {
+            fade_in.push(lit);
         }
     }
     assert!(
@@ -501,5 +552,166 @@ async fn source_switched_during_ftb_is_pillarboxed_after_it() {
         pillarboxed,
     );
     eprintln!("after FTB: white={:.2}", white);
+    running.stop();
+}
+
+/// Run the mixer at about 40% of real time: each output frame takes 80 ms
+/// instead of 33.
+fn slow_down_mixer(running: &Running, block_id: &str) {
+    running
+        .element(&format!("{block_id}:mixer"))
+        .static_pad("src")
+        .expect("mixer src")
+        .add_probe(gstreamer::PadProbeType::BUFFER, |_, _| {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            gstreamer::PadProbeReturn::Ok
+        });
+}
+
+/// FTB keyframes are in the mixer's stream time. On a mixer slower than real
+/// time, both fades must still play out in full.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ftb_plays_out_on_a_slow_mixer() {
+    gstreamer::init().unwrap();
+    if !gl_available_or_required() {
+        return;
+    }
+    let block_id = "vmftb_slow";
+    let running = Running::start(build_flow(block_id, LANDSCAPE));
+    wait_for_pgm(&running.appsink, "the landscape source filling PGM", |f| {
+        f > 0.95
+    });
+    slow_down_mixer(&running, block_id);
+
+    running
+        .manager
+        .fade_to_black(block_id, 200)
+        .expect("FTB on");
+    wait_for_pgm_by(&running.appsink, "black", black_fraction, |f| f > 0.95);
+    running
+        .manager
+        .fade_to_black(block_id, 1000)
+        .expect("FTB off");
+    wait_for_pgm(&running.appsink, "the source back at full level", |f| {
+        f > 0.95
+    });
+    running.stop();
+}
+
+/// FTB off pressed while FTB on is still fading out brings PGM fully back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ftb_off_during_the_fade_out_restores_pgm() {
+    gstreamer::init().unwrap();
+    if !gl_available_or_required() {
+        return;
+    }
+    let block_id = "vmftb_abort";
+    let running = Running::start(build_flow(block_id, LANDSCAPE));
+    wait_for_pgm(&running.appsink, "the landscape source filling PGM", |f| {
+        f > 0.95
+    });
+
+    running
+        .manager
+        .fade_to_black(block_id, 500)
+        .expect("FTB on");
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    running
+        .manager
+        .fade_to_black(block_id, 500)
+        .expect("FTB off");
+    // FTB on's cleanup comes due in the middle of FTB off's fade. Stuck
+    // part-way, PGM stays grey.
+    wait_for_pgm(&running.appsink, "the source back at full level", |f| {
+        f > 0.95
+    });
+    running.stop();
+}
+
+/// A cropped PiP source that changes shape during FTB comes back with its
+/// crop re-derived from the new width: half of 720 px, not of 1280.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pip_crop_follows_a_source_resized_during_ftb() {
+    use strom_types::vision_mixer::{PipTransforms, SourceCrop, Zone};
+    gstreamer::init().unwrap();
+    if !gl_available_or_required() {
+        return;
+    }
+    let block_id = "vmftb_pipcrop";
+    let mut flow = build_flow(block_id, LANDSCAPE);
+    flow.blocks[0]
+        .properties
+        .insert("num_pips".to_string(), PV::String("1".into()));
+    let running = Running::start(flow);
+    wait_for_pgm(&running.appsink, "the landscape source filling PGM", |f| {
+        f > 0.95
+    });
+
+    // PiP on PGM: red background (input 1), input 0 in one zone with its
+    // right half cropped off.
+    let mut transforms = PipTransforms::new();
+    transforms.insert(
+        0,
+        SourceCrop {
+            left: 0.0,
+            top: 0.0,
+            right: 0.5,
+            bottom: 0.0,
+        },
+    );
+    running
+        .manager
+        .apply_vision_mixer_pip_config(
+            block_id,
+            0,
+            Some(1),
+            vec![Zone {
+                rect: None,
+                capacity: None,
+                sources: vec![0],
+                border: None,
+            }],
+            transforms,
+        )
+        .expect("PiP config");
+    running
+        .manager
+        .select_vision_mixer_pip_for_preview(block_id, 0)
+        .expect("PiP to PVW");
+    running
+        .manager
+        .trigger_transition(block_id, 0, 0, "cut", 0)
+        .expect("take the PiP");
+    let pad = running
+        .element(&format!("{block_id}:mixer"))
+        .static_pad("sink_0")
+        .expect("mixer sink_0");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while pad.property::<i32>("crop-right") != 640 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PiP crop never applied, crop-right {}",
+            pad.property::<i32>("crop-right")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    running
+        .manager
+        .fade_to_black(block_id, 200)
+        .expect("FTB on");
+    wait_for_pgm_by(&running.appsink, "black", black_fraction, |f| f > 0.95);
+    running.set_source_shape(PORTRAIT);
+    running.wait_for_input_width(block_id, 0, PORTRAIT.0);
+    running
+        .manager
+        .fade_to_black(block_id, 200)
+        .expect("FTB off");
+
+    assert_eq!(
+        pad.property::<i32>("crop-right"),
+        PORTRAIT.0 / 2,
+        "the crop after FTB off is still sized for the old source"
+    );
     running.stop();
 }
