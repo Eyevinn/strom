@@ -622,11 +622,41 @@ fn identical_caps_pass_straight_through() {
     }
 }
 
+/// Run a `gst::parse::launch` description with `CONVERT` standing for the
+/// element under test, named `convert`, and an appsink named `sink`. Returns
+/// the first sample, its caps, and the conversion path.
+fn launch_one(label: &str, launch: &str) -> (Option<gst::Sample>, String) {
+    let pipeline = gst::parse::launch(&launch.replace("CONVERT", super::ELEMENT_NAME))
+        .unwrap_or_else(|e| panic!("{label}: {e}"))
+        .downcast::<gst::Pipeline>()
+        .expect("pipeline");
+    let convert = pipeline.by_name("convert").expect("convert");
+    let sink = pipeline
+        .by_name("sink")
+        .expect("sink")
+        .downcast::<gst_app::AppSink>()
+        .expect("appsink");
+
+    pipeline.set_state(gst::State::Playing).expect("play");
+    let sample = sink.try_pull_sample(gst::ClockTime::from_seconds(10));
+    // Read before NULL: `stop()` drops the negotiated state.
+    let path = convert.property::<String>("conversion-path");
+    pipeline.set_state(gst::State::Null).expect("null");
+    (sample, path)
+}
+
+/// What an AVFoundation camera sends: format, size and rate, with no pixel
+/// aspect ratio, interlace mode or colorimetry. `capssetter` strips the caps
+/// to that.
+const CAMERA: &str =
+    "videotestsrc num-buffers=1 ! video/x-raw,format=NV12,width=1920,height=1080 ! \
+     capssetter replace=true \
+       caps=\"video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1\"";
+
 /// Caps a source leaves incomplete must still pass straight through.
-/// AVFoundation cameras omit the pixel aspect ratio; filling it in on the
-/// output side would make the caps differ and copy every frame, in system
-/// memory, or through the CPU for GL memory. `capssetter` strips the caps to
-/// what such a source sends.
+/// Filling in a field on the output side makes the caps differ, and a copy of
+/// every frame, in system memory, or through the CPU for GL memory, would
+/// follow unless the frames are recognised as the same.
 #[test]
 fn input_without_pixel_aspect_ratio_passes_through() {
     init();
@@ -634,10 +664,7 @@ fn input_without_pixel_aspect_ratio_passes_through() {
     for (label, launch) in [
         (
             "system memory",
-            "videotestsrc num-buffers=1 ! video/x-raw,format=NV12,width=1920,height=1080 ! \
-             capssetter replace=true \
-               caps=\"video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1\" ! \
-             CONVERT name=convert ! video/x-raw ! appsink name=sink sync=false",
+            format!("{CAMERA} ! CONVERT name=convert ! video/x-raw ! appsink name=sink sync=false"),
         ),
         (
             "GL memory",
@@ -646,31 +673,50 @@ fn input_without_pixel_aspect_ratio_passes_through() {
                width=64,height=64,framerate=30/1,texture-target=2D\" ! \
              CONVERT name=convert ! \
              video/x-raw(memory:GLMemory),pixel-aspect-ratio=[1/2,2/1] ! \
-             gldownload ! video/x-raw,format=RGBA ! appsink name=sink sync=false",
+             gldownload ! video/x-raw,format=RGBA ! appsink name=sink sync=false"
+                .to_string(),
         ),
     ] {
-        let pipeline = gst::parse::launch(&launch.replace("CONVERT", super::ELEMENT_NAME))
-            .unwrap_or_else(|e| panic!("{label}: {e}"))
-            .downcast::<gst::Pipeline>()
-            .expect("pipeline");
-        let convert = pipeline.by_name("convert").expect("convert");
-        let sink = pipeline
-            .by_name("sink")
-            .expect("sink")
-            .downcast::<gst_app::AppSink>()
-            .expect("appsink");
-
-        pipeline.set_state(gst::State::Playing).expect("play");
-        let sample = sink.try_pull_sample(gst::ClockTime::from_seconds(10));
-        // Read before NULL: `stop()` drops the negotiated state.
-        let path = convert.property::<String>("conversion-path");
-        pipeline.set_state(gst::State::Null).expect("null");
-
+        let (sample, path) = launch_one(label, &launch);
         assert!(sample.is_some(), "{label}: no output");
         assert_eq!(
             path, PATH_PASSTHROUGH,
             "{label} without a pixel aspect ratio was converted"
         );
+    }
+}
+
+/// A consumer that requires a field the input left out must receive it,
+/// written into the output caps, as `videoconvert` does. Where the field's
+/// value is the input's default the frames still pass through; where it
+/// differs they are converted.
+#[test]
+fn a_field_the_peer_requires_is_written_into_the_output() {
+    init();
+
+    for (field, value, expected_path) in [
+        ("pixel-aspect-ratio", "1/1", PATH_PASSTHROUGH),
+        ("interlace-mode", "progressive", PATH_PASSTHROUGH),
+        // 1080p without colorimetry means bt709.
+        ("colorimetry", "bt709", PATH_PASSTHROUGH),
+        ("colorimetry", "bt601", PATH_FALLBACK),
+    ] {
+        let label = format!("{field}={value}");
+        let (sample, path) = launch_one(
+            &label,
+            &format!(
+                "{CAMERA} ! CONVERT name=convert ! \
+                 appsink name=sink sync=false caps=\"video/x-raw,{field}={value}\""
+            ),
+        );
+        let sample = sample.unwrap_or_else(|| panic!("{label}: no output"));
+        let caps = sample.caps().expect("caps");
+        let written = caps
+            .structure(0)
+            .and_then(|s| s.value(field).ok())
+            .map(|v| v.serialize().expect("serialize").to_string());
+        assert_eq!(written.as_deref(), Some(value), "{label}: output {caps}");
+        assert_eq!(path, expected_path, "{label}");
     }
 }
 
