@@ -826,3 +826,105 @@ fn test_built_mixer_passes_audio_to_main_out() {
         }
     }
 }
+
+/// Count buffers arriving at a new fakesink hung off `tee`, through `caps`.
+fn count_from(m: &Assembled, tee: &str, caps: &str) -> Arc<AtomicUsize> {
+    let filter = gst::ElementFactory::make("capsfilter")
+        .property("caps", caps.parse::<gst::Caps>().unwrap())
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .property("async", false)
+        .build()
+        .unwrap();
+    m.pipeline.add_many([&filter, &sink]).unwrap();
+    m.element(tee)
+        .link_pads(Some("src_%u"), &filter, None)
+        .unwrap();
+    filter.link(&sink).unwrap();
+    let buffers = Arc::new(AtomicUsize::new(0));
+    let counter = buffers.clone();
+    sink.static_pad("sink")
+        .unwrap()
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+    buffers
+}
+
+#[test]
+fn test_input_links_late_when_main_consumer_pins_rate() {
+    // A mixer with return feeds: aux buses and the solo bus start with no
+    // input and nothing downstream that fixes a rate, while main feeds a
+    // consumer that needs 48 kHz (an encoder, the vision mixer). An input
+    // that arrives after startup, as every WHIP input does, must still link.
+    let m = assemble(&props(&[
+        ("num_channels", PropertyValue::UInt(2)),
+        ("num_aux_buses", PropertyValue::UInt(2)),
+        ("num_groups", PropertyValue::UInt(1)),
+        ("dsp_backend", PropertyValue::String("rust".to_string())),
+    ]));
+    let main = count_from(&m, "main_out_tee", "audio/x-raw,rate=48000");
+    let aux = count_from(&m, "aux1_out_tee", "audio/x-raw");
+    count_from(&m, "aux0_out_tee", "audio/x-raw");
+    count_from(&m, "monitor_out_tee", "audio/x-raw");
+    count_from(&m, "group0_out_tee", "audio/x-raw");
+
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for bus in [
+        "aux0_mixer",
+        "aux1_mixer",
+        "group0_mixer",
+        "solo_mixer",
+        "monitor_mixer",
+    ] {
+        let pad = m.element(bus).static_pad("src").unwrap();
+        while pad.current_caps().is_none() {
+            assert!(Instant::now() < deadline, "{bus} never negotiated");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .build()
+        .unwrap();
+    let decoded = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            "audio/x-raw,format=S16LE,rate=48000,channels=2,layout=interleaved"
+                .parse::<gst::Caps>()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    m.pipeline.add_many([&src, &decoded]).unwrap();
+    src.link(&decoded).unwrap();
+    decoded
+        .static_pad("src")
+        .unwrap()
+        .link(&m.element("convert_0").static_pad("sink").unwrap())
+        .expect("a late input must link into a running mixer");
+    src.sync_state_with_parent().unwrap();
+    decoded.sync_state_with_parent().unwrap();
+
+    let bus = m.pipeline.bus().unwrap();
+    let (main_start, aux_start) = (main.load(Ordering::Relaxed), aux.load(Ordering::Relaxed));
+    while main.load(Ordering::Relaxed) < main_start + 5
+        || aux.load(Ordering::Relaxed) < aux_start + 5
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the input never reached main and aux"
+        );
+        if let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Error],
+        ) {
+            panic!("pipeline error: {msg:?}");
+        }
+    }
+}
