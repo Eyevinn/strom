@@ -412,8 +412,9 @@ fn choose_format(othercaps: &gst::Caps, in_format: Option<VideoFormat>) -> gst::
 /// centred siting (`jpeg`). Caps without a `chroma-site` field default to
 /// left-cosited (`mpeg2`) at HD sizes, and the encoders carry that label into
 /// the stream, so an unlabelled RGB-to-Y'CbCr output would tell the player
-/// the colour sits half a pixel from where it is. A Y'CbCr input keeps
-/// its own siting, since the chroma is copied, not resampled. A siting the
+/// the colour sits half a pixel from where it is. RGB has no chroma to site,
+/// so a `chroma-site` on RGB caps is ignored. A Y'CbCr input keeps its own
+/// siting, since the chroma is copied, not resampled. A siting the
 /// peer insists on is left alone; [`Plan::build`] then declines vImage and
 /// `GstVideoConverter` resamples to it.
 fn fixate_chroma_site(
@@ -433,10 +434,12 @@ fn fixate_chroma_site(
     if !out.is_yuv() || !subsampled {
         return;
     }
-    let target = match in_s.get::<&str>("chroma-site") {
-        Ok(site) => site.to_owned(),
-        Err(_) if VideoFormatInfo::from_format(in_format).is_rgb() => "jpeg".to_owned(),
-        Err(_) => return,
+    let target = if VideoFormatInfo::from_format(in_format).is_rgb() {
+        "jpeg".to_owned()
+    } else if let Ok(site) = in_s.get::<&str>("chroma-site") {
+        site.to_owned()
+    } else {
+        return;
     };
     if s.has_field("chroma-site") {
         s.fixate_field_str("chroma-site", &target);
