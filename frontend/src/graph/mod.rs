@@ -325,8 +325,13 @@ pub(super) fn get_connected_request_pad_names(
         }
     }
 
+    // Numeric order by index (sink_2 before sink_10); names without a numeric
+    // index after the prefix go last, in string order.
     let mut result: Vec<String> = pad_names.into_iter().collect();
-    result.sort();
+    result.sort_by_cached_key(|name| {
+        let index = name[pattern.len()..].parse::<u64>().ok();
+        (index.is_none(), index, name.clone())
+    });
     result
 }
 
@@ -573,6 +578,32 @@ mod tests {
         assert_eq!(
             drawn_sink_pads(Vec::new(), &mux, &mux_info),
             vec![("audio".to_string(), true), ("video".to_string(), true)]
+        );
+    }
+
+    /// A mixer with more than ten inputs drew them as sink_0, sink_1,
+    /// sink_10, sink_2, ...: connecting the eleventh input moved it between
+    /// the second and third.
+    #[test]
+    fn request_pads_are_drawn_in_numeric_order() {
+        let mix = element("mix", "compositor");
+        let mix_info = info(
+            "compositor",
+            vec![pad("sink_%u", PadPresence::Request)],
+            vec![pad("src", PadPresence::Always)],
+        );
+        let links: Vec<Link> = [10, 2, 0, 1, 11]
+            .iter()
+            .map(|i| link(&format!("s{i}:src"), &format!("mix:sink_{i}")))
+            .collect();
+
+        let names: Vec<String> = drawn_sink_pads(links, &mix, &mix_info)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            ["sink_0", "sink_1", "sink_2", "sink_10", "sink_11", "sink_3"]
         );
     }
 }
