@@ -104,14 +104,37 @@ fn gl_environment_available() -> bool {
     }
 }
 
+/// Are the GL elements installed? Every CI job installs them, so a missing one
+/// is a broken install, not a headless runner: `STROM_REQUIRE_GST_PLUGINS`
+/// turns the skip into a failure, as it does for every other missing element.
+fn gl_elements_available() -> bool {
+    let missing: Vec<&str> = ["glshader", "gltestsrc"]
+        .into_iter()
+        .filter(|e| gst::ElementFactory::find(e).is_none())
+        .collect();
+    if missing.is_empty() {
+        return true;
+    }
+    // Either variable forbids the skip: a missing element is a broken install,
+    // and a platform that must render cannot render without them.
+    if let Some(var) = ["STROM_REQUIRE_GST_PLUGINS", "STROM_REQUIRE_GL"]
+        .into_iter()
+        .find(|v| strom_types::env::var_opt(v).is_some())
+    {
+        panic!(
+            "{var} is set but these elements are missing: {}",
+            missing.join(", ")
+        );
+    }
+    eprintln!("SKIP: GL elements missing: {}", missing.join(", "));
+    false
+}
+
 #[test]
 fn all_shader_fragments_compile() {
     gst::init().expect("gst init");
 
-    if gst::ElementFactory::find("glshader").is_none()
-        || gst::ElementFactory::find("gltestsrc").is_none()
-    {
-        eprintln!("SKIP: GStreamer GL elements not available");
+    if !gl_elements_available() {
         return;
     }
 
@@ -152,10 +175,7 @@ fn all_shader_fragments_compile() {
 fn runtime_fragment_swap_takes_effect() {
     gst::init().expect("gst init");
 
-    if gst::ElementFactory::find("glshader").is_none()
-        || gst::ElementFactory::find("gltestsrc").is_none()
-    {
-        eprintln!("SKIP: GStreamer GL elements not available");
+    if !gl_elements_available() {
         return;
     }
     if !gl_environment_available() {
