@@ -242,9 +242,10 @@ impl BaseTransformImpl for VImageConvert {
 
     /// Pin the other pad's caps, preferring no conversion at all.
     ///
-    /// Format is chosen by the loss score in [`conversion_loss`], chroma siting
-    /// by [`fixate_chroma_site`], and pixel aspect ratio is pulled towards the
-    /// input.
+    /// A peer that accepts the input unchanged gets it unchanged. Otherwise
+    /// format is chosen by the loss score in [`conversion_loss`], chroma siting
+    /// by [`fixate_chroma_site`], and a pixel aspect ratio the peer constrains
+    /// is pulled towards the input.
     fn fixate_caps(
         &self,
         _direction: gst::PadDirection,
@@ -256,6 +257,15 @@ impl BaseTransformImpl for VImageConvert {
             othercaps.fixate();
             return othercaps;
         };
+
+        // A peer that takes the input as it is gets it as it is. Filling in
+        // a field the input left out, such as the pixel aspect ratio a
+        // camera omits, would make the two sides differ and cost a copy of
+        // every frame instead of a passthrough.
+        if othercaps.can_intersect(caps) {
+            gst::debug!(CAT, imp = self, "peer accepts {} unchanged", caps);
+            return caps.clone();
+        }
 
         let in_format = in_s
             .get::<&str>("format")
@@ -270,16 +280,14 @@ impl BaseTransformImpl for VImageConvert {
             if let Some(s) = result.structure_mut(0) {
                 fixate_int(s, "width", in_s.get::<i32>("width").ok());
                 fixate_int(s, "height", in_s.get::<i32>("height").ok());
-                let par = in_s
-                    .get::<gst::Fraction>("pixel-aspect-ratio")
-                    .unwrap_or_else(|_| gst::Fraction::new(1, 1));
                 if s.has_field("pixel-aspect-ratio") {
+                    let par = in_s
+                        .get::<gst::Fraction>("pixel-aspect-ratio")
+                        .unwrap_or_else(|_| gst::Fraction::new(1, 1));
                     s.fixate_field_nearest_fraction(
                         "pixel-aspect-ratio",
                         (par.numer(), par.denom()),
                     );
-                } else {
-                    s.set("pixel-aspect-ratio", par);
                 }
                 fixate_chroma_site(s, in_s, in_format);
             }
@@ -362,6 +370,15 @@ impl VideoFilterImpl for VImageConvert {
         let path = if self.obj().is_passthrough() {
             gst::info!(CAT, imp = self, "passthrough for {}", incaps);
             Path::Passthrough
+        } else if !incaps.features(0).is_some_and(is_system_memory) {
+            // `transform_caps` never offers such memory for conversion, so
+            // this is a guard, not a path: mapping it would copy every frame
+            // through the CPU.
+            return Err(gst::loggable_error!(
+                CAT,
+                "cannot convert {}: only system memory can be mapped",
+                incaps
+            ));
         } else {
             self.conversion_path(in_info, out_info)?
         };

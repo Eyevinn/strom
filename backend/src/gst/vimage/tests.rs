@@ -622,6 +622,58 @@ fn identical_caps_pass_straight_through() {
     }
 }
 
+/// Caps a source leaves incomplete must still pass straight through.
+/// AVFoundation cameras omit the pixel aspect ratio; filling it in on the
+/// output side would make the caps differ and copy every frame, in system
+/// memory, or through the CPU for GL memory. `capssetter` strips the caps to
+/// what such a source sends.
+#[test]
+fn input_without_pixel_aspect_ratio_passes_through() {
+    init();
+
+    for (label, launch) in [
+        (
+            "system memory",
+            "videotestsrc num-buffers=1 ! video/x-raw,format=NV12,width=1920,height=1080 ! \
+             capssetter replace=true \
+               caps=\"video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1\" ! \
+             CONVERT name=convert ! video/x-raw ! appsink name=sink sync=false",
+        ),
+        (
+            "GL memory",
+            "videotestsrc num-buffers=1 ! video/x-raw,format=RGBA,width=64,height=64 ! glupload ! \
+             capssetter replace=true caps=\"video/x-raw(memory:GLMemory),format=RGBA,\
+               width=64,height=64,framerate=30/1,texture-target=2D\" ! \
+             CONVERT name=convert ! \
+             video/x-raw(memory:GLMemory),pixel-aspect-ratio=[1/2,2/1] ! \
+             gldownload ! video/x-raw,format=RGBA ! appsink name=sink sync=false",
+        ),
+    ] {
+        let pipeline = gst::parse::launch(&launch.replace("CONVERT", super::ELEMENT_NAME))
+            .unwrap_or_else(|e| panic!("{label}: {e}"))
+            .downcast::<gst::Pipeline>()
+            .expect("pipeline");
+        let convert = pipeline.by_name("convert").expect("convert");
+        let sink = pipeline
+            .by_name("sink")
+            .expect("sink")
+            .downcast::<gst_app::AppSink>()
+            .expect("appsink");
+
+        pipeline.set_state(gst::State::Playing).expect("play");
+        let sample = sink.try_pull_sample(gst::ClockTime::from_seconds(10));
+        // Read before NULL: `stop()` drops the negotiated state.
+        let path = convert.property::<String>("conversion-path");
+        pipeline.set_state(gst::State::Null).expect("null");
+
+        assert!(sample.is_some(), "{label}: no output");
+        assert_eq!(
+            path, PATH_PASSTHROUGH,
+            "{label} without a pixel aspect ratio was converted"
+        );
+    }
+}
+
 /// Interlaced frames need field-aware chroma handling that vImage's
 /// frame-at-a-time calls lack, so every pair, including those vImage has a
 /// path for when progressive, must run on the fallback and match
