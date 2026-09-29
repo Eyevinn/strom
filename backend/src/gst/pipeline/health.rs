@@ -33,6 +33,7 @@
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 use strom_types::flow::{BlockHealth, BlockHealthCause, BlockHealthStatus};
 use strom_types::Link;
 
@@ -123,48 +124,80 @@ fn owning_block(element_id: &str) -> &str {
     element_id.split(':').next().unwrap_or(element_id)
 }
 
-/// Whether a deferred link has missed its only chance to form.
+/// Links the linker has given up on, recorded as the flow declares them.
 ///
-/// `pending_links` holds every link `try_link_elements` refused, and the only
-/// thing that retries one is the `pad-added` handler on its source element. A
-/// pad that is already there will not be added again, so a deferred link whose
-/// named source pad exists and has no peer is unformed for the life of the
-/// pipeline, not merely slow.
+/// A refused link is retried only by the `pad-added` handler on its source
+/// element, so two kinds of refusal are final. Construction records one whose
+/// source pad already exists or can be requested: that pad will not be added
+/// again. The handler records every attempt it makes on a pad that appears
+/// later. A late pad it cannot link gets an auto-tee as its peer, so the pad's
+/// own state cannot show the refusal; the record does.
 ///
-/// The converse is deliberately not reported. A source pad that does not exist
-/// yet - `decodebin` before it has typefound, a `whipserversrc` before a
-/// publisher arrives - is the case the deferral was built for, and the handler
-/// will link it when it appears.
+/// A link whose source pad has not appeared yet is never recorded. That is
+/// what deferral is for: `decodebin` before it has typefound, a
+/// `whipserversrc` before a publisher arrives.
 ///
-/// Two links are outside what this can judge, and both read as formed. One
-/// whose source pad appeared under a different name than the link asked for
-/// (`src` matching `src_0`) is linked through the handler's pattern match, and
-/// one whose unlinked dynamic pad picked up an auto-tee has a peer that is not
-/// the declared destination.
-fn unformed_link(elements: &HashMap<String, gst::Element>, link: &Link) -> bool {
-    let (from_ref, _) = link.to_pad_refs();
-    let Some(element) = elements.get(&from_ref.element_id) else {
-        return false;
-    };
-    // An element-level link names no pad; GStreamer would have used the
-    // element's own `src` pad, so that is what is checked.
-    let pad_name = from_ref.pad_name.as_deref().unwrap_or("src");
-    let Some(pad) = element.static_pad(pad_name) else {
-        return false;
-    };
-    pad.direction() == gst::PadDirection::Src && pad.peer().is_none()
+/// Recorded links are the ones the flow declares, not the ones construction
+/// rewrote to go through an auto-tee, so a failure names a link and a block the
+/// operator can find.
+#[derive(Clone, Default)]
+pub(crate) struct UnformedLinks(Arc<Mutex<Vec<LinkAttempts>>>);
+
+struct LinkAttempts {
+    link: Link,
+    /// The latest outcome for each source pad tried: `true` if it linked.
+    pads: Vec<(String, bool)>,
+}
+
+impl UnformedLinks {
+    /// Record the outcome of linking `link` from the source pad `pad`.
+    pub(crate) fn record(&self, link: &Link, pad: &str, formed: bool) {
+        let mut attempts = self.0.lock().unwrap();
+        let index = match attempts
+            .iter()
+            .position(|a| a.link.from == link.from && a.link.to == link.to)
+        {
+            Some(index) => index,
+            None => {
+                attempts.push(LinkAttempts {
+                    link: link.clone(),
+                    pads: Vec::new(),
+                });
+                attempts.len() - 1
+            }
+        };
+        let pads = &mut attempts[index].pads;
+        match pads.iter_mut().find(|(name, _)| name == pad) {
+            Some(entry) => entry.1 = formed,
+            None => pads.push((pad.to_string(), formed)),
+        }
+    }
+
+    /// Links with no source pad linked, in the order first recorded.
+    ///
+    /// One pad linking is enough: a link asking for `src` is tried against
+    /// every `src_N` a demuxer adds, and only the matching stream links.
+    pub(crate) fn unformed(&self) -> Vec<Link> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.pads.iter().all(|(_, formed)| !formed))
+            .map(|a| a.link.clone())
+            .collect()
+    }
 }
 
 /// Report health for every block with at least one element in `elements`.
 ///
-/// `pending_links` are the links construction could not make, carried from the
-/// `PipelineManager` unchanged.
+/// `unformed_links` are the links the linker gave up on, from
+/// [`UnformedLinks::unformed`].
 ///
 /// Call only while the pipeline is playing; a paused task is expected in any
 /// other pipeline state.
 pub(crate) fn scan_block_health(
     elements: &HashMap<String, gst::Element>,
-    pending_links: &[Link],
+    unformed_links: &[Link],
 ) -> Vec<BlockHealth> {
     let mut by_block: BTreeMap<&str, BlockHealth> = BTreeMap::new();
 
@@ -196,10 +229,7 @@ pub(crate) fn scan_block_health(
     // behind a link that never formed is the symptom, and the link is the cause.
     // Where a block has several, the first names it, as in the scan above.
     let mut named_by_link: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for link in pending_links {
-        if !unformed_link(elements, link) {
-            continue;
-        }
+    for link in unformed_links {
         let (from_ref, _) = link.to_pad_refs();
         let block_id = owning_block(&from_ref.element_id);
         if !named_by_link.insert(block_id.to_string()) {
@@ -210,7 +240,7 @@ pub(crate) fn scan_block_health(
         };
         entry.status = BlockHealthStatus::Failed;
         entry.detail = Some(format!(
-            "link {} -> {} never formed - this branch has carried no data since the flow started",
+            "link {} -> {} never formed - this branch is carrying no data",
             link.from, link.to
         ));
     }
@@ -272,9 +302,7 @@ impl super::PipelineManager {
             .map(|(id, element)| (id.clone(), element.downgrade()))
             .collect();
 
-        // Construction is the only writer of pending_links, and it has finished
-        // by the time this task starts.
-        let pending_links = self.pending_links.clone();
+        let unformed_links = self.unformed_links.clone();
         let cached_state = self.cached_state.clone();
         let block_health = self.block_health.clone();
         let events = self.events.clone();
@@ -308,7 +336,7 @@ impl super::PipelineManager {
                     continue;
                 }
 
-                let mut snapshot = scan_block_health(&elements, &pending_links);
+                let mut snapshot = scan_block_health(&elements, &unformed_links.unformed());
 
                 // A block is only reported once it has looked stalled on
                 // CONFIRMATIONS_BEFORE_FAILED scans in a row. Downgrade the
@@ -445,8 +473,15 @@ mod tests {
             .and_then(|h| h.detail.clone())
     }
 
+    fn link(from: &str, to: &str) -> Link {
+        Link {
+            from: from.to_string(),
+            to: to.to_string(),
+        }
+    }
+
     #[test]
-    fn a_deferred_link_that_never_formed_fails_its_block() {
+    fn an_unformed_link_fails_the_block_owning_its_source() {
         let (elements, link) = unlinkable_pair();
 
         assert!(
@@ -465,52 +500,84 @@ mod tests {
         );
     }
 
-    /// The deferral exists for a source pad that is not there yet. Reporting one
-    /// would mark every `decodebin` failed for as long as it takes to typefind.
     #[test]
-    fn a_deferred_link_waiting_on_a_dynamic_pad_is_not_reported() {
+    fn the_first_unformed_link_names_the_block() {
         gst::init().unwrap();
-        let elements: HashMap<String, gst::Element> = [(
-            "dec".to_string(),
-            gst::ElementFactory::make("decodebin")
-                .name("dec")
-                .build()
-                .expect("decodebin should build"),
-        )]
-        .into_iter()
-        .collect();
-        let pending = [Link {
-            from: "dec:src_0".to_string(),
-            to: "sink:sink".to_string(),
-        }];
+        let elements: HashMap<String, gst::Element> = ["mix:dist", "mix:mv"]
+            .into_iter()
+            .map(|id| {
+                (
+                    id.to_string(),
+                    gst::ElementFactory::make("identity")
+                        .build()
+                        .expect("identity should build"),
+                )
+            })
+            .collect();
+        let unformed = [
+            link("mix:dist:src", "out:sink"),
+            link("mix:mv:src", "mv_out:sink"),
+        ];
 
+        let detail = failure_detail(&scan_block_health(&elements, &unformed), "mix")
+            .expect("the block must be reported");
         assert!(
-            scan_block_health(&elements, &pending)
-                .iter()
-                .all(|h| h.status == BlockHealthStatus::Ok),
-            "a source pad that has not appeared yet is not a failure"
+            detail.contains("mix:dist:src -> out:sink"),
+            "the first unformed link must name the block: {}",
+            detail
         );
     }
 
-    /// A link the `pad-added` handler resolved is still in `pending_links`, so a
-    /// linked source pad has to read as healthy.
+    /// Reporting a pad that has not appeared yet would mark every `decodebin`
+    /// failed for as long as it takes to typefind.
     #[test]
-    fn a_deferred_link_that_did_form_is_not_reported() {
-        let (elements, link) = unlinkable_pair();
-        let vconv = elements.get("vconv").unwrap();
-        let holder = elements.get("holder").unwrap();
-        vconv
-            .static_pad("src")
-            .unwrap()
-            .link(&holder.static_pad("sink").unwrap())
-            .expect("videoconvert should link to fakesink");
+    fn only_a_source_pad_that_exists_or_can_be_requested_is_final() {
+        gst::init().unwrap();
+        let make = |factory: &str| gst::ElementFactory::make(factory).build().unwrap();
 
+        assert!(PipelineManager::source_pad_is_available(
+            &make("videoconvert"),
+            "src"
+        ));
         assert!(
-            scan_block_health(&elements, &[link])
-                .iter()
-                .all(|h| h.status == BlockHealthStatus::Ok),
-            "a linked source pad means the deferred link resolved"
+            PipelineManager::source_pad_is_available(&make("tee"), "src_1"),
+            "a request pad that was refused is released again, and nothing retries it"
         );
+        assert!(
+            !PipelineManager::source_pad_is_available(&make("decodebin"), "src_0"),
+            "decodebin's src pads appear once it has typefound"
+        );
+        assert!(
+            !PipelineManager::source_pad_is_available(&make("videoconvert"), "sink"),
+            "a sink pad is not a source pad"
+        );
+    }
+
+    /// A link asking for `src` is tried against every `src_N` a demuxer adds.
+    #[test]
+    fn one_linked_pad_forms_the_link() {
+        let links = UnformedLinks::default();
+        let declared = link("demux:src", "vconv:sink");
+
+        links.record(&declared, "src_0", false);
+        assert_eq!(links.unformed().len(), 1);
+
+        links.record(&declared, "src_1", true);
+        assert!(
+            links.unformed().is_empty(),
+            "the video stream linked, so the audio stream's refusal is not a failure"
+        );
+    }
+
+    /// A publisher that reconnects re-adds the same pad; its latest attempt counts.
+    #[test]
+    fn a_pad_refused_after_it_once_linked_is_unformed() {
+        let links = UnformedLinks::default();
+        let declared = link("whip:src_0", "vconv:sink");
+
+        links.record(&declared, "src_0", true);
+        links.record(&declared, "src_0", false);
+        assert_eq!(links.unformed().len(), 1);
     }
 
     #[test]
@@ -1250,6 +1317,233 @@ mod tests {
         assert_eq!(manager.get_state(), strom_types::PipelineState::Playing);
 
         manager.stop().expect("pipeline should stop");
+    }
+
+    /// Play `flow` until some block is reported failed or the report window
+    /// closes, and return what the health scan last said. `inspect` sees the
+    /// running pipeline before it stops.
+    fn health_after_playing(
+        flow: &Flow,
+        inspect: impl FnOnce(&PipelineManager),
+    ) -> Vec<BlockHealth> {
+        gst::init().unwrap();
+        let mut manager = PipelineManager::new(
+            flow,
+            EventBroadcaster::default(),
+            &BlockRegistry::new("test_blocks.json"),
+            vec!["stun:stun.l.google.com:19302".to_string()],
+            "all".to_string(),
+            None,
+            std::path::PathBuf::from("./media"),
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+        .expect("pipeline should build");
+
+        manager.start().expect("pipeline should start");
+        assert!(
+            wait_for(
+                || manager.get_state() == strom_types::PipelineState::Playing,
+                Duration::from_secs(10)
+            ),
+            "pipeline never reached Playing"
+        );
+        wait_for(
+            || {
+                manager
+                    .get_block_health()
+                    .iter()
+                    .any(|h| h.status.is_failed())
+            },
+            HEALTH_POLL_INTERVAL * (CONFIRMATIONS_BEFORE_FAILED + 4),
+        );
+        let health = manager.get_block_health();
+        inspect(&manager);
+        manager.stop().expect("pipeline should stop");
+        health
+    }
+
+    fn failed_blocks(health: &[BlockHealth]) -> Vec<&str> {
+        health
+            .iter()
+            .filter(|h| h.status.is_failed())
+            .map(|h| h.block_id.as_str())
+            .collect()
+    }
+
+    /// `vconv:src` feeds a fakesink and an audioconvert, so construction puts an
+    /// auto-tee on it and the refused link starts from one of the tee's pads.
+    fn fan_out_flow(refused_to: &str) -> Flow {
+        let mut flow = Flow::new("fan-out unformed link health test");
+        flow.elements = vec![
+            element(
+                "src",
+                "videotestsrc",
+                &[("is-live", PropertyValue::Bool(true))],
+            ),
+            element("vconv", "videoconvert", &[]),
+            element("vsink", "fakesink", &[("sync", PropertyValue::Bool(false))]),
+            element("aconv", "audioconvert", &[]),
+            element(
+                "asink",
+                "fakesink",
+                &[
+                    ("sync", PropertyValue::Bool(false)),
+                    ("async", PropertyValue::Bool(false)),
+                ],
+            ),
+        ];
+        flow.links = vec![
+            link("src", "vconv"),
+            link("vconv:src", "vsink:sink"),
+            link("vconv:src", refused_to),
+            link("aconv", "asink"),
+        ];
+        flow
+    }
+
+    /// The failure must land on a block in the flow and name the link the flow
+    /// declares, not the auto-tee construction inserted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_branch_of_a_fan_out_is_reported_against_its_source() {
+        let health = health_after_playing(&fan_out_flow("aconv:sink"), |_| {});
+        assert_eq!(failed_blocks(&health), ["vconv"], "{:?}", health);
+        let detail = failure_detail(&health, "vconv").unwrap();
+        assert!(
+            detail.contains("vconv:src -> aconv:sink"),
+            "the detail must name the declared link: {}",
+            detail
+        );
+    }
+
+    /// Linking to an element with no pad named requests a pad on the tee and
+    /// releases it again when the link is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_fan_out_branch_naming_no_sink_pad_is_reported() {
+        let health = health_after_playing(&fan_out_flow("aconv"), |_| {});
+        assert_eq!(failed_blocks(&health), ["vconv"], "{:?}", health);
+    }
+
+    /// `decodebin` passes raw video through on a pad it adds once it has
+    /// typefound, after construction has finished.
+    fn late_pad_flow(to: &str) -> Flow {
+        let mut flow = Flow::new("late pad health test");
+        flow.elements = vec![
+            element(
+                "src",
+                "videotestsrc",
+                &[("is-live", PropertyValue::Bool(true))],
+            ),
+            element("dec", "decodebin", &[]),
+            element(
+                "vsink",
+                "fakesink",
+                &[
+                    ("sync", PropertyValue::Bool(false)),
+                    ("async", PropertyValue::Bool(false)),
+                ],
+            ),
+            element("aconv", "audioconvert", &[]),
+            element(
+                "asink",
+                "fakesink",
+                &[
+                    ("sync", PropertyValue::Bool(false)),
+                    ("async", PropertyValue::Bool(false)),
+                ],
+            ),
+        ];
+        flow.links = vec![
+            link("src", "dec"),
+            link("dec:src", to),
+            link("aconv", "asink"),
+        ];
+        flow
+    }
+
+    /// The `pad-added` handler gives a pad it cannot link an auto-tee, so the
+    /// pad has a peer and only the handler's record shows the refusal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_pad_that_cannot_link_is_reported() {
+        let health = health_after_playing(&late_pad_flow("aconv:sink"), |_| {});
+        assert_eq!(failed_blocks(&health), ["dec"], "{:?}", health);
+        let detail = failure_detail(&health, "dec").unwrap();
+        assert!(
+            detail.contains("dec:src -> aconv:sink"),
+            "the detail must name the declared link: {}",
+            detail
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_pad_that_links_is_not_reported() {
+        let health = health_after_playing(&late_pad_flow("vsink:sink"), |manager| {
+            let vsink = manager.elements.get("vsink").unwrap();
+            assert!(
+                vsink.static_pad("sink").unwrap().is_linked(),
+                "decodebin's late pad never linked, so this test proves nothing"
+            );
+        });
+        assert!(
+            failed_blocks(&health).is_empty(),
+            "a late pad that linked must read as healthy: {:?}",
+            health
+        );
+    }
+
+    /// `decodebin` unpacks a stream with audio and video into two late pads.
+    /// The flow's one link from `dec:src` is tried against both: the audio pad
+    /// is refused by `videoconvert`, the video pad links.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_pad_refused_beside_one_that_linked_is_not_reported() {
+        let mut flow = Flow::new("demuxed late pads health test");
+        flow.elements = vec![
+            element(
+                "vsrc",
+                "videotestsrc",
+                &[("is-live", PropertyValue::Bool(true))],
+            ),
+            element(
+                "asrc",
+                "audiotestsrc",
+                &[("is-live", PropertyValue::Bool(true))],
+            ),
+            element("mux", "matroskamux", &[]),
+            element("dec", "decodebin", &[]),
+            element("vconv", "videoconvert", &[]),
+            element("vsink", "fakesink", &[("sync", PropertyValue::Bool(false))]),
+        ];
+        flow.links = vec![
+            link("vsrc:src", "mux:video_0"),
+            link("asrc:src", "mux:audio_0"),
+            link("mux", "dec"),
+            link("dec:src", "vconv:sink"),
+            link("vconv", "vsink"),
+        ];
+
+        let health = health_after_playing(&flow, |manager| {
+            let vsink = manager.elements.get("vsink").unwrap();
+            let vconv_linked = manager
+                .elements
+                .get("vconv")
+                .unwrap()
+                .static_pad("sink")
+                .unwrap()
+                .is_linked();
+            assert!(
+                vconv_linked && vsink.static_pad("sink").unwrap().is_linked(),
+                "the video pad never linked, so this test proves nothing"
+            );
+            let dec_pads = manager.elements.get("dec").unwrap().src_pads().len();
+            assert_eq!(
+                dec_pads, 2,
+                "decodebin must add an audio and a video pad for the refusal to happen"
+            );
+        });
+        assert!(
+            failed_blocks(&health).is_empty(),
+            "the audio pad's refusal must not fail a link the video pad formed: {:?}",
+            health
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
