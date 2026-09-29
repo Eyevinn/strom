@@ -474,6 +474,7 @@ impl BlockBuilder for LiveAudioRouterBuilder {
                 .property("silent", true)
                 .build()
                 .map_err(|e| BlockBuildError::ElementCreation(format!("identity: {e}")))?;
+            watch_input_channels(&identity, in_idx, channels);
             elements.push((identity_id.clone(), identity));
 
             let deint_id = format!("{instance_id}:deinterleave_in_{in_idx}");
@@ -686,6 +687,64 @@ fn output_fader_db(properties: &HashMap<String, PropertyValue>) -> f64 {
         })
         .unwrap_or(routing::DEFAULT_OUTPUT_FADER_DB)
         .clamp(routing::MIN_OUTPUT_FADER_DB, routing::MAX_OUTPUT_FADER_DB)
+}
+
+/// Warn when an input's negotiated channel count differs from its declared
+/// `input_<i>_channels`.
+///
+/// The router does not follow the stream: the declared count is what the saved
+/// routing matrix is indexed by, so resizing underneath it would silently
+/// change what a saved flow means. The operator is told which property to set
+/// instead. The warning goes on the bus from the input's `identity`, which the
+/// pipeline's bus watch forwards to clients as a pipeline warning.
+///
+/// An event probe that acts on CAPS only, so it fires once per negotiation and
+/// never per buffer. It captures no GStreamer object.
+fn watch_input_channels(identity: &gst::Element, in_idx: usize, declared: usize) {
+    let Some(sink) = identity.static_pad("sink") else {
+        return;
+    };
+    sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |pad, info| {
+        let Some(gst::PadProbeData::Event(event)) = &info.data else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let gst::EventView::Caps(caps) = event.view() else {
+            return gst::PadProbeReturn::Ok;
+        };
+        let negotiated = caps
+            .caps()
+            .structure(0)
+            .and_then(|s| s.get::<i32>("channels").ok())
+            .map(|n| n.max(0) as usize);
+        let Some(message) = negotiated.and_then(|n| channel_mismatch(in_idx, declared, n)) else {
+            return gst::PadProbeReturn::Ok;
+        };
+        if let Some(element) = pad.parent_element() {
+            gst::element_warning!(element, gst::StreamError::Format, ("{}", message));
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// The operator-facing message for an input whose stream carries `negotiated`
+/// channels against a declaration of `declared`, or `None` when they agree.
+fn channel_mismatch(in_idx: usize, declared: usize, negotiated: usize) -> Option<String> {
+    if negotiated == declared {
+        return None;
+    }
+    let consequence = if negotiated < declared {
+        format!(
+            "{} of its declared channels carry nothing",
+            declared - negotiated
+        )
+    } else {
+        format!("{} of its channels are not routed", negotiated - declared)
+    };
+    Some(format!(
+        "Live Audio Router input {in_idx} carries {negotiated} channel(s) but \
+         input_{in_idx}_channels is {declared}: {consequence}. Set input_{in_idx}_channels \
+         to {negotiated} and restart the flow."
+    ))
 }
 
 /// capssetter fixing the channel-mask the way `builtin.audiorouter` does:

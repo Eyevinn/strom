@@ -1224,14 +1224,14 @@ impl PropertyInspector {
                         }
                     }
 
-                    // Show RTP statistics for any block that reports them, plus a
+                    // Show statistics for any block that reports them, plus a
                     // hint for block types that can report them but have none yet
                     let block_stats = rtp_stats.and_then(|s| {
                         s.blocks.iter().find(|bs| bs.block_instance_id == block.id)
                     });
                     if block_stats.is_some() || is_rtp_stats_block_def(&definition.id) {
                         ui.separator();
-                        ui.heading("📊 RTP Statistics");
+                        ui.heading("📊 Statistics");
                         ui.add_space(4.0);
 
                         if let Some(block_stats) = block_stats {
@@ -1276,7 +1276,7 @@ impl PropertyInspector {
                                         for stat in &block_stats.stats {
                                             let label = ui.label(&stat.metadata.display_name);
                                             label.on_hover_text(&stat.metadata.description);
-                                            let formatted = stat.value.format();
+                                            let formatted = stat.format_value();
                                             ui.monospace(&formatted);
                                             ui.end_row();
                                         }
@@ -1303,7 +1303,7 @@ impl PropertyInspector {
                                                             .unwrap_or(&stat.metadata.display_name);
                                                         let label = ui.label(display_name);
                                                         label.on_hover_text(&stat.metadata.description);
-                                                        let formatted = stat.value.format();
+                                                        let formatted = stat.format_value();
                                                         ui.monospace(&formatted);
                                                         ui.end_row();
                                                     }
@@ -1312,16 +1312,16 @@ impl PropertyInspector {
                                 }
                             }
                         } else if rtp_stats.is_some() {
-                            // Flow is running but this block has no jitterbuffer yet
+                            // Flow is running but this block has nothing to report yet
                             // (e.g. no stream received so far)
-                            ui.small("RTP statistics appear once a stream is received.");
+                            ui.small("Statistics appear once the block receives a stream.");
                         } else {
                             ui.colored_label(
                                 Color32::from_rgb(200, 200, 100),
                                 "⚠ Statistics are only available when the flow is running",
                             );
                             ui.add_space(4.0);
-                            ui.small("Start the flow to see RTP jitterbuffer statistics.");
+                            ui.small("Start the flow to see this block's statistics.");
                         }
                     }
 
