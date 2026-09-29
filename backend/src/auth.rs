@@ -176,14 +176,19 @@ pub async fn auth_middleware(
     // Check auth_token query parameter (for WebSocket connections)
     if let Some(query) = request.uri().query() {
         for param in query.split('&') {
-            if let Some(token) = param.strip_prefix("auth_token=") {
-                // Check API key
-                if config.verify_api_key(token) {
-                    return Ok(next.run(request).await);
-                }
-                // Check native GUI token
-                if config.verify_native_gui_token(token) {
-                    return Ok(next.run(request).await);
+            if let Some(raw) = param.strip_prefix("auth_token=") {
+                // A client that builds its URL properly percent-encodes the
+                // token, and a base64 API key has `+`, `/` and `=` in it.
+                // Try the decoded form as well as the raw one, so a key
+                // pasted into the URL unencoded keeps working. `+` is left
+                // as it is: in a key it is a plus, never a space.
+                let decoded = urlencoding::decode(raw).ok();
+                let candidates =
+                    std::iter::once(raw).chain(decoded.as_deref().filter(|d| *d != raw));
+                for token in candidates {
+                    if config.verify_api_key(token) || config.verify_native_gui_token(token) {
+                        return Ok(next.run(request).await);
+                    }
                 }
             }
         }
@@ -705,6 +710,31 @@ mod middleware_tests {
         ] {
             assert_eq!(status(&app, get_req(&uri)).await, StatusCode::OK, "{uri}");
         }
+    }
+
+    /// `openssl rand -base64 32`, the documented way to make an API key,
+    /// yields `+`, `/` and `=`. A client that builds the query properly
+    /// percent-encodes them, and the key must still match. A client that
+    /// pastes the key in raw must keep working too.
+    #[tokio::test]
+    async fn percent_encoded_query_token_is_accepted() {
+        let key = "ab+cd/ef==";
+        let app = router(AuthConfig {
+            api_key: Some(key.to_string()),
+            ..enabled_config()
+        });
+        for uri in [
+            "/protected?auth_token=ab%2Bcd%2Fef%3D%3D",
+            "/protected?auth_token=ab%2bcd%2fef%3d%3d",
+            "/protected?auth_token=ab+cd/ef==",
+        ] {
+            assert_eq!(status(&app, get_req(uri)).await, StatusCode::OK, "{uri}");
+        }
+        // Decoding must not turn a wrong token into a right one.
+        assert_eq!(
+            status(&app, get_req("/protected?auth_token=ab%2Bcd%2Fef%3D")).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
