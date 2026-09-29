@@ -4,18 +4,24 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use strom_types::PropertyValue;
 
-use super::{DEFAULT_CHANNELS, MAX_AUX_BUSES, MAX_CHANNELS, MAX_GROUPS};
+use super::{DEFAULT_CHANNELS, MAX_AUX_BUSES, MAX_CHANNELS, MAX_GROUPS, MIN_KNEE_LINEAR};
+
+/// Read a count property. A negative integer counts as zero so the caller's
+/// clamp lands on its minimum; `as usize` would wrap it to `usize::MAX`.
+fn parse_count(value: &PropertyValue) -> Option<usize> {
+    match value {
+        PropertyValue::Int(i) => Some(usize::try_from(*i).unwrap_or(0)),
+        PropertyValue::UInt(u) => Some(usize::try_from(*u).unwrap_or(usize::MAX)),
+        PropertyValue::String(s) => s.parse::<usize>().ok(),
+        _ => None,
+    }
+}
 
 /// Parse number of channels from properties.
 pub(super) fn parse_num_channels(properties: &HashMap<String, PropertyValue>) -> usize {
     properties
         .get("num_channels")
-        .and_then(|v| match v {
-            PropertyValue::Int(i) => Some(*i as usize),
-            PropertyValue::UInt(u) => Some(*u as usize),
-            PropertyValue::String(s) => s.parse::<usize>().ok(),
-            _ => None,
-        })
+        .and_then(parse_count)
         .unwrap_or(DEFAULT_CHANNELS)
         .clamp(1, MAX_CHANNELS)
 }
@@ -24,12 +30,7 @@ pub(super) fn parse_num_channels(properties: &HashMap<String, PropertyValue>) ->
 pub(super) fn parse_num_aux_buses(properties: &HashMap<String, PropertyValue>) -> usize {
     properties
         .get("num_aux_buses")
-        .and_then(|v| match v {
-            PropertyValue::Int(i) => Some(*i as usize),
-            PropertyValue::UInt(u) => Some(*u as usize),
-            PropertyValue::String(s) => s.parse::<usize>().ok(),
-            _ => None,
-        })
+        .and_then(parse_count)
         .unwrap_or(0)
         .clamp(0, MAX_AUX_BUSES)
 }
@@ -38,12 +39,7 @@ pub(super) fn parse_num_aux_buses(properties: &HashMap<String, PropertyValue>) -
 pub(super) fn parse_num_groups(properties: &HashMap<String, PropertyValue>) -> usize {
     properties
         .get("num_groups")
-        .and_then(|v| match v {
-            PropertyValue::Int(i) => Some(*i as usize),
-            PropertyValue::UInt(u) => Some(*u as usize),
-            PropertyValue::String(s) => s.parse::<usize>().ok(),
-            _ => None,
-        })
+        .and_then(parse_count)
         .unwrap_or(0)
         .clamp(0, MAX_GROUPS)
 }
@@ -172,7 +168,15 @@ pub fn translate_property_for_element(
             "at" => ("attack".to_string(), value.clone()),
             "rt" => ("release".to_string(), value.clone()),
             "mk" => ("makeup-gain".to_string(), value.clone()),
-            "kn" => ("knee".to_string(), value.clone()),
+            "kn" => {
+                // Same clamp as the build path, so a live write lands on the
+                // value the next restart would build.
+                let knee = match value {
+                    PropertyValue::Float(v) => v.clamp(MIN_KNEE_LINEAR, 1.0),
+                    _ => return vec![],
+                };
+                ("knee".to_string(), PropertyValue::Float(knee))
+            }
             "enabled" => return vec![],
             _ => return vec![],
         };
@@ -217,4 +221,60 @@ pub fn translate_property_for_element(
     }
 
     vec![]
+}
+
+#[cfg(test)]
+mod clamping_tests {
+    use super::*;
+
+    fn props(key: &str, value: PropertyValue) -> HashMap<String, PropertyValue> {
+        HashMap::from([(key.to_string(), value)])
+    }
+
+    #[test]
+    fn negative_counts_clamp_to_the_minimum() {
+        // `-1 as usize` wraps to usize::MAX, which the clamp then turned into
+        // the largest mixer the block can build.
+        assert_eq!(
+            parse_num_channels(&props("num_channels", PropertyValue::Int(-1))),
+            1
+        );
+        assert_eq!(
+            parse_num_aux_buses(&props("num_aux_buses", PropertyValue::Int(-1))),
+            0
+        );
+        assert_eq!(
+            parse_num_groups(&props("num_groups", PropertyValue::Int(-5))),
+            0
+        );
+        assert_eq!(
+            parse_num_channels(&props("num_channels", PropertyValue::Int(4))),
+            4
+        );
+    }
+
+    fn live_knee(linear: f64) -> f64 {
+        let _ = gst::init();
+        let _ = gst_plugins_lsp::plugin_register_static();
+        let comp = gst::ElementFactory::make("lsp-rs-compressor")
+            .build()
+            .expect("lsp-rs-compressor is statically registered");
+        let out = translate_property_for_element(&comp, "kn", &PropertyValue::Float(linear));
+        match out.as_slice() {
+            [(name, PropertyValue::Float(v))] if name == "knee" => *v,
+            other => panic!("kn should translate to one Float knee, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn live_knee_is_clamped_like_the_build_path() {
+        // The builder clamps the knee to MIN_KNEE_LINEAR..=1.0. A live write
+        // must land on the same value: otherwise -30 dB is applied live but
+        // the next restart builds -24 dB, and anything above 0 dB is rejected
+        // by the element's param spec (0.0..=1.0) instead of being clamped.
+        assert_eq!(live_knee(db_to_linear(-30.0)), MIN_KNEE_LINEAR);
+        assert_eq!(live_knee(db_to_linear(6.0)), 1.0);
+        let mid = db_to_linear(-6.0);
+        assert_eq!(live_knee(mid), mid);
+    }
 }
