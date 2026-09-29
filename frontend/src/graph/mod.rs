@@ -355,3 +355,154 @@ pub(super) fn allocate_next_pad_name(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use strom_types::element::{MediaType, PadPresence};
+
+    fn link(from: &str, to: &str) -> Link {
+        Link {
+            from: from.to_string(),
+            to: to.to_string(),
+        }
+    }
+
+    fn pad(name: &str, presence: PadPresence) -> PadInfo {
+        PadInfo {
+            name: name.to_string(),
+            caps: String::new(),
+            presence,
+            media_type: MediaType::Generic,
+            properties: Vec::new(),
+        }
+    }
+
+    fn pair(a: &str, b: &str) -> Option<(String, String)> {
+        Some((a.to_string(), b.to_string()))
+    }
+
+    #[test]
+    fn parse_pad_ref_splits_at_the_first_colon() {
+        assert_eq!(parse_pad_ref("mixer:sink_0"), pair("mixer", "sink_0"));
+        // Everything after the first colon is the pad name.
+        assert_eq!(parse_pad_ref("a:b:c"), pair("a", "b:c"));
+        assert_eq!(parse_pad_ref("a:"), pair("a", ""));
+        assert_eq!(parse_pad_ref(":sink"), pair("", "sink"));
+    }
+
+    #[test]
+    fn parse_pad_ref_without_a_colon_is_none() {
+        assert_eq!(parse_pad_ref("mixer"), None);
+        assert_eq!(parse_pad_ref(""), None);
+    }
+
+    #[test]
+    fn is_request_pad_from_presence_or_template_name() {
+        assert!(is_request_pad(&pad("audio", PadPresence::Request)));
+        for name in ["sink_%u", "src_%d", "sink_%s"] {
+            assert!(is_request_pad(&pad(name, PadPresence::Always)), "{name}");
+        }
+        assert!(!is_request_pad(&pad("sink", PadPresence::Always)));
+        assert!(!is_request_pad(&pad("src", PadPresence::Sometimes)));
+    }
+
+    #[test]
+    fn connected_names_are_sorted_deduplicated_and_scoped() {
+        let links = [
+            link("src1:src", "mix:sink_2"),
+            link("src2:src", "mix:sink_0"),
+            // Same pad twice: listed once.
+            link("src3:src", "mix:sink_2"),
+            // Other element, same pad name.
+            link("src4:src", "other:sink_1"),
+            // The element as a source is not a sink connection.
+            link("mix:sink_5", "out:sink"),
+            // Static pad that does not start with the template prefix.
+            link("src5:src", "mix:sink"),
+            // Element-level link with no pad.
+            link("src6", "mix"),
+        ];
+        assert_eq!(
+            get_connected_request_pad_names("mix", "sink_%u", &links, true),
+            vec!["sink_0".to_string(), "sink_2".to_string()]
+        );
+        assert_eq!(
+            get_connected_request_pad_names("mix", "sink_%u", &links, false),
+            vec!["sink_5".to_string()]
+        );
+        assert!(get_connected_request_pad_names("mix", "sink_%u", &[], true).is_empty());
+    }
+
+    #[test]
+    fn connected_names_keep_templates_apart_by_prefix() {
+        let links = [
+            link("v:src", "mux:video_0"),
+            link("a:src", "mux:audio_0"),
+            link("a2:src", "mux:audio_1"),
+        ];
+        assert_eq!(
+            get_connected_request_pad_names("mux", "video_%u", &links, true),
+            vec!["video_0"]
+        );
+        assert_eq!(
+            get_connected_request_pad_names("mux", "audio_%u", &links, true),
+            vec!["audio_0", "audio_1"]
+        );
+    }
+
+    #[test]
+    fn allocate_starts_at_zero() {
+        assert_eq!(
+            allocate_next_pad_name("mix", "sink_%u", &[], true),
+            "sink_0"
+        );
+        assert_eq!(allocate_next_pad_name("tee", "src_%d", &[], false), "src_0");
+    }
+
+    #[test]
+    fn allocate_fills_the_first_gap() {
+        let links = [
+            link("a:src", "mix:sink_0"),
+            link("b:src", "mix:sink_2"),
+            link("c:src", "mix:sink_3"),
+        ];
+        assert_eq!(
+            allocate_next_pad_name("mix", "sink_%u", &links, true),
+            "sink_1"
+        );
+    }
+
+    #[test]
+    fn allocate_goes_past_the_last_contiguous_index() {
+        let links: Vec<Link> = (0..12)
+            .map(|i| link(&format!("s{i}:src"), &format!("mix:sink_{i}")))
+            .collect();
+        assert_eq!(
+            allocate_next_pad_name("mix", "sink_%u", &links, true),
+            "sink_12"
+        );
+    }
+
+    #[test]
+    fn allocate_ignores_other_elements_and_the_other_direction() {
+        let links = [
+            link("a:src", "other:sink_0"),
+            link("mix:sink_0", "b:sink"),
+            link("tee:src_0", "b:sink"),
+            link("tee:src_1", "c:sink"),
+        ];
+        assert_eq!(
+            allocate_next_pad_name("mix", "sink_%u", &links, true),
+            "sink_0"
+        );
+        assert_eq!(
+            allocate_next_pad_name("tee", "src_%u", &links, false),
+            "src_2"
+        );
+        assert_eq!(
+            allocate_next_pad_name("tee", "src_%u", &links, true),
+            "src_0"
+        );
+    }
+}
