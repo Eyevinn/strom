@@ -18,7 +18,7 @@ use gstreamer_video as gst_video;
 use gstreamer_video::prelude::*;
 use gstreamer_video::{VideoFormat, VideoInfo};
 
-use super::imp::{PATH_FALLBACK, PATH_VIMAGE};
+use super::imp::{PATH_FALLBACK, PATH_PASSTHROUGH, PATH_VIMAGE};
 use super::plan::Plan;
 
 fn init() {
@@ -572,24 +572,175 @@ fn element_exposes_n_threads_for_configure_video_convert() {
     );
 }
 
-/// Negotiation must prefer leaving the format alone. If this regresses, an
-/// element asked only to pass frames through starts converting them.
+/// Same caps on both sides must go straight through, whatever the input
+/// carries. If this regresses, an element asked only to pass frames through
+/// starts converting them, and `conversion-path` names an engine that is doing
+/// nothing.
 #[test]
-fn identical_caps_negotiate_without_conversion() {
+fn identical_caps_pass_straight_through() {
     init();
 
-    let info = VideoInfo::builder(VideoFormat::Nv12, 128, 64)
+    let progressive = |format, width, height| {
+        VideoInfo::builder(format, width, height)
+            .fps(gst::Fraction::new(30, 1))
+            .build()
+            .expect("info")
+    };
+    let cases = [
+        (progressive(VideoFormat::Nv12, 128, 64), None),
+        (progressive(VideoFormat::I420, 1920, 1080), None),
+        // RGB caps naming a siting: the label must not force a conversion.
+        (
+            progressive(VideoFormat::Rgba, 1920, 1080),
+            Some(("chroma-site", "mpeg2")),
+        ),
+        (
+            progressive(VideoFormat::Uyvy, 1920, 1080),
+            Some(("interlace-mode", "interleaved")),
+        ),
+    ];
+    for (info, extra) in cases {
+        let mut caps = info.to_caps().expect("caps");
+        if let Some((field, value)) = extra {
+            caps.make_mut()
+                .structure_mut(0)
+                .expect("structure")
+                .set(field, value);
+        }
+        let ours = convert_one(
+            super::ELEMENT_NAME,
+            &caps,
+            &gst::Caps::builder("video/x-raw").build(),
+            &source_buffer(&info),
+        );
+        assert_eq!(ours.info.format(), info.format(), "{caps}");
+        assert_eq!(
+            ours.path.as_deref(),
+            Some(PATH_PASSTHROUGH),
+            "{caps} was converted instead of passed through"
+        );
+    }
+}
+
+/// Interlaced frames need field-aware chroma handling that vImage's
+/// frame-at-a-time calls lack, so every pair, including those vImage has a
+/// path for when progressive, must run on the fallback and match
+/// `videoconvert` exactly.
+#[test]
+fn interlaced_input_takes_the_fallback() {
+    init();
+
+    for (src, dst) in [
+        (VideoFormat::I420, VideoFormat::Nv12),
+        (VideoFormat::Nv12, VideoFormat::Rgba),
+        (VideoFormat::Uyvy, VideoFormat::Bgra),
+        (VideoFormat::Rgba, VideoFormat::I420),
+    ] {
+        let progressive = VideoInfo::builder(src, 1920, 1080)
+            .fps(gst::Fraction::new(30, 1))
+            .build()
+            .expect("info");
+        let mut in_caps = progressive.to_caps().expect("caps");
+        in_caps
+            .make_mut()
+            .structure_mut(0)
+            .expect("structure")
+            .set("interlace-mode", "interleaved");
+        let input = source_buffer(&progressive);
+        let out_caps = gst::Caps::builder("video/x-raw")
+            .field("format", dst.to_str())
+            .build();
+
+        let ours = convert_one(super::ELEMENT_NAME, &in_caps, &out_caps, &input);
+        let label = format!("interlaced {src:?} -> {dst:?}");
+        assert_eq!(ours.path.as_deref(), Some(PATH_FALLBACK), "{label}");
+        assert!(
+            ours.info.is_interlaced(),
+            "{label}: output lost interlacing"
+        );
+
+        let exact_caps = ours.info.to_caps().expect("output caps");
+        let theirs = convert_one("videoconvert", &in_caps, &exact_caps, &input);
+        assert_frames_match(&label, &ours.info, &ours.buffer, &theirs.buffer, 0);
+    }
+}
+
+/// Caps features must link wherever `videoconvert` links them. Field-per-buffer
+/// interlacing (`format:Interlaced`) is system memory and converts; GL memory
+/// cannot be mapped here and may only pass through.
+#[test]
+fn caps_features_link_like_videoconvert() {
+    init();
+
+    let with_features = |caps: gst::Caps, features: &[&str]| {
+        let mut caps = caps;
+        caps.make_mut()
+            .set_features(0, Some(gst::CapsFeatures::new(features.iter().copied())));
+        caps
+    };
+
+    let fields = VideoInfo::builder(VideoFormat::Uyvy, 1920, 1080)
+        .fps(gst::Fraction::new(30, 1))
+        .interlace_mode(gst_video::VideoInterlaceMode::Alternate)
+        .build()
+        .expect("alternate info");
+    let in_caps = with_features(
+        fields.to_caps().expect("caps"),
+        &[gst_video::CAPS_FEATURE_FORMAT_INTERLACED],
+    );
+    let out_caps = with_features(
+        gst::Caps::builder("video/x-raw")
+            .field("format", "NV12")
+            .build(),
+        &[gst_video::CAPS_FEATURE_FORMAT_INTERLACED],
+    );
+    let input = gst::Buffer::with_size(fields.size()).expect("field buffer");
+    let ours = convert_one(super::ELEMENT_NAME, &in_caps, &out_caps, &input);
+    assert_eq!(ours.info.format(), VideoFormat::Nv12, "field-per-buffer");
+    assert_eq!(
+        ours.path.as_deref(),
+        Some(PATH_FALLBACK),
+        "field-per-buffer"
+    );
+
+    let gl = VideoInfo::builder(VideoFormat::Rgba, 1920, 1080)
         .fps(gst::Fraction::new(30, 1))
         .build()
-        .expect("info");
-    let caps = info.to_caps().expect("caps");
+        .expect("gl info");
+    let gl_caps = with_features(gl.to_caps().expect("caps"), &["memory:GLMemory"]);
+    let input = gst::Buffer::with_size(gl.size()).expect("gl buffer");
+    let ours = convert_one(super::ELEMENT_NAME, &gl_caps, &gl_caps, &input);
+    assert_eq!(ours.path.as_deref(), Some(PATH_PASSTHROUGH), "GL memory");
 
-    let ours = convert_one(
-        super::ELEMENT_NAME,
-        &caps,
-        &gst::Caps::builder("video/x-raw").build(),
-        &source_buffer(&info),
+    // What the element offers downstream for each input: any format other
+    // than the input's means it is willing to convert.
+    let offers_conversion = |caps: &gst::Caps| {
+        let input_format = caps
+            .structure(0)
+            .and_then(|s| s.get::<&str>("format").ok())
+            .expect("input format");
+        let element = gst::ElementFactory::make(super::ELEMENT_NAME)
+            .build()
+            .expect("element");
+        // A capsfilter answers a caps query with its caps even when stopped;
+        // an appsrc does not.
+        let upstream = gst::ElementFactory::make("capsfilter")
+            .property("caps", caps)
+            .build()
+            .expect("capsfilter");
+        let bin = gst::Pipeline::new();
+        bin.add_many([&upstream, &element]).expect("add");
+        upstream.link(&element).expect("link");
+        element
+            .static_pad("src")
+            .expect("src pad")
+            .query_caps(None)
+            .iter()
+            .any(|s| s.get::<&str>("format").ok() != Some(input_format))
+    };
+    assert!(offers_conversion(&in_caps), "field-per-buffer must convert");
+    assert!(
+        !offers_conversion(&gl_caps),
+        "GL memory cannot be mapped here and must only pass through"
     );
-    assert_eq!(ours.info.format(), VideoFormat::Nv12);
-    assert_eq!((ours.info.width(), ours.info.height()), (128, 64));
 }
