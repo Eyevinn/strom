@@ -448,6 +448,7 @@ fn flat_source(info: &VideoInfo, colour: [u8; 3]) -> gst::Buffer {
 /// At HD sizes, caps without a `chroma-site` field mean left-cosited chroma,
 /// which vImage does not write. The element must label its output with the
 /// centred siting it produces, and then match `videoconvert` given that label.
+/// RGB has no chroma, so a `chroma-site` on the input caps changes nothing.
 #[test]
 fn hd_output_is_labelled_with_the_siting_vimage_writes() {
     init();
@@ -456,13 +457,17 @@ fn hd_output_is_labelled_with_the_siting_vimage_writes() {
         .fps(gst::Fraction::new(30, 1))
         .build()
         .expect("input info");
-    let in_caps = in_info.to_caps().expect("input caps");
+    let unlabelled = in_info.to_caps().expect("input caps");
+    let mut labelled = unlabelled.clone();
+    labelled.make_mut().set("chroma-site", "mpeg2");
     let input = packed_rgb_buffer(&in_info);
 
-    for dst in [VideoFormat::Nv12, VideoFormat::I420, VideoFormat::Uyvy] {
+    for (in_caps, dst) in [&unlabelled, &labelled].into_iter().flat_map(|caps| {
+        [VideoFormat::Nv12, VideoFormat::I420, VideoFormat::Uyvy].map(|dst| (caps, dst))
+    }) {
         let ours = convert_one(
             super::ELEMENT_NAME,
-            &in_caps,
+            in_caps,
             &gst::Caps::builder("video/x-raw")
                 .field("format", dst.to_str())
                 .build(),
@@ -471,12 +476,12 @@ fn hd_output_is_labelled_with_the_siting_vimage_writes() {
         assert_eq!(
             ours.info.chroma_site(),
             gst_video::VideoChromaSite::JPEG,
-            "RGBA -> {dst:?} at 1080p was not labelled with centred chroma"
+            "RGBA -> {dst:?} at 1080p from {in_caps} was not labelled with centred chroma"
         );
-        assert_eq!(ours.path.as_deref(), Some(PATH_VIMAGE));
+        assert_eq!(ours.path.as_deref(), Some(PATH_VIMAGE), "from {in_caps}");
 
-        let labelled = ours.info.to_caps().expect("output caps");
-        let reference = convert_one("videoconvert", &in_caps, &labelled, &input);
+        let out_caps = ours.info.to_caps().expect("output caps");
+        let reference = convert_one("videoconvert", in_caps, &out_caps, &input);
         assert_frames_match(
             &format!("Rgba -> {dst:?} at 1080p"),
             &ours.info,
