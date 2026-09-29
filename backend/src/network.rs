@@ -178,36 +178,32 @@ mod tests {
 
     #[test]
     fn test_get_source_ipv4_for_destination() {
-        // Query for a public IP - should return a non-loopback address
-        if let Some(ip) = get_source_ipv4_for_destination("8.8.8.8") {
-            assert!(
-                !ip.is_loopback(),
-                "Should not return loopback for public destination"
-            );
-            assert!(!ip.is_unspecified(), "Should not return 0.0.0.0");
-        }
-        // It's OK if this returns None (e.g., no network connectivity)
+        // The loopback route exists on every host, with or without a network,
+        // so the kernel's answer is fixed. Both the bare-address and the
+        // address:port forms must work.
+        let loopback = Ipv4Addr::new(127, 0, 0, 1);
+        assert_eq!(get_source_ipv4_for_destination("127.0.0.1"), Some(loopback));
+        assert_eq!(
+            get_source_ipv4_for_destination("127.0.0.1:5004"),
+            Some(loopback)
+        );
     }
 
     #[test]
-    fn test_get_source_ipv4_for_multicast() {
-        // Query for a multicast address - should return the interface that would be used
-        if let Some(ip) = get_source_ipv4_for_destination("239.69.1.1") {
-            assert!(
-                !ip.is_loopback(),
-                "Should not return loopback for multicast"
-            );
-            assert!(!ip.is_unspecified(), "Should not return 0.0.0.0");
-            println!("Source IP for multicast 239.69.1.1: {}", ip);
-        }
-    }
+    fn test_get_interface_ipv4_skips_loopback_and_unknown() {
+        assert_eq!(get_interface_ipv4("no-such-interface-xyz"), None);
 
-    #[test]
-    fn test_get_default_ipv4() {
-        // Should return some IP on a system with network connectivity
-        if let Some(ip) = get_default_ipv4() {
-            assert!(!ip.is_loopback(), "Default IP should not be loopback");
-            assert!(!ip.is_unspecified(), "Default IP should not be 0.0.0.0");
-        }
+        let response = discover_interfaces();
+        let lo = response
+            .interfaces
+            .iter()
+            .find(|i| i.is_loopback)
+            .expect("a loopback interface");
+        assert_eq!(
+            get_interface_ipv4(&lo.name),
+            None,
+            "loopback address must not be returned for {}",
+            lo.name
+        );
     }
 }
