@@ -577,3 +577,242 @@ mod tests {
         assert!(!config_without_key.has_api_key_auth());
     }
 }
+
+/// Tests that drive `auth_middleware` through a router, the way requests
+/// actually reach it: session layer and config extension outside, the
+/// middleware in front of a protected route.
+#[cfg(test)]
+mod middleware_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::{get, post},
+        Router,
+    };
+    use tower::ServiceExt;
+    use tower_sessions::{MemoryStore, SessionManagerLayer};
+
+    const API_KEY: &str = "test-api-key";
+    const NATIVE_TOKEN: &str = "native-gui-00000000-0000-0000-0000-000000000000";
+    const ADMIN_USER: &str = "admin";
+    const ADMIN_PASSWORD: &str = "correct horse";
+
+    fn enabled_config() -> AuthConfig {
+        AuthConfig {
+            admin_user: Some(ADMIN_USER.to_string()),
+            // Minimum bcrypt cost keeps the login test fast; the verify path is
+            // the same one production uses.
+            admin_password_hash: Some(bcrypt::hash(ADMIN_PASSWORD, 4).unwrap()),
+            api_key: Some(API_KEY.to_string()),
+            native_gui_token: Some(NATIVE_TOKEN.to_string()),
+            enabled: true,
+        }
+    }
+
+    fn router(config: AuthConfig) -> Router {
+        let protected = Router::new()
+            .route("/protected", get(|| async { "ok" }))
+            .layer(middleware::from_fn(auth_middleware));
+        Router::new()
+            .route("/login", post(login_handler))
+            .merge(protected)
+            .layer(Extension(Arc::new(config)))
+            .layer(SessionManagerLayer::new(MemoryStore::default()).with_secure(false))
+    }
+
+    async fn status(app: &Router, request: Request<Body>) -> StatusCode {
+        app.clone().oneshot(request).await.unwrap().status()
+    }
+
+    fn get_req(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+
+    fn with_auth_header(value: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/protected")
+            .header(header::AUTHORIZATION, value)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn bearer(token: &str) -> Request<Body> {
+        with_auth_header(&format!("Bearer {token}"))
+    }
+
+    #[tokio::test]
+    async fn no_credentials_is_unauthorized() {
+        let app = router(enabled_config());
+        assert_eq!(
+            status(&app, get_req("/protected")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_disabled_lets_everything_through() {
+        let app = router(AuthConfig {
+            admin_user: None,
+            admin_password_hash: None,
+            api_key: None,
+            native_gui_token: None,
+            enabled: false,
+        });
+        assert_eq!(status(&app, get_req("/protected")).await, StatusCode::OK);
+        assert_eq!(status(&app, bearer("whatever")).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn valid_bearer_api_key_is_accepted() {
+        let app = router(enabled_config());
+        assert_eq!(status(&app, bearer(API_KEY)).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn valid_bearer_native_gui_token_is_accepted() {
+        let app = router(enabled_config());
+        assert_eq!(status(&app, bearer(NATIVE_TOKEN)).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn invalid_or_malformed_bearer_is_unauthorized() {
+        let app = router(enabled_config());
+        for value in [
+            "Bearer wrong-key".to_string(),
+            "Bearer ".to_string(),
+            // The right key under the wrong scheme, or with no scheme.
+            format!("Basic {API_KEY}"),
+            API_KEY.to_string(),
+        ] {
+            assert_eq!(
+                status(&app, with_auth_header(&value)).await,
+                StatusCode::UNAUTHORIZED,
+                "{value}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_query_token_is_accepted() {
+        let app = router(enabled_config());
+        for uri in [
+            format!("/protected?auth_token={API_KEY}"),
+            format!("/protected?auth_token={NATIVE_TOKEN}"),
+            // Not the first parameter.
+            format!("/protected?foo=bar&auth_token={API_KEY}"),
+        ] {
+            assert_eq!(status(&app, get_req(&uri)).await, StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_query_token_is_unauthorized() {
+        let app = router(enabled_config());
+        for uri in [
+            "/protected?auth_token=wrong-key".to_string(),
+            "/protected?auth_token=".to_string(),
+            // The key under another parameter name does not count.
+            format!("/protected?token={API_KEY}"),
+            format!("/protected?xauth_token={API_KEY}"),
+        ] {
+            assert_eq!(
+                status(&app, get_req(&uri)).await,
+                StatusCode::UNAUTHORIZED,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn logged_in_session_is_accepted() {
+        let app = router(enabled_config());
+
+        let login = |password: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "username": ADMIN_USER, "password": password }).to_string(),
+                ))
+                .unwrap()
+        };
+        let cookie_of = |response: &Response| {
+            response.headers().get(header::SET_COOKIE).map(|value| {
+                value
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+        };
+        let with_cookie = |cookie: &str| {
+            Request::builder()
+                .uri("/protected")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // A failed login yields no authenticated session. An empty session
+        // is not stored, so there may be no cookie at all.
+        let failed = app.clone().oneshot(login("wrong")).await.unwrap();
+        if let Some(cookie) = cookie_of(&failed) {
+            assert_eq!(
+                status(&app, with_cookie(&cookie)).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+
+        let ok = app.clone().oneshot(login(ADMIN_PASSWORD)).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let cookie = cookie_of(&ok).expect("a successful login sets a session cookie");
+        assert_eq!(status(&app, with_cookie(&cookie)).await, StatusCode::OK);
+
+        // An unknown session id is not authenticated.
+        assert_eq!(
+            status(&app, with_cookie(&format!("{cookie}x"))).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// The middleware has no exempt paths of its own: exemption is where the
+    /// app router applies it. Check that placement on the real router.
+    #[tokio::test]
+    async fn app_router_exempts_only_public_routes() {
+        gstreamer::init().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = crate::state::AppState::with_json_storage(
+            dir.path().join("flows.json"),
+            dir.path().join("blocks.json"),
+            dir.path().join("media"),
+            vec![],
+            "all".to_string(),
+            vec![],
+            false,
+            false,
+        );
+        let app = crate::create_app_with_state_and_auth(state, enabled_config()).await;
+
+        for uri in ["/health", "/api/auth/status"] {
+            assert_eq!(status(&app, get_req(uri)).await, StatusCode::OK, "{uri}");
+        }
+        for uri in ["/api/flows", "/api/ws", "/swagger-ui/"] {
+            assert_eq!(
+                status(&app, get_req(uri)).await,
+                StatusCode::UNAUTHORIZED,
+                "{uri}"
+            );
+        }
+        let authed = Request::builder()
+            .uri("/api/flows")
+            .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status(&app, authed).await, StatusCode::OK);
+    }
+}
