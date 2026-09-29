@@ -51,7 +51,7 @@ mod keyed_alpha {
     fn build_flow(block_id: &str, output_format: &str) -> Flow {
         let mut flow = Flow::new(format!("vm_keyed_alpha_{}", block_id));
         flow.blocks.push(strom_types::BlockInstance {
-            id: block_id.to_string(),
+            id: common::ids::claim(block_id),
             block_definition_id: "builtin.vision_mixer".to_string(),
             name: None,
             properties: {
@@ -502,7 +502,7 @@ mod pip_capacity {
     fn build_vm_flow(block_id: &str, num_inputs: u64) -> Flow {
         let mut flow = Flow::new("vm_pip_capacity_test");
         flow.blocks.push(strom_types::BlockInstance {
-            id: block_id.to_string(),
+            id: common::ids::claim(block_id),
             block_definition_id: "builtin.vision_mixer".to_string(),
             name: None,
             properties: {

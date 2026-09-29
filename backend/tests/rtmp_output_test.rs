@@ -404,50 +404,15 @@ mod pipeline {
             // sync=false so a dead sink cannot pace the graph while we wait.
             props.insert("sync".to_string(), PropertyValue::Bool(false));
 
-            let ctx = BlockBuildContext::new(vec![], "all".to_string());
+            let ctx = common::block::context();
             let built = RtmpOutputBuilder
                 .build(INSTANCE, &props, &ctx)
                 .expect("rtmp_output block builds");
 
             let sink_id = format!("{}:rtmp_sink", INSTANCE);
             let pipeline = gst::Pipeline::new();
-            let mut by_id: HashMap<String, gst::Element> = HashMap::new();
-            for (id, element) in &built.elements {
-                // Everything but the sink; see the header for why it stays out.
-                if id == &sink_id {
-                    continue;
-                }
-                pipeline.add(element).expect("add block element");
-                by_id.insert(id.clone(), element.clone());
-            }
-            for (from, to) in &built.internal_links {
-                // The only declared link is flvmux:src to the sink, which is not here.
-                if from.element_id == sink_id || to.element_id == sink_id {
-                    continue;
-                }
-                let src = by_id
-                    .get(&from.element_id)
-                    .unwrap_or_else(|| panic!("internal link source {} missing", from.element_id));
-                let sink = by_id
-                    .get(&to.element_id)
-                    .unwrap_or_else(|| panic!("internal link target {} missing", to.element_id));
-                match (&from.pad_name, &to.pad_name) {
-                    (Some(src_pad), Some(sink_pad)) => {
-                        let src_pad = src.static_pad(src_pad).unwrap_or_else(|| {
-                            panic!("{} has no pad {}", from.element_id, src_pad)
-                        });
-                        let sink_pad = sink
-                            .static_pad(sink_pad)
-                            .unwrap_or_else(|| panic!("{} has no pad {}", to.element_id, sink_pad));
-                        src_pad
-                            .link(&sink_pad)
-                            .unwrap_or_else(|e| panic!("internal pad link failed: {:?}", e));
-                    }
-                    _ => src
-                        .link(sink)
-                        .unwrap_or_else(|e| panic!("internal element link failed: {:?}", e)),
-                }
-            }
+            // Everything but the sink; see the header for why it stays out.
+            let by_id = common::block::install_except(&pipeline, &built, &[&sink_id]);
 
             let mux = by_id
                 .get(&format!("{}:rtmp_flvmux", INSTANCE))

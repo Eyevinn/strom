@@ -29,7 +29,7 @@ pub mod common;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::videoenc::VideoEncBuilder;
-use strom::blocks::{BlockBuildContext, BlockBuilder};
+use strom::blocks::BlockBuilder;
 use strom_types::PropertyValue;
 
 use gstreamer as gst;
@@ -94,27 +94,13 @@ fn negotiate(codec: &str, input_format: &str, profile: Option<&str>) -> Negotiat
         props.insert("profile".to_string(), PropertyValue::String(p.to_string()));
     }
 
-    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let ctx = common::block::context();
     let built = VideoEncBuilder
         .build(INSTANCE, &props, &ctx)
         .expect("videoenc block builds");
 
     let pipeline = gst::Pipeline::new();
-    let mut by_id: HashMap<String, gst::Element> = HashMap::new();
-    for (id, element) in &built.elements {
-        pipeline.add(element).expect("add block element");
-        by_id.insert(id.clone(), element.clone());
-    }
-    for (from, to) in &built.internal_links {
-        let src = by_id
-            .get(&from.element_id)
-            .unwrap_or_else(|| panic!("internal link source {} missing", from.element_id));
-        let sink = by_id
-            .get(&to.element_id)
-            .unwrap_or_else(|| panic!("internal link target {} missing", to.element_id));
-        src.link(sink)
-            .unwrap_or_else(|e| panic!("internal link failed: {:?}", e));
-    }
+    let by_id = common::block::install(&pipeline, &built);
 
     let encoder = by_id
         .get(&format!("{}:encoder", INSTANCE))

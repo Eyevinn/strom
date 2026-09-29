@@ -28,7 +28,6 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
 use strom::blocks::builtin::whip::build_whipserversrc;
-use strom::blocks::BlockBuildContext;
 use strom_types::PropertyValue;
 
 /// Elements this test needs. `whipserversrc` is deliberately not among them:
@@ -184,39 +183,11 @@ fn reuse_slot(first: &Session, second: &Session, consumer: Consumer) {
         PropertyValue::String("slot-reuse".to_string()),
     );
 
-    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let ctx = common::block::context();
     let built = build_whipserversrc(instance_id, &props, &ctx).expect("WHIP Input block builds");
 
     let pipeline = gst::Pipeline::new();
-    let mut by_id: HashMap<String, gst::Element> = HashMap::new();
-    for (id, element) in &built.elements {
-        pipeline.add(element).expect("add block element");
-        by_id.insert(id.clone(), element.clone());
-    }
-    for (from, to) in &built.internal_links {
-        let src = by_id
-            .get(&from.element_id)
-            .unwrap_or_else(|| panic!("internal link source {} missing", from.element_id));
-        let sink = by_id
-            .get(&to.element_id)
-            .unwrap_or_else(|| panic!("internal link target {} missing", to.element_id));
-        match (&from.pad_name, &to.pad_name) {
-            (Some(src_pad), Some(sink_pad)) => {
-                let src_pad = src
-                    .static_pad(src_pad)
-                    .unwrap_or_else(|| panic!("{} has no pad {}", from.element_id, src_pad));
-                let sink_pad = sink
-                    .static_pad(sink_pad)
-                    .unwrap_or_else(|| panic!("{} has no pad {}", to.element_id, sink_pad));
-                src_pad
-                    .link(&sink_pad)
-                    .unwrap_or_else(|e| panic!("internal pad link failed: {:?}", e));
-            }
-            _ => src
-                .link(sink)
-                .unwrap_or_else(|e| panic!("internal element link failed: {:?}", e)),
-        }
-    }
+    let by_id = common::block::install(&pipeline, &built);
 
     let appsrc: gst_app::AppSrc = by_id
         .get(&format!("{}:appsrc_audio_0", instance_id))

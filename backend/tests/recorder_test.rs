@@ -73,9 +73,7 @@ impl Recorder {
     /// and before PLAYING. They decide which tracks are connected and get a
     /// `splitmuxsink` pad, so they must run after the inputs are linked.
     fn run_setups(&self) {
-        for setup in self.ctx.take_element_setups() {
-            setup(uuid::Uuid::new_v4(), EventBroadcaster::with_capacity(16));
-        }
+        common::block::run_setups(&self.ctx);
     }
 }
 
@@ -106,26 +104,11 @@ fn add_recorder(
         PropertyValue::String(media_root.to_string_lossy().to_string()),
     );
 
-    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let ctx = common::block::context();
     let built = RecorderBuilder
         .build(instance_id, &properties, &ctx)
         .expect("recorder block builds");
-
-    let mut elements = HashMap::new();
-    for (id, element) in &built.elements {
-        pipeline.add(element).expect("add block element");
-        elements.insert(id.clone(), element.clone());
-    }
-    for (from, to) in &built.internal_links {
-        let src = pipeline
-            .by_name(&from.element_id)
-            .expect("internal link source element is in the pipeline");
-        let dst = pipeline
-            .by_name(&to.element_id)
-            .expect("internal link sink element is in the pipeline");
-        src.link_pads(from.pad_name.as_deref(), &dst, to.pad_name.as_deref())
-            .expect("internal recorder link");
-    }
+    let elements = common::block::install(pipeline, &built);
 
     Recorder {
         instance_id: instance_id.to_string(),
