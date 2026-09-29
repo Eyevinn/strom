@@ -8,6 +8,8 @@
 //!
 //! The guard: a session that reuses a slot decodes through a different video
 //! decoder instance than the previous session did, and still produces frames.
+//! A fresh decoder also lets a publisher that negotiated another codec reuse
+//! the slot: the kept one refused it with `not-negotiated`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,8 +25,6 @@ use strom::whip_session_manager::WhipEndpointConfig;
 use strom_types::element::ElementPadRef;
 use strom_types::PropertyValue;
 
-const INSTANCE_ID: &str = "whip_reuse";
-
 /// Elements this test needs beyond core GStreamer. Missing on a bare CI image.
 const REQUIRED: &[&str] = &[
     "appsrc",
@@ -36,6 +36,8 @@ const REQUIRED: &[&str] = &[
     "videotestsrc",
     "x264enc",
     "h264parse",
+    "vp8enc",
+    "vp8dec",
     "appsink",
     "fakesink",
     // `WHIPInputBuilder::build` refuses to build without ICE.
@@ -85,7 +87,9 @@ fn resolve_pad(
 
 /// Build one single-slot WHIP Input through the real block builder and wire up
 /// its declared internal links, as the pipeline manager does.
-fn build_whip_input() -> (
+fn build_whip_input(
+    instance_id: &str,
+) -> (
     gst::Pipeline,
     HashMap<String, gst::Element>,
     WhipEndpointConfig,
@@ -96,7 +100,7 @@ fn build_whip_input() -> (
     let mut props: HashMap<String, PropertyValue> = HashMap::new();
     props.insert(
         "endpoint_id".to_string(),
-        PropertyValue::String("reuse".to_string()),
+        PropertyValue::String(instance_id.to_string()),
     );
     props.insert(
         "mode".to_string(),
@@ -107,7 +111,7 @@ fn build_whip_input() -> (
 
     let ctx = BlockBuildContext::new(vec![], "all".to_string());
     let built = WHIPInputBuilder
-        .build(INSTANCE_ID, &props, &ctx)
+        .build(instance_id, &props, &ctx)
         .expect("WHIP Input block builds");
     for (id, element) in &built.elements {
         pipeline.add(element).expect("add block element");
@@ -128,14 +132,17 @@ fn build_whip_input() -> (
     (pipeline, by_id, config)
 }
 
-/// One publisher: H.264 pushed into the slot appsrc the way a session's
-/// appsink bridge does.
-fn start_publisher(slot_appsrc: gst_app::AppSrc) -> gst::Element {
-    let feeder = gst::parse::launch(
+const H264: &str = "x264enc tune=zerolatency key-int-max=15 ! h264parse";
+const VP8: &str = "vp8enc deadline=1 keyframe-max-dist=15";
+
+/// One publisher: video encoded with `encoder`, pushed into the slot appsrc
+/// the way a session's appsink bridge does.
+fn start_publisher(slot_appsrc: gst_app::AppSrc, encoder: &str) -> gst::Element {
+    let feeder = gst::parse::launch(&format!(
         "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=30/1 \
-         ! x264enc tune=zerolatency key-int-max=15 ! h264parse \
-         ! appsink name=out emit-signals=true sync=false",
-    )
+         ! {} ! appsink name=out emit-signals=true sync=false",
+        encoder
+    ))
     .expect("feeder pipeline");
     let appsink = feeder
         .downcast_ref::<gst::Bin>()
@@ -182,23 +189,30 @@ fn video_decoder(decodebin: &gst::Element) -> Option<gst::Element> {
         })
 }
 
-#[test]
-fn reused_slot_decodes_through_a_fresh_video_decoder() {
-    gst::init().expect("gstreamer init");
-    if !plugins_available() {
-        eprintln!("skipping: required GStreamer elements missing");
-        return;
-    }
+/// A running WHIP Input with one slot, and a count of the frames leaving it.
+struct Slot {
+    pipeline: gst::Pipeline,
+    decodebin: gst::Element,
+    config: WhipEndpointConfig,
+    frames: Arc<AtomicUsize>,
+}
 
-    let (pipeline, by_id, config) = build_whip_input();
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+fn start_slot(instance_id: &str) -> Slot {
+    let (pipeline, by_id, config) = build_whip_input(instance_id);
     let decodebin = by_id
-        .get(&format!("{}:decodebin_video_0", INSTANCE_ID))
+        .get(&format!("{}:decodebin_video_0", instance_id))
         .expect("slot 0 has a video decodebin")
         .clone();
 
     // Count frames where they leave the slot.
     let tee = by_id
-        .get(&format!("{}:video_out_tee_0", INSTANCE_ID))
+        .get(&format!("{}:video_out_tee_0", instance_id))
         .expect("slot 0 has a video output tee");
     let sink = gst::ElementFactory::make("fakesink")
         .property("sync", false)
@@ -225,11 +239,29 @@ fn reused_slot_decodes_through_a_fresh_video_decoder() {
         (gst::StateChangeSuccess::Success, gst::State::Playing)
     );
 
+    Slot {
+        pipeline,
+        decodebin,
+        config,
+        frames,
+    }
+}
+
+#[test]
+fn reused_slot_decodes_through_a_fresh_video_decoder() {
+    gst::init().expect("gstreamer init");
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements missing");
+        return;
+    }
+    let slot = start_slot("whip_reuse");
+    let (decodebin, config, frames) = (&slot.decodebin, &slot.config, &slot.frames);
+
     // First session.
     let slot = config.allocate_slot("first").expect("a free slot");
-    let publisher = start_publisher(config.slot_video_appsrcs[slot].clone());
-    let first_frames = wait_for_frames(&frames, 0, 10);
-    let first_decoder = video_decoder(&decodebin);
+    let publisher = start_publisher(config.slot_video_appsrcs[slot].clone(), H264);
+    let first_frames = wait_for_frames(frames, 0, 10);
+    let first_decoder = video_decoder(decodebin);
     publisher
         .set_state(gst::State::Null)
         .expect("publisher stops");
@@ -238,16 +270,12 @@ fn reused_slot_decodes_through_a_fresh_video_decoder() {
     // Second session on the same slot.
     let before = frames.load(Ordering::Relaxed);
     let slot_again = config.allocate_slot("second").expect("a free slot");
-    let publisher = start_publisher(config.slot_video_appsrcs[slot_again].clone());
-    let second_frames = wait_for_frames(&frames, before, 10);
-    let second_decoder = video_decoder(&decodebin);
+    let publisher = start_publisher(config.slot_video_appsrcs[slot_again].clone(), H264);
+    let second_frames = wait_for_frames(frames, before, 10);
+    let second_decoder = video_decoder(decodebin);
     publisher
         .set_state(gst::State::Null)
         .expect("publisher stops");
-
-    pipeline
-        .set_state(gst::State::Null)
-        .expect("pipeline to NULL");
 
     assert!(
         first_frames >= 10,
@@ -270,5 +298,50 @@ fn reused_slot_decodes_through_a_fresh_video_decoder() {
         second_frames >= 10,
         "the second session on a reused slot decoded {} frames",
         second_frames
+    );
+}
+
+/// A publisher whose browser negotiated VP8 reuses a slot an H.264 publisher
+/// left. WHIP publishers choose their codec.
+#[test]
+fn reused_slot_accepts_a_different_codec() {
+    gst::init().expect("gstreamer init");
+    if !plugins_available() {
+        eprintln!("skipping: required GStreamer elements missing");
+        return;
+    }
+    let slot = start_slot("whip_codec");
+    let bus = slot.pipeline.bus().expect("pipeline bus");
+
+    let index = slot.config.allocate_slot("h264").expect("a free slot");
+    let publisher = start_publisher(slot.config.slot_video_appsrcs[index].clone(), H264);
+    let h264_frames = wait_for_frames(&slot.frames, 0, 10);
+    publisher
+        .set_state(gst::State::Null)
+        .expect("publisher stops");
+    slot.config.release_slot(index);
+
+    let before = slot.frames.load(Ordering::Relaxed);
+    let index = slot.config.allocate_slot("vp8").expect("a free slot");
+    let publisher = start_publisher(slot.config.slot_video_appsrcs[index].clone(), VP8);
+    let vp8_frames = wait_for_frames(&slot.frames, before, 10);
+    publisher
+        .set_state(gst::State::Null)
+        .expect("publisher stops");
+
+    let errors: Vec<String> = bus
+        .iter_filtered(&[gst::MessageType::Error])
+        .map(|message| format!("{:?}", message))
+        .collect();
+    assert!(
+        h264_frames >= 10,
+        "the H.264 session decoded {} frames",
+        h264_frames
+    );
+    assert!(
+        vp8_frames >= 10,
+        "the VP8 session on a reused slot decoded {} frames; errors: {:?}",
+        vp8_frames,
+        errors
     );
 }
