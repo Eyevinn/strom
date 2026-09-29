@@ -64,6 +64,13 @@ fn first_stalled_pad(element: &gst::Element) -> Option<StalledPad> {
 /// that the flow leaves unconnected gets `not-linked` from its loop and parks
 /// the task there permanently - the vision mixer's `multiview_out` does exactly
 /// this whenever a flow uses only the program output.
+///
+/// That exclusion holds only because every `tee` Strom builds sets
+/// `allow-not-linked`, which keeps the `not-linked` at the unconnected branch.
+/// A `tee` with its default instead returns `not-linked` upstream once all its
+/// branches are unconnected, so the task that parks is the one feeding the tee,
+/// on a pad that does have a peer. A raw `tee` element in a user flow does
+/// exactly that, and the element upstream of it is reported as failed.
 fn stalled_pad_on(element: &gst::Element) -> Option<StalledPad> {
     if element.current_state() != gst::State::Playing {
         return None;
