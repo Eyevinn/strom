@@ -332,26 +332,34 @@ pub(super) fn get_connected_request_pad_names(
 
 /// Allocate the next available pad name for a request pad template.
 /// For example, if "sink_0" and "sink_2" are taken, this returns "sink_1".
+///
+/// A request template without a placeholder (flvmux's `audio`, for example)
+/// names exactly one pad, so once it is connected there is none to offer
+/// and this returns `None`.
 pub(super) fn allocate_next_pad_name(
     element_id: &str,
     template: &str,
     links: &[Link],
     is_sink: bool,
-) -> String {
+) -> Option<String> {
     let connected = get_connected_request_pad_names(element_id, template, links, is_sink);
+
+    if !template.contains('%') {
+        return (!connected.iter().any(|name| name == template)).then(|| template.to_string());
+    }
 
     // Find the first available index
     let mut index = 0;
     loop {
         let candidate = generate_pad_name(template, index);
         if !connected.contains(&candidate) {
-            return candidate;
+            return Some(candidate);
         }
         index += 1;
 
         // Safety limit to prevent infinite loop
         if index > 1000 {
-            return generate_pad_name(template, index);
+            return Some(generate_pad_name(template, index));
         }
     }
 }
@@ -455,9 +463,12 @@ mod tests {
     fn allocate_starts_at_zero() {
         assert_eq!(
             allocate_next_pad_name("mix", "sink_%u", &[], true),
-            "sink_0"
+            Some("sink_0".to_string())
         );
-        assert_eq!(allocate_next_pad_name("tee", "src_%d", &[], false), "src_0");
+        assert_eq!(
+            allocate_next_pad_name("tee", "src_%d", &[], false),
+            Some("src_0".to_string())
+        );
     }
 
     #[test]
@@ -469,7 +480,7 @@ mod tests {
         ];
         assert_eq!(
             allocate_next_pad_name("mix", "sink_%u", &links, true),
-            "sink_1"
+            Some("sink_1".to_string())
         );
     }
 
@@ -480,7 +491,7 @@ mod tests {
             .collect();
         assert_eq!(
             allocate_next_pad_name("mix", "sink_%u", &links, true),
-            "sink_12"
+            Some("sink_12".to_string())
         );
     }
 
@@ -494,15 +505,74 @@ mod tests {
         ];
         assert_eq!(
             allocate_next_pad_name("mix", "sink_%u", &links, true),
-            "sink_0"
+            Some("sink_0".to_string())
         );
         assert_eq!(
             allocate_next_pad_name("tee", "src_%u", &links, false),
-            "src_2"
+            Some("src_2".to_string())
         );
         assert_eq!(
             allocate_next_pad_name("tee", "src_%u", &links, true),
-            "src_0"
+            Some("src_0".to_string())
+        );
+    }
+
+    fn element(id: &str, element_type: &str) -> Element {
+        Element {
+            id: id.to_string(),
+            element_type: element_type.to_string(),
+            properties: HashMap::new(),
+            pad_properties: HashMap::new(),
+            position: (0.0, 0.0),
+        }
+    }
+
+    fn info(name: &str, sink_pads: Vec<PadInfo>, src_pads: Vec<PadInfo>) -> ElementInfo {
+        ElementInfo {
+            name: name.to_string(),
+            description: String::new(),
+            category: String::new(),
+            src_pads,
+            sink_pads,
+            properties: Vec::new(),
+        }
+    }
+
+    /// Sink pads the editor draws, as (name, is_empty).
+    fn drawn_sink_pads(
+        links: Vec<Link>,
+        el: &Element,
+        el_info: &ElementInfo,
+    ) -> Vec<(String, bool)> {
+        let mut editor = GraphEditor::new();
+        editor.load(vec![el.clone()], links);
+        let (sinks, _) = editor.get_pads_to_render(el, Some(el_info));
+        sinks.into_iter().map(|p| (p.name, p.is_empty)).collect()
+    }
+
+    /// flvmux and hlssink2 have request pads named plainly `audio` and
+    /// `video`: there is one of each, so a connected one leaves nothing to
+    /// offer. The editor drew a second, empty `audio` pad next to the
+    /// connected one, and a link to it fails when the flow starts.
+    #[test]
+    fn fixed_name_request_pad_is_drawn_once_when_connected() {
+        let mux = element("mux", "flvmux");
+        let mux_info = info(
+            "flvmux",
+            vec![
+                pad("audio", PadPresence::Request),
+                pad("video", PadPresence::Request),
+            ],
+            vec![pad("src", PadPresence::Always)],
+        );
+
+        assert_eq!(
+            drawn_sink_pads(vec![link("enc:src", "mux:audio")], &mux, &mux_info),
+            vec![("audio".to_string(), false), ("video".to_string(), true)]
+        );
+        assert_eq!(
+            drawn_sink_pads(Vec::new(), &mux, &mux_info),
+            vec![("audio".to_string(), true), ("video".to_string(), true)]
         );
     }
 }

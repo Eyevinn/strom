@@ -313,15 +313,17 @@ impl GraphEditor {
                     });
                 }
 
-                // Add one empty pad
-                let next_name =
-                    allocate_next_pad_name(&element.id, &pad_info.name, &self.links, true);
-                sink_pads_to_render.push(PadToRender {
-                    name: next_name,
-                    template_name: pad_info.name.clone(),
-                    media_type: pad_info.media_type,
-                    is_empty: true,
-                });
+                // Add one empty pad, if the template has a name left to give
+                if let Some(next_name) =
+                    allocate_next_pad_name(&element.id, &pad_info.name, &self.links, true)
+                {
+                    sink_pads_to_render.push(PadToRender {
+                        name: next_name,
+                        template_name: pad_info.name.clone(),
+                        media_type: pad_info.media_type,
+                        is_empty: true,
+                    });
+                }
             } else {
                 // Static pad - render as-is
                 sink_pads_to_render.push(PadToRender {
@@ -354,15 +356,17 @@ impl GraphEditor {
                     });
                 }
 
-                // Add one empty pad
-                let next_name =
-                    allocate_next_pad_name(&element.id, &pad_info.name, &self.links, false);
-                src_pads_to_render.push(PadToRender {
-                    name: next_name,
-                    template_name: pad_info.name.clone(),
-                    media_type: pad_info.media_type,
-                    is_empty: true,
-                });
+                // Add one empty pad, if the template has a name left to give
+                if let Some(next_name) =
+                    allocate_next_pad_name(&element.id, &pad_info.name, &self.links, false)
+                {
+                    src_pads_to_render.push(PadToRender {
+                        name: next_name,
+                        template_name: pad_info.name.clone(),
+                        media_type: pad_info.media_type,
+                        is_empty: true,
+                    });
+                }
             } else {
                 // Static pad - render as-is
                 src_pads_to_render.push(PadToRender {
