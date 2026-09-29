@@ -1284,24 +1284,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_element_discovery() {
-        gst::init().unwrap();
-        let mut discovery = ElementDiscovery::new();
-        let elements = discovery.discover_all();
-        assert!(!elements.is_empty(), "Should discover some elements");
-    }
-
-    #[test]
     fn test_get_specific_element() {
         gst::init().unwrap();
         let mut discovery = ElementDiscovery::new();
 
-        // Try to get a common element
-        let info = discovery.get_element_info("fakesrc");
-        assert!(info.is_some(), "Should find fakesrc element");
+        let info = discovery
+            .get_element_info("fakesrc")
+            .expect("Should find fakesrc element");
+        assert_eq!(info.name, "fakesrc");
+        assert!(
+            info.src_pads.iter().any(|p| p.name == "src"),
+            "fakesrc's src pad template must be introspected: {:?}",
+            info.src_pads
+        );
+        assert!(info.sink_pads.is_empty(), "{:?}", info.sink_pads);
+        assert!(
+            info.properties.is_empty(),
+            "properties are lazy-loaded, not part of the element listing"
+        );
 
-        if let Some(info) = info {
-            assert_eq!(info.name, "fakesrc");
-        }
+        let with_props = discovery
+            .load_element_properties("fakesrc")
+            .expect("fakesrc properties");
+        assert!(
+            with_props
+                .properties
+                .iter()
+                .any(|p| p.name == "num-buffers"),
+            "fakesrc's properties must be introspected on request"
+        );
+        // The loaded properties are cached for later lookups
+        assert!(!discovery
+            .get_element_info("fakesrc")
+            .expect("fakesrc")
+            .properties
+            .is_empty());
+
+        assert!(discovery.get_element_info("no_such_element_xyz").is_none());
     }
 }

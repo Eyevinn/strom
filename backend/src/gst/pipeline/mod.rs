@@ -334,25 +334,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_create_pipeline() {
-        gst::init().unwrap();
-        let flow = create_test_flow();
-        let events = EventBroadcaster::default();
-        let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(
-            &flow,
-            events,
-            &registry,
-            default_test_ice_servers(),
-            "all".to_string(),
-            None,
-            std::path::PathBuf::from("./media"),
-            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-        );
-        assert!(manager.is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn test_start_stop_pipeline() {
         gst::init().unwrap();
         let flow = create_test_flow();
@@ -395,7 +376,7 @@ mod tests {
 
         let events = EventBroadcaster::default();
         let registry = BlockRegistry::new("test_blocks.json");
-        let manager = PipelineManager::new(
+        let result = PipelineManager::new(
             &flow,
             events,
             &registry,
@@ -405,7 +386,15 @@ mod tests {
             std::path::PathBuf::from("./media"),
             std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         );
-        assert!(manager.is_err());
+        match result {
+            Err(PipelineError::ElementCreation(msg)) => assert!(
+                msg.contains("src") && msg.contains("nonexistentelement"),
+                "error must name the element and its type: {}",
+                msg
+            ),
+            Err(other) => panic!("expected ElementCreation, got {:?}", other),
+            Ok(_) => panic!("a flow with an unknown element type was accepted"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

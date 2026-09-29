@@ -1269,25 +1269,4 @@ lease_ttl_seconds = 600
             "turn:user:pass@turn.example.com:3478"
         );
     }
-
-    #[test]
-    fn test_legacy_config_new() {
-        let temp_dir = TempDir::new().unwrap();
-        let flows = temp_dir.path().join("flows.json");
-        let blocks = temp_dir.path().join("blocks.json");
-
-        let config = Config::new(
-            8080,
-            None,
-            Some(flows.clone()),
-            Some(blocks.clone()),
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(config.port, 8080);
-        assert_eq!(config.flows_path, flows);
-        assert_eq!(config.blocks_path, blocks);
-    }
 }

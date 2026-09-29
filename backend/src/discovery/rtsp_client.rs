@@ -131,69 +131,61 @@ mod tests {
 
     #[test]
     fn test_parse_rtsp_url() {
-        let url = "rtsp://192.168.1.100:8554/stream1";
-        let parsed = parse_rtsp_url(url).unwrap();
-        assert_eq!(parsed.host, "192.168.1.100");
-        assert_eq!(parsed.port, 8554);
-        assert_eq!(parsed.path, "/stream1");
+        // (url, host, port, path)
+        let cases = [
+            (
+                "rtsp://192.0.2.10:8554/stream1",
+                "192.0.2.10",
+                8554,
+                "/stream1",
+            ),
+            // Missing port defaults to 8554
+            ("rtsp://example.com/test", "example.com", 8554, "/test"),
+            // Missing path defaults to "/"
+            ("rtsp://192.0.2.10:554", "192.0.2.10", 554, "/"),
+            (
+                "rtsp://192.0.2.10:8554/by-name/stream1",
+                "192.0.2.10",
+                8554,
+                "/by-name/stream1",
+            ),
+            (
+                "rtsp://ravenna-device.local:8554/stream",
+                "ravenna-device.local",
+                8554,
+                "/stream",
+            ),
+        ];
+        for (url, host, port, path) in cases {
+            let parsed = parse_rtsp_url(url).unwrap_or_else(|e| panic!("{}: {}", url, e));
+            assert_eq!(
+                (parsed.host.as_str(), parsed.port, parsed.path.as_str()),
+                (host, port, path),
+                "{}",
+                url
+            );
+        }
     }
 
     #[test]
-    fn test_parse_rtsp_url_no_port() {
-        let url = "rtsp://example.com/test";
-        let parsed = parse_rtsp_url(url).unwrap();
-        assert_eq!(parsed.host, "example.com");
-        assert_eq!(parsed.port, 8554);
-        assert_eq!(parsed.path, "/test");
-    }
-
-    #[test]
-    fn test_parse_rtsp_url_no_path() {
-        let url = "rtsp://192.168.1.100:554";
-        let parsed = parse_rtsp_url(url).unwrap();
-        assert_eq!(parsed.host, "192.168.1.100");
-        assert_eq!(parsed.port, 554);
-        assert_eq!(parsed.path, "/");
-    }
-
-    #[test]
-    fn test_parse_rtsp_url_invalid_scheme() {
-        let url = "http://192.168.1.100:8554/stream";
-        let result = parse_rtsp_url(url);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("rtsp://"));
-    }
-
-    #[test]
-    fn test_parse_rtsp_url_no_scheme() {
-        let url = "192.168.1.100:8554/stream";
-        let result = parse_rtsp_url(url);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_rtsp_url_invalid_port() {
-        let url = "rtsp://192.168.1.100:notaport/stream";
-        let result = parse_rtsp_url(url);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("port"));
-    }
-
-    #[test]
-    fn test_parse_rtsp_url_with_nested_path() {
-        let url = "rtsp://192.168.1.100:8554/by-name/stream1";
-        let parsed = parse_rtsp_url(url).unwrap();
-        assert_eq!(parsed.host, "192.168.1.100");
-        assert_eq!(parsed.port, 8554);
-        assert_eq!(parsed.path, "/by-name/stream1");
-    }
-
-    #[test]
-    fn test_parse_rtsp_url_hostname() {
-        let url = "rtsp://ravenna-device.local:8554/stream";
-        let parsed = parse_rtsp_url(url).unwrap();
-        assert_eq!(parsed.host, "ravenna-device.local");
-        assert_eq!(parsed.port, 8554);
-        assert_eq!(parsed.path, "/stream");
+    fn test_parse_rtsp_url_rejects() {
+        // (url, text the error must contain)
+        let cases = [
+            ("http://192.0.2.10:8554/stream", "rtsp://"),
+            ("192.0.2.10:8554/stream", "rtsp://"),
+            ("rtsp://192.0.2.10:notaport/stream", "port"),
+        ];
+        for (url, expected) in cases {
+            let err = parse_rtsp_url(url)
+                .err()
+                .unwrap_or_else(|| panic!("{} was accepted", url));
+            assert!(
+                err.to_string().contains(expected),
+                "{}: error {:?} should mention {:?}",
+                url,
+                err.to_string(),
+                expected
+            );
+        }
     }
 }

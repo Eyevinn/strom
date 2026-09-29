@@ -151,18 +151,23 @@ mod tests {
         assert_eq!(require_ice_elements("Block").is_ok(), available);
     }
 
+    /// Every CI image installs the libnice GStreamer plugin, so CI sets
+    /// `STROM_REQUIRE_GST_PLUGINS=1` and this test must take the real path
+    /// there. Only a developer machine without libnice may skip.
     #[test]
     fn a_present_installation_reports_nothing_missing() {
         let _ = gst::init();
-        if gst::ElementFactory::find("nicesrc").is_some()
-            && gst::ElementFactory::find("nicesink").is_some()
-        {
-            assert!(missing_ice_elements().is_empty());
-            assert!(require_ice_elements("WHIP Input").is_ok());
-        } else {
-            // No ICE here (this is the CI Linux image, among others): the
-            // probe must say so and name both elements.
-            assert_eq!(missing_ice_elements().len(), 2);
+        let installed = gst::ElementFactory::find("nicesrc").is_some()
+            && gst::ElementFactory::find("nicesink").is_some();
+        if !installed {
+            assert!(
+                strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
+                "STROM_REQUIRE_GST_PLUGINS is set but nicesrc/nicesink are missing"
+            );
+            eprintln!("libnice GStreamer plugin not installed, skipping");
+            return;
         }
+        assert_eq!(missing_ice_elements(), Vec::<&str>::new());
+        assert!(require_ice_elements("WHIP Input").is_ok());
     }
 }

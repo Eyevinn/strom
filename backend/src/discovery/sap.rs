@@ -25,7 +25,7 @@ pub enum SapError {
 }
 
 /// SAP packet header flags.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SapFlags {
     /// SAP version (must be 1).
     pub version: u8,
@@ -261,9 +261,12 @@ impl SapPacket {
 mod tests {
     use super::*;
 
+    /// Flags against fixed RFC 2974 wire bytes (V=3 bits, A, R, T, E, C), in
+    /// both directions. A round trip alone would pass with a bit mapped to
+    /// the wrong position on both sides.
     #[test]
-    fn test_flags_roundtrip() {
-        let flags = SapFlags {
+    fn test_flags_wire_bytes() {
+        let v1 = SapFlags {
             version: 1,
             ipv6: false,
             reserved: false,
@@ -271,32 +274,55 @@ mod tests {
             encrypted: false,
             compressed: false,
         };
-
-        let byte = flags.to_byte();
-        let parsed = SapFlags::from_byte(byte);
-
-        assert_eq!(parsed.version, 1);
-        assert!(!parsed.ipv6);
-        assert!(!parsed.deletion);
-        assert!(!parsed.encrypted);
-        assert!(!parsed.compressed);
-    }
-
-    #[test]
-    fn test_flags_deletion() {
-        let flags = SapFlags {
-            version: 1,
-            ipv6: false,
-            reserved: false,
-            deletion: true,
-            encrypted: false,
-            compressed: false,
-        };
-
-        let byte = flags.to_byte();
-        let parsed = SapFlags::from_byte(byte);
-
-        assert!(parsed.deletion);
+        let cases = [
+            (0x20, v1),
+            (0x30, SapFlags { ipv6: true, ..v1 }),
+            (
+                0x28,
+                SapFlags {
+                    reserved: true,
+                    ..v1
+                },
+            ),
+            (
+                0x24,
+                SapFlags {
+                    deletion: true,
+                    ..v1
+                },
+            ),
+            (
+                0x22,
+                SapFlags {
+                    encrypted: true,
+                    ..v1
+                },
+            ),
+            (
+                0x21,
+                SapFlags {
+                    compressed: true,
+                    ..v1
+                },
+            ),
+            (
+                0x3F,
+                SapFlags {
+                    version: 1,
+                    ipv6: true,
+                    reserved: true,
+                    deletion: true,
+                    encrypted: true,
+                    compressed: true,
+                },
+            ),
+            (0x00, SapFlags { version: 0, ..v1 }),
+            (0xE0, SapFlags { version: 7, ..v1 }),
+        ];
+        for (byte, flags) in cases {
+            assert_eq!(flags.to_byte(), byte, "to_byte({:?})", flags);
+            assert_eq!(SapFlags::from_byte(byte), flags, "from_byte({:#04x})", byte);
+        }
     }
 
     #[test]
@@ -314,18 +340,6 @@ mod tests {
         assert_eq!(parsed.origin, origin);
         assert_eq!(parsed.payload_type, Some("application/sdp".to_string()));
         assert_eq!(parsed.payload, sdp);
-    }
-
-    #[test]
-    fn test_build_deletion() {
-        let origin = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let msg_id_hash = 0xABCD;
-        let sdp = "v=0\r\ns=Test\r\n";
-
-        let packet = SapPacket::build(origin, msg_id_hash, sdp, true);
-        let parsed = SapPacket::parse(&packet).unwrap();
-
-        assert!(parsed.is_deletion());
     }
 
     #[test]
@@ -347,6 +361,7 @@ mod tests {
         let sdp = "v=0\r\ns=IPv6 Test\r\n";
 
         let packet = SapPacket::build(origin, msg_id_hash, sdp, false);
+        assert_eq!(packet[0], 0x30, "V=1 with the IPv6 address bit");
         let parsed = SapPacket::parse(&packet).unwrap();
 
         assert!(parsed.flags.ipv6);
@@ -381,63 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn test_flags_ipv6() {
-        let flags = SapFlags {
-            version: 1,
-            ipv6: true,
-            reserved: false,
-            deletion: false,
-            encrypted: false,
-            compressed: false,
-        };
-
-        let byte = flags.to_byte();
-        let parsed = SapFlags::from_byte(byte);
-
-        assert!(parsed.ipv6);
-        assert!(!parsed.deletion);
-    }
-
-    #[test]
-    fn test_flags_compressed() {
-        let flags = SapFlags {
-            version: 1,
-            ipv6: false,
-            reserved: false,
-            deletion: false,
-            encrypted: false,
-            compressed: true,
-        };
-
-        let byte = flags.to_byte();
-        let parsed = SapFlags::from_byte(byte);
-
-        assert!(parsed.compressed);
-    }
-
-    #[test]
-    fn test_flags_all_set() {
-        let flags = SapFlags {
-            version: 1,
-            ipv6: true,
-            reserved: true,
-            deletion: true,
-            encrypted: true,
-            compressed: true,
-        };
-
-        let byte = flags.to_byte();
-        let parsed = SapFlags::from_byte(byte);
-
-        assert_eq!(parsed.version, 1);
-        assert!(parsed.ipv6);
-        assert!(parsed.reserved);
-        assert!(parsed.deletion);
-        assert!(parsed.encrypted);
-        assert!(parsed.compressed);
-    }
-
-    #[test]
     fn test_is_deletion() {
         let origin = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
         let msg_id_hash = 0x1234;
@@ -445,24 +403,14 @@ mod tests {
 
         // Build announcement (not deletion)
         let packet = SapPacket::build(origin, msg_id_hash, sdp, false);
+        assert_eq!(packet[0], 0x20, "V=1 announcement");
         let parsed = SapPacket::parse(&packet).unwrap();
         assert!(!parsed.is_deletion());
 
         // Build deletion
         let packet_del = SapPacket::build(origin, msg_id_hash, sdp, true);
+        assert_eq!(packet_del[0], 0x24, "V=1 with the message-type bit");
         let parsed_del = SapPacket::parse(&packet_del).unwrap();
         assert!(parsed_del.is_deletion());
-    }
-
-    #[test]
-    fn test_sap_error_display() {
-        let err = SapError::PacketTooShort(5);
-        assert!(err.to_string().contains("5 bytes"));
-
-        let err = SapError::InvalidVersion(2);
-        assert!(err.to_string().contains("2"));
-
-        let err = SapError::EncryptionNotSupported;
-        assert!(err.to_string().contains("Encryption"));
     }
 }

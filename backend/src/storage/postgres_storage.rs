@@ -227,30 +227,32 @@ impl Storage for PostgresStorage {
 mod tests {
     use super::*;
 
-    // Note: These tests require a PostgreSQL instance to be running.
-    // Set the STROM_DATABASE_URL environment variable to run them:
-    // STROM_DATABASE_URL=postgresql://user:pass@localhost/strom_test cargo test
+    // These tests need a PostgreSQL instance, so they are ignored by default.
+    // They share one table, so run them serially:
+    // STROM_DATABASE_URL=postgresql://user:pass@localhost/strom_test \
+    //   cargo test postgres_storage -- --ignored --test-threads=1
 
-    async fn create_test_storage() -> Option<PostgresStorage> {
-        let database_url = std::env::var("STROM_DATABASE_URL").ok()?;
-        let storage = PostgresStorage::new(&database_url).await.ok()?;
-        storage.run_migrations().await.ok()?;
+    async fn create_test_storage() -> PostgresStorage {
+        let database_url =
+            std::env::var("STROM_DATABASE_URL").expect("STROM_DATABASE_URL must be set");
+        let storage = PostgresStorage::new(&database_url)
+            .await
+            .expect("connect to STROM_DATABASE_URL");
+        storage.run_migrations().await.expect("run migrations");
 
         // Clean up any existing test data
         sqlx::query("DELETE FROM flows")
             .execute(storage.pool())
             .await
-            .ok()?;
+            .expect("clear flows table");
 
-        Some(storage)
+        storage
     }
 
     #[tokio::test]
+    #[ignore = "requires STROM_DATABASE_URL"]
     async fn test_save_and_load() {
-        let Some(storage) = create_test_storage().await else {
-            eprintln!("Skipping test: STROM_DATABASE_URL not set");
-            return;
-        };
+        let storage = create_test_storage().await;
 
         // Create a flow
         let flow = Flow::new("Test Flow");
@@ -265,11 +267,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires STROM_DATABASE_URL"]
     async fn test_delete_flow() {
-        let Some(storage) = create_test_storage().await else {
-            eprintln!("Skipping test: STROM_DATABASE_URL not set");
-            return;
-        };
+        let storage = create_test_storage().await;
 
         // Create and save a flow
         let flow = Flow::new("Test Flow");
@@ -284,11 +284,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires STROM_DATABASE_URL"]
     async fn test_update_flow() {
-        let Some(storage) = create_test_storage().await else {
-            eprintln!("Skipping test: STROM_DATABASE_URL not set");
-            return;
-        };
+        let storage = create_test_storage().await;
 
         // Create and save a flow
         let mut flow = Flow::new("Test Flow");

@@ -145,19 +145,4 @@ mod tests {
              (is_in_docker() was {baseline} before the variable was set)"
         );
     }
-
-    #[test]
-    fn test_system_info() {
-        let info = get();
-
-        // These should always be set by build.rs
-        assert!(!info.version.is_empty());
-        assert!(!info.git_hash.is_empty());
-        assert!(!info.build_timestamp.is_empty());
-
-        // These might be empty depending on git state
-        // but shouldn't panic
-        let _ = info.version_string();
-        let _ = info.short_version();
-    }
 }

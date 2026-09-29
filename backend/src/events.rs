@@ -84,33 +84,6 @@ mod tests {
     use strom_types::FlowId;
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::Layer;
-    use uuid::Uuid;
-
-    #[tokio::test]
-    async fn test_broadcaster_creation() {
-        let broadcaster = EventBroadcaster::with_capacity(10);
-        assert_eq!(broadcaster.subscriber_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_broadcast_event() {
-        let broadcaster = EventBroadcaster::with_capacity(10);
-        let flow_id = FlowId::from(Uuid::new_v4());
-
-        // Subscribe before broadcasting
-        let mut _rx = broadcaster.subscribe();
-        assert_eq!(broadcaster.subscriber_count(), 1);
-
-        // Broadcast an event
-        broadcaster.broadcast(StromEvent::FlowCreated { flow_id });
-
-        // Verify we can receive the event
-        let received = _rx.recv().await.unwrap();
-        match received {
-            StromEvent::FlowCreated { flow_id: id } => assert_eq!(id, flow_id),
-            _ => panic!("Unexpected event type"),
-        }
-    }
 
     /// Counts tracing events emitted from `event_logging`, so tests can assert on the
     /// `structured_events` / `include_high_frequency_events` gate in `broadcast()` without

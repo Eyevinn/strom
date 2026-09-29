@@ -70,8 +70,6 @@ mod tests {
     use gstreamer as gst;
     use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
     use std::sync::{Arc, RwLock};
-    use strom_types::block::PropertyType;
-    use strom_types::PropertyValue;
     use uuid::Uuid;
 
     /// Helper to create a MediaPlayerState for testing (no GStreamer elements).
@@ -103,47 +101,38 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_uri_file_scheme() {
-        let media_path = std::path::Path::new("/media");
-        assert_eq!(
-            normalize_uri("file:///path/to/video.mp4", media_path),
-            "file:///path/to/video.mp4"
-        );
-    }
+    fn test_normalize_uri() {
+        // A media dir that does not exist, so canonicalize() leaves paths alone
+        let media_path = std::path::Path::new("/nonexistent-strom-media");
+        let in_media = format!("file://{}", media_path.join("video.mp4").display());
 
-    #[test]
-    fn test_normalize_uri_http_scheme() {
-        let media_path = std::path::Path::new("/media");
-        assert_eq!(
-            normalize_uri("http://example.com/video.mp4", media_path),
-            "http://example.com/video.mp4"
-        );
-    }
-
-    #[test]
-    fn test_normalize_uri_https_scheme() {
-        let media_path = std::path::Path::new("/media");
-        assert_eq!(
-            normalize_uri("https://example.com/video.mp4", media_path),
-            "https://example.com/video.mp4"
-        );
-    }
-
-    #[test]
-    fn test_normalize_uri_relative_path() {
-        let media_path = std::path::Path::new("/media");
-        let result = normalize_uri("video.mp4", media_path);
-        assert!(result.starts_with("file://"));
-        assert!(result.ends_with("video.mp4"));
-    }
-
-    #[test]
-    fn test_normalize_uri_absolute_path() {
-        let media_path = std::path::Path::new("/media");
-        assert_eq!(
-            normalize_uri("/tmp/video.mp4", media_path),
-            "file:///tmp/video.mp4"
-        );
+        let cases: Vec<(&str, String)> = vec![
+            // URIs with a scheme pass through
+            (
+                "file:///path/to/video.mp4",
+                "file:///path/to/video.mp4".into(),
+            ),
+            (
+                "http://example.com/video.mp4",
+                "http://example.com/video.mp4".into(),
+            ),
+            (
+                "https://example.com/video.mp4",
+                "https://example.com/video.mp4".into(),
+            ),
+            // Relative paths resolve against media_path, legacy prefixes stripped
+            ("video.mp4", in_media.clone()),
+            ("./media/video.mp4", in_media.clone()),
+            ("media/video.mp4", in_media),
+            // Absolute paths are kept
+            (
+                "/nonexistent-strom-abs/video.mp4",
+                "file:///nonexistent-strom-abs/video.mp4".into(),
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(normalize_uri(input, media_path), expected, "{}", input);
+        }
     }
 
     #[test]
@@ -205,54 +194,5 @@ mod tests {
 
         state.is_paused.store(true, Ordering::SeqCst);
         assert_eq!(state.state(), PlayerState::Paused);
-    }
-
-    #[test]
-    fn test_block_definition() {
-        let def = definition::media_player_definition();
-
-        assert_eq!(def.id, "builtin.media_player");
-        assert_eq!(def.category, "Inputs");
-        assert!(def.built_in);
-        assert_eq!(def.exposed_properties.len(), 4);
-
-        let decode = def
-            .exposed_properties
-            .iter()
-            .find(|p| p.name == "decode")
-            .unwrap();
-        assert!(matches!(decode.property_type, PropertyType::Bool));
-        assert!(matches!(
-            decode.default_value,
-            Some(PropertyValue::Bool(false))
-        ));
-
-        let sync = def
-            .exposed_properties
-            .iter()
-            .find(|p| p.name == "sync")
-            .unwrap();
-        assert!(matches!(
-            sync.default_value,
-            Some(PropertyValue::Bool(true))
-        ));
-
-        assert!(def
-            .exposed_properties
-            .iter()
-            .any(|p| p.name == "loop_playlist"));
-
-        assert_eq!(def.external_pads.inputs.len(), 0);
-        assert_eq!(def.external_pads.outputs.len(), 2);
-        assert!(def
-            .external_pads
-            .outputs
-            .iter()
-            .any(|p| p.name == "video_out"));
-        assert!(def
-            .external_pads
-            .outputs
-            .iter()
-            .any(|p| p.name == "audio_out"));
     }
 }

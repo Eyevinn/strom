@@ -10,6 +10,7 @@
 //!   Each session is assigned to a numbered slot with independent output chains
 //!   (appsrc → decodebin → convert → tee per slot).
 
+use super::whep::{parse_do_retransmission, parse_drop_on_latency};
 use crate::blocks::{
     set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder,
     APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
@@ -228,32 +229,6 @@ fn parse_jitterbuffer_latency_ms(properties: &HashMap<String, PropertyValue>) ->
             _ => None,
         })
         .unwrap_or(400)
-}
-
-/// Parse do_retransmission from properties (default: true).
-fn parse_do_retransmission(properties: &HashMap<String, PropertyValue>) -> bool {
-    properties
-        .get("do_retransmission")
-        .and_then(|v| match v {
-            PropertyValue::Bool(b) => Some(*b),
-            _ => None,
-        })
-        .unwrap_or(true)
-}
-
-/// Parse drop_on_latency from properties (default: true).
-///
-/// True works around a GStreamer rtpjitterbuffer bug (see the comment in
-/// `whep.rs` `build_whepsrc` iterate_recurse). False keeps late packets for a
-/// downstream WebRTC endpoint that buffers adaptively, and reinstates the stall.
-fn parse_drop_on_latency(properties: &HashMap<String, PropertyValue>) -> bool {
-    properties
-        .get("drop_on_latency")
-        .and_then(|v| match v {
-            PropertyValue::Bool(b) => Some(*b),
-            _ => None,
-        })
-        .unwrap_or(true)
 }
 
 /// Keep a slot with no publisher from holding the pipeline out of PLAYING.
@@ -2141,40 +2116,6 @@ mod tests {
             )])),
             0
         );
-    }
-
-    #[test]
-    fn do_retransmission_defaults_to_true() {
-        assert!(parse_do_retransmission(&props(&[])));
-    }
-
-    #[test]
-    fn do_retransmission_respects_explicit_true() {
-        assert!(parse_do_retransmission(&props(&[(
-            "do_retransmission",
-            PropertyValue::Bool(true)
-        )])));
-    }
-
-    #[test]
-    fn drop_on_latency_defaults_to_true() {
-        assert!(parse_drop_on_latency(&props(&[])));
-    }
-
-    #[test]
-    fn drop_on_latency_respects_explicit_false() {
-        assert!(!parse_drop_on_latency(&props(&[(
-            "drop_on_latency",
-            PropertyValue::Bool(false)
-        )])));
-    }
-
-    #[test]
-    fn do_retransmission_respects_explicit_false() {
-        assert!(!parse_do_retransmission(&props(&[(
-            "do_retransmission",
-            PropertyValue::Bool(false)
-        )])));
     }
 
     /// The inactivity watchdog must stop as soon as a teardown path sets the
