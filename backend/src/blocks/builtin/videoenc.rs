@@ -555,6 +555,11 @@ fn set_encoder_properties(
         };
         if let Some(rc_property) = rc_property {
             set_encoder_property(encoder, rc_property, rc_nick)?;
+        } else {
+            warn!(
+                "{} has neither rate-control nor rc-mode; rate_control={} is not applied",
+                encoder_name, rc_nick
+            );
         }
 
         // NVENC defaults leave VBR excursions unconstrained: max-bitrate is
