@@ -590,6 +590,20 @@ jobs:
 
       - name: Run tests
         run: |
+          # Git Bash puts its own /mingw64/bin first in PATH, and that holds a
+          # different OpenSSL under the same DLL names GStreamer's plugins link
+          # against. A test binary resolves a plugin's dependencies through
+          # PATH, so gstsrt.dll picked up Git's libcrypto and failed with "The
+          # specified procedure could not be found" (gst-inspect-1.0 does not
+          # show it: Windows searches the program's own directory first).
+          gst_bin=/d/gstreamer/1.0/msvc_x86_64/bin
+          while IFS= read -r dir; do
+            if [ "$dir" = "$gst_bin" ]; then break; fi
+            for dll in "$gst_bin"/*.dll; do
+              if [ -e "$dir/${dll##*/}" ]; then echo "shadows GStreamer: $dir/${dll##*/}"; fi
+            done
+          done < <(echo "$PATH" | tr ':' '\n')
+          export PATH="$gst_bin:$PATH"
           cargo test --package strom --features nvidia
           cargo test --package strom-types
         env:
