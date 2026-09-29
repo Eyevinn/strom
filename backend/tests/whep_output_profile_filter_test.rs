@@ -145,15 +145,17 @@ fn post_offer(port: u16) -> String {
 struct Viewer {
     /// Buffers the viewer's payloader pushed.
     payloaded: usize,
-    /// The level the encoder produced, from the parsed stream's caps.
+    /// The level the viewer's payloader was given.
     level: Option<String>,
     /// Anything that went wrong along the way.
     problems: Vec<String>,
 }
 
-/// Build the WHEP Output block with one video track, feed it `profile` H.264
-/// at `width`x`height` and `fps`, and connect one video-only viewer.
-fn viewer_payloaded_buffers(profile: &str, width: i32, height: i32, fps: i32) -> Viewer {
+/// Build the WHEP Output block with one video track, feed it `width`x`height`
+/// video at `fps`, and connect one video-only viewer. With `profile`, the
+/// video arrives as H.264 of that profile; without, it arrives raw and the
+/// block encodes it.
+fn viewer_payloaded_buffers(profile: Option<&str>, width: i32, height: i32, fps: i32) -> Viewer {
     let mut props: HashMap<String, PropertyValue> = HashMap::new();
     props.insert("num_audio_tracks".to_string(), PropertyValue::Int(0));
     props.insert("num_video_tracks".to_string(), PropertyValue::Int(1));
@@ -200,31 +202,32 @@ fn viewer_payloaded_buffers(profile: &str, width: i32, height: i32, fps: i32) ->
         )
         .build()
         .expect("capsfilter");
-    let enc = gst::ElementFactory::make("x264enc")
-        // No speed preset: `ultrafast` turns off the High profile tools and
-        // x264 then labels the stream Constrained Baseline.
-        .property_from_str("tune", "zerolatency")
-        .property("key-int-max", 15u32)
-        .build()
-        .expect("x264enc");
-    let encoded = gst::ElementFactory::make("capsfilter")
-        .property(
-            "caps",
-            gst::Caps::builder("video/x-h264")
-                .field("profile", profile)
-                .build(),
-        )
-        .build()
-        .expect("capsfilter");
-    let parse = gst::ElementFactory::make("h264parse")
-        .build()
-        .expect("h264parse");
-    pipeline
-        .add_many([&src, &raw, &enc, &encoded, &parse])
-        .expect("add source");
-    let block_input = &by_id[&format!("{}:video_queue", INSTANCE)];
-    gst::Element::link_many([&src, &raw, &enc, &encoded, &parse, block_input])
-        .expect("link source to block");
+    let mut chain = vec![src, raw];
+    if let Some(profile) = profile {
+        let enc = gst::ElementFactory::make("x264enc")
+            // No speed preset: `ultrafast` turns off the High profile tools and
+            // x264 then labels the stream Constrained Baseline.
+            .property_from_str("tune", "zerolatency")
+            .property("key-int-max", 15u32)
+            .build()
+            .expect("x264enc");
+        let encoded = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("video/x-h264")
+                    .field("profile", profile)
+                    .build(),
+            )
+            .build()
+            .expect("capsfilter");
+        let parse = gst::ElementFactory::make("h264parse")
+            .build()
+            .expect("h264parse");
+        chain.extend([enc, encoded, parse]);
+    }
+    pipeline.add_many(&chain).expect("add source");
+    chain.push(by_id[&format!("{}:video_queue", INSTANCE)].clone());
+    gst::Element::link_many(&chain).expect("link source to block");
 
     let flow_id = strom_types::flow::FlowId::new_v4();
     let events = EventBroadcaster::with_capacity(16);
@@ -240,14 +243,17 @@ fn viewer_payloaded_buffers(profile: &str, width: i32, height: i32, fps: i32) ->
     // Count what the viewer's payloader emits. A buffer out of the payloader
     // means the chain in front of it negotiated.
     let payloaded = Arc::new(AtomicUsize::new(0));
+    let payloaders = Arc::new(Mutex::new(Vec::<gst::glib::WeakRef<gst::Element>>::new()));
     let problems = Arc::new(Mutex::new(Vec::<String>::new()));
     let sink = &by_id[&format!("{}:whepserversink", INSTANCE)];
     {
         let payloaded = payloaded.clone();
+        let payloaders = payloaders.clone();
         sink.connect("payloader-setup", false, move |values| {
             let consumer_id = values[1].get::<String>().unwrap_or_default();
             let payloader = values[3].get::<gst::Element>().expect("payloader");
             if consumer_id != "discovery" {
+                payloaders.lock().unwrap().push(payloader.downgrade());
                 let payloaded = payloaded.clone();
                 payloader
                     .static_pad("src")
@@ -303,8 +309,12 @@ fn viewer_payloaded_buffers(profile: &str, width: i32, height: i32, fps: i32) ->
         }
     }
 
-    let level = parse
-        .static_pad("src")
+    let level = payloaders
+        .lock()
+        .unwrap()
+        .first()
+        .and_then(|payloader| payloader.upgrade())
+        .and_then(|payloader| payloader.static_pad("sink"))
         .and_then(|pad| pad.current_caps())
         .and_then(|caps| {
             caps.structure(0)
@@ -324,7 +334,7 @@ fn baseline_offer_gets_high_profile_video() {
     if !plugins_available() {
         return;
     }
-    let viewer = viewer_payloaded_buffers("high", 320, 240, 30);
+    let viewer = viewer_payloaded_buffers(Some("high"), 320, 240, 30);
     assert!(
         viewer.payloaded > 0,
         "a viewer offering H.264 Baseline got no High profile video \
@@ -341,7 +351,7 @@ fn level_3_1_offer_gets_720p60_video() {
     if !plugins_available() {
         return;
     }
-    let viewer = viewer_payloaded_buffers("high", 1280, 720, 60);
+    let viewer = viewer_payloaded_buffers(Some("high"), 1280, 720, 60);
     assert_eq!(
         viewer.level.as_deref(),
         Some("3.2"),
@@ -354,6 +364,30 @@ fn level_3_1_offer_gets_720p60_video() {
         "a viewer offering H.264 level 3.1 got no level 3.2 video \
          (payloaded {} buffers; {:?})",
         viewer.payloaded,
+        viewer.problems
+    );
+}
+
+/// Raw input is encoded inside the block, and the encoder reads the same
+/// level list: without the strip, x264enc refuses 1080p ("Frame size larger
+/// than level 31 allows") and the viewer gets nothing.
+#[test]
+fn level_3_1_offer_gets_1080p_video_encoded_by_the_block() {
+    if !plugins_available() {
+        return;
+    }
+    let viewer = viewer_payloaded_buffers(None, 1920, 1080, 30);
+    assert!(
+        viewer.payloaded > 0,
+        "a viewer offering H.264 level 3.1 got no 1080p video from the \
+         block's encoder (payloaded {} buffers; {:?})",
+        viewer.payloaded,
+        viewer.problems
+    );
+    assert_eq!(
+        viewer.level.as_deref(),
+        Some("4"),
+        "the block's encoder should produce level 4 for 1080p30 ({:?})",
         viewer.problems
     );
 }
