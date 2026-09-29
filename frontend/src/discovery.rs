@@ -1,76 +1,12 @@
 //! Discovery page for browsing SAP/mDNS/AES67 streams and NDI sources.
 
 use egui::{Color32, Context, Ui};
-use serde::{Deserialize, Serialize};
+use strom_types::discovery::{AnnouncedStreamResponse, DeviceResponse, DiscoveredStreamResponse};
 
 use crate::list_navigator::{list_navigator, ListItem};
 
-/// Response from the discovery API for a discovered stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiscoveredStream {
-    pub id: String,
-    pub name: String,
-    pub source: String,
-    pub multicast_address: String,
-    pub port: u16,
-    pub channels: u8,
-    pub sample_rate: u32,
-    pub encoding: String,
-    pub origin_host: String,
-    pub first_seen_secs_ago: u64,
-    pub last_seen_secs_ago: u64,
-    pub ttl_secs: u64,
-    /// Network interface the stream was discovered on (for SAP).
-    #[serde(default)]
-    pub received_on_interface: Option<String>,
-}
-
-/// Response from the discovery API for an announced stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnnouncedStream {
-    pub flow_id: String,
-    pub block_id: String,
-    pub origin_ip: String,
-    pub sdp: String,
-    /// Network interface the stream is announced on (None = all interfaces).
-    #[serde(default)]
-    pub announce_interface: Option<String>,
-}
-
-/// Response from the device discovery API for a discovered device.
-/// Used for NDI sources and other devices (audio, video, etc.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiscoveredDevice {
-    pub id: String,
-    /// Display name of the device.
-    pub name: String,
-    /// Device class (e.g., "Audio/Source", "Video/Source", "Source/Network").
-    pub device_class: String,
-    /// Device category.
-    pub category: String,
-    /// Provider that discovered this device (e.g., "pulsedeviceprovider", "ndideviceprovider").
-    pub provider: String,
-    /// Additional properties from the device.
-    #[serde(default)]
-    pub properties: std::collections::HashMap<String, String>,
-    pub first_seen_secs_ago: u64,
-    pub last_seen_secs_ago: u64,
-}
-
-impl DiscoveredDevice {
-    /// Get IP address from properties (for NDI devices).
-    pub fn ip_address(&self) -> Option<&str> {
-        self.properties.get("ip").map(|s| s.as_str())
-    }
-
-    /// Get URL address from properties (for NDI devices).
-    pub fn url_address(&self) -> Option<&str> {
-        self.properties.get("url-address").map(|s| s.as_str())
-    }
-}
-
 /// Alias for backward compatibility.
-pub type NdiSource = DiscoveredDevice;
+pub type NdiSource = DeviceResponse;
 
 /// Type of selected stream
 #[derive(Debug, Clone, PartialEq)]
@@ -95,9 +31,9 @@ pub enum StreamTab {
 /// Discovery page state.
 pub struct DiscoveryPage {
     /// Discovered streams from SAP/mDNS
-    pub discovered_streams: Vec<DiscoveredStream>,
+    pub discovered_streams: Vec<DiscoveredStreamResponse>,
     /// Streams we're announcing
-    pub announced_streams: Vec<AnnouncedStream>,
+    pub announced_streams: Vec<AnnouncedStreamResponse>,
     /// Discovered NDI sources
     pub ndi_sources: Vec<NdiSource>,
     /// Whether NDI discovery is available
@@ -238,7 +174,7 @@ impl DiscoveryPage {
             .collect();
 
         // Helper to check if a stream is our own
-        let is_own_stream = |stream: &DiscoveredStream| -> bool {
+        let is_own_stream = |stream: &DiscoveredStreamResponse| -> bool {
             own_multicast_addrs.contains(&stream.multicast_address)
                 || own_origin_ips.contains(&stream.origin_host)
         };
@@ -804,14 +740,14 @@ impl DiscoveryPage {
     }
 
     /// Update discovered streams (called from message handler).
-    pub fn set_discovered_streams(&mut self, streams: Vec<DiscoveredStream>) {
+    pub fn set_discovered_streams(&mut self, streams: Vec<DiscoveredStreamResponse>) {
         self.discovered_streams = streams;
         self.loading = false;
         self.error = None;
     }
 
     /// Update announced streams (called from message handler).
-    pub fn set_announced_streams(&mut self, streams: Vec<AnnouncedStream>) {
+    pub fn set_announced_streams(&mut self, streams: Vec<AnnouncedStreamResponse>) {
         self.announced_streams = streams;
     }
 

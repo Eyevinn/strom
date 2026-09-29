@@ -119,9 +119,9 @@ pub enum AppMessage {
     AvailableChannelsLoaded(Vec<strom_types::api::AvailableOutput>),
 
     /// Discovered streams loaded from API
-    DiscoveredStreamsLoaded(Vec<crate::discovery::DiscoveredStream>),
+    DiscoveredStreamsLoaded(Vec<strom_types::discovery::DiscoveredStreamResponse>),
     /// Announced streams loaded from API
-    AnnouncedStreamsLoaded(Vec<crate::discovery::AnnouncedStream>),
+    AnnouncedStreamsLoaded(Vec<strom_types::discovery::AnnouncedStreamResponse>),
     /// NDI sources loaded from API
     NdiSourcesLoaded {
         available: bool,

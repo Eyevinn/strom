@@ -32,7 +32,7 @@ pub struct DiscoveredStreamResponse {
 }
 
 /// Response for announced streams list.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct AnnouncedStreamResponse {
     pub flow_id: String,
@@ -112,6 +112,16 @@ pub struct DeviceResponse {
 }
 
 impl DeviceResponse {
+    /// IP address property, set by the NDI device provider.
+    pub fn ip_address(&self) -> Option<&str> {
+        self.properties.get("ip").map(|s| s.as_str())
+    }
+
+    /// URL address property, set by the NDI device provider.
+    pub fn url_address(&self) -> Option<&str> {
+        self.properties.get("url-address").map(|s| s.as_str())
+    }
+
     /// Human-readable name of the OS media API exposing this device
     /// (e.g. "WASAPI", "PulseAudio", "V4L2").
     ///
@@ -184,7 +194,7 @@ pub struct DeviceCountByCategory {
 }
 
 /// NDI discovery status response.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 pub struct NdiDiscoveryStatus {
     /// Whether NDI discovery is available (plugin installed).

@@ -1,4 +1,6 @@
-use serde::Serialize;
+use strom_types::mediaplayer::{
+    PlayerAction, PlayerControlRequest, SeekRequest, SetPlaylistRequest,
+};
 use strom_types::FlowId;
 
 use super::*;
@@ -23,11 +25,6 @@ impl ApiClient {
             files.len()
         );
 
-        #[derive(Serialize)]
-        struct SetPlaylistRequest {
-            files: Vec<String>,
-        }
-
         let response = self
             .with_auth(self.client.post(&url))
             .json(&SetPlaylistRequest { files })
@@ -49,12 +46,12 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Control a media player block (play, pause, next, prev).
+    /// Control a media player block.
     pub async fn control_player(
         &self,
         flow_id: FlowId,
         block_id: &str,
-        action: &str,
+        action: PlayerAction,
     ) -> ApiResult<()> {
         use tracing::info;
 
@@ -62,17 +59,12 @@ impl ApiClient {
             "{}/flows/{}/blocks/{}/player/control",
             self.base_url, flow_id, block_id
         );
-        info!("Controlling player {}: {}", block_id, action);
-
-        #[derive(Serialize)]
-        struct ControlRequest {
-            action: String,
-        }
+        info!("Controlling player {}: {:?}", block_id, action);
 
         let response = self
             .with_auth(self.client.post(&url))
-            .json(&ControlRequest {
-                action: action.to_string(),
+            .json(&PlayerControlRequest {
+                action: action.clone(),
             })
             .send()
             .await
@@ -88,7 +80,7 @@ impl ApiClient {
             return Err(ApiError::Http(status, text));
         }
 
-        info!("Successfully sent {} to player {}", action, block_id);
+        info!("Successfully sent {:?} to player {}", action, block_id);
         Ok(())
     }
 
@@ -142,11 +134,6 @@ impl ApiClient {
             self.base_url, flow_id, block_id
         );
         info!("Seeking player {} to {} ns", block_id, position_ns);
-
-        #[derive(Serialize)]
-        struct SeekRequest {
-            position_ns: u64,
-        }
 
         let response = self
             .with_auth(self.client.post(&url))
