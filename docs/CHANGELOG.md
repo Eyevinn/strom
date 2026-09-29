@@ -2,6 +2,41 @@
 
 All notable changes to the Strom GStreamer Flow Engine project.
 
+## [0.6.11] - 2026-09-29
+
+### Added
+- Ports: a port pool — reserve port numbers from a Strom-administered set (#852, #890)
+- Logging: optional structured event logging and a JSON stdout format (#789)
+- GStreamer: give pipeline threads a macOS QoS class so they run on P cores (#723)
+- Live Audio Router: output bus headroom and a ceiling (#795)
+- Stats: WHIP Input jitterbuffer stats per seat (#793)
+- Frontend: show RTP statistics for any block that reports them (#857)
+- Clocks: point to the chrony setup script when the clock is poorly disciplined (#888)
+
+### Changed
+- Outputs: fail the flow with the block's reason when it refuses an input (#869)
+- RTMP Output: refuse H.264 in a profile RTMP receivers reject (#871)
+- Video Encoder: default to the codec's 8-bit 4:2:0 profile (#850)
+
+### Fixed
+- MPEG-TS/SRT Input: relink an output when the demuxer replaces its pad (#877)
+- Pipeline: bound the `set_state(NULL)` join in stop and drop (#874)
+- Properties: read enum properties on elements and pads as their nick (#875)
+- Live Audio Router: show the bus its consumer's format before input (#881)
+- Vision Mixer: reject a PiP zone whose sources exceed its capacity (#808)
+
+### CI
+- Windows: put GStreamer's DLLs ahead of Git's in the test PATH (#892)
+- Stop Static JS Tests re-running on every label event (#858)
+- Dependencies: security updates only from Dependabot, monthly otherwise; group cargo patch bumps, excluding GStreamer; drop the unused tower-http `fs` feature (#859, #860, #866, #891)
+- Tests: stabilise the mach port, `run_with_deadline` and live audio router tests (#870, #873, #878)
+
+### Documentation
+- The output block input convention (#867)
+- How quiet draft PRs are handled (#872)
+
+---
+
 ## [0.6.10] - 2026-09-22
 
 ### Added

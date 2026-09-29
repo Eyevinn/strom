@@ -6618,7 +6618,7 @@ dependencies = [
 
 [[package]]
 name = "strom"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6697,7 +6697,7 @@ dependencies = [
 
 [[package]]
 name = "strom-frontend"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6733,7 +6733,7 @@ dependencies = [
 
 [[package]]
 name = "strom-types"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "garde",
  "serde",
