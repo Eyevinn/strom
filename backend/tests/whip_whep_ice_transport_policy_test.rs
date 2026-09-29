@@ -21,6 +21,8 @@
 //! child webrtcbin from a `deep-element-added` handler that needs a negotiated
 //! session to observe.
 
+pub mod common;
+
 use std::collections::HashMap;
 
 use strom::blocks::builtin::{get_builder, whip::build_whipserversrc};
@@ -38,41 +40,6 @@ const REQUIRED: &[&str] = &[
     "capsfilter",
     "tee",
 ];
-
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    init_gst();
-
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gstreamer::ElementFactory::find(e).is_none())
-        .collect();
-
-    if missing.is_empty() {
-        return true;
-    }
-
-    if std::env::var("STROM_REQUIRE_GST_PLUGINS").is_ok() {
-        panic!("required GStreamer elements missing: {:?}", missing);
-    }
-
-    eprintln!("SKIP: required GStreamer elements missing: {:?}", missing);
-    false
-}
-
-/// The WHIP/WHEP elements come from `gst-plugins-rs`, which is linked into the
-/// binary and registered at startup. A test binary has to register it itself.
-fn init_gst() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        gstreamer::init().expect("gst init");
-        gstwebrtchttp::plugin_register_static().expect("register webrtchttp plugins");
-        gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
-    });
-}
 
 fn props(policy: Option<&str>) -> HashMap<String, PropertyValue> {
     let mut props: HashMap<String, PropertyValue> = HashMap::new();
@@ -109,7 +76,7 @@ fn registered_policy(server_policy: &str, block_policy: Option<&str>) -> String 
 
 #[test]
 fn block_property_forces_relay_on_a_server_that_allows_all_candidates() {
-    if !plugins_available() {
+    if !webrtc_elements_available(REQUIRED) {
         return;
     }
     assert_eq!(registered_policy("all", Some("relay")), "relay");
@@ -117,7 +84,7 @@ fn block_property_forces_relay_on_a_server_that_allows_all_candidates() {
 
 #[test]
 fn unset_block_property_inherits_the_server_policy() {
-    if !plugins_available() {
+    if !webrtc_elements_available(REQUIRED) {
         return;
     }
     assert_eq!(registered_policy("all", None), "all");
@@ -126,7 +93,7 @@ fn unset_block_property_inherits_the_server_policy() {
 
 #[test]
 fn block_property_can_widen_a_relay_only_server() {
-    if !plugins_available() {
+    if !webrtc_elements_available(REQUIRED) {
         return;
     }
     assert_eq!(registered_policy("relay", Some("all")), "all");
@@ -137,7 +104,7 @@ fn block_property_can_widen_a_relay_only_server() {
 /// string is possible.
 #[test]
 fn unknown_block_property_falls_back_to_the_server_policy() {
-    if !plugins_available() {
+    if !webrtc_elements_available(REQUIRED) {
         return;
     }
     assert_eq!(registered_policy("all", Some("turn-only")), "all");
@@ -152,25 +119,10 @@ fn unknown_block_property_falls_back_to_the_server_policy() {
 /// Without `gst-plugins-rs` these blocks refuse to build at all.
 const WEBRTC_ELEMENTS: &[&str] = &["whipsink", "whipclientsink", "whepsrc", "whepserversink"];
 
-fn webrtc_elements_available() -> bool {
-    init_gst();
-
-    let missing: Vec<&str> = WEBRTC_ELEMENTS
-        .iter()
-        .copied()
-        .filter(|e| gstreamer::ElementFactory::find(e).is_none())
-        .collect();
-
-    if missing.is_empty() {
-        return true;
-    }
-
-    if std::env::var("STROM_REQUIRE_GST_PLUGINS").is_ok() {
-        panic!("required GStreamer elements missing: {:?}", missing);
-    }
-
-    eprintln!("SKIP: required GStreamer elements missing: {:?}", missing);
-    false
+/// Register the `gst-plugins-rs` elements, then check `required`.
+fn webrtc_elements_available(required: &[&str]) -> bool {
+    common::init_webrtc_plugins();
+    common::plugins_available(required)
 }
 
 /// Build `block_id` with the given properties and read the ICE transport policy
@@ -231,7 +183,7 @@ fn impl_props(implementation: &str, policy: Option<&str>) -> HashMap<String, Pro
 
 #[test]
 fn whip_output_whipsink_carries_the_block_policy() {
-    if !webrtc_elements_available() {
+    if !webrtc_elements_available(WEBRTC_ELEMENTS) {
         return;
     }
     assert_eq!(
@@ -256,7 +208,7 @@ fn whip_output_whipsink_carries_the_block_policy() {
 
 #[test]
 fn whip_output_whipclientsink_carries_the_block_policy() {
-    if !webrtc_elements_available() {
+    if !webrtc_elements_available(WEBRTC_ELEMENTS) {
         return;
     }
     assert_eq!(
@@ -281,7 +233,7 @@ fn whip_output_whipclientsink_carries_the_block_policy() {
 
 #[test]
 fn whep_input_whepsrc_carries_the_block_policy() {
-    if !webrtc_elements_available() {
+    if !webrtc_elements_available(WEBRTC_ELEMENTS) {
         return;
     }
     assert_eq!(
@@ -306,7 +258,7 @@ fn whep_input_whepsrc_carries_the_block_policy() {
 
 #[test]
 fn whep_output_carries_the_block_policy() {
-    if !webrtc_elements_available() {
+    if !webrtc_elements_available(WEBRTC_ELEMENTS) {
         return;
     }
     assert_eq!(
@@ -332,7 +284,7 @@ fn whep_output_carries_the_block_policy() {
 /// A relay-only server with no block override must still reach the element.
 #[test]
 fn server_policy_reaches_the_element_when_the_block_does_not_override_it() {
-    if !webrtc_elements_available() {
+    if !webrtc_elements_available(WEBRTC_ELEMENTS) {
         return;
     }
     assert_eq!(

@@ -8,6 +8,8 @@
 //! the other that a slot claimed by a session still decodes. Either alone could
 //! be satisfied by a change that breaks the other.
 
+pub mod common;
+
 use std::collections::HashMap;
 use strom::blocks::builtin::whip::WHIPInputBuilder;
 use strom::blocks::{BlockBuildContext, BlockBuilder};
@@ -35,25 +37,6 @@ const REQUIRED: &[&str] = &[
     "nicesrc",
     "nicesink",
 ];
-
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    false
-}
 
 /// Resolve one side of a block's declared internal link to a pad.
 fn resolve_pad(
@@ -159,7 +142,7 @@ fn stuck_decodebins(by_id: &HashMap<String, gst::Element>) -> Vec<String> {
 #[test]
 fn idle_whip_slots_do_not_block_playing() {
     gst::init().expect("gstreamer init");
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements missing");
         return;
     }
@@ -191,7 +174,7 @@ fn idle_whip_slots_do_not_block_playing() {
 #[test]
 fn allocated_slot_decodes_incoming_media() {
     gst::init().expect("gstreamer init");
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements missing");
         return;
     }
@@ -305,7 +288,7 @@ fn allocated_slot_decodes_incoming_media() {
 #[test]
 fn allocated_slot_without_media_does_not_stall_a_running_pipeline() {
     gst::init().expect("gstreamer init");
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements missing");
         return;
     }

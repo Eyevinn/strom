@@ -11,6 +11,8 @@
 //! setter is taken back out. A panic inside `build()` fails the test the same
 //! way an unexpected `Ok` does.
 
+pub mod common;
+
 use std::collections::HashMap;
 use strom::blocks::builtin::videoenc::VideoEncBuilder;
 use strom::blocks::{BlockBuildContext, BlockBuilder};
@@ -21,28 +23,15 @@ use gstreamer as gst;
 /// Elements the H.264 path of the encoder block builds. Missing on a bare image.
 const REQUIRED: &[&str] = &["x264enc", "h264parse", "videoconvert", "capsfilter"];
 
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
+/// Initialises what the encoder builder needs, then see
+/// `common::plugins_available`.
 fn plugins_available() -> bool {
     gst::init().expect("GStreamer initialises");
     // `VideoEncBuilder::build` reads the process-global video convert mode, which
     // panics until this has run — without it every test here dies before it ever
     // reaches a bitrate.
     strom::gpu::detect_gpu_capabilities();
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    false
+    common::plugins_available(REQUIRED)
 }
 
 /// Build a Video Encoder block with `bitrate` as the client sent it.

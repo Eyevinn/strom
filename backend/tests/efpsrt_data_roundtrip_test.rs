@@ -10,8 +10,12 @@
 //! It also pins the two things a caller has to get right and cannot discover
 //! from the block's shape: embedded data is addressed to a *media* stream by
 //! `stream-id`, and it only leaves the muxer on a frame of that stream.
+//!
+//! `block_shape` covers what a flow sees of the channel without running it.
 
 #![cfg(feature = "efp")]
+
+pub mod common;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,25 +60,6 @@ const PAYLOAD: &[u8] = b"c2pa-manifest-bytes";
 fn init() {
     let _ = gst::init();
     let _ = gst_plugin_efp::plugin_register_static();
-}
-
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    false
 }
 
 fn srt_port() -> u16 {
@@ -159,7 +144,7 @@ fn drain_errors(pipeline: &gst::Pipeline, label: &str) {
 #[test]
 fn embedded_data_survives_the_trip_between_the_blocks() {
     init();
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements are missing");
         return;
     }
@@ -359,7 +344,7 @@ fn embedded_data_survives_the_trip_between_the_blocks() {
 #[test]
 fn data_stream_ids_pins_each_track_to_its_sender_stream() {
     init();
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements are missing");
         return;
     }
@@ -529,4 +514,155 @@ fn data_stream_ids_pins_each_track_to_its_sender_stream() {
         vec![(0usize, 2i32), (1usize, 1i32)],
         "data_stream_ids=\"2,1\" must put stream 2 on data_out_0 and stream 1 on data_out_1"
     );
+}
+
+/// The shape of the embedded-data channel as a flow sees it (#691): external
+/// pads on both blocks, and the input block's validation of `data_stream_ids`.
+/// The tests above prove bytes cross; these pin what they cannot see.
+mod block_shape {
+    use super::*;
+    use strom_types::MediaType;
+
+    fn context() -> BlockBuildContext {
+        BlockBuildContext::new(Vec::new(), "all".to_string())
+    }
+
+    fn properties(pairs: &[(&str, u64)]) -> HashMap<String, PropertyValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), PropertyValue::UInt(*v)))
+            .collect()
+    }
+
+    #[test]
+    fn output_block_exposes_a_data_input_per_data_track() {
+        init();
+
+        let props = properties(&[("num_data_tracks", 2)]);
+        let pads = EfpSrtOutputBuilder
+            .get_external_pads(&props)
+            .expect("efpsrt_output should report external pads");
+
+        for i in 0..2 {
+            let name = format!("data_in_{}", i);
+            let pad = pads
+                .inputs
+                .iter()
+                .find(|pad| pad.name == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected external input pad '{}', got {:?}",
+                        name,
+                        pads.inputs.iter().map(|p| &p.name).collect::<Vec<_>>()
+                    )
+                });
+
+            assert_eq!(
+                pad.media_type,
+                MediaType::Generic,
+                "embedded-data pads carry neither audio nor video"
+            );
+            assert_eq!(pad.internal_element_id, format!("data_input_{}", i));
+            assert_eq!(pad.internal_pad_name, "sink");
+        }
+    }
+
+    /// Every data output the block builds is on the flow graph, addressed to the
+    /// element that carries it. More than one: gst-plugin-efp v0.4.0 gives each EFP
+    /// stream its own `embedded_<stream-id>` src pad, and until then this block
+    /// rejected anything above one.
+    #[test]
+    fn input_block_exposes_a_data_output_per_data_track() {
+        init();
+
+        let props = properties(&[("num_data_tracks", 3)]);
+        let pads = EfpSrtInputBuilder
+            .get_external_pads(&props)
+            .expect("efpsrt_input should report external pads");
+
+        let data_pads: Vec<_> = pads
+            .outputs
+            .iter()
+            .filter(|pad| pad.name.starts_with("data_out_"))
+            .collect();
+        assert_eq!(
+            data_pads
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["data_out_0", "data_out_1", "data_out_2"],
+            "the flow graph must show every data output the block builds"
+        );
+        for (i, pad) in data_pads.iter().enumerate() {
+            assert_eq!(pad.media_type, MediaType::Generic);
+            assert_eq!(pad.internal_element_id, format!("data_output_{}", i));
+            assert_eq!(pad.internal_pad_name, "src");
+        }
+    }
+
+    /// Guards the `usize::try_from` conversion. Read with `as usize`, a negative
+    /// `Int` becomes `usize::MAX` and drives the pad loops, so this asserts the
+    /// value is discarded and the default applies instead.
+    #[test]
+    fn a_negative_track_count_falls_back_to_the_default() {
+        init();
+
+        for name in ["num_video_tracks", "num_audio_tracks", "num_data_tracks"] {
+            let props: HashMap<String, PropertyValue> =
+                [(name.to_string(), PropertyValue::Int(-1))].into();
+
+            assert_eq!(
+                strom::blocks::builtin::efpsrt::track_count(&props, name),
+                None,
+                "a negative {} must be discarded, not wrapped to usize::MAX",
+                name
+            );
+        }
+    }
+
+    /// Build the input block with `data_stream_ids` set, returning the error text.
+    fn data_stream_ids_error(num_data_tracks: u64, ids: &str) -> String {
+        let mut props = properties(&[
+            ("num_video_tracks", 0),
+            ("num_audio_tracks", 0),
+            ("num_data_tracks", num_data_tracks),
+        ]);
+        props.insert(
+            "data_stream_ids".to_string(),
+            PropertyValue::String(ids.to_string()),
+        );
+        // `BlockBuildResult` is not `Debug`, so unwrap the error by hand.
+        match EfpSrtInputBuilder.build("blk", &props, &context()) {
+            Ok(_) => panic!("data_stream_ids '{}' should not build", ids),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// A misconfigured routing list fails at build rather than quietly leaving a
+    /// track fed by whatever arrives first, which is the surprise the property
+    /// exists to remove.
+    #[test]
+    fn input_block_rejects_a_bad_data_stream_ids_list() {
+        init();
+        common::require_elements(&["efpdemux", "srtsrc", "identity"]);
+
+        for (ids, tracks, expected) in [
+            ("1", 2u64, "num_data_tracks"),
+            ("1,2,3", 2, "num_data_tracks"),
+            ("0", 1, "reserved"),
+            ("1,1", 2, "twice"),
+            ("audio", 1, "not an EFP stream ID"),
+            ("300", 1, "not an EFP stream ID"),
+        ] {
+            let message = data_stream_ids_error(tracks, ids);
+            assert!(
+                message.contains(expected),
+                "'{}' with {} track(s) should mention '{}', got: {}",
+                ids,
+                tracks,
+                expected,
+                message
+            );
+        }
+    }
 }

@@ -15,6 +15,8 @@
 //! of the pipeline for reasons explained there. TAMS Output is not covered: its
 //! builder needs a TAMS server to register the flow with.
 
+pub mod common;
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use strom::blocks::builtin::mpegtssrt::MpegTsSrtOutputBuilder;
@@ -40,30 +42,6 @@ const REQUIRED: &[&str] = &[
 
 /// The name every test source gets, so its errors can be told from the block's.
 const TEST_SOURCE: &str = "test_source";
-
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    gst::init().expect("gst init");
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    eprintln!(
-        "skipping: missing GStreamer elements: {}",
-        missing.join(", ")
-    );
-    false
-}
 
 fn srt_port() -> u16 {
     std::net::UdpSocket::bind("127.0.0.1:0")
@@ -260,7 +238,7 @@ fn scratch_dir(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn mpegtssrt_output_refuses_raw_video_by_failing_the_flow() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let errors = errors_after_feeding(
@@ -275,7 +253,7 @@ fn mpegtssrt_output_refuses_raw_video_by_failing_the_flow() {
 
 #[test]
 fn recorder_refuses_raw_video_by_failing_the_flow() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let dir = scratch_dir("video");
@@ -292,7 +270,7 @@ fn recorder_refuses_raw_video_by_failing_the_flow() {
 
 #[test]
 fn recorder_refuses_raw_audio_by_failing_the_flow() {
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     let dir = scratch_dir("audio");
@@ -311,7 +289,7 @@ fn recorder_refuses_raw_audio_by_failing_the_flow() {
 #[test]
 fn efpsrt_output_refuses_raw_video_by_failing_the_flow() {
     use strom::blocks::builtin::efpsrt::EfpSrtOutputBuilder;
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         return;
     }
     // efpmux is a Rust plugin linked into Strom, not installed system-wide, so

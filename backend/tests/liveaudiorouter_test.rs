@@ -4,6 +4,8 @@
 //! the same property set and pad shape as `builtin.audiorouter`, and differ only
 //! in being able to change its crosspoints on a running flow.
 
+pub mod common;
+
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::prelude::*;
@@ -218,19 +220,6 @@ const REQUIRED_ELEMENTS: &[&str] = &[
     "fakesink",
 ];
 
-fn require_elements() {
-    gst::init().unwrap();
-    let missing: Vec<&str> = REQUIRED_ELEMENTS
-        .iter()
-        .copied()
-        .filter(|n| gst::ElementFactory::find(n).is_none())
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "missing GStreamer elements {missing:?} — install gstreamer1.0-plugins-{{base,good,bad}}"
-    );
-}
-
 struct Harness {
     pipeline: gst::Pipeline,
     elements: HashMap<String, gst::Element>,
@@ -259,7 +248,7 @@ fn resolve_pad(element: &gst::Element, name: &str) -> gst::Pad {
 /// Build the block through its real builder and assemble the result into a
 /// pipeline the way the pipeline manager does.
 fn assemble(instance: &str, properties: &HashMap<String, PropertyValue>) -> Harness {
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
     let result = liveaudiorouter::LiveAudioRouterBuilder
         .build(instance, properties, &ctx)
@@ -1188,7 +1177,7 @@ fn the_crossbar_costs_no_thread_per_crosspoint() {
         ("output_1_channels", PropertyValue::UInt(8)),
     ]);
 
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
     let result = liveaudiorouter::LiveAudioRouterBuilder
         .build("live", &properties, &ctx)
@@ -1236,7 +1225,7 @@ const CONTROLLABLE_FLAG: u32 = 1 << 9;
 /// have in saved flows, so it has to keep routing audio exactly as before.
 #[test]
 fn the_original_audiorouter_still_routes_audio() {
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let properties = props(&[
         ("num_inputs", PropertyValue::UInt(2)),
         ("num_outputs", PropertyValue::UInt(1)),
@@ -1329,7 +1318,7 @@ fn the_original_audiorouter_is_not_offered_live_routing_or_gains() {
 /// Which crosspoints a build opens, by (input stream, channel, output stream,
 /// channel), read back from the elements the builder produced.
 fn open_crosspoints(instance: &str, properties: &HashMap<String, PropertyValue>) -> Vec<String> {
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
     let result = liveaudiorouter::LiveAudioRouterBuilder
         .build(instance, properties, &ctx)
@@ -1388,7 +1377,7 @@ fn the_original_audiorouter_keeps_its_silent_default() {
     // The default is deliberately not applied to `builtin.audiorouter`: an
     // existing flow whose router was never configured must not start passing
     // audio because of an upgrade.
-    require_elements();
+    common::require_elements(REQUIRED_ELEMENTS);
     let fresh = props(&[
         ("num_inputs", PropertyValue::UInt(1)),
         ("num_outputs", PropertyValue::UInt(1)),
