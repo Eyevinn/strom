@@ -6,22 +6,36 @@ use axum::{
     Router,
 };
 use serde_json::json;
+use strom::create_app_with_state;
+use strom::state::AppState;
 use strom_types::api::FlowListResponse;
 use strom_types::Flow;
+use tempfile::TempDir;
 use tower::ServiceExt; // for `oneshot`
 
-/// Helper to create a test app instance.
-async fn create_test_app() -> Router {
-    // Import from the backend crate
-    use strom::create_app;
-
+/// Create a test app whose state (flows, blocks, media) lives in a temporary
+/// directory, so running the tests never writes into the working directory.
+///
+/// The returned `TempDir` must be kept alive for as long as the app is used.
+async fn create_test_app() -> (Router, TempDir) {
     gstreamer::init().unwrap();
-    create_app().await
+    let dir = TempDir::new().unwrap();
+    let state = AppState::with_json_storage(
+        dir.path().join("flows.json"),
+        dir.path().join("blocks.json"),
+        dir.path().join("media"),
+        vec![],
+        "all".to_string(),
+        vec![],
+        false,
+        false,
+    );
+    (create_app_with_state(state).await, dir)
 }
 
 #[tokio::test]
 async fn test_health_check() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let response = app
         .oneshot(
@@ -38,7 +52,7 @@ async fn test_health_check() {
 
 #[tokio::test]
 async fn test_list_flows_empty() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let response = app
         .oneshot(
@@ -62,7 +76,7 @@ async fn test_list_flows_empty() {
 
 #[tokio::test]
 async fn test_create_flow() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let flow = Flow::new("Test Flow".to_string());
 
@@ -100,7 +114,7 @@ async fn test_create_flow() {
 
 #[tokio::test]
 async fn test_create_flow_empty_name() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let flow = Flow::new("".to_string());
 
@@ -121,7 +135,7 @@ async fn test_create_flow_empty_name() {
 
 #[tokio::test]
 async fn test_create_flow_name_too_long() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let flow = Flow::new("x".repeat(256));
 
@@ -142,7 +156,7 @@ async fn test_create_flow_name_too_long() {
 
 #[tokio::test]
 async fn test_list_elements() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let response = app
         .oneshot(
@@ -170,7 +184,7 @@ async fn test_list_elements() {
 
 #[tokio::test]
 async fn test_get_specific_element() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let response = app
         .oneshot(
@@ -195,7 +209,7 @@ async fn test_get_specific_element() {
 
 #[tokio::test]
 async fn test_get_nonexistent_element() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let response = app
         .oneshot(
@@ -216,7 +230,7 @@ async fn test_get_nonexistent_element() {
 
 #[tokio::test]
 async fn test_parse_gst_launch_simple() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let request_body = json!({
         "pipeline": "videotestsrc ! fakesink"
@@ -259,7 +273,7 @@ async fn test_parse_gst_launch_simple() {
 
 #[tokio::test]
 async fn test_parse_gst_launch_with_properties() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let request_body = json!({
         "pipeline": "videotestsrc pattern=ball num-buffers=100 ! fakesink"
@@ -298,7 +312,7 @@ async fn test_parse_gst_launch_with_properties() {
 
 #[tokio::test]
 async fn test_parse_gst_launch_invalid_pipeline() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let request_body = json!({
         "pipeline": "this_element_does_not_exist ! fakesink"
@@ -328,7 +342,7 @@ async fn test_parse_gst_launch_invalid_pipeline() {
 
 #[tokio::test]
 async fn test_export_gst_launch_simple() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let request_body = json!({
         "elements": [
@@ -377,7 +391,7 @@ async fn test_export_gst_launch_simple() {
 
 #[tokio::test]
 async fn test_export_gst_launch_with_properties() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let request_body = json!({
         "elements": [
@@ -433,7 +447,7 @@ async fn test_export_gst_launch_with_properties() {
 
 #[tokio::test]
 async fn test_list_probes_nonexistent_flow() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let response = app
         .oneshot(
@@ -450,7 +464,7 @@ async fn test_list_probes_nonexistent_flow() {
 
 #[tokio::test]
 async fn test_activate_probe_nonexistent_flow() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let request_body = json!({
         "element_id": "some-element"
@@ -473,7 +487,7 @@ async fn test_activate_probe_nonexistent_flow() {
 
 #[tokio::test]
 async fn test_activate_probe_invalid_flow_id() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let request_body = json!({
         "element_id": "some-element"
@@ -496,7 +510,7 @@ async fn test_activate_probe_invalid_flow_id() {
 
 #[tokio::test]
 async fn test_deactivate_probe_nonexistent_flow() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let response = app
         .oneshot(
@@ -514,7 +528,7 @@ async fn test_deactivate_probe_nonexistent_flow() {
 
 #[tokio::test]
 async fn test_export_gst_launch_empty() {
-    let app = create_test_app().await;
+    let (app, _dir) = create_test_app().await;
 
     let request_body = json!({
         "elements": [],
