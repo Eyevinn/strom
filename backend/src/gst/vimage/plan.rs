@@ -7,7 +7,7 @@
 //! time: every decision, including the generated colour matrices, is resolved
 //! in `build` and reused for every frame.
 
-use gstreamer_video::{VideoColorMatrix, VideoColorRange, VideoFormat, VideoInfo};
+use gstreamer_video::{VideoChromaSite, VideoColorMatrix, VideoColorRange, VideoFormat, VideoInfo};
 
 use super::accelerate as acc;
 
@@ -83,11 +83,11 @@ impl Plan {
     ///
     /// Returns `None` — meaning "use the `GstVideoConverter` fallback" — for
     /// a resize, an odd frame size against a subsampled format, a colour
-    /// matrix or range vImage's generated conversions do not cover, and every
-    /// format pair not enumerated below.
+    /// matrix, range or chroma siting vImage's conversions do not cover, and
+    /// every format pair not enumerated below.
     pub(super) fn build(in_info: &VideoInfo, out_info: &VideoInfo) -> Option<Self> {
-        // vImage's converters do not resize. A scaling stage stays on
-        // `GstVideoConverter`, which fuses convert and scale in one pass.
+        // vImage's converters do not resize. The element never negotiates a
+        // size change, so this only guards the plan against mismatched infos.
         if in_info.width() != out_info.width() || in_info.height() != out_info.height() {
             return None;
         }
@@ -111,6 +111,11 @@ impl Plan {
                 let range = yuv_pixel_range(out_info)?;
                 let matrix = rgb_to_yuv_matrix(out_info)?;
                 require_full_range_rgb(in_info)?;
+                // vImage averages chroma around its centre. Any other siting
+                // needs the filter `GstVideoConverter` applies.
+                if out_info.chroma_site() != VideoChromaSite::JPEG {
+                    return None;
+                }
                 let mut info = acc::vImage_ARGBToYpCbCr { opaque: [0; 128] };
                 // SAFETY: `matrix` is one of Accelerate's own static matrices,
                 // `range` is a fully initialised value type, and `info` is a
@@ -168,8 +173,10 @@ impl Plan {
         }
 
         // The remaining paths move bytes without touching colour, so they are
-        // only correct when both sides agree on range and matrix.
-        if in_info.colorimetry() != out_info.colorimetry() {
+        // only correct when both sides agree on range, matrix and siting.
+        if in_info.colorimetry() != out_info.colorimetry()
+            || in_info.chroma_site() != out_info.chroma_site()
+        {
             return None;
         }
 
