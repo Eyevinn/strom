@@ -127,6 +127,20 @@ fn build_flow(block_id: &str, first_shape: (i32, i32)) -> Flow {
         "capsfilter",
         vec![("caps", PV::String(source_caps(first_shape).to_string()))],
     ));
+    // Input 1, on PVW: a red source for takes.
+    flow.elements.push(elem(
+        "src1",
+        "videotestsrc",
+        vec![
+            ("pattern", PV::String("red".into())),
+            ("is-live", PV::Bool(true)),
+        ],
+    ));
+    flow.elements.push(elem(
+        "caps1",
+        "capsfilter",
+        vec![("caps", PV::String(source_caps(LANDSCAPE).to_string()))],
+    ));
     flow.elements.push(elem(
         "pgmsink",
         "appsink",
@@ -139,6 +153,8 @@ fn build_flow(block_id: &str, first_shape: (i32, i32)) -> Flow {
     for (from, to) in [
         ("src0:src".to_string(), "caps0:sink".to_string()),
         ("caps0:src".to_string(), format!("{block_id}:video_in_0")),
+        ("src1:src".to_string(), "caps1:sink".to_string()),
+        ("caps1:src".to_string(), format!("{block_id}:video_in_1")),
         (format!("{block_id}:pgm_out"), "pgmsink:sink".to_string()),
     ] {
         flow.links.push(strom_types::Link { from, to });
@@ -148,6 +164,26 @@ fn build_flow(block_id: &str, first_shape: (i32, i32)) -> Flow {
 
 /// Fraction of PGM pixels that are white.
 fn white_fraction(sample: &gstreamer::Sample) -> f64 {
+    pixel_fraction(sample, |px| px[0] > 200 && px[1] > 200 && px[2] > 200)
+}
+
+/// Fraction of PGM pixels that are black.
+fn black_fraction(sample: &gstreamer::Sample) -> f64 {
+    pixel_fraction(sample, |px| px[0] < 40 && px[1] < 40 && px[2] < 40)
+}
+
+/// Mean green level of PGM: 255 for white, 0 for red or black.
+fn mean_green(sample: &gstreamer::Sample) -> f64 {
+    let buffer = sample.buffer().expect("buffer");
+    let map = buffer.map_readable().expect("map");
+    let (sum, n) = map
+        .chunks_exact(4)
+        .step_by(4)
+        .fold((0u64, 0u64), |(sum, n), px| (sum + px[1] as u64, n + 1));
+    sum as f64 / n.max(1) as f64
+}
+
+fn pixel_fraction(sample: &gstreamer::Sample, matches: impl Fn(&[u8]) -> bool) -> f64 {
     let caps = sample.caps().expect("caps");
     let s = caps.structure(0).unwrap();
     let w = s.get::<i32>("width").unwrap() as usize;
@@ -160,25 +196,35 @@ fn white_fraction(sample: &gstreamer::Sample) -> f64 {
     );
     let buffer = sample.buffer().expect("buffer");
     let map = buffer.map_readable().expect("map");
-    let mut white = 0u64;
+    let mut hits = 0u64;
     let mut total = 0u64;
     // Flat colour fields: every 4th pixel gives the same fraction, faster.
     for px in map.chunks_exact(4).take(w * h).step_by(4) {
-        if px[0] > 200 && px[1] > 200 && px[2] > 200 {
-            white += 1;
+        if matches(px) {
+            hits += 1;
         }
         total += 1;
     }
-    white as f64 / total.max(1) as f64
+    hits as f64 / total.max(1) as f64
 }
 
-/// Pull PGM frames until one satisfies `done`, or fail after 30 s.
+/// Pull PGM frames until one's white fraction satisfies `done`, or fail
+/// after 30 s.
 fn wait_for_pgm(appsink: &gstreamer_app::AppSink, what: &str, done: impl Fn(f64) -> bool) -> f64 {
+    wait_for_pgm_by(appsink, what, white_fraction, done)
+}
+
+fn wait_for_pgm_by(
+    appsink: &gstreamer_app::AppSink,
+    what: &str,
+    measure: impl Fn(&gstreamer::Sample) -> f64,
+    done: impl Fn(f64) -> bool,
+) -> f64 {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut last = None;
     while std::time::Instant::now() < deadline {
         if let Some(s) = appsink.try_pull_sample(gstreamer::ClockTime::from_mseconds(500)) {
-            let f = white_fraction(&s);
+            let f = measure(&s);
             if done(f) {
                 return f;
             }
@@ -186,7 +232,7 @@ fn wait_for_pgm(appsink: &gstreamer_app::AppSink, what: &str, done: impl Fn(f64)
         }
     }
     panic!(
-        "PGM never showed {} within 30s, last white fraction {:?}",
+        "PGM never showed {} within 30s, last measured {:?}",
         what, last
     );
 }
@@ -248,7 +294,11 @@ impl Running {
     }
 
     fn set_source_shape(&self, shape: (i32, i32)) {
-        self.element("caps0")
+        self.set_input_shape(0, shape);
+    }
+
+    fn set_input_shape(&self, input: usize, shape: (i32, i32)) {
+        self.element(&format!("caps{input}"))
             .set_property("caps", source_caps(shape));
     }
 
@@ -337,5 +387,119 @@ async fn source_switch_fits_when_caps_are_stored_late() {
         pillarboxed,
     );
     eprintln!("portrait, caps stored late: white={:.2}", white);
+    running.stop();
+}
+
+/// A source that changes shape during a fade must not cut the fade short,
+/// and must be fitted in its new shape once the fade is over.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_resized_during_a_fade_is_fitted_after_it() {
+    gstreamer::init().unwrap();
+    if !gl_available_or_required() {
+        return;
+    }
+    let block_id = "vmresize_fade";
+    let running = Running::start(build_flow(block_id, LANDSCAPE));
+    wait_for_pgm(&running.appsink, "the landscape source filling PGM", |f| {
+        f > 0.95
+    });
+
+    // Fade from white (input 0) to red (input 1) over 2 s. The red source
+    // turns 4:3 at 600 ms.
+    running
+        .manager
+        .trigger_transition(block_id, 0, 1, "fade", 2000)
+        .expect("fade");
+    running
+        .manager
+        .update_vision_mixer_after_take(block_id, Some(1), Some(0), 2)
+        .expect("after take");
+    let start = std::time::Instant::now();
+    let mut resized = false;
+    let mut mid_fade = Vec::new();
+    while start.elapsed() < std::time::Duration::from_millis(1000) {
+        if !resized && start.elapsed() > std::time::Duration::from_millis(600) {
+            running.set_input_shape(1, (960, 720));
+            resized = true;
+        }
+        if let Some(s) = running
+            .appsink
+            .try_pull_sample(gstreamer::ClockTime::from_mseconds(200))
+        {
+            if start.elapsed() > std::time::Duration::from_millis(750) {
+                mid_fade.push(mean_green(&s));
+            }
+        }
+    }
+    // Still blending: some white left. A cut shows red and black only.
+    assert!(
+        !mid_fade.is_empty() && mid_fade.iter().all(|g| *g > 30.0),
+        "the fade was cut short after the resize, mean green {:?}",
+        mid_fade
+    );
+
+    // 4:3 red on 16:9: pillarbox bars cover a quarter of PGM.
+    let bars = wait_for_pgm_by(
+        &running.appsink,
+        "the 4:3 source pillarboxed after the fade",
+        black_fraction,
+        |f| (0.20..0.30).contains(&f),
+    );
+    eprintln!("after the fade: black={:.2}", bars);
+    running.stop();
+}
+
+/// A source that changes shape during Fade to Black comes back fitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_switched_during_ftb_is_pillarboxed_after_it() {
+    gstreamer::init().unwrap();
+    if !gl_available_or_required() {
+        return;
+    }
+    let block_id = "vmresize_ftb";
+    let running = Running::start(build_flow(block_id, LANDSCAPE));
+    wait_for_pgm(&running.appsink, "the landscape source filling PGM", |f| {
+        f > 0.95
+    });
+
+    running
+        .manager
+        .fade_to_black(block_id, 200)
+        .expect("FTB on");
+    wait_for_pgm(&running.appsink, "black", |f| f < 0.05);
+    running.set_source_shape(PORTRAIT);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    running
+        .manager
+        .fade_to_black(block_id, 1000)
+        .expect("FTB off");
+
+    // The source is grey while it fades back in, so count lit pixels: every
+    // frame of the fade-in must already show it pillarboxed, not stretched.
+    let start = std::time::Instant::now();
+    let mut fade_in = Vec::new();
+    while start.elapsed() < std::time::Duration::from_millis(900) {
+        if let Some(s) = running
+            .appsink
+            .try_pull_sample(gstreamer::ClockTime::from_mseconds(200))
+        {
+            let lit = 1.0 - black_fraction(&s);
+            if lit > 0.05 {
+                fade_in.push(lit);
+            }
+        }
+    }
+    assert!(
+        !fade_in.is_empty() && fade_in.iter().all(|lit| *lit < 0.45),
+        "the source faded in stretched, lit fractions {:?}",
+        fade_in
+    );
+
+    let white = wait_for_pgm(
+        &running.appsink,
+        "the portrait source pillarboxed",
+        pillarboxed,
+    );
+    eprintln!("after FTB: white={:.2}", white);
     running.stop();
 }

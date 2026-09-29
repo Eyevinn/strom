@@ -359,7 +359,7 @@ impl PipelineManager {
                 base,
                 scale: cw as f64 / state.pgm_w.max(1) as f64,
             });
-            pads_for_source(
+            let targets = pads_for_source(
                 &state,
                 state.pgm_pip(),
                 pgm,
@@ -370,12 +370,33 @@ impl PipelineManager {
                 src_aspect,
                 &self.vision_mixer_source_aspects(block_instance_id, state.num_inputs),
                 dist_underlay,
-            )
-            .into_iter()
-            // Restore bordered zone sources' underlay pads along with their
-            // content pads.
-            .flat_map(|t| std::iter::once(t.pad_idx).chain(t.underlay.map(|u| u.pad_idx)))
-            .collect()
+            );
+            // Fit the pads to their sources' current shapes before they fade
+            // back in: a source that changed shape during FTB was not re-fitted.
+            for (pad_idx, (x, y, w, h)) in targets.iter().flat_map(|t| {
+                std::iter::once((t.pad_idx, (t.x, t.y, t.w, t.h))).chain(
+                    t.underlay
+                        .as_ref()
+                        .map(|u| (u.pad_idx, (u.x, u.y, u.w, u.h))),
+                )
+            }) {
+                if let Some(pad) = find_pad(mixer, &format!("sink_{}", pad_idx)) {
+                    crate::gst::control_bindings::wipe_control_bindings(
+                        pad.upcast_ref(),
+                        &["xpos", "ypos", "width", "height"],
+                    );
+                    pad.set_property("xpos", x);
+                    pad.set_property("ypos", y);
+                    pad.set_property("width", w);
+                    pad.set_property("height", h);
+                }
+            }
+            targets
+                .into_iter()
+                // Restore bordered zone sources' underlay pads along with their
+                // content pads.
+                .flat_map(|t| std::iter::once(t.pad_idx).chain(t.underlay.map(|u| u.pad_idx)))
+                .collect()
         };
 
         // Use mixer position for stream-time (same as transitions).

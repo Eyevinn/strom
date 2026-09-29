@@ -82,6 +82,9 @@ pub struct VisionMixerOverlayState {
     pub num_inputs: usize,
     /// Whether Fade to Black is active.
     pub ftb_active: AtomicBool,
+    /// An input changed size while a take or FTB was animating the layout,
+    /// so the layout still has to be re-fitted once the animation is over.
+    pub layout_refit_pending: AtomicBool,
     /// Multiview overlay alpha (0.0–1.0), stored as f64 bits.
     overlay_alpha: AtomicU64,
     /// DSK enabled states (one per DSK input, max 4).
@@ -199,6 +202,7 @@ impl VisionMixerOverlayState {
             num_pips: pip.num_pips,
             num_inputs,
             ftb_active: AtomicBool::new(false),
+            layout_refit_pending: AtomicBool::new(false),
             overlay_alpha: AtomicU64::new(1.0f64.to_bits()),
             dsk_enabled: (0..num_dsk_inputs)
                 .map(|_| AtomicBool::new(false))
