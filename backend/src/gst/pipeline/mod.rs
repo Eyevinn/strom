@@ -170,6 +170,8 @@ pub struct PipelineManager {
     events: EventBroadcaster,
     /// Pending links that couldn't be made because source pads don't exist yet (dynamic pads)
     pending_links: Vec<Link>,
+    /// Links the linker has given up on, read by the block health scan
+    unformed_links: health::UnformedLinks,
     /// Flow properties (clock configuration, etc.)
     properties: strom_types::flow::FlowProperties,
     /// Pad properties to apply after pads are created (element_id -> (pad_name -> properties))

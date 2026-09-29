@@ -78,6 +78,7 @@ impl PipelineManager {
             elements: HashMap::new(),
             events,
             pending_links: Vec::new(),
+            unformed_links: Default::default(),
             properties: flow.properties.clone(),
             pad_properties: HashMap::new(),
             block_message_handlers: Vec::new(),
@@ -277,6 +278,20 @@ impl PipelineManager {
                     "Could not link immediately: {} -> {} (error: {}). Will retry when pad becomes available.",
                     link.from, link.to, e
                 );
+                // Nothing retries a link whose source pad is already there.
+                let (from_ref, _) = link.to_pad_refs();
+                let pad_name = from_ref.pad_name.as_deref().unwrap_or("src");
+                if manager
+                    .elements
+                    .get(&from_ref.element_id)
+                    .is_some_and(|src| Self::source_pad_is_available(src, pad_name))
+                {
+                    manager.unformed_links.record(
+                        &Self::declared_link(link, &processed_links.tees),
+                        pad_name,
+                        false,
+                    );
+                }
                 // Store as pending link
                 manager.pending_links.push(link.clone());
             } else {
@@ -290,7 +305,7 @@ impl PipelineManager {
 
         // Set up dynamic pad handlers for all elements that might have dynamic pads
         debug!("Setting up dynamic pad handlers...");
-        manager.setup_dynamic_pad_handlers();
+        manager.setup_dynamic_pad_handlers(&processed_links.tees);
         debug!("Dynamic pad handlers set up");
 
         // Note: Pad properties are applied in start() after reaching READY state
