@@ -9,32 +9,15 @@
 //! These tests call `create_flow` and `update_flow` directly, so reverting the
 //! fix in `backend/src/api/flows.rs` turns them red.
 
+pub mod common;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use std::collections::HashMap;
 use strom::api::flows::{create_flow, update_flow};
 use strom::json_rejection::JsonBody;
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::block::{BlockInstance, Position};
 use strom_types::{Element, Flow, Link, PropertyValue};
-use tempfile::NamedTempFile;
-
-fn new_state() -> AppState {
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let storage = JsonFileStorage::new(storage_file.path());
-    AppState::new(
-        storage,
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    )
-}
 
 fn element(id: &str, element_type: &str, x: f32) -> Element {
     Element {
@@ -77,7 +60,7 @@ fn bare_link_flow(name: &str) -> Flow {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_keeps_links_written_with_bare_element_ids() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let flow = bare_link_flow("bare-links");
     let id = flow.id;
@@ -107,7 +90,7 @@ async fn create_flow_keeps_links_written_with_bare_element_ids() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_flow_keeps_links_written_with_bare_element_ids() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = bare_link_flow("bare-links-update");
     let id = flow.id;
@@ -143,7 +126,7 @@ async fn update_flow_keeps_links_written_with_bare_element_ids() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_rejects_a_link_to_an_unknown_node() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = bare_link_flow("unknown-node");
     let id = flow.id;
@@ -173,7 +156,7 @@ async fn create_flow_rejects_a_link_to_an_unknown_node() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_flow_rejects_a_link_to_an_unknown_node() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = bare_link_flow("unknown-node-update");
     let id = flow.id;
@@ -207,7 +190,7 @@ async fn update_flow_rejects_a_link_to_an_unknown_node() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_resolves_a_bare_block_reference_to_its_only_pad() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = Flow::new("bare-block");
     let id = flow.id;
@@ -245,7 +228,7 @@ async fn create_flow_resolves_a_bare_block_reference_to_its_only_pad() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_rejects_an_ambiguous_bare_block_reference() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = Flow::new("ambiguous-block");
     let id = flow.id;
@@ -277,7 +260,7 @@ async fn create_flow_rejects_an_ambiguous_bare_block_reference() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_flow_prunes_a_link_to_a_pad_the_block_no_longer_has() {
     gstreamer::init().unwrap();
-    let state = new_state();
+    let state = common::state::new();
 
     let mut flow = Flow::new("stale-block-pad");
     let id = flow.id;

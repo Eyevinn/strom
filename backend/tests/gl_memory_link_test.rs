@@ -17,11 +17,9 @@ pub mod common;
 
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
-use tempfile::NamedTempFile;
 
 /// `gldownload` and `gltestsrc` both ship in the GL plugin (`gstreamer1.0-gl`
 /// on Ubuntu), which CI installs. A silent skip here would let the guard pass
@@ -43,21 +41,9 @@ fn build_manager(flow: &Flow) -> PipelineManager {
     gstreamer::init().unwrap();
     strom::gpu::detect_gpu_capabilities();
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
     let events = EventBroadcaster::with_capacity(10);
 
-    PipelineManager::new(
-        flow,
-        events,
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    )
-    .expect("build pipeline")
+    common::manager::build_with(flow, events, std::env::temp_dir()).expect("build pipeline")
 }
 
 /// `source` feeding a bare `videoconvert -> x264enc -> fakesink`.
