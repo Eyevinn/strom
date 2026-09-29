@@ -80,9 +80,16 @@ pub async fn parse_gst_launch(
     ValidatedJson(req): ValidatedJson<ParseGstLaunchRequest>,
 ) -> Result<Json<ParseGstLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
     info!("Parsing gst-launch pipeline: {}", req.pipeline);
+    parse_pipeline(&req.pipeline).map(Json)
+}
 
+/// Parse a gst-launch-1.0 pipeline string into Strom elements and links, laid
+/// out left to right in data-flow order.
+fn parse_pipeline(
+    input: &str,
+) -> Result<ParseGstLaunchResponse, (StatusCode, Json<ErrorResponse>)> {
     // Preprocess the pipeline string (strip gst-launch-1.0, handle line continuations)
-    let cleaned_pipeline = preprocess_pipeline_string(&req.pipeline);
+    let cleaned_pipeline = preprocess_pipeline_string(input);
     debug!("Cleaned pipeline: {}", cleaned_pipeline);
 
     // Parse the pipeline using GStreamer's native parser
@@ -113,10 +120,10 @@ pub async fn parse_gst_launch(
             })?;
 
             let elem = extract_element_info(&element, 0)?;
-            return Ok(Json(ParseGstLaunchResponse {
+            return Ok(ParseGstLaunchResponse {
                 elements: vec![elem],
                 links: vec![],
-            }));
+            });
         }
     };
 
@@ -210,7 +217,7 @@ pub async fn parse_gst_launch(
         links.len()
     );
 
-    Ok(Json(ParseGstLaunchResponse { elements, links }))
+    Ok(ParseGstLaunchResponse { elements, links })
 }
 
 /// Extract element information from a GStreamer element.
@@ -969,135 +976,118 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_preprocess_simple_pipeline() {
-        let input = "videotestsrc ! fakesink";
-        let result = preprocess_pipeline_string(input);
-        assert_eq!(result, "videotestsrc ! fakesink");
-    }
-
-    #[test]
-    fn test_preprocess_with_gst_launch_prefix() {
-        let input = "gst-launch-1.0 videotestsrc ! fakesink";
-        let result = preprocess_pipeline_string(input);
-        assert_eq!(result, "videotestsrc ! fakesink");
-    }
-
-    #[test]
-    fn test_preprocess_with_windows_exe() {
-        let input = "gst-launch-1.0.exe videotestsrc ! fakesink";
-        let result = preprocess_pipeline_string(input);
-        assert_eq!(result, "videotestsrc ! fakesink");
-    }
-
-    #[test]
-    fn test_preprocess_with_windows_exe_and_flags() {
-        let input = "gst-launch-1.0.exe -v -e videotestsrc ! fakesink";
-        let result = preprocess_pipeline_string(input);
-        assert_eq!(result, "videotestsrc ! fakesink");
-    }
-
-    #[test]
-    fn test_preprocess_with_flags() {
-        let input = "gst-launch-1.0 -v -e videotestsrc ! fakesink";
-        let result = preprocess_pipeline_string(input);
-        assert_eq!(result, "videotestsrc ! fakesink");
-    }
-
-    #[test]
-    fn test_preprocess_line_continuation() {
-        let input = "videotestsrc \\\n  ! fakesink";
-        let result = preprocess_pipeline_string(input);
-        assert_eq!(result, "videotestsrc ! fakesink");
-    }
-
-    #[test]
-    fn test_preprocess_multiline_with_command() {
-        let input = "gst-launch-1.0 -v -e videotestsrc \\\n  ! x264enc \\\n  ! fakesink";
-        let result = preprocess_pipeline_string(input);
-        assert_eq!(result, "videotestsrc ! x264enc ! fakesink");
-    }
-
-    #[test]
-    fn test_preprocess_leading_flags_without_command() {
-        // User pasted flags but forgot the gst-launch-1.0 command
-        let input = "-v -e videotestsrc ! fakesink";
-        let result = preprocess_pipeline_string(input);
-        assert_eq!(result, "videotestsrc ! fakesink");
-    }
-
-    #[test]
-    fn test_preprocess_complex_multiline() {
-        let input = r#"gst-launch-1.0 -v -e videotestsrc \
-  ! x264enc \
-  ! mp4mux name=mux \
-  ! filesink location="bla.mp4" \
-  audiotestsrc ! lamemp3enc ! mux."#;
-        let result = preprocess_pipeline_string(input);
-        // Should strip gst-launch-1.0, -v, -e, and handle line continuations
-        assert!(result.starts_with("videotestsrc"));
-        assert!(result.contains("x264enc"));
-        assert!(result.contains("mp4mux"));
-        assert!(result.contains("name=mux"));
-        assert!(result.contains("mux."));
-        assert!(!result.contains("gst-launch"));
-        assert!(!result.contains("-v"));
-        assert!(!result.contains("-e"));
+    fn test_preprocess_pipeline_string() {
+        let cases: &[(&str, &str)] = &[
+            ("videotestsrc ! fakesink", "videotestsrc ! fakesink"),
+            ("gst-launch-1.0 videotestsrc ! fakesink", "videotestsrc ! fakesink"),
+            ("gst-launch videotestsrc ! fakesink", "videotestsrc ! fakesink"),
+            ("gst-launch-1.0.exe videotestsrc ! fakesink", "videotestsrc ! fakesink"),
+            (
+                "gst-launch-1.0.exe -v -e videotestsrc ! fakesink",
+                "videotestsrc ! fakesink",
+            ),
+            (
+                "gst-launch-1.0 -v -e videotestsrc ! fakesink",
+                "videotestsrc ! fakesink",
+            ),
+            ("videotestsrc \\\n  ! fakesink", "videotestsrc ! fakesink"),
+            ("videotestsrc \\\r\n  ! fakesink", "videotestsrc ! fakesink"),
+            (
+                "gst-launch-1.0 -v -e videotestsrc \\\n  ! x264enc \\\n  ! fakesink",
+                "videotestsrc ! x264enc ! fakesink",
+            ),
+            // Flags pasted without the gst-launch-1.0 command
+            ("-v -e videotestsrc ! fakesink", "videotestsrc ! fakesink"),
+            (
+                "gst-launch-1.0 -v -e videotestsrc \\\n  ! x264enc \\\n  ! mp4mux name=mux \\\n  ! filesink location=\"bla.mp4\" \\\n  audiotestsrc ! lamemp3enc ! mux.",
+                "videotestsrc ! x264enc ! mp4mux name=mux ! filesink location=\"bla.mp4\" audiotestsrc ! lamemp3enc ! mux.",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                preprocess_pipeline_string(input),
+                *expected,
+                "input: {:?}",
+                input
+            );
+        }
     }
 
     // ========================================================================
-    // Parse Tests (require GStreamer initialization)
+    // Value helpers
     // ========================================================================
 
     #[test]
-    fn test_parse_simple_pipeline() {
+    fn test_values_equal() {
         init_gst();
+        let ball = gst::ElementFactory::make("videotestsrc")
+            .property_from_str("pattern", "ball")
+            .build()
+            .unwrap()
+            .property_value("pattern");
+        let smpte = gst::ElementFactory::make("videotestsrc")
+            .build()
+            .unwrap()
+            .property_value("pattern");
 
-        let pipeline = gst::parse::launch("videotestsrc ! fakesink").unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
-        assert_eq!(elements.len(), 2);
-
-        // Check element types
-        let types: Vec<_> = elements
-            .iter()
-            .map(|e| e.factory().unwrap().name().to_string())
-            .collect();
-        assert!(types.contains(&"videotestsrc".to_string()));
-        assert!(types.contains(&"fakesink".to_string()));
-    }
-
-    #[test]
-    fn test_parse_pipeline_with_properties() {
-        init_gst();
-
-        let pipeline = gst::parse::launch("videotestsrc pattern=ball ! fakesink").unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        // Find videotestsrc and check that we correctly extract its pattern property as a string
-        for (idx, gst_elem) in bin.iterate_elements().into_iter().flatten().enumerate() {
-            if gst_elem.factory().unwrap().name() == "videotestsrc" {
-                // Extract element info which should include pattern as a string
-                let elem = extract_element_info(&gst_elem, idx).unwrap();
-
-                // Verify pattern is extracted as "ball" (string), not 18 (int)
-                assert!(elem.properties.contains_key("pattern"));
-                match elem.properties.get("pattern") {
-                    Some(PropertyValue::String(s)) => {
-                        assert_eq!(s, "ball", "Expected pattern='ball', got pattern='{}'", s);
-                    }
-                    other => panic!("Expected pattern as String('ball'), got {:?}", other),
-                }
-            }
+        let cases: Vec<(&str, gst::glib::Value, gst::glib::Value, bool)> = vec![
+            ("i32 equal", 42i32.to_value(), 42i32.to_value(), true),
+            ("i32 differ", 42i32.to_value(), 43i32.to_value(), false),
+            ("u64 equal", 7u64.to_value(), 7u64.to_value(), true),
+            ("f64 differ", 1.0f64.to_value(), 1.5f64.to_value(), false),
+            ("string equal", "hello".to_value(), "hello".to_value(), true),
+            (
+                "string differ",
+                "hello".to_value(),
+                "world".to_value(),
+                false,
+            ),
+            ("bool equal", true.to_value(), true.to_value(), true),
+            ("bool differ", true.to_value(), false.to_value(), false),
+            ("type mismatch", 1i32.to_value(), 1i64.to_value(), false),
+            ("enum equal", ball.clone(), ball.clone(), true),
+            ("enum differ", ball, smpte, false),
+        ];
+        for (name, a, b, expected) in cases {
+            assert_eq!(values_equal(&a, &b), expected, "{}", name);
         }
     }
 
     #[test]
-    fn test_parse_invalid_pipeline() {
+    fn test_gvalue_to_property_value() {
         init_gst();
 
-        let result = gst::parse::launch("this_element_does_not_exist ! fakesink");
-        assert!(result.is_err());
+        assert!(matches!(
+            gvalue_to_property_value(&42i32.to_value()),
+            Some(PropertyValue::Int(42))
+        ));
+        assert!(matches!(
+            gvalue_to_property_value(&7u32.to_value()),
+            Some(PropertyValue::UInt(7))
+        ));
+        assert!(matches!(
+            gvalue_to_property_value(&true.to_value()),
+            Some(PropertyValue::Bool(true))
+        ));
+        assert!(matches!(
+            gvalue_to_property_value(&"test".to_value()),
+            Some(PropertyValue::String(s)) if s == "test"
+        ));
+        match gvalue_to_property_value(&2.5f64.to_value()) {
+            Some(PropertyValue::Float(f)) => assert!((f - 2.5).abs() < 0.001),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+
+        // Enums convert to their nick, not the integer value
+        let pattern = gst::ElementFactory::make("videotestsrc")
+            .property_from_str("pattern", "ball")
+            .build()
+            .unwrap()
+            .property_value("pattern");
+        assert!(matches!(
+            gvalue_to_property_value(&pattern),
+            Some(PropertyValue::String(s)) if s == "ball"
+        ));
     }
 
     #[test]
@@ -1121,279 +1111,154 @@ mod tests {
             .unwrap();
         let props2 = extract_non_default_properties(&elem2);
         assert!(
-            props2.contains_key("pattern"),
-            "Expected 'pattern' in properties, got: {:?}",
-            props2
-        );
-        // Should be a string "ball"
-        assert!(
             matches!(props2.get("pattern"), Some(PropertyValue::String(s)) if s == "ball"),
             "Expected pattern='ball', got {:?}",
             props2.get("pattern")
         );
     }
 
-    #[test]
-    fn test_values_equal_integers() {
-        let a = 42i32.to_value();
-        let b = 42i32.to_value();
-        let c = 43i32.to_value();
+    // ========================================================================
+    // Layout
+    // ========================================================================
 
-        assert!(values_equal(&a, &b));
-        assert!(!values_equal(&a, &c));
-    }
-
-    #[test]
-    fn test_values_equal_strings() {
-        let a = "hello".to_value();
-        let b = "hello".to_value();
-        let c = "world".to_value();
-
-        assert!(values_equal(&a, &b));
-        assert!(!values_equal(&a, &c));
-    }
-
-    #[test]
-    fn test_values_equal_booleans() {
-        let a = true.to_value();
-        let b = true.to_value();
-        let c = false.to_value();
-
-        assert!(values_equal(&a, &b));
-        assert!(!values_equal(&a, &c));
-    }
-
-    #[test]
-    fn test_qos_default_comparison() {
-        init_gst();
-
-        // Verify that fresh element comparison works correctly for qos
-        let elem = gst::ElementFactory::make("videoconvert").build().unwrap();
-        let fresh_elem = gst::ElementFactory::make("videoconvert").build().unwrap();
-
-        let qos_current = elem.property_value("qos");
-        let qos_fresh = fresh_elem.property_value("qos");
-
-        println!(
-            "Current qos: {:?} (type: {:?})",
-            qos_current,
-            qos_current.type_()
-        );
-        println!("Fresh qos: {:?} (type: {:?})", qos_fresh, qos_fresh.type_());
-
-        if let Ok(cv) = qos_current.get::<bool>() {
-            println!("Current as bool: {}", cv);
+    fn bare_element(id: &str) -> Element {
+        Element {
+            id: id.to_string(),
+            element_type: "identity".to_string(),
+            properties: HashMap::new(),
+            pad_properties: HashMap::new(),
+            position: (0.0, 0.0),
         }
-        if let Ok(fv) = qos_fresh.get::<bool>() {
-            println!("Fresh as bool: {}", fv);
+    }
+
+    fn link(from: &str, to: &str) -> Link {
+        Link {
+            from: from.to_string(),
+            to: to.to_string(),
         }
-
-        println!(
-            "values_equal result: {}",
-            values_equal(&qos_current, &qos_fresh)
-        );
-
-        // They should be equal (both true)
-        assert!(
-            values_equal(&qos_current, &qos_fresh),
-            "qos current and fresh should be equal"
-        );
     }
 
     #[test]
-    fn test_gvalue_to_property_value() {
-        // Integer
-        let v = 42i32.to_value();
-        assert!(matches!(
-            gvalue_to_property_value(&v),
-            Some(PropertyValue::Int(42))
-        ));
+    fn test_reposition_elements_topologically() {
+        // a -> b -> c, plus a shortcut a -> c. c must land in the column after
+        // b (longest path), not next to b. d is disconnected and sits with the
+        // sources.
+        let mut elements: Vec<Element> =
+            ["c", "b", "a", "d"].into_iter().map(bare_element).collect();
+        let links = vec![
+            link("a:src", "b:sink"),
+            link("b:src", "c:sink_0"),
+            link("a:src_1", "c:sink_1"),
+        ];
 
-        // Boolean
-        let v = true.to_value();
-        assert!(matches!(
-            gvalue_to_property_value(&v),
-            Some(PropertyValue::Bool(true))
-        ));
+        reposition_elements_topologically(&mut elements, &links);
 
-        // String
-        let v = "test".to_string().to_value();
-        assert!(
-            matches!(gvalue_to_property_value(&v), Some(PropertyValue::String(s)) if s == "test")
-        );
-
-        // Float
-        let v = 2.5f64.to_value();
-        if let Some(PropertyValue::Float(f)) = gvalue_to_property_value(&v) {
-            assert!((f - 2.5).abs() < 0.001);
-        } else {
-            panic!("Expected Float");
-        }
+        let x = |id: &str| elements.iter().find(|e| e.id == id).unwrap().position.0;
+        let y = |id: &str| elements.iter().find(|e| e.id == id).unwrap().position.1;
+        assert_eq!(x("a"), 100.0);
+        assert_eq!(x("d"), 100.0);
+        assert_eq!(x("b"), 350.0);
+        assert_eq!(x("c"), 600.0);
+        // Two sources share a column, so they must not share a row
+        assert_ne!(y("a"), y("d"));
+        assert_eq!(y("b"), 200.0);
+        assert_eq!(y("c"), 200.0);
     }
 
     // ========================================================================
-    // Enum Conversion Tests
+    // parse_pipeline (the handler's parser, element and link extraction)
     // ========================================================================
 
-    #[test]
-    fn test_enum_conversion_direct() {
-        init_gst();
-
-        // Create element with enum property set using from_str (enums need this)
-        let elem = gst::ElementFactory::make("videotestsrc")
-            .property_from_str("pattern", "ball")
-            .build()
-            .unwrap();
-
-        // Get the property value
-        let pattern_value = elem.property_value("pattern");
-
-        println!("Pattern type: {:?}", pattern_value.type_());
-        println!(
-            "Is enum: {}",
-            pattern_value.type_().is_a(gst::glib::Type::ENUM)
-        );
-
-        // Try to get as i32
-        match pattern_value.get::<i32>() {
-            Ok(val) => println!("Value as i32: {}", val),
-            Err(e) => println!("Failed to get as i32: {:?}", e),
-        }
-
-        // Try enum class lookup
-        if let Some(enum_class) = gst::glib::EnumClass::with_type(pattern_value.type_()) {
-            println!("Successfully got enum class");
-            if let Ok(int_val) = pattern_value.get::<i32>() {
-                println!("Got int value: {}", int_val);
-                if let Some(enum_value) = enum_class.value(int_val) {
-                    println!("Got enum nick: {}", enum_value.nick());
-                } else {
-                    println!("enum_class.value({}) returned None", int_val);
-                }
-            }
-        } else {
-            println!("EnumClass::with_type returned None");
-        }
-
-        // Test gvalue_to_property_value conversion
-        let converted = gvalue_to_property_value(&pattern_value);
-        println!("Converted value: {:?}", converted);
-
-        // Should be a String "ball", not Int 18
-        match converted {
-            Some(PropertyValue::String(s)) => {
-                assert_eq!(s, "ball", "Expected enum nick 'ball', got '{}'", s);
-            }
-            other => {
-                panic!("Expected PropertyValue::String('ball'), got {:?}", other);
-            }
-        }
-    }
-
-    // ========================================================================
-    // Round-trip Tests (Import -> Export preserves enum properties)
-    // ========================================================================
-
-    #[test]
-    fn test_roundtrip_enum_properties_simple() {
-        init_gst();
-
-        let input = "videotestsrc pattern=ball ! fakesink";
-
-        // Parse the pipeline
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        // Extract elements
-        let mut elements = Vec::new();
-        for (idx, gst_elem) in bin.iterate_elements().into_iter().flatten().enumerate() {
-            let elem = extract_element_info(&gst_elem, idx).unwrap();
-            elements.push(elem);
-        }
-
-        // Find videotestsrc and verify pattern is "ball" (string, not integer)
-        let videotestsrc = elements
+    fn find_by_type<'a>(resp: &'a ParseGstLaunchResponse, element_type: &str) -> &'a Element {
+        resp.elements
             .iter()
-            .find(|e| e.element_type == "videotestsrc")
-            .expect("videotestsrc not found");
-
-        assert!(
-            videotestsrc.properties.contains_key("pattern"),
-            "pattern property missing"
-        );
-        match videotestsrc.properties.get("pattern") {
-            Some(PropertyValue::String(s)) => {
-                assert_eq!(s, "ball", "Expected pattern='ball', got pattern='{}'", s);
-            }
-            Some(other) => panic!("Expected pattern as String, got {:?}", other),
-            None => panic!("pattern property missing"),
-        }
+            .find(|e| e.element_type == element_type)
+            .unwrap_or_else(|| panic!("{} not found in {:?}", element_type, resp.elements))
     }
+
+    fn has_link(resp: &ParseGstLaunchResponse, from: &str, to: &str) -> bool {
+        resp.links.iter().any(|l| l.from == from && l.to == to)
+    }
+
+    #[test]
+    fn test_parse_simple_chain_links_with_pad_names() {
+        init_gst();
+
+        let resp = parse_pipeline("videotestsrc ! videoconvert ! fakesink").unwrap();
+        assert_eq!(resp.elements.len(), 3);
+        assert_eq!(resp.links.len(), 2, "links: {:?}", resp.links);
+
+        let src = &find_by_type(&resp, "videotestsrc").id;
+        let conv = &find_by_type(&resp, "videoconvert").id;
+        let sink = &find_by_type(&resp, "fakesink").id;
+        assert!(has_link(
+            &resp,
+            &format!("{src}:src"),
+            &format!("{conv}:sink")
+        ));
+        assert!(has_link(
+            &resp,
+            &format!("{conv}:src"),
+            &format!("{sink}:sink")
+        ));
+
+        // Laid out left to right in data-flow order
+        assert_eq!(find_by_type(&resp, "videotestsrc").position.0, 100.0);
+        assert_eq!(find_by_type(&resp, "videoconvert").position.0, 350.0);
+        assert_eq!(find_by_type(&resp, "fakesink").position.0, 600.0);
+    }
+
+    #[test]
+    fn test_parse_invalid_pipeline() {
+        init_gst();
+
+        let (status, Json(err)) =
+            parse_pipeline("this_element_does_not_exist ! fakesink").unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "Invalid pipeline syntax");
+        let details = err.details.expect("parser error details");
+        assert!(
+            details.contains("this_element_does_not_exist"),
+            "details should name the unknown element: {}",
+            details
+        );
+    }
+
+    #[test]
+    fn test_parse_preserves_user_names() {
+        init_gst();
+
+        let resp = parse_pipeline("videotestsrc name=mysrc ! fakesink").unwrap();
+        assert_eq!(find_by_type(&resp, "videotestsrc").id, "mysrc");
+        let sink = &find_by_type(&resp, "fakesink").id;
+        assert!(
+            sink.starts_with("fakesink_"),
+            "auto-named element gets a readable id: {}",
+            sink
+        );
+        assert!(has_link(&resp, "mysrc:src", &format!("{sink}:sink")));
+    }
+
+    // ========================================================================
+    // Round-trip Tests (parse -> export)
+    // ========================================================================
 
     #[test]
     fn test_roundtrip_enum_export() {
         init_gst();
 
-        let input = "videotestsrc pattern=ball ! videoconvert ! fakesink";
+        let resp = parse_pipeline("videotestsrc pattern=ball ! videoconvert ! fakesink").unwrap();
 
-        // Parse
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+        // Enum imported as its nick, not the integer
+        assert!(matches!(
+            find_by_type(&resp, "videotestsrc").properties.get("pattern"),
+            Some(PropertyValue::String(s)) if s == "ball"
+        ));
 
-        // Extract elements and links
-        let mut elements = Vec::new();
-        let mut element_id_map: HashMap<String, String> = HashMap::new();
-
-        for (idx, gst_elem) in bin.iterate_elements().into_iter().flatten().enumerate() {
-            let gst_name = gst_elem.name().to_string();
-            let elem = extract_element_info(&gst_elem, idx).unwrap();
-            element_id_map.insert(gst_name, elem.id.clone());
-            elements.push(elem);
-        }
-
-        // Extract links
-        let mut links = Vec::new();
-        let mut seen_links: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-
-        for gst_elem in bin.iterate_elements().into_iter().flatten() {
-            let gst_name = gst_elem.name().to_string();
-            let Some(our_id) = element_id_map.get(&gst_name) else {
-                continue;
-            };
-
-            for pad in gst_elem.src_pads() {
-                if let Some(peer) = pad.peer() {
-                    if let Some(peer_elem) = peer.parent_element() {
-                        let peer_gst_name = peer_elem.name().to_string();
-                        if let Some(peer_our_id) = element_id_map.get(&peer_gst_name) {
-                            let link_key = (our_id.clone(), peer_our_id.clone());
-                            if !seen_links.contains(&link_key) {
-                                seen_links.insert(link_key);
-                                links.push(Link {
-                                    from: format!("{}:{}", our_id, pad.name()),
-                                    to: format!("{}:{}", peer_our_id, peer.name()),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Export back to gst-launch syntax
-        let output = elements_to_gst_launch(&elements, &links);
-
-        // Verify the output contains "pattern=ball" (not "pattern=18")
-        assert!(
-            output.contains("pattern=ball"),
-            "Expected 'pattern=ball' in output, got: {}",
-            output
-        );
-        assert!(
-            !output.contains("pattern=18"),
-            "Should not contain 'pattern=18', got: {}",
-            output
+        let output = elements_to_gst_launch(&resp.elements, &resp.links);
+        assert_eq!(
+            output,
+            "videotestsrc pattern=ball ! videoconvert ! fakesink"
         );
     }
 
@@ -1401,464 +1266,194 @@ mod tests {
     fn test_roundtrip_multiple_enum_properties() {
         init_gst();
 
-        // Test with multiple enum properties (use non-default values)
-        // pattern default is "smpte" (0), so "snow" is non-default
-        // animation-mode default is "frames" (0), so use "wall-time" (1) instead
-        let input = "videotestsrc pattern=snow animation-mode=wall-time ! fakesink";
+        // pattern default is "smpte", animation-mode default is "frames"
+        let resp = parse_pipeline("videotestsrc pattern=snow animation-mode=wall-time ! fakesink")
+            .unwrap();
+        let videotestsrc = find_by_type(&resp, "videotestsrc");
 
-        // Parse
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+        assert!(matches!(
+            videotestsrc.properties.get("pattern"),
+            Some(PropertyValue::String(s)) if s == "snow"
+        ));
+        assert!(matches!(
+            videotestsrc.properties.get("animation-mode"),
+            Some(PropertyValue::String(s)) if s == "wall-time"
+        ));
 
-        // Extract elements
-        let mut elements = Vec::new();
-        for (idx, gst_elem) in bin.iterate_elements().into_iter().flatten().enumerate() {
-            let elem = extract_element_info(&gst_elem, idx).unwrap();
-            elements.push(elem);
-        }
-
-        // Find videotestsrc
-        let videotestsrc = elements
-            .iter()
-            .find(|e| e.element_type == "videotestsrc")
-            .expect("videotestsrc not found");
-
-        // Verify both enum properties are strings
-        match videotestsrc.properties.get("pattern") {
-            Some(PropertyValue::String(s)) => {
-                assert_eq!(s, "snow", "Expected pattern='snow'");
-            }
-            other => panic!("Expected pattern as String, got {:?}", other),
-        }
-
-        match videotestsrc.properties.get("animation-mode") {
-            Some(PropertyValue::String(s)) => {
-                assert_eq!(s, "wall-time", "Expected animation-mode='wall-time'");
-            }
-            other => panic!("Expected animation-mode as String, got {:?}", other),
-        }
-
-        // Export and verify
-        let links = Vec::new(); // No links needed for this test
-        let output = elements_to_gst_launch(&elements, &links);
-
-        assert!(
-            output.contains("pattern=snow"),
-            "Expected 'pattern=snow' in output"
-        );
-        assert!(
-            output.contains("animation-mode=wall-time"),
-            "Expected 'animation-mode=wall-time' in output"
-        );
+        let output = elements_to_gst_launch(&resp.elements, &resp.links);
+        assert!(output.contains("pattern=snow"), "{}", output);
+        assert!(output.contains("animation-mode=wall-time"), "{}", output);
     }
 
     #[test]
     fn test_roundtrip_no_extra_properties() {
         init_gst();
 
-        // THE REAL ROUND-TRIP TEST: Only explicitly set properties should be exported
-        // This is what the user expected!
-        let input = "videotestsrc pattern=ball ! videoconvert ! fakesink";
+        // Only explicitly set properties may be exported, never defaults
+        let resp = parse_pipeline("videotestsrc pattern=ball ! videoconvert ! fakesink").unwrap();
 
-        // Parse
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        // Extract elements and links
-        let mut elements = Vec::new();
-        let mut element_id_map: HashMap<String, String> = HashMap::new();
-
-        for (idx, gst_elem) in bin.iterate_elements().into_iter().flatten().enumerate() {
-            let gst_name = gst_elem.name().to_string();
-            let elem = extract_element_info(&gst_elem, idx).unwrap();
-            element_id_map.insert(gst_name, elem.id.clone());
-            elements.push(elem);
-        }
-
-        // Extract links
-        let mut links = Vec::new();
-        let mut seen_links: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-
-        for gst_elem in bin.iterate_elements().into_iter().flatten() {
-            let gst_name = gst_elem.name().to_string();
-            let Some(our_id) = element_id_map.get(&gst_name) else {
-                continue;
-            };
-
-            for pad in gst_elem.src_pads() {
-                if let Some(peer) = pad.peer() {
-                    if let Some(peer_elem) = peer.parent_element() {
-                        let peer_gst_name = peer_elem.name().to_string();
-                        if let Some(peer_our_id) = element_id_map.get(&peer_gst_name) {
-                            let link_key = (our_id.clone(), peer_our_id.clone());
-                            if !seen_links.contains(&link_key) {
-                                seen_links.insert(link_key);
-                                links.push(Link {
-                                    from: format!("{}:{}", our_id, pad.name()),
-                                    to: format!("{}:{}", peer_our_id, peer.name()),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Export back to gst-launch syntax
-        let output = elements_to_gst_launch(&elements, &links);
-
-        // Verify ONLY pattern=ball is set on videotestsrc, no other properties
-        let videotestsrc = elements
-            .iter()
-            .find(|e| e.element_type == "videotestsrc")
-            .expect("videotestsrc not found");
-
+        let videotestsrc = find_by_type(&resp, "videotestsrc");
         assert_eq!(
             videotestsrc.properties.len(),
             1,
-            "Expected only 1 property (pattern), got: {:?}",
+            "Expected only pattern, got: {:?}",
             videotestsrc.properties
         );
-        assert!(matches!(
-            videotestsrc.properties.get("pattern"),
-            Some(PropertyValue::String(s)) if s == "ball"
-        ));
-
-        // Verify videoconvert has NO non-default properties
-        let videoconvert = elements
-            .iter()
-            .find(|e| e.element_type == "videoconvert")
-            .expect("videoconvert not found");
-
-        assert!(
-            videoconvert.properties.is_empty(),
-            "Expected no non-default properties on videoconvert, got: {:?}",
-            videoconvert.properties
-        );
-
-        // Verify fakesink has NO non-default properties
-        let fakesink = elements
-            .iter()
-            .find(|e| e.element_type == "fakesink")
-            .expect("fakesink not found");
-
-        assert!(
-            fakesink.properties.is_empty(),
-            "Expected no non-default properties on fakesink, got: {:?}",
-            fakesink.properties
-        );
-
-        // The output should be clean - only pattern=ball
-        assert!(
-            output.contains("pattern=ball"),
-            "Expected 'pattern=ball' in output"
-        );
-
-        // Should NOT contain any of these default properties
-        assert!(
-            !output.contains("motion="),
-            "Should not contain motion= (default value), got: {}",
-            output
-        );
-        assert!(
-            !output.contains("animation-mode="),
-            "Should not contain animation-mode= (default value), got: {}",
-            output
-        );
-        assert!(
-            !output.contains("chroma-resampler="),
-            "Should not contain chroma-resampler= (default value), got: {}",
-            output
-        );
-        assert!(
-            !output.contains("method="),
-            "Should not contain method= (default value), got: {}",
-            output
-        );
+        for element_type in ["videoconvert", "fakesink"] {
+            let elem = find_by_type(&resp, element_type);
+            assert!(
+                elem.properties.is_empty(),
+                "Expected no non-default properties on {}, got: {:?}",
+                element_type,
+                elem.properties
+            );
+        }
     }
 
     #[test]
     fn test_roundtrip_preserves_all_property_types() {
         init_gst();
 
-        // Pipeline with mixed property types: enum, bool, int
-        let input = "videotestsrc pattern=ball is-live=true num-buffers=100 ! fakesink";
+        // enum, bool and int properties, including hyphenated names
+        let resp = parse_pipeline(
+            "videotestsrc pattern=ball is-live=true num-buffers=100 ! fakesink sync=true",
+        )
+        .unwrap();
 
-        // Parse
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        // Extract elements
-        let mut elements = Vec::new();
-        for (idx, gst_elem) in bin.iterate_elements().into_iter().flatten().enumerate() {
-            let elem = extract_element_info(&gst_elem, idx).unwrap();
-            elements.push(elem);
-        }
-
-        // Find videotestsrc
-        let videotestsrc = elements
-            .iter()
-            .find(|e| e.element_type == "videotestsrc")
-            .expect("videotestsrc not found");
-
-        // Verify enum is String
+        let videotestsrc = find_by_type(&resp, "videotestsrc");
         assert!(matches!(
             videotestsrc.properties.get("pattern"),
             Some(PropertyValue::String(s)) if s == "ball"
         ));
-
-        // Verify bool is Bool
         assert!(matches!(
             videotestsrc.properties.get("is-live"),
             Some(PropertyValue::Bool(true))
         ));
-
-        // Verify int is Int
         assert!(matches!(
             videotestsrc.properties.get("num-buffers"),
             Some(PropertyValue::Int(100))
         ));
+        assert!(matches!(
+            // fakesink defaults to sync=false
+            find_by_type(&resp, "fakesink").properties.get("sync"),
+            Some(PropertyValue::Bool(true))
+        ));
 
-        // Export and verify all properties are present
-        let links = Vec::new();
-        let output = elements_to_gst_launch(&elements, &links);
-
-        assert!(output.contains("pattern=ball"));
-        assert!(output.contains("is-live=true"));
-        assert!(output.contains("num-buffers=100"));
+        let output = elements_to_gst_launch(&resp.elements, &resp.links);
+        assert!(output.contains("pattern=ball"), "{}", output);
+        assert!(output.contains("is-live=true"), "{}", output);
+        assert!(output.contains("num-buffers=100"), "{}", output);
+        assert!(output.contains("sync=true"), "{}", output);
     }
 
     // ========================================================================
-    // Real-World Pipeline Pattern Tests
+    // Multi-branch pipelines
     // ========================================================================
 
     #[test]
     fn test_parse_tee_pattern() {
         init_gst();
 
-        // Skip if x264enc not available (e.g., Windows MSVC GStreamer)
-        if gst::ElementFactory::find("x264enc").is_none() {
-            println!("x264enc not available, skipping test");
-            return;
-        }
-
-        // Tee pattern: record and display simultaneously
         let input = r#"videotestsrc ! tee name=t
-            t. ! queue ! x264enc ! mp4mux ! filesink location=test.mp4
-            t. ! queue ! fakesink"#;
+            t. ! queue ! fakesink name=a
+            t. ! queue ! fakesink name=b"#;
+        let resp = parse_pipeline(input).unwrap();
 
-        let cleaned = preprocess_pipeline_string(input);
-        let pipeline = gst::parse::launch(&cleaned).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+        assert_eq!(resp.elements.len(), 6, "{:?}", resp.elements);
+        assert_eq!(find_by_type(&resp, "tee").id, "t");
 
-        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
-
-        // Should have: videotestsrc, tee, queue (x2), x264enc, mp4mux, filesink, fakesink
-        assert!(
-            elements.len() >= 6,
-            "Expected at least 6 elements in tee pipeline, got {}",
-            elements.len()
-        );
-
-        // Verify we have a tee element
-        let tee_elem = elements
+        // Both tee branches are extracted as separate links from tee request pads
+        let tee_links: Vec<_> = resp
+            .links
             .iter()
-            .find(|e| e.factory().unwrap().name() == "tee")
-            .expect("Should have tee element");
-
-        let tee_name: String = tee_elem.property("name");
-        assert_eq!(tee_name, "t", "Expected tee to be named 't'");
-    }
-
-    #[test]
-    fn test_parse_caps_with_properties() {
-        init_gst();
-
-        // Caps filter with properties containing hyphens and underscores
-        let input = "videotestsrc ! video/x-raw,width=640,height=480,framerate=30/1 ! fakesink";
-
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        // Should parse successfully with capsfilter
-        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
-        assert!(
-            elements.len() >= 2,
-            "Should have at least videotestsrc and fakesink"
-        );
-    }
-
-    #[test]
-    fn test_parse_properties_with_hyphens() {
-        init_gst();
-
-        // Properties with hyphens and underscores
-        let input = "videotestsrc is-live=true num-buffers=100 ! fakesink sync=false";
-
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        // Extract elements
-        let mut elements = Vec::new();
-        for (idx, gst_elem) in bin.iterate_elements().into_iter().flatten().enumerate() {
-            let elem = extract_element_info(&gst_elem, idx).unwrap();
-            elements.push(elem);
-        }
-
-        // Find videotestsrc and verify hyphenated properties
-        let videotestsrc = elements
-            .iter()
-            .find(|e| e.element_type == "videotestsrc")
-            .expect("videotestsrc not found");
-
-        assert!(matches!(
-            videotestsrc.properties.get("is-live"),
-            Some(PropertyValue::Bool(true))
-        ));
-        assert!(matches!(
-            videotestsrc.properties.get("num-buffers"),
-            Some(PropertyValue::Int(100))
-        ));
-    }
-
-    #[test]
-    fn test_parse_rtp_streaming_pattern() {
-        init_gst();
-
-        // Skip if x264enc not available (e.g., Windows MSVC GStreamer)
-        if gst::ElementFactory::find("x264enc").is_none() {
-            println!("x264enc not available, skipping test");
-            return;
-        }
-
-        // Simple RTP pattern (without the complex caps string that has typed values)
-        let input = "videotestsrc ! x264enc ! rtph264pay ! udpsink port=5000";
-
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
-
-        // Should have: videotestsrc, x264enc, rtph264pay, udpsink
-        assert!(
-            elements.len() >= 4,
-            "Expected at least 4 elements in RTP pipeline, got {}",
-            elements.len()
-        );
-
-        // Verify we have the RTP payload element
-        let types: Vec<_> = elements
-            .iter()
-            .map(|e| e.factory().unwrap().name().to_string())
+            .filter(|l| l.from.starts_with("t:src_"))
             .collect();
+        assert_eq!(tee_links.len(), 2, "links: {:?}", resp.links);
 
-        assert!(
-            types.contains(&"rtph264pay".to_string()),
-            "Missing rtph264pay"
-        );
-        assert!(types.contains(&"udpsink".to_string()), "Missing udpsink");
-    }
-
-    // ========================================================================
-    // Complex Multi-Branch Pipeline Tests (Mux)
-    // ========================================================================
-
-    #[test]
-    fn test_parse_multiline_mux_pipeline() {
-        init_gst();
-
-        // Skip if x264enc or lamemp3enc not available (e.g., Windows MSVC GStreamer)
-        if gst::ElementFactory::find("x264enc").is_none()
-            || gst::ElementFactory::find("lamemp3enc").is_none()
-        {
-            println!("x264enc or lamemp3enc not available, skipping test");
-            return;
-        }
-
-        // The user's example pipeline with video and audio branches
-        let input = r#"gst-launch-1.0 -v -e videotestsrc \
-  ! x264enc \
-  ! mp4mux name=mux \
-  ! filesink location="bla.mp4" \
-  audiotestsrc ! lamemp3enc ! mux."#;
-
-        // Preprocess and parse
-        let cleaned = preprocess_pipeline_string(input);
-        let pipeline = gst::parse::launch(&cleaned).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
-
-        // Extract elements
-        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
-
-        // Should have 6 elements: videotestsrc, x264enc, mp4mux, filesink, audiotestsrc, lamemp3enc
-        assert!(elements.len() >= 5, "Expected at least 5 elements (videotestsrc, x264enc, mp4mux, filesink, audiotestsrc, lamemp3enc), got {}", elements.len());
-
-        // Check that we have the expected element types
-        let types: Vec<_> = elements
+        // The two queues share a column after the tee, on different rows
+        let queues: Vec<_> = resp
+            .elements
             .iter()
-            .map(|e| e.factory().unwrap().name().to_string())
+            .filter(|e| e.element_type == "queue")
             .collect();
-
-        assert!(
-            types.contains(&"videotestsrc".to_string()),
-            "Missing videotestsrc"
-        );
-        assert!(
-            types.contains(&"audiotestsrc".to_string()),
-            "Missing audiotestsrc"
-        );
-        assert!(
-            types.contains(&"mp4mux".to_string()) || types.contains(&"qtmux".to_string()),
-            "Missing mp4mux/qtmux"
-        );
-        assert!(types.contains(&"filesink".to_string()), "Missing filesink");
-
-        // Check that mp4mux has a name
-        let mux = elements
-            .iter()
-            .find(|e| {
-                let factory_name = e.factory().unwrap().name();
-                factory_name == "mp4mux" || factory_name == "qtmux"
-            })
-            .expect("Should have mp4mux or qtmux");
-
-        let mux_name: String = mux.property("name");
-        assert_eq!(
-            mux_name, "mux",
-            "Expected mux to be named 'mux', got '{}'",
-            mux_name
-        );
+        assert_eq!(queues.len(), 2);
+        assert_eq!(queues[0].position.0, queues[1].position.0);
+        assert_ne!(queues[0].position.1, queues[1].position.1);
+        assert!(queues[0].position.0 > find_by_type(&resp, "tee").position.0);
     }
 
     #[test]
     fn test_roundtrip_mux_pipeline() {
         init_gst();
 
-        // Simpler mux test using funnel (can handle raw data) - create funnel first in main chain, then branch to it
-        let input = "videotestsrc ! funnel name=f ! fakesink audiotestsrc ! f.";
+        // Two sources merge into a named funnel
+        let resp =
+            parse_pipeline("videotestsrc ! funnel name=f ! fakesink audiotestsrc ! f.").unwrap();
+        assert_eq!(resp.elements.len(), 4);
+        assert_eq!(find_by_type(&resp, "funnel").id, "f");
 
-        // Parse
-        let pipeline = gst::parse::launch(input).unwrap();
-        let bin = pipeline.downcast::<gst::Bin>().unwrap();
+        let video = &find_by_type(&resp, "videotestsrc").id;
+        let audio = &find_by_type(&resp, "audiotestsrc").id;
+        let sink = &find_by_type(&resp, "fakesink").id;
+        for src in [video, audio] {
+            assert!(
+                resp.links
+                    .iter()
+                    .any(|l| l.from == format!("{src}:src") && l.to.starts_with("f:")),
+                "{} must link into the funnel: {:?}",
+                src,
+                resp.links
+            );
+        }
+        assert!(has_link(&resp, "f:src", &format!("{sink}:sink")));
 
-        // Extract elements and verify we have all the pieces
-        let elements: Vec<_> = bin.iterate_elements().into_iter().flatten().collect();
+        // Both sources in the first column, funnel and sink after them
+        assert_eq!(find_by_type(&resp, "videotestsrc").position.0, 100.0);
+        assert_eq!(find_by_type(&resp, "audiotestsrc").position.0, 100.0);
+        assert_eq!(find_by_type(&resp, "funnel").position.0, 350.0);
+        assert_eq!(find_by_type(&resp, "fakesink").position.0, 600.0);
 
-        // Should have: videotestsrc, funnel, fakesink, audiotestsrc (4 elements)
+        // Export names the funnel so the second branch can reference it
+        let output = elements_to_gst_launch(&resp.elements, &resp.links);
+        assert!(output.contains("funnel name=f"), "{}", output);
+        assert!(output.contains("f."), "{}", output);
+    }
+
+    #[test]
+    fn test_parse_multiline_mux_pipeline() {
+        init_gst();
+
+        // The user's example: gst-launch prefix, flags, line continuations,
+        // and an audio branch into a named muxer
+        let input = r#"gst-launch-1.0 -v -e videotestsrc \
+  ! x264enc \
+  ! mp4mux name=mux \
+  ! filesink location="bla.mp4" \
+  audiotestsrc ! lamemp3enc ! mux."#;
+        let resp = parse_pipeline(input).unwrap();
+
+        assert_eq!(resp.elements.len(), 6, "{:?}", resp.elements);
+        assert_eq!(find_by_type(&resp, "mp4mux").id, "mux");
+
+        let x264 = format!("{}:src", find_by_type(&resp, "x264enc").id);
+        let lame = format!("{}:src", find_by_type(&resp, "lamemp3enc").id);
         assert!(
-            elements.len() >= 4,
-            "Expected at least 4 elements, got {}",
-            elements.len()
+            resp.links
+                .iter()
+                .any(|l| l.from == x264 && l.to.starts_with("mux:video_")),
+            "links: {:?}",
+            resp.links
         );
-
-        // Verify funnel is named
-        let funnel = elements
-            .iter()
-            .find(|e| e.factory().unwrap().name() == "funnel")
-            .expect("Should have funnel");
-
-        let funnel_name: String = funnel.property("name");
-        assert_eq!(funnel_name, "f", "Expected funnel to be named 'f'");
+        assert!(
+            resp.links
+                .iter()
+                .any(|l| l.from == lame && l.to.starts_with("mux:audio_")),
+            "links: {:?}",
+            resp.links
+        );
+        assert!(matches!(
+            find_by_type(&resp, "filesink").properties.get("location"),
+            Some(PropertyValue::String(s)) if s == "bla.mp4"
+        ));
     }
 }
