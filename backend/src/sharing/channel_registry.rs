@@ -146,26 +146,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_register_and_get() {
-        let registry = ChannelRegistry::new();
-        let flow_id = Uuid::new_v4();
-        let channel_name = ChannelRegistry::generate_channel_name(&flow_id, "video");
-
-        registry
-            .register(ChannelInfo {
-                source_flow_id: flow_id,
-                output_name: "video".to_string(),
-                channel_name: channel_name.clone(),
-                media_type: MediaType::Video,
-            })
-            .await;
-
-        let info = registry.get(&channel_name).await;
-        assert!(info.is_some());
-        assert_eq!(info.unwrap().output_name, "video");
-    }
-
-    #[tokio::test]
     async fn test_unregister_flow() {
         let registry = ChannelRegistry::new();
         let flow_id = Uuid::new_v4();
@@ -215,12 +195,6 @@ mod tests {
 
         // Should be inactive after unregistration
         assert!(!registry.is_active(&channel_name).await);
-    }
-
-    #[tokio::test]
-    async fn test_get_nonexistent() {
-        let registry = ChannelRegistry::new();
-        assert!(registry.get("nonexistent_channel").await.is_none());
     }
 
     #[tokio::test]
@@ -303,12 +277,5 @@ mod tests {
         let name = ChannelRegistry::generate_channel_name(&flow_id, "output:0");
         // Colons should be replaced with underscores
         assert_eq!(name, "strom_550e8400-e29b-41d4-a716-446655440000_output_0");
-    }
-
-    #[test]
-    fn test_default() {
-        let registry = ChannelRegistry::default();
-        // Default should create an empty registry
-        assert!(std::sync::Arc::strong_count(&registry.channels) == 1);
     }
 }

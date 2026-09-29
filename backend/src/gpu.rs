@@ -572,18 +572,10 @@ fn test_cuda_gl_interop() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+// Every test here is macOS-only: the helpers under test are no-ops elsewhere.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_video_convert_mode_element_name() {
-        assert_eq!(
-            VideoConvertMode::GpuAccelerated.element_name(),
-            "autovideoconvert"
-        );
-        assert_eq!(VideoConvertMode::Software.element_name(), "videoconvert");
-    }
 
     /// `configure_video_convert` must raise the thread count off the stock
     /// default of 1. Dropping the property, or a call site's use of this

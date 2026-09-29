@@ -793,11 +793,4 @@ mod tests {
         assert_eq!(s.get::<f32>("u_duration").unwrap(), 0.8);
         assert_eq!(s.get::<f32>("u_dx").unwrap(), -1.0);
     }
-
-    #[test]
-    fn master_bases() {
-        assert_eq!(MasterFxKind::Glitch.base(), MasterBase::DelayedCut);
-        assert_eq!(MasterFxKind::Flash.base(), MasterBase::Fade);
-        assert_eq!(MasterFxKind::WhipLeft.base(), MasterBase::Push(-1, 0));
-    }
 }

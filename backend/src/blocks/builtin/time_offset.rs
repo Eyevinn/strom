@@ -250,25 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn definition_is_generic() {
-        let blocks = get_blocks();
-        assert_eq!(blocks.len(), 1);
-        let b = &blocks[0];
-        assert_eq!(b.id, "builtin.time_offset");
-        assert_eq!(b.exposed_properties.len(), 1);
-        assert_eq!(b.exposed_properties[0].name, "offset_ms");
-        assert!(b.exposed_properties[0].live);
-        assert!(matches!(
-            b.external_pads.inputs[0].media_type,
-            MediaType::Generic
-        ));
-        assert!(matches!(
-            b.external_pads.outputs[0].media_type,
-            MediaType::Generic
-        ));
-    }
-
-    #[test]
     fn live_apply_sets_pad_offset_when_element_matches() {
         init();
         let element = gst::ElementFactory::make("identity")

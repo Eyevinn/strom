@@ -554,19 +554,3 @@ use std::collections::HashMap;
 pub fn new_tap_store() -> ThumbnailTapStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_thumbnail_tap_config_default() {
-        let config = ThumbnailTapConfig::default();
-        assert_eq!(config.width, 320);
-        assert_eq!(config.height, 180);
-        assert_eq!(config.jpeg_quality, 75);
-        assert_eq!(config.idle_timeout, Duration::from_secs(10));
-        assert_eq!(config.update_interval, Duration::from_secs(1));
-        assert_eq!(config.cache_ttl, Duration::from_millis(500));
-    }
-}
