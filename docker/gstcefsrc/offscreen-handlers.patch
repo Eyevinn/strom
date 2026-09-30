@@ -1,0 +1,201 @@
+Strom's patch: answer every CefClient handler an offscreen video source can
+be reached through, instead of leaving it to CEF's defaults.
+
+gstcefsrc runs CEF inside the embedding process. A default that shows UI
+builds it there: a click on <input type=file> built a GTK file chooser inside
+Strom on Xvfb, which tripped a GTK assertion and aborted Strom with every
+pipeline in it. A default that saves writes to that process's disk: a page's
+download landed in /root/Downloads without a click. Both measured in
+strom-full with CEF 144.
+
+Every CefClient handler in CEF 144 (branch 7559), and what a cefsrc does:
+
+  Handler          Decision
+  ---------------  ---------------------------------------------------------
+  Audio            gstcefsrc's own: page audio into the pipeline
+  Command          not used: Chrome-style only, and a windowless browser is
+                   Alloy-style
+  ContextMenu      THIS PATCH: menu emptied (no save as, print, view source)
+  Dialog           THIS PATCH: every file dialog cancelled
+  Display          gstcefsrc's own: console messages to the GStreamer log
+  Download         THIS PATCH: every download refused
+  Drag             THIS PATCH: every drop refused
+  Find             not used: only reached through the embedder's API
+  Focus            default: nothing is shown outside the page
+  Frame            default: notifications only
+  JSDialog         THIS PATCH: alert/confirm/prompt suppressed; beforeunload
+                   lets the page go
+  Keyboard         default: key events only reach it from remote control, and
+                   the commands they could start (save, print, open) end in
+                   the dialog and print paths covered here
+  LifeSpan         gstcefsrc's own; popups keep this client, so every
+                   decision here applies to them too
+  Load             default: notifications only
+  Permission       strict-network.patch answers Local Network Access; THIS
+                   PATCH refuses all media access, which enable-media-stream
+                   would otherwise grant without asking
+  Print            not implemented on purpose: with none, CEF on Linux does
+                   not print, and one would open the print path
+  Render           gstcefsrc's own: frames into the pipeline
+  Request          gstcefsrc's own; certificate errors and authentication
+                   requests keep CEF's default, which is to cancel
+
+diff --git a/gstcefsrc.cc b/gstcefsrc.cc
+index e7dc418..734e883 100644
+--- a/gstcefsrc.cc
++++ b/gstcefsrc.cc
+@@ -416,7 +416,12 @@ class BrowserClient :
+   public CefClient,
+   public CefLifeSpanHandler,
+   public CefRequestHandler,
+-  public CefPermissionHandler
++  public CefPermissionHandler,
++  public CefDialogHandler,
++  public CefDownloadHandler,
++  public CefJSDialogHandler,
++  public CefContextMenuHandler,
++  public CefDragHandler
+ {
+   public:
+ 
+@@ -459,6 +464,140 @@ class BrowserClient :
+       return this;
+     }
+ 
++    virtual CefRefPtr<CefDialogHandler> GetDialogHandler() override
++    {
++      return this;
++    }
++
++    virtual CefRefPtr<CefDownloadHandler> GetDownloadHandler() override
++    {
++      return this;
++    }
++
++    virtual CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override
++    {
++      return this;
++    }
++
++    virtual CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override
++    {
++      return this;
++    }
++
++    virtual CefRefPtr<CefDragHandler> GetDragHandler() override
++    {
++      return this;
++    }
++
++    // Media access (getUserMedia, getDisplayMedia):
++    //
++    // gstcefsrc passes enable-media-stream, under which CEF grants a page the
++    // embedding machine's cameras and microphones without asking. On a
++    // broadcast server those may be capture devices. A page renders to video;
++    // it has no business with them. Every request is refused.
++    bool OnRequestMediaAccessPermission(CefRefPtr<CefBrowser> browser,
++        CefRefPtr<CefFrame> frame, const CefString& requesting_origin,
++        uint32_t requested_permissions,
++        CefRefPtr<CefMediaAccessCallback> callback) override
++    {
++      GST_INFO_OBJECT (src, "Refusing media access for %s",
++          requesting_origin.ToString().c_str());
++      callback->Cancel();
++      return true;
++    }
++
++    // CefContextMenuHandler Methods:
++    //
++    // A right click through remote control would otherwise offer Chromium's
++    // own commands - save as, print, view source. The menu is emptied.
++    void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
++        CefRefPtr<CefFrame> frame, CefRefPtr<CefContextMenuParams> params,
++        CefRefPtr<CefMenuModel> model) override
++    {
++      model->Clear();
++    }
++
++    // CefDragHandler Methods:
++    //
++    // Nothing is dropped into an offscreen page.
++    bool OnDragEnter(CefRefPtr<CefBrowser> browser,
++        CefRefPtr<CefDragData> dragData, DragOperationsMask mask) override
++    {
++      return true;
++    }
++
++    // CefDialogHandler Methods:
++    //
++    // An offscreen browser has nobody to show a file chooser to. Left to CEF,
++    // one is built with GTK inside the embedding process, on whatever display
++    // it has, and on Xvfb it trips a GTK assertion that aborts that process -
++    // every pipeline in it - on the first click on an <input type=file>.
++    // Every file dialog is cancelled.
++    bool OnFileDialog(CefRefPtr<CefBrowser> browser, FileDialogMode mode,
++        const CefString& title, const CefString& default_file_path,
++        const std::vector<CefString>& accept_filters,
++        const std::vector<CefString>& accept_extensions,
++        const std::vector<CefString>& accept_descriptions,
++        CefRefPtr<CefFileDialogCallback> callback) override
++    {
++      GST_INFO_OBJECT (src, "Cancelling a file dialog the page asked for");
++      callback->Cancel();
++      return true;
++    }
++
++    // CefDownloadHandler Methods:
++    //
++    // A page renders to video; nothing it downloads has anywhere to go but
++    // the embedding process's disk, where it is written without a word.
++    // Every download is refused.
++    bool CanDownload(CefRefPtr<CefBrowser> browser, const CefString& url,
++        const CefString& request_method) override
++    {
++      GST_INFO_OBJECT (src, "Refusing a download the page asked for");
++      return false;
++    }
++
++    bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
++        CefRefPtr<CefDownloadItem> download_item,
++        const CefString& suggested_name,
++        CefRefPtr<CefBeforeDownloadCallback> callback) override
++    {
++      // Taking the download without continuing it leaves it unsaved.
++      return true;
++    }
++
++    void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
++        CefRefPtr<CefDownloadItem> download_item,
++        CefRefPtr<CefDownloadItemCallback> callback) override
++    {
++      if (download_item->IsInProgress())
++        callback->Cancel();
++    }
++
++    // CefJSDialogHandler Methods:
++    //
++    // alert(), confirm() and prompt() have nobody to answer them either. They
++    // are suppressed, which answers them as dismissed, rather than left to a
++    // default that may build a dialog in the embedding process.
++    bool OnJSDialog(CefRefPtr<CefBrowser> browser, const CefString& origin_url,
++        JSDialogType dialog_type, const CefString& message_text,
++        const CefString& default_prompt_text,
++        CefRefPtr<CefJSDialogCallback> callback,
++        bool& suppress_message) override
++    {
++      suppress_message = true;
++      return false;
++    }
++
++    bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
++        const CefString& message_text, bool is_reload,
++        CefRefPtr<CefJSDialogCallback> callback) override
++    {
++      // Let the page go: a source is stopped or navigated by its operator.
++      callback->Continue(true, CefString());
++      return true;
++    }
++
+     // CefPermissionHandler Methods:
+     //
+     // Chromium asks before a page reaches this machine or its local network
