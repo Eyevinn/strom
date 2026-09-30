@@ -15,6 +15,8 @@
 // process there (#834); see `mpegtssrt_streamheader_test.rs`.
 #![cfg(not(target_os = "windows"))]
 
+pub mod common;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -41,25 +43,6 @@ const REQUIRED: &[&str] = &[
     "aacparse",
     "fakesink",
 ];
-
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn plugins_available() -> bool {
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    false
-}
 
 /// A free UDP port for the SRT listener. Binding one and dropping it races with
 /// anything else on the host; a failure to bind shows up as a named error.
@@ -233,7 +216,7 @@ const MIN_BUFFERS_FROM_B: u64 = 10;
 
 fn assert_survives_pid_change(decode: bool) {
     gst::init().unwrap();
-    if !plugins_available() {
+    if !common::plugins_available(REQUIRED) {
         eprintln!("skipping: required GStreamer elements are missing");
         return;
     }

@@ -19,6 +19,8 @@
 //! block and reads the property back off the `rtpbin` it ends up with. Drop the
 //! workaround from a block and its test fails.
 
+pub mod common;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -28,37 +30,10 @@ use strom::blocks::builtin::get_builder;
 use strom::blocks::BlockBuildContext;
 use strom_types::PropertyValue;
 
-/// Skipping on a missing element passes green and guards nothing, so CI sets
-/// `STROM_REQUIRE_GST_PLUGINS=1` to turn a skip into a failure.
-fn elements_available(required: &[&str]) -> bool {
-    init_gst();
-    let missing: Vec<&str> = required
-        .iter()
-        .copied()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    assert!(
-        strom_types::env::var_opt("STROM_REQUIRE_GST_PLUGINS").is_none(),
-        "STROM_REQUIRE_GST_PLUGINS is set but these elements are missing: {}",
-        missing.join(", ")
-    );
-    eprintln!("SKIP: required GStreamer elements missing: {:?}", missing);
-    false
-}
-
-/// The WHEP elements come from `gst-plugins-rs`, which is linked into the
-/// binary and registered at startup. A test binary has to register it itself.
-fn init_gst() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        gst::init().expect("gst init");
-        gstwebrtchttp::plugin_register_static().expect("register webrtchttp plugins");
-        gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
-    });
+/// Register the `gst-plugins-rs` elements, then check `required`.
+fn webrtc_elements_available(required: &[&str]) -> bool {
+    common::init_webrtc_plugins();
+    common::plugins_available(required)
 }
 
 /// Every `rtpbin` inside `bin`, at any depth.
@@ -101,7 +76,7 @@ fn build_whepsrc(drop_on_latency: Option<bool>) -> gst::Bin {
 /// `drop_on_latency` property turns it off.
 #[test]
 fn whep_input_whepsrc_sets_drop_on_latency_on_its_rtpbin() {
-    if !elements_available(&["whepsrc", "rtpbin"]) {
+    if !webrtc_elements_available(&["whepsrc", "rtpbin"]) {
         return;
     }
 
@@ -128,7 +103,7 @@ fn whep_input_whepsrc_sets_drop_on_latency_on_its_rtpbin() {
 /// so the pipeline has to run for the block's element-added handler to see it.
 #[test]
 fn aes67_input_sets_drop_on_latency_on_the_sdpdemux_rtpbin() {
-    if !elements_available(&["filesrc", "sdpdemux", "rtpbin", "udpsrc"]) {
+    if !webrtc_elements_available(&["filesrc", "sdpdemux", "rtpbin", "udpsrc"]) {
         return;
     }
 

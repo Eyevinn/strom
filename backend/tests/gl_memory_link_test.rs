@@ -13,6 +13,8 @@
 //! construction, and inspect the resulting topology. Linking happens in NULL,
 //! so they need the GL plugin installed but no GL context.
 
+pub mod common;
+
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
@@ -25,15 +27,7 @@ use tempfile::NamedTempFile;
 /// on Ubuntu), which CI installs. A silent skip here would let the guard pass
 /// green while testing nothing, so their absence is a CI regression and must
 /// fail.
-fn require_gl_plugin() {
-    for factory in ["gltestsrc", "gldownload"] {
-        assert!(
-            gstreamer::ElementFactory::find(factory).is_some(),
-            "{} is missing, so this guard would test nothing. Install the GStreamer GL plugin.",
-            factory
-        );
-    }
-}
+const GL_ELEMENTS: &[&str] = &["gltestsrc", "gldownload"];
 
 fn elem(id: &str, ty: &str, props: Vec<(&str, PV)>) -> strom_types::Element {
     strom_types::Element {
@@ -124,7 +118,7 @@ fn peer_factory(pipeline: &gstreamer::Pipeline, element: &str) -> Option<String>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gl_only_producer_reaches_a_system_memory_encoder() {
     gstreamer::init().unwrap();
-    require_gl_plugin();
+    common::require_elements(GL_ELEMENTS);
 
     let flow = flow_into_encoder("gl_into_encoder", elem("glsrc", "gltestsrc", vec![]));
     let manager = build_manager(&flow);
@@ -163,7 +157,7 @@ async fn a_gl_only_producer_reaches_a_system_memory_encoder() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gl_only_producer_is_adapted_when_a_pad_is_unnamed() {
     gstreamer::init().unwrap();
-    require_gl_plugin();
+    common::require_elements(GL_ELEMENTS);
 
     for (from, to) in [
         ("glsrc", "convert:sink"),
@@ -192,7 +186,7 @@ async fn a_gl_only_producer_is_adapted_when_a_pad_is_unnamed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_system_memory_producer_is_left_alone() {
     gstreamer::init().unwrap();
-    require_gl_plugin();
+    common::require_elements(GL_ELEMENTS);
 
     let flow = flow_into_encoder(
         "system_into_encoder",
@@ -214,7 +208,7 @@ async fn a_system_memory_producer_is_left_alone() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gl_only_producer_reaches_the_video_encoder_block() {
     gstreamer::init().unwrap();
-    require_gl_plugin();
+    common::require_elements(GL_ELEMENTS);
 
     let mut flow = Flow::new("gl_into_videoenc".to_string());
     flow.elements.push(elem("glsrc", "gltestsrc", vec![]));
@@ -288,7 +282,7 @@ fn gldownloads_in(pipeline: &gstreamer::Pipeline) -> usize {
 #[test]
 fn a_link_refused_for_another_reason_is_not_adapted() {
     gstreamer::init().unwrap();
-    require_gl_plugin();
+    common::require_elements(GL_ELEMENTS);
 
     let (pipeline, elements) = bare_pipeline(&[
         ("gltestsrc", "glsrc"),
@@ -319,7 +313,7 @@ fn a_link_refused_for_another_reason_is_not_adapted() {
 #[test]
 fn a_failed_adaptation_leaves_nothing_behind() {
     gstreamer::init().unwrap();
-    require_gl_plugin();
+    common::require_elements(GL_ELEMENTS);
 
     let (pipeline, elements) = bare_pipeline(&[
         ("gltestsrc", "glsrc"),
