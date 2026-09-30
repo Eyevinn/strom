@@ -638,6 +638,51 @@ mod block_shape {
         }
     }
 
+    /// `num_data_tracks` defaults to 0, so a flow saved before embedded data
+    /// existed must build exactly as it did: no `embed_%u` pad requested on
+    /// `efpmux`, and no data element on either block.
+    #[test]
+    fn default_properties_build_no_data_path() {
+        init();
+        common::require_elements(&["efpmux", "efpdemux", "srtsink", "srtsrc", "identity"]);
+
+        let output = EfpSrtOutputBuilder
+            .build("blk", &HashMap::new(), &context())
+            .expect("efpsrt_output should build with default properties");
+        let embed_pads: Vec<String> = element(&output, "blk:efpmux")
+            .pads()
+            .into_iter()
+            .filter(|pad| {
+                pad.pad_template()
+                    .is_some_and(|templ| templ.name_template() == "embed_%u")
+            })
+            .map(|pad| pad.name().to_string())
+            .collect();
+        assert!(
+            embed_pads.is_empty(),
+            "efpmux requested embed pads by default: {:?}",
+            embed_pads
+        );
+        assert!(
+            !output
+                .elements
+                .iter()
+                .any(|(id, _)| id == "blk:data_input_0"),
+            "efpsrt_output built a data input by default"
+        );
+
+        let input = EfpSrtInputBuilder
+            .build("blk", &HashMap::new(), &context())
+            .expect("efpsrt_input should build with default properties");
+        assert!(
+            !input
+                .elements
+                .iter()
+                .any(|(id, _)| id == "blk:data_output_0"),
+            "efpsrt_input built a data output by default"
+        );
+    }
+
     /// A misconfigured routing list fails at build rather than quietly leaving a
     /// track fed by whatever arrives first, which is the surprise the property
     /// exists to remove.
