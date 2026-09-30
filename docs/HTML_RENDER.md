@@ -275,7 +275,7 @@ wrong, needs the browser's network locked down from outside, for instance by
 not running with `--network host` and by dropping `169.254.169.254` for the
 container.
 
-## Browser profiles, and running one Strom for several customers
+## Browser profiles
 
 Upstream gstcefsrc creates every browser in one shared context. Every HTML
 source in a Strom process then shares one cookie jar, one local storage and one
@@ -287,7 +287,9 @@ adds a browser context per source (`isolated-context`, `context-cache-path` and
 `persist-session-cookies` on `cefsrc`). When the plugin has it:
 
 - **Every HTML Input block gets a profile of its own**, kept in the CEF cache
-  directory, so a login survives a flow restart. Set **Browser Profile** to the
+  directory, so a login survives a flow restart. The `strom-full` entrypoint
+  clears that directory when the container starts, so it does not survive a
+  container restart unless the cache is mounted elsewhere. Set **Browser Profile** to the
   same name on several blocks to let them share one — for example, several
   graphics from one logged-in dashboard.
 - **Every raw `cefsrc` element gets one too**, keyed by its flow and element
@@ -299,28 +301,54 @@ Without it, Strom logs a warning for every HTML source it builds, and a remote
 control link says that a login made through it reaches every HTML source in the
 instance.
 
-**Whether a Strom can be shared between customers therefore depends on the
-plugin.** With isolation, HTML sources belonging to different customers do not
-see each other's sessions, and a remote control link (in its default, filtered
-mode) reaches only the page it was minted for and that page's own profile. Without
-isolation, do not put HTML sources from different customers on one Strom.
+## Running HTML sources for several customers
 
-What stays shared either way:
+A page an HTML source renders is code of the customer's choosing, running on
+the server. Strict Network Access, Local Network Access and browser profiles
+all hold against a page that plays by the browser's rules. None of them holds
+against a page that exploits a bug in Chromium itself, and **Chromium's sandbox
+is off in the `strom-full` image**: the image runs as root, which Chromium's
+sandbox refuses, so the entrypoint passes `no-sandbox`. A renderer bug in one
+customer's page is then code running as root in that Strom's container, with
+every flow, credential and network that Strom can reach.
 
-- **One browser process and one debug port.** Full DevTools (below) is not
-  filtered and reaches every page in the process, so it must stay off on a
-  shared Strom.
+So the rule for customers who must not reach each other is:
+
+**One Strom container per customer, on a locked network.**
+
+- **One container per customer.** Each gets its own process, its own browser,
+  its own debug port, its own API key and its own cache directory, and a CPU
+  or memory limit of its own. A page that breaks out of the browser reaches
+  that customer's own Strom and nothing of anyone else's.
+- **No `--network host`.** With host networking, "loopback" and "local
+  network" are the host's, and every service on it is in reach.
+- **Containers cannot reach each other.** Put each customer's container on a
+  network of its own, or drop traffic between them.
+- **No cloud metadata.** Drop `169.254.169.254` (and the rest of
+  `169.254.0.0/16`) for the containers, and on AWS require IMDSv2 with a hop
+  limit of 1. The metadata service hands out the host's cloud credentials, and
+  a hostname that resolves to it gets past Strict Network Access.
+
+What one Strom shared between customers still gives, with Strom's gstcefsrc
+build: sessions and cookies kept apart per source, and a filtered remote
+control link that reaches only its own page and that page's profile. That is
+enough against a customer who is curious or careless. It is not enough against
+one who is hostile, because what separates them is one browser process
+without a sandbox. If you share a Strom anyway:
+
+- **Full DevTools must stay off.** It is not filtered and reaches every page in
+  the process.
+- **Strict Network Access must stay on**, and customers must never be able to
+  change it.
 - **Profile names are one namespace per Strom.** Strom does not know who owns a
-  flow, so two customers who pick the same Browser Profile name share one. A
-  system that drives one Strom for several customers has to make the names its
-  own, for instance by prefixing them with a tenant id, and has to scope who
-  may mint a remote control link for which source, because Strom's
-  authentication is per instance, not per customer.
+  flow, so two customers who pick the same Browser Profile name share one. The
+  system in front of Strom has to make the names its own, for instance by
+  prefixing them with a tenant id, and has to scope who may mint a remote
+  control link for which source, because Strom's authentication is per
+  instance, not per customer.
 
-If the system in front of Strom does not do that tenant handling, the
-alternative is one Strom container per customer. That gives each customer its
-own process, its own debug port and its own cache directory, whatever the
-plugin supports.
+Without Strom's gstcefsrc build, every HTML source in a Strom shares one cookie
+jar, so a shared Strom is not an option at all.
 
 ## Remote control (logging in to a page)
 
@@ -408,8 +436,8 @@ curl -X DELETE -H "Authorization: Bearer $STROM_API_KEY" \
 Revoking ends sessions that are already open, not just the next one — it is the
 emergency stop, so it has to reach whoever is holding the socket.
 
-A login survives a restart: the source's profile keeps the cookies, session
-cookies included (see [Browser profiles](#browser-profiles-and-running-one-strom-for-several-customers)).
+A login survives a flow restart: the source's profile keeps the cookies, session
+cookies included (see [Browser profiles](#browser-profiles)).
 Chromium writes them on a timer, so a login made seconds before the process is
 killed can still be lost.
 
@@ -449,7 +477,8 @@ so the two cannot be combined.
 - **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
-- **One browser process per instance**: every `cefsrc` shares one CEF process and one debugging port. Cookies and storage are per source only with Strom's gstcefsrc build (see [Browser profiles](#browser-profiles-and-running-one-strom-for-several-customers))
+- **No Chromium sandbox in `strom-full`**: the image runs as root and the entrypoint passes `no-sandbox`, so a Chromium bug in a page is code running in Strom's container. See [Running HTML sources for several customers](#running-html-sources-for-several-customers)
+- **One browser process per instance**: every `cefsrc` shares one CEF process and one debugging port. Cookies and storage are per source only with Strom's gstcefsrc build (see [Browser profiles](#browser-profiles))
 - **Profiles are not removed with their block**: a deleted block's profile stays in the CEF cache directory until the directory is cleared
 
 ## References
