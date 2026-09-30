@@ -40,7 +40,7 @@ use strom_types::{block::StreamMode, block::*, element::ElementPadRef, PropertyV
 use tracing::{info, warn};
 
 /// The page shown by a block nobody has configured yet.
-const DEFAULT_URL: &str = "https://github.com/Eyevinn/strom/pull/879";
+const DEFAULT_URL: &str = "https://google.com";
 const DEFAULT_WIDTH: u64 = 1920;
 const DEFAULT_HEIGHT: u64 = 1080;
 const DEFAULT_FRAMERATE: u64 = 30;
@@ -418,9 +418,14 @@ pub fn checked_url(properties: &HashMap<String, PropertyValue>) -> Result<String
 ///
 /// `cefsrc` loads a new `url` into a running browser, but its property does
 /// not carry `GST_PARAM_MUTABLE_PLAYING`, so the generic live-write path
-/// refuses it. Returns `true` when the write was this block's and has been
-/// applied; the caller then skips the generic path. The value has already been
-/// through [`normalize_url`] in `update_block_properties`.
+/// refuses it. Returns `None` when the write is not this block's, and the
+/// caller carries on with the generic path.
+///
+/// Every live property write reaches this, not only `update_block_properties`:
+/// the raw element endpoint and MCP do too, so the URL is checked here rather
+/// than trusted. The source is strict unless its `cefsrc` says it is
+/// not: a plugin without [`CEFSRC_STRICT_NETWORK_PROPERTY`] cannot say, and is
+/// treated as strict.
 ///
 /// Coupling note: the element id tail mirrors the `cefsrc` name in `build`.
 pub fn try_apply_live_url(
@@ -428,16 +433,24 @@ pub fn try_apply_live_url(
     element_id: &str,
     prop_name: &str,
     value: &PropertyValue,
-) -> bool {
+) -> Option<Result<(), String>> {
     if prop_name != URL_PROPERTY || !element_id.ends_with(":cefsrc") {
-        return false;
+        return None;
     }
-    let PropertyValue::String(url) = value else {
-        return false;
+    let PropertyValue::String(raw) = value else {
+        return Some(Err("value must be a string".to_string()));
     };
-    element.set_property(URL_PROPERTY, url);
+    let strict = element
+        .find_property(CEFSRC_STRICT_NETWORK_PROPERTY)
+        .is_none()
+        || element.property::<bool>(CEFSRC_STRICT_NETWORK_PROPERTY);
+    let url = match checked_destination(raw, strict) {
+        Ok(url) => url,
+        Err(reason) => return Some(Err(reason)),
+    };
+    element.set_property(URL_PROPERTY, &url);
     info!("Loaded {} into HTML source {}", url, element_id);
-    true
+    Some(Ok(()))
 }
 
 /// Whether this block's operator has allowed a remote control link for it.
@@ -1163,6 +1176,46 @@ mod tests {
                 url
             );
         }
+    }
+
+    #[test]
+    fn a_live_url_write_is_checked_whichever_path_it_came_by() {
+        // The raw element endpoint and MCP reach this without going through
+        // `update_block_properties`, so the check has to be here. The element
+        // has no strict-network property, so it is taken as strict. Refused
+        // writes return before the element is touched, which is why a
+        // fakesrc stands in for cefsrc.
+        gst::init().unwrap();
+        let element = gst::ElementFactory::make("fakesrc").build().unwrap();
+        for url in [
+            "file:///etc/passwd",
+            "chrome://settings",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8080/",
+        ] {
+            let applied = try_apply_live_url(
+                &element,
+                "html1:cefsrc",
+                URL_PROPERTY,
+                &PropertyValue::String(url.to_string()),
+            );
+            assert!(
+                matches!(applied, Some(Err(_))),
+                "{} must be refused on air, got {:?}",
+                url,
+                applied
+            );
+        }
+        assert!(
+            try_apply_live_url(
+                &element,
+                "fakesrc0",
+                URL_PROPERTY,
+                &PropertyValue::String("https://example.com".to_string()),
+            )
+            .is_none(),
+            "an element that is not a block's cefsrc is left to the generic path"
+        );
     }
 
     #[test]

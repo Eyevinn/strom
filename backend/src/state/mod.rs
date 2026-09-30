@@ -1949,6 +1949,14 @@ impl AppState {
         // pipeline restart. Done after the pipeline writes so we don't store
         // values that failed to apply.
         if !to_persist.is_empty() {
+            // Remote control links are revoked when a flow changes under them
+            // (see `DevToolsState::watch_flows`), and switching it off has to
+            // end the sessions already open rather than only refuse new ones.
+            let remote_control_changed = definition.id
+                == crate::blocks::builtin::html_input::BLOCK_ID
+                && to_persist.iter().any(|(name, _)| {
+                    name == crate::blocks::builtin::html_input::REMOTE_CONTROL_PROPERTY
+                });
             {
                 let mut flows = self.inner.flows.write().await;
                 if let Some(flow) = flows.get_mut(flow_id) {
@@ -1961,6 +1969,11 @@ impl AppState {
                 }
             }
             self.mark_flow_dirty(*flow_id).await;
+            if remote_control_changed {
+                self.inner
+                    .events
+                    .broadcast(StromEvent::FlowUpdated { flow_id: *flow_id });
+            }
         }
 
         let current = self

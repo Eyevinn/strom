@@ -1663,40 +1663,9 @@ impl StromApp {
 
                         // Handle live property updates (e.g., audiogain real-time control)
                         // Debounce: avoid flooding the backend on every slider drag frame.
-                        // drain_live_updates also flushes expired pending values so the
-                        // final slider position is always delivered.
-                        let updates_to_send = crate::properties::drain_live_updates(
-                            &mut self.live_property_debounce,
-                            result.live_property_updates,
-                        );
-                        // If there are still pending updates in the debounce map, schedule
-                        // a repaint so they get flushed once the interval expires.
-                        if self
-                            .live_property_debounce
-                            .values()
-                            .any(|v| v.pending.is_some())
-                        {
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(
-                                crate::properties::LIVE_PROPERTY_DEBOUNCE_MS,
-                            ));
-                        }
-                        for update in updates_to_send {
-                            let api = self.api.clone();
-                            spawn_task(async move {
-                                if let Err(e) = api
-                                    .update_block_property(
-                                        &update.flow_id,
-                                        &update.block_id,
-                                        &update.property_name,
-                                        update.value,
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!("Live property update failed: {}", e);
-                                }
-                            });
-                        }
+                        // Pending values are flushed every frame, so the final
+                        // slider position is always delivered.
+                        self.send_live_updates(ui.ctx(), result.live_property_updates);
                     } else {
                         ui.label("Block definition not found");
                     }

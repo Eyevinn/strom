@@ -302,6 +302,15 @@ pub(super) async fn pump(
             }
 
             _ = hold_tick.tick() => {
+                // A backstop for a change that reached the flow without an
+                // event, which is what normally revokes the link.
+                if !super::still_allowed(&app, &source).await {
+                    info!(
+                        "Remote control is no longer allowed for block {}; closing the session",
+                        source.block_id
+                    );
+                    break;
+                }
                 if std::mem::take(&mut used) {
                     hold.used();
                 } else {

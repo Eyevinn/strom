@@ -64,6 +64,13 @@ pub(super) struct HtmlSource {
     pub(super) flow_name: String,
     /// The block's own name, or its id when it has none.
     pub(super) block_name: String,
+    /// A raw `cefsrc` element rather than an HTML Input block.
+    ///
+    /// It renders in the same CEF process, so its page has to be counted when
+    /// deciding which page is a block's - left out, it is the "one page left
+    /// over" that a block with no page of its own gets handed. It has no
+    /// Remote Control switch, so no link is ever minted for it.
+    pub(super) raw_element: bool,
 }
 
 impl HtmlSource {
@@ -79,7 +86,13 @@ impl HtmlSource {
     }
 
     pub(super) fn is(&self, flow_id: &FlowId, block_id: &str) -> bool {
-        self.flow_id == *flow_id && self.block_id == block_id
+        !self.raw_element && self.flow_id == *flow_id && self.block_id == block_id
+    }
+
+    fn is_same(&self, other: &HtmlSource) -> bool {
+        self.raw_element == other.raw_element
+            && self.flow_id == other.flow_id
+            && self.block_id == other.block_id
     }
 }
 
@@ -103,7 +116,8 @@ pub(super) enum Resolution {
 /// steps, and every step keeps the rule that an answer is only given when it
 /// is the only possible one:
 ///
-/// 1. **Exact URL.** The page is still on the URL the block names.
+/// 1. **Exact URL.** The page is still on the URL the block names, and no
+///    other source names it too - that one's page may be the one still there.
 /// 2. **Same origin.** The page redirected or was clicked through within the
 ///    site the block names. Pages another block claims exactly are its, not
 ///    ours, and another source pointed at the same site makes this a tie.
@@ -118,14 +132,19 @@ pub(super) fn resolve_target(
     sources: &[HtmlSource],
     want: &HtmlSource,
 ) -> Resolution {
-    // 1. Still on the URL it was given.
+    // 1. Still on the URL it was given. Another source given the same URL
+    //    could be the one still on it, with ours navigated away.
     let exact: Vec<&PageTarget> = targets
         .iter()
         .filter(|t| same_page(&t.url, &want.url))
         .collect();
-    match exact.len() {
-        1 => return Resolution::Target(exact[0].id.clone()),
-        0 => {}
+    let namesakes = sources
+        .iter()
+        .filter(|s| !s.is_same(want) && same_page(&s.url, &want.url))
+        .count();
+    match (exact.len(), namesakes) {
+        (0, _) => {}
+        (1, 0) => return Resolution::Target(exact[0].id.clone()),
         _ => return Resolution::Ambiguous,
     }
 
@@ -140,9 +159,7 @@ pub(super) fn resolve_target(
         .collect();
     let rivals = sources
         .iter()
-        .filter(|s| {
-            !s.is(&want.flow_id, &want.block_id) && !settled(s) && same_origin(&s.url, &want.url)
-        })
+        .filter(|s| !s.is_same(want) && !settled(s) && same_origin(&s.url, &want.url))
         .count();
     if !candidates.is_empty() && (candidates.len() > 1 || rivals > 0) {
         return Resolution::Ambiguous;
@@ -165,8 +182,7 @@ pub(super) fn resolve_target(
         .iter()
         .filter(|s| !settled(s) && !targets.iter().any(|t| same_origin(&t.url, &s.url)))
         .collect();
-    if unclaimed.len() == 1 && homeless.len() == 1 && homeless[0].is(&want.flow_id, &want.block_id)
-    {
+    if unclaimed.len() == 1 && homeless.len() == 1 && homeless[0].is_same(want) {
         return Resolution::Target(unclaimed[0].id.clone());
     }
 
@@ -197,7 +213,8 @@ pub(super) async fn html_sources(app: &AppState) -> Vec<HtmlSource> {
     html_sources_in(app.get_flows().await, &running)
 }
 
-/// The HTML sources in the flows that are running.
+/// The HTML sources in the flows that are running: HTML Input blocks, and raw
+/// `cefsrc` elements.
 ///
 /// A stopped flow renders nothing, so its blocks can never own a page. Left
 /// in, each one looks like a source whose page has not been found yet, and
@@ -211,10 +228,11 @@ pub(super) fn html_sources_in(flows: Vec<Flow>, running: &HashSet<FlowId>) -> Ve
         .flat_map(|flow| {
             let flow_id = flow.id;
             let flow_name = flow.name;
-            flow.blocks
+            let blocks = flow
+                .blocks
                 .into_iter()
                 .filter(|b| b.block_definition_id == crate::blocks::builtin::html_input::BLOCK_ID)
-                .map(move |b| HtmlSource {
+                .map(|b| HtmlSource {
                     flow_id,
                     // A block with no `url` property still renders the block's
                     // default, and a bare address is rendered as https://, so
@@ -228,8 +246,35 @@ pub(super) fn html_sources_in(flows: Vec<Flow>, running: &HashSet<FlowId>) -> Ve
                     flow_name: flow_name.clone(),
                     block_name: b.name.clone().unwrap_or_else(|| b.id.clone()),
                     block_id: b.id,
+                    raw_element: false,
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            // A raw element with no `url` renders the plugin's default, which
+            // Strom does not know. Its empty URL matches no page and no site,
+            // so it stays a source still looking for its page, and the "one
+            // page left over" rule refuses rather than hand its page out.
+            let elements = flow
+                .elements
+                .into_iter()
+                .filter(|e| e.element_type == "cefsrc")
+                .map(|e| HtmlSource {
+                    flow_id,
+                    url: match e
+                        .properties
+                        .get(crate::blocks::builtin::html_input::URL_PROPERTY)
+                    {
+                        Some(strom_types::PropertyValue::String(u)) => u.trim().to_string(),
+                        _ => String::new(),
+                    },
+                    remote_control: false,
+                    strict: true,
+                    flow_name: flow_name.clone(),
+                    block_name: e.id.clone(),
+                    block_id: e.id,
+                    raw_element: true,
+                })
+                .collect::<Vec<_>>();
+            blocks.into_iter().chain(elements)
         })
         .collect()
 }
@@ -254,6 +299,7 @@ mod tests {
             strict: true,
             flow_name: "Flow".to_string(),
             block_name: block_id.to_string(),
+            raw_element: false,
         }
     }
 
@@ -455,6 +501,83 @@ mod tests {
             resolve_target(&targets, &sources, want),
             Resolution::Target("AAAA".to_string())
         );
+    }
+
+    fn raw_cefsrc_flow(name: &str, url: Option<&str>) -> Flow {
+        let mut flow = Flow::new(name);
+        let properties = match url {
+            Some(url) => serde_json::json!({ "url": url }),
+            None => serde_json::json!({}),
+        };
+        flow.elements.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "cefsrc0",
+                "element_type": "cefsrc",
+                "properties": properties,
+                "position": [0.0, 0.0]
+            }))
+            .expect("a valid element"),
+        );
+        flow
+    }
+
+    #[test]
+    fn a_raw_cefsrc_on_a_blocks_url_is_not_handed_to_the_block() {
+        // The block redirected to its login page; a raw cefsrc in another
+        // flow - one that never switched Remote Control on - is showing the
+        // block's configured URL. That page is the element's, not the block's.
+        let block = html_flow("block", "https://app.example/dashboard");
+        let raw = raw_cefsrc_flow("raw", Some("https://app.example/dashboard"));
+        let running: HashSet<FlowId> = [block.id, raw.id].into_iter().collect();
+        let sources = html_sources_in(vec![block.clone(), raw], &running);
+        assert_eq!(sources.len(), 2, "the raw element is a source as well");
+
+        let targets = vec![
+            target("AAAA", "https://login.idp.example/"),
+            target("BBBB", "https://app.example/dashboard"),
+        ];
+        let want = sources
+            .iter()
+            .find(|s| s.flow_id == block.id)
+            .expect("the block is a source");
+        assert_eq!(
+            resolve_target(&targets, &sources, want),
+            Resolution::Ambiguous
+        );
+    }
+
+    #[test]
+    fn a_raw_cefsrc_page_is_not_the_one_left_over() {
+        // The block's own page is not there yet. The only page is the raw
+        // element's, which renders the plugin's default because it was given
+        // no URL - it must not be what the block's link opens.
+        for url in [None, Some("https://raw.example/")] {
+            let block = html_flow("block", "https://app.example/dashboard");
+            let raw = raw_cefsrc_flow("raw", url);
+            let running: HashSet<FlowId> = [block.id, raw.id].into_iter().collect();
+            let sources = html_sources_in(vec![block.clone(), raw], &running);
+
+            let targets = vec![target("AAAA", "https://www.raw-default.example/")];
+            let want = sources
+                .iter()
+                .find(|s| s.flow_id == block.id)
+                .expect("the block is a source");
+            assert_eq!(
+                resolve_target(&targets, &sources, want),
+                Resolution::Unknown,
+                "raw element url {:?}",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn a_raw_cefsrc_can_never_be_asked_for_by_block_id() {
+        let raw = raw_cefsrc_flow("raw", Some("https://raw.example/"));
+        let running: HashSet<FlowId> = [raw.id].into_iter().collect();
+        let sources = html_sources_in(vec![raw.clone()], &running);
+        assert!(!sources[0].remote_control);
+        assert!(!sources[0].is(&raw.id, "cefsrc0"));
     }
 
     #[test]

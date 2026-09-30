@@ -109,6 +109,10 @@ pub async fn create_app_with_config(
 
     let auth_config = Arc::new(auth_config);
 
+    // Remote control links end as soon as the block they were minted for
+    // stops allowing them.
+    devtools.watch_flows(state.clone());
+
     if auth_config.enabled {
         tracing::info!("Authentication enabled");
         if auth_config.has_session_auth() {

@@ -37,7 +37,8 @@
 //! The key is the credential for everything under `/devtools/<key>`. It
 //! expires on its own after [`LINK_TTL`] of disuse — nobody opening it, and
 //! nobody clicking, typing or navigating in a session on it — and can be
-//! revoked before that, and either one also ends a session that is already open — otherwise
+//! revoked before that, as switching the block's Remote Control off also does,
+//! and either one also ends a session that is already open — otherwise
 //! revocation would close the door on the next visitor while the one already
 //! inside stayed.
 //!
@@ -85,7 +86,7 @@ use strom_types::devtools::{
     DevToolsLink, DevToolsLinkSummary, DevToolsLinks, DevToolsRevokedLinks, DevToolsTarget,
     DevToolsTargets, REMOTE_CONTROL_WARNING, SCREENCAST_CONTROL_WARNING, SHARED_CONTEXT_WARNING,
 };
-use strom_types::FlowId;
+use strom_types::{FlowId, StromEvent};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -379,6 +380,71 @@ impl DevToolsState {
         count
     }
 
+    /// Revoke every link whose block no longer allows one, ending any session
+    /// open on it: the flow or block is gone, or Remote Control is off.
+    ///
+    /// The switch is read when a link is minted, so without this turning it
+    /// off would only stop new links, and a link already handed out would
+    /// keep control of the page until it went unused for [`LINK_TTL`].
+    pub async fn revoke_disallowed(&self, app: &AppState) -> usize {
+        let held: Vec<(String, LinkSource)> = {
+            let mut links = self.links.lock().unwrap();
+            Self::sweep(&mut links, Instant::now());
+            links
+                .iter()
+                .map(|(key, link)| (key.clone(), link.source.clone()))
+                .collect()
+        };
+        let mut disallowed = Vec::new();
+        for (key, source) in held {
+            if !still_allowed(app, &source).await {
+                disallowed.push(key);
+            }
+        }
+        let mut links = self.links.lock().unwrap();
+        let mut revoked = 0;
+        for key in disallowed {
+            if let Some(link) = links.remove(&key) {
+                let _ = link.cancel.send(());
+                revoked += 1;
+            }
+        }
+        if revoked > 0 {
+            info!(
+                "Revoked {} remote control link(s) whose HTML source no longer allows one",
+                revoked
+            );
+        }
+        revoked
+    }
+
+    /// Revoke links as soon as a flow changes under them, rather than at the
+    /// next request on them.
+    ///
+    /// A session already open makes no request of its own that could notice,
+    /// so this is what ends it when an operator switches Remote Control off.
+    /// Nothing to watch when the debug port is closed: no link can exist.
+    pub fn watch_flows(&self, app: AppState) {
+        if self.config.debug_port.is_none() {
+            return;
+        }
+        let state = self.clone();
+        let mut events = app.events().subscribe();
+        tokio::spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match events.recv().await {
+                    Ok(StromEvent::FlowUpdated { .. } | StromEvent::FlowDeleted { .. }) => {}
+                    Ok(_) => continue,
+                    // A change may have been among what was missed.
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => break,
+                }
+                state.revoke_disallowed(&app).await;
+            }
+        });
+    }
+
     /// The live links, newest expiry last. Never the keys.
     fn list(&self) -> Vec<DevToolsLinkSummary> {
         let mut links = self.links.lock().unwrap();
@@ -388,6 +454,19 @@ impl DevToolsState {
         out.sort_by_key(|a| a.expires_in_seconds);
         out
     }
+}
+
+/// Whether the block a link was minted for still allows one: it still exists,
+/// is still an HTML source, and still has Remote Control switched on.
+async fn still_allowed(app: &AppState, source: &LinkSource) -> bool {
+    let Some(flow) = app.get_flow(&source.flow_id).await else {
+        return false;
+    };
+    flow.blocks.iter().any(|b| {
+        b.id == source.block_id
+            && b.block_definition_id == crate::blocks::builtin::html_input::BLOCK_ID
+            && crate::blocks::builtin::html_input::remote_control_enabled(&b.properties)
+    })
 }
 
 /// Chromium only ever hands out hex target ids. Anything else is somebody
@@ -916,6 +995,7 @@ pub async fn revoke_link(
 /// redirect is the only place that has to name an address — and the address it
 /// names is the one the operator themselves just used.
 pub async fn open_link(
+    State(app): State<AppState>,
     Extension(state): Extension<DevToolsState>,
     Path(key): Path<String>,
     headers: HeaderMap,
@@ -923,7 +1003,11 @@ pub async fn open_link(
     if state.config.debug_port.is_none() {
         return disabled();
     }
-    if !valid_key(&key) || state.resolve(&key).is_none() {
+    if !valid_key(&key) {
+        return no_such_link();
+    }
+    state.revoke_disallowed(&app).await;
+    if state.resolve(&key).is_none() {
         return no_such_link();
     }
 
@@ -981,6 +1065,7 @@ pub async fn open_link(
 /// the key is what lets the application's own relative paths keep working
 /// without a cookie to carry the credential.
 pub async fn proxy_ui(
+    State(app): State<AppState>,
     Extension(state): Extension<DevToolsState>,
     Path((key, path)): Path<(String, String)>,
     RawQuery(query): RawQuery,
@@ -996,7 +1081,11 @@ pub async fn proxy_ui(
         )
             .into_response();
     }
-    if !valid_key(&key) || state.resolve(&key).is_none() {
+    if !valid_key(&key) {
+        return no_such_link();
+    }
+    state.revoke_disallowed(&app).await;
+    if state.resolve(&key).is_none() {
         return no_such_link();
     }
     if !safe_asset_path(&path) {
@@ -1028,6 +1117,7 @@ pub async fn proxy_cdp(
     // expire ends this session too — otherwise revocation would only refuse
     // the *next* one, and whoever already had the socket would keep control of
     // the browser for as long as they cared to hold it.
+    state.revoke_disallowed(&app).await;
     let Some(session) = state.open_session(&key) else {
         return no_such_link();
     };
@@ -1257,6 +1347,96 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(1), cancelled.recv())
             .await
             .expect("the live session must be told within the second");
+    }
+
+    fn app_state() -> AppState {
+        let storage_file = tempfile::NamedTempFile::new().unwrap();
+        let blocks_file = tempfile::NamedTempFile::new().unwrap();
+        AppState::new(
+            crate::storage::JsonFileStorage::new(storage_file.path()),
+            blocks_file.path(),
+            std::env::temp_dir(),
+            vec![],
+            "all".to_string(),
+            vec![],
+            false,
+            false,
+        )
+    }
+
+    fn html_flow() -> strom_types::Flow {
+        let mut flow = strom_types::Flow::new("remote-control");
+        flow.blocks.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "html1",
+                "block_definition_id": crate::blocks::builtin::html_input::BLOCK_ID,
+                "properties": { "url": "https://a.example", "remote_control": true },
+                "position": { "x": 0.0, "y": 0.0 }
+            }))
+            .expect("a valid block"),
+        );
+        flow
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switching_remote_control_off_ends_the_sessions_already_open() {
+        // The switch is read when a link is minted. Without the watch, an
+        // operator switching it off would stop only new links, and the one
+        // already handed out would keep control of the page on air.
+        gstreamer::init().unwrap();
+        let app = app_state();
+        let flow = html_flow();
+        let flow_id = flow.id;
+        app.upsert_flow(flow).await.expect("upsert_flow");
+
+        let s = state();
+        s.watch_flows(app.clone());
+        let mut source = link_source("https://a.example");
+        source.flow_id = flow_id;
+        source.block_id = "html1".to_string();
+        let minted = s.mint("ABCD".to_string(), "https://a.example".to_string(), source);
+        let mut cancelled = s
+            .open_session(&minted.key)
+            .expect("session opens")
+            .cancelled;
+        assert_eq!(s.revoke_disallowed(&app).await, 0, "it is still allowed");
+
+        let (_, rejected) = app
+            .update_block_properties(
+                &flow_id,
+                "html1",
+                HashMap::from([(
+                    crate::blocks::builtin::html_input::REMOTE_CONTROL_PROPERTY.to_string(),
+                    strom_types::PropertyValue::Bool(false),
+                )]),
+                None,
+                None,
+            )
+            .await
+            .expect("update_block_properties");
+        assert!(rejected.is_empty(), "{:?}", rejected);
+
+        let _ = tokio::time::timeout(Duration::from_secs(1), cancelled.recv())
+            .await
+            .expect("the open session must be told within the second");
+        assert!(
+            s.resolve(&minted.key).is_none(),
+            "the key must not open a new session either"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_link_whose_block_is_gone_is_revoked() {
+        gstreamer::init().unwrap();
+        let app = app_state();
+        let s = state();
+        let minted = s.mint(
+            "ABCD".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
+        assert_eq!(s.revoke_disallowed(&app).await, 1);
+        assert!(s.resolve(&minted.key).is_none());
     }
 
     #[tokio::test]

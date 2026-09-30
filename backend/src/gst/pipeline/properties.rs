@@ -213,13 +213,17 @@ impl PipelineManager {
 
         // HTML Input: cefsrc loads a new URL into a running browser, but does
         // not flag the property as mutable in PLAYING.
-        if crate::blocks::builtin::html_input::try_apply_live_url(
+        if let Some(result) = crate::blocks::builtin::html_input::try_apply_live_url(
             element,
             element_id,
             property_name,
             value,
         ) {
-            return Ok(());
+            return result.map_err(|reason| PipelineError::InvalidProperty {
+                element: element_id.to_string(),
+                property: property_name.to_string(),
+                reason,
+            });
         }
 
         // Live Audio Router: `routing_matrix` is one JSON string describing the

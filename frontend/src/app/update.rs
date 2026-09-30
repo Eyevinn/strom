@@ -9,6 +9,49 @@ use super::APP_SETTINGS_KEY;
 use super::*;
 
 impl StromApp {
+    /// Debounce live property writes and send whatever is due.
+    ///
+    /// Called by every control that writes live, and once a frame with nothing
+    /// new: a value still settling - a URL being typed - has to go out once the
+    /// typing stops, even if the control that produced it is no longer drawn
+    /// because its block was deselected.
+    pub(super) fn send_live_updates(
+        &mut self,
+        ctx: &egui::Context,
+        incoming: Vec<crate::properties::LivePropertyUpdate>,
+    ) {
+        let updates =
+            crate::properties::drain_live_updates(&mut self.live_property_debounce, incoming);
+        // Anything still pending is flushed on a later frame, so make sure
+        // there is one once the interval has passed.
+        if self
+            .live_property_debounce
+            .values()
+            .any(|v| v.pending.is_some())
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                crate::properties::LIVE_PROPERTY_DEBOUNCE_MS,
+            ));
+        }
+        for update in updates {
+            let api = self.api.clone();
+            spawn_task(async move {
+                if let Err(e) = api
+                    .update_block_property(
+                        &update.flow_id,
+                        &update.block_id,
+                        &update.property_name,
+                        update.value,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!("Live property update failed: {}", e);
+                }
+            });
+        }
+    }
+
     /// Spawn an async seek API call on the appropriate runtime.
     fn spawn_seek(
         api: crate::api::ApiClient,
@@ -64,6 +107,16 @@ impl eframe::App for StromApp {
 
         // Apply deferred graph selection (avoids egui two-pass ID instability)
         self.graph.apply_pending_selection();
+
+        // Flush live property writes whose debounce has run out, whether or
+        // not the control that made them is on screen this frame.
+        if self
+            .live_property_debounce
+            .values()
+            .any(|v| v.pending.is_some())
+        {
+            self.send_live_updates(ui.ctx(), Vec::new());
+        }
 
         // Handle pending flow selection (deferred from previous frame to avoid accesskit panic)
         // This MUST happen before any UI is drawn to prevent "Focused ID not in node list" errors
@@ -1787,8 +1840,8 @@ impl eframe::App for StromApp {
             // Only for a block whose routing_matrix is declared live.
             // `builtin.audiorouter`'s routing is topology, so the backend would
             // reject the write and the round-trip would be wasted.
-            let updates = crate::properties::drain_live_updates(
-                &mut self.live_property_debounce,
+            self.send_live_updates(
+                ui.ctx(),
                 if live {
                     vec![crate::properties::LivePropertyUpdate {
                         flow_id,
@@ -1801,33 +1854,6 @@ impl eframe::App for StromApp {
                     Vec::new()
                 },
             );
-            if self
-                .live_property_debounce
-                .values()
-                .any(|v| v.pending.is_some())
-            {
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(
-                        crate::properties::LIVE_PROPERTY_DEBOUNCE_MS,
-                    ));
-            }
-            for update in updates {
-                let api = self.api.clone();
-                spawn_task(async move {
-                    if let Err(e) = api
-                        .update_block_property(
-                            &update.flow_id,
-                            &update.block_id,
-                            &update.property_name,
-                            update.value,
-                            None,
-                        )
-                        .await
-                    {
-                        tracing::warn!("Live routing update failed: {}", e);
-                    }
-                });
-            }
 
             // Save mode also writes the flow to storage. Live mode does not:
             // the block-property endpoint persists the value itself.
