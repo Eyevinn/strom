@@ -20,7 +20,7 @@
 //! workaround from a block and its test fails.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -187,28 +187,33 @@ fn aes67_input_sets_drop_on_latency_on_the_sdpdemux_rtpbin() {
         .downcast::<gst::Bin>()
         .expect("sdpdemux is a bin");
 
+    // Read the property from our own element-added handler rather than by
+    // polling sdpdemux's children. gst_bin_add puts rtpbin in the child list
+    // before it emits element-added, so a poll can find it before the block's
+    // handler has set the property. Handlers run in connection order, and the
+    // block connected its handler at build time, so ours sees the value the
+    // block left.
+    let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
+    sdpdemux.connect_element_added(move |_, element| {
+        if element.factory().is_some_and(|f| f.name() == "rtpbin") {
+            let _ = tx.send((
+                element.name().to_string(),
+                element.property::<bool>("drop-on-latency"),
+            ));
+        }
+    });
+
     pipeline
         .set_state(gst::State::Playing)
         .expect("pipeline accepts PLAYING");
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut bins = rtpbins(&sdpdemux);
-    while bins.is_empty() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-        bins = rtpbins(&sdpdemux);
-    }
-    let values: Vec<(String, bool)> = bins
-        .iter()
-        .map(|b| (b.name().to_string(), b.property::<bool>("drop-on-latency")))
-        .collect();
+    let first = rx.recv_timeout(Duration::from_secs(10));
     pipeline
         .set_state(gst::State::Null)
         .expect("pipeline to NULL");
 
-    assert!(
-        !values.is_empty(),
-        "sdpdemux never created an rtpbin within 10s"
-    );
+    let first = first.expect("sdpdemux never created an rtpbin within 10s");
+    let values: Vec<(String, bool)> = std::iter::once(first).chain(rx.try_iter()).collect();
     for (name, value) in values {
         assert!(
             value,
