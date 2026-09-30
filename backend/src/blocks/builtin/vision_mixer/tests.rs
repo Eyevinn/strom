@@ -579,3 +579,48 @@ fn overlay_timer_exits_when_its_appsrc_is_orphaned() {
     let _ = appsrc.set_state(gst::State::Null);
     unregister_flow(&flow_id);
 }
+
+/// With `output_format` Auto, every CPU input's tee feeds branches that run
+/// through `videocrop`. The input must be held to formats `videocrop` takes:
+/// left open it can settle on one only the compositors accept (A444_16LE on
+/// GStreamer 1.26), and the dist and PVW branches then fail with
+/// not-negotiated, leaving PGM black.
+#[test]
+fn test_cpu_auto_format_inputs_are_held_to_videocrop_formats() {
+    use crate::blocks::{builtin::get_builder, BlockBuildContext};
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+
+    gst::init().unwrap();
+    crate::gpu::detect_gpu_capabilities();
+
+    let mut props = HashMap::new();
+    props.insert(
+        "compositor_preference".to_string(),
+        PropertyValue::String("cpu".to_string()),
+    );
+    props.insert("num_inputs".to_string(), PropertyValue::UInt(2));
+    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let built = get_builder("builtin.vision_mixer")
+        .expect("vision mixer has a builder")
+        .build("vm", &props, &ctx)
+        .expect("CPU vision mixer builds");
+
+    let a444: gst::Caps = "video/x-raw,format=A444_16LE".parse().unwrap();
+
+    for i in 0..2 {
+        let id = format!("vm:capsfilter_in_{}", i);
+        let (_, capsfilter) = built
+            .elements
+            .iter()
+            .find(|(eid, _)| *eid == id)
+            .unwrap_or_else(|| panic!("{} is missing: input {} goes to its tee unfiltered", id, i));
+        let caps = capsfilter.property::<gst::Caps>("caps");
+        assert!(
+            !caps.can_intersect(&a444),
+            "{} lets A444_16LE through: {}",
+            id,
+            caps
+        );
+    }
+}
