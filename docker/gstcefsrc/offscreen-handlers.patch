@@ -17,7 +17,9 @@ Every CefClient handler in CEF 144 (branch 7559), and what a cefsrc does:
                    Alloy-style
   ContextMenu      THIS PATCH: menu emptied (no save as, print, view source)
   Dialog           THIS PATCH: every file dialog cancelled
-  Display          gstcefsrc's own: console messages to the GStreamer log
+  Display          THIS PATCH: console messages to the cef_console GStreamer
+                   debug category only, not also to stderr, where a page
+                   logging in a loop would fill the embedding process's log
   Download         THIS PATCH: every download refused
   Drag             THIS PATCH: every drop refused
   Find             not used: only reached through the embedder's API
@@ -39,12 +41,23 @@ Every CefClient handler in CEF 144 (branch 7559), and what a cefsrc does:
   Render           gstcefsrc's own: frames into the pipeline
   Request          gstcefsrc's own; certificate errors and authentication
                    requests keep CEF's default, which is to cancel
-
 diff --git a/gstcefsrc.cc b/gstcefsrc.cc
-index e7dc418..734e883 100644
+index e7dc418..a3238dc 100644
 --- a/gstcefsrc.cc
 +++ b/gstcefsrc.cc
-@@ -416,7 +416,12 @@ class BrowserClient :
+@@ -390,7 +390,10 @@ public:
+     };
+     GST_CAT_LEVEL_LOG (cef_console_debug, gst_level, src, "%s:%d %s", source.ToString().c_str(), line,
+       message.ToString().c_str());
+-    return false;
++    // Handled: the page's console goes to the cef_console debug category
++    // only. Returning false also has CEF write it to stderr, so a page
++    // logging in a loop would fill the embedding process's log.
++    return true;
+   }
+ 
+ private:
+@@ -416,7 +419,12 @@ class BrowserClient :
    public CefClient,
    public CefLifeSpanHandler,
    public CefRequestHandler,
@@ -58,7 +71,7 @@ index e7dc418..734e883 100644
  {
    public:
  
-@@ -459,6 +464,140 @@ class BrowserClient :
+@@ -459,6 +467,140 @@ class BrowserClient :
        return this;
      }
  
