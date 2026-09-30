@@ -371,6 +371,20 @@ impl PipelineManager {
             );
         }
 
+        // Strict about this machine and its network unless the flow says
+        // otherwise, the same default as the HTML Input block.
+        if element_def.element_type == "cefsrc"
+            && !element_def
+                .properties
+                .contains_key(html_input::CEFSRC_STRICT_NETWORK_PROPERTY)
+        {
+            html_input::restrict_network(
+                &element,
+                &format!("cefsrc {} in flow {}", element_def.id, self.flow_id),
+                true,
+            );
+        }
+
         // Set properties
         if !element_def.properties.is_empty() {
             debug!(

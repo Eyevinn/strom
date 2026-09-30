@@ -99,6 +99,13 @@ RUN cd /build/gstcefsrc && git apply /build/popup-close.patch
 COPY isolated-context.patch /build/isolated-context.patch
 RUN cd /build/gstcefsrc && git apply /build/isolated-context.patch
 
+# Strom's patch: strict-network answers Chromium's Local Network Access prompt
+# (deny when strict, allow otherwise) instead of leaving it to CEF's default,
+# keeps a strict browser's WebRTC off plain UDP, and lets enable-features be
+# repeated in GST_CEF_CHROME_EXTRA_FLAGS, which is split on commas.
+COPY strict-network.patch /build/strict-network.patch
+RUN cd /build/gstcefsrc && git apply /build/strict-network.patch
+
 WORKDIR /build/gstcefsrc
 
 # Build gstcefsrc
@@ -150,7 +157,7 @@ RUN mkdir -p /output/lib/gstreamer-1.0 && \
     # Create version info file
     echo "CEF_VERSION=${CEF_VERSION}" > /output/version.txt && \
     echo "GSTCEFSRC_REF=${GSTCEFSRC_REF}" >> /output/version.txt && \
-    echo "STROM_PATCHES=popup-close isolated-context" >> /output/version.txt && \
+    echo "STROM_PATCHES=popup-close isolated-context strict-network" >> /output/version.txt && \
     echo "TARGETARCH=${TARGETARCH}" >> /output/version.txt && \
     echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /output/version.txt && \
     # List what was built

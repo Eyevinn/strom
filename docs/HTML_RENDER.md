@@ -245,6 +245,36 @@ and pick whether the page's audio comes out as a second pad. Internally it is
 `cefsrc` feeding `cefdemux`, with `cefdemux` built only when audio is asked
 for. Raw `cefsrc` pipelines still work — the block just spares you the caps.
 
+## Strict Network Access
+
+A page an HTML source renders goes on air, so a page on the server itself
+would put the server's own services on screen: `http://127.0.0.1:9222/json/list`
+lists every page the browser has open, and on a cloud VM
+`http://169.254.169.254/` is the instance's metadata. **Strict Network Access**
+on the HTML Input block keeps a source off the server and its local network,
+and it is **on by default**.
+
+With it on:
+
+- The block's URL, a URL changed on air, remote control's address bar and the
+  pin button refuse loopback, private, link-local and `localhost` addresses.
+- With Strom's gstcefsrc build, Chromium also refuses the page's own
+  requests to them (Local Network Access): fetches, frames, workers,
+  navigations and WebSockets, checked against the address actually connected
+  to. WebRTC sends UDP only through a proxy, so not at all.
+- Raw `cefsrc` elements are strict too, unless the flow sets `strict-network`.
+
+Turn it off only on your own machine, to render your own local pages.
+
+> **Never expose this setting to anyone who is not the server's operator.** A
+> system that lets customers edit flows must not let them switch it off.
+
+What it does not cover: a hostname that only resolves to an internal address,
+when it is the page's own URL. That, and anything Chromium itself might get
+wrong, needs the browser's network locked down from outside, for instance by
+not running with `--network host` and by dropping `169.254.169.254` for the
+container.
+
 ## Browser profiles, and running one Strom for several customers
 
 Upstream gstcefsrc creates every browser in one shared context. Every HTML

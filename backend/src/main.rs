@@ -437,6 +437,40 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Have Chromium check what a page reaches on this machine and its network
+    // on every path it can. Local Network Access is on by default, but in this
+    // Chromium it leaves navigations, WebSocket and WebTransport unchecked.
+    // These only switch the checks on; whether a page is refused is each
+    // browser's own answer to the prompt, which gstcefsrc's strict-network
+    // gives. A loose source still reaches what it asks for.
+    //
+    // gstcefsrc splits the list on commas, so a feature list cannot be one
+    // value. Strom's build adds each repeated enable-features to the last; an
+    // older plugin keeps only the last one, which switches on one check
+    // instead of three and changes nothing else.
+    //
+    // set_var is safe here for the same reason as above.
+    {
+        let mut flags: Vec<String> = std::env::var("GST_CEF_CHROME_EXTRA_FLAGS")
+            .ok()
+            .map(|existing| {
+                existing
+                    .split(',')
+                    .map(|f| f.trim().to_string())
+                    .filter(|f| !f.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for feature in [
+            "LocalNetworkAccessForNavigations",
+            "LocalNetworkAccessChecksWebSockets",
+            "LocalNetworkAccessChecksWebTransport",
+        ] {
+            flags.push(format!("enable-features={}", feature));
+        }
+        std::env::set_var("GST_CEF_CHROME_EXTRA_FLAGS", flags.join(","));
+    }
+
     // Open Chromium's remote debugging port when the operator asked for it.
     //
     // This is what lets an operator drive an HTML source: log in to a page,

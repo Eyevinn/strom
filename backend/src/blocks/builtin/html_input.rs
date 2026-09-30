@@ -72,6 +72,11 @@ pub const STRICT_NETWORK_PROPERTY: &str = "strict_network";
 /// own cookies, storage and cache instead of the process-wide ones.
 pub const ISOLATED_CONTEXT_PROPERTY: &str = "isolated-context";
 
+/// The `cefsrc` property, from Strom's gstcefsrc build, that has Chromium
+/// refuse the page this machine and its local network: Local Network Access is
+/// denied, and WebRTC sends UDP only through a proxy.
+pub const CEFSRC_STRICT_NETWORK_PROPERTY: &str = "strict-network";
+
 /// The `cefsrc` property naming the directory an isolated context persists in.
 const CONTEXT_CACHE_PATH_PROPERTY: &str = "context-cache-path";
 
@@ -193,6 +198,27 @@ pub fn isolate_browser(
         .is_some()
     {
         cefsrc.set_property(PERSIST_SESSION_COOKIES_PROPERTY, true);
+    }
+}
+
+/// Tell a `cefsrc` how strict to be about this machine and its network.
+///
+/// Strom refuses an internal address as the page's own URL either way; this
+/// is what reaches the page's own requests - its fetches, frames, workers and
+/// WebRTC - which only Chromium sees. A plugin without the property cannot
+/// refuse them, and `who` is named in a warning about it.
+pub fn restrict_network(cefsrc: &gst::Element, who: &str, strict: bool) {
+    if cefsrc
+        .find_property(CEFSRC_STRICT_NETWORK_PROPERTY)
+        .is_some()
+    {
+        cefsrc.set_property(CEFSRC_STRICT_NETWORK_PROPERTY, strict);
+    } else if strict {
+        warn!(
+            "{}: this gstcefsrc has no {} property, so what the page itself requests is not \
+             kept off this machine and its network",
+            who, CEFSRC_STRICT_NETWORK_PROPERTY
+        );
     }
 }
 
@@ -529,6 +555,11 @@ impl BlockBuilder for HtmlInputBuilder {
 
         let cefsrc = make("cefsrc")?;
         cefsrc.set_property("url", &url);
+        restrict_network(
+            &cefsrc,
+            &format!("HTML Input block {}", instance_id),
+            strict_network(properties),
+        );
 
         isolate_browser(
             &cefsrc,
