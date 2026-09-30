@@ -9,6 +9,7 @@
 //! - `unfed_track`: `splitmuxsink` pads go to connected tracks only, and to
 //!   every connected track before data flows.
 //! - `stalled_track`: a track that stops delivering must not freeze the rest.
+//! - `track_resume`: a track ended that way is recorded again once it resumes.
 //! - `splitmux_threading`: one upstream streaming task feeding every track must
 //!   not deadlock `splitmuxsink`.
 
@@ -1422,5 +1423,730 @@ mod splitmux_threading {
             files
         );
         assert!(total_bytes(&files) > 0, "recorded fragments were empty");
+    }
+}
+
+/// A track the stall watchdog ended (see `stalled_track`) is recorded again,
+/// in a new file, once its source carries data again. A source that really
+/// ended, with EOS, stays ended and still finishes the recording.
+mod track_resume {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// A switch in front of a recorder input. While `stalled` is set, buffers are
+    /// dropped before they reach the recorder, which is what the recorder sees when
+    /// the source upstream stops producing: no data, no EOS.
+    fn gate(pipeline: &gst::Pipeline, stalled: &Arc<AtomicBool>) -> gst::Element {
+        let gate = gst::ElementFactory::make("identity").build().unwrap();
+        pipeline.add(&gate).unwrap();
+        let stalled = Arc::clone(stalled);
+        gate.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+            move |_pad, _info| {
+                if stalled.load(Ordering::Relaxed) {
+                    gst::PadProbeReturn::Drop
+                } else {
+                    gst::PadProbeReturn::Ok
+                }
+            },
+        );
+        gate
+    }
+
+    /// Live H.264 into `target` through `gate`, a keyframe every `key_int_max`
+    /// frames. `num_buffers` of -1 runs until the pipeline stops.
+    fn feed_video(
+        pipeline: &gst::Pipeline,
+        target: &gst::Element,
+        gate: &gst::Element,
+        num_buffers: i32,
+        key_int_max: u32,
+    ) {
+        let enc = video_source(pipeline, num_buffers, true);
+        enc.set_property("key-int-max", key_int_max);
+        enc.link(gate).unwrap();
+        gate.link(target).expect("link video into recorder");
+    }
+
+    /// Live AAC into `target` through `gate`.
+    fn feed_audio(pipeline: &gst::Pipeline, target: &gst::Element, gate: &gst::Element) {
+        audio_source(pipeline, -1, true).link(gate).unwrap();
+        gate.link(target).expect("link audio into recorder");
+    }
+
+    /// A one-video, one-audio mp4 recorder and its two inputs.
+    fn add_av_recorder(
+        pipeline: &gst::Pipeline,
+        instance_id: &str,
+        media_root: &Path,
+    ) -> (gst::Element, gst::Element, Recorder) {
+        let recorder = add_mp4_recorder(pipeline, instance_id, media_root, 1, 1);
+        (
+            recorder.input("video_input_0"),
+            recorder.input("audio_input_0"),
+            recorder,
+        )
+    }
+
+    /// Send EOS into the pipeline, as a flow stop does, and wait for the recording
+    /// to be finalised. Returns whether the pipeline reported EOS.
+    fn stop_with_eos(pipeline: &gst::Pipeline) -> bool {
+        pipeline.send_event(gst::event::Eos::new());
+        wait_for_eos(pipeline, Duration::from_secs(15))
+    }
+
+    /// What one track of a recorded file holds.
+    #[derive(Debug, Default, Clone)]
+    struct TrackSummary {
+        samples: u64,
+        duration: Duration,
+    }
+
+    #[derive(Debug, Default)]
+    struct FileSummary {
+        path: PathBuf,
+        video: TrackSummary,
+        audio: TrackSummary,
+    }
+
+    /// The payload of each child box of `data`, by four-character type.
+    fn boxes(data: &[u8]) -> Vec<(&[u8], &[u8])> {
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while pos + 8 <= data.len() {
+            let size32 = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            let kind = &data[pos + 4..pos + 8];
+            let (header, size) = match size32 {
+                1 if pos + 16 <= data.len() => (
+                    16,
+                    u64::from_be_bytes(data[pos + 8..pos + 16].try_into().unwrap()) as usize,
+                ),
+                0 => (8, data.len() - pos),
+                n => (8, n),
+            };
+            if size < header || pos + size > data.len() {
+                break;
+            }
+            out.push((kind, &data[pos + header..pos + size]));
+            pos += size;
+        }
+        out
+    }
+
+    fn child<'a>(data: &'a [u8], kind: &[u8]) -> Option<&'a [u8]> {
+        boxes(data)
+            .into_iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, payload)| payload)
+    }
+
+    fn be32(data: &[u8], at: usize) -> u64 {
+        u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as u64
+    }
+
+    /// Read each track's sample count and duration from a recorded mp4's `moov`.
+    ///
+    /// qtdemux is no use here: it drops any track shorter than a fifth of the file
+    /// as a "preview image", which is exactly the short track these tests look for.
+    /// A readable `moov` with sample tables is also what says the file was
+    /// finalised.
+    fn summarize(path: &Path) -> FileSummary {
+        let data = std::fs::read(path).expect("read recording");
+        let moov = child(&data, b"moov")
+            .unwrap_or_else(|| panic!("{} has no moov: not finalised", path.display()));
+        let mut summary = FileSummary {
+            path: path.to_path_buf(),
+            ..Default::default()
+        };
+        for (kind, trak) in boxes(moov) {
+            if kind != b"trak" {
+                continue;
+            }
+            let mdia = child(trak, b"mdia").expect("trak has mdia");
+            let handler = &child(mdia, b"hdlr").expect("mdia has hdlr")[8..12];
+            let mdhd = child(mdia, b"mdhd").expect("mdia has mdhd");
+            let (timescale, duration) = if mdhd[0] == 1 {
+                (
+                    be32(mdhd, 20),
+                    u64::from_be_bytes(mdhd[24..32].try_into().unwrap()),
+                )
+            } else {
+                (be32(mdhd, 12), be32(mdhd, 16))
+            };
+            let stsz = child(mdia, b"minf")
+                .and_then(|minf| child(minf, b"stbl"))
+                .and_then(|stbl| child(stbl, b"stsz"))
+                .expect("track has a sample size table");
+            let track = TrackSummary {
+                samples: be32(stsz, 8),
+                duration: Duration::from_secs_f64(duration as f64 / timescale.max(1) as f64),
+            };
+            match handler {
+                b"vide" => summary.video = track,
+                b"soun" => summary.audio = track,
+                _ => {}
+            }
+        }
+        summary
+    }
+
+    /// Frames reaching splitmuxsink's video pad — what the muxer actually takes.
+    /// A new file comes with new pads, so count on the pad there is now.
+    fn count_video_into_muxer(pipeline: &gst::Pipeline, instance_id: &str) -> Arc<AtomicU64> {
+        let counter = Arc::new(AtomicU64::new(0));
+        let sink = pipeline
+            .by_name(&format!("{}:splitmuxsink", instance_id))
+            .expect("splitmuxsink in pipeline");
+        let c = Arc::clone(&counter);
+        sink.static_pad("video")
+            .expect("splitmuxsink has a video pad")
+            .add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                c.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        counter
+    }
+
+    /// The production failure: video stops arriving for longer than the stall
+    /// timeout while audio keeps going, then comes back. The recorder ends the video
+    /// track so the audio is not frozen behind it, and once video is flowing again
+    /// the recording has to have video in it again.
+    ///
+    /// If the track stays ended, every frame in the recording is from before the
+    /// stall, and the last assertion fails.
+    #[test]
+    fn a_track_that_stalls_and_resumes_is_recorded_again() {
+        if !plugins_available() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let media_root = tmp.path();
+        let pipeline = gst::Pipeline::new();
+        let (video_in, audio_in, recorder) = add_av_recorder(&pipeline, "rec_resume", media_root);
+        let video_stalled = Arc::new(AtomicBool::new(false));
+        let audio_stalled = Arc::new(AtomicBool::new(false));
+        let video_gate = gate(&pipeline, &video_stalled);
+        let audio_gate = gate(&pipeline, &audio_stalled);
+        feed_video(&pipeline, &video_in, &video_gate, -1, 30);
+        feed_audio(&pipeline, &audio_in, &audio_gate);
+        recorder.run_setups();
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(15));
+
+        std::thread::sleep(Duration::from_secs(3));
+        let bus = pipeline.bus().expect("pipeline bus");
+        while bus
+            .pop_filtered(&[gst::MessageType::StateChanged])
+            .is_some()
+        {}
+        let running_before_stall = pipeline.current_running_time();
+        video_stalled.store(true, Ordering::Relaxed);
+        // Past the stall timeout, so the video track is ended.
+        std::thread::sleep(Duration::from_secs(9));
+        let running_at_resume = pipeline.current_running_time();
+        video_stalled.store(false, Ordering::Relaxed);
+
+        // Recovery takes a poll interval, the old file's finalisation and the next
+        // keyframe. Then measure a window of steady recording.
+        std::thread::sleep(Duration::from_secs(3));
+        let video_into_muxer = count_video_into_muxer(&pipeline, "rec_resume");
+        std::thread::sleep(Duration::from_secs(4));
+        let frames_after = video_into_muxer.load(Ordering::Relaxed);
+
+        // Closing the first file must not look like the end of the stream: the
+        // pipeline would report EOS while it is still recording.
+        let early_eos = bus.pop_filtered(&[gst::MessageType::Eos]);
+        // And restarting the muxer must stay inside the recorder, not take the
+        // whole pipeline back to PAUSED while the new file prerolls.
+        let pipeline_left_playing =
+            std::iter::from_fn(|| bus.pop_filtered(&[gst::MessageType::StateChanged]))
+                .filter(|msg| msg.src() == Some(pipeline.upcast_ref::<gst::Object>()))
+                .filter_map(|msg| match msg.view() {
+                    gst::MessageView::StateChanged(sc) => Some(sc.current()),
+                    _ => None,
+                })
+                .find(|current| *current != gst::State::Playing);
+
+        let stopped = stop_with_eos(&pipeline);
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+        assert!(
+            early_eos.is_none(),
+            "starting the next file posted EOS on the pipeline"
+        );
+        assert_eq!(
+            pipeline_left_playing, None,
+            "starting the next file knocked the pipeline out of PLAYING"
+        );
+        assert!(
+            stopped,
+            "the recording did not finish on EOS after a resumed track"
+        );
+
+        let summaries: Vec<FileSummary> = recordings(media_root, "")
+            .iter()
+            .map(|p| summarize(p))
+            .collect();
+        for s in &summaries {
+            eprintln!(
+                "{}: video {} samples over {:?}, audio {} samples over {:?}",
+                s.path.file_name().unwrap().to_string_lossy(),
+                s.video.samples,
+                s.video.duration,
+                s.audio.samples,
+                s.audio.duration
+            );
+        }
+        eprintln!(
+            "stall from {:?} to {:?}; {} frames into the muxer in the 4 s window",
+            running_before_stall, running_at_resume, frames_after
+        );
+
+        // The file open before the stall keeps what was recorded until then.
+        let first = summaries.first().expect("at least one recording");
+        assert!(
+            first.video.samples >= 30,
+            "the recording before the stall lost its video: {:?}",
+            first
+        );
+
+        // 30 fps over four seconds is 120 frames. Anything near that means video is
+        // being recorded again rather than dropped at the recorder.
+        assert!(
+            frames_after >= 60,
+            "video came back but the recorder is not taking it: {} frames reached the muxer in 4 s",
+            frames_after
+        );
+
+        // And it is in a file: a file that starts after the stall has video in it,
+        // alongside audio.
+        let resumed = summaries
+            .iter()
+            .skip(1)
+            .find(|s| s.video.samples > 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no recording after the stall has video; files: {:?}",
+                    summaries
+                )
+            });
+        assert!(
+            resumed.video.samples >= 60,
+            "the resumed recording has too little video: {:?}",
+            resumed
+        );
+        assert!(
+            resumed.audio.samples > 0,
+            "the resumed recording dropped the audio track: {:?}",
+            resumed
+        );
+    }
+
+    /// A source that really ends sends EOS. That track is finished, not stalled: the
+    /// recorder must not wait for it to come back, the other track keeps recording
+    /// into the same file, and a flow stop still finalises the recording.
+    #[test]
+    fn a_track_that_really_ends_stays_ended_and_the_recording_finishes() {
+        if !plugins_available() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let media_root = tmp.path();
+        let pipeline = gst::Pipeline::new();
+        let (video_in, audio_in, recorder) = add_av_recorder(&pipeline, "rec_eos", media_root);
+        let never = Arc::new(AtomicBool::new(false));
+        let video_gate = gate(&pipeline, &never);
+        let audio_gate = gate(&pipeline, &never);
+        // Two seconds of video, then a real EOS from the source.
+        feed_video(&pipeline, &video_in, &video_gate, 60, 30);
+        feed_audio(&pipeline, &audio_in, &audio_gate);
+        recorder.run_setups();
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .expect("pipeline accepts PLAYING");
+        let _ = pipeline.state(gst::ClockTime::from_seconds(15));
+
+        // Well past the stall timeout after the video ended.
+        std::thread::sleep(Duration::from_secs(10));
+        let stopped = stop_with_eos(&pipeline);
+        pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+        assert!(
+            stopped,
+            "the recording did not finish on EOS after a track ended"
+        );
+
+        let summaries: Vec<FileSummary> = recordings(media_root, "")
+            .iter()
+            .map(|p| summarize(p))
+            .collect();
+        assert_eq!(
+            summaries.len(),
+            1,
+            "a track that ended for real must not start a new file: {:?}",
+            summaries
+        );
+        let file = &summaries[0];
+        assert!(
+            (50..=60).contains(&file.video.samples),
+            "the video that was sent should all be recorded, and nothing more: {:?}",
+            file
+        );
+        // Audio kept going for the whole run, well past the end of the video.
+        assert!(
+            file.audio.duration >= Duration::from_secs(8),
+            "audio stopped with the video: {:?}",
+            file
+        );
+    }
+
+    /// A recorder fed live video and audio, each behind its own stall switch,
+    /// running in PLAYING.
+    struct Rig {
+        _tmp: tempfile::TempDir,
+        media_root: PathBuf,
+        pipeline: gst::Pipeline,
+        audio_in: gst::Element,
+        video_gate: gst::Element,
+        video_stalled: Arc<AtomicBool>,
+        audio_stalled: Arc<AtomicBool>,
+    }
+
+    impl Rig {
+        fn start(instance_id: &str) -> Self {
+            Self::start_with(instance_id, 30, false)
+        }
+
+        /// `remote_encoder` drops key-unit requests on their way upstream, as for a
+        /// source whose encoder sits on the far side of an SRT or RTMP link.
+        fn start_with(instance_id: &str, key_int_max: u32, remote_encoder: bool) -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let media_root = tmp.path().to_path_buf();
+            let pipeline = gst::Pipeline::new();
+            let (video_in, audio_in, recorder) =
+                add_av_recorder(&pipeline, instance_id, &media_root);
+            let video_stalled = Arc::new(AtomicBool::new(false));
+            let audio_stalled = Arc::new(AtomicBool::new(false));
+            let video_gate = gate(&pipeline, &video_stalled);
+            let audio_gate = gate(&pipeline, &audio_stalled);
+            if remote_encoder {
+                video_gate.static_pad("src").unwrap().add_probe(
+                    gst::PadProbeType::EVENT_UPSTREAM,
+                    |_pad, info| match info.data.as_ref() {
+                        Some(gst::PadProbeData::Event(e))
+                            if e.type_() == gst::EventType::CustomUpstream =>
+                        {
+                            gst::PadProbeReturn::Drop
+                        }
+                        _ => gst::PadProbeReturn::Ok,
+                    },
+                );
+            }
+            feed_video(&pipeline, &video_in, &video_gate, -1, key_int_max);
+            feed_audio(&pipeline, &audio_in, &audio_gate);
+            recorder.run_setups();
+            pipeline
+                .set_state(gst::State::Playing)
+                .expect("pipeline accepts PLAYING");
+            let _ = pipeline.state(gst::ClockTime::from_seconds(15));
+            Rig {
+                _tmp: tmp,
+                media_root,
+                pipeline,
+                audio_in,
+                video_gate,
+                video_stalled,
+                audio_stalled,
+            }
+        }
+
+        /// The sink pad of the element splitmuxsink writes the file with.
+        fn file_sink_pad(&self) -> gst::Pad {
+            self.pipeline
+                .iterate_all_by_element_factory_name("splitmuxsink")
+                .into_iter()
+                .filter_map(Result::ok)
+                .find_map(|smx| {
+                    smx.downcast::<gst::Bin>()
+                        .ok()?
+                        .iterate_sinks()
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .find_map(|sink| sink.static_pad("sink"))
+                })
+                .expect("splitmuxsink has a file sink once it has started")
+        }
+
+        /// Stop the flow with EOS and read back every file it wrote.
+        fn stop(self) -> Vec<FileSummary> {
+            let stopped = stop_with_eos(&self.pipeline);
+            self.pipeline
+                .set_state(gst::State::Null)
+                .expect("pipeline to NULL");
+            assert!(stopped, "the recording did not finish on EOS");
+            let summaries: Vec<FileSummary> = recordings(&self.media_root, "")
+                .iter()
+                .map(|p| summarize(p))
+                .collect();
+            for s in &summaries {
+                eprintln!(
+                    "{}: video {} samples over {:?}, audio {} samples over {:?}",
+                    s.path.file_name().unwrap().to_string_lossy(),
+                    s.video.samples,
+                    s.video.duration,
+                    s.audio.samples,
+                    s.audio.duration
+                );
+            }
+            summaries
+        }
+    }
+
+    /// The same recovery with the tracks the other way round. Audio is not the
+    /// track splitmuxsink splits on, so ending it takes a different path through
+    /// splitmuxsink, and the new file has to bring it back all the same.
+    #[test]
+    fn an_audio_track_that_stalls_and_resumes_is_recorded_again() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_audio_back");
+        std::thread::sleep(Duration::from_secs(3));
+        rig.audio_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        rig.audio_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(6));
+        let summaries = rig.stop();
+
+        let last = summaries.last().expect("at least one recording");
+        assert!(
+            summaries.len() >= 2,
+            "no new file was started once the audio came back: {:?}",
+            summaries
+        );
+        // About 5 s of AAC at 1024 samples / 44.1 kHz is 215 frames.
+        assert!(
+            last.audio.samples >= 100 && last.video.samples >= 60,
+            "the file after the stall should have both tracks: {:?}",
+            last
+        );
+    }
+
+    /// A source that stalls once can stall again. Every return gets its own file,
+    /// and each one has the track in it.
+    #[test]
+    fn a_track_that_stalls_twice_is_recorded_after_each_return() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_twice");
+        // Each file gets 5 s of recording between the restart and the next stall.
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_secs(5));
+            rig.video_stalled.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_secs(8));
+            rig.video_stalled.store(false, Ordering::Relaxed);
+        }
+        std::thread::sleep(Duration::from_secs(5));
+        let summaries = rig.stop();
+
+        assert_eq!(
+            summaries.len(),
+            3,
+            "expected one file per return plus the first: {:?}",
+            summaries
+        );
+        for s in &summaries {
+            assert!(
+                s.video.samples >= 60 && s.audio.samples > 0,
+                "every file should hold both tracks: {:?}",
+                s
+            );
+        }
+    }
+
+    /// The flow is stopped while a track is still out. The recording has to
+    /// finish as it did before: EOS reaches the pipeline and the file is written
+    /// out with what it recorded.
+    #[test]
+    fn a_flow_stopped_while_a_track_is_out_still_finishes() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_stop_out");
+        std::thread::sleep(Duration::from_secs(3));
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(10));
+        let summaries = rig.stop();
+
+        assert_eq!(
+            summaries.len(),
+            1,
+            "no track came back, so no new file: {:?}",
+            summaries
+        );
+        let file = &summaries[0];
+        assert!(
+            file.video.samples >= 60 && file.audio.duration >= Duration::from_secs(10),
+            "the file should hold the video before the stall and all of the audio: {:?}",
+            file
+        );
+    }
+
+    /// The keyframe that shows a track is back has to go into the new file. The
+    /// next one can be a whole GOP later, and when the encoder cannot be asked for
+    /// one sooner, that is longer than the stall timeout: the new file would sit
+    /// empty until the track is ended again, over and over, with the audio lost.
+    #[test]
+    fn a_track_back_mid_gop_is_recorded_from_the_keyframe_that_showed_it() {
+        if !plugins_available() {
+            return;
+        }
+        // Keyframes at 0, 10 and 20 s. The one at 10 s falls in the stall, so the
+        // one at 20 s is the first the recorder sees, and the next is 10 s later.
+        let rig = Rig::start_with("rec_long_gop", 300, true);
+        std::thread::sleep(Duration::from_secs(3));
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        rig.video_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(15));
+        let summaries = rig.stop();
+
+        assert_eq!(
+            summaries.len(),
+            2,
+            "one file before the stall and one after: {:?}",
+            summaries
+        );
+        let last = &summaries[1];
+        assert!(
+            last.video.samples >= 150 && last.audio.duration >= Duration::from_secs(5),
+            "the file after the stall should hold everything from the 20 s keyframe on: {:?}",
+            last
+        );
+    }
+
+    /// A track that comes back for a single frame and stops again leaves the rest
+    /// of the recording going. The frame starts a new file, so it has to be in
+    /// that file: a file whose video never arrives waits on it for good, and the
+    /// audio goes with it.
+    #[test]
+    fn a_track_back_for_one_frame_leaves_the_rest_recorded() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_one_frame");
+        // 0: pass everything; 1: pass the next keyframe only; 2: pass nothing.
+        let one_frame = Arc::new(AtomicU64::new(0));
+        let state = Arc::clone(&one_frame);
+        // Added after the stall gate's probe, so it sees what that one passes.
+        rig.video_gate.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::BUFFER,
+            move |_pad, info| match state.load(Ordering::SeqCst) {
+                0 => gst::PadProbeReturn::Ok,
+                1 if info
+                    .buffer()
+                    .is_some_and(|b| !b.flags().contains(gst::BufferFlags::DELTA_UNIT)) =>
+                {
+                    state.store(2, Ordering::SeqCst);
+                    gst::PadProbeReturn::Ok
+                }
+                _ => gst::PadProbeReturn::Drop,
+            },
+        );
+        std::thread::sleep(Duration::from_secs(3));
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        one_frame.store(1, Ordering::SeqCst);
+        rig.video_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(20));
+        let summaries = rig.stop();
+
+        assert_eq!(summaries.len(), 2, "{:?}", summaries);
+        let last = &summaries[1];
+        assert!(
+            last.video.samples >= 1 && last.audio.duration >= Duration::from_secs(12),
+            "the file started by the frame should hold it and go on recording the audio: {:?}",
+            last
+        );
+    }
+
+    /// Storage that stalls while the next file is being started delays the
+    /// switch, but does not fail the flow.
+    #[test]
+    fn storage_that_stalls_during_the_switch_does_not_fail_the_flow() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_slow_storage");
+        std::thread::sleep(Duration::from_secs(3));
+        let slow = Arc::new(AtomicBool::new(false));
+        let next_write_is_slow = Arc::clone(&slow);
+        rig.file_sink_pad()
+            .add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                if next_write_is_slow.swap(false, Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_secs(14));
+                }
+                gst::PadProbeReturn::Ok
+            });
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        // The next write is the current file's last ones, as the switch closes it.
+        slow.store(true, Ordering::SeqCst);
+        rig.video_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(25));
+        let summaries = rig.stop();
+
+        assert!(
+            summaries.iter().skip(1).any(|s| s.video.samples >= 60),
+            "the video should be recorded again once the storage recovers: {:?}",
+            summaries
+        );
+    }
+
+    /// An EOS that reaches a track while the next file is being started still ends
+    /// the recording.
+    #[test]
+    fn an_eos_while_the_next_file_starts_still_ends_the_recording() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_eos_switch");
+        // The audio input is only cut off from its chain to start the next file.
+        // Its source stops there too, so the EOS is the next thing to reach it: a
+        // buffer first would be held for the new file and carry the EOS in after it.
+        let pipeline_weak = rig.pipeline.downgrade();
+        let audio_stalled = Arc::clone(&rig.audio_stalled);
+        rig.audio_in
+            .static_pad("src")
+            .unwrap()
+            .connect_unlinked(move |_pad, _peer| {
+                audio_stalled.store(true, Ordering::Relaxed);
+                let pipeline_weak = pipeline_weak.clone();
+                std::thread::spawn(move || {
+                    if let Some(pipeline) = pipeline_weak.upgrade() {
+                        pipeline.send_event(gst::event::Eos::new());
+                    }
+                });
+            });
+        std::thread::sleep(Duration::from_secs(3));
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        rig.video_stalled.store(false, Ordering::Relaxed);
+
+        let finished = wait_for_eos(&rig.pipeline, Duration::from_secs(15));
+        rig.pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+        assert!(finished, "the EOS never reached the pipeline");
     }
 }
