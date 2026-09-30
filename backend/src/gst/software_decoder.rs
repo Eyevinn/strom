@@ -1,4 +1,5 @@
-//! Pick a video decoder that runs on the CPU.
+//! Pick a video decoder for a stream: the host's best one for its exact caps
+//! ([`decoders_for`]), or one that runs on the CPU ([`best_for`]).
 //!
 //! An autoplugger picks the highest-ranked decoder for a stream, which on a
 //! Mac is VideoToolbox (`vtdec_hw`, primary + 1) for ProRes, among others. A
@@ -45,6 +46,24 @@ pub fn best_for(caps: &gst::Caps) -> Option<gst::ElementFactory> {
             .collect();
     candidates.sort_by_key(|f| std::cmp::Reverse(f.rank()));
     candidates.into_iter().next()
+}
+
+/// Video decoders that take all of `caps`, hardware or not, highest rank
+/// first, as `decodebin` would rank them.
+///
+/// Pass the parser's output caps, which carry profile, chroma format and bit
+/// depth: a hardware decoder whose templates lack the stream's profile (NVDEC,
+/// VA or D3D for 4:2:2 or 10-bit H.264) is left out, and the stream falls to a
+/// decoder that takes it. Filtering on the bare media type would pick the
+/// hardware decoder and fail with not-negotiated.
+pub fn decoders_for(caps: &gst::Caps) -> Vec<gst::ElementFactory> {
+    let mut candidates: Vec<gst::ElementFactory> =
+        gst::ElementFactory::factories_with_type(picture_decoders(), gst::Rank::MARGINAL)
+            .into_iter()
+            .filter(|f| f.can_sink_all_caps(caps))
+            .collect();
+    candidates.sort_by_key(|f| std::cmp::Reverse(f.rank()));
+    candidates
 }
 
 /// Caps that make a `uridecodebin3` stop at `encoded` video instead of
@@ -99,6 +118,35 @@ mod tests {
         let picked = best_for(&gst::Caps::builder("video/x-prores").build())
             .expect("a software ProRes decoder (gst-libav)");
         assert!(!is_hardware(&picked), "{}", picked.name());
+    }
+
+    /// `decoders_for` returns only decoders that take the whole caps, best
+    /// rank first. Guards the filter and the order only: which decoder wins
+    /// on a host is up to its ranks.
+    #[test]
+    fn decoders_for_takes_the_caps_best_rank_first() {
+        gst::init().unwrap();
+        let caps: gst::Caps =
+            "video/x-h264, stream-format=byte-stream, alignment=au, profile=high-4:2:2"
+                .parse()
+                .unwrap();
+        let found = decoders_for(&caps);
+        assert!(!found.is_empty(), "no H.264 decoder (gst-libav)");
+        for f in &found {
+            assert!(
+                f.can_sink_all_caps(&caps),
+                "{} does not take {caps}",
+                f.name()
+            );
+        }
+        assert!(
+            found.windows(2).all(|w| w[0].rank() >= w[1].rank()),
+            "not ordered by rank: {:?}",
+            found
+                .iter()
+                .map(|f| (f.name().to_string(), f.rank()))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
