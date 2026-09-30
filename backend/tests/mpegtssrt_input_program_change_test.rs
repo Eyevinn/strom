@@ -11,10 +11,6 @@
 //! pad before removing the old one, `decodebin` removes first — so both modes
 //! are driven here.
 
-// Not on Windows: `gstsrt.dll` intermittently fails to load inside the test
-// process there (#834); see `mpegtssrt_streamheader_test.rs`.
-#![cfg(not(target_os = "windows"))]
-
 pub mod common;
 
 use std::collections::HashMap;
