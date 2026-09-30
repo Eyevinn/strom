@@ -1,12 +1,14 @@
 //! Guards for the App Nap opt-out in `macos_app_nap`.
 //!
-//! ~32 s after launch macOS moves headless Strom into the background QoS band and
-//! every thread drops to scheduling priority 4 — on Apple Silicon, efficiency
-//! cores at a throttled clock, which costs a 1080p x264 flow ~7x its wall clock.
-//! The server holds an `NSProcessInfo` activity assertion to opt out.
+//! macOS moves Strom into the background QoS band — headless ~32 s after launch,
+//! with a GUI whenever its window is hidden or covered — and every thread drops
+//! to scheduling priority 4: on Apple Silicon, efficiency cores at a throttled
+//! clock, with timers coalesced. A 1080p x264 flow takes ~7x its wall clock, and
+//! live mixers miss deadlines in bursts. The server holds an `NSProcessInfo`
+//! activity assertion to opt out.
 //!
 //! Two failure modes, tested separately because they cost three orders of
-//! magnitude apart: the call going missing from `run_headless_entry` (the
+//! magnitude apart: the call going missing from either launch mode (the
 //! realistic regression, caught in well under a second), and macOS ceasing to
 //! honour the assertion (only observable by waiting out the demotion window, so
 //! opt-in and run by hand).
@@ -25,6 +27,11 @@ const MARKER: &str = "App Nap opt-out";
 /// the deadline.
 const READY: &str = "Server listening on";
 
+/// Logged by GUI mode just before the assertion is taken. A GUI process may not
+/// get as far as [`READY`] on a machine without a display, so this is the GUI
+/// test's evidence that startup reached the point where the marker belongs.
+const GUI_STARTING: &str = "Starting Strom backend server with GUI";
+
 /// Darwin's QoS classes map onto scheduling priorities: 46-47 user-interactive,
 /// 37 user-initiated, 31 default, 20 utility, 4 background.
 const BACKGROUND_PRIORITY: u32 = 4;
@@ -37,17 +44,22 @@ struct Server {
 
 impl Server {
     fn spawn() -> Self {
+        Self::spawn_with(&["--headless"])
+    }
+
+    fn spawn_with(mode_args: &[&str]) -> Self {
         let dir = tempfile::tempdir().expect("create a data directory");
         let log = tempfile::NamedTempFile::new().expect("create a log file");
         // Port 0 lets the OS pick, so concurrent tests cannot collide.
         let child = Command::new(env!("CARGO_BIN_EXE_strom"))
-            .args(["--headless", "--port", "0", "--data-dir"])
+            .args(mode_args)
+            .args(["--port", "0", "--data-dir"])
             .arg(dir.path())
             .stdout(log.reopen().expect("reopen the log for stdout"))
             .stderr(log.reopen().expect("reopen the log for stderr"))
             .stdin(Stdio::null())
             .spawn()
-            .expect("spawn the headless server");
+            .expect("spawn the server");
         Self {
             child,
             log,
@@ -73,7 +85,7 @@ impl Drop for Server {
     }
 }
 
-/// The wiring test. Fails if the call in `run_headless_entry` is removed.
+/// The wiring test. Fails if the call is removed from the headless path.
 #[test]
 fn headless_entry_takes_the_activity_assertion() {
     let server = Server::spawn();
@@ -101,6 +113,50 @@ fn headless_entry_takes_the_activity_assertion() {
          took an NSProcessInfo activity assertion, so macOS will App-Nap the process \
          into the background QoS band about thirty seconds in and every pipeline \
          after that will run on efficiency cores"
+    );
+}
+
+/// The same wiring for GUI mode. A window keeps the app out of App Nap only while
+/// it is visible. Fails if the call is removed from the GUI path.
+///
+/// The server is killed as soon as the marker appears, before the GUI has time
+/// to open a window.
+#[test]
+fn gui_mode_takes_the_activity_assertion() {
+    let mut server = Server::spawn_with(&[]);
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut reached = false;
+    while Instant::now() < deadline {
+        if server.log_contains(MARKER) {
+            return;
+        }
+        // Past either line the marker is already late. The GUI line is logged
+        // just before the call, so give it a moment to follow.
+        if server.log_contains(READY) || server.log_contains(GUI_STARTING) {
+            std::thread::sleep(Duration::from_millis(500));
+            reached = true;
+            break;
+        }
+        if server.child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if server.log_contains(MARKER) {
+        return;
+    }
+
+    assert!(
+        reached,
+        "the GUI server never logged {GUI_STARTING:?} or {READY:?}, so this says \
+         nothing about the activity assertion"
+    );
+    panic!(
+        "the GUI server started without logging {MARKER:?}: nothing took an \
+         NSProcessInfo activity assertion, so macOS will App-Nap the process into \
+         the background QoS band whenever its window is hidden or covered, and \
+         its live mixers will freeze video and drop audio"
     );
 }
 
