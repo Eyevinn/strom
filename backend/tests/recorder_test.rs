@@ -2113,6 +2113,120 @@ mod track_resume {
         );
     }
 
+    /// A video track still being recorded when another track comes back keeps
+    /// every frame, even from a remote encoder with a 10 s GOP that ignores
+    /// key-unit requests: the current file takes it up to its next keyframe, and
+    /// the next file starts on that keyframe.
+    #[test]
+    fn a_long_gop_track_still_recording_loses_no_video_to_the_switch() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start_with("rec_long_gop_other", 300, true);
+        std::thread::sleep(Duration::from_secs(3));
+        // Keyframes at 0, 10, 20 and 30 s. The video blocks at the 10 s one
+        // behind the dead audio, which is ended at about 15 s.
+        rig.audio_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(19));
+        rig.audio_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(22));
+        let summaries = rig.stop();
+
+        assert!(
+            summaries.iter().all(|s| s.video.samples > 0),
+            "every file should have video: {:?}",
+            summaries
+        );
+        let video: Duration = summaries.iter().map(|s| s.video.duration).sum();
+        assert!(
+            video >= Duration::from_secs(42),
+            "the video should be recorded without a gap across the switch, got {:?}: {:?}",
+            video,
+            summaries
+        );
+        assert!(
+            summaries
+                .last()
+                .is_some_and(|s| s.audio.duration >= Duration::from_secs(10)),
+            "the audio should be recorded again after it comes back: {:?}",
+            summaries
+        );
+    }
+
+    /// A video track that stops just as another track comes back, so it never
+    /// reaches the keyframe the switch waits for, is left out of the next file,
+    /// and the track that came back is recorded from its return.
+    #[test]
+    fn a_video_track_that_stops_before_its_keyframe_does_not_hold_the_switch() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_cut_timeout");
+        std::thread::sleep(Duration::from_secs(3));
+        rig.audio_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        rig.audio_stalled.store(false, Ordering::Relaxed);
+        // The switch gives up on the video's keyframe after 15 s.
+        std::thread::sleep(Duration::from_secs(28));
+        let summaries = rig.stop();
+
+        assert!(
+            summaries
+                .last()
+                .is_some_and(|s| s.audio.duration >= Duration::from_secs(20)),
+            "the audio should be recorded from its return: {:?}",
+            summaries
+        );
+    }
+
+    /// A track that dies while the next file is being started is ended like any
+    /// other, even while another track is still replaying into that file.
+    #[test]
+    fn a_track_that_dies_during_the_switch_is_ended_while_the_rest_replays() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_dies_in_switch");
+        std::thread::sleep(Duration::from_secs(3));
+        // Slow storage makes the switch take long enough for the video to keep
+        // more than its queue holds, so its replay waits on the audio.
+        let slow = Arc::new(AtomicBool::new(false));
+        let next_write_is_slow = Arc::clone(&slow);
+        rig.file_sink_pad()
+            .add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                if next_write_is_slow.swap(false, Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_secs(14));
+                }
+                gst::PadProbeReturn::Ok
+            });
+        // The audio dies as the switch cuts it off, and never comes back.
+        let audio_stalled = Arc::clone(&rig.audio_stalled);
+        rig.audio_in
+            .static_pad("src")
+            .unwrap()
+            .connect_unlinked(move |_pad, _peer| {
+                audio_stalled.store(true, Ordering::Relaxed);
+            });
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        slow.store(true, Ordering::SeqCst);
+        rig.video_stalled.store(false, Ordering::Relaxed);
+        // The switch takes about 14 s, then 5 s to find the dead audio.
+        std::thread::sleep(Duration::from_secs(26));
+        let video_into_muxer = count_video_into_muxer(&rig.pipeline, "rec_dies_in_switch");
+        std::thread::sleep(Duration::from_secs(6));
+        let frames = video_into_muxer.load(Ordering::Relaxed);
+        let summaries = rig.stop();
+
+        assert!(
+            frames >= 60,
+            "the video should be recorded once the dead audio is ended: {} frames in 6 s: {:?}",
+            frames,
+            summaries
+        );
+    }
+
     /// An EOS that reaches a track while the next file is being started still ends
     /// the recording.
     #[test]

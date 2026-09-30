@@ -41,7 +41,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_video as gst_video;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use strom_types::{
@@ -110,6 +110,11 @@ const TRACK_STALL_POLL: Duration = Duration::from_millis(500);
 /// before it restarts the muxer anyway. mp4 is written with robust muxing, so a
 /// file cut short still plays; it only misses its last header update.
 const FILE_FINISH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `start_next_file` waits for a video track still being recorded to
+/// reach a keyframe before it leaves the track out of the next file. Covers the
+/// 10 s GOP of a remote encoder that ignores key-unit requests.
+const KEYFRAME_CUT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The most a parked input keeps for replay, in bytes: a GOP of high-bitrate video
 /// with room to spare. Past it the stash starts over from the next keyframe.
@@ -440,7 +445,10 @@ fn park_input(input: &gst::Element, activity: &Arc<TrackActivity>) {
     };
     let activity = Arc::clone(activity);
     src.add_probe(gst::PadProbeType::IDLE, move |pad, _info| {
-        activity.parked.store(true, Ordering::SeqCst);
+        // A cut at a keyframe and the fallback cut can both get here.
+        if activity.parked.swap(true, Ordering::SeqCst) {
+            return gst::PadProbeReturn::Remove;
+        }
         add_park_probe(pad, &activity);
         if let Some(peer) = pad.peer() {
             let _ = pad.unlink(&peer);
@@ -450,6 +458,67 @@ fn park_input(input: &gst::Element, activity: &Arc<TrackActivity>) {
         }
         gst::PadProbeReturn::Remove
     });
+}
+
+/// Where a cut at a keyframe stands. See `park_at_next_keyframe`.
+const CUT_WAITING: u8 = 0;
+const CUT_AT_KEYFRAME: u8 = 1;
+const CUT_DONE: u8 = 2;
+
+/// Park a video track that is still being recorded at its next keyframe, so the
+/// current file keeps its frames up to there and the next file starts on that
+/// keyframe.
+///
+/// A key-unit request goes upstream first. A remote encoder may ignore it, and
+/// the wait is then up to one GOP. From the keyframe on, buffers are kept for the
+/// next file until the input is parked. A keyframe inside a buffer list is not
+/// split out: the list goes to the current file, and the cut is at the next one.
+///
+/// `cut` ends at `CUT_DONE`, set here once the input is parked or by the caller
+/// when it stops waiting; the probe then removes itself on its next buffer.
+fn park_at_next_keyframe(input: &gst::Element, activity: &Arc<TrackActivity>, cut: &Arc<AtomicU8>) {
+    let (Some(src), Some(sink)) = (input.static_pad("src"), input.static_pad("sink")) else {
+        return;
+    };
+    let input_weak = input.downgrade();
+    let activity = Arc::clone(activity);
+    let probe_cut = Arc::clone(cut);
+    src.add_probe(
+        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+        move |_pad, info| {
+            if activity.parked.load(Ordering::SeqCst) {
+                probe_cut.store(CUT_DONE, Ordering::SeqCst);
+                return gst::PadProbeReturn::Remove;
+            }
+            let state = probe_cut.load(Ordering::SeqCst);
+            if state == CUT_DONE {
+                return gst::PadProbeReturn::Remove;
+            }
+            let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() else {
+                return gst::PadProbeReturn::Ok;
+            };
+            if state == CUT_WAITING && buffer.flags().contains(gst::BufferFlags::DELTA_UNIT) {
+                return gst::PadProbeReturn::Ok;
+            }
+            activity
+                .stash
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keep(buffer);
+            if state == CUT_WAITING {
+                probe_cut.store(CUT_AT_KEYFRAME, Ordering::SeqCst);
+                if let Some(input) = input_weak.upgrade() {
+                    park_input(&input, &activity);
+                }
+            }
+            gst::PadProbeReturn::Drop
+        },
+    );
+    sink.push_event(
+        gst_video::UpstreamForceKeyUnitEvent::builder()
+            .all_headers(true)
+            .build(),
+    );
 }
 
 /// Keep a parked input quiet, keep what reaches it for the next file, and notice
@@ -698,7 +767,9 @@ fn wait_for(
 /// `%05d` and `format-location` reports it as usual.
 ///
 /// 1. Every track going over is parked, which ends its chain. The current file
-///    then has EOS on every pad, and the muxer writes it out.
+///    then has EOS on every pad, and the muxer writes it out. A video track
+///    still being recorded is parked at its next keyframe, so neither file loses
+///    the frames up to it. One with no keyframe in time is ended instead.
 /// 2. That EOS is caught before the file sink, once the file is written. Let
 ///    through, it would reach the pipeline as the recorder's end of stream:
 ///    splitmuxsink forwards it once the primary video pad has ended, which is
@@ -712,7 +783,8 @@ fn wait_for(
 ///    that is not live would otherwise go back to PAUSED until the new file
 ///    prerolls.
 /// 5. Each track replays what its input kept while parked, from the first
-///    keyframe on, and goes live (see `replay_stash`).
+///    keyframe on, and goes live (see `replay_stash`). The stall check keeps
+///    running meanwhile: a replay can wait on a track that died in the switch.
 fn start_next_file(
     block_id: &str,
     splitmuxsink: &gst::Element,
@@ -720,6 +792,7 @@ fn start_next_file(
     next: &NextFile,
     epoch: Instant,
     next_file_index: &AtomicU32,
+    stall: &mut StallCheck,
 ) {
     let Some(bin) = splitmuxsink
         .parent()
@@ -765,19 +838,64 @@ fn start_next_file(
     });
 
     // 1
-    for &index in &next.record {
-        let activity = &tracks[index].activity;
-        if !activity.parked.load(Ordering::SeqCst) {
-            if let Some(input) = tracks[index].input.upgrade() {
-                park_input(&input, activity);
-            }
+    let mut record = next.record.clone();
+    let mut release = next.release.clone();
+    let mut cuts = Vec::new();
+    let mut cut_out = Vec::new();
+    for &index in &record {
+        let track = &tracks[index];
+        if track.activity.parked.load(Ordering::SeqCst) {
+            continue;
+        }
+        let Some(input) = track.input.upgrade() else {
+            continue;
+        };
+        if track.is_video {
+            let cut = Arc::new(AtomicU8::new(CUT_WAITING));
+            park_at_next_keyframe(&input, &track.activity, &cut);
+            cuts.push((index, cut));
+        } else {
+            park_input(&input, &track.activity);
         }
     }
-    let all_parked = || {
-        next.record
+    let all_parked = |record: &[usize]| {
+        record
             .iter()
             .all(|&i| tracks[i].activity.parked.load(Ordering::SeqCst))
     };
+    if !cuts.is_empty()
+        && !wait_for(splitmuxsink, Some(KEYFRAME_CUT_TIMEOUT), || {
+            all_parked(&record)
+        })
+    {
+        // No keyframe to start the next file on. The muxer opens a file only once
+        // its primary video has one, so such a track would hold the new file
+        // empty. It is ended instead, and a new file takes it back once its input
+        // sees a keyframe, as for any ended track.
+        for (index, cut) in &cuts {
+            if cut.load(Ordering::SeqCst) != CUT_WAITING {
+                continue;
+            }
+            let track = &tracks[*index];
+            warn!(
+                "Recorder {}: {} reached no keyframe within {}s — it stays out of the next file until it does",
+                block_id,
+                track.label,
+                KEYFRAME_CUT_TIMEOUT.as_secs()
+            );
+            track.activity.ended.store(true, Ordering::SeqCst);
+            if let Some(input) = track.input.upgrade() {
+                park_input(&input, &track.activity);
+            }
+            record.retain(|i| i != index);
+            release.push(*index);
+            cut_out.push(*index);
+        }
+    }
+    for (_, cut) in &cuts {
+        cut.store(CUT_DONE, Ordering::SeqCst);
+    }
+    let all_parked = || all_parked(&record) && all_parked(&cut_out);
     if !wait_for(splitmuxsink, Some(FILE_FINISH_TIMEOUT), all_parked) {
         warn!(
             "Recorder {}: a track is still pushing into the current file after {}s — waiting for it before starting the next file",
@@ -833,7 +951,7 @@ fn start_next_file(
         }
     }
 
-    for &index in next.record.iter().chain(next.release.iter()) {
+    for &index in record.iter().chain(release.iter()) {
         for role in ["parser", "queue"] {
             if let Some(old) = bin.by_name(&chain_element_name(block_id, &tracks[index].key, role))
             {
@@ -845,14 +963,14 @@ fn start_next_file(
     // A state change resets a pad's data flow but not splitmuxsink's record of
     // it: a pad that has seen EOS stays ended, and the new file would neither
     // wait for it nor split on it. Only a fresh pad starts clean.
-    for &index in next.record.iter().chain(next.release.iter()) {
+    for &index in record.iter().chain(release.iter()) {
         if let Some(pad) = tracks[index].muxer_pad.take().and_then(|p| p.upgrade()) {
             splitmuxsink.release_request_pad(&pad);
         }
     }
 
-    let mut recorded = Vec::with_capacity(next.record.len());
-    for &index in &next.record {
+    let mut recorded = Vec::with_capacity(record.len());
+    for &index in &record {
         let track = &mut tracks[index];
         let Some(input) = track.input.upgrade() else {
             continue;
@@ -935,15 +1053,18 @@ fn start_next_file(
         activity.ended.store(false, Ordering::SeqCst);
     }
 
+    stall.last_end_ms = Some(now_ms);
+
     // 5
     let tracks = &*tracks;
     std::thread::scope(|scope| {
+        let mut replays = Vec::with_capacity(recorded.len());
         for &index in &recorded {
             let track = &tracks[index];
             let Some(src) = track.input.upgrade().and_then(|i| i.static_pad("src")) else {
                 continue;
             };
-            scope.spawn(move || {
+            replays.push(scope.spawn(move || {
                 replay_stash(&src, &track.activity, track.is_video);
                 track.activity.resumed.store(false, Ordering::SeqCst);
                 // An EOS that reached the input while it was parked is stored on
@@ -954,7 +1075,12 @@ fn start_next_file(
                         parser_sink.send_event(gst::event::Eos::new());
                     }
                 }
-            });
+            }));
+        }
+        while !replays.iter().all(|replay| replay.is_finished()) {
+            std::thread::sleep(TRACK_STALL_POLL);
+            let states: Vec<TrackState> = tracks.iter().map(track_state).collect();
+            stall.poll(block_id, tracks, &states, epoch);
         }
     });
 }
@@ -1079,16 +1205,7 @@ fn watch_tracks(
     epoch: Instant,
     next_file_index: &AtomicU32,
 ) {
-    let timeout_ms = TRACK_STALL_TIMEOUT.as_millis() as u64;
-
-    // When the last track was ended or the last file started. Either frees the
-    // others, but not within a poll interval: without a pause here the whole
-    // recording is ended track by track before the first one has taken effect.
-    let mut last_end_ms: Option<u64> = None;
-
-    // Whether the current freeze has already been reported as the muxer's own, so
-    // a long storage stall logs once rather than on every poll.
-    let mut reported_muxer_stall = false;
+    let mut stall = StallCheck::default();
 
     loop {
         std::thread::sleep(TRACK_STALL_POLL);
@@ -1114,16 +1231,50 @@ fn watch_tracks(
                 block_id,
                 back.join(", ")
             );
-            start_next_file(block_id, &sink, tracks, &next, epoch, next_file_index);
-            last_end_ms = Some(epoch.elapsed().as_millis() as u64);
+            start_next_file(
+                block_id,
+                &sink,
+                tracks,
+                &next,
+                epoch,
+                next_file_index,
+                &mut stall,
+            );
+            stall.last_end_ms = Some(epoch.elapsed().as_millis() as u64);
             continue;
         }
         drop(sink);
 
+        stall.poll(block_id, tracks, &states, epoch);
+    }
+}
+
+/// What the stall check carries from one poll to the next.
+#[derive(Default)]
+struct StallCheck {
+    /// When the last track was ended or the last file started. Either frees the
+    /// others, but not within a poll interval: without a pause here the whole
+    /// recording is ended track by track before the first one has taken effect.
+    last_end_ms: Option<u64>,
+    /// Whether the current freeze has already been reported as the muxer's own, so
+    /// a long storage stall logs once rather than on every poll.
+    reported_muxer_stall: bool,
+}
+
+impl StallCheck {
+    /// End the track holding the recording up, if the recording is frozen.
+    fn poll(
+        &mut self,
+        block_id: &str,
+        tracks: &[WatchedTrack],
+        states: &[TrackState],
+        epoch: Instant,
+    ) {
+        let timeout_ms = TRACK_STALL_TIMEOUT.as_millis() as u64;
         let now_ms = epoch.elapsed().as_millis() as u64;
         let mut live = Vec::with_capacity(tracks.len());
 
-        for (track, state) in tracks.iter().zip(&states) {
+        for (track, state) in tracks.iter().zip(states) {
             if *state != TrackState::Recording {
                 continue;
             }
@@ -1153,13 +1304,15 @@ fn watch_tracks(
         // other input backs up behind it within a second, so a machine that is
         // merely overloaded looks exactly the same from any single input.
         let frozen = live.len() > 1
-            && !last_end_ms.is_some_and(|t| now_ms.saturating_sub(t) < timeout_ms)
+            && !self
+                .last_end_ms
+                .is_some_and(|t| now_ms.saturating_sub(t) < timeout_ms)
             && live
                 .iter()
                 .all(|(_, _, quiet_ms, _, _)| *quiet_ms >= timeout_ms);
         if !frozen {
-            reported_muxer_stall = false;
-            continue;
+            self.reported_muxer_stall = false;
+            return;
         }
 
         let positions: Vec<(u64, Option<u32>)> = live
@@ -1167,17 +1320,22 @@ fn watch_tracks(
             .map(|(_, _, _, running_ms, queued)| (*running_ms, *queued))
             .collect();
         let Some(index) = track_holding_the_recording(&positions) else {
-            if !reported_muxer_stall && positions.iter().all(|(_, q)| q.is_some_and(|n| n > 0)) {
+            if !self.reported_muxer_stall && positions.iter().all(|(_, q)| q.is_some_and(|n| n > 0))
+            {
                 warn!(
                     "Recorder {}: nothing muxed for {}s with every track backed up — the muxer or its storage is stalled, so no track is ended",
                     block_id,
                     live.iter().map(|(_, _, quiet_ms, _, _)| *quiet_ms).min().unwrap_or(0) / 1000
                 );
-                reported_muxer_stall = true;
+                self.reported_muxer_stall = true;
             }
-            continue;
+            return;
         };
         let (track, input, quiet_ms, running_ms, _) = live.swap_remove(index);
+        // Still replaying into a new file: that replay is what is running.
+        if track.activity.parked.load(Ordering::SeqCst) {
+            return;
+        }
         warn!(
             "Recorder {}: nothing muxed for {}s and {} has run dry at {}ms while another track is backed up — ending that track so the rest of the recording continues; it is recorded again, in a new file, once it carries data",
             block_id,
@@ -1186,7 +1344,7 @@ fn watch_tracks(
             running_ms
         );
         end_stalled_track(&input, &track.activity);
-        last_end_ms = Some(now_ms);
+        self.last_end_ms = Some(now_ms);
     }
 }
 
