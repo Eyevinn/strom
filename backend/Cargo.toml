@@ -35,6 +35,7 @@ serde_json.workspace = true
 chrono = "0.4"
 
 # URL encoding
+url = "2.5"
 urlencoding = "2.1"
 
 # Logging

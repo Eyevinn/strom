@@ -58,6 +58,16 @@ pub const REMOTE_CONTROL_PROPERTY: &str = "remote_control";
 /// The property holding the page to render.
 pub const URL_PROPERTY: &str = "url";
 
+/// The property that keeps an HTML source off the server's own network.
+///
+/// On by default, because the default is a server: the page is whatever the
+/// operator - or on a shared Strom, a customer - pointed it at, and it renders
+/// on air, so a page on `127.0.0.1` or `169.254.169.254` would put the
+/// server's own services on screen. Off is for a Strom on the operator's own
+/// machine that renders its own local pages. Anything that lets a customer
+/// edit a flow must never expose it.
+pub const STRICT_NETWORK_PROPERTY: &str = "strict_network";
+
 /// The `cefsrc` property, from Strom's gstcefsrc build, that gives a browser its
 /// own cookies, storage and cache instead of the process-wide ones.
 pub const ISOLATED_CONTEXT_PROPERTY: &str = "isolated-context";
@@ -291,9 +301,91 @@ pub fn normalize_url(raw: &str) -> Result<String, String> {
     Ok(format!("{}:{}", scheme, rest))
 }
 
-/// The page this block renders, checked against [`ALLOWED_SCHEMES`].
+/// Whether this block is kept off the server's own network. Anything but an
+/// explicit `false` is strict.
+pub fn strict_network(properties: &HashMap<String, PropertyValue>) -> bool {
+    !matches!(
+        properties.get(STRICT_NETWORK_PROPERTY),
+        Some(PropertyValue::Bool(false))
+    )
+}
+
+/// Whether an address is the server's own or its network's: loopback,
+/// private, link-local (which holds cloud metadata), carrier-grade NAT and
+/// unspecified, in IPv4 or IPv6, including IPv4 mapped into IPv6.
+fn is_internal_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                // 100.64.0.0/10, shared address space
+                || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_internal_ip(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // fc00::/7, unique local
+                || (first & 0xfe00) == 0xfc00
+                // fe80::/10, link-local
+                || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Refuse an address on the server's own network, for a strict source.
+///
+/// This checks the address as written, the way Chromium will parse it:
+/// `127.1`, `0x7f000001` and `[::ffff:127.0.0.1]` are all loopback. A name
+/// that only resolves to an internal address gets past it, which is why the
+/// browser needs its own network to be locked down as well; this closes the
+/// door that needs no DNS at all.
+pub fn check_destination(url: &str, strict: bool) -> Result<(), String> {
+    if !strict {
+        return Ok(());
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Err(format!("{} is not a URL", url));
+    };
+    let internal = match parsed.host() {
+        None => false,
+        Some(url::Host::Ipv4(v4)) => is_internal_ip(v4.into()),
+        Some(url::Host::Ipv6(v6)) => is_internal_ip(v6.into()),
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+    };
+    if internal {
+        return Err(format!(
+            "{} is on this server or its local network, which an HTML source with Strict \
+             Network Access does not reach",
+            parsed.host_str().unwrap_or(url)
+        ));
+    }
+    Ok(())
+}
+
+/// A URL this block may render: an allowed scheme, and for a strict block an
+/// address off the server's own network.
+pub fn checked_destination(raw: &str, strict: bool) -> Result<String, String> {
+    let url = normalize_url(raw)?;
+    check_destination(&url, strict)?;
+    Ok(url)
+}
+
+/// The page this block renders, checked against [`ALLOWED_SCHEMES`] and, for a
+/// strict block, against the server's own network.
 pub fn checked_url(properties: &HashMap<String, PropertyValue>) -> Result<String, String> {
-    normalize_url(&url(properties))
+    checked_destination(&url(properties), strict_network(properties))
 }
 
 /// Load a new page into a running HTML source.
@@ -701,6 +793,28 @@ fn html_input_definition() -> BlockDefinition {
                 live: true,
                 persist: None,
             },
+            ExposedProperty {
+                name: STRICT_NETWORK_PROPERTY.to_string(),
+                label: "Strict Network Access".to_string(),
+                description: "SECURITY: leave this on for any server deployment. On, the page \
+                              cannot be pointed at this server or its local network - \
+                              localhost, 127.0.0.1, private addresses, or the cloud metadata \
+                              service at 169.254.169.254 - whether through its URL, remote \
+                              control or set-as-start-page. Off lets a page reach everything \
+                              this server can, and renders it on air. Turn it off only on \
+                              your own machine, for your own local pages. A system that lets \
+                              customers edit flows must never expose this setting."
+                    .to_string(),
+                property_type: PropertyType::Bool,
+                default_value: Some(PropertyValue::Bool(true)),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: STRICT_NETWORK_PROPERTY.to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
         ],
         external_pads: ExternalPads {
             inputs: vec![],
@@ -971,6 +1085,77 @@ mod tests {
         );
         let escaped = named("../../etc");
         assert_eq!(escaped.parent(), Some(std::path::Path::new("/cache")));
+    }
+
+    #[test]
+    fn a_strict_source_does_not_reach_the_server_or_its_network() {
+        for url in [
+            "http://127.0.0.1:9222/json/list",
+            "http://localhost:8080/api/flows",
+            "http://LOCALHOST./",
+            "http://app.localhost/",
+            "http://127.1/",
+            "http://0x7f000001/",
+            "http://2130706433/",
+            "http://0.0.0.0:8080/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/",
+            "http://172.16.1.1/",
+            "http://192.168.1.1/",
+            "http://100.64.0.1/",
+            "http://[::1]:9222/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+        ] {
+            assert!(
+                checked_destination(url, true).is_err(),
+                "{} must be refused for a strict source",
+                url
+            );
+            assert!(
+                checked_destination(url, false).is_ok(),
+                "{} is allowed once strict is off",
+                url
+            );
+        }
+        for url in [
+            "https://example.com/",
+            "http://192.0.2.10/",
+            "https://8.8.8.8/",
+            "data:text/html,<h1>hi</h1>",
+            "localhost.example.com",
+        ] {
+            assert!(
+                checked_destination(url, true).is_ok(),
+                "{} is not on the server's network",
+                url
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_is_strict_unless_switched_off() {
+        assert!(strict_network(&props(&[])));
+        assert!(strict_network(&props(&[(
+            STRICT_NETWORK_PROPERTY,
+            PropertyValue::String("false".to_string())
+        )])));
+        assert!(!strict_network(&props(&[(
+            STRICT_NETWORK_PROPERTY,
+            PropertyValue::Bool(false)
+        )])));
+        let local = props(&[(
+            URL_PROPERTY,
+            PropertyValue::String("http://127.0.0.1:8080/".to_string()),
+        )]);
+        assert!(checked_url(&local).is_err());
+        let mut loose = local.clone();
+        loose.insert(
+            STRICT_NETWORK_PROPERTY.to_string(),
+            PropertyValue::Bool(false),
+        );
+        assert!(checked_url(&loose).is_ok());
     }
 
     #[test]

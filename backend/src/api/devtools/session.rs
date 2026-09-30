@@ -181,7 +181,7 @@ pub(super) async fn pump(
                     }
                     continue;
                 }
-                let forward = filter::allows(text.as_str());
+                let forward = filter::allows(text.as_str(), source.strict);
                 // Every command of Strom's own is the operator asking for it.
                 used |= matches!(
                     forward,

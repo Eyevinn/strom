@@ -1868,7 +1868,8 @@ impl AppState {
                     rejected.insert(name, "value must be a string".to_string());
                     continue;
                 };
-                match crate::blocks::builtin::html_input::normalize_url(raw) {
+                let strict = crate::blocks::builtin::html_input::strict_network(&stored_properties);
+                match crate::blocks::builtin::html_input::checked_destination(raw, strict) {
                     Ok(url) => PropertyValue::String(url),
                     Err(reason) => {
                         rejected.insert(name, reason);

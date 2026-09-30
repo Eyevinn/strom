@@ -59,6 +59,8 @@ pub(super) struct HtmlSource {
     /// is showing now.
     pub(super) url: String,
     pub(super) remote_control: bool,
+    /// Strict Network Access, carried into the link's filter.
+    pub(super) strict: bool,
     pub(super) flow_name: String,
     /// The block's own name, or its id when it has none.
     pub(super) block_name: String,
@@ -72,6 +74,7 @@ impl HtmlSource {
             home_url: self.url.clone(),
             flow_name: self.flow_name.clone(),
             block_name: self.block_name.clone(),
+            strict: self.strict,
         }
     }
 
@@ -221,6 +224,7 @@ pub(super) fn html_sources_in(flows: Vec<Flow>, running: &HashSet<FlowId>) -> Ve
                     remote_control: crate::blocks::builtin::html_input::remote_control_enabled(
                         &b.properties,
                     ),
+                    strict: crate::blocks::builtin::html_input::strict_network(&b.properties),
                     flow_name: flow_name.clone(),
                     block_name: b.name.clone().unwrap_or_else(|| b.id.clone()),
                     block_id: b.id,
@@ -247,6 +251,7 @@ mod tests {
             block_id: block_id.to_string(),
             url: url.to_string(),
             remote_control: true,
+            strict: true,
             flow_name: "Flow".to_string(),
             block_name: block_id.to_string(),
         }

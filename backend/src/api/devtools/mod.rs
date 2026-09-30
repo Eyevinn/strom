@@ -201,6 +201,9 @@ struct LinkSource {
     home_url: String,
     flow_name: String,
     block_name: String,
+    /// The block's Strict Network Access, which the filter holds navigation
+    /// and a new start page to.
+    strict: bool,
 }
 
 impl LinkSource {
@@ -1052,6 +1055,7 @@ mod tests {
             home_url: url.to_string(),
             flow_name: "Flow".to_string(),
             block_name: "html".to_string(),
+            strict: true,
         }
     }
 

@@ -2,19 +2,19 @@
 //!
 //! A link carries the page: its picture, clicks and keystrokes into it, its
 //! history, and navigation to an address an HTML source is allowed to render
-//! (see [`normalize_url`]). Everything outside that — `Runtime.evaluate`,
+//! (see [`normalize_url`](crate::blocks::builtin::html_input::normalize_url)). Everything outside that — `Runtime.evaluate`,
 //! `Storage.getCookies`, the whole `Network` and `Debugger` domains, and any
 //! `file:` or `chrome:` page — is what turns a link into control of this host,
 //! so the proxy refuses it rather than trusting the page not to ask. The page
 //! we serve is only the first user of the link; this filter is what makes the
 //! link safe to hand to a second one.
 
-use crate::blocks::builtin::html_input::normalize_url;
+use crate::blocks::builtin::html_input::checked_destination;
 use serde_json::{json, Value};
 
 /// The methods a remote control session may send, as Chromium names them.
 ///
-/// `Page.navigate` goes only to an address [`normalize_url`] accepts, so never
+/// `Page.navigate` goes only to an address [`normalize_url`](crate::blocks::builtin::html_input::normalize_url) accepts, so never
 /// to the filesystem or Chromium's own pages. It still reaches whatever this
 /// server reaches over http, and a `data:` page runs script of the client's
 /// choosing, which is why the link's warning says so.
@@ -102,7 +102,11 @@ fn by_operator(method: &str) -> bool {
 
 /// Whether one message from the client may be forwarded, and in what form, or
 /// the refusal to send back in its place.
-pub fn allows(raw: &str) -> Result<Forward, String> {
+///
+/// `strict` is the source's Strict Network Access: navigation and a new start
+/// page are then refused an address on the server's own network, the same as
+/// the block's URL is.
+pub fn allows(raw: &str, strict: bool) -> Result<Forward, String> {
     let Ok(message) = serde_json::from_str::<Value>(raw) else {
         return Err(refusal(None, "Not a DevTools protocol message"));
     };
@@ -149,7 +153,7 @@ pub fn allows(raw: &str) -> Result<Forward, String> {
             let Some(raw) = params.and_then(|p| p.get("url")).and_then(Value::as_str) else {
                 return Err(refusal(id, &format!("{} needs a url", method)));
             };
-            let url = normalize_url(raw).map_err(|reason| refusal(id, &reason))?;
+            let url = checked_destination(raw, strict).map_err(|reason| refusal(id, &reason))?;
             if method == SET_HOME {
                 return Ok(Forward::SetHome { id, url });
             }
@@ -208,7 +212,7 @@ mod tests {
     }
 
     fn rewritten(raw: &str) -> Value {
-        match allows(raw).expect("allowed") {
+        match allows(raw, true).expect("allowed") {
             Forward::Rewritten { text, .. } => serde_json::from_str(&text).expect("valid JSON"),
             other => panic!("expected a rewrite of {}, got {:?}", raw, other),
         }
@@ -224,7 +228,7 @@ mod tests {
             })
             .to_string();
             assert!(
-                allows(&raw).is_ok(),
+                allows(&raw, true).is_ok(),
                 "{} is what the page needs to work",
                 method
             );
@@ -250,8 +254,8 @@ mod tests {
             "DOM.getDocument",
             "Emulation.setDeviceMetricsOverride",
         ] {
-            let refused =
-                allows(&command(method)).expect_err(&format!("{} must not be forwarded", method));
+            let refused = allows(&command(method), true)
+                .expect_err(&format!("{} must not be forwarded", method));
             assert!(
                 refused.contains(method),
                 "the refusal has to name what was refused, got {}",
@@ -272,7 +276,7 @@ mod tests {
             "Strom.goHomeTo",
         ] {
             assert!(
-                allows(&command(method)).is_err(),
+                allows(&command(method), true).is_err(),
                 "{} is not on the list",
                 method
             );
@@ -283,7 +287,7 @@ mod tests {
     fn going_home_takes_no_address_from_the_client() {
         let raw = json!({ "id": 9, "method": GO_HOME, "params": { "url": "file:///etc/passwd" } })
             .to_string();
-        assert_eq!(allows(&raw), Ok(Forward::GoHome { id: Some(9) }));
+        assert_eq!(allows(&raw, true), Ok(Forward::GoHome { id: Some(9) }));
         // The address is the proxy's, whatever the client put in.
         let sent: Value = serde_json::from_str(&go_home_message(Some(9), HOME)).unwrap();
         assert_eq!(sent["method"], "Page.navigate");
@@ -294,7 +298,7 @@ mod tests {
     fn switching_and_closing_name_a_target_for_the_proxy_to_check() {
         let switch = json!({ "id": 3, "method": SWITCH_PAGE, "params": { "targetId": "ABCD" } });
         assert_eq!(
-            allows(&switch.to_string()),
+            allows(&switch.to_string(), true),
             Ok(Forward::SwitchPage {
                 id: Some(3),
                 target: "ABCD".to_string()
@@ -302,14 +306,14 @@ mod tests {
         );
         let close = json!({ "id": 4, "method": CLOSE_PAGE, "params": { "targetId": "ABCD" } });
         assert_eq!(
-            allows(&close.to_string()),
+            allows(&close.to_string(), true),
             Ok(Forward::ClosePage {
                 id: Some(4),
                 target: "ABCD".to_string()
             })
         );
         let bare = json!({ "id": 5, "method": SWITCH_PAGE, "params": {} });
-        assert!(allows(&bare.to_string()).is_err());
+        assert!(allows(&bare.to_string(), true).is_err());
     }
 
     #[test]
@@ -335,8 +339,8 @@ mod tests {
             "javascript:alert(1)",
         ] {
             let message = json!({ "id": 3, "method": "Page.navigate", "params": { "url": raw } });
-            let refused =
-                allows(&message.to_string()).expect_err(&format!("{} must not be reached", raw));
+            let refused = allows(&message.to_string(), true)
+                .expect_err(&format!("{} must not be reached", raw));
             let parsed: Value = serde_json::from_str(&refused).expect("valid JSON");
             assert_eq!(parsed["id"], 3);
         }
@@ -346,14 +350,34 @@ mod tests {
     fn setting_home_is_checked_and_handed_to_strom() {
         let message = json!({ "id": 8, "method": SET_HOME, "params": { "url": "example.com/x" } });
         assert_eq!(
-            allows(&message.to_string()),
+            allows(&message.to_string(), true),
             Ok(Forward::SetHome {
                 id: Some(8),
                 url: "https://example.com/x".to_string()
             })
         );
         let message = json!({ "id": 8, "method": SET_HOME, "params": { "url": "file:///etc" } });
-        assert!(allows(&message.to_string()).is_err());
+        assert!(allows(&message.to_string(), true).is_err());
+    }
+
+    #[test]
+    fn a_strict_source_is_not_navigated_onto_the_server() {
+        for method in ["Page.navigate", SET_HOME] {
+            let message = json!({
+                "id": 3,
+                "method": method,
+                "params": { "url": "http://127.0.0.1:9222/json/list" }
+            })
+            .to_string();
+            let refused = allows(&message, true).expect_err("loopback must be refused");
+            let parsed: Value = serde_json::from_str(&refused).expect("valid JSON");
+            assert_eq!(parsed["id"], 3);
+            assert!(
+                allows(&message, false).is_ok(),
+                "{} is allowed loose",
+                method
+            );
+        }
     }
 
     #[test]
@@ -380,7 +404,7 @@ mod tests {
         assert_eq!(sent["params"], json!({ "entryId": 12 }));
 
         let without = json!({ "id": 5, "method": "Page.navigateToHistoryEntry", "params": {} });
-        assert!(allows(&without.to_string()).is_err());
+        assert!(allows(&without.to_string(), true).is_err());
     }
 
     #[test]
@@ -411,6 +435,7 @@ mod tests {
             match allows(
             &json!({ "id": 1, "method": method, "params": { "url": "https://example.com", "entryId": 1 } })
                 .to_string(),
+            true,
         ) {
             Ok(Forward::Rewritten { by_operator, .. }) => by_operator,
             other => panic!("expected {} to be forwarded, got {:?}", method, other),
@@ -441,7 +466,7 @@ mod tests {
 
     #[test]
     fn a_refusal_answers_the_command_that_was_sent() {
-        let refused = allows(&command("Runtime.evaluate")).unwrap_err();
+        let refused = allows(&command("Runtime.evaluate"), true).unwrap_err();
         let parsed: Value = serde_json::from_str(&refused).expect("valid JSON");
         // A client matches answers to commands by id; an answer without one is
         // an answer it will wait for forever.
@@ -451,10 +476,10 @@ mod tests {
 
     #[test]
     fn anything_that_is_not_a_command_is_refused() {
-        assert!(allows("not json at all").is_err());
-        assert!(allows("{}").is_err());
-        assert!(allows(r#"{"id":1}"#).is_err());
+        assert!(allows("not json at all", true).is_err());
+        assert!(allows("{}", true).is_err());
+        assert!(allows(r#"{"id":1}"#, true).is_err());
         // A response, not a command - the client has no business sending one.
-        assert!(allows(r#"{"id":1,"result":{}}"#).is_err());
+        assert!(allows(r#"{"id":1,"result":{}}"#, true).is_err());
     }
 }
