@@ -35,8 +35,9 @@
 //! with it.
 //!
 //! The key is the credential for everything under `/devtools/<key>`. It
-//! expires on its own after [`LINK_TTL`] of disuse and can be revoked before
-//! that, and either one also ends a session that is already open — otherwise
+//! expires on its own after [`LINK_TTL`] of disuse — nobody opening it, and
+//! nobody clicking, typing or navigating in a session on it — and can be
+//! revoked before that, and either one also ends a session that is already open — otherwise
 //! revocation would close the door on the next visitor while the one already
 //! inside stayed.
 //!
@@ -90,8 +91,10 @@ use uuid::Uuid;
 ///
 /// Long enough to walk to another machine, find the page and work through a
 /// login with a second factor; short enough that a link left in a chat log is
-/// dead by the time anyone reads it. Every use pushes it out again, so a
-/// session in progress does not expire under the operator.
+/// dead by the time anyone reads it. Every use pushes it out again: opening
+/// the link, and the operator's input in a session on it, so a session being
+/// worked in does not expire under the operator. A tab left open and watched
+/// is not use, and is closed when the time runs out.
 pub const LINK_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Where the DevTools endpoint lives, from this instance's configuration.
@@ -205,6 +208,34 @@ struct Session {
     target_id: String,
     source: LinkSource,
     cancelled: broadcast::Receiver<()>,
+    hold: LinkHold,
+}
+
+/// A session's hold on the link it was opened on.
+///
+/// The table is otherwise swept only when something touches it, so without
+/// this a session would neither keep its link alive while the operator works
+/// in it, nor be ended by its expiry while nobody else asked about links.
+struct LinkHold {
+    links: Arc<Mutex<HashMap<String, Link>>>,
+    key: String,
+}
+
+impl LinkHold {
+    /// The operator used the link: start its time over.
+    fn used(&self) {
+        let mut links = self.links.lock().unwrap();
+        let now = Instant::now();
+        DevToolsState::sweep(&mut links, now);
+        if let Some(link) = links.get_mut(&self.key) {
+            link.expires = now + LINK_TTL;
+        }
+    }
+
+    /// Nobody used it: let an expiry take effect.
+    fn idle(&self) {
+        DevToolsState::sweep(&mut self.links.lock().unwrap(), Instant::now());
+    }
 }
 
 /// What a caller gets back when a link is minted: the credential, and the
@@ -293,6 +324,10 @@ impl DevToolsState {
             target_id: link.target_id.clone(),
             source: link.source.clone(),
             cancelled: link.cancel.subscribe(),
+            hold: LinkHold {
+                links: self.links.clone(),
+                key: key.to_string(),
+            },
         })
     }
 
@@ -1359,6 +1394,43 @@ mod tests {
         }
         assert!(s.resolve(&minted.key).is_none());
         assert!(s.links.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn working_in_a_session_keeps_its_link_alive() {
+        let s = state();
+        let minted = s.mint(
+            "ABCD".to_string(),
+            "https://a.example".to_string(),
+            link_source("https://a.example"),
+        );
+        let session = s.open_session(&minted.key).expect("session opens");
+        let expire_soon = || {
+            s.links
+                .lock()
+                .unwrap()
+                .get_mut(&minted.key)
+                .unwrap()
+                .expires = Instant::now() + Duration::from_millis(20);
+        };
+
+        // Input from the operator starts the time over.
+        expire_soon();
+        session.hold.used();
+        let left = s.links.lock().unwrap()[&minted.key]
+            .expires
+            .saturating_duration_since(Instant::now());
+        assert!(left > LINK_TTL - Duration::from_secs(5));
+
+        // Left alone, the session is ended by the expiry without anything
+        // else touching the table.
+        expire_soon();
+        let mut cancelled = session.cancelled;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        session.hold.idle();
+        let _ = tokio::time::timeout(Duration::from_secs(1), cancelled.recv())
+            .await
+            .expect("an idle session must be ended by its link's expiry");
     }
 
     #[test]

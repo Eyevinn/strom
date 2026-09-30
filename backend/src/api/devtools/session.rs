@@ -15,12 +15,18 @@ use axum::extract::ws::{Message, WebSocket};
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
 type Upstream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// How often a session reports to its link whether the operator did anything.
+/// Well inside the link's lifetime, and rare enough that input does not take
+/// the table's lock per keystroke.
+const HOLD_INTERVAL: Duration = Duration::from_secs(15);
 type ClientTx = SplitSink<WebSocket, Message>;
 
 async fn open_page(port: u16, target: &str) -> Option<Upstream> {
@@ -113,6 +119,7 @@ pub(super) async fn pump(
         target_id: root,
         mut source,
         mut cancelled,
+        hold,
     } = session;
     let Some(mut upstream) = open_page(port, &root).await else {
         return;
@@ -134,6 +141,8 @@ pub(super) async fn pump(
     };
     let mut family = PageFamily::new(root.clone());
     let mut current = root.clone();
+    let mut hold_tick = tokio::time::interval(HOLD_INTERVAL);
+    let mut used = false;
 
     // Our page is the client in filtered mode, and its header names the
     // source. The DevTools application would have no use for this.
@@ -165,20 +174,26 @@ pub(super) async fn pump(
                     Message::Ping(_) | Message::Pong(_) => continue,
                 };
                 if full_devtools {
+                    // Nothing is parsed in this mode, so anything is use.
+                    used = true;
                     if upstream.send(WsMessage::Text(text.as_str().into())).await.is_err() {
                         break;
                     }
                     continue;
                 }
-                let reply = match filter::allows(text.as_str()) {
-                    Ok(filter::Forward::AsIs) => {
-                        if upstream.send(WsMessage::Text(text.as_str().into())).await.is_err() {
-                            break;
-                        }
-                        None
-                    }
-                    Ok(filter::Forward::Rewritten(rewritten)) => {
-                        if upstream.send(WsMessage::Text(rewritten.into())).await.is_err() {
+                let forward = filter::allows(text.as_str());
+                // Every command of Strom's own is the operator asking for it.
+                used |= matches!(
+                    forward,
+                    Ok(filter::Forward::Rewritten { by_operator: true, .. })
+                        | Ok(filter::Forward::SetHome { .. })
+                        | Ok(filter::Forward::GoHome { .. })
+                        | Ok(filter::Forward::SwitchPage { .. })
+                        | Ok(filter::Forward::ClosePage { .. })
+                );
+                let reply = match forward {
+                    Ok(filter::Forward::Rewritten { text, .. }) => {
+                        if upstream.send(WsMessage::Text(text.into())).await.is_err() {
                             break;
                         }
                         None
@@ -283,6 +298,14 @@ pub(super) async fn pump(
                 }
                 if !tell(&mut client_tx, family.message(&current)).await {
                     break;
+                }
+            }
+
+            _ = hold_tick.tick() => {
+                if std::mem::take(&mut used) {
+                    hold.used();
+                } else {
+                    hold.idle();
                 }
             }
 

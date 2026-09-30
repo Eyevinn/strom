@@ -5,8 +5,9 @@
 //! (see [`normalize_url`]). Everything outside that — `Runtime.evaluate`,
 //! `Storage.getCookies`, the whole `Network` and `Debugger` domains, and any
 //! `file:` or `chrome:` page — is what turns a link into control of this host,
-//! so the proxy refuses it rather than trusting the page not to ask. The page we serve is only the first user of the link; this filter is
-//! what makes the link safe to hand to a second one.
+//! so the proxy refuses it rather than trusting the page not to ask. The page
+//! we serve is only the first user of the link; this filter is what makes the
+//! link safe to hand to a second one.
 
 use crate::blocks::builtin::html_input::normalize_url;
 use serde_json::{json, Value};
@@ -51,11 +52,15 @@ pub const SET_HOME: &str = "Strom.setHome";
 /// What to send to Chromium in place of a message the client sent.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Forward {
-    /// The message as it arrived.
-    AsIs,
     /// A message rebuilt from the client's, carrying only what the filter
-    /// allows.
-    Rewritten(String),
+    /// allows. Nothing the client sent goes to Chromium as it arrived.
+    Rewritten {
+        text: String,
+        /// Whether the operator did something - clicked, typed, navigated -
+        /// as opposed to the page keeping its screencast going. Only this
+        /// keeps a link alive.
+        by_operator: bool,
+    },
     /// Not for Chromium: set the block's URL to this checked address and
     /// answer the command with this id.
     SetHome { id: Option<i64>, url: String },
@@ -85,9 +90,18 @@ pub fn refusal(id: Option<i64>, message: &str) -> String {
     .to_string()
 }
 
+/// Whether a method is the operator doing something, rather than the page's
+/// own upkeep of the screencast and history.
+fn by_operator(method: &str) -> bool {
+    method.starts_with("Input.")
+        || matches!(
+            method,
+            "Page.navigate" | "Page.navigateToHistoryEntry" | "Page.reload"
+        )
+}
+
 /// Whether one message from the client may be forwarded, and in what form, or
 /// the refusal to send back in its place.
-///
 pub fn allows(raw: &str) -> Result<Forward, String> {
     let Ok(message) = serde_json::from_str::<Value>(raw) else {
         return Err(refusal(None, "Not a DevTools protocol message"));
@@ -124,10 +138,12 @@ pub fn allows(raw: &str) -> Result<Forward, String> {
                 .and_then(|p| p.get("ignoreCache"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            Ok(Forward::Rewritten(
-                json!({ "id": id, "method": method, "params": { "ignoreCache": ignore_cache } })
-                    .to_string(),
-            ))
+            Ok(Forward::Rewritten {
+                text:
+                    json!({ "id": id, "method": method, "params": { "ignoreCache": ignore_cache } })
+                        .to_string(),
+                by_operator: true,
+            })
         }
         "Page.navigate" | SET_HOME => {
             let Some(raw) = params.and_then(|p| p.get("url")).and_then(Value::as_str) else {
@@ -139,9 +155,10 @@ pub fn allows(raw: &str) -> Result<Forward, String> {
             }
             // Only the address goes through: frameId would aim at a subframe,
             // and nothing else the method takes is needed.
-            Ok(Forward::Rewritten(
-                json!({ "id": id, "method": method, "params": { "url": url } }).to_string(),
-            ))
+            Ok(Forward::Rewritten {
+                text: json!({ "id": id, "method": method, "params": { "url": url } }).to_string(),
+                by_operator: true,
+            })
         }
         "Page.navigateToHistoryEntry" => {
             let Some(entry_id) = params
@@ -150,12 +167,25 @@ pub fn allows(raw: &str) -> Result<Forward, String> {
             else {
                 return Err(refusal(id, "Page.navigateToHistoryEntry needs an entryId"));
             };
-            Ok(Forward::Rewritten(
-                json!({ "id": id, "method": method, "params": { "entryId": entry_id } })
+            Ok(Forward::Rewritten {
+                text: json!({ "id": id, "method": method, "params": { "entryId": entry_id } })
                     .to_string(),
-            ))
+                by_operator: true,
+            })
         }
-        _ if REMOTE_CONTROL_METHODS.contains(&method) => Ok(Forward::AsIs),
+        // Rebuilt from what was parsed, so only the command reaches Chromium:
+        // a top-level `sessionId`, say, would aim it at another session on
+        // the same socket.
+        _ if REMOTE_CONTROL_METHODS.contains(&method) => {
+            let mut rebuilt = json!({ "id": id, "method": method });
+            if let Some(params) = params {
+                rebuilt["params"] = params.clone();
+            }
+            Ok(Forward::Rewritten {
+                text: rebuilt.to_string(),
+                by_operator: by_operator(method),
+            })
+        }
         _ => Err(refusal(
             id,
             &format!(
@@ -179,7 +209,7 @@ mod tests {
 
     fn rewritten(raw: &str) -> Value {
         match allows(raw).expect("allowed") {
-            Forward::Rewritten(text) => serde_json::from_str(&text).expect("valid JSON"),
+            Forward::Rewritten { text, .. } => serde_json::from_str(&text).expect("valid JSON"),
             other => panic!("expected a rewrite of {}, got {:?}", raw, other),
         }
     }
@@ -351,6 +381,62 @@ mod tests {
 
         let without = json!({ "id": 5, "method": "Page.navigateToHistoryEntry", "params": {} });
         assert!(allows(&without.to_string()).is_err());
+    }
+
+    #[test]
+    fn only_the_parsed_command_is_forwarded() {
+        // Whatever else rides along on an allowed method stays behind: a
+        // top-level sessionId would route the command to another session.
+        let raw = json!({
+            "id": 6,
+            "method": "Input.dispatchMouseEvent",
+            "sessionId": "OTHER",
+            "params": { "type": "mousePressed", "x": 1, "y": 2 }
+        })
+        .to_string();
+        let sent = rewritten(&raw);
+        assert_eq!(
+            sent,
+            json!({
+                "id": 6,
+                "method": "Input.dispatchMouseEvent",
+                "params": { "type": "mousePressed", "x": 1, "y": 2 }
+            })
+        );
+    }
+
+    #[test]
+    fn only_the_operator_keeps_a_link_alive() {
+        let operator = |method: &str| {
+            match allows(
+            &json!({ "id": 1, "method": method, "params": { "url": "https://example.com", "entryId": 1 } })
+                .to_string(),
+        ) {
+            Ok(Forward::Rewritten { by_operator, .. }) => by_operator,
+            other => panic!("expected {} to be forwarded, got {:?}", method, other),
+        }
+        };
+        for method in [
+            "Input.dispatchMouseEvent",
+            "Input.dispatchKeyEvent",
+            "Input.insertText",
+            "Page.navigate",
+            "Page.navigateToHistoryEntry",
+            "Page.reload",
+        ] {
+            assert!(operator(method), "{} is the operator at work", method);
+        }
+        // A tab left open on an animated page acks frames forever; that is
+        // not someone using the link.
+        for method in [
+            "Page.enable",
+            "Page.startScreencast",
+            "Page.stopScreencast",
+            "Page.screencastFrameAck",
+            "Page.getNavigationHistory",
+        ] {
+            assert!(!operator(method), "{} is upkeep, not use", method);
+        }
     }
 
     #[test]
