@@ -904,3 +904,24 @@ fn test_solo_keeps_block_latency_without_aux_or_group() {
         "monitor {monitor} ms stacks latency on main {main} ms"
     );
 }
+
+#[test]
+fn test_solo_does_not_stack_block_latency_with_aux_buses() {
+    // Open Live's shape: aux buses and no group, so Main takes only channels
+    // and does not hide what Solo adds. Solo sums the aux buses, which already
+    // wait the block latency; Monitor sums Solo.
+    let latency = 100;
+    let [main, aux, monitor] = reported_latency(
+        &small_mixer_props(&[
+            ("num_groups", PropertyValue::UInt(0)),
+            ("latency", PropertyValue::UInt(latency)),
+        ]),
+        &["main_out_tee", "aux0_out_tee", "monitor_out_tee"],
+    )[..] else {
+        unreachable!()
+    };
+    assert!(
+        monitor <= main.max(aux) + 3 * INTERNAL_BUS_LATENCY_MS,
+        "monitor {monitor} ms stacks latency on main {main} ms / aux {aux} ms"
+    );
+}
