@@ -80,7 +80,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use strom_types::devtools::{
     DevToolsLink, DevToolsLinkSummary, DevToolsLinks, DevToolsRevokedLinks, DevToolsTarget,
-    DevToolsTargets, REMOTE_CONTROL_WARNING, SCREENCAST_CONTROL_WARNING,
+    DevToolsTargets, REMOTE_CONTROL_WARNING, SCREENCAST_CONTROL_WARNING, SHARED_CONTEXT_WARNING,
 };
 use strom_types::{Flow, FlowId};
 use tokio::sync::broadcast;
@@ -122,12 +122,26 @@ pub struct DevToolsConfig {
 }
 
 /// What to tell an operator this link hands over, which depends on whether the
-/// protocol is filtered.
+/// protocol is filtered and whether each HTML source has a browser context of
+/// its own.
+///
+/// Isolation is asked of the plugin when the link is minted rather than at
+/// startup: a link is minted for a page that is rendering, so the plugin is
+/// loaded by then, and loading it any earlier is not free.
 fn link_warning(config: &DevToolsConfig) -> String {
+    warning_for(
+        config,
+        crate::blocks::builtin::html_input::plugin_isolates(),
+    )
+}
+
+fn warning_for(config: &DevToolsConfig, isolated: bool) -> String {
     if config.full_devtools {
         REMOTE_CONTROL_WARNING.to_string()
-    } else {
+    } else if isolated {
         SCREENCAST_CONTROL_WARNING.to_string()
+    } else {
+        format!("{} {}", SCREENCAST_CONTROL_WARNING, SHARED_CONTEXT_WARNING)
     }
 }
 
@@ -1847,8 +1861,20 @@ mod tests {
             full_devtools: true,
             ..filtered
         };
-        assert_eq!(link_warning(&filtered), SCREENCAST_CONTROL_WARNING);
-        assert_eq!(link_warning(&unfiltered), REMOTE_CONTROL_WARNING);
-        assert_ne!(link_warning(&filtered), link_warning(&unfiltered));
+        for isolated in [true, false] {
+            assert!(warning_for(&filtered, isolated).starts_with(SCREENCAST_CONTROL_WARNING));
+            assert_eq!(warning_for(&unfiltered, isolated), REMOTE_CONTROL_WARNING);
+        }
+    }
+
+    #[test]
+    fn without_isolation_the_warning_says_a_login_reaches_every_source() {
+        let filtered = DevToolsConfig {
+            debug_port: Some(9222),
+            tls: false,
+            full_devtools: false,
+        };
+        assert!(warning_for(&filtered, false).contains(SHARED_CONTEXT_WARNING));
+        assert!(!warning_for(&filtered, true).contains(SHARED_CONTEXT_WARNING));
     }
 }

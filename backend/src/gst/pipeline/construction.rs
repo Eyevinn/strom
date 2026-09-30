@@ -1,4 +1,5 @@
 use super::{PipelineError, PipelineManager, QoSAggregator};
+use crate::blocks::builtin::html_input;
 use crate::blocks::BlockRegistry;
 use crate::events::EventBroadcaster;
 use crate::whip_registry::WhipRegistry;
@@ -352,6 +353,22 @@ impl PipelineManager {
         {
             element.set_property("is-live", true);
             debug!("Enabled is-live on test source {}", element_def.id);
+        }
+
+        // A raw cefsrc gets a browser context of its own, the same as the HTML
+        // Input block, so HTML sources in different flows do not share a
+        // cookie jar. A flow that sets isolated-context itself decides.
+        if element_def.element_type == "cefsrc"
+            && !element_def
+                .properties
+                .contains_key(html_input::ISOLATED_CONTEXT_PROPERTY)
+        {
+            let flow_id = self.flow_id.to_string();
+            html_input::isolate_browser(
+                &element,
+                &format!("cefsrc {} in flow {}", element_def.id, flow_id),
+                |root| html_input::element_profile_dir(root, &flow_id, &element_def.id),
+            );
         }
 
         // Set properties

@@ -245,6 +245,53 @@ and pick whether the page's audio comes out as a second pad. Internally it is
 `cefsrc` feeding `cefdemux`, with `cefdemux` built only when audio is asked
 for. Raw `cefsrc` pipelines still work — the block just spares you the caps.
 
+## Browser profiles, and running one Strom for several customers
+
+Upstream gstcefsrc creates every browser in one shared context. Every HTML
+source in a Strom process then shares one cookie jar, one local storage and one
+HTTP cache: a login made for one source is a login for all of them, whichever
+flow they are in.
+
+Strom builds its own gstcefsrc for the `strom-full` image, with a patch that
+adds a browser context per source (`isolated-context`, `context-cache-path` and
+`persist-session-cookies` on `cefsrc`). When the plugin has it:
+
+- **Every HTML Input block gets a profile of its own**, kept in the CEF cache
+  directory, so a login survives a flow restart. Set **Browser Profile** to the
+  same name on several blocks to let them share one — for example, several
+  graphics from one logged-in dashboard.
+- **Every raw `cefsrc` element gets one too**, keyed by its flow and element
+  id, unless the flow sets `isolated-context` on it itself.
+- **A popup the page opens shares its opener's profile**, so a "Sign in
+  with…" window logs in the page that opened it.
+
+Without it, Strom logs a warning for every HTML source it builds, and a remote
+control link says that a login made through it reaches every HTML source in the
+instance.
+
+**Whether a Strom can be shared between customers therefore depends on the
+plugin.** With isolation, HTML sources belonging to different customers do not
+see each other's sessions, and a remote control link (in its default, filtered
+mode) reaches only the page it was minted for and that page's own profile. Without
+isolation, do not put HTML sources from different customers on one Strom.
+
+What stays shared either way:
+
+- **One browser process and one debug port.** Full DevTools (below) is not
+  filtered and reaches every page in the process, so it must stay off on a
+  shared Strom.
+- **Profile names are one namespace per Strom.** Strom does not know who owns a
+  flow, so two customers who pick the same Browser Profile name share one. A
+  system that drives one Strom for several customers has to make the names its
+  own, for instance by prefixing them with a tenant id, and has to scope who
+  may mint a remote control link for which source, because Strom's
+  authentication is per instance, not per customer.
+
+If the system in front of Strom does not do that tenant handling, the
+alternative is one Strom container per customer. That gives each customer its
+own process, its own debug port and its own cache directory, whatever the
+plugin supports.
+
 ## Remote control (logging in to a page)
 
 An HTML source renders on the server, so a page behind a login shows its login
@@ -331,9 +378,14 @@ curl -X DELETE -H "Authorization: Bearer $STROM_API_KEY" \
 Revoking ends sessions that are already open, not just the next one — it is the
 emergency stop, so it has to reach whoever is holding the socket.
 
-A login survives a restart: the profile directory keeps the cookies, and Strom
-asks Chromium to persist session cookies too. Chromium writes them on a timer,
-so a login made seconds before the process is killed can still be lost.
+A login survives a restart: the source's profile keeps the cookies, session
+cookies included (see [Browser profiles](#browser-profiles-and-running-one-strom-for-several-customers)).
+Chromium writes them on a timer, so a login made seconds before the process is
+killed can still be lost.
+
+A link stays alive while you work in it: opening it, and every click, keystroke
+or navigation in a session, starts its half hour over. A tab left open and only
+watched is closed when the time runs out.
 
 ### Full DevTools
 
@@ -352,12 +404,12 @@ so the two cannot be combined.
 
 > **With this on, a link is control of the host, and it is instance-wide.** It
 > runs arbitrary JavaScript, navigates anywhere including `file://`, and reads
-> every cookie in the profile. One browser process serves every HTML source in
-> a Strom instance, so a link reaches all of them, every page they are logged
-> in to, and the files this process can read. Give it only to someone you would
-> trust with the instance itself. To keep customers apart, run a Strom process
-> per customer — that is an orchestration choice, and there is no per-source
-> isolation inside one process.
+> every cookie it can reach. One browser process serves every HTML source in
+> a Strom instance, and the unfiltered protocol can attach to any of them, so a
+> link reaches all of them, every page they are logged in to, and the files
+> this process can read. Separate browser profiles do not change that. Give it
+> only to someone you would trust with the instance itself, and never turn it
+> on for a Strom shared between customers.
 
 ## Limitations
 
@@ -367,7 +419,8 @@ so the two cannot be combined.
 - **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
-- **No per-source isolation**: one CEF process serves every `cefsrc` in an instance, so they share one profile, one cookie jar and one debugging port
+- **One browser process per instance**: every `cefsrc` shares one CEF process and one debugging port. Cookies and storage are per source only with Strom's gstcefsrc build (see [Browser profiles](#browser-profiles-and-running-one-strom-for-several-customers))
+- **Profiles are not removed with their block**: a deleted block's profile stays in the CEF cache directory until the directory is cleared
 
 ## References
 

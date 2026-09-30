@@ -60,7 +60,7 @@ pub const URL_PROPERTY: &str = "url";
 
 /// The `cefsrc` property, from Strom's gstcefsrc build, that gives a browser its
 /// own cookies, storage and cache instead of the process-wide ones.
-const ISOLATED_CONTEXT_PROPERTY: &str = "isolated-context";
+pub const ISOLATED_CONTEXT_PROPERTY: &str = "isolated-context";
 
 /// The `cefsrc` property naming the directory an isolated context persists in.
 const CONTEXT_CACHE_PATH_PROPERTY: &str = "context-cache-path";
@@ -106,6 +106,84 @@ pub fn profile_dir(
         format!("strom-named-{}", escape_profile_name(&name))
     };
     cache_root.join(leaf)
+}
+
+/// Where a raw `cefsrc` element's browser profile lives, under the CEF cache
+/// directory. Under its own prefix, so it can land on neither a block's profile
+/// nor a named one.
+pub fn element_profile_dir(
+    cache_root: &std::path::Path,
+    flow_id: &str,
+    element_id: &str,
+) -> std::path::PathBuf {
+    cache_root.join(format!(
+        "strom-element-{}-{}",
+        escape_profile_name(flow_id),
+        escape_profile_name(element_id)
+    ))
+}
+
+/// Whether this gstcefsrc can give a browser a context of its own. Only
+/// Strom's patched build can; upstream creates every browser in the global
+/// context, so every HTML source in the process shares one cookie jar.
+pub fn plugin_isolates() -> bool {
+    gst::ElementFactory::find("cefsrc")
+        .and_then(|f| f.load().ok())
+        .and_then(|f| gst::glib::object::ObjectClass::from_type(f.element_type()))
+        .and_then(|class| class.find_property(ISOLATED_CONTEXT_PROPERTY))
+        .is_some()
+}
+
+/// Give a `cefsrc` a browser context of its own, persisted in the directory
+/// `dir_for` picks under the CEF cache root.
+///
+/// Every cefsrc in the process shares one browser context by default: one
+/// cookie jar and one local storage for every HTML source on this Strom,
+/// whichever flow - and on a shared Strom, whichever customer - it belongs to.
+/// A plugin with isolated-context gives each its own. Older plugins lack the
+/// property and keep sharing, which `who` is named in a warning about.
+pub fn isolate_browser(
+    cefsrc: &gst::Element,
+    who: &str,
+    dir_for: impl FnOnce(&std::path::Path) -> std::path::PathBuf,
+) {
+    if cefsrc.find_property(ISOLATED_CONTEXT_PROPERTY).is_none() {
+        warn!(
+            "{}: this gstcefsrc has no {} property, so the page shares cookies and storage \
+             with every other HTML source in this Strom",
+            who, ISOLATED_CONTEXT_PROPERTY
+        );
+        return;
+    }
+    cefsrc.set_property(ISOLATED_CONTEXT_PROPERTY, true);
+    // Chromium only persists a context inside its root cache path; without one
+    // the context stays in memory, isolated all the same.
+    let Some(root) = std::env::var_os("GST_CEF_CACHE_LOCATION") else {
+        warn!(
+            "{}: no CEF cache directory, so its browser profile is kept in memory and a \
+             login does not survive a flow restart",
+            who
+        );
+        return;
+    };
+    let dir = dir_for(std::path::Path::new(&root));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!(
+            "{}: could not create browser profile {}: {} - the page keeps its session in \
+             memory only",
+            who,
+            dir.display(),
+            e
+        );
+        return;
+    }
+    cefsrc.set_property(CONTEXT_CACHE_PATH_PROPERTY, dir.to_string_lossy().as_ref());
+    if cefsrc
+        .find_property(PERSIST_SESSION_COOKIES_PROPERTY)
+        .is_some()
+    {
+        cefsrc.set_property(PERSIST_SESSION_COOKIES_PROPERTY, true);
+    }
 }
 
 fn escape_profile_name(name: &str) -> String {
@@ -360,52 +438,11 @@ impl BlockBuilder for HtmlInputBuilder {
         let cefsrc = make("cefsrc")?;
         cefsrc.set_property("url", &url);
 
-        // Every cefsrc in the process shares one browser context by default:
-        // one cookie jar and one local storage for every HTML source on this
-        // Strom, whichever flow - and on a shared Strom, whichever customer -
-        // it belongs to. A plugin with isolated-context gives this block its
-        // own. Older plugins lack the property and keep sharing.
-        if cefsrc.find_property(ISOLATED_CONTEXT_PROPERTY).is_some() {
-            cefsrc.set_property(ISOLATED_CONTEXT_PROPERTY, true);
-            // Chromium only persists a context inside its root cache path;
-            // without one the context stays in memory, isolated all the same.
-            match std::env::var_os("GST_CEF_CACHE_LOCATION") {
-                Some(root) => {
-                    let dir = profile_dir(std::path::Path::new(&root), properties);
-                    if let Err(e) = std::fs::create_dir_all(&dir) {
-                        warn!(
-                            "HTML Input block {}: could not create browser profile {}: {} - \
-                             the page keeps its session in memory only",
-                            instance_id,
-                            dir.display(),
-                            e
-                        );
-                    } else {
-                        cefsrc.set_property(
-                            CONTEXT_CACHE_PATH_PROPERTY,
-                            dir.to_string_lossy().as_ref(),
-                        );
-                        if cefsrc
-                            .find_property(PERSIST_SESSION_COOKIES_PROPERTY)
-                            .is_some()
-                        {
-                            cefsrc.set_property(PERSIST_SESSION_COOKIES_PROPERTY, true);
-                        }
-                    }
-                }
-                None => warn!(
-                    "HTML Input block {}: no CEF cache directory, so its browser profile is \
-                     kept in memory and a login does not survive a flow restart",
-                    instance_id
-                ),
-            }
-        } else {
-            warn!(
-                "HTML Input block {}: this gstcefsrc has no {} property, so the page shares \
-                 cookies and storage with every other HTML source in this Strom",
-                instance_id, ISOLATED_CONTEXT_PROPERTY
-            );
-        }
+        isolate_browser(
+            &cefsrc,
+            &format!("HTML Input block {}", instance_id),
+            |root| profile_dir(root, properties),
+        );
 
         // cefsrc renders at whatever size is negotiated downstream, so this
         // capsfilter is the page's viewport. BGRA is what cefsrc produces and
@@ -934,6 +971,36 @@ mod tests {
         );
         let escaped = named("../../etc");
         assert_eq!(escaped.parent(), Some(std::path::Path::new("/cache")));
+    }
+
+    #[test]
+    fn a_raw_cefsrc_gets_a_profile_no_block_or_name_can_land_on() {
+        let root = std::path::Path::new("/cache");
+        let element = element_profile_dir(root, "f", "b");
+        // Keyed by flow as well: element ids are only unique within one.
+        assert_ne!(element, element_profile_dir(root, "g", "b"));
+        assert_eq!(element.parent(), Some(root));
+        let block = profile_dir(
+            root,
+            &props(&[
+                ("_flow_id", PropertyValue::String("f".to_string())),
+                ("_block_id", PropertyValue::String("b".to_string())),
+            ]),
+        );
+        let named = profile_dir(
+            root,
+            &props(&[(
+                BROWSER_PROFILE_PROPERTY,
+                PropertyValue::String("strom-element-f-b".to_string()),
+            )]),
+        );
+        assert_ne!(element, block);
+        assert_ne!(element, named);
+        assert_eq!(
+            element_profile_dir(root, "f", "../x").parent(),
+            Some(root),
+            "an element id cannot climb out of the cache root"
+        );
     }
 
     #[test]

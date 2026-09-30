@@ -109,6 +109,17 @@ pub const SCREENCAST_CONTROL_WARNING: &str = "This link shows the page as it \
     Whoever holds it can see and change what that source is putting on air, \
     until the link expires or is revoked.";
 
+/// Added to [`SCREENCAST_CONTROL_WARNING`] when the HTML renderer cannot give
+/// each source a browser context of its own.
+///
+/// Upstream gstcefsrc creates every browser in one shared context, so a login
+/// made through one source's link is a cookie every HTML source in the instance
+/// sends. Strom's own gstcefsrc build, in the strom-full image, isolates them.
+pub const SHARED_CONTEXT_WARNING: &str = "This Strom's HTML renderer keeps one \
+    cookie jar for every HTML source, so whatever you log in to through this \
+    link, every other HTML source in this Strom instance is logged in to as \
+    well. Do not use it on a Strom shared between customers.";
+
 /// What remote control actually grants, for any client that offers it.
 ///
 /// One CEF process serves every `cefsrc` in a Strom instance, so a session
