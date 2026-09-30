@@ -149,6 +149,8 @@ RUN mkdir -p /output/lib/gstreamer-1.0 && \
     cp /build/libmallinfo_shim.so /output/lib/cef/ && \
     # Create version info file
     echo "CEF_VERSION=${CEF_VERSION}" > /output/version.txt && \
+    echo "GSTCEFSRC_REF=${GSTCEFSRC_REF}" >> /output/version.txt && \
+    echo "STROM_PATCHES=popup-close isolated-context" >> /output/version.txt && \
     echo "TARGETARCH=${TARGETARCH}" >> /output/version.txt && \
     echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /output/version.txt && \
     # List what was built
