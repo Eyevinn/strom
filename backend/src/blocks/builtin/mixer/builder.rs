@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 use super::elements::*;
 use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
-use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR};
+use super::{INTERNAL_BUS_LATENCY_MS, METER_INTERVAL_NS, MIN_KNEE_LINEAR};
 use strom_types::mixer::{DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS};
 
 /// Mixer block builder.
@@ -278,10 +278,18 @@ impl BlockBuilder for MixerBuilder {
         // are always the no-solo case — no need to inspect properties here.
         // ========================================================================
         let solo_mixer_id = format!("{}:solo_mixer", instance_id);
+        // Solo also takes each channel's PFL/AFL tap straight from the channel.
+        // Those taps keep the block's slack as long as an aux or group bus
+        // feeds solo too: solo then reports that bus's latency plus its own.
+        let solo_latency_ms = if num_aux_buses + num_groups > 0 {
+            latency_ms.min(INTERNAL_BUS_LATENCY_MS)
+        } else {
+            latency_ms
+        };
         let solo_mixer = make_audiomixer(
             &solo_mixer_id,
             force_live,
-            latency_ms,
+            solo_latency_ms,
             min_upstream_latency_ms,
         )?;
         elements.push((solo_mixer_id.clone(), solo_mixer));
@@ -324,7 +332,7 @@ impl BlockBuilder for MixerBuilder {
         let monitor_mixer = make_audiomixer(
             &monitor_mixer_id,
             force_live,
-            latency_ms,
+            latency_ms.min(INTERNAL_BUS_LATENCY_MS),
             min_upstream_latency_ms,
         )?;
         elements.push((monitor_mixer_id.clone(), monitor_mixer));

@@ -826,3 +826,81 @@ fn test_built_mixer_passes_audio_to_main_out() {
         }
     }
 }
+
+/// Minimum latency reported upstream of each named output tee, with live audio
+/// playing into both channels. An unfed channel fails the query.
+fn reported_latency(properties: &HashMap<String, PropertyValue>, tees: &[&str]) -> Vec<u64> {
+    let m = assemble(properties);
+    for ch in 0..2 {
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("is-live", true)
+            .build()
+            .unwrap();
+        m.pipeline.add(&src).unwrap();
+        src.link_pads(None, m.element(&format!("convert_{ch}")), Some("sink"))
+            .unwrap();
+    }
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    // The query fails until every element upstream has reached PLAYING.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    tees.iter()
+        .map(|tee| {
+            let pad = m.element(tee).static_pad("sink").unwrap();
+            loop {
+                let mut q = gst::query::Latency::new();
+                if pad.peer_query(&mut q) {
+                    let (live, min, _) = q.result();
+                    assert!(live, "{tee} is live");
+                    break min.mseconds();
+                }
+                assert!(Instant::now() < deadline, "latency query upstream of {tee}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn test_monitor_bus_does_not_stack_block_latency() {
+    // Monitor sums Main and Solo, and Solo sums the aux and group buses. Each
+    // of those already waits the block latency, so Monitor must add only a
+    // little on top of Main, or a linked monitor_out holds every sink in the
+    // flow a further block latency.
+    let latency = 100;
+    let [main, aux, monitor] = reported_latency(
+        &small_mixer_props(&[("latency", PropertyValue::UInt(latency))]),
+        &["main_out_tee", "aux0_out_tee", "monitor_out_tee"],
+    )[..] else {
+        unreachable!()
+    };
+    assert!(aux >= latency, "aux waits the block latency: {aux} ms");
+    assert!(
+        monitor <= main + 3 * INTERNAL_BUS_LATENCY_MS,
+        "monitor {monitor} ms stacks latency on main {main} ms"
+    );
+}
+
+#[test]
+fn test_solo_keeps_block_latency_without_aux_or_group() {
+    // With no aux or group bus, Solo's only inputs are the channels' PFL/AFL
+    // taps, which need the same slack Main gives the channels.
+    let latency = 100;
+    let props = props(&[
+        ("num_channels", PropertyValue::UInt(2)),
+        ("num_aux_buses", PropertyValue::UInt(0)),
+        ("num_groups", PropertyValue::UInt(0)),
+        ("dsp_backend", PropertyValue::String("rust".to_string())),
+        ("latency", PropertyValue::UInt(latency)),
+    ]);
+    let m = assemble(&props);
+    let solo = m.element("solo_mixer").property::<u64>("latency");
+    assert_eq!(solo, latency * 1_000_000);
+    drop(m);
+    let [main, monitor] = reported_latency(&props, &["main_out_tee", "monitor_out_tee"])[..] else {
+        unreachable!()
+    };
+    assert!(
+        monitor <= main + 3 * INTERNAL_BUS_LATENCY_MS,
+        "monitor {monitor} ms stacks latency on main {main} ms"
+    );
+}
