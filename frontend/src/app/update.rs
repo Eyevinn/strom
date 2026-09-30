@@ -1795,6 +1795,7 @@ impl eframe::App for StromApp {
                         block_id: block_id.clone(),
                         property_name: "routing_matrix".to_string(),
                         value: strom_types::PropertyValue::String(routing_json.clone()),
+                        settle: false,
                     }]
                 } else {
                     Vec::new()

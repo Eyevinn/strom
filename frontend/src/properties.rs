@@ -22,10 +22,19 @@ pub struct LivePropertyUpdate {
     /// Exposed property name (e.g. `ch1_pfl`, `fader_db`).
     pub property_name: String,
     pub value: PropertyValue,
+    /// Send only once the value has stopped changing for
+    /// [`LIVE_TEXT_SETTLE_MS`]. For free text: a URL typed into a live field
+    /// would otherwise go out a character at a time, and an HTML source would
+    /// load every prefix of it.
+    pub settle: bool,
 }
 
 /// Minimum interval between live property API calls for the same element+property.
 pub const LIVE_PROPERTY_DEBOUNCE_MS: u64 = 80;
+
+/// How long a settling value (free text) has to stay unchanged before it is
+/// sent.
+pub const LIVE_TEXT_SETTLE_MS: u64 = 700;
 
 /// Block definition IDs whose running pipeline can report RTP jitterbuffer
 /// statistics via `GET /api/flows/{id}/rtp-stats`.
@@ -42,6 +51,8 @@ pub fn is_rtp_stats_block_def(definition_id: &str) -> bool {
 /// always delivered).
 pub struct LivePropertyDebounce {
     pub last_sent: instant::Instant,
+    /// When the pending value last changed.
+    pub last_input: instant::Instant,
     pub pending: Option<LivePropertyUpdate>,
 }
 
@@ -60,6 +71,7 @@ pub fn drain_live_updates(
 ) -> Vec<LivePropertyUpdate> {
     let now = instant::Instant::now();
     let interval = std::time::Duration::from_millis(LIVE_PROPERTY_DEBOUNCE_MS);
+    let settle = std::time::Duration::from_millis(LIVE_TEXT_SETTLE_MS);
     let mut to_send: Vec<LivePropertyUpdate> = Vec::new();
 
     // Keys that received a fresh incoming update this frame
@@ -76,10 +88,15 @@ pub fn drain_live_updates(
             .or_insert_with(|| LivePropertyDebounce {
                 // Set last_sent far enough in the past so the first update always goes through
                 last_sent: now - interval,
+                last_input: now,
                 pending: None,
             });
+        entry.last_input = now;
 
-        if now.duration_since(entry.last_sent) >= interval {
+        if update.settle {
+            // Never on the leading edge: wait for the typing to stop.
+            entry.pending = Some(update);
+        } else if now.duration_since(entry.last_sent) >= interval {
             // Enough time has passed — send immediately
             entry.last_sent = now;
             entry.pending = None;
@@ -96,6 +113,10 @@ pub fn drain_live_updates(
         .iter()
         .filter(|(k, v)| v.pending.is_some() && !touched_keys.contains(*k))
         .filter(|(_, v)| now.duration_since(v.last_sent) >= interval)
+        .filter(|(_, v)| {
+            !v.pending.as_ref().is_some_and(|p| p.settle)
+                || now.duration_since(v.last_input) >= settle
+        })
         .map(|(k, _)| k.clone())
         .collect();
 
@@ -971,6 +992,10 @@ impl PropertyInspector {
                                                     block_id: block.id.clone(),
                                                     property_name: exposed_prop.name.clone(),
                                                     value,
+                                                    settle: matches!(
+                                                        exposed_prop.property_type,
+                                                        strom_types::block::PropertyType::String
+                                                    ),
                                                 },
                                             );
                                         }
@@ -1967,6 +1992,10 @@ impl PropertyInspector {
                             block_id: block.id.clone(),
                             property_name: exposed_prop.name.clone(),
                             value,
+                            settle: matches!(
+                                exposed_prop.property_type,
+                                strom_types::block::PropertyType::String
+                            ),
                         });
                     }
                 }
@@ -2035,6 +2064,7 @@ impl PropertyInspector {
                 block_id: block.id.clone(),
                 property_name: prop.name.clone(),
                 value,
+                settle: matches!(prop.property_type, strom_types::block::PropertyType::String),
             });
         }
 
@@ -3041,5 +3071,56 @@ impl PropertyInspector {
                 (PropertyValue::Bool(b), _) => ui.checkbox(b, "").changed(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    fn update(value: &str, settle: bool) -> LivePropertyUpdate {
+        LivePropertyUpdate {
+            flow_id: FlowId::nil(),
+            block_id: "html1".to_string(),
+            property_name: "url".to_string(),
+            value: PropertyValue::String(value.to_string()),
+            settle,
+        }
+    }
+
+    #[test]
+    fn typed_text_goes_out_once_the_typing_stops() {
+        let mut map = HashMap::new();
+        // Every keystroke of an address, one frame each.
+        for prefix in ["h", "ht", "htt", "http", "https://example.com"] {
+            assert!(
+                drain_live_updates(&mut map, vec![update(prefix, true)]).is_empty(),
+                "{} was sent while still being typed",
+                prefix
+            );
+        }
+        // Nothing new arrives, but the settle time has not passed yet.
+        assert!(drain_live_updates(&mut map, vec![]).is_empty());
+
+        // Once it has, only the finished value is sent.
+        let key = ("html1".to_string(), "url".to_string());
+        let past = instant::Instant::now() - Duration::from_millis(LIVE_TEXT_SETTLE_MS + 50);
+        let entry = map.get_mut(&key).unwrap();
+        entry.last_input = past;
+        entry.last_sent = past;
+        let sent = drain_live_updates(&mut map, vec![]);
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(&sent[0].value, PropertyValue::String(s) if s == "https://example.com"));
+    }
+
+    #[test]
+    fn a_slider_still_goes_out_on_the_first_change() {
+        let mut map = HashMap::new();
+        assert_eq!(
+            drain_live_updates(&mut map, vec![update("x", false)]).len(),
+            1
+        );
     }
 }
