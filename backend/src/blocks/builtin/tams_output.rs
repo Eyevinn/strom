@@ -523,6 +523,11 @@ fn build_flow_chain(
     if splitmuxsink.has_property("send-keyframe-requests") {
         splitmuxsink.set_property("send-keyframe-requests", true);
     }
+    // A sink completes READY->PAUSED only once it has prerolled a buffer, so an
+    // input that carries no data would hold the whole pipeline short of PLAYING.
+    // Locked, the sink stays in NULL until the first essence's caps probe links a
+    // parser to it and brings it in.
+    splitmuxsink.set_locked_state(true);
 
     // Codec label for the TAMS flow, derived from caps at runtime by the probes and
     // read by the uploader when it creates the flow.
@@ -662,6 +667,15 @@ fn build_flow_chain(
                     instance_id_owned
                 );
                 return gst::PadProbeReturn::Ok;
+            }
+            // Bring the sink in before the caps event reaches it. Idempotent across
+            // essences sharing one muxed sink.
+            splitmuxsink.set_locked_state(false);
+            if let Err(e) = splitmuxsink.sync_state_with_parent() {
+                error!(
+                    "TAMS Output {}: failed to sync splitmuxsink with pipeline state: {}",
+                    instance_id_owned, e
+                );
             }
             // Linked successfully — now consume the one-shot guard so subsequent
             // Caps events (renegotiation) don't re-insert a second parser.
