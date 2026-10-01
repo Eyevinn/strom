@@ -672,7 +672,7 @@ mod tests {
         let editor = editor_from(&loaded);
         // A save replaces the block's properties, so a key missing here
         // reverts to its default on the next build: direct_out pads vanish
-        // and their links fail.
+        // and the flow's next save deletes their links.
         for saved in [
             editor.collect_properties(),
             editor.collect_structural_properties(),
