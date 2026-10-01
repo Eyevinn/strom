@@ -23,13 +23,28 @@ use tracing::debug;
 /// Normalize a file path to a proper URI.
 ///
 /// Converts relative paths to absolute file:// URIs resolved against `media_path`.
-/// Passes through URIs that already have a scheme (file://, http://, https://).
+/// Passes through anything that already is a URI - `scheme://...` with any
+/// scheme GStreamer may have a source for (file, http(s) including HLS and DASH,
+/// rtsp, srt, udp, rtmp, ...).
 ///
 /// Relative paths are resolved relative to `media_path` (the configured media directory).
 /// Legacy paths starting with `./media/` have that prefix stripped before resolution.
+/// Whether `s` starts with an RFC 3986 scheme followed by `://`: a letter, then
+/// letters, digits, `+`, `-` or `.`.
+fn has_uri_scheme(s: &str) -> bool {
+    let Some((scheme, _)) = s.split_once("://") else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 pub fn normalize_uri(path: &str, media_path: &Path) -> String {
-    // If it already has a scheme, pass through
-    if path.starts_with("file://") || path.starts_with("http://") || path.starts_with("https://") {
+    // If it already has a scheme, pass through. Only file, http and https
+    // used to, so an rtsp:// or srt:// URL became a path in the media
+    // directory.
+    if has_uri_scheme(path) {
         return path.to_string();
     }
 
@@ -78,8 +93,8 @@ mod tests {
             instance_id: Uuid::new_v4(),
             source_element: gst::glib::WeakRef::new(),
             internal_pipeline: RwLock::new(None),
-            video_appsrc: None,
-            audio_appsrc: None,
+            video_appsrcs: Vec::new(),
+            audio_appsrcs: Vec::new(),
             playlist: RwLock::new(Playlist {
                 files: playlist,
                 current_index: 0,
@@ -89,8 +104,8 @@ mod tests {
             block_id: block_id.to_string(),
             flow_id,
             switching_file: AtomicBool::new(false),
-            video_linked: AtomicBool::new(false),
-            audio_linked: AtomicBool::new(false),
+            video_tracks_seen: std::sync::atomic::AtomicUsize::new(0),
+            audio_tracks_seen: std::sync::atomic::AtomicUsize::new(0),
             decode: false,
             sync: true,
             media_path: std::path::PathBuf::from("/media"),
@@ -120,6 +135,19 @@ mod tests {
                 "https://example.com/video.mp4",
                 "https://example.com/video.mp4".into(),
             ),
+            (
+                "https://example.com/live/master.m3u8?format=hls",
+                "https://example.com/live/master.m3u8?format=hls".into(),
+            ),
+            (
+                "rtsp://192.0.2.10:8554/stream",
+                "rtsp://192.0.2.10:8554/stream".into(),
+            ),
+            (
+                "srt://192.0.2.10:9000?mode=caller",
+                "srt://192.0.2.10:9000?mode=caller".into(),
+            ),
+            ("udp://239.0.0.1:5000", "udp://239.0.0.1:5000".into()),
             // Relative paths resolve against media_path, legacy prefixes stripped
             ("video.mp4", in_media.clone()),
             ("./media/video.mp4", in_media.clone()),
@@ -130,7 +158,10 @@ mod tests {
                 "file:///nonexistent-strom-abs/video.mp4".into(),
             ),
         ];
-        for (input, expected) in cases {
+        // Not a scheme: a file whose name merely contains "://" further on
+        let odd = "my video ://.mp4";
+        let odd_expected = format!("file://{}", media_path.join(odd).display());
+        for (input, expected) in cases.into_iter().chain([(odd, odd_expected)]) {
             assert_eq!(normalize_uri(input, media_path), expected, "{}", input);
         }
     }

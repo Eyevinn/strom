@@ -600,6 +600,8 @@ pub struct PlaylistEditor {
     pub current_playing_index: Option<usize>,
     /// Width in pixels of the file browser left pane (draggable)
     pub browser_width_px: f32,
+    /// A URL being typed in, to add to the playlist
+    pub url_input: String,
 }
 
 impl PlaylistEditor {
@@ -617,6 +619,7 @@ impl PlaylistEditor {
             browser_needs_refresh: true, // Load on first show
             current_playing_index: None,
             browser_width_px: 350.0,
+            url_input: String::new(),
         }
     }
 
@@ -832,6 +835,31 @@ impl PlaylistEditor {
     }
 
     fn show_playlist_panel(&mut self, ui: &mut Ui, result: &mut Option<Vec<String>>) {
+        // A stream or file by URL, next to files from the media folder: the
+        // player opens anything GStreamer has a source for.
+        ui.horizontal(|ui| {
+            let url = self.url_input.trim();
+            let valid = is_url(url);
+            let add = ui
+                .add_enabled(
+                    valid,
+                    egui::Button::new(format!("{} Add URL", egui_phosphor::regular::LINK)),
+                )
+                .on_hover_text("http(s) including HLS and DASH, rtsp, srt, udp, ...")
+                .on_disabled_hover_text("Enter a URL such as https://example.com/live.m3u8");
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut self.url_input)
+                    .hint_text("https://example.com/live.m3u8")
+                    .desired_width(f32::INFINITY),
+            );
+            let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if valid && (add.clicked() || entered) {
+                self.playlist.push(self.url_input.trim().to_string());
+                self.url_input.clear();
+                self.dirty = true;
+            }
+        });
+
         // Action buttons BEFORE scroll area so they don't overflow the cell
         ui.horizontal(|ui| {
             if ui
@@ -860,7 +888,7 @@ impl PlaylistEditor {
         ui.separator();
 
         if self.playlist.is_empty() {
-            ui.label("(empty - click files on the left or enter path above)");
+            ui.label("(empty - click files on the left or add a URL above)");
         }
 
         // Scrollable playlist (LAST so it fills the remaining cell height)
@@ -916,22 +944,33 @@ impl PlaylistEditor {
                                 to_move_up = Some(i);
                             }
 
-                            // Filename fills the remaining space with truncation
-                            let display_name = std::path::Path::new(file)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| file.clone());
+                            // Name fills the remaining space with truncation
+                            let display_name = playlist_entry_name(file);
                             let color = if is_playing {
                                 Color32::GREEN
                             } else {
                                 ui.style().visuals.text_color()
                             };
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(&display_name).color(color))
+                            // Shortened to fit; the full entry is on hover, a
+                            // click copies it, and so does the context menu.
+                            let label = ui
+                                .add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&display_name).color(color),
+                                    )
                                     .truncate()
-                                    .sense(egui::Sense::hover()),
-                            )
-                            .on_hover_text(file);
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text(format!("{}\n\nClick to copy", file));
+                            if label.clicked() {
+                                ui.ctx().copy_text(file.clone());
+                            }
+                            label.context_menu(|ui| {
+                                if ui.button("Copy").clicked() {
+                                    ui.ctx().copy_text(file.clone());
+                                    ui.close();
+                                }
+                            });
                         });
                     });
                 }
@@ -953,6 +992,37 @@ impl PlaylistEditor {
     }
 }
 
+/// Whether `s` is a URL with a scheme (`scheme://...`), as opposed to a path in
+/// the media folder.
+fn is_url(s: &str) -> bool {
+    let Some((scheme, rest)) = s.split_once("://") else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    !rest.is_empty()
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// What a playlist entry is called in the list: a file's name, or for a URL its
+/// host and last path segment, without the query.
+fn playlist_entry_name(entry: &str) -> String {
+    if is_url(entry) && !entry.starts_with("file://") {
+        let rest = entry.split_once("://").map(|(_, r)| r).unwrap_or(entry);
+        let without_query = rest.split(['?', '#']).next().unwrap_or(rest);
+        let mut parts = without_query.split('/').filter(|p| !p.is_empty());
+        let host = parts.next().unwrap_or("");
+        return match parts.next_back() {
+            Some(last) => format!("{} \u{2026} {}", host, last),
+            None => host.to_string(),
+        };
+    }
+    std::path::Path::new(entry)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| entry.to_string())
+}
+
 /// Format file size for display.
 fn format_file_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -967,5 +1037,47 @@ fn format_file_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_url_is_told_from_a_media_folder_path() {
+        for url in [
+            "https://example.com/live/master.m3u8?format=hls",
+            "rtsp://192.0.2.10:8554/stream",
+            "srt://192.0.2.10:9000?mode=caller",
+            "udp://239.0.0.1:5000",
+            "file:///media/clip.mp4",
+        ] {
+            assert!(is_url(url), "{}", url);
+        }
+        for path in [
+            "clip.mp4",
+            "folder/clip.mp4",
+            "/abs/clip.mp4",
+            "https://",
+            "://x",
+            "1http://x",
+        ] {
+            assert!(!is_url(path), "{}", path);
+        }
+    }
+
+    #[test]
+    fn a_url_is_listed_by_host_and_last_segment() {
+        assert_eq!(
+            playlist_entry_name("https://cdn.example.com/l4/se/svt1/master.m3u8?format=hls"),
+            "cdn.example.com \u{2026} master.m3u8"
+        );
+        assert_eq!(
+            playlist_entry_name("rtsp://192.0.2.10:8554"),
+            "192.0.2.10:8554"
+        );
+        assert_eq!(playlist_entry_name("folder/clip.mp4"), "clip.mp4");
+        assert_eq!(playlist_entry_name("file:///media/clip.mp4"), "clip.mp4");
     }
 }

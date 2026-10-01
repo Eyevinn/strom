@@ -65,63 +65,8 @@ pub fn create_decode_pipeline(
         };
 
         let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
-        let caps_name = caps
-            .as_ref()
-            .and_then(|c| c.structure(0))
-            .map(|s| s.name().to_string());
-
-        let is_video = caps_name
-            .as_ref()
-            .map(|n| n.starts_with("video/"))
-            .unwrap_or(false);
-        let is_audio = caps_name
-            .as_ref()
-            .map(|n| n.starts_with("audio/"))
-            .unwrap_or(false);
-
-        if is_video && !state.video_linked.load(Ordering::SeqCst) {
-            if let Some(ref appsrc) = state.video_appsrc {
-                if let Err(e) = link_pad_through_clocksync(
-                    &pipeline,
-                    pad,
-                    appsrc,
-                    &state,
-                    &format!("{}_clocksync_video", instance_id_owned),
-                    &format!("{}_appsink_video", instance_id_owned),
-                    sync,
-                    "video",
-                ) {
-                    error!("Media Player: Failed to link video chain: {}", e);
-                } else {
-                    state.video_linked.store(true, Ordering::SeqCst);
-                    info!(
-                        "Media Player {}: Linked internal video chain",
-                        instance_id_owned
-                    );
-                }
-            }
-        } else if is_audio && !state.audio_linked.load(Ordering::SeqCst) {
-            if let Some(ref appsrc) = state.audio_appsrc {
-                if let Err(e) = link_pad_through_clocksync(
-                    &pipeline,
-                    pad,
-                    appsrc,
-                    &state,
-                    &format!("{}_clocksync_audio", instance_id_owned),
-                    &format!("{}_appsink_audio", instance_id_owned),
-                    sync,
-                    "audio",
-                ) {
-                    error!("Media Player: Failed to link audio chain: {}", e);
-                } else {
-                    state.audio_linked.store(true, Ordering::SeqCst);
-                    info!(
-                        "Media Player {}: Linked internal audio chain",
-                        instance_id_owned
-                    );
-                }
-            }
-        }
+        let kind = TrackKind::from_caps(caps.as_ref());
+        route_pad(&pipeline, pad, &state, &instance_id_owned, sync, kind, "");
     });
 
     // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
@@ -194,130 +139,42 @@ pub fn create_passthrough_pipeline(
                 None
             }
         });
-
-        let caps_name = caps
-            .as_ref()
-            .and_then(|c| c.structure(0))
-            .map(|s| s.name().to_string());
-
         debug!(
             "Media Player {}: Pad {} caps: {:?}",
-            instance_id_owned, pad_name, caps_name
+            instance_id_owned,
+            pad_name,
+            caps.as_ref()
+                .and_then(|c| c.structure(0))
+                .map(|s| s.name().to_string())
         );
 
-        let is_video = caps_name
-            .as_ref()
-            .map(|n| n.starts_with("video/"))
-            .unwrap_or(false);
-        let is_audio = caps_name
-            .as_ref()
-            .map(|n| n.starts_with("audio/"))
-            .unwrap_or(false);
-
-        if is_video && !state.video_linked.load(Ordering::SeqCst) {
-            if let Some(ref appsrc) = state.video_appsrc {
-                if let Err(e) = link_pad_through_clocksync(
-                    &pipeline,
-                    pad,
-                    appsrc,
-                    &state,
-                    &format!("{}_clocksync_video", instance_id_owned),
-                    &format!("{}_appsink_video", instance_id_owned),
-                    sync,
-                    "video",
-                ) {
-                    error!("Media Player: Failed to link video chain: {}", e);
-                } else {
-                    state.video_linked.store(true, Ordering::SeqCst);
-                    info!(
-                        "Media Player {}: Linked internal video chain (passthrough)",
-                        instance_id_owned
-                    );
-                }
-            }
-        } else if is_audio && !state.audio_linked.load(Ordering::SeqCst) {
-            if let Some(ref appsrc) = state.audio_appsrc {
-                if let Err(e) = link_pad_through_clocksync(
-                    &pipeline,
-                    pad,
-                    appsrc,
-                    &state,
-                    &format!("{}_clocksync_audio", instance_id_owned),
-                    &format!("{}_appsink_audio", instance_id_owned),
-                    sync,
-                    "audio",
-                ) {
-                    error!("Media Player: Failed to link audio chain: {}", e);
-                } else {
-                    state.audio_linked.store(true, Ordering::SeqCst);
-                    info!(
-                        "Media Player {}: Linked internal audio chain (passthrough)",
-                        instance_id_owned
-                    );
-                }
-            }
-        } else if !is_video && !is_audio {
-            // Heuristic: try video first, then audio
-            debug!(
-                "Media Player {}: Pad {} media type unknown, trying heuristic linking",
-                instance_id_owned, pad_name
-            );
-
-            if !state.video_linked.load(Ordering::SeqCst) {
-                if let Some(ref appsrc) = state.video_appsrc {
-                    if link_pad_through_clocksync(
-                        &pipeline,
-                        pad,
-                        appsrc,
-                        &state,
-                        &format!("{}_clocksync_video", instance_id_owned),
-                        &format!("{}_appsink_video", instance_id_owned),
-                        sync,
-                        "video",
-                    )
-                    .is_ok()
-                    {
-                        state.video_linked.store(true, Ordering::SeqCst);
+        match caps.as_ref().map(|c| TrackKind::from_caps(Some(c))) {
+            Some(kind) => route_pad(
+                &pipeline,
+                pad,
+                &state,
+                &instance_id_owned,
+                sync,
+                kind,
+                " (passthrough)",
+            ),
+            // No caps yet: a stream whose type is not known until data flows.
+            // Offer it to a free video slot, then a free audio slot, the way
+            // the block always has; with neither free, discard it.
+            None => {
+                for kind in [TrackKind::Video, TrackKind::Audio] {
+                    if try_slot(&pipeline, pad, &state, &instance_id_owned, sync, kind) {
                         info!(
-                            "Media Player {}: Linked unknown pad {} to video (heuristic)",
-                            instance_id_owned, pad_name
+                            "Media Player {}: Linked untyped pad {} to {} (heuristic)",
+                            instance_id_owned,
+                            pad_name,
+                            kind.name()
                         );
                         return;
                     }
                 }
+                discard_pad(&pipeline, pad, &instance_id_owned, "its type is not known");
             }
-
-            if !state.audio_linked.load(Ordering::SeqCst) {
-                if let Some(ref appsrc) = state.audio_appsrc {
-                    if link_pad_through_clocksync(
-                        &pipeline,
-                        pad,
-                        appsrc,
-                        &state,
-                        &format!("{}_clocksync_audio", instance_id_owned),
-                        &format!("{}_appsink_audio", instance_id_owned),
-                        sync,
-                        "audio",
-                    )
-                    .is_ok()
-                    {
-                        state.audio_linked.store(true, Ordering::SeqCst);
-                        info!(
-                            "Media Player {}: Linked unknown pad {} to audio (heuristic)",
-                            instance_id_owned, pad_name
-                        );
-                        return;
-                    }
-                }
-            }
-
-            debug!(
-                "Media Player {}: Could not link pad {} (video_linked={}, audio_linked={})",
-                instance_id_owned,
-                pad_name,
-                state.video_linked.load(Ordering::SeqCst),
-                state.audio_linked.load(Ordering::SeqCst)
-            );
         }
     });
 
@@ -326,6 +183,159 @@ pub fn create_passthrough_pipeline(
     rtp_hdrext::install(&pipeline);
 
     Ok(pipeline)
+}
+
+/// Which output a stream from the source element can go to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrackKind {
+    Video,
+    Audio,
+    /// Subtitles, metadata and anything else this block has no output for.
+    Other,
+}
+
+impl TrackKind {
+    fn from_caps(caps: Option<&gst::Caps>) -> Self {
+        match caps.and_then(|c| c.structure(0)).map(|s| s.name()) {
+            Some(n) if n.starts_with("video/") => TrackKind::Video,
+            Some(n) if n.starts_with("audio/") => TrackKind::Audio,
+            _ => TrackKind::Other,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            TrackKind::Video => "video",
+            TrackKind::Audio => "audio",
+            TrackKind::Other => "other",
+        }
+    }
+}
+
+/// Send a new stream to the next free output of its kind, or discard it.
+///
+/// A file can carry more tracks than the block has outputs for - a second
+/// audio language, subtitles - and a stream pad left unlinked stops the whole
+/// source with `not-linked`, so every pad is either bridged or discarded.
+fn route_pad(
+    pipeline: &gst::Pipeline,
+    pad: &gst::Pad,
+    state: &Arc<MediaPlayerState>,
+    instance_id: &str,
+    sync: bool,
+    kind: TrackKind,
+    mode: &str,
+) {
+    if kind == TrackKind::Other {
+        discard_pad(pipeline, pad, instance_id, "it is not audio or video");
+        return;
+    }
+    if !try_slot(pipeline, pad, state, instance_id, sync, kind) {
+        let reason = format!(
+            "every {} output is taken; raise num_{}_tracks to keep it",
+            kind.name(),
+            kind.name()
+        );
+        discard_pad(pipeline, pad, instance_id, &reason);
+        return;
+    }
+    debug!(
+        "Media Player {}: Linked internal {} chain{}",
+        instance_id,
+        kind.name(),
+        mode
+    );
+}
+
+/// Claim the next free slot of `kind` and bridge `pad` to it. Returns false,
+/// with the slot given back, when there is no free slot or the link fails.
+fn try_slot(
+    pipeline: &gst::Pipeline,
+    pad: &gst::Pad,
+    state: &Arc<MediaPlayerState>,
+    instance_id: &str,
+    sync: bool,
+    kind: TrackKind,
+) -> bool {
+    let (seen, appsrcs) = match kind {
+        TrackKind::Video => (&state.video_tracks_seen, &state.video_appsrcs),
+        TrackKind::Audio => (&state.audio_tracks_seen, &state.audio_appsrcs),
+        TrackKind::Other => return false,
+    };
+    // pad-added can fire from several streaming threads at once, so the slot
+    // is claimed atomically.
+    let slot = seen.fetch_add(1, Ordering::SeqCst);
+    let Some(appsrc) = appsrcs.get(slot) else {
+        seen.fetch_sub(1, Ordering::SeqCst);
+        return false;
+    };
+    let sfx = super::builder::slot_suffix(slot);
+    match link_pad_through_clocksync(
+        pipeline,
+        pad,
+        appsrc,
+        state,
+        &format!("{}_clocksync_{}{}", instance_id, kind.name(), sfx),
+        &format!("{}_appsink_{}{}", instance_id, kind.name(), sfx),
+        sync,
+        kind.name(),
+    ) {
+        Ok(()) => {
+            info!(
+                "Media Player {}: {} track {} -> {}_out{}",
+                instance_id,
+                kind.name(),
+                slot,
+                kind.name(),
+                sfx
+            );
+            true
+        }
+        Err(e) => {
+            error!(
+                "Media Player {}: Failed to link {} chain: {}",
+                instance_id,
+                kind.name(),
+                e
+            );
+            // Give the slot back only if nothing claimed a later one meanwhile.
+            let _ = seen.compare_exchange(slot + 1, slot, Ordering::SeqCst, Ordering::SeqCst);
+            false
+        }
+    }
+}
+
+/// Link a stream nobody will use to a fakesink, so it does not stop the source.
+fn discard_pad(pipeline: &gst::Pipeline, pad: &gst::Pad, instance_id: &str, reason: &str) {
+    let sink = match gst::ElementFactory::make("fakesink")
+        .name(format!("{}_discard_{}", instance_id, pad.name()))
+        .property("sync", false)
+        .property("async", false)
+        .build()
+    {
+        Ok(sink) => sink,
+        Err(e) => {
+            error!("Media Player {}: fakesink: {}", instance_id, e);
+            return;
+        }
+    };
+    if pipeline.add(&sink).is_err() {
+        return;
+    }
+    let _ = sink.sync_state_with_parent();
+    match sink.static_pad("sink").map(|sp| pad.link(&sp)) {
+        Some(Ok(_)) => info!(
+            "Media Player {}: Discarding track {}: {}",
+            instance_id,
+            pad.name(),
+            reason
+        ),
+        _ => warn!(
+            "Media Player {}: Could not discard track {}",
+            instance_id,
+            pad.name()
+        ),
+    }
 }
 
 /// Link a dynamic pad through clocksync → appsink, with appsink bridging to the given appsrc.
@@ -616,7 +626,7 @@ pub fn watch_internal_bus(
 mod tests {
     use super::super::state::Playlist;
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicI64};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
     use std::sync::{Mutex, RwLock};
 
     /// The bare minimum for the two pipeline constructors: they read `sync` and
@@ -626,8 +636,8 @@ mod tests {
             instance_id: uuid::Uuid::new_v4(),
             source_element: gst::glib::WeakRef::new(),
             internal_pipeline: RwLock::new(None),
-            video_appsrc: None,
-            audio_appsrc: None,
+            video_appsrcs: Vec::new(),
+            audio_appsrcs: Vec::new(),
             playlist: RwLock::new(Playlist {
                 files: Vec::new(),
                 current_index: 0,
@@ -637,8 +647,8 @@ mod tests {
             block_id: "test".to_string(),
             flow_id: uuid::Uuid::new_v4(),
             switching_file: AtomicBool::new(false),
-            video_linked: AtomicBool::new(false),
-            audio_linked: AtomicBool::new(false),
+            video_tracks_seen: AtomicUsize::new(0),
+            audio_tracks_seen: AtomicUsize::new(0),
             decode: true,
             sync: true,
             media_path: std::env::temp_dir(),
@@ -675,6 +685,143 @@ mod tests {
              has RTP header extension aggregation enabled — an interrupted H264 \
              fragmentation unit from an rtsp:// source will abort the whole process \
              (gstreamer#5057)"
+        );
+    }
+
+    /// A Matroska file with one video track and two audio tracks, all raw so no
+    /// decoder is needed. matroska and the test sources are in
+    /// gstreamer1.0-plugins-good/-base, installed in CI.
+    fn write_two_audio_track_file(dir: &std::path::Path) -> String {
+        let path = dir.join("two-audio.mkv");
+        let pipeline = gst::parse::launch(&format!(
+            "matroskamux name=mux ! filesink location={} \
+             videotestsrc num-buffers=15 ! video/x-raw,format=I420,width=64,height=48,framerate=15/1 ! mux. \
+             audiotestsrc num-buffers=10 ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux. \
+             audiotestsrc num-buffers=10 wave=silence ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux.",
+            path.display()
+        ))
+        .expect("matroskamux, videotestsrc and audiotestsrc are installed in CI");
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let bus = pipeline.bus().unwrap();
+        let msg = bus
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(20),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("writing the test file finishes");
+        assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{:?}", msg);
+        pipeline.set_state(gst::State::Null).unwrap();
+        format!("file://{}", path.display())
+    }
+
+    /// A state with `video` and `audio` slots, backed by appsrcs that are in no
+    /// pipeline: pushes to them fail, which the bridge treats as "not ready
+    /// yet", so the internal pipeline runs to its end on its own.
+    fn state_with_slots(video: usize, audio: usize) -> Arc<MediaPlayerState> {
+        let appsrcs = |n: usize| (0..n).map(|_| gst_app::AppSrc::builder().build()).collect();
+        let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
+        state.video_appsrcs = appsrcs(video);
+        state.audio_appsrcs = appsrcs(audio);
+        state.sync = false;
+        Arc::new(state)
+    }
+
+    /// Play `uri` through a Media Player internal pipeline and return the
+    /// message it ends with: EOS when every track found a home, an error when
+    /// one was left unlinked.
+    fn play_to_end(pipeline: &gst::Pipeline) -> gst::Message {
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let msg = pipeline
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(20),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("the internal pipeline reaches EOS or an error");
+        pipeline.set_state(gst::State::Null).unwrap();
+        msg
+    }
+
+    /// The element a routed pad ended up linked to.
+    fn peer_factory(pad: &gst::Pad) -> Option<String> {
+        pad.peer()
+            .and_then(|peer| peer.parent_element())
+            .and_then(|el| el.factory())
+            .map(|f| f.name().to_string())
+    }
+
+    /// A stream with nowhere to go - a second audio rendition, subtitles - used
+    /// to be left unlinked. On SVT's live HLS that stopped the whole source
+    /// with `not-linked` within a few frames. Every pad has to end up linked:
+    /// to the bridge when there is a free output, to a fakesink otherwise.
+    #[test]
+    fn a_track_with_no_free_output_is_linked_to_a_fakesink() {
+        let _ = gst::init();
+        for (kind, caps) in [
+            (TrackKind::Audio, "audio/x-raw"),
+            (TrackKind::Video, "video/x-raw"),
+            (TrackKind::Other, "text/x-raw"),
+        ] {
+            let pipeline = gst::Pipeline::new();
+            let src = gst::ElementFactory::make("identity").build().unwrap();
+            pipeline.add(&src).unwrap();
+            let pad = src.static_pad("src").unwrap();
+            // No output slots at all: every track is one too many.
+            let state = state_with_slots(0, 0);
+
+            route_pad(&pipeline, &pad, &state, "test", false, kind, "");
+
+            assert!(pad.is_linked(), "a {} track was left unlinked", caps);
+            assert_eq!(peer_factory(&pad).as_deref(), Some("fakesink"), "{}", caps);
+        }
+    }
+
+    #[test]
+    fn a_track_with_a_free_output_is_bridged_and_the_next_one_discarded() {
+        let _ = gst::init();
+        let pipeline = gst::Pipeline::new();
+        let state = state_with_slots(0, 1);
+        let mut pads = Vec::new();
+        for _ in 0..2 {
+            let src = gst::ElementFactory::make("identity").build().unwrap();
+            pipeline.add(&src).unwrap();
+            let pad = src.static_pad("src").unwrap();
+            route_pad(&pipeline, &pad, &state, "test", false, TrackKind::Audio, "");
+            pads.push(pad);
+        }
+        assert_eq!(peer_factory(&pads[0]).as_deref(), Some("clocksync"));
+        assert_eq!(peer_factory(&pads[1]).as_deref(), Some("fakesink"));
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// End to end on a real file: two audio tracks with two outputs give each
+    /// its own bridge, and playback runs to the end.
+    #[test]
+    fn each_audio_track_gets_its_own_output_when_there_are_enough() {
+        let _ = gst::init();
+        let dir = tempfile::tempdir().unwrap();
+        let uri = write_two_audio_track_file(dir.path());
+
+        let state = state_with_slots(1, 2);
+        let pipeline = create_decode_pipeline("test", &state, Some(&uri)).unwrap();
+        let msg = play_to_end(&pipeline);
+        assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{:?}", msg);
+        assert_eq!(state.audio_tracks_seen.load(Ordering::SeqCst), 2);
+        for name in [
+            "test_appsink_audio",
+            "test_appsink_audio_1",
+            "test_appsink_video",
+        ] {
+            assert!(
+                pipeline.by_name(name).is_some(),
+                "{} was not created: each track needs its own bridge",
+                name
+            );
+        }
+        assert!(
+            pipeline.by_name("test_appsink_audio_2").is_none(),
+            "there is no third audio track"
         );
     }
 

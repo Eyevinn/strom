@@ -5,7 +5,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use strom_types::FlowId;
 use tracing::{debug, error, info};
@@ -36,10 +36,12 @@ pub struct MediaPlayerState {
     pub source_element: gst::glib::WeakRef<gst::Element>,
     /// The isolated internal pipeline (owned by this block)
     pub internal_pipeline: RwLock<Option<gst::Pipeline>>,
-    /// Video appsrc in the main pipeline (bridge target)
-    pub video_appsrc: Option<gst_app::AppSrc>,
-    /// Audio appsrc in the main pipeline (bridge target)
-    pub audio_appsrc: Option<gst_app::AppSrc>,
+    /// Video appsrcs in the main pipeline, one per video track slot (bridge targets).
+    /// Slot 0 feeds `video_out`.
+    pub video_appsrcs: Vec<gst_app::AppSrc>,
+    /// Audio appsrcs in the main pipeline, one per audio track slot (bridge targets).
+    /// Slot 0 feeds `audio_out`.
+    pub audio_appsrcs: Vec<gst_app::AppSrc>,
     /// Playlist and current index (single lock for atomicity)
     pub playlist: RwLock<Playlist>,
     /// Whether playback is paused
@@ -52,10 +54,12 @@ pub struct MediaPlayerState {
     pub flow_id: FlowId,
     /// True while load_current_file() is in progress — bus watch should ignore EOS.
     pub switching_file: AtomicBool,
-    /// Whether video pad has been linked (reset on file switch)
-    pub video_linked: AtomicBool,
-    /// Whether audio pad has been linked (reset on file switch)
-    pub audio_linked: AtomicBool,
+    /// Video tracks of the current file handed a slot so far (reset on file switch).
+    /// A track past the last slot is discarded.
+    pub video_tracks_seen: AtomicUsize,
+    /// Audio tracks of the current file handed a slot so far (reset on file switch).
+    /// A track past the last slot is discarded.
+    pub audio_tracks_seen: AtomicUsize,
     /// Whether to decode streams (true) or pass through encoded (false)
     pub decode: bool,
     /// Whether clocksync pacing is enabled
@@ -234,8 +238,8 @@ impl MediaPlayerState {
 
         // Reset linked flags and timestamp offset so new pads get linked
         // and the bridge recomputes the offset from the first buffer
-        self.video_linked.store(false, Ordering::SeqCst);
-        self.audio_linked.store(false, Ordering::SeqCst);
+        self.video_tracks_seen.store(0, Ordering::SeqCst);
+        self.audio_tracks_seen.store(0, Ordering::SeqCst);
         self.ts_offset.store(i64::MIN, Ordering::SeqCst);
 
         // Set the new URI on source element
