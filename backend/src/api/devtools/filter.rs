@@ -44,6 +44,12 @@ pub const SWITCH_PAGE: &str = "Strom.switchPage";
 /// was minted for cannot be closed this way.
 pub const CLOSE_PAGE: &str = "Strom.closePage";
 
+/// Not a Chromium method: load one of the session's popups' address into the
+/// session's own page, and close the popup. A login that finishes in a popup
+/// leaves the popup logged in and the page on air where it was; the profile is
+/// shared, so taking the popup's address is all the page needs.
+pub const ADOPT_PAGE: &str = "Strom.adoptPage";
+
 /// Not a Chromium method: make an address the block's own URL, so the page the
 /// operator has reached becomes where the source starts. The proxy performs it
 /// against Strom, not Chromium.
@@ -72,12 +78,22 @@ pub enum Forward {
     /// Not for Chromium: close this target, if it is one of the session's
     /// popups.
     ClosePage { id: Option<i64>, target: String },
+    /// Not for Chromium as it stands: load this popup's address into the
+    /// session's own page, and close the popup. The address is the proxy's
+    /// to look up, never the client's to supply.
+    AdoptPage { id: Option<i64>, target: String },
+}
+
+/// A navigation of the session's own page to an address the proxy has
+/// already checked.
+pub fn navigate_message(id: Option<i64>, url: &str) -> String {
+    json!({ "id": id, "method": "Page.navigate", "params": { "url": url } }).to_string()
 }
 
 /// The navigation [`GO_HOME`] stands for, once the session is back on its own
 /// page.
 pub fn go_home_message(id: Option<i64>, home_url: &str) -> String {
-    json!({ "id": id, "method": "Page.navigate", "params": { "url": home_url } }).to_string()
+    navigate_message(id, home_url)
 }
 
 /// The protocol's own shape for "no", so the client sees a refusal against the
@@ -121,7 +137,7 @@ pub fn allows(raw: &str, strict: bool) -> Result<Forward, String> {
 
     match method {
         GO_HOME => Ok(Forward::GoHome { id }),
-        SWITCH_PAGE | CLOSE_PAGE => {
+        SWITCH_PAGE | CLOSE_PAGE | ADOPT_PAGE => {
             let Some(target) = params
                 .and_then(|p| p.get("targetId"))
                 .and_then(Value::as_str)
@@ -129,10 +145,10 @@ pub fn allows(raw: &str, strict: bool) -> Result<Forward, String> {
                 return Err(refusal(id, &format!("{} needs a targetId", method)));
             };
             let target = target.to_string();
-            Ok(if method == SWITCH_PAGE {
-                Forward::SwitchPage { id, target }
-            } else {
-                Forward::ClosePage { id, target }
+            Ok(match method {
+                SWITCH_PAGE => Forward::SwitchPage { id, target },
+                CLOSE_PAGE => Forward::ClosePage { id, target },
+                _ => Forward::AdoptPage { id, target },
             })
         }
         // Page.reload also takes scriptToEvaluateOnLoad, which is arbitrary
@@ -313,6 +329,26 @@ mod tests {
             })
         );
         let bare = json!({ "id": 5, "method": SWITCH_PAGE, "params": {} });
+        assert!(allows(&bare.to_string(), true).is_err());
+    }
+
+    #[test]
+    fn adopting_a_popup_names_the_popup_and_never_an_address() {
+        let adopt = json!({
+            "id": 6,
+            "method": ADOPT_PAGE,
+            "params": { "targetId": "ABCD", "url": "http://127.0.0.1:9222/json/list" }
+        });
+        // The address is looked up by the proxy; whatever the client puts
+        // next to the target is not carried.
+        assert_eq!(
+            allows(&adopt.to_string(), true),
+            Ok(Forward::AdoptPage {
+                id: Some(6),
+                target: "ABCD".to_string()
+            })
+        );
+        let bare = json!({ "id": 7, "method": ADOPT_PAGE, "params": {} });
         assert!(allows(&bare.to_string(), true).is_err());
     }
 

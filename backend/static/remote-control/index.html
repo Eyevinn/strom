@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Strom remote control page, version 4 -->
+<!-- Strom remote control page, version 5 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -294,6 +294,19 @@
       tab.appendChild(text);
       tab.addEventListener("click", () => send("Strom.switchPage", { targetId: page.id }));
       if (page.popup) {
+        // A login that finishes in a popup leaves the popup logged in and
+        // the page on air where it was. This loads the popup's page into the
+        // source instead, and closes the popup.
+        const adopt = document.createElement("button");
+        adopt.textContent = "\u2913";
+        adopt.title = "Show this page in the source, and close the popup";
+        adopt.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          send("Strom.adoptPage", { targetId: page.id }, () => {
+            setState("live", "Popup's page loaded into the source");
+          });
+        });
+        tab.appendChild(adopt);
         const close = document.createElement("button");
         close.textContent = "\u00d7";
         close.title = "Close this popup";

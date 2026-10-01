@@ -190,6 +190,7 @@ pub(super) async fn pump(
                         | Ok(filter::Forward::GoHome { .. })
                         | Ok(filter::Forward::SwitchPage { .. })
                         | Ok(filter::Forward::ClosePage { .. })
+                        | Ok(filter::Forward::AdoptPage { .. })
                 );
                 let reply = match forward {
                     Ok(filter::Forward::Rewritten { text, .. }) => {
@@ -238,6 +239,51 @@ pub(super) async fn pump(
                                 id,
                                 "Only a popup this session's page opened can be closed",
                             )),
+                        }
+                    }
+                    Ok(filter::Forward::AdoptPage { id, target }) => {
+                        // The address is Chromium's report of the popup, and
+                        // goes through the same check as any other the page
+                        // may be sent to.
+                        let checked = match (&closer, family.popup_url(&target)) {
+                            (Some(_), Some(url)) => {
+                                crate::blocks::builtin::html_input::checked_destination(
+                                    url,
+                                    source.strict,
+                                )
+                            }
+                            _ => Err("Only a popup this session's page opened can be shown in \
+                                      it"
+                            .to_string()),
+                        };
+                        match checked {
+                            Err(reason) => Some(filter::refusal(id, &reason)),
+                            Ok(url) => {
+                                if current != root {
+                                    match open_page(port, &root).await {
+                                        Some(page) => {
+                                            upstream = page;
+                                            current = root.clone();
+                                            if !tell(&mut client_tx, switched(&current)).await {
+                                                break;
+                                            }
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                info!(
+                                    "Remote control loaded a popup's page into block {} in flow {}",
+                                    source.block_id, source.flow_id
+                                );
+                                let navigate = filter::navigate_message(id, &url);
+                                if upstream.send(WsMessage::Text(navigate.into())).await.is_err() {
+                                    break;
+                                }
+                                if let Some(closer) = &closer {
+                                    closer.close(&target);
+                                }
+                                None
+                            }
                         }
                     }
                     Err(refusal) => {

@@ -130,6 +130,16 @@ impl PageFamily {
         false
     }
 
+    /// The address a popup of this session is showing, for loading it into the
+    /// session's own page. `None` for the session's own page, for anything not
+    /// opened from it, and for a target Chromium has not described yet.
+    pub fn popup_url(&self, id: &str) -> Option<&str> {
+        if id == self.root || !self.contains(id) {
+            return None;
+        }
+        self.get(id).map(|t| t.url.as_str())
+    }
+
     /// The pages this session may show: its own first, then its popups in the
     /// order they were opened.
     pub fn pages(&self) -> Vec<&TargetInfo> {
@@ -371,6 +381,22 @@ mod tests {
         }));
         assert!(!f.contains("WORKER"));
         assert_eq!(f.pages().len(), 1);
+    }
+
+    #[test]
+    fn only_our_own_popups_can_be_adopted() {
+        let mut family = family();
+        family.apply(page("POPUP", Some("MAIN")));
+        family.apply(page("THEIRS", Some("OTHER")));
+        assert_eq!(family.popup_url("POPUP"), Some("https://popup.example/"));
+        assert_eq!(
+            family.popup_url("MAIN"),
+            None,
+            "the page is not its own popup"
+        );
+        assert_eq!(family.popup_url("OTHER"), None, "another source's page");
+        assert_eq!(family.popup_url("THEIRS"), None, "another source's popup");
+        assert_eq!(family.popup_url("GONE"), None);
     }
 
     #[test]
