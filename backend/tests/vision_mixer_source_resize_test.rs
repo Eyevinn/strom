@@ -15,6 +15,12 @@ use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue as PV};
 use tempfile::NamedTempFile;
 
+/// A take index for `trigger_transition`, which takes `usize` on main and
+/// `Option<usize>` once #806 lands. Either signature accepts this.
+fn idx<T: From<usize>>(i: usize) -> T {
+    T::from(i)
+}
+
 /// Same probe as `vision_mixer_fx_test`: a trivial GL run must reach EOS.
 /// Having the GL plugins installed is not enough on headless runners.
 fn gl_environment_available() -> bool {
@@ -447,7 +453,7 @@ async fn source_resized_during_a_fade_is_fitted_after_it() {
     let start = running.position(block_id);
     running
         .manager
-        .trigger_transition(block_id, 0, 1, "fade", 4000)
+        .trigger_transition(block_id, idx(0), idx(1), "fade", 4000)
         .expect("fade");
     running
         .manager
@@ -680,7 +686,7 @@ async fn pip_crop_follows_a_source_resized_during_ftb() {
         .expect("PiP to PVW");
     running
         .manager
-        .trigger_transition(block_id, 0, 0, "cut", 0)
+        .trigger_transition(block_id, idx(0), idx(0), "cut", 0)
         .expect("take the PiP");
     let pad = running
         .element(&format!("{block_id}:mixer"))
