@@ -2263,4 +2263,136 @@ mod track_resume {
             .expect("pipeline to NULL");
         assert!(finished, "the EOS never reached the pipeline");
     }
+
+    /// Clear DELTA_UNIT on every video buffer reaching the recorder, as tsdemux
+    /// output does: Strom's SRT input in passthrough links tsdemux straight to
+    /// its output, with no parser to mark which frames are keyframes.
+    fn strip_delta_flags(rig: &Rig) {
+        rig.video_gate.static_pad("src").unwrap().add_probe(
+            gst::PadProbeType::BUFFER,
+            |_pad, info| {
+                if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                    buffer.make_mut().unset_flags(gst::BufferFlags::DELTA_UNIT);
+                }
+                gst::PadProbeReturn::Ok
+            },
+        );
+    }
+
+    /// Video with no keyframe flags, from a remote encoder with a 10 s GOP, that
+    /// stalls and comes back is recorded again from a real keyframe, and the flow
+    /// does not fail.
+    #[test]
+    fn a_returning_track_without_keyframe_flags_is_recorded_from_a_keyframe() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start_with("rec_noflags_back", 300, true);
+        strip_delta_flags(&rig);
+        std::thread::sleep(Duration::from_secs(3));
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        rig.video_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(15));
+        let summaries = rig.stop();
+
+        let audio: Duration = summaries.iter().map(|s| s.audio.duration).sum();
+        assert!(
+            audio >= Duration::from_secs(22),
+            "audio lost across the resume: {:?} recorded: {:?}",
+            audio,
+            summaries
+        );
+        let last = summaries.last().expect("a recording");
+        assert!(
+            summaries.len() >= 2 && last.video.samples >= 150,
+            "the file after the stall should hold the video from its return: {:?}",
+            summaries
+        );
+    }
+
+    /// Video with no keyframe flags that is still being recorded when another
+    /// track comes back is cut at a real keyframe, and the flow does not fail.
+    #[test]
+    fn a_recording_track_without_keyframe_flags_is_cut_at_a_keyframe() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start_with("rec_noflags_cut", 300, true);
+        strip_delta_flags(&rig);
+        std::thread::sleep(Duration::from_secs(3));
+        rig.audio_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(19));
+        rig.audio_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(22));
+        let summaries = rig.stop();
+
+        let video: Duration = summaries.iter().map(|s| s.video.duration).sum();
+        assert!(
+            summaries.iter().all(|s| s.video.samples > 0) && video >= Duration::from_secs(42),
+            "the video should be recorded without a gap across the switch, got {:?}: {:?}",
+            video,
+            summaries
+        );
+    }
+
+    /// With a GOP short enough that nothing is ended twice, video with no
+    /// keyframe flags loses no more to a switch than video with them.
+    #[test]
+    fn a_track_without_keyframe_flags_loses_no_video_to_the_switch() {
+        if !plugins_available() {
+            return;
+        }
+        fn run(instance_id: &str, strip: bool) -> Duration {
+            let rig = Rig::start_with(instance_id, 120, true);
+            if strip {
+                strip_delta_flags(&rig);
+            }
+            std::thread::sleep(Duration::from_secs(3));
+            rig.audio_stalled.store(true, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_secs(12));
+            rig.audio_stalled.store(false, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_secs(12));
+            rig.stop().iter().map(|s| s.video.duration).sum()
+        }
+        let (with_flags, without_flags) = std::thread::scope(|scope| {
+            let with = scope.spawn(|| run("rec_flags_cut4", false));
+            let without = scope.spawn(|| run("rec_noflags_cut4", true));
+            (with.join().unwrap(), without.join().unwrap())
+        });
+        assert!(
+            without_flags + Duration::from_millis(400) >= with_flags,
+            "lost {:?} of video to the switch: {:?} recorded, {:?} with keyframe flags",
+            with_flags.saturating_sub(without_flags),
+            without_flags,
+            with_flags
+        );
+    }
+
+    /// A flow stops with NULL and no EOS, and right after dropping its pipeline
+    /// reports a leak if anything still holds it. A stop while a switch waits for
+    /// the recorded video's keyframe leaves nothing holding it.
+    #[test]
+    fn a_flow_stopped_during_the_switch_leaves_nothing_holding_its_pipeline() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start_with("rec_stop_in_switch", 300, true);
+        std::thread::sleep(Duration::from_secs(3));
+        rig.audio_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(19));
+        rig.audio_stalled.store(false, Ordering::Relaxed);
+        // The switch starts within a poll and waits for the keyframe at 30 s.
+        std::thread::sleep(Duration::from_secs(3));
+
+        let weak = rig.pipeline.downgrade();
+        rig.pipeline
+            .set_state(gst::State::Null)
+            .expect("pipeline to NULL");
+        drop(rig);
+        assert!(
+            weak.upgrade().is_none(),
+            "the pipeline was still held right after it was dropped"
+        );
+    }
 }

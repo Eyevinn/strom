@@ -294,6 +294,58 @@ fn link_track_chain(
     Ok(())
 }
 
+/// Put a video track's long-lived parser between its input and the point where
+/// the recorder parks it, replacing the one there if the codec changed.
+///
+/// Parking, the keyframe cut and the stash all decide on keyframes from the
+/// DELTA_UNIT flag, which not every source sets: tsdemux output, as SRT
+/// passthrough delivers it, marks no frame as a delta. A parser marks them, and
+/// with `config-interval=-1` puts SPS/PPS before every keyframe, so a file that
+/// starts on one can be decoded. It stays across files; the per-file chain
+/// behind the park point is what `start_next_file` replaces.
+fn link_keyframe_parser(
+    bin: &gst::Bin,
+    instance_id: &str,
+    key: &str,
+    parser_factory: &str,
+    input_src: &gst::Pad,
+    park_sink: &gst::Pad,
+) -> Result<(), String> {
+    let name = chain_element_name(instance_id, key, "keyframes");
+    if let Some(old) = bin.by_name(&name) {
+        if let Some(peer) = input_src.peer() {
+            let _ = input_src.unlink(&peer);
+        }
+        if let Some(src) = old.static_pad("src") {
+            let _ = src.unlink(park_sink);
+        }
+        let _ = old.set_state(gst::State::Null);
+        let _ = bin.remove(&old);
+    }
+    let parser = gst::ElementFactory::make(parser_factory)
+        .name(name)
+        .property("config-interval", -1i32)
+        .build()
+        .map_err(|e| format!("failed to create {}: {}", parser_factory, e))?;
+    bin.add(&parser)
+        .map_err(|e| format!("failed to add {} to bin: {}", parser_factory, e))?;
+    parser
+        .sync_state_with_parent()
+        .map_err(|e| format!("failed to sync {} state: {}", parser.name(), e))?;
+    let parser_sink = parser.static_pad("sink").ok_or("parser has no sink pad")?;
+    let parser_src = parser.static_pad("src").ok_or("parser has no src pad")?;
+    input_src
+        .link(&parser_sink)
+        .map_err(|e| format!("failed to link input to {}: {:?}", parser_factory, e))?;
+    parser_src.link(park_sink).map_err(|e| {
+        format!(
+            "failed to link {} to the park point: {:?}",
+            parser_factory, e
+        )
+    })?;
+    Ok(())
+}
+
 /// Request this track's splitmuxsink sink pad.
 ///
 /// The first video track takes the primary pad, so splitmuxsink splits on its
@@ -597,7 +649,8 @@ fn add_park_probe(src: &gst::Pad, activity: &Arc<TrackActivity>) {
 /// would park them again. The chain needs the stream's caps and segment before
 /// them. The input holds those and sends them ahead of its next buffer, which may
 /// never come, so they are pushed now: pushing one sticky event sends every one
-/// still pending, in order.
+/// still pending, in order. An input that took an EOS while parked refuses that
+/// push, so its chain gets them directly; the EOS follows the replay.
 ///
 /// Whatever arrives during the replay is added to the stash and replayed after
 /// it. `parked` is cleared under the stash lock once it is empty, so live data
@@ -607,10 +660,26 @@ fn add_park_probe(src: &gst::Pad, activity: &Arc<TrackActivity>) {
 /// Every track replays on its own thread: splitmuxsink holds one track's queue
 /// until the others reach the same point, so one replay can wait on another.
 fn replay_stash(src: &gst::Pad, activity: &TrackActivity, is_video: bool) {
-    if let Some(segment) = src.sticky_event::<gst::event::Segment>(0) {
-        let _ = src.push_event(segment);
-    }
     let peer = src.peer();
+    if let Some(segment) = src.sticky_event::<gst::event::Segment>(0) {
+        if !src.push_event(segment) && src.pad_flags().contains(gst::PadFlags::EOS) {
+            if let Some(peer) = peer.as_ref() {
+                let stream_start = src.sticky_event::<gst::event::StreamStart>(0);
+                let caps = src.sticky_event::<gst::event::Caps>(0);
+                let segment = src.sticky_event::<gst::event::Segment>(0);
+                for event in [
+                    stream_start.map(gst::Event::from),
+                    caps.map(gst::Event::from),
+                    segment.map(gst::Event::from),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    peer.send_event(event);
+                }
+            }
+        }
+    }
     let mut replayed = false;
     let mut flowing = true;
     loop {
@@ -794,12 +863,6 @@ fn start_next_file(
     next_file_index: &AtomicU32,
     stall: &mut StallCheck,
 ) {
-    let Some(bin) = splitmuxsink
-        .parent()
-        .and_then(|p| p.downcast::<gst::Bin>().ok())
-    else {
-        return;
-    };
     let file_sink_pad = splitmuxsink.downcast_ref::<gst::Bin>().and_then(|b| {
         b.iterate_sinks()
             .into_iter()
@@ -934,6 +997,17 @@ fn start_next_file(
     }
 
     // 3
+    //
+    // The pipeline is taken only now, and only while it is running. A flow
+    // that stops checks right after dropping its pipeline that nothing still
+    // holds it, so holding it across the waits above reads as a leak.
+    let Some(bin) = splitmuxsink
+        .parent()
+        .and_then(|p| p.downcast::<gst::Bin>().ok())
+        .filter(|b| b.current_state() >= gst::State::Paused)
+    else {
+        return;
+    };
     splitmuxsink.set_locked_state(true);
     if let Err(e) = splitmuxsink.set_state(gst::State::Null) {
         error!(
@@ -1038,6 +1112,7 @@ fn start_next_file(
         }
         recorded.push(index);
     }
+    drop(bin);
 
     // 4
     splitmuxsink.set_property("async-handling", true);
@@ -1664,7 +1739,12 @@ impl BlockBuilder for RecorderBuilder {
         // Pad name per track, filled in by that hook. Empty means unconnected, no pad.
         let mut video_pad_cells: Vec<Arc<OnceLock<String>>> = Vec::new();
         let mut audio_pad_cells: Vec<Arc<OnceLock<String>>> = Vec::new();
-        let mut video_input_weaks: Vec<gst::glib::WeakRef<gst::Element>> = Vec::new();
+        // Per video track: the input its link arrives on, and the park point the
+        // stall watchdog works on. An audio track's input is both.
+        let mut video_input_weaks: Vec<(
+            gst::glib::WeakRef<gst::Element>,
+            gst::glib::WeakRef<gst::Element>,
+        )> = Vec::new();
         let mut audio_input_weaks: Vec<gst::glib::WeakRef<gst::Element>> = Vec::new();
 
         // Track liveness, for the stall watchdog the setup hook starts.
@@ -1686,13 +1766,24 @@ impl BlockBuilder for RecorderBuilder {
                     BlockBuildError::ElementCreation(format!("video identity {}: {}", vi, e))
                 })?;
 
+            // Where the recorder parks and cuts this track, behind its keyframe
+            // parser (see `link_keyframe_parser`).
+            let video_park_id = format!("{}:video_park_{}", instance_id, vi);
+            let video_park = gst::ElementFactory::make("identity")
+                .name(&video_park_id)
+                .build()
+                .map_err(|e| {
+                    BlockBuildError::ElementCreation(format!("video identity {}: {}", vi, e))
+                })?;
+            let park_weak = video_park.downgrade();
+
             let parser_inserted = Arc::new(AtomicBool::new(false));
             let splitmuxsink_weak = splitmuxsink.downgrade();
             let instance_id_clone = instance_id.to_string();
 
             let pad_name_cell: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
             video_pad_cells.push(Arc::clone(&pad_name_cell));
-            video_input_weaks.push(video_input.downgrade());
+            video_input_weaks.push((video_input.downgrade(), video_park.downgrade()));
 
             // Use a pad probe on the identity src pad to detect caps and insert parser
             let src_pad = video_input.static_pad("src").ok_or_else(|| {
@@ -1719,10 +1810,6 @@ impl BlockBuilder for RecorderBuilder {
                         return gst::PadProbeReturn::Ok;
                     }
 
-                    if parser_inserted.swap(true, Ordering::SeqCst) {
-                        return gst::PadProbeReturn::Ok;
-                    }
-
                     let caps = match event.view() {
                         gst::EventView::Caps(c) => c.caps().to_owned(),
                         _ => return gst::PadProbeReturn::Ok,
@@ -1735,6 +1822,48 @@ impl BlockBuilder for RecorderBuilder {
                             return gst::PadProbeReturn::Ok;
                         }
                     };
+
+                    let Some(park) = park_weak.upgrade() else {
+                        return gst::PadProbeReturn::Ok;
+                    };
+                    let Some(park_sink) = park.static_pad("sink") else {
+                        return gst::PadProbeReturn::Ok;
+                    };
+
+                    if parser_inserted.swap(true, Ordering::SeqCst) {
+                        // Later caps: the keyframe parser follows a change of codec,
+                        // e.g. a WHIP seat that rejoins with another one.
+                        let current = pad
+                            .peer()
+                            .and_then(|p| p.parent_element())
+                            .and_then(|e| e.factory())
+                            .map(|f| f.name().to_string());
+                        let wanted = parser_for(true, structure);
+                        if wanted.is_some_and(|w| current.as_deref() == Some(w)) {
+                            return gst::PadProbeReturn::Ok;
+                        }
+                        let Some(input) = pad.parent_element() else {
+                            return gst::PadProbeReturn::Ok;
+                        };
+                        let Some(parser_factory) = wanted else {
+                            refuse_input(&input, &refusal_for(true, structure.name()));
+                            return gst::PadProbeReturn::Ok;
+                        };
+                        let Some(bin) = input.parent().and_then(|p| p.downcast::<gst::Bin>().ok()) else {
+                            return gst::PadProbeReturn::Ok;
+                        };
+                        if let Err(e) = link_keyframe_parser(
+                            &bin,
+                            &instance_id_clone,
+                            &format!("video_{}", vi),
+                            parser_factory,
+                            pad,
+                            &park_sink,
+                        ) {
+                            error!("Recorder {}: video track {}: {}", instance_id_clone, vi, e);
+                        }
+                        return gst::PadProbeReturn::Ok;
+                    }
 
                     let caps_name = structure.name().to_string();
                     debug!("Recorder {}: video caps detected: {}", instance_id_clone, caps_name);
@@ -1785,26 +1914,41 @@ impl BlockBuilder for RecorderBuilder {
                         }
                     };
 
-                    if let Err(e) = link_track_chain(
+                    let Some(park_src) = park.static_pad("src") else {
+                        give_pad_back();
+                        return gst::PadProbeReturn::Ok;
+                    };
+                    if let Err(e) = link_keyframe_parser(
                         &bin,
                         &instance_id_clone,
                         &format!("video_{}", vi),
                         parser_factory,
                         pad,
-                        &sink_pad,
-                        || activate_recording_sink(&splitmuxsink, &instance_id_clone),
-                    ) {
+                        &park_sink,
+                    )
+                    .and_then(|()| {
+                        link_track_chain(
+                            &bin,
+                            &instance_id_clone,
+                            &format!("video_{}", vi),
+                            parser_factory,
+                            &park_src,
+                            &sink_pad,
+                            || activate_recording_sink(&splitmuxsink, &instance_id_clone),
+                        )
+                    }) {
                         error!("Recorder {}: video track {}: {}", instance_id_clone, vi, e);
                         give_pad_back();
                         return gst::PadProbeReturn::Ok;
                     }
 
-                    info!("Recorder {}: video chain linked: identity -> {} -> queue -> splitmuxsink", instance_id_clone, parser_factory);
+                    info!("Recorder {}: video chain linked: identity -> {} -> identity -> {} -> queue -> splitmuxsink", instance_id_clone, parser_factory, parser_factory);
                     gst::PadProbeReturn::Ok
                 },
             );
 
             elements.push((video_input_id, video_input));
+            elements.push((video_park_id, video_park));
         }
 
         // --- Create audio input chains ---
@@ -1960,17 +2104,19 @@ impl BlockBuilder for RecorderBuilder {
                 let mut watched: Vec<WatchedTrack> = Vec::new();
                 let video = video_input_weaks
                     .iter()
+                    .map(|(input, park)| (input, park))
                     .zip(video_pad_cells.iter())
                     .zip(video_activities.iter())
                     .enumerate()
                     .map(|(n, t)| (true, n, t));
                 let audio = audio_input_weaks
                     .iter()
+                    .map(|input| (input, input))
                     .zip(audio_pad_cells.iter())
                     .zip(audio_activities.iter())
                     .enumerate()
                     .map(|(n, t)| (false, n, t));
-                for (is_video, n, ((input, cell), activity)) in video.chain(audio) {
+                for (is_video, n, (((input, park), cell), activity)) in video.chain(audio) {
                     let kind = if is_video { "video" } else { "audio" };
                     if !input_is_connected(input) {
                         info!(
@@ -2000,7 +2146,7 @@ impl BlockBuilder for RecorderBuilder {
                         label: format!("{} {}", kind, n),
                         key,
                         is_video,
-                        input: input.clone(),
+                        input: park.clone(),
                         muxer_pad: Some(pad.downgrade()),
                         activity: Arc::clone(activity),
                     });
