@@ -92,6 +92,42 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Jump a media player to playlist entry `index` and play it.
+    pub async fn goto_player(
+        &self,
+        flow_id: FlowId,
+        block_id: &str,
+        index: usize,
+    ) -> ApiResult<()> {
+        let url = format!(
+            "{}/flows/{}/blocks/{}/player/goto",
+            self.base_url, flow_id, block_id
+        );
+
+        #[derive(Serialize)]
+        struct GotoRequest {
+            index: usize,
+        }
+
+        let response = self
+            .with_auth(self.client.post(&url))
+            .json(&GotoRequest { index })
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error jumping to playlist entry: {}", e);
+                ApiError::Network(e.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP error {}: {}", status, text);
+            return Err(ApiError::Http(status, text));
+        }
+        Ok(())
+    }
+
     /// Seek a media player to a specific position.
     pub async fn seek_player(
         &self,

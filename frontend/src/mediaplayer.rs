@@ -602,6 +602,8 @@ pub struct PlaylistEditor {
     pub browser_width_px: f32,
     /// A URL being typed in, to add to the playlist
     pub url_input: String,
+    /// The entry double-clicked to play now, until the app sends it
+    goto_request: Option<usize>,
 }
 
 impl PlaylistEditor {
@@ -620,6 +622,7 @@ impl PlaylistEditor {
             current_playing_index: None,
             browser_width_px: 350.0,
             url_input: String::new(),
+            goto_request: None,
         }
     }
 
@@ -641,6 +644,16 @@ impl PlaylistEditor {
         self.browser_entries = entries;
         self.browser_loading = false;
         self.browser_needs_refresh = false;
+    }
+
+    /// The entry the user double-clicked, to play now. When the list has
+    /// unsaved edits it comes with the list, which has to be saved first so
+    /// the index means the entry the user sees.
+    pub fn take_goto(&mut self) -> Option<(usize, Option<Vec<String>>)> {
+        let index = self.goto_request.take()?;
+        let unsaved = self.dirty.then(|| self.playlist.clone());
+        self.dirty = false;
+        Some((index, unsaved))
     }
 
     /// Request to navigate to a path in the browser.
@@ -953,8 +966,8 @@ impl PlaylistEditor {
                             };
                             // Left-aligned from the index number to the
                             // buttons, cut short only when it does not fit; the
-                            // full entry is on hover, a click copies it, and so
-                            // does the context menu.
+                            // full entry is on hover. A double-click plays it,
+                            // the context menu copies it.
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
@@ -966,11 +979,18 @@ impl PlaylistEditor {
                                             .truncate()
                                             .sense(egui::Sense::click()),
                                         )
-                                        .on_hover_text(format!("{}\n\nClick to copy", file));
-                                    if label.clicked() {
-                                        ui.ctx().copy_text(file.clone());
+                                        .on_hover_text(format!(
+                                            "{}\n\nDouble-click to play, right-click to copy",
+                                            file
+                                        ));
+                                    if label.double_clicked() {
+                                        self.goto_request = Some(i);
                                     }
                                     label.context_menu(|ui| {
+                                        if ui.button("Play now").clicked() {
+                                            self.goto_request = Some(i);
+                                            ui.close();
+                                        }
                                         if ui.button("Copy").clicked() {
                                             ui.ctx().copy_text(file.clone());
                                             ui.close();
@@ -1066,6 +1086,26 @@ mod tests {
         ] {
             assert!(!is_url(path), "{}", path);
         }
+    }
+
+    #[test]
+    fn a_double_clicked_entry_plays_after_unsaved_edits_are_saved() {
+        let mut editor = PlaylistEditor::new(uuid::Uuid::nil(), "b".into());
+        editor.set_playlist(vec!["a.mp4".into(), "b.mp4".into()]);
+        assert_eq!(editor.take_goto(), None);
+
+        editor.goto_request = Some(1);
+        assert_eq!(editor.take_goto(), Some((1, None)), "saved list: just go");
+        assert_eq!(editor.take_goto(), None, "sent once");
+
+        // An entry added but not saved: the server's index 2 does not exist yet.
+        editor.playlist.push("https://example.com/live.m3u8".into());
+        editor.dirty = true;
+        editor.goto_request = Some(2);
+        let (index, unsaved) = editor.take_goto().unwrap();
+        assert_eq!(index, 2);
+        assert_eq!(unsaved.as_deref().map(|p| p.len()), Some(3));
+        assert!(!editor.dirty);
     }
 
     #[test]

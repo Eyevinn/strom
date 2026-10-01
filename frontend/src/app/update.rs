@@ -1682,6 +1682,32 @@ impl eframe::App for StromApp {
                 }
             }
 
+            if let Some((index, unsaved)) = editor.take_goto() {
+                let flow_id = editor.flow_id;
+                let block_id = editor.block_id.clone();
+                let api = self.api.clone();
+                let task = async move {
+                    if let Some(playlist) = unsaved {
+                        if let Err(e) = api.set_player_playlist(flow_id, &block_id, playlist).await
+                        {
+                            tracing::error!("Failed to set playlist: {}", e);
+                            return;
+                        }
+                    }
+                    if let Err(e) = api.goto_player(flow_id, &block_id, index).await {
+                        tracing::error!("Failed to play playlist entry {}: {}", index + 1, e);
+                    }
+                };
+
+                #[cfg(target_arch = "wasm32")]
+                wasm_bindgen_futures::spawn_local(task);
+
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(task);
+                }
+            }
+
             if !editor.open {
                 self.playlist_editor = None;
             }
