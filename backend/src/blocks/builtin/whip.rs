@@ -1253,15 +1253,15 @@ const MAX_PTS_NUDGE_NS: u64 = 1_000_000;
 /// appsink's streaming thread touches it.
 struct VideoPtsOrder {
     /// RTP timestamp of the last frame, `u64::MAX` before the first.
-    last_rtptime: AtomicU64,
-    last_pts: AtomicU64,
+    last_rtptime: std::sync::atomic::AtomicU64,
+    last_pts: std::sync::atomic::AtomicU64,
 }
 
 impl VideoPtsOrder {
     fn new() -> Self {
         Self {
-            last_rtptime: AtomicU64::new(u64::MAX),
-            last_pts: AtomicU64::new(0),
+            last_rtptime: std::sync::atomic::AtomicU64::new(u64::MAX),
+            last_pts: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
