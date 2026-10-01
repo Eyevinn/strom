@@ -385,12 +385,6 @@ fn connect_main_pipeline_handler(
         }
     }
 
-    // Pace on the main pipeline's clock: a flow may run on PTP or NTP, and the
-    // bridge stamps buffers in main-pipeline time.
-    if let Some(main) = state.main_pipeline.upgrade() {
-        internal_pipeline.use_clock(Some(&main.pipeline_clock()));
-    }
-
     // Start the internal pipeline
     if let Err(e) = internal_pipeline.set_state(gst::State::Playing) {
         tracing::error!(

@@ -103,7 +103,7 @@ impl Timing {
     /// when the main pipeline is at `now`.
     ///
     /// `paced` is the internal pipeline's base time minus the main one's,
-    /// when a clocksync paced the buffer on the shared clock. The buffer then
+    /// both in main-clock terms, when a clocksync paced the buffer. The buffer then
     /// left at `rt + sync_offset` internal running time, which is its time in
     /// the main pipeline too. One more than [`LATE_RESYNC_NS`] late found the
     /// source starved: the offset moves on by the lateness plus the delay,

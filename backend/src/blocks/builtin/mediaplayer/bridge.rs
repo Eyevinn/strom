@@ -449,7 +449,6 @@ fn link_pad_through_clocksync(
         .to_string();
     let mut pushed: u64 = 0;
     // The main pipeline's clock and base time, read once instead of per buffer.
-    // The internal pipeline runs on the same clock (see the builder).
     let mut main_clock: Option<(gst::Clock, gst::ClockTime)> = None;
 
     appsink.set_callbacks(
@@ -489,12 +488,26 @@ fn link_pad_through_clocksync(
                     return Ok(gst::FlowSuccess::Ok);
                 };
                 let now = clock.time().saturating_sub(*base).nseconds() as i64;
-                // Paced on the shared clock once the internal pipeline plays.
-                let paced = sync
-                    .then(|| sink.base_time())
-                    .flatten()
-                    .filter(|_| sink.clock().is_some())
-                    .map(|internal| internal.nseconds() as i64 - base.nseconds() as i64);
+                // Once the internal pipeline plays, its clocksync paced the
+                // buffer on the internal clock. The flow's clock can be
+                // another one - realtime, PTP, NTP - so the internal base
+                // time is carried over into main-clock terms, read fresh
+                // for each buffer.
+                let paced = if sync {
+                    match (sink.clock(), sink.base_time()) {
+                        (Some(internal_clock), Some(internal_base)) => {
+                            let clocks = clock.time().nseconds() as i64
+                                - internal_clock.time().nseconds() as i64;
+                            Some(
+                                internal_base.nseconds() as i64 + clocks
+                                    - base.nseconds() as i64,
+                            )
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
 
                 let placed = timing.place(rt.nseconds() as i64, now, paced);
                 if let Some(lateness) = placed.resynced_after {
@@ -994,6 +1007,12 @@ mod tests {
                 })
                 .build(),
         );
+        // A flow can run on another clock than the internal pipeline's
+        // default monotonic one; realtime is 56 years ahead of it.
+        let realtime = gst::glib::Object::builder::<gst::SystemClock>()
+            .property("clock-type", gst::ClockType::Realtime)
+            .build();
+        main.use_clock(Some(&realtime));
         main.set_state(gst::State::Playing).unwrap();
 
         let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
@@ -1005,7 +1024,6 @@ mod tests {
 
         // The internal pipeline, fed like a live stream.
         let internal = gst::Pipeline::new();
-        internal.use_clock(Some(&main.pipeline_clock()));
         let src = gst_app::AppSrc::builder()
             .format(gst::Format::Time)
             .caps(&caps)
