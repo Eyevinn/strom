@@ -568,6 +568,12 @@ async fn wipe_between_letterboxed_sources_animates() {
     main_loop_thread.join().expect("main loop thread");
 }
 
+/// A take index for `trigger_transition`, which takes `usize` on main and
+/// `Option<usize>` once #806 lands. Either signature accepts this.
+fn idx<T: From<usize>>(i: usize) -> T {
+    T::from(i)
+}
+
 /// A master-FX take out of a PiP runs the take through the PiP-aware path,
 /// which animates the pads and lays the full-frame envelope over them. The
 /// envelope is what lands on air, so the take must report the effect, as the
@@ -577,12 +583,11 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
     use gstreamer::prelude::*;
     gstreamer::init().unwrap();
 
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
 
-    // Its own block id: mixer state is registered per block id, and the
-    // other tests in this file run in parallel under BLOCK_ID.
+    // Its own block id, so this test never reads another test's mixer.
     const PIP_BLOCK_ID: &str = "vmfx_pip";
     let mut flow = build_vm_flow();
     flow.blocks[0].id = PIP_BLOCK_ID.to_string();
@@ -644,7 +649,7 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
         .apply_vision_mixer_pip_config(PIP_BLOCK_ID, 0, Some(1), vec![], crop)
         .expect("pip config");
 
-    let result = manager.trigger_transition(PIP_BLOCK_ID, 0, 1, "glitch_cut", 200);
+    let result = manager.trigger_transition(PIP_BLOCK_ID, idx(0), idx(1), "glitch_cut", 200);
 
     manager.stop().expect("stop");
     strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);
@@ -664,11 +669,11 @@ async fn gpu_mixer_reports_media_age_per_input() {
     use strom_types::PropertyValue as PV;
     gstreamer::init().unwrap();
 
-    if !gl_available_or_required() {
+    if !common::gl_available(GL_ELEMENTS) {
         return;
     }
 
-    // Its own block id: mixer state is registered per block id.
+    // Its own block id, so this test never reads another test's mixer.
     const AGE_BLOCK_ID: &str = "vmfx_age";
     let mut flow = build_vm_flow();
     flow.blocks[0].id = AGE_BLOCK_ID.to_string();
@@ -756,8 +761,9 @@ async fn gpu_mixer_reports_media_age_per_input() {
     // Frames already queued past the valve keep reaching the mixer for a
     // while, longer on a loaded runner, so wait for the gap instead of a
     // fixed time.
-    let s = strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(AGE_BLOCK_ID)
-        .expect("overlay state registered");
+    let s =
+        strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(&flow.id, AGE_BLOCK_ID)
+            .expect("overlay state registered");
     let read =
         || -> Vec<Option<u64>> { (0..s.num_inputs).map(|i| s.input_media_age_ms(i)).collect() };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
