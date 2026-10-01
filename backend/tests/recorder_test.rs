@@ -1651,9 +1651,10 @@ mod track_resume {
         let running_at_resume = pipeline.current_running_time();
         video_stalled.store(false, Ordering::Relaxed);
 
-        // Recovery takes a poll interval, the old file's finalisation and the next
-        // keyframe. Then measure a window of steady recording.
-        std::thread::sleep(Duration::from_secs(3));
+        // Recovery takes the 3 s the track has to carry data first, a poll
+        // interval and the old file's finalisation. Then measure a window of
+        // steady recording.
+        std::thread::sleep(Duration::from_secs(6));
         let video_into_muxer = count_video_into_muxer(&pipeline, "rec_resume");
         std::thread::sleep(Duration::from_secs(4));
         let frames_after = video_into_muxer.load(Ordering::Relaxed);
@@ -2035,48 +2036,192 @@ mod track_resume {
         );
     }
 
-    /// A track that comes back for a single frame and stops again leaves the rest
-    /// of the recording going. The frame starts a new file, so it has to be in
-    /// that file: a file whose video never arrives waits on it for good, and the
-    /// audio goes with it.
-    #[test]
-    fn a_track_back_for_one_frame_leaves_the_rest_recorded() {
-        if !plugins_available() {
-            return;
-        }
-        let rig = Rig::start("rec_one_frame");
-        // 0: pass everything; 1: pass the next keyframe only; 2: pass nothing.
-        let one_frame = Arc::new(AtomicU64::new(0));
-        let state = Arc::clone(&one_frame);
-        // Added after the stall gate's probe, so it sees what that one passes.
+    /// Thin the video that gets through the rig's stall gate: all of it while the
+    /// returned mode is 0, one keyframe every `every` once it is 1, nothing once
+    /// it is 2. Added after the stall gate's probe, so it sees what that one
+    /// passes.
+    fn thin_video(rig: &Rig, every: Duration) -> Arc<AtomicU64> {
+        let mode = Arc::new(AtomicU64::new(0));
+        let state = Arc::clone(&mode);
+        let last = std::sync::Mutex::new(None::<Instant>);
         rig.video_gate.static_pad("src").unwrap().add_probe(
             gst::PadProbeType::BUFFER,
             move |_pad, info| match state.load(Ordering::SeqCst) {
                 0 => gst::PadProbeReturn::Ok,
                 1 if info
                     .buffer()
-                    .is_some_and(|b| !b.flags().contains(gst::BufferFlags::DELTA_UNIT)) =>
+                    .is_some_and(|b| !b.flags().contains(gst::BufferFlags::DELTA_UNIT))
+                    && last
+                        .lock()
+                        .unwrap()
+                        .is_none_or(|t: Instant| t.elapsed() >= every) =>
                 {
-                    state.store(2, Ordering::SeqCst);
+                    *last.lock().unwrap() = Some(Instant::now());
                     gst::PadProbeReturn::Ok
                 }
                 _ => gst::PadProbeReturn::Drop,
             },
         );
+        mode
+    }
+
+    /// A track that comes back for a single frame and stops again stays out, and
+    /// the rest of the recording goes on in the same file. A new file for it would
+    /// freeze the other tracks again once the frame is followed by nothing.
+    #[test]
+    fn a_track_back_for_one_frame_stays_out_and_the_rest_is_recorded() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_one_frame");
+        let thin = thin_video(&rig, Duration::from_secs(600));
         std::thread::sleep(Duration::from_secs(3));
         rig.video_stalled.store(true, Ordering::Relaxed);
         std::thread::sleep(Duration::from_secs(9));
-        one_frame.store(1, Ordering::SeqCst);
+        thin.store(1, Ordering::SeqCst);
         rig.video_stalled.store(false, Ordering::Relaxed);
-        std::thread::sleep(Duration::from_secs(20));
+        std::thread::sleep(Duration::from_secs(15));
+        let summaries = rig.stop();
+
+        assert_eq!(summaries.len(), 1, "{:?}", summaries);
+        assert!(
+            summaries[0].audio.duration >= Duration::from_secs(25),
+            "the audio should go on being recorded in the first file: {:?}",
+            summaries
+        );
+    }
+
+    /// A source that sends a keyframe every 6 s, just past the stall timeout, is
+    /// not recorded again. Each keyframe would otherwise start a new file, and
+    /// the stop after it freeze the other tracks for the stall timeout again.
+    #[test]
+    fn a_track_back_for_a_frame_now_and_then_starts_no_new_files() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_sparse");
+        let thin = thin_video(&rig, Duration::from_secs(6));
+        std::thread::sleep(Duration::from_secs(3));
+        thin.store(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_secs(30));
+        let summaries = rig.stop();
+
+        assert_eq!(summaries.len(), 1, "{:?}", summaries);
+        assert!(
+            summaries[0].audio.duration >= Duration::from_secs(30),
+            "the audio should be recorded throughout: {:?}",
+            summaries
+        );
+    }
+
+    /// A track back long enough to be recorded again, which stops again as the
+    /// new file takes it, is ended there like the first time, and the rest of the
+    /// recording goes on.
+    #[test]
+    fn a_track_that_stops_again_in_the_new_file_leaves_the_rest_recorded() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_stops_again");
+        std::thread::sleep(Duration::from_secs(3));
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        // The point the video is parked at is next linked when the new file takes
+        // the track.
+        let video_stalled = Arc::clone(&rig.video_stalled);
+        rig.pipeline
+            .by_name("rec_stops_again:video_park_0")
+            .expect("the recorder parks video at video_park_0")
+            .static_pad("src")
+            .unwrap()
+            .connect_linked(move |_pad, _peer| {
+                video_stalled.store(true, Ordering::Relaxed);
+            });
+        rig.video_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(22));
         let summaries = rig.stop();
 
         assert_eq!(summaries.len(), 2, "{:?}", summaries);
         let last = &summaries[1];
         assert!(
-            last.video.samples >= 1 && last.audio.duration >= Duration::from_secs(12),
-            "the file started by the frame should hold it and go on recording the audio: {:?}",
+            last.video.samples >= 60 && last.audio.duration >= Duration::from_secs(15),
+            "the new file should hold the video's return and go on recording the audio: {:?}",
             last
+        );
+    }
+
+    /// A video track still being recorded when the audio comes back is cut at its
+    /// keyframe, then stops for longer than a parked input may pause, while the
+    /// switch is still closing the old file. What it kept from the keyframe on is
+    /// already promised to the new file, and goes into it.
+    #[test]
+    fn a_break_during_the_switch_loses_nothing_the_new_file_was_given() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start_with("rec_break_in_switch", 300, true);
+        std::thread::sleep(Duration::from_secs(3));
+        // The switch closing the old file sends EOS into its file sink. Hold the
+        // switch there for 7 s and stop the video for 5.5 s of it.
+        let armed = Arc::new(AtomicBool::new(false));
+        let fire = Arc::clone(&armed);
+        let video_stalled = Arc::clone(&rig.video_stalled);
+        rig.file_sink_pad()
+            .add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+                let eos = matches!(info.data.as_ref(),
+                    Some(gst::PadProbeData::Event(e)) if e.type_() == gst::EventType::Eos);
+                if eos && fire.swap(false, Ordering::SeqCst) {
+                    let video_stalled = Arc::clone(&video_stalled);
+                    std::thread::spawn(move || {
+                        video_stalled.store(true, Ordering::Relaxed);
+                        std::thread::sleep(Duration::from_millis(5500));
+                        video_stalled.store(false, Ordering::Relaxed);
+                    });
+                    std::thread::sleep(Duration::from_secs(7));
+                }
+                gst::PadProbeReturn::Ok
+            });
+        rig.audio_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(16));
+        armed.store(true, Ordering::SeqCst);
+        rig.audio_stalled.store(false, Ordering::Relaxed);
+        // The cut waits for the keyframe at 30 s.
+        std::thread::sleep(Duration::from_secs(31));
+        let summaries = rig.stop();
+
+        let frames: u64 = summaries.iter().skip(1).map(|s| s.video.samples).sum();
+        let audio: Duration = summaries.iter().skip(1).map(|s| s.audio.duration).sum();
+        // 30 s to 50 s at 30 fps, less the break.
+        assert!(
+            frames >= 400 && audio >= Duration::from_secs(25),
+            "the new file should start on the cut keyframe and hold the audio from its return: {} frames, {:?} audio: {:?}",
+            frames,
+            audio,
+            summaries
+        );
+    }
+
+    /// A slow source, here a frame about every 4 s, is recorded before a stall, so
+    /// it is recorded again after one.
+    #[test]
+    fn a_slow_source_is_recorded_again_after_a_stall() {
+        if !plugins_available() {
+            return;
+        }
+        let rig = Rig::start("rec_slow_source");
+        let thin = thin_video(&rig, Duration::from_millis(3900));
+        std::thread::sleep(Duration::from_secs(3));
+        rig.video_stalled.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(9));
+        thin.store(1, Ordering::SeqCst);
+        rig.video_stalled.store(false, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_secs(24));
+        let summaries = rig.stop();
+
+        assert!(
+            summaries.len() >= 2 && summaries.last().unwrap().video.samples >= 3,
+            "{:?}",
+            summaries
         );
     }
 
@@ -2212,8 +2357,9 @@ mod track_resume {
         std::thread::sleep(Duration::from_secs(9));
         slow.store(true, Ordering::SeqCst);
         rig.video_stalled.store(false, Ordering::Relaxed);
-        // The switch takes about 14 s, then 5 s to find the dead audio.
-        std::thread::sleep(Duration::from_secs(26));
+        // The switch starts 3 s after the video's return, takes about 14 s, then
+        // 5 s to find the dead audio.
+        std::thread::sleep(Duration::from_secs(29));
         let video_into_muxer = count_video_into_muxer(&rig.pipeline, "rec_dies_in_switch");
         std::thread::sleep(Duration::from_secs(6));
         let frames = video_into_muxer.load(Ordering::Relaxed);

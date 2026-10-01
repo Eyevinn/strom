@@ -116,31 +116,98 @@ const FILE_FINISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// 10 s GOP of a remote encoder that ignores key-unit requests.
 const KEYFRAME_CUT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The most a parked input keeps for replay, in bytes: a GOP of high-bitrate video
-/// with room to spare. Past it the stash starts over from the next keyframe.
+/// The most a parked input keeps for replay, in bytes: `RESUME_HOLD` and a switch
+/// of video up to about 70 Mbit/s. Past it the stash drops its oldest GOP.
 const STASH_MAX_BYTES: usize = 32 << 20;
 
+/// How long a parked input has to carry data without a break before its track is
+/// recorded again. A source that sends a frame now and then, or keeps dropping out
+/// just past `TRACK_STALL_TIMEOUT`, would otherwise start a new file each time and
+/// freeze the other tracks again each time it stops. The stash keeps the run from
+/// its first keyframe for the new file, so nothing is lost by waiting unless the
+/// run outgrows `STASH_MAX_BYTES`.
+const RESUME_HOLD: Duration = Duration::from_secs(3);
+
+/// The longest break in a parked input's data that still counts as one run. A
+/// longer one drops the stash: it starts again from the next keyframe. The same
+/// as `TRACK_STALL_TIMEOUT`, so a source slow enough to be recorded before a stall
+/// is recorded again after one, and one that sends less often stays out.
+const RESUME_GAP: Duration = TRACK_STALL_TIMEOUT;
+
 /// What a parked input has kept for the next file: everything from the first
-/// keyframe that reached it, in order.
+/// keyframe of its current run of data, in order.
 #[derive(Default)]
 struct Stash {
     buffers: Vec<gst::Buffer>,
     bytes: usize,
+    /// When the current run of data started, and when its last buffer arrived.
+    run: Option<(Instant, Instant)>,
+    /// Set once the track is going into the next file. From then on a break keeps
+    /// the stash: it is what the new file starts with.
+    committed: bool,
+    /// Set while the stash is being replayed. What arrives meanwhile follows the
+    /// batch being pushed, so it is kept even if it is not a keyframe.
+    replaying: bool,
 }
 
 impl Stash {
-    /// Keep `buffer` if it continues the stash or can start one.
-    fn keep(&mut self, buffer: &gst::Buffer) {
+    /// Keep `buffer`, arriving at `now`, if it continues the stash or can start
+    /// one.
+    fn keep(&mut self, buffer: &gst::Buffer, now: Instant) {
         let delta = buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
-        if self.bytes + buffer.size() > STASH_MAX_BYTES {
-            self.buffers.clear();
-            self.bytes = 0;
+        let start = match self.run {
+            Some((start, last)) if now.duration_since(last) <= RESUME_GAP => start,
+            // Promised to the next file: keep what is there, but the run starts
+            // again, so the break is not counted as data.
+            Some(_) if self.committed => now,
+            _ => {
+                self.buffers.clear();
+                self.bytes = 0;
+                now
+            }
+        };
+        self.run = Some((start, now));
+        while self.bytes + buffer.size() > STASH_MAX_BYTES && !self.buffers.is_empty() {
+            self.drop_oldest_gop();
         }
-        if self.buffers.is_empty() && delta {
+        if self.buffers.is_empty() && delta && !self.replaying {
             return;
         }
         self.bytes += buffer.size();
         self.buffers.push(buffer.clone());
+    }
+
+    /// Take what is kept, to replay it. Until the replay finishes, whatever
+    /// arrives is kept after it.
+    fn take_for_replay(&mut self) -> Vec<gst::Buffer> {
+        self.replaying = true;
+        self.bytes = 0;
+        std::mem::take(&mut self.buffers)
+    }
+
+    /// Drop everything before the second keyframe, or everything if there is
+    /// none. What follows then has to start on a keyframe again, even during a
+    /// replay: the frames it depends on are gone.
+    fn drop_oldest_gop(&mut self) {
+        let next = self
+            .buffers
+            .iter()
+            .skip(1)
+            .position(|b| !b.flags().contains(gst::BufferFlags::DELTA_UNIT))
+            .map_or(self.buffers.len(), |i| i + 1);
+        if next == self.buffers.len() {
+            self.replaying = false;
+        }
+        self.bytes -= self.buffers.drain(..next).map(|b| b.size()).sum::<usize>();
+    }
+
+    /// Whether the input is carrying data again: it has a keyframe kept, its run
+    /// spans `RESUME_HOLD`, and the run is still going at `now`.
+    fn carrying_data(&self, now: Instant) -> bool {
+        !self.buffers.is_empty()
+            && self.run.is_some_and(|(start, last)| {
+                last.duration_since(start) >= RESUME_HOLD && now.duration_since(last) <= RESUME_GAP
+            })
     }
 }
 
@@ -546,7 +613,7 @@ fn park_at_next_keyframe(input: &gst::Element, activity: &Arc<TrackActivity>, cu
                 .stash
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .keep(buffer);
+                .keep(buffer, Instant::now());
             if state == CUT_WAITING {
                 probe_cut.store(CUT_AT_KEYFRAME, Ordering::SeqCst);
                 if let Some(input) = input_weak.upgrade() {
@@ -579,12 +646,12 @@ fn park_at_next_keyframe(input: &gst::Element, activity: &Arc<TrackActivity>, cu
 /// queue holding only that query reads as drained, so the watchdog cannot see the
 /// track is backed up, and the recording stays frozen.
 ///
-/// Each buffer from the first keyframe on is kept, and `start_next_file` replays
-/// them into the new chain. So the keyframe that shows a track is back is the
-/// first frame of the new file, and the file has the track even if nothing
-/// follows it, or if the next keyframe is further off than `TRACK_STALL_TIMEOUT`.
-/// Holding the buffer in the probe instead would block the tee the input hangs off
-/// for as long as the switch takes.
+/// Each buffer from the first keyframe of the current run of data on is kept, and
+/// `start_next_file` replays them into the new chain once the run has lasted
+/// `RESUME_HOLD`. So the new file starts on that keyframe, with nothing lost to the
+/// wait, even if the next keyframe is further off than `TRACK_STALL_TIMEOUT`.
+/// Holding the buffers in the probe instead would block the tee the input hangs
+/// off for as long as the wait and the switch take.
 ///
 /// It runs on every buffer while the input is parked, so it takes a lock and can
 /// grow the stash — the exception to the rule for buffer probes, and only for an
@@ -618,11 +685,12 @@ fn add_park_probe(src: &gst::Pad, activity: &Arc<TrackActivity>) {
             if !activity.parked.load(Ordering::SeqCst) {
                 return gst::PadProbeReturn::Remove;
             }
+            let now = Instant::now();
             match info.data.as_ref() {
-                Some(gst::PadProbeData::Buffer(buffer)) => stash.keep(buffer),
-                Some(gst::PadProbeData::BufferList(list)) => {
-                    list.iter_owned().for_each(|buffer| stash.keep(&buffer))
-                }
+                Some(gst::PadProbeData::Buffer(buffer)) => stash.keep(buffer, now),
+                Some(gst::PadProbeData::BufferList(list)) => list
+                    .iter_owned()
+                    .for_each(|buffer| stash.keep(&buffer, now)),
                 _ => {}
             }
             if !stash.buffers.is_empty() {
@@ -679,11 +747,12 @@ fn replay_stash(src: &gst::Pad, activity: &TrackActivity, is_video: bool) {
                 if is_video && !replayed {
                     add_keyframe_gate(src);
                 }
+                stash.run = None;
+                stash.replaying = false;
                 activity.parked.store(false, Ordering::SeqCst);
                 return;
             }
-            stash.bytes = 0;
-            std::mem::take(&mut stash.buffers)
+            stash.take_for_replay()
         };
         replayed = true;
         for buffer in batch {
@@ -732,7 +801,8 @@ enum TrackState {
     Finished,
     /// Ended by the watchdog; its input is still quiet.
     Ended,
-    /// Ended by the watchdog, and data has come back to its input.
+    /// Ended by the watchdog, and its input has carried data again for
+    /// `RESUME_HOLD`.
     Resumed,
 }
 
@@ -779,7 +849,17 @@ fn track_state(track: &WatchedTrack) -> TrackState {
     if activity.retired.load(Ordering::SeqCst) {
         TrackState::Gone
     } else if activity.ended.load(Ordering::SeqCst) {
-        if activity.parked.load(Ordering::SeqCst) && activity.resumed.load(Ordering::SeqCst) {
+        let carrying_data = || {
+            activity
+                .stash
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .carrying_data(Instant::now())
+        };
+        if activity.parked.load(Ordering::SeqCst)
+            && activity.resumed.load(Ordering::SeqCst)
+            && carrying_data()
+        {
             TrackState::Resumed
         } else {
             TrackState::Ended
@@ -818,6 +898,37 @@ fn wait_for(
     }
 }
 
+/// Marks the stashes of the tracks going into the next file as committed for as
+/// long as the switch runs. A track left out after all, such as a video ended for
+/// want of a keyframe, gets its break rule back.
+struct CommittedStashes(Vec<Arc<TrackActivity>>);
+
+impl CommittedStashes {
+    fn new<'a>(activities: impl Iterator<Item = &'a Arc<TrackActivity>>) -> Self {
+        let activities: Vec<_> = activities.cloned().collect();
+        for activity in &activities {
+            activity
+                .stash
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .committed = true;
+        }
+        Self(activities)
+    }
+}
+
+impl Drop for CommittedStashes {
+    fn drop(&mut self) {
+        for activity in &self.0 {
+            activity
+                .stash
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .committed = false;
+        }
+    }
+}
+
 /// Close the current file and start the next one with the tracks in `next`.
 ///
 /// The same splitmuxsink is reused, taken back to NULL and set up as it was at
@@ -853,6 +964,7 @@ fn start_next_file(
     next_file_index: &AtomicU32,
     stall: &mut StallCheck,
 ) {
+    let _committed = CommittedStashes::new(next.record.iter().map(|&i| &tracks[i].activity));
     let file_sink_pad = splitmuxsink.downcast_ref::<gst::Bin>().and_then(|b| {
         b.iterate_sinks()
             .into_iter()
@@ -2582,27 +2694,138 @@ mod tests {
             }
             buffer
         };
+        let now = Instant::now();
         let mut stash = Stash::default();
-        stash.keep(&buffer(16, true));
+        stash.keep(&buffer(16, true), now);
         assert!(
             stash.buffers.is_empty(),
             "a delta frame cannot start a stash"
         );
-        stash.keep(&buffer(16, false));
-        stash.keep(&buffer(16, true));
+        stash.keep(&buffer(16, false), now);
+        stash.keep(&buffer(16, true), now);
         assert_eq!(
             stash.buffers.len(),
             2,
             "a stash keeps what follows its keyframe"
         );
 
-        stash.keep(&buffer(STASH_MAX_BYTES, true));
+        stash.keep(&buffer(STASH_MAX_BYTES, true), now);
         assert!(
             stash.buffers.is_empty(),
             "a full stash starts over, and only on a keyframe"
         );
-        stash.keep(&buffer(16, false));
+        stash.keep(&buffer(16, false), now);
         assert_eq!((stash.buffers.len(), stash.bytes), (1, 16));
+
+        let gop = STASH_MAX_BYTES / 3;
+        let mut stash = Stash::default();
+        for _ in 0..2 {
+            stash.keep(&buffer(gop, true), now);
+            stash.keep(&buffer(gop, false), now);
+        }
+        stash.keep(&buffer(gop, true), now);
+        assert_eq!(
+            (stash.buffers.len(), stash.bytes),
+            (2, 2 * gop),
+            "a full stash drops its oldest GOP and keeps the newest"
+        );
+        assert!(!stash.buffers[0]
+            .flags()
+            .contains(gst::BufferFlags::DELTA_UNIT));
+    }
+
+    /// A parked input counts as carrying data only after a run of `RESUME_HOLD`
+    /// with no break longer than `RESUME_GAP`. A break drops what was kept, so a
+    /// source that sends a keyframe now and then never starts a new file.
+    #[test]
+    fn a_stash_is_carrying_data_only_after_an_unbroken_run() {
+        gst::init().expect("GStreamer initialises");
+        let keyframe = || gst::Buffer::with_size(16).expect("allocate buffer");
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut stash = Stash::default();
+
+        stash.keep(&keyframe(), at(0));
+        assert!(
+            !stash.carrying_data(at(3500)),
+            "one keyframe is not a run of data, however long ago it came"
+        );
+        for ms in (500..=3000).step_by(500) {
+            stash.keep(&keyframe(), at(ms));
+        }
+        assert!(
+            stash.carrying_data(at(3000)),
+            "an unbroken run of RESUME_HOLD is carrying data"
+        );
+        assert!(
+            !stash.carrying_data(at(8500)),
+            "a run that has stopped is not"
+        );
+
+        stash.keep(&keyframe(), at(9000));
+        assert_eq!(
+            stash.buffers.len(),
+            1,
+            "a break longer than RESUME_GAP starts the stash over"
+        );
+        stash.keep(&keyframe(), at(15000));
+        assert!(
+            !stash.carrying_data(at(15000)),
+            "a keyframe every 6 s never adds up to a run"
+        );
+
+        stash.committed = true;
+        stash.keep(&keyframe(), at(21000));
+        assert_eq!(
+            stash.buffers.len(),
+            2,
+            "a stash promised to the next file is kept across a break"
+        );
+        stash.committed = false;
+        assert!(
+            !stash.carrying_data(at(21000)),
+            "the break is not counted as part of the run"
+        );
+    }
+
+    /// Frames that reach a parked input while its stash is replayed follow the
+    /// batch being pushed, so the first of them is kept even if it is not a
+    /// keyframe. Dropped, it would leave a hole in the GOP.
+    #[test]
+    fn a_frame_arriving_during_the_replay_is_kept() {
+        gst::init().expect("GStreamer initialises");
+        let frame = |delta: bool| {
+            let mut buffer = gst::Buffer::with_size(16).expect("allocate buffer");
+            if delta {
+                buffer
+                    .get_mut()
+                    .expect("fresh buffer is writable")
+                    .set_flags(gst::BufferFlags::DELTA_UNIT);
+            }
+            buffer
+        };
+        let now = Instant::now();
+        let mut stash = Stash::default();
+        stash.keep(&frame(false), now);
+        stash.keep(&frame(true), now);
+        assert_eq!(stash.take_for_replay().len(), 2);
+        stash.keep(&frame(true), now);
+        assert_eq!(
+            (stash.buffers.len(), stash.bytes),
+            (1, 16),
+            "a delta frame arriving during the replay is kept for it"
+        );
+
+        let mut big = gst::Buffer::with_size(STASH_MAX_BYTES).expect("allocate buffer");
+        big.get_mut()
+            .expect("fresh buffer is writable")
+            .set_flags(gst::BufferFlags::DELTA_UNIT);
+        stash.keep(&big, now);
+        stash.keep(&frame(true), now);
+        assert!(
+            stash.buffers.is_empty(),
+            "once a full stash has dropped the frames a delta depends on, it waits for a keyframe"
+        );
     }
 
     #[test]
