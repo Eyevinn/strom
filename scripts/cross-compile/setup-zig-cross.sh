@@ -63,12 +63,12 @@ echo "Installing cargo-zigbuild..."
 if command -v cargo-zigbuild &> /dev/null; then
     echo "✓ cargo-zigbuild already installed"
 else
-    CZB_VERSION="0.22.3"
+    CZB_VERSION="0.23.4"
     CZB_TARGET="${ZIG_ARCH}-unknown-linux-gnu"
     if [ "$ZIG_ARCH" = "x86_64" ]; then
-        CZB_SHA256="6a014d41ba41ca4b69ca4c4819b9f78a41b0197b5d486904e31c1244e3686190"
+        CZB_SHA256="6b69963040818ca1ef573d8135a95aa902e17cf7f873c32c6426642dadfe7f59"
     else
-        CZB_SHA256="6f86a78cf8be222ac08a68a944ffd8a1ef9d455c504097f0ffbd8bcfbe434a55"
+        CZB_SHA256="25cf2cdc6cde848b33a761ff2cf46d1efe6ba7e1adfc4b6f3ee2d570cacb5419"
     fi
     CZB_URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CZB_VERSION}/cargo-zigbuild-${CZB_TARGET}.tar.xz"
     curl -L --fail --retry 5 --retry-all-errors --retry-delay 3 \

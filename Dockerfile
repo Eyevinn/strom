@@ -115,10 +115,10 @@ RUN if [ "$BUILDPLATFORM" != "$TARGETPLATFORM" ] && [ "$TARGETARCH" = "arm64" ];
         x86_64) echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea" ;; \
         aarch64) echo "041ac42323837eb5624068acd8b00cd5777dac4cf91179e8dad7a7e90dd0c556" ;; \
     esac) && \
-    CZB_VERSION="0.22.3" && \
+    CZB_VERSION="0.23.4" && \
     CZB_SHA256=$(case ${ZIG_ARCH} in \
-        x86_64) echo "6a014d41ba41ca4b69ca4c4819b9f78a41b0197b5d486904e31c1244e3686190" ;; \
-        aarch64) echo "6f86a78cf8be222ac08a68a944ffd8a1ef9d455c504097f0ffbd8bcfbe434a55" ;; \
+        x86_64) echo "6b69963040818ca1ef573d8135a95aa902e17cf7f873c32c6426642dadfe7f59" ;; \
+        aarch64) echo "25cf2cdc6cde848b33a761ff2cf46d1efe6ba7e1adfc4b6f3ee2d570cacb5419" ;; \
     esac) && \
     ZIG_TARBALL="zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" && \
     # Prefer community mirror (faster, not throttled); fall back to upstream
