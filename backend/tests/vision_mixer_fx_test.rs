@@ -613,6 +613,12 @@ async fn wipe_between_letterboxed_sources_animates() {
     drop(manager);
 }
 
+/// A take index for `trigger_transition`, which takes `usize` on main and
+/// `Option<usize>` once #806 lands. Either signature accepts this.
+fn idx<T: From<usize>>(i: usize) -> T {
+    T::from(i)
+}
+
 /// A master-FX take out of a PiP runs the take through the PiP-aware path,
 /// which animates the pads and lays the full-frame envelope over them. The
 /// envelope is what lands on air, so the take must report the effect, as the
@@ -689,7 +695,7 @@ async fn master_fx_take_out_of_a_pip_reports_the_effect() {
         .apply_vision_mixer_pip_config(PIP_BLOCK_ID, 0, Some(1), vec![], crop)
         .expect("pip config");
 
-    let result = manager.trigger_transition(PIP_BLOCK_ID, 0, 1, "glitch_cut", 200);
+    let result = manager.trigger_transition(PIP_BLOCK_ID, idx(0), idx(1), "glitch_cut", 200);
 
     manager.stop().expect("stop");
     strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);

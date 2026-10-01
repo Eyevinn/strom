@@ -11,6 +11,12 @@ use strom_types::vision_mixer::{PipTransforms, SourceCrop};
 use strom_types::{Flow, PropertyValue as PV};
 use tempfile::NamedTempFile;
 
+/// A take index for `trigger_transition`, which takes `usize` on main and
+/// `Option<usize>` once #806 lands. Either signature accepts this.
+fn idx<T: From<usize>>(i: usize) -> T {
+    T::from(i)
+}
+
 fn elem(id: &str, ty: &str, props: Vec<(&str, PV)>) -> strom_types::Element {
     strom_types::Element {
         id: id.to_string(),
@@ -199,7 +205,7 @@ async fn punch_in_taken_to_plain_input_reports_morph() {
         .apply_vision_mixer_pip_config(block_id, 0, Some(1), vec![], crop)
         .expect("pip config");
 
-    let result = manager.trigger_transition(block_id, 0, 1, "fade", 500);
+    let result = manager.trigger_transition(block_id, idx(0), idx(1), "fade", 500);
 
     let _ = manager.stop();
     strom::blocks::builtin::vision_mixer::overlay::unregister_flow(&flow.id);
@@ -239,7 +245,7 @@ async fn unknown_transition_out_of_a_pip_is_refused() {
         .expect("pip config");
     assert!(manager.fade_to_black(block_id, 200).expect("ftb"));
 
-    let result = manager.trigger_transition(block_id, 0, 1, "morph", 500);
+    let result = manager.trigger_transition(block_id, idx(0), idx(1), "morph", 500);
     let s = strom::blocks::builtin::vision_mixer::overlay::get_overlay_state(block_id)
         .expect("overlay state registered");
     let (pgm_pip, pvw_input, ftb) = (s.pgm_pip(), s.pvw_input(), ftb_active(block_id));
@@ -266,7 +272,7 @@ async fn unknown_transition_between_inputs_keeps_fade_to_black() {
     let mut manager = start(&flow, block_id).await;
     assert!(manager.fade_to_black(block_id, 200).expect("ftb"));
 
-    let result = manager.trigger_transition(block_id, 0, 1, "morph", 500);
+    let result = manager.trigger_transition(block_id, idx(0), idx(1), "morph", 500);
     let ftb = ftb_active(block_id);
 
     let _ = manager.stop();
