@@ -27,6 +27,7 @@ struct Built {
 /// feed every audio and video input with a live test source.
 fn build_block(id: &str, num_audio: u32, num_video: u32) -> Built {
     gst::init().expect("gstreamer init");
+    strom::gpu::detect_gpu_capabilities();
     // Both tests call this; a second registration returns an error.
     let _ = gstrswebrtc::plugin_register_static();
 
