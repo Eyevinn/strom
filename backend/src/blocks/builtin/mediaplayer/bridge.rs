@@ -69,6 +69,8 @@ pub fn create_decode_pipeline(
         route_pad(&pipeline, pad, &state, &instance_id_owned, sync, kind, "");
     });
 
+    free_slot_on_pad_removed(&source, state);
+
     // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
     // internal pipeline needs the same gstreamer#5057 workaround as the main one.
     rtp_hdrext::install(&pipeline);
@@ -178,11 +180,26 @@ pub fn create_passthrough_pipeline(
         }
     });
 
+    free_slot_on_pad_removed(&source, state);
+
     // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
     // internal pipeline needs the same gstreamer#5057 workaround as the main one.
     rtp_hdrext::install(&pipeline);
 
     Ok(pipeline)
+}
+
+/// Give a slot back when the pad holding it goes away, so the stream that
+/// replaces it - an HLS variant switch swaps every stream pad - takes the same
+/// output instead of being discarded as one too many.
+fn free_slot_on_pad_removed(source: &gst::Element, state: &Arc<MediaPlayerState>) {
+    let state_weak = Arc::downgrade(state);
+    source.connect_pad_removed(move |_src, pad| {
+        if let Some(state) = state_weak.upgrade() {
+            debug!("Media Player: pad {} removed, freeing its slot", pad.name());
+            state.free_slot_of(&pad.name());
+        }
+    });
 }
 
 /// Which output a stream from the source element can go to.
@@ -257,16 +274,23 @@ fn try_slot(
     sync: bool,
     kind: TrackKind,
 ) -> bool {
-    let (seen, appsrcs) = match kind {
-        TrackKind::Video => (&state.video_tracks_seen, &state.video_appsrcs),
-        TrackKind::Audio => (&state.audio_tracks_seen, &state.audio_appsrcs),
+    let (slots, appsrcs) = match kind {
+        TrackKind::Video => (&state.video_slots, &state.video_appsrcs),
+        TrackKind::Audio => (&state.audio_slots, &state.audio_appsrcs),
         TrackKind::Other => return false,
     };
     // pad-added can fire from several streaming threads at once, so the slot
-    // is claimed atomically.
-    let slot = seen.fetch_add(1, Ordering::SeqCst);
+    // is claimed under the lock. Not a per-buffer path.
+    let slot = {
+        let mut slots = slots.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(free) = slots.iter().position(Option::is_none) else {
+            return false;
+        };
+        slots[free] = Some(pad.name().to_string());
+        free
+    };
     let Some(appsrc) = appsrcs.get(slot) else {
-        seen.fetch_sub(1, Ordering::SeqCst);
+        state.free_slot_of(&pad.name());
         return false;
     };
     let sfx = super::builder::slot_suffix(slot);
@@ -298,8 +322,7 @@ fn try_slot(
                 kind.name(),
                 e
             );
-            // Give the slot back only if nothing claimed a later one meanwhile.
-            let _ = seen.compare_exchange(slot + 1, slot, Ordering::SeqCst, Ordering::SeqCst);
+            state.free_slot_of(&pad.name());
             false
         }
     }
@@ -355,6 +378,22 @@ fn link_pad_through_clocksync(
     sync: bool,
     media_type: &str,
 ) -> Result<(), String> {
+    // The slot's chain is already there when an earlier pad held it - an HLS
+    // variant switch replaces the stream pads mid-playback. The new pad takes
+    // over the same chain, so the output carries on.
+    if let Some(existing) = pipeline.by_name(clocksync_name) {
+        let sink = existing
+            .static_pad("sink")
+            .ok_or("clocksync has no sink pad")?;
+        if sink.is_linked() {
+            return Err(format!("{} is still fed by another pad", clocksync_name));
+        }
+        return src_pad
+            .link(&sink)
+            .map(|_| ())
+            .map_err(|e| format!("relink pad to clocksync: {:?}", e));
+    }
+
     let clocksync = gst::ElementFactory::make("clocksync")
         .name(clocksync_name)
         .property("sync", sync)
@@ -626,7 +665,7 @@ pub fn watch_internal_bus(
 mod tests {
     use super::super::state::Playlist;
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
+    use std::sync::atomic::{AtomicBool, AtomicI64};
     use std::sync::{Mutex, RwLock};
 
     /// The bare minimum for the two pipeline constructors: they read `sync` and
@@ -647,8 +686,8 @@ mod tests {
             block_id: "test".to_string(),
             flow_id: uuid::Uuid::new_v4(),
             switching_file: AtomicBool::new(false),
-            video_tracks_seen: AtomicUsize::new(0),
-            audio_tracks_seen: AtomicUsize::new(0),
+            video_slots: MediaPlayerState::free_slots(0),
+            audio_slots: MediaPlayerState::free_slots(0),
             decode: true,
             sync: true,
             media_path: std::env::temp_dir(),
@@ -722,6 +761,8 @@ mod tests {
         let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
         state.video_appsrcs = appsrcs(video);
         state.audio_appsrcs = appsrcs(audio);
+        state.video_slots = MediaPlayerState::free_slots(video);
+        state.audio_slots = MediaPlayerState::free_slots(audio);
         state.sync = false;
         Arc::new(state)
     }
@@ -795,6 +836,73 @@ mod tests {
         let _ = pipeline.set_state(gst::State::Null);
     }
 
+    /// A source pad on a bin, the way uridecodebin exposes its streams.
+    fn ghost_src(bin: &gst::Bin, name: &str) -> gst::Pad {
+        let inner = gst::ElementFactory::make("identity").build().unwrap();
+        bin.add(&inner).unwrap();
+        let pad = gst::GhostPad::builder_with_target(&inner.static_pad("src").unwrap())
+            .unwrap()
+            .name(name)
+            .build();
+        pad.set_active(true).unwrap();
+        bin.add_pad(&pad).unwrap();
+        pad.upcast()
+    }
+
+    /// An HLS variant switch removes every stream pad and exposes new ones. The
+    /// slots used to stay taken, so after the first quality switch the new
+    /// video and audio were discarded as one too many and the outputs went
+    /// silent. The pad that replaces one has to take over the same output.
+    #[test]
+    fn a_stream_that_replaces_a_removed_one_takes_over_its_output() {
+        let _ = gst::init();
+        let pipeline = gst::Pipeline::new();
+        let source = gst::Bin::with_name("source");
+        pipeline.add(&source).unwrap();
+        let state = state_with_slots(0, 1);
+        free_slot_on_pad_removed(source.upcast_ref(), &state);
+
+        let first = ghost_src(&source, "src_0");
+        route_pad(
+            &pipeline,
+            &first,
+            &state,
+            "test",
+            false,
+            TrackKind::Audio,
+            "",
+        );
+        assert_eq!(peer_factory(&first).as_deref(), Some("clocksync"));
+
+        // The variant switch: the old pad goes, a new one comes.
+        source.remove_pad(&first).unwrap();
+        let second = ghost_src(&source, "src_3");
+        route_pad(
+            &pipeline,
+            &second,
+            &state,
+            "test",
+            false,
+            TrackKind::Audio,
+            "",
+        );
+
+        assert_eq!(
+            peer_factory(&second).as_deref(),
+            Some("clocksync"),
+            "the replacing stream was discarded instead of taking the free output"
+        );
+        assert_eq!(
+            second
+                .peer()
+                .and_then(|p| p.parent_element())
+                .map(|e| e.name().to_string()),
+            Some("test_clocksync_audio".to_string()),
+            "it has to feed the same chain, so audio_out carries on"
+        );
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
     /// End to end on a real file: two audio tracks with two outputs give each
     /// its own bridge, and playback runs to the end.
     #[test]
@@ -807,7 +915,6 @@ mod tests {
         let pipeline = create_decode_pipeline("test", &state, Some(&uri)).unwrap();
         let msg = play_to_end(&pipeline);
         assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{:?}", msg);
-        assert_eq!(state.audio_tracks_seen.load(Ordering::SeqCst), 2);
         for name in [
             "test_appsink_audio",
             "test_appsink_audio_1",

@@ -12,7 +12,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{Arc, RwLock};
 use strom_types::block::{ExternalPad, ExternalPads};
 use strom_types::element::ElementPadRef;
@@ -251,6 +251,7 @@ fn build_media_player(
     }
 
     // --- Create shared state ---
+    let (num_video_slots, num_audio_slots) = (video_appsrcs.len(), audio_appsrcs.len());
     let player_instance_id = Uuid::new_v4();
     let source_element_weak = gst::glib::WeakRef::new();
     let ts_offset = Arc::new(AtomicI64::new(i64::MIN));
@@ -269,8 +270,8 @@ fn build_media_player(
         block_id: block_id.to_string(),
         flow_id,
         switching_file: AtomicBool::new(false),
-        video_tracks_seen: AtomicUsize::new(0),
-        audio_tracks_seen: AtomicUsize::new(0),
+        video_slots: MediaPlayerState::free_slots(num_video_slots),
+        audio_slots: MediaPlayerState::free_slots(num_audio_slots),
         decode,
         sync,
         media_path: media_path.clone(),

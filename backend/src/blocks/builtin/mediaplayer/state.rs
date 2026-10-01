@@ -5,7 +5,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use strom_types::FlowId;
 use tracing::{debug, error, info};
@@ -54,12 +54,13 @@ pub struct MediaPlayerState {
     pub flow_id: FlowId,
     /// True while load_current_file() is in progress — bus watch should ignore EOS.
     pub switching_file: AtomicBool,
-    /// Video tracks of the current file handed a slot so far (reset on file switch).
-    /// A track past the last slot is discarded.
-    pub video_tracks_seen: AtomicUsize,
-    /// Audio tracks of the current file handed a slot so far (reset on file switch).
-    /// A track past the last slot is discarded.
-    pub audio_tracks_seen: AtomicUsize,
+    /// Which source pad holds each video slot, by pad name; `None` is free.
+    /// A slot is freed when its pad goes away - an HLS variant switch replaces
+    /// every stream pad - so the next pad of that kind takes over the same
+    /// output. Reset on file switch.
+    pub video_slots: Mutex<Vec<Option<String>>>,
+    /// Which source pad holds each audio slot, as for `video_slots`.
+    pub audio_slots: Mutex<Vec<Option<String>>>,
     /// Whether to decode streams (true) or pass through encoded (false)
     pub decode: bool,
     /// Whether clocksync pacing is enabled
@@ -84,6 +85,31 @@ pub struct MediaPlayerState {
 }
 
 impl MediaPlayerState {
+    /// `n` free slots.
+    pub fn free_slots(n: usize) -> Mutex<Vec<Option<String>>> {
+        Mutex::new(vec![None; n])
+    }
+
+    /// Free every slot, for a new file.
+    pub fn free_all_slots(&self) {
+        for slots in [&self.video_slots, &self.audio_slots] {
+            let mut slots = slots.lock().unwrap_or_else(|p| p.into_inner());
+            slots.iter_mut().for_each(|s| *s = None);
+        }
+    }
+
+    /// Free the slot `pad_name` holds, if any.
+    pub fn free_slot_of(&self, pad_name: &str) {
+        for slots in [&self.video_slots, &self.audio_slots] {
+            let mut slots = slots.lock().unwrap_or_else(|p| p.into_inner());
+            for slot in slots.iter_mut() {
+                if slot.as_deref() == Some(pad_name) {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
     /// Get the current file URI, if any.
     pub fn current_file(&self) -> Option<String> {
         let pl = self.playlist.read().ok()?;
@@ -238,8 +264,7 @@ impl MediaPlayerState {
 
         // Reset linked flags and timestamp offset so new pads get linked
         // and the bridge recomputes the offset from the first buffer
-        self.video_tracks_seen.store(0, Ordering::SeqCst);
-        self.audio_tracks_seen.store(0, Ordering::SeqCst);
+        self.free_all_slots();
         self.ts_offset.store(i64::MIN, Ordering::SeqCst);
 
         // Set the new URI on source element
