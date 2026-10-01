@@ -54,6 +54,7 @@ flowchart LR
 | Groups (subgroups) | 0 – 32 (default 0) | Stereo. Each group has its own output **and** also feeds Main. |
 | Main output | 1 | Stereo. |
 | Monitor output | 1 | Stereo. Follows Main, switches to Solo bus on PFL/AFL. |
+| Direct outputs | one per channel, off by default | Stereo. Turned on by the `direct_outs` setting. See [3.1](#31-direct-outputs). |
 
 ---
 
@@ -153,6 +154,28 @@ Every channel can be independently routed to **Main**, to any of the
   be set to pre-fader or post-fader.
 - **All aux buses default to *post-fader***. Flip a bus to pre-fader
   when using it for stage monitors or IEMs.
+
+### 3.1 Direct outputs
+
+With **Direct Outs** on (construction time), each channel gets an output
+pad `direct_out_N` carrying exactly what that channel sends to Main:
+after its fader, mute and **To Main** switch, before the Main sum and
+the Main processing. A mute or To Main change fades on the direct out
+with the same ramp as on Main.
+
+```
+[Channel post-fader] ──► ROUTING TEE ──► TO MAIN (on/off) ──┬──► MAIN
+                                                            └──► DIRECT OUT N
+```
+
+This is not the direct out of a hardware console, which taps the
+channel at a chosen point (input, pre-EQ, pre-fader, post-fader) and
+ignores the channel's bus assignments. Here the To Main switch applies:
+a channel routed only to a group reaches program through the group but
+is **silent on its direct out**.
+
+If nothing pulls from a direct out, its audio is dropped; Main is not
+held up.
 
 ### Quick routing matrix view
 
