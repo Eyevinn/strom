@@ -133,3 +133,33 @@ async fn load_from_storage_strips_transient_properties() {
         block.properties.get("ch1_fader")
     );
 }
+
+/// A clone of a fresh `TestState` must keep the storage dir alive: user block
+/// saves do not recreate it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloned_test_state_keeps_its_storage() {
+    gstreamer::init().unwrap();
+    let state = common::state::new().clone();
+    let request = strom_types::block::CreateBlockRequest {
+        name: "clone-guard".into(),
+        description: String::new(),
+        category: "test".into(),
+        exposed_properties: vec![],
+        external_pads: strom_types::block::ExternalPads {
+            inputs: vec![],
+            outputs: vec![],
+        },
+        ui_metadata: None,
+    };
+    let app: &strom::state::AppState = &state;
+    let result = strom::api::blocks::create_block(
+        axum::extract::State(app.clone()),
+        strom::json_rejection::JsonBody(request),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "block save failed: {:?}",
+        result.err().map(|e| e.1 .0)
+    );
+}
