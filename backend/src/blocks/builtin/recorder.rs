@@ -295,7 +295,7 @@ fn link_track_chain(
 }
 
 /// Put a video track's long-lived parser between its input and the point where
-/// the recorder parks it, replacing the one there if the codec changed.
+/// the recorder parks it.
 ///
 /// Parking, the keyframe cut and the stash all decide on keyframes from the
 /// DELTA_UNIT flag, which not every source sets: tsdemux output, as SRT
@@ -312,16 +312,6 @@ fn link_keyframe_parser(
     park_sink: &gst::Pad,
 ) -> Result<(), String> {
     let name = chain_element_name(instance_id, key, "keyframes");
-    if let Some(old) = bin.by_name(&name) {
-        if let Some(peer) = input_src.peer() {
-            let _ = input_src.unlink(&peer);
-        }
-        if let Some(src) = old.static_pad("src") {
-            let _ = src.unlink(park_sink);
-        }
-        let _ = old.set_state(gst::State::Null);
-        let _ = bin.remove(&old);
-    }
     let parser = gst::ElementFactory::make(parser_factory)
         .name(name)
         .property("config-interval", -1i32)
@@ -1810,6 +1800,10 @@ impl BlockBuilder for RecorderBuilder {
                         return gst::PadProbeReturn::Ok;
                     }
 
+                    if parser_inserted.swap(true, Ordering::SeqCst) {
+                        return gst::PadProbeReturn::Ok;
+                    }
+
                     let caps = match event.view() {
                         gst::EventView::Caps(c) => c.caps().to_owned(),
                         _ => return gst::PadProbeReturn::Ok,
@@ -1829,41 +1823,6 @@ impl BlockBuilder for RecorderBuilder {
                     let Some(park_sink) = park.static_pad("sink") else {
                         return gst::PadProbeReturn::Ok;
                     };
-
-                    if parser_inserted.swap(true, Ordering::SeqCst) {
-                        // Later caps: the keyframe parser follows a change of codec,
-                        // e.g. a WHIP seat that rejoins with another one.
-                        let current = pad
-                            .peer()
-                            .and_then(|p| p.parent_element())
-                            .and_then(|e| e.factory())
-                            .map(|f| f.name().to_string());
-                        let wanted = parser_for(true, structure);
-                        if wanted.is_some_and(|w| current.as_deref() == Some(w)) {
-                            return gst::PadProbeReturn::Ok;
-                        }
-                        let Some(input) = pad.parent_element() else {
-                            return gst::PadProbeReturn::Ok;
-                        };
-                        let Some(parser_factory) = wanted else {
-                            refuse_input(&input, &refusal_for(true, structure.name()));
-                            return gst::PadProbeReturn::Ok;
-                        };
-                        let Some(bin) = input.parent().and_then(|p| p.downcast::<gst::Bin>().ok()) else {
-                            return gst::PadProbeReturn::Ok;
-                        };
-                        if let Err(e) = link_keyframe_parser(
-                            &bin,
-                            &instance_id_clone,
-                            &format!("video_{}", vi),
-                            parser_factory,
-                            pad,
-                            &park_sink,
-                        ) {
-                            error!("Recorder {}: video track {}: {}", instance_id_clone, vi, e);
-                        }
-                        return gst::PadProbeReturn::Ok;
-                    }
 
                     let caps_name = structure.name().to_string();
                     debug!("Recorder {}: video caps detected: {}", instance_id_clone, caps_name);
