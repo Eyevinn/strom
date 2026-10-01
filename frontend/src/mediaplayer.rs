@@ -951,26 +951,33 @@ impl PlaylistEditor {
                             } else {
                                 ui.style().visuals.text_color()
                             };
-                            // Shortened to fit; the full entry is on hover, a
-                            // click copies it, and so does the context menu.
-                            let label = ui
-                                .add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&display_name).color(color),
-                                    )
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                                )
-                                .on_hover_text(format!("{}\n\nClick to copy", file));
-                            if label.clicked() {
-                                ui.ctx().copy_text(file.clone());
-                            }
-                            label.context_menu(|ui| {
-                                if ui.button("Copy").clicked() {
-                                    ui.ctx().copy_text(file.clone());
-                                    ui.close();
-                                }
-                            });
+                            // Left-aligned from the index number to the
+                            // buttons, cut short only when it does not fit; the
+                            // full entry is on hover, a click copies it, and so
+                            // does the context menu.
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let label = ui
+                                        .add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&display_name).color(color),
+                                            )
+                                            .truncate()
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_text(format!("{}\n\nClick to copy", file));
+                                    if label.clicked() {
+                                        ui.ctx().copy_text(file.clone());
+                                    }
+                                    label.context_menu(|ui| {
+                                        if ui.button("Copy").clicked() {
+                                            ui.ctx().copy_text(file.clone());
+                                            ui.close();
+                                        }
+                                    });
+                                },
+                            );
                         });
                     });
                 }
@@ -1004,18 +1011,12 @@ fn is_url(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
-/// What a playlist entry is called in the list: a file's name, or for a URL its
-/// host and last path segment, without the query.
+/// What a playlist entry is called in the list: a file's name, and a URL in
+/// full, scheme and all - `rtsp://` and `https://` to the same host are
+/// different sources.
 fn playlist_entry_name(entry: &str) -> String {
     if is_url(entry) && !entry.starts_with("file://") {
-        let rest = entry.split_once("://").map(|(_, r)| r).unwrap_or(entry);
-        let without_query = rest.split(['?', '#']).next().unwrap_or(rest);
-        let mut parts = without_query.split('/').filter(|p| !p.is_empty());
-        let host = parts.next().unwrap_or("");
-        return match parts.next_back() {
-            Some(last) => format!("{} \u{2026} {}", host, last),
-            None => host.to_string(),
-        };
+        return entry.to_string();
     }
     std::path::Path::new(entry)
         .file_name()
@@ -1068,15 +1069,14 @@ mod tests {
     }
 
     #[test]
-    fn a_url_is_listed_by_host_and_last_segment() {
-        assert_eq!(
-            playlist_entry_name("https://cdn.example.com/l4/se/svt1/master.m3u8?format=hls"),
-            "cdn.example.com \u{2026} master.m3u8"
-        );
-        assert_eq!(
-            playlist_entry_name("rtsp://192.0.2.10:8554"),
-            "192.0.2.10:8554"
-        );
+    fn a_url_is_listed_in_full_and_a_file_by_name() {
+        for url in [
+            "https://cdn.example.com/l4/se/svt1/master.m3u8?format=hls",
+            "rtsp://192.0.2.10:8554",
+            "srt://192.0.2.10:9000?mode=caller",
+        ] {
+            assert_eq!(playlist_entry_name(url), url);
+        }
         assert_eq!(playlist_entry_name("folder/clip.mp4"), "clip.mp4");
         assert_eq!(playlist_entry_name("file:///media/clip.mp4"), "clip.mp4");
     }
