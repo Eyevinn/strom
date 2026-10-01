@@ -468,6 +468,21 @@ fn main() -> anyhow::Result<()> {
         ] {
             flags.push(format!("enable-features={}", feature));
         }
+        // A page gets a silent microphone and a black camera, never the
+        // server's own devices. Without the files, the page gets no devices
+        // at all rather than Chromium's beeping test card.
+        if let Some(cache) = std::env::var_os("GST_CEF_CACHE_LOCATION") {
+            let dir = PathBuf::from(cache).join("strom-fake-media");
+            match strom::cef_media::fake_device_switches(&dir) {
+                Ok(switches) => flags.extend(switches),
+                Err(e) => warn!(
+                    "Could not write fake media devices to {}: {} - pages get no camera or \
+                     microphone",
+                    dir.display(),
+                    e
+                ),
+            }
+        }
         std::env::set_var("GST_CEF_CHROME_EXTRA_FLAGS", flags.join(","));
     }
 

@@ -261,7 +261,7 @@ With it on:
 - With Strom's gstcefsrc build, Chromium also refuses the page's own
   requests to them (Local Network Access): fetches, frames, workers,
   navigations and WebSockets, checked against the address actually connected
-  to. WebRTC sends UDP only through a proxy, so not at all.
+  to.
 - Raw `cefsrc` elements are strict too, unless the flow sets `strict-network`.
 
 Turn it off only on your own machine, to render your own local pages.
@@ -269,11 +269,37 @@ Turn it off only on your own machine, to render your own local pages.
 > **Never expose this setting to anyone who is not the server's operator.** A
 > system that lets customers edit flows must not let them switch it off.
 
-What it does not cover: a hostname that only resolves to an internal address,
-when it is the page's own URL. That, and anything Chromium itself might get
+What it does not cover:
+
+- **WebRTC.** A page can have the browser send WebRTC connectivity checks
+  (small STUN packets) over UDP to any address, internal ones included, and
+  tell from the answers which ports are open. It cannot send data of its own
+  that way, and Local Network Access in this Chromium does not look at WebRTC.
+  UDP stays allowed, because blocking it breaks most WebRTC pages, which are
+  a real use: a video call or a WebRTC player rendered as a source.
+- A hostname that only resolves to an internal address, when it is the page's
+  own URL. That, and anything Chromium itself might get
 wrong, needs the browser's network locked down from outside, for instance by
 not running with `--network host` and by dropping `169.254.169.254` for the
 container.
+
+## Camera, microphone, and what else a page cannot do
+
+A page is never given the server's own cameras or microphones, which on a
+broadcast server may be capture cards. With Strom's gstcefsrc build it gets a
+camera and a microphone all the same, because some pages will not start
+without them - a video call joined to be watched, for one. They are
+synthetic: the microphone is silent and the camera shows a black frame.
+Strom writes both into the CEF cache directory when it starts.
+
+Nor does a page get anything that would need someone at the server: file
+dialogs are cancelled, downloads refused, `alert`, `confirm` and `prompt`
+answered as dismissed, printing cancelled, the right-click menu empty, and
+drops refused. Left to CEF, a file dialog was built inside Strom and aborted
+it, and `print()` froze the page.
+
+A page's console messages go to the `cef_console` GStreamer debug category
+(`GST_DEBUG=cef_console:5`), not to the container log.
 
 ## Browser profiles
 

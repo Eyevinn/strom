@@ -1,5 +1,5 @@
 diff --git a/gstcefsrc.cc b/gstcefsrc.cc
-index 8be9339..e7dc418 100644
+index 8be9339..8f1707b 100644
 --- a/gstcefsrc.cc
 +++ b/gstcefsrc.cc
 @@ -132,6 +132,7 @@ enum
@@ -53,31 +53,7 @@ index 8be9339..e7dc418 100644
      bool OnProcessMessageReceived(
        CefRefPtr<CefBrowser> browser,
        CefRefPtr<CefFrame> frame,
-@@ -565,6 +593,23 @@ class BrowserClient :
-           new ContextReadyHandler(this));
-     }
- 
-+    // A strict browser sends WebRTC over UDP only through a proxy, which
-+    // with none configured means not at all: ICE would otherwise reach any
-+    // UDP port on this machine or its network, where Local Network Access
-+    // does not look. The setting belongs to the context, so it takes an
-+    // isolated one.
-+    void RestrictContext(CefRefPtr<CefRequestContext> request_context)
-+    {
-+      if (!src->strict_network)
-+        return;
-+      CefRefPtr<CefValue> value = CefValue::Create();
-+      value->SetString("disable_non_proxied_udp");
-+      CefString error;
-+      if (!request_context->SetPreference("webrtc.ip_handling_policy", value, error))
-+        GST_WARNING_OBJECT (src, "Could not restrict WebRTC to proxied UDP: %s",
-+            error.ToString().c_str());
-+    }
-+
-     void CreateBrowserIn(CefRefPtr<CefRequestContext> request_context)
-     {
-       CefWindowInfo window_info;
-@@ -696,7 +741,18 @@ void BrowserApp::OnBeforeCommandLineProcessing(const CefString &process_type,
+@@ -696,7 +724,18 @@ void BrowserApp::OnBeforeCommandLineProcessing(const CefString &process_type,
        for (i = 0; i < g_strv_length (flags_list); i++) {
          gchar **switch_value = g_strsplit ((const gchar *) flags_list[i], "=", -1);
  
@@ -97,15 +73,7 @@ index 8be9339..e7dc418 100644
            GST_INFO_OBJECT (src, "Adding switch with value %s=%s", switch_value[0], switch_value[1]);
            command_line->AppendSwitchWithValue (switch_value[0], switch_value[1]);
          } else {
-@@ -957,6 +1013,7 @@ gst_cef_src_change_state(GstElement *src, GstStateChange transition)
- 
- void ContextReadyHandler::OnRequestContextInitialized(CefRefPtr<CefRequestContext> request_context)
- {
-+  client_->RestrictContext(request_context);
-   client_->CreateBrowserIn(request_context);
- }
- 
-@@ -1260,6 +1317,9 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
+@@ -1260,6 +1299,9 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
      case PROP_PERSIST_SESSION_COOKIES:
        src->persist_session_cookies = g_value_get_boolean (value);
        break;
@@ -115,7 +83,7 @@ index 8be9339..e7dc418 100644
      default:
        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
        break;
-@@ -1309,6 +1369,9 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
+@@ -1309,6 +1351,9 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
      case PROP_PERSIST_SESSION_COOKIES:
        g_value_set_boolean (value, src->persist_session_cookies);
        break;
@@ -125,7 +93,7 @@ index 8be9339..e7dc418 100644
      default:
        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
        break;
-@@ -1355,6 +1418,7 @@ gst_cef_src_init (GstCefSrc * src)
+@@ -1355,6 +1400,7 @@ gst_cef_src_init (GstCefSrc * src)
    src->isolated_context = FALSE;
    src->context_cache_path = NULL;
    src->persist_session_cookies = FALSE;
@@ -133,15 +101,14 @@ index 8be9339..e7dc418 100644
  
    gst_base_src_set_format (base_src, GST_FORMAT_TIME);
    gst_base_src_set_live (base_src, TRUE);
-@@ -1452,6 +1516,13 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
+@@ -1452,6 +1498,12 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
            "most logins are. Otherwise they are gone when the browser closes.",
            FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
  
 +  g_object_class_install_property (gobject_class, PROP_STRICT_NETWORK,
 +    g_param_spec_boolean ("strict-network", "strict-network",
-+          "Refuse the page access to this machine and its local network: deny "
-+          "Chromium's Local Network Access prompt and, with isolated-context, "
-+          "send WebRTC over UDP only through a proxy.",
++          "Refuse the page access to this machine and its local network by "
++          "denying Chromium's Local Network Access prompt.",
 +          FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
 +
    gst_element_class_set_static_metadata (gstelement_class,

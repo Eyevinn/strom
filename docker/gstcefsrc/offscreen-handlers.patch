@@ -5,8 +5,8 @@ gstcefsrc runs CEF inside the embedding process. A default that shows UI
 builds it there: a click on <input type=file> built a GTK file chooser inside
 Strom on Xvfb, which tripped a GTK assertion and aborted Strom with every
 pipeline in it. A default that saves writes to that process's disk: a page's
-download landed in /root/Downloads without a click. Both measured in
-strom-full with CEF 144.
+download landed in /root/Downloads without a click. window.print() froze the
+page. All measured in strom-full with CEF 144.
 
 Every CefClient handler in CEF 144 (branch 7559), and what a cefsrc does:
 
@@ -34,15 +34,20 @@ Every CefClient handler in CEF 144 (branch 7559), and what a cefsrc does:
                    decision here applies to them too
   Load             default: notifications only
   Permission       strict-network.patch answers Local Network Access; THIS
-                   PATCH refuses all media access, which enable-media-stream
-                   would otherwise grant without asking
-  Print            not implemented on purpose: with none, CEF on Linux does
-                   not print, and one would open the print path
+                   PATCH grants camera and microphone only when Chromium runs
+                   with use-fake-device-for-media-stream, so a page gets
+                   synthetic devices and never the machine's; otherwise, and
+                   for screen capture always, media access is refused (which
+                   enable-media-stream would otherwise grant without asking)
+  Print            THIS PATCH: every print cancelled. With no handler,
+                   window.print() went into GTK's print path in the embedding
+                   process and never returned, freezing the page
   Render           gstcefsrc's own: frames into the pipeline
   Request          gstcefsrc's own; certificate errors and authentication
                    requests keep CEF's default, which is to cancel
+
 diff --git a/gstcefsrc.cc b/gstcefsrc.cc
-index e7dc418..a3238dc 100644
+index 8f1707b..aab40b7 100644
 --- a/gstcefsrc.cc
 +++ b/gstcefsrc.cc
 @@ -390,7 +390,10 @@ public:
@@ -57,7 +62,7 @@ index e7dc418..a3238dc 100644
    }
  
  private:
-@@ -416,7 +419,12 @@ class BrowserClient :
+@@ -416,7 +419,13 @@ class BrowserClient :
    public CefClient,
    public CefLifeSpanHandler,
    public CefRequestHandler,
@@ -67,11 +72,12 @@ index e7dc418..a3238dc 100644
 +  public CefDownloadHandler,
 +  public CefJSDialogHandler,
 +  public CefContextMenuHandler,
-+  public CefDragHandler
++  public CefDragHandler,
++  public CefPrintHandler
  {
    public:
  
-@@ -459,6 +467,140 @@ class BrowserClient :
+@@ -459,6 +468,192 @@ class BrowserClient :
        return this;
      }
  
@@ -100,20 +106,72 @@ index e7dc418..a3238dc 100644
 +      return this;
 +    }
 +
++    virtual CefRefPtr<CefPrintHandler> GetPrintHandler() override
++    {
++      return this;
++    }
++
++    // CefPrintHandler Methods:
++    //
++    // With no handler, window.print() went into GTK's print path inside the
++    // embedding process and never returned, freezing the page (and tripping
++    // a GLib assertion on the way). Every print is cancelled, so print()
++    // returns at once.
++    void OnPrintStart(CefRefPtr<CefBrowser> browser) override {}
++
++    void OnPrintSettings(CefRefPtr<CefBrowser> browser,
++        CefRefPtr<CefPrintSettings> settings, bool get_defaults) override {}
++
++    bool OnPrintDialog(CefRefPtr<CefBrowser> browser, bool has_selection,
++        CefRefPtr<CefPrintDialogCallback> callback) override
++    {
++      GST_INFO_OBJECT (src, "Cancelling a print the page asked for");
++      callback->Cancel();
++      return true;
++    }
++
++    bool OnPrintJob(CefRefPtr<CefBrowser> browser,
++        const CefString& document_name, const CefString& pdf_file_path,
++        CefRefPtr<CefPrintJobCallback> callback) override
++    {
++      // Taking the job without continuing it leaves it unprinted.
++      return true;
++    }
++
++    void OnPrintReset(CefRefPtr<CefBrowser> browser) override {}
++
 +    // Media access (getUserMedia, getDisplayMedia):
 +    //
 +    // gstcefsrc passes enable-media-stream, under which CEF grants a page the
 +    // embedding machine's cameras and microphones without asking. On a
-+    // broadcast server those may be capture devices. A page renders to video;
-+    // it has no business with them. Every request is refused.
++    // broadcast server those may be capture devices, and a page renders to
++    // video; it has no business with them.
++    //
++    // Some pages will not start without a camera and a microphone, though - a
++    // video call to watch, for one. With use-fake-device-for-media-stream the
++    // only devices Chromium has are synthetic, so a camera and microphone
++    // request is granted then: the page gets the fake ones, never the
++    // machine's. Without that switch, and for screen capture always, the
++    // request is refused.
 +    bool OnRequestMediaAccessPermission(CefRefPtr<CefBrowser> browser,
 +        CefRefPtr<CefFrame> frame, const CefString& requesting_origin,
 +        uint32_t requested_permissions,
 +        CefRefPtr<CefMediaAccessCallback> callback) override
 +    {
-+      GST_INFO_OBJECT (src, "Refusing media access for %s",
-+          requesting_origin.ToString().c_str());
-+      callback->Cancel();
++      const uint32_t devices = CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE |
++          CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE;
++      bool fake = CefCommandLine::GetGlobalCommandLine()->HasSwitch(
++          "use-fake-device-for-media-stream");
++      if (fake && requested_permissions != 0 &&
++          (requested_permissions & ~devices) == 0) {
++        GST_INFO_OBJECT (src, "Granting fake media devices to %s",
++            requesting_origin.ToString().c_str());
++        callback->Continue(requested_permissions);
++      } else {
++        GST_INFO_OBJECT (src, "Refusing media access for %s",
++            requesting_origin.ToString().c_str());
++        callback->Cancel();
++      }
 +      return true;
 +    }
 +
