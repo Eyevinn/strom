@@ -91,6 +91,23 @@ impl MediaPlayerState {
         Mutex::new(vec![None; n])
     }
 
+    /// Run `internal` on the flow's clock and base time, so a running time
+    /// means the same in both pipelines (see `timing`). Without a start time
+    /// the internal pipeline keeps that base time through pause and resume.
+    /// Returns false when the flow is not playing yet.
+    pub fn follow_main_clock(&self, internal: &gst::Pipeline) -> bool {
+        let Some(main) = self.main_pipeline.upgrade() else {
+            return false;
+        };
+        let (Some(clock), Some(base)) = (main.clock(), main.base_time()) else {
+            return false;
+        };
+        internal.use_clock(Some(&clock));
+        internal.set_start_time(gst::ClockTime::NONE);
+        internal.set_base_time(base);
+        true
+    }
+
     /// Free every slot, for a new file.
     pub fn free_all_slots(&self) {
         for slots in [&self.video_slots, &self.audio_slots] {
@@ -266,12 +283,13 @@ impl MediaPlayerState {
         // Reset linked flags and timestamp offset so new pads get linked
         // and the bridge recomputes the offset from the first buffer
         self.free_all_slots();
-        self.timing.reset(None);
+        self.timing.reset(None, &self.main_pipeline);
 
         // Set the new URI on source element
         source_element.set_property("uri", &uri);
 
         // Start playing again
+        self.follow_main_clock(pipeline);
         pipeline.set_state(gst::State::Playing).map_err(|e| {
             error!("Failed to start internal pipeline: {:?}", e);
             "Failed to start playback".to_string()
@@ -293,7 +311,8 @@ impl MediaPlayerState {
             .ok_or("Internal pipeline not created")?;
         // Reset timestamp offset so the bridge recomputes from the first buffer
         // after resume — prevents accumulated drift from pause duration.
-        self.timing.reset(Some(pipeline));
+        self.timing.reset(Some(pipeline), &self.main_pipeline);
+        self.follow_main_clock(pipeline);
         pipeline.set_state(gst::State::Playing).map_err(|e| {
             error!("Failed to resume playback: {:?}", e);
             "Failed to resume playback".to_string()
@@ -348,7 +367,7 @@ impl MediaPlayerState {
         // Reset timestamp offset so the bridge recomputes from the first buffer
         // after the seek — the file PTS jumps but main pipeline running time doesn't.
         if let Ok(guard) = self.internal_pipeline.read() {
-            self.timing.reset(guard.as_ref());
+            self.timing.reset(guard.as_ref(), &self.main_pipeline);
         }
 
         let seek_result = source.seek_simple(

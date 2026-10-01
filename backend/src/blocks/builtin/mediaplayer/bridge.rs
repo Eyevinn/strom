@@ -432,7 +432,7 @@ fn link_pad_through_clocksync(
         .map_err(|e| format!("sync appsink state: {:?}", e))?;
 
     if sync {
-        timing::arm(&clocksync, &state.timing);
+        timing::arm(&clocksync, &state.timing, &state.main_pipeline);
     }
 
     // Set up bridge callback: appsink -> appsrc, restamped into the main
@@ -488,28 +488,7 @@ fn link_pad_through_clocksync(
                     return Ok(gst::FlowSuccess::Ok);
                 };
                 let now = clock.time().saturating_sub(*base).nseconds() as i64;
-                // Once the internal pipeline plays, its clocksync paced the
-                // buffer on the internal clock. The flow's clock can be
-                // another one - realtime, PTP, NTP - so the internal base
-                // time is carried over into main-clock terms, read fresh
-                // for each buffer.
-                let paced = if sync {
-                    match (sink.clock(), sink.base_time()) {
-                        (Some(internal_clock), Some(internal_base)) => {
-                            let clocks = clock.time().nseconds() as i64
-                                - internal_clock.time().nseconds() as i64;
-                            Some(
-                                internal_base.nseconds() as i64 + clocks
-                                    - base.nseconds() as i64,
-                            )
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                let placed = timing.place(rt.nseconds() as i64, now, paced);
+                let placed = timing.place(rt.nseconds() as i64, now, sync);
                 if let Some(lateness) = placed.resynced_after {
                     timing::log_resync(&instance, &media_type_owned, lateness, &timing);
                     if let (Some(internal), Some(offset)) =
@@ -1022,8 +1001,10 @@ mod tests {
         state.main_pipeline.set(Some(&main));
         let state = Arc::new(state);
 
-        // The internal pipeline, fed like a live stream.
+        // The internal pipeline, fed like a live stream, on the flow's clock
+        // as the block runs it.
         let internal = gst::Pipeline::new();
+        assert!(state.follow_main_clock(&internal));
         let src = gst_app::AppSrc::builder()
             .format(gst::Format::Time)
             .caps(&caps)
@@ -1081,6 +1062,118 @@ mod tests {
                 *pts >= now - SLACK_NS,
                 "buffer {} arrived {} ms after its time in the main pipeline",
                 n,
+                (now - pts) / 1_000_000
+            );
+        }
+    }
+
+    /// A file switch takes the internal pipeline through READY and back, which
+    /// gave it a new base time while the clocksync offset still counted from
+    /// the old one: after the switch one frame came through, then nothing for
+    /// seconds, and the encoders downstream reported buffer age. Playback has
+    /// to carry on, on time, after a switch - audio and video both, on a flow
+    /// whose clock is not the internal pipeline's default one.
+    #[test]
+    fn playback_carries_on_in_time_after_a_file_switch() {
+        let _ = gst::init();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("av.mkv");
+        let writer = gst::parse::launch(&format!(
+            "matroskamux name=mux ! filesink location={} \
+             videotestsrc num-buffers=100 ! video/x-raw,format=I420,width=64,height=48,framerate=25/1 ! mux. \
+             audiotestsrc num-buffers=200 samplesperbuffer=960 ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux.",
+            path.display()
+        ))
+        .expect("matroskamux, videotestsrc and audiotestsrc are installed in CI");
+        writer.set_state(gst::State::Playing).unwrap();
+        writer
+            .bus()
+            .unwrap()
+            .timed_pop_filtered(gst::ClockTime::from_seconds(20), &[gst::MessageType::Eos])
+            .expect("writing the test file finishes");
+        writer.set_state(gst::State::Null).unwrap();
+        let uri = format!("file://{}", path.display());
+
+        // The flow, on a realtime clock, with a sink per output that notes
+        // when each buffer arrives against what it is stamped with.
+        let main = gst::Pipeline::new();
+        let realtime = gst::glib::Object::builder::<gst::SystemClock>()
+            .property("clock-type", gst::ClockType::Realtime)
+            .build();
+        main.use_clock(Some(&realtime));
+        let arrivals = Arc::new(Mutex::new(Vec::<(&str, i64, i64)>::new()));
+        let mut outs = Vec::new();
+        for kind in ["video", "audio"] {
+            let out = gst_app::AppSrc::builder()
+                .format(gst::Format::Time)
+                .is_live(true)
+                .build();
+            let sink = gst_app::AppSink::builder().sync(false).build();
+            main.add_many([out.upcast_ref(), sink.upcast_ref::<gst::Element>()])
+                .unwrap();
+            out.link(&sink).unwrap();
+            let main_weak = main.downgrade();
+            let arrivals = Arc::clone(&arrivals);
+            sink.set_callbacks(
+                gst_app::AppSinkCallbacks::builder()
+                    .new_sample(move |s| {
+                        let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        let main = main_weak.upgrade().ok_or(gst::FlowError::Eos)?;
+                        let now = main.current_running_time().unwrap().nseconds() as i64;
+                        let pts = sample.buffer().unwrap().pts().unwrap().nseconds() as i64;
+                        arrivals.lock().unwrap().push((kind, pts, now));
+                        Ok(gst::FlowSuccess::Ok)
+                    })
+                    .build(),
+            );
+            outs.push(out);
+        }
+        main.set_state(gst::State::Playing).unwrap();
+        let _ = main.state(gst::ClockTime::from_seconds(5));
+
+        let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
+        state.audio_appsrcs = vec![outs.pop().unwrap()];
+        state.video_appsrcs = vec![outs.pop().unwrap()];
+        state.video_slots = MediaPlayerState::free_slots(1);
+        state.audio_slots = MediaPlayerState::free_slots(1);
+        state.timing = Arc::new(timing::Timing::new(200));
+        state.main_pipeline.set(Some(&main));
+        let state = Arc::new(state);
+        let internal = create_decode_pipeline("test", &state, Some(&uri)).unwrap();
+        *state.internal_pipeline.write().unwrap() = Some(internal.clone());
+        state.set_playlist(vec![uri.clone(), uri]);
+        assert!(state.follow_main_clock(&internal));
+        internal.set_state(gst::State::Playing).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let switched_at = main.current_running_time().unwrap().nseconds() as i64;
+        state.goto(1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let _ = internal.set_state(gst::State::Null);
+        let _ = main.set_state(gst::State::Null);
+
+        let arrivals = arrivals.lock().unwrap().clone();
+        for kind in ["video", "audio"] {
+            let after = arrivals
+                .iter()
+                .filter(|(k, _, now)| *k == kind && *now > switched_at)
+                .count();
+            // 1.5 s after the switch, less the 200 ms delay: about 32 video
+            // frames and 65 audio buffers.
+            let expected = if kind == "video" { 20 } else { 40 };
+            assert!(
+                after >= expected,
+                "only {} {} buffers in 1.5 s after the switch",
+                after,
+                kind
+            );
+        }
+        const SLACK_NS: i64 = 150_000_000;
+        for (kind, pts, now) in &arrivals {
+            assert!(
+                *pts >= now - SLACK_NS,
+                "a {} buffer arrived {} ms after its time in the flow",
+                kind,
                 (now - pts) / 1_000_000
             );
         }

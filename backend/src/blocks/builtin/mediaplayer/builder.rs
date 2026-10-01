@@ -385,13 +385,10 @@ fn connect_main_pipeline_handler(
         }
     }
 
-    // Start the internal pipeline
-    if let Err(e) = internal_pipeline.set_state(gst::State::Playing) {
-        tracing::error!(
-            "Media Player {}: Failed to start internal pipeline: {:?}",
-            block_id,
-            e
-        );
+    // The internal pipeline runs on the flow's clock and base time, which the
+    // flow only has once it plays. Start it now if it does, or when it does.
+    if state.follow_main_clock(&internal_pipeline) {
+        start_internal(&internal_pipeline, &block_id);
     }
 
     // Watch internal pipeline bus for EOS, errors, state changes
@@ -448,9 +445,39 @@ fn connect_main_pipeline_handler(
         },
     );
 
-    // Return a no-op handler on the main bus — all real work is on the internal bus.
-    // We must return a valid SignalHandlerId per BusMessageConnectFn contract.
-    main_bus.connect_message(None, |_bus, _msg| {})
+    // Start the internal pipeline when the flow reaches PLAYING. Weak refs
+    // only: the main bus outlives neither.
+    let state_weak = Arc::downgrade(&state);
+    let internal_weak = internal_pipeline.downgrade();
+    main_bus.connect_message(Some("state-changed"), move |_bus, msg| {
+        let gst::MessageView::StateChanged(change) = msg.view() else {
+            return;
+        };
+        if change.current() != gst::State::Playing
+            || !msg.src().is_some_and(|s| s.is::<gst::Pipeline>())
+        {
+            return;
+        }
+        let (Some(state), Some(internal)) = (state_weak.upgrade(), internal_weak.upgrade()) else {
+            return;
+        };
+        if internal.current_state() != gst::State::Playing
+            && internal.pending_state() != gst::State::Playing
+            && state.follow_main_clock(&internal)
+        {
+            start_internal(&internal, &state.block_id);
+        }
+    })
+}
+
+fn start_internal(internal: &gst::Pipeline, block_id: &str) {
+    if let Err(e) = internal.set_state(gst::State::Playing) {
+        tracing::error!(
+            "Media Player {}: Failed to start internal pipeline: {:?}",
+            block_id,
+            e
+        );
+    }
 }
 
 #[cfg(test)]

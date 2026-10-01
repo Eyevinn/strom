@@ -1,16 +1,21 @@
 //! When each buffer leaves the internal pipeline, and what it is stamped with
 //! in the main one.
 //!
+//! The internal pipeline runs on the flow's clock and base time (see
+//! `MediaPlayerState::follow_main_clock`), so a running time means the same
+//! in both pipelines and nothing needs converting.
+//!
 //! A file starts at running time zero, but a live stream does not: SVT's HLS
 //! carries the broadcaster's own timeline, over a thousand hours in. Paced
 //! against its raw running time, a clocksync would wait that long, and an
-//! unpaced stream arrives in bursts, a segment at a time. So every stream is
-//! placed on a shared baseline taken from its first buffer, plus a playout
-//! delay that holds data back to ride out network and decoder jitter.
+//! unpaced stream arrives in bursts, a segment at a time. So the first buffer
+//! sets one clocksync `ts-offset` for every stream of the player: it leaves a
+//! playout delay from now, and the rest keep their spacing from it. Each
+//! buffer is stamped with the running time its clocksync let it go at.
 //!
 //! A stall longer than the delay would otherwise leave every later buffer
-//! late for good. A late buffer re-syncs instead: the baseline moves forward
-//! by the lateness plus the delay, which skips the gap in the output and
+//! late for good. A buffer that far late re-syncs instead: the offset moves
+//! on by the lateness plus the delay, which skips the gap in the output and
 //! refills the delay.
 
 use gstreamer as gst;
@@ -22,9 +27,11 @@ use tracing::{debug, info};
 /// Not set yet; taken from the next buffer.
 const UNSET: i64 = i64::MIN;
 
-/// How late a paced buffer may reach the main pipeline before it re-syncs:
-/// about a frame. Scheduling alone stays far below it.
-pub const LATE_RESYNC_NS: i64 = 40_000_000;
+/// How late a paced buffer may reach the main pipeline before it re-syncs.
+/// A busy CPU makes a buffer tens of ms late now and then, and the mixers'
+/// latency covers that; a re-sync skips the delay's worth of output, so it
+/// is kept for a source that has run dry.
+pub const LATE_RESYNC_NS: i64 = 250_000_000;
 
 /// Default playout delay.
 pub const DEFAULT_PLAYOUT_DELAY_MS: u64 = 500;
@@ -35,8 +42,8 @@ pub const MAX_PLAYOUT_DELAY_MS: u64 = 5_000;
 
 /// Shared by every stream of one player, so audio and video stay together.
 pub struct Timing {
-    /// Main-pipeline running time minus internal running time: what a buffer
-    /// is stamped with is its running time plus this.
+    /// For unpaced buffers (sync off): what a buffer is stamped with is its
+    /// running time plus this, taken from the first one's arrival.
     map_offset: AtomicI64,
     /// The `ts-offset` every clocksync paces with.
     sync_offset: AtomicI64,
@@ -73,18 +80,22 @@ impl Timing {
 
     /// Start over from the next buffer: a new file, a seek, a resume.
     /// `internal` gets its clocksyncs ready to take the new baseline.
-    pub fn reset(self: &Arc<Self>, internal: Option<&gst::Pipeline>) {
+    pub fn reset(
+        self: &Arc<Self>,
+        internal: Option<&gst::Pipeline>,
+        main: &gst::glib::WeakRef<gst::Pipeline>,
+    ) {
         self.map_offset.store(UNSET, Ordering::Release);
         self.sync_offset.store(UNSET, Ordering::Release);
         if let Some(pipeline) = internal {
             for clocksync in clocksyncs(pipeline) {
-                arm(&clocksync, self);
+                arm(&clocksync, self, main);
             }
         }
     }
 
     /// The clocksync offset for a stream whose first buffer has running time
-    /// `rt` when the internal pipeline is at `now`: it leaves `delay` from now.
+    /// `rt` when the flow is at `now`: it leaves `delay` from now.
     /// Whichever stream gets here first sets it for all of them.
     fn take_sync_offset(&self, rt: i64, now: i64) -> i64 {
         let proposed = now - rt + self.delay;
@@ -99,21 +110,19 @@ impl Timing {
         }
     }
 
-    /// Place a buffer with internal running time `rt`, reaching the bridge
-    /// when the main pipeline is at `now`.
+    /// Place a buffer with running time `rt`, reaching the bridge when the
+    /// main pipeline is at `now`.
     ///
-    /// `paced` is the internal pipeline's base time minus the main one's,
-    /// both in main-clock terms, when a clocksync paced the buffer. The buffer then
-    /// left at `rt + sync_offset` internal running time, which is its time in
-    /// the main pipeline too. One more than [`LATE_RESYNC_NS`] late found the
-    /// source starved: the offset moves on by the lateness plus the delay,
-    /// for every stream, so the next buffers wait out the delay again.
+    /// A `paced` buffer left its clocksync at `rt + sync_offset`, which is
+    /// its time in the main pipeline. One more than [`LATE_RESYNC_NS`] late
+    /// found the source dry: the offset moves on by the lateness plus the
+    /// delay, for every stream, so the next buffers wait out the delay again.
     ///
-    /// Unpaced buffers - sync off, or before the internal pipeline plays -
-    /// keep the spacing of their running times from the first one's arrival.
-    pub fn place(&self, rt: i64, now: i64, paced: Option<i64>) -> Placement {
+    /// Unpaced buffers - sync off - keep the spacing of their running times
+    /// from the first one's arrival.
+    pub fn place(&self, rt: i64, now: i64, paced: bool) -> Placement {
         let sync = self.sync_offset.load(Ordering::Acquire);
-        let Some(base_delta) = paced.filter(|_| sync != UNSET) else {
+        if !paced || sync == UNSET {
             let map = match self.map_offset.compare_exchange(
                 UNSET,
                 now - rt,
@@ -127,8 +136,8 @@ impl Timing {
                 running_time: rt + map,
                 resynced_after: None,
             };
-        };
-        let due = rt + sync + base_delta;
+        }
+        let due = rt + sync;
         let lateness = now - due;
         if lateness <= LATE_RESYNC_NS {
             return Placement {
@@ -149,7 +158,7 @@ impl Timing {
                 resynced_after: Some(lateness),
             },
             Err(current) => Placement {
-                running_time: rt + current + base_delta,
+                running_time: rt + current,
                 resynced_after: None,
             },
         }
@@ -175,12 +184,18 @@ pub fn apply_sync_offset(pipeline: &gst::Pipeline, offset: i64) {
 
 /// Have `clocksync` take the shared offset from its next buffer, before it
 /// paces that buffer. The probe removes itself, so it sees one buffer. It
-/// holds the `Timing`, which holds no elements, so there is no cycle.
-pub fn arm(clocksync: &gst::Element, timing: &Arc<Timing>) {
+/// holds the `Timing`, which holds no elements, and a weak ref to the flow's
+/// pipeline, so there is no cycle.
+pub fn arm(
+    clocksync: &gst::Element,
+    timing: &Arc<Timing>,
+    main: &gst::glib::WeakRef<gst::Pipeline>,
+) {
     let Some(pad) = clocksync.static_pad("sink") else {
         return;
     };
     let timing = Arc::clone(timing);
+    let main = main.clone();
     pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
         let Some(gst::PadProbeData::Buffer(buffer)) = info.data.as_ref() else {
             return gst::PadProbeReturn::Ok;
@@ -199,11 +214,13 @@ pub fn arm(clocksync: &gst::Element, timing: &Arc<Timing>) {
         let Some(rt) = rt else {
             return gst::PadProbeReturn::Remove;
         };
-        // Without a clock the internal pipeline is not playing yet, and its
-        // running time is about to start from zero.
-        let now = match (clocksync.clock(), clocksync.base_time()) {
-            (Some(clock), Some(base)) => clock.time().saturating_sub(base).nseconds() as i64,
-            _ => 0,
+        // The flow's running time; the internal pipeline shares it.
+        let Some(now) = main
+            .upgrade()
+            .and_then(|p| p.current_running_time())
+            .map(|t| t.nseconds() as i64)
+        else {
+            return gst::PadProbeReturn::Remove;
         };
         let offset = timing.take_sync_offset(rt.nseconds() as i64, now);
         clocksync.set_property("ts-offset", offset);
@@ -254,11 +271,9 @@ mod tests {
     fn a_paced_buffer_is_stamped_with_the_time_its_clocksync_let_it_go() {
         let t = Timing::new(500);
         let rt = 3_668_182 * 1_000 * MS;
-        let sync = t.take_sync_offset(rt, 0);
-        // The internal pipeline started 7 s after the main one.
-        let delta = 7_000 * MS;
-        let p = t.place(rt + 40 * MS, 7_540 * MS, Some(delta));
-        assert_eq!(p.running_time, rt + 40 * MS + sync + delta);
+        let sync = t.take_sync_offset(rt, 7_000 * MS);
+        let p = t.place(rt + 40 * MS, 7_540 * MS, true);
+        assert_eq!(p.running_time, rt + 40 * MS + sync);
         assert_eq!(p.running_time, 7_540 * MS);
         assert_eq!(p.resynced_after, None);
     }
@@ -270,36 +285,40 @@ mod tests {
     fn a_late_buffer_moves_the_offset_and_the_next_is_on_time() {
         let t = Timing::new(500);
         t.take_sync_offset(0, 0); // due at rt + 500 ms
-        assert_eq!(t.place(0, 500 * MS, Some(0)).running_time, 500 * MS);
+        assert_eq!(t.place(0, 500 * MS, true).running_time, 500 * MS);
 
         // 40 ms of content arrives 300 ms after it was due.
-        let late = t.place(40 * MS, 840 * MS, Some(0));
+        let late = t.place(40 * MS, 840 * MS, true);
         assert_eq!(late.resynced_after, Some(300 * MS));
         // It goes out the delay ahead.
         assert_eq!(late.running_time, 840 * MS + 500 * MS);
         assert_eq!(t.sync_offset(), Some(500 * MS + 800 * MS));
 
         // The clocksync now lets the next one go on the new schedule.
-        let next = t.place(80 * MS, 1_380 * MS, Some(0));
+        let next = t.place(80 * MS, 1_380 * MS, true);
         assert_eq!(next.resynced_after, None);
         assert_eq!(next.running_time, 1_380 * MS);
     }
 
+    /// A busy CPU makes buffers tens of ms late; re-syncing on that skipped
+    /// half a second of output each time.
     #[test]
     fn a_little_late_is_left_alone() {
         let t = Timing::new(500);
         t.take_sync_offset(0, 0);
-        let p = t.place(40 * MS, 540 * MS + LATE_RESYNC_NS, Some(0));
-        assert_eq!(p.resynced_after, None);
-        assert_eq!(p.running_time, 540 * MS);
+        for late in [44 * MS, 64 * MS, LATE_RESYNC_NS] {
+            let p = t.place(40 * MS, 540 * MS + late, true);
+            assert_eq!(p.resynced_after, None, "{} ms", late / MS);
+            assert_eq!(p.running_time, 540 * MS);
+        }
     }
 
     #[test]
     fn unpaced_buffers_keep_their_spacing_and_never_resync() {
         let t = Timing::new(500);
         t.take_sync_offset(0, 0);
-        assert_eq!(t.place(0, 100 * MS, None).running_time, 100 * MS);
-        let p = t.place(40 * MS, 5_000 * MS, None);
+        assert_eq!(t.place(0, 100 * MS, false).running_time, 100 * MS);
+        let p = t.place(40 * MS, 5_000 * MS, false);
         assert_eq!(p.resynced_after, None);
         assert_eq!(p.running_time, 140 * MS);
     }
@@ -308,9 +327,9 @@ mod tests {
     fn reset_takes_a_new_baseline() {
         let t = Arc::new(Timing::new(500));
         t.take_sync_offset(0, 0);
-        t.place(0, 1_000 * MS, None);
-        t.reset(None);
+        t.place(0, 1_000 * MS, false);
+        t.reset(None, &gst::glib::WeakRef::new());
         assert_eq!(t.sync_offset(), None);
-        assert_eq!(t.place(0, 9_000 * MS, None).running_time, 9_000 * MS);
+        assert_eq!(t.place(0, 9_000 * MS, false).running_time, 9_000 * MS);
     }
 }
