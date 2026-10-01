@@ -336,10 +336,10 @@ async fn ndi_status_failure_means_unavailable() {
 #[tokio::test]
 async fn ndi_sources_are_fetched_when_available() {
     let sources = r#"[{"id":"n1","name":"Camera 1","device_class":"Source/Network",
-        "category":"ndi","provider":"ndideviceprovider","first_seen_secs_ago":3,
-        "last_seen_secs_ago":1}]"#;
+        "category":"networksource","provider":"ndideviceprovider","properties":{},
+        "first_seen_secs_ago":3,"last_seen_secs_ago":1}]"#;
     let (base, rx) = serve(vec![
-        respond(200, r#"{"available":true}"#),
+        respond(200, r#"{"available":true,"source_count":1}"#),
         respond(200, sources),
     ]);
 
