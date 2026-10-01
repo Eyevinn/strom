@@ -7,6 +7,9 @@ use std::time::Duration;
 use strom_types::mediaplayer::PlayerState;
 use strom_types::FlowId;
 
+mod channels;
+use channels::LIVE_CHANNELS;
+
 /// Time-to-live for media player data before it's considered stale.
 const PLAYER_DATA_TTL: Duration = Duration::from_millis(1000);
 
@@ -656,6 +659,14 @@ impl PlaylistEditor {
         Some((index, unsaved))
     }
 
+    /// Put `url` first in the list and play it. The list is unsaved now, so
+    /// `take_goto` hands it over to be saved before entry 0 is played.
+    fn play_now(&mut self, url: &str) {
+        self.playlist.insert(0, url.to_string());
+        self.dirty = true;
+        self.goto_request = Some(0);
+    }
+
     /// Request to navigate to a path in the browser.
     /// Returns the path to load if refresh is needed.
     pub fn get_browser_path_to_load(&mut self) -> Option<String> {
@@ -701,10 +712,23 @@ impl PlaylistEditor {
                                 .size(egui_extras::Size::remainder().at_least(120.0))
                                 .clip(true)
                                 .horizontal(|mut strip| {
-                                    // Left pane — file browser
+                                    // Left pane — file browser above live channels
                                     strip.cell(|ui| {
-                                        ui.heading("Server Media Files");
-                                        self.show_browser_panel(ui);
+                                        egui_extras::StripBuilder::new(ui)
+                                            .size(egui_extras::Size::relative(0.55))
+                                            .size(egui_extras::Size::remainder())
+                                            .clip(true)
+                                            .vertical(|mut strip| {
+                                                strip.cell(|ui| {
+                                                    ui.heading("Server Media Files");
+                                                    self.show_browser_panel(ui);
+                                                });
+                                                strip.cell(|ui| {
+                                                    ui.separator();
+                                                    ui.heading("Live Channels");
+                                                    self.show_channels_panel(ui);
+                                                });
+                                            });
                                     });
 
                                     // Draggable divider
@@ -845,6 +869,47 @@ impl PlaylistEditor {
                     }
                 });
         }
+    }
+
+    fn show_channels_panel(&mut self, ui: &mut Ui) {
+        ui.label("Click a channel to play it now, + to add it to the playlist.");
+        egui::ScrollArea::vertical()
+            .id_salt("live_channels_scroll")
+            .auto_shrink(false)
+            .max_height(ui.available_height())
+            .show(ui, |ui| {
+                let mut play = None;
+                let mut add = None;
+                for channel in LIVE_CHANNELS {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(egui_phosphor::regular::PLUS)
+                            .on_hover_text("Add to playlist")
+                            .clicked()
+                        {
+                            add = Some(channel.url);
+                        }
+                        if ui
+                            .button(format!(
+                                "{} {}",
+                                egui_phosphor::regular::BROADCAST,
+                                channel.name
+                            ))
+                            .on_hover_text(format!("{}\n\nClick to play now", channel.url))
+                            .clicked()
+                        {
+                            play = Some(channel.url);
+                        }
+                    });
+                }
+                if let Some(url) = add {
+                    self.playlist.push(url.to_string());
+                    self.dirty = true;
+                }
+                if let Some(url) = play {
+                    self.play_now(url);
+                }
+            });
     }
 
     fn show_playlist_panel(&mut self, ui: &mut Ui, result: &mut Option<Vec<String>>) {
@@ -1106,6 +1171,28 @@ mod tests {
         assert_eq!(index, 2);
         assert_eq!(unsaved.as_deref().map(|p| p.len()), Some(3));
         assert!(!editor.dirty);
+    }
+
+    #[test]
+    fn a_channel_played_now_goes_first_and_plays_after_the_list_is_saved() {
+        let mut editor = PlaylistEditor::new(uuid::Uuid::nil(), "b".into());
+        editor.set_playlist(vec!["a.mp4".into()]);
+        let channel = &LIVE_CHANNELS[0];
+
+        editor.play_now(channel.url);
+
+        assert_eq!(
+            editor.take_goto(),
+            Some((0, Some(vec![channel.url.to_string(), "a.mp4".into()])))
+        );
+        assert!(!editor.dirty);
+    }
+
+    #[test]
+    fn every_live_channel_is_a_url_the_player_takes() {
+        for channel in LIVE_CHANNELS {
+            assert!(is_url(channel.url), "{}: {}", channel.name, channel.url);
+        }
     }
 
     #[test]
