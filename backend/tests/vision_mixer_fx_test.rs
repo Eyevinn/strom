@@ -7,6 +7,8 @@
 //! context (probed like `shader_validation_test`; merely having the GL
 //! plugins installed is not enough, as headless CI runners show).
 
+pub mod common;
+
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
@@ -65,26 +67,10 @@ fn gl_environment_available() -> bool {
 /// exercising the FX engine.
 ///
 /// Missing GL elements are a different failure: every CI job installs them, so
-/// they go through `STROM_REQUIRE_GST_PLUGINS` like any other missing element,
+/// they fail under `STROM_REQUIRE_GST_PLUGINS` like any other missing element,
 /// rather than being folded into "no GL context" where the Linux jobs skip.
 fn gl_available_or_required() -> bool {
-    let missing: Vec<&str> = ["glvideomixerelement", "glshader", "gltestsrc"]
-        .into_iter()
-        .filter(|e| gstreamer::ElementFactory::find(e).is_none())
-        .collect();
-    if !missing.is_empty() {
-        // Either variable forbids the skip: a missing element is a broken install,
-        // and a platform that must render cannot render without them.
-        if let Some(var) = ["STROM_REQUIRE_GST_PLUGINS", "STROM_REQUIRE_GL"]
-            .into_iter()
-            .find(|v| strom_types::env::var_opt(v).is_some())
-        {
-            panic!(
-                "{var} is set but these elements are missing: {}",
-                missing.join(", ")
-            );
-        }
-        eprintln!("SKIP: GL elements missing: {}", missing.join(", "));
+    if !common::gl_elements_available(&["glvideomixerelement", "glshader", "gltestsrc"]) {
         return false;
     }
     if gl_environment_available() {

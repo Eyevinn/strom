@@ -9,6 +9,8 @@
 //! The whole test skips when the environment cannot create a GL context at
 //! all (probed with the identity fragment, which is trivially valid GLSL).
 
+pub mod common;
+
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -104,37 +106,15 @@ fn gl_environment_available() -> bool {
     }
 }
 
-/// Are the GL elements installed? Every CI job installs them, so a missing one
-/// is a broken install, not a headless runner: `STROM_REQUIRE_GST_PLUGINS`
-/// turns the skip into a failure, as it does for every other missing element.
-fn gl_elements_available() -> bool {
-    let missing: Vec<&str> = ["glshader", "gltestsrc"]
-        .into_iter()
-        .filter(|e| gst::ElementFactory::find(e).is_none())
-        .collect();
-    if missing.is_empty() {
-        return true;
-    }
-    // Either variable forbids the skip: a missing element is a broken install,
-    // and a platform that must render cannot render without them.
-    if let Some(var) = ["STROM_REQUIRE_GST_PLUGINS", "STROM_REQUIRE_GL"]
-        .into_iter()
-        .find(|v| strom_types::env::var_opt(v).is_some())
-    {
-        panic!(
-            "{var} is set but these elements are missing: {}",
-            missing.join(", ")
-        );
-    }
-    eprintln!("SKIP: GL elements missing: {}", missing.join(", "));
-    false
-}
+/// The GL elements this test needs. Every CI job installs them, so a missing
+/// one is a broken install, not a headless runner, and must not skip silently.
+const GL_ELEMENTS: &[&str] = &["glshader", "gltestsrc"];
 
 #[test]
 fn all_shader_fragments_compile() {
     gst::init().expect("gst init");
 
-    if !gl_elements_available() {
+    if !common::gl_elements_available(GL_ELEMENTS) {
         return;
     }
 
@@ -175,7 +155,7 @@ fn all_shader_fragments_compile() {
 fn runtime_fragment_swap_takes_effect() {
     gst::init().expect("gst init");
 
-    if !gl_elements_available() {
+    if !common::gl_elements_available(GL_ELEMENTS) {
         return;
     }
     if !gl_environment_available() {
