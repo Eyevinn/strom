@@ -874,7 +874,10 @@ fn assert_late_input_is_heard(rate: i32) {
 
     m.pipeline.set_state(gst::State::Playing).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
+    // An idle bus left to fixate on its own picks 44100; check the rate
+    // before the late link, which would otherwise fail and hide the cause.
     for bus in [
+        "audiomixer",
         "aux0_mixer",
         "aux1_mixer",
         "group0_mixer",
@@ -882,10 +885,18 @@ fn assert_late_input_is_heard(rate: i32) {
         "monitor_mixer",
     ] {
         let pad = m.element(bus).static_pad("src").unwrap();
-        while pad.current_caps().is_none() {
+        let caps = loop {
+            if let Some(caps) = pad.current_caps() {
+                break caps;
+            }
             assert!(Instant::now() < deadline, "{bus} never negotiated");
             std::thread::sleep(Duration::from_millis(20));
-        }
+        };
+        assert_eq!(
+            caps.structure(0).unwrap().get::<i32>("rate").unwrap(),
+            MIXER_SAMPLE_RATE,
+            "{bus} negotiated {caps}"
+        );
     }
 
     let src = gst::ElementFactory::make("audiotestsrc")
