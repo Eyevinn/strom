@@ -1223,10 +1223,20 @@ impl BlockBuilder for MixerBuilder {
                 // thread, so a direct-out consumer that stops pulling would
                 // block it and silence the channel on Main. The leaky queue
                 // drops direct-out audio instead.
+                //
+                // A consumer that syncs to the clock holds each buffer for the
+                // flow's latency, so the queue must hold that much audio or it
+                // leaks nearly all of it. The default limits (1 s, 200
+                // buffers) are below a 1-2 s flow latency, or below 400 ms
+                // with 1 ms buffers. A consumer that stalls and resumes
+                // first gets up to this much old audio.
                 let direct_queue_id = format!("{}:direct_queue_{}", instance_id, ch);
                 let direct_queue = gst::ElementFactory::make("queue")
                     .name(&direct_queue_id)
                     .property_from_str("leaky", "downstream")
+                    .property("max-size-time", 3 * gst::ClockTime::SECOND.nseconds())
+                    .property("max-size-buffers", 0u32)
+                    .property("max-size-bytes", 0u32)
                     .build()
                     .map_err(|e| {
                         BlockBuildError::ElementCreation(format!(

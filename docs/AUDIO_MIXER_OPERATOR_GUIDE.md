@@ -175,7 +175,8 @@ a channel routed only to a group reaches program through the group but
 is **silent on its direct out**.
 
 If nothing pulls from a direct out, its audio is dropped; Main is not
-held up.
+held up. A consumer that stops and resumes first receives up to 3 s of
+old audio.
 
 ### Quick routing matrix view
 

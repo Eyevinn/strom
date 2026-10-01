@@ -1492,8 +1492,8 @@ fn test_stalled_direct_out_consumer_does_not_starve_main() {
             gst::PadProbeReturn::Ok
         })
         .unwrap();
-    // Long enough to fill a default queue (1 s) and then some.
-    std::thread::sleep(Duration::from_millis(2500));
+    // Long enough to fill the direct queue (3 s) and then some.
+    std::thread::sleep(Duration::from_millis(4500));
     let main = snapshot(&main);
     consumer_pad.remove_probe(block);
 
@@ -1512,5 +1512,31 @@ fn test_stalled_direct_out_consumer_does_not_starve_main() {
         longest < 30,
         "Main lost the tone for {} ms in a row",
         longest * 10
+    );
+}
+
+/// A consumer that syncs to the clock (the Inter Output block's default)
+/// holds each buffer for the flow's latency. At 1.5 s the direct out must
+/// still deliver every buffer, not leak them while the consumer waits.
+#[test]
+fn test_direct_out_feeds_a_synced_consumer_at_high_latency() {
+    let m = assemble_as("mx_direct_synced", &direct_props(&[]));
+    feed(&m, 0, "sine");
+    feed(&m, 1, "silence");
+    let direct = capture(&m, "direct_out_tee_0", true);
+    m.pipeline
+        .set_latency(Some(gst::ClockTime::from_mseconds(1500)));
+    play_until_flowing(&m, &[&direct]);
+    std::thread::sleep(Duration::from_millis(4000));
+
+    // The envelope is keyed by sample time, so a dropped buffer is a missing
+    // bucket between the first and the last.
+    let keys: Vec<u64> = snapshot(&direct).keys().copied().skip(20).collect();
+    let span = (keys[keys.len() - 1] - keys[0] + 1) as usize;
+    assert!(span > 200, "direct out barely ran: {span} buckets");
+    let missing = span - keys.len();
+    assert!(
+        missing * 100 <= span,
+        "direct out lost {missing} of {span} 10 ms buckets"
     );
 }
