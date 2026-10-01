@@ -16,7 +16,7 @@ use crate::blocks::{
     APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
 };
 use crate::gst::ice_preflight;
-use crate::gst::keyframe_request;
+use crate::gst::keyframe_request::{self, RecoveryStep, VideoDamage};
 use crate::gst::rtp_hdrext;
 use crate::whip_session_manager::{SessionActivity, SessionCleanupRequest, WhipEndpointConfig};
 use gstreamer as gst;
@@ -352,6 +352,11 @@ pub fn build_whipserversrc(
     let video_decoding: Arc<Vec<AtomicBool>> =
         Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect());
 
+    // One per slot, raised by the slot's decode chain when a running session's
+    // video has lost data that only a keyframe can repair.
+    let video_damage: Arc<Vec<VideoDamage>> =
+        Arc::new((0..max_sessions).map(|_| VideoDamage::default()).collect());
+
     for slot in 0..max_sessions {
         let mut decodebins_for_slot: Vec<gst::glib::WeakRef<gst::Element>> = Vec::new();
 
@@ -517,6 +522,27 @@ pub fn build_whipserversrc(
                 prepare_idle_decodebin(&decodebin);
                 decodebins_for_slot.push(decodebin.downgrade());
 
+                // The depayloader decodebin plugs is the one element that sees
+                // a loss the jitterbuffer gave up on.
+                let video_damage_for_depay = video_damage.clone();
+                decodebin
+                    .downcast_ref::<gst::Bin>()
+                    .expect("decodebin is a bin")
+                    .connect_element_added(move |_bin, element| {
+                        // By klass, not by C type: the Rust `*depay2` elements
+                        // are registered too and do not derive from
+                        // RTPBaseDepayload.
+                        let is_depayloader = element
+                            .factory()
+                            .and_then(|f| {
+                                f.metadata(gst::ELEMENT_METADATA_KLASS).map(str::to_owned)
+                            })
+                            .is_some_and(|klass| klass.contains("Depayloader"));
+                        if is_depayloader {
+                            watch_depayloader_for_damage(element, &video_damage_for_depay, slot);
+                        }
+                    });
+
                 let videoconvert = gst::ElementFactory::make("videoconvert")
                     .name(&videoconvert_id)
                     .build()
@@ -533,10 +559,20 @@ pub fn build_whipserversrc(
                 // decodebin has dynamic pads — connect pad-added to link to videoconvert
                 let videoconvert_weak = videoconvert.downgrade();
                 let video_decoding_for_pad = video_decoding.clone();
+                let video_damage_for_pad = video_damage.clone();
                 decodebin.connect_pad_added(move |_dec, src_pad| {
                     if src_pad.direction() != gst::PadDirection::Src {
                         return;
                     }
+                    // Pictures out of the decoder: the other half of the
+                    // slot's silent-decoder check. Per frame, one atomic.
+                    let damage = video_damage_for_pad.clone();
+                    src_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, _info| {
+                        if let Some(damage) = damage.get(slot) {
+                            damage.decoded();
+                        }
+                        gst::PadProbeReturn::Ok
+                    });
                     // Video is decoding: whoever is asking for keyframes on
                     // this slot can stop.
                     if let Some(flag) = video_decoding_for_pad.get(slot) {
@@ -608,6 +644,7 @@ pub fn build_whipserversrc(
             pipeline_weak: gst::glib::WeakRef::new(),
             decode,
             video_decoding,
+            video_damage,
             jitterbuffer_latency_ms,
             do_retransmission,
             drop_on_latency,
@@ -627,6 +664,57 @@ pub fn build_whipserversrc(
         bus_message_handler: None,
         pad_properties: HashMap::new(),
     })
+}
+
+/// Report a mid-session recovery step for `slot`.
+fn log_recovery_step(step: RecoveryStep, slot: usize) {
+    match step {
+        RecoveryStep::Wait => {}
+        RecoveryStep::Request { attempt } => debug!(
+            "WHIP Input: slot {} video damaged (a gap, or the decoder stopped producing), requesting keyframe (PLI) attempt {}",
+            slot, attempt
+        ),
+        RecoveryStep::Recovered { after, requests } => info!(
+            "WHIP Input: slot {} video recovered after {} ms ({} keyframe request(s))",
+            slot,
+            after.as_millis(),
+            requests
+        ),
+        RecoveryStep::GaveUp { requests } => warn!(
+            "WHIP Input: slot {} video still damaged after {} keyframe request(s); not asking again until it recovers",
+            slot, requests
+        ),
+    }
+}
+
+/// Feed every access unit leaving a slot's video depayloader into the slot's
+/// damage flag. A BUFFER probe, so it runs per frame: atomics only.
+fn watch_depayloader_for_damage(depay: &gst::Element, damage: &Arc<Vec<VideoDamage>>, slot: usize) {
+    let Some(src) = depay.static_pad("src") else {
+        return;
+    };
+    let damage = damage.clone();
+    src.add_probe(
+        gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+        move |_pad, info| {
+            let Some(damage) = damage.get(slot) else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let observe = |buffer: &gst::BufferRef| {
+                let flags = buffer.flags();
+                damage.depayloaded(
+                    flags.contains(gst::BufferFlags::DISCONT),
+                    !flags.contains(gst::BufferFlags::DELTA_UNIT),
+                );
+            };
+            match &info.data {
+                Some(gst::PadProbeData::Buffer(buffer)) => observe(buffer),
+                Some(gst::PadProbeData::BufferList(list)) => list.iter().for_each(observe),
+                _ => {}
+            }
+            gst::PadProbeReturn::Ok
+        },
+    );
 }
 
 /// How long a session may go without a buffer before the watchdog tears it down.
@@ -916,6 +1004,11 @@ pub fn create_whipserversrc_for_session(
     if let Some(flag) = video_decoding.get(slot) {
         flag.store(false, Ordering::Relaxed);
     }
+    let video_damage = config.video_damage.clone();
+    if let Some(damage) = video_damage.get(slot) {
+        damage.clear();
+    }
+    let decode = config.decode;
 
     // Shared timestamp offset for A/V sync across audio and video appsrcs.
     // Computed from the first buffer on either stream:
@@ -1121,6 +1214,55 @@ pub fn create_whipserversrc_for_session(
                             "WHIP Input: could not spawn keyframe requester for slot {}: {}",
                             slot, e
                         );
+                    }
+
+                    // Once decoding, ask again whenever the slot's decode chain
+                    // reports damage only a keyframe repairs. Without decode
+                    // there is no decode chain, and nothing ever reports.
+                    if decode {
+                        let repair_pad = pad.downgrade();
+                        let repair_damage = video_damage.clone();
+                        let repair_stop = cleanup_sent_for_pads.clone();
+                        let repair_slot = slot;
+                        if let Err(e) = std::thread::Builder::new()
+                            .name(format!("whip-repair-{}", repair_slot))
+                            .spawn(move || {
+                                let Some(damage) = repair_damage.get(repair_slot) else {
+                                    return;
+                                };
+                                let epoch = Instant::now();
+                                keyframe_request::recover_while(
+                                    keyframe_request::RecoveryPolicy::default(),
+                                    damage,
+                                    // The session's teardown paths set the
+                                    // flag; a dropped session pipeline also
+                                    // ends it.
+                                    || {
+                                        repair_stop.load(Ordering::SeqCst)
+                                            || repair_pad.upgrade().is_none()
+                                    },
+                                    || epoch.elapsed(),
+                                    std::thread::sleep,
+                                    |step| {
+                                        log_recovery_step(step, repair_slot);
+                                        if let RecoveryStep::Request { .. } = step {
+                                            if let Some(pad) = repair_pad.upgrade() {
+                                                pad.send_event(
+                                                    gst_video::UpstreamForceKeyUnitEvent::builder()
+                                                        .all_headers(true)
+                                                        .build(),
+                                                );
+                                            }
+                                        }
+                                    },
+                                );
+                            })
+                        {
+                            warn!(
+                                "WHIP Input: could not spawn keyframe repairer for slot {}: {}",
+                                slot, e
+                            );
+                        }
                     }
                 }
 
