@@ -79,6 +79,7 @@ fn init_gst() {
         gst::init().expect("gst init");
         gstwebrtchttp::plugin_register_static().expect("register webrtchttp plugins");
         gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
+        strom::gpu::detect_gpu_capabilities();
     });
 }
 
