@@ -119,7 +119,7 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         ExposedProperty {
             name: "direct_outs".to_string(),
             label: "Direct Outs".to_string(),
-            description: "Add a direct_out_N output per channel: the channel's contribution to Main (after fader, mute and the to-Main switch, before the sum). A channel routed only to a group is silent on it. A channel with no input sends nothing, so an output that waits for its first audio (NDI, DeckLink audio) holds the flow until it has input.".to_string(),
+            description: "Add a direct_out_N output per channel: the channel's contribution to Main (after fader, mute and the to-Main switch, before the sum). A channel routed only to a group is silent on it. A channel with no input sends nothing, so an output that waits for its first audio (NDI, DeckLink audio, TAMS) gets nothing and keeps the flow from reporting playing until the channel has input; Main keeps playing.".to_string(),
             property_type: PropertyType::Bool,
             default_value: Some(PropertyValue::Bool(false)),
             mapping: PropertyMapping {
