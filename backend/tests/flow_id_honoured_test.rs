@@ -28,7 +28,7 @@ async fn creates_flow_with_the_supplied_id() {
     let chosen = Flow::new("scratch").id; // a fresh, known uuid
     flow.id = chosen;
 
-    let (status, body) = create_flow(State(state.clone()), JsonBody(flow))
+    let (status, body) = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect("create_flow should succeed");
 
@@ -53,13 +53,13 @@ async fn rejects_a_duplicate_id_with_conflict() {
     let mut first = Flow::new("first");
     let shared = Flow::new("scratch").id;
     first.id = shared;
-    let _first = create_flow(State(state.clone()), JsonBody(first))
+    let _first = create_flow(State(state.app()), JsonBody(first))
         .await
         .expect("first create should succeed");
 
     let mut second = Flow::new("second");
     second.id = shared;
-    let err = create_flow(State(state.clone()), JsonBody(second))
+    let err = create_flow(State(state.app()), JsonBody(second))
         .await
         .expect_err("a duplicate id must be rejected");
 
@@ -89,7 +89,7 @@ async fn assigns_an_id_when_the_caller_sends_nil() {
         "precondition: the request carries a nil id"
     );
 
-    let (status, body) = create_flow(State(state.clone()), JsonBody(flow))
+    let (status, body) = create_flow(State(state.app()), JsonBody(flow))
         .await
         .expect("create_flow should succeed");
 
@@ -119,7 +119,7 @@ async fn concurrent_creates_with_the_same_id_yield_one_flow() {
 
     let mut handles = Vec::with_capacity(attempts);
     for i in 0..attempts {
-        let state = state.clone();
+        let state = state.app();
         handles.push(tokio::spawn(async move {
             let mut flow = Flow::new(format!("racer-{i}"));
             flow.id = shared;
