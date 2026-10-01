@@ -5,13 +5,13 @@
 //! corresponding appsrc in the main pipeline.
 
 use super::state::MediaPlayerState;
+use super::timing;
 use crate::blocks::BlockBuildError;
 use crate::events::EventBroadcaster;
 use crate::gst::rtp_hdrext;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use strom_types::{FlowId, StromEvent};
 use tracing::{debug, error, info, warn};
@@ -431,12 +431,26 @@ fn link_pad_through_clocksync(
         .sync_state_with_parent()
         .map_err(|e| format!("sync appsink state: {:?}", e))?;
 
-    // Set up bridge callback: appsink → appsrc with timestamp offset
+    if sync {
+        timing::arm(&clocksync, &state.timing);
+    }
+
+    // Set up bridge callback: appsink -> appsrc, restamped into the main
+    // pipeline's running time.
     let appsrc_weak = appsrc.downgrade();
     let media_type_owned = media_type.to_string();
-    let ts_offset = Arc::clone(&state.ts_offset);
+    let timing = Arc::clone(&state.timing);
     let main_pipeline_weak = state.main_pipeline.clone();
-    let pushed_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let internal_pipeline_weak = pipeline.downgrade();
+    let instance = clocksync_name
+        .split("_clocksync_")
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let mut pushed: u64 = 0;
+    // The main pipeline's clock and base time, read once instead of per buffer.
+    // The internal pipeline runs on the same clock (see the builder).
+    let mut main_clock: Option<(gst::Clock, gst::ClockTime)> = None;
 
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
@@ -454,72 +468,78 @@ fn link_pad_through_clocksync(
                 };
 
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                let pts = buffer.pts();
+                let Some(pts) = buffer.pts() else {
+                    let _ = appsrc.push_sample(&sample);
+                    return Ok(gst::FlowSuccess::Ok);
+                };
+                let rt = sample
+                    .segment()
+                    .and_then(|s| s.downcast_ref::<gst::ClockTime>())
+                    .and_then(|s| s.to_running_time(pts))
+                    .unwrap_or(pts);
 
-                // Compute or reuse timestamp offset
-                let offset_ns = {
-                    let current = ts_offset.load(Ordering::Relaxed);
-                    if current != i64::MIN {
-                        current
-                    } else if let (Some(pts_val), Some(main_pipe)) =
-                        (pts, main_pipeline_weak.upgrade())
+                if main_clock.is_none() {
+                    main_clock = main_pipeline_weak
+                        .upgrade()
+                        .and_then(|p| Some((p.clock()?, p.base_time()?)));
+                }
+                // The main pipeline is not playing yet: the push would fail
+                // anyway, so take no baseline from it.
+                let Some((clock, base)) = main_clock.as_ref() else {
+                    return Ok(gst::FlowSuccess::Ok);
+                };
+                let now = clock.time().saturating_sub(*base).nseconds() as i64;
+                // Paced on the shared clock once the internal pipeline plays.
+                let paced = sync
+                    .then(|| sink.base_time())
+                    .flatten()
+                    .filter(|_| sink.clock().is_some())
+                    .map(|internal| internal.nseconds() as i64 - base.nseconds() as i64);
+
+                let placed = timing.place(rt.nseconds() as i64, now, paced);
+                if let Some(lateness) = placed.resynced_after {
+                    timing::log_resync(&instance, &media_type_owned, lateness, &timing);
+                    if let (Some(internal), Some(offset)) =
+                        (internal_pipeline_weak.upgrade(), timing.sync_offset())
                     {
-                        let clock = main_pipe.clock();
-                        let base_time = main_pipe.base_time();
-                        if let (Some(clock), Some(base_time)) = (clock, base_time) {
-                            let running = clock.time().saturating_sub(base_time);
-                            let offset = running.nseconds() as i64 - pts_val.nseconds() as i64;
-                            ts_offset.store(offset, Ordering::Relaxed);
-                            offset
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
+                        timing::apply_sync_offset(&internal, offset);
                     }
-                };
+                }
 
-                // Build the sample to push, applying timestamp offset if needed
-                let push_result = if offset_ns != 0 {
-                    if let Some(pts_val) = pts {
-                        let adjusted = (pts_val.nseconds() as i64 + offset_ns).max(0) as u64;
-                        let mut new_buf = buffer.copy();
-                        {
-                            let buf_ref = new_buf.get_mut().unwrap();
-                            buf_ref.set_pts(gst::ClockTime::from_nseconds(adjusted));
-                            if let Some(dts) = buffer.dts() {
-                                let adj_dts = (dts.nseconds() as i64 + offset_ns).max(0) as u64;
-                                buf_ref.set_dts(gst::ClockTime::from_nseconds(adj_dts));
-                            }
-                        }
-                        let owned_caps = sample.caps().map(|c| c.to_owned());
-                        let mut builder = gst::Sample::builder().buffer(&new_buf);
-                        if let Some(ref caps) = owned_caps {
-                            builder = builder.caps(caps);
-                        }
-                        appsrc.push_sample(&builder.build())
-                    } else {
-                        appsrc.push_sample(&sample)
+                // Move PTS and DTS by the same step, so their spacing holds.
+                let step = placed.running_time.max(0) - pts.nseconds() as i64;
+                let mut new_buf = buffer.copy();
+                {
+                    let buf_ref = new_buf.make_mut();
+                    buf_ref.set_pts(gst::ClockTime::from_nseconds(placed.running_time.max(0) as u64));
+                    if let Some(dts) = buffer.dts() {
+                        let adj = (dts.nseconds() as i64 + step).max(0) as u64;
+                        buf_ref.set_dts(gst::ClockTime::from_nseconds(adj));
                     }
-                } else {
-                    appsrc.push_sample(&sample)
-                };
+                }
+                let caps = sample.caps_owned();
+                let mut builder = gst::Sample::builder().buffer(&new_buf);
+                if let Some(caps) = caps.as_ref() {
+                    builder = builder.caps(caps);
+                }
+                let push_result = appsrc.push_sample(&builder.build());
 
                 // Don't kill the appsink on transient errors (e.g. FLUSHING while
                 // the main pipeline is still starting). Drop the sample and retry
                 // on the next one — the appsrc will accept data once it's ready.
                 match push_result {
                     Ok(_) => {
-                        if pushed_count.fetch_add(1, Ordering::Relaxed) == 0 {
+                        if pushed == 0 {
                             info!(
                                 "Media Player bridge: {} first sample delivered, pts={:?}",
                                 media_type_owned, pts
                             );
                         }
+                        pushed += 1;
                         Ok(gst::FlowSuccess::Ok)
                     }
                     Err(e) => {
-                        if pushed_count.load(Ordering::Relaxed) == 0 {
+                        if pushed == 0 {
                             debug!(
                                 "Media Player bridge: {} push_sample failed ({:?}), waiting for appsrc",
                                 media_type_owned, e
@@ -665,7 +685,7 @@ pub fn watch_internal_bus(
 mod tests {
     use super::super::state::Playlist;
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicI64};
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Mutex, RwLock};
 
     /// The bare minimum for the two pipeline constructors: they read `sync` and
@@ -691,7 +711,7 @@ mod tests {
             decode: true,
             sync: true,
             media_path: std::env::temp_dir(),
-            ts_offset: Arc::new(AtomicI64::new(i64::MIN)),
+            timing: Arc::new(super::super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: Mutex::new(None),
         })
@@ -930,6 +950,122 @@ mod tests {
             pipeline.by_name("test_appsink_audio_2").is_none(),
             "there is no third audio track"
         );
+    }
+
+    /// A live stream carries the broadcaster's timeline - SVT's HLS is over a
+    /// thousand hours in - and its network stalls now and then. Paced against
+    /// that raw running time the clocksync waited a thousand hours, so nothing
+    /// came out; and a stall used to leave every later buffer late for good.
+    /// Every buffer has to reach the main pipeline on time, stall or not.
+    #[test]
+    fn a_live_timeline_with_a_stall_plays_on_time_in_the_main_pipeline() {
+        let _ = gst::init();
+        const CHUNK_MS: u64 = 20;
+        let caps = gst::Caps::builder("audio/x-raw")
+            .field("format", "S16LE")
+            .field("layout", "interleaved")
+            .field("rate", 48_000i32)
+            .field("channels", 2i32)
+            .build();
+
+        // The main pipeline: the slot's appsrc, and a sink that notes when
+        // each buffer arrives against what it is stamped with.
+        let main = gst::Pipeline::new();
+        let out = gst_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            .is_live(true)
+            .build();
+        let sink = gst_app::AppSink::builder().sync(false).build();
+        main.add_many([out.upcast_ref(), sink.upcast_ref::<gst::Element>()])
+            .unwrap();
+        out.link(&sink).unwrap();
+        let arrivals = Arc::new(Mutex::new(Vec::<(i64, i64)>::new()));
+        let main_weak = main.downgrade();
+        let arrivals_cb = Arc::clone(&arrivals);
+        sink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |s| {
+                    let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    let main = main_weak.upgrade().ok_or(gst::FlowError::Eos)?;
+                    let now = main.current_running_time().unwrap().nseconds() as i64;
+                    let pts = sample.buffer().unwrap().pts().unwrap().nseconds() as i64;
+                    arrivals_cb.lock().unwrap().push((pts, now));
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+        main.set_state(gst::State::Playing).unwrap();
+
+        let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
+        state.audio_appsrcs = vec![out];
+        state.audio_slots = MediaPlayerState::free_slots(1);
+        state.timing = Arc::new(timing::Timing::new(100));
+        state.main_pipeline.set(Some(&main));
+        let state = Arc::new(state);
+
+        // The internal pipeline, fed like a live stream.
+        let internal = gst::Pipeline::new();
+        internal.use_clock(Some(&main.pipeline_clock()));
+        let src = gst_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            .caps(&caps)
+            .build();
+        internal.add(&src).unwrap();
+        route_pad(
+            &internal,
+            &src.static_pad("src").unwrap(),
+            &state,
+            "test",
+            true,
+            TrackKind::Audio,
+            "",
+        );
+        internal.set_state(gst::State::Playing).unwrap();
+
+        let start = gst::ClockTime::from_seconds(1000 * 3600);
+        let push = |i: u64| {
+            let mut buf = gst::Buffer::with_size((48 * CHUNK_MS * 4) as usize).unwrap();
+            {
+                let b = buf.get_mut().unwrap();
+                b.set_pts(start + gst::ClockTime::from_mseconds(i * CHUNK_MS));
+                b.set_duration(gst::ClockTime::from_mseconds(CHUNK_MS));
+            }
+            src.push_buffer(buf).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(CHUNK_MS));
+        };
+        for i in 0..15 {
+            push(i);
+        }
+        // The stall: nothing for 400 ms, far longer than the 100 ms delay.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        for i in 15..30 {
+            push(i);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+
+        let arrivals = arrivals.lock().unwrap().clone();
+        let _ = internal.set_state(gst::State::Null);
+        let _ = main.set_state(gst::State::Null);
+
+        assert!(
+            arrivals.len() >= 25,
+            "only {} of 30 buffers reached the main pipeline",
+            arrivals.len()
+        );
+        // The one buffer that finds the stall goes out early, by the delay.
+        // Every buffer must be on time: stamped no earlier than it arrives,
+        // less some slack for the hop through the main pipeline on a busy CI
+        // runner. Without the re-sync, the buffers after the stall are 350 ms
+        // late.
+        const SLACK_NS: i64 = 150_000_000;
+        for (n, (pts, now)) in arrivals.iter().enumerate() {
+            assert!(
+                *pts >= now - SLACK_NS,
+                "buffer {} arrived {} ms after its time in the main pipeline",
+                n,
+                (now - pts) / 1_000_000
+            );
+        }
     }
 
     #[test]

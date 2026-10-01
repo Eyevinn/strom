@@ -3,6 +3,7 @@
 use super::bridge;
 use super::normalize_uri;
 use super::state::{MediaPlayerKey, MediaPlayerState, MEDIA_PLAYER_REGISTRY};
+use super::timing::{self, Timing};
 use crate::blocks::{
     BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder, BusMessageConnectFn,
     APPSRC_MAX_BYTES_AUDIO, APPSRC_MAX_BYTES_VIDEO, APPSRC_MAX_TIME,
@@ -12,7 +13,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use strom_types::block::{ExternalPad, ExternalPads};
 use strom_types::element::ElementPadRef;
@@ -106,6 +107,15 @@ impl BlockBuilder for MediaPlayerBuilder {
             })
             .unwrap_or(true);
 
+        let playout_delay_ms = properties
+            .get("playout_delay_ms")
+            .and_then(|v| match v {
+                PropertyValue::UInt(u) => Some(*u),
+                PropertyValue::Int(i) => u64::try_from(*i).ok(),
+                _ => None,
+            })
+            .unwrap_or(timing::DEFAULT_PLAYOUT_DELAY_MS);
+
         let position_update_interval_ms = properties
             .get("position_update_interval")
             .and_then(|v| match v {
@@ -125,10 +135,11 @@ impl BlockBuilder for MediaPlayerBuilder {
         let block_id = instance_id.to_string();
 
         info!(
-            "Media Player {}: decode={}, sync={} ({})",
+            "Media Player {}: decode={}, sync={}, playout_delay={} ms ({})",
             instance_id,
             decode,
             sync,
+            playout_delay_ms,
             if decode {
                 "decoding to raw"
             } else {
@@ -169,6 +180,7 @@ impl BlockBuilder for MediaPlayerBuilder {
             loop_playlist,
             decode,
             sync,
+            playout_delay_ms,
             position_update_interval_ms,
             initial_playlist,
             media_path,
@@ -190,6 +202,7 @@ fn build_media_player(
     loop_playlist: bool,
     decode: bool,
     sync: bool,
+    playout_delay_ms: u64,
     position_update_interval_ms: u64,
     initial_playlist: Vec<String>,
     media_path: std::path::PathBuf,
@@ -254,7 +267,6 @@ fn build_media_player(
     let (num_video_slots, num_audio_slots) = (video_appsrcs.len(), audio_appsrcs.len());
     let player_instance_id = Uuid::new_v4();
     let source_element_weak = gst::glib::WeakRef::new();
-    let ts_offset = Arc::new(AtomicI64::new(i64::MIN));
     let state = Arc::new(MediaPlayerState {
         instance_id: player_instance_id,
         source_element: source_element_weak,
@@ -275,7 +287,7 @@ fn build_media_player(
         decode,
         sync,
         media_path: media_path.clone(),
-        ts_offset,
+        timing: Arc::new(Timing::new(playout_delay_ms)),
         main_pipeline: gst::glib::WeakRef::new(),
         bus_watch: std::sync::Mutex::new(None),
     });
@@ -371,6 +383,12 @@ fn connect_main_pipeline_handler(
             }
             current = obj.parent();
         }
+    }
+
+    // Pace on the main pipeline's clock: a flow may run on PTP or NTP, and the
+    // bridge stamps buffers in main-pipeline time.
+    if let Some(main) = state.main_pipeline.upgrade() {
+        internal_pipeline.use_clock(Some(&main.pipeline_clock()));
     }
 
     // Start the internal pipeline

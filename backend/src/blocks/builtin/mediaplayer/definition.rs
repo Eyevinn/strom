@@ -47,6 +47,25 @@ pub fn media_player_definition() -> BlockDefinition {
                 persist: None,
             },
             ExposedProperty {
+                name: "playout_delay_ms".to_string(),
+                label: "Playout Delay (ms)".to_string(),
+                description: "With Sync on, how long each buffer is held before it plays. \
+                              Rides out network and decoder hiccups on streams; a stall \
+                              longer than this skips ahead and refills the delay."
+                    .to_string(),
+                property_type: PropertyType::UInt,
+                default_value: Some(PropertyValue::UInt(
+                    super::timing::DEFAULT_PLAYOUT_DELAY_MS,
+                )),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "playout_delay_ms".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
                 name: "loop_playlist".to_string(),
                 label: "Loop Playlist".to_string(),
                 description: "Loop back to the first file when reaching the end of the playlist"

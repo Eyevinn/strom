@@ -12,6 +12,7 @@ mod bridge;
 mod builder;
 mod definition;
 mod state;
+mod timing;
 
 pub use builder::MediaPlayerBuilder;
 pub use definition::get_blocks;
@@ -83,7 +84,7 @@ mod tests {
         MediaPlayerKey, MediaPlayerRegistry, MediaPlayerState, Playlist,
     };
     use gstreamer as gst;
-    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, RwLock};
     use uuid::Uuid;
 
@@ -109,7 +110,7 @@ mod tests {
             decode: false,
             sync: true,
             media_path: std::path::PathBuf::from("/media"),
-            ts_offset: Arc::new(AtomicI64::new(i64::MIN)),
+            timing: Arc::new(super::timing::Timing::new(0)),
             main_pipeline: gst::glib::WeakRef::new(),
             bus_watch: std::sync::Mutex::new(None),
         }
