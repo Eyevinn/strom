@@ -8,6 +8,7 @@
 //! via a background task that receives cleanup requests through an mpsc channel.
 
 use crate::blocks::DynamicWebrtcbinStore;
+use crate::gst::keyframe_request::VideoDamage;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -51,6 +52,10 @@ pub struct WhipEndpointConfig {
     /// without the parameter sets that travel with a keyframe the depayloader
     /// can never produce an access unit. See `gst::keyframe_request`.
     pub video_decoding: Arc<Vec<AtomicBool>>,
+    /// Per-slot flag, set by the slot's decode chain when a running session's
+    /// video has lost data that only a keyframe can repair. The session asks
+    /// the publisher for one; see `gst::keyframe_request::VideoDamage`.
+    pub video_damage: Arc<Vec<VideoDamage>>,
     /// Jitterbuffer latency in milliseconds for the per-session webrtcbin.
     pub jitterbuffer_latency_ms: u32,
     /// Whether whipserversrc should request retransmission (NACK) of lost
@@ -1258,6 +1263,7 @@ mod tests {
             pipeline_weak: Default::default(),
             decode: true,
             video_decoding: Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect()),
+            video_damage: Arc::new((0..max_sessions).map(|_| VideoDamage::default()).collect()),
             jitterbuffer_latency_ms: 200,
             do_retransmission: true,
             drop_on_latency: true,
