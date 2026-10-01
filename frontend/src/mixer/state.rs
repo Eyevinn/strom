@@ -1,5 +1,16 @@
 use super::*;
 
+/// Block properties set in the property panel, not the mixer editor. The
+/// editor carries them through its saves unchanged.
+const BUILD_CONFIG_KEYS: [&str; 6] = [
+    "dsp_backend",
+    "force_live",
+    "latency",
+    "min_upstream_latency",
+    "direct_outs",
+    "sample_rate",
+];
+
 impl MixerEditor {
     /// Create a new mixer editor.
     pub fn new(flow_id: FlowId, block_id: String, num_channels: usize, api: ApiClient) -> Self {
@@ -41,11 +52,17 @@ impl MixerEditor {
             editing_label: None,
             strip_interacted: false,
             pipeline_running: false,
+            build_config: HashMap::new(),
         }
     }
 
     /// Load channel values from block properties.
     pub fn load_from_properties(&mut self, properties: &HashMap<String, PropertyValue>) {
+        self.build_config = BUILD_CONFIG_KEYS
+            .iter()
+            .filter_map(|&k| properties.get(k).map(|v| (k.to_string(), v.clone())))
+            .collect();
+
         // Load main fader and mute
         if let Some(PropertyValue::Float(f)) = properties.get("main_fader") {
             self.main_fader = *f as f32;
@@ -354,6 +371,7 @@ impl MixerEditor {
             "num_groups".to_string(),
             PropertyValue::Int(self.num_groups as i64),
         );
+        props.extend(self.build_config.clone());
 
         // Main bus
         set_f!("main_fader".to_string(), self.main_fader, DEFAULT_FADER);
@@ -616,6 +634,57 @@ impl MixerEditor {
             "num_groups".to_string(),
             PropertyValue::Int(self.num_groups as i64),
         );
+        props.extend(self.build_config.clone());
         props
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn editor_from(properties: &HashMap<String, PropertyValue>) -> MixerEditor {
+        let mut editor = MixerEditor::new(
+            FlowId::new_v4(),
+            "b0".to_string(),
+            2,
+            ApiClient::new_with_auth("http://example.com", None),
+        );
+        editor.load_from_properties(properties);
+        editor
+    }
+
+    #[test]
+    fn saves_keep_build_config_the_editor_does_not_edit() {
+        let loaded = HashMap::from([
+            ("num_channels".to_string(), PropertyValue::Int(2)),
+            ("direct_outs".to_string(), PropertyValue::Bool(true)),
+            (
+                "dsp_backend".to_string(),
+                PropertyValue::String("lv2".into()),
+            ),
+            ("latency".to_string(), PropertyValue::UInt(30)),
+            (
+                "sample_rate".to_string(),
+                PropertyValue::String("44100".into()),
+            ),
+        ]);
+        let editor = editor_from(&loaded);
+        // A save replaces the block's properties, so a key missing here
+        // reverts to its default on the next build: direct_out pads vanish
+        // and their links fail.
+        for saved in [
+            editor.collect_properties(),
+            editor.collect_structural_properties(),
+        ] {
+            for key in ["direct_outs", "dsp_backend", "latency", "sample_rate"] {
+                assert_eq!(
+                    format!("{:?}", saved.get(key)),
+                    format!("{:?}", loaded.get(key)),
+                    "{key} not carried"
+                );
+            }
+            assert!(!saved.contains_key("force_live"), "unset keys stay unset");
+        }
     }
 }
