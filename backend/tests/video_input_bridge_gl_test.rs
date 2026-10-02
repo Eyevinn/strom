@@ -10,6 +10,12 @@
 //! asks for a surfaceless EGL context, which Mesa's software rasteriser
 //! provides. It is its own test binary because that choice has to be made in
 //! the environment before GStreamer creates a GL display.
+//!
+//! Not built on Windows. The Windows CI runner has no OpenGL driver that
+//! GStreamer can use ("No GL shader support available"), and there is no
+//! software GL context to fall back to. Linux CI runs it.
+
+#![cfg(not(target_os = "windows"))]
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
