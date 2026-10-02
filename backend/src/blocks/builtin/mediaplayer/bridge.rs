@@ -835,15 +835,16 @@ mod tests {
     }
 
     /// A Matroska file with one video track and two audio tracks, all raw so no
-    /// decoder is needed. matroska and the test sources are in
+    /// decoder is needed, each about a second long: decodebin3 can let a 0.2 s
+    /// track end before it ever exposes a pad for it. matroska and the test sources are in
     /// gstreamer1.0-plugins-good/-base, installed in CI.
     fn write_two_audio_track_file(dir: &std::path::Path) -> String {
         let path = dir.join("two-audio.mkv");
         let pipeline = gst::parse::launch(&format!(
             "matroskamux name=mux ! filesink location={} \
              videotestsrc num-buffers=15 ! video/x-raw,format=I420,width=64,height=48,framerate=15/1 ! mux. \
-             audiotestsrc num-buffers=10 ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux. \
-             audiotestsrc num-buffers=10 wave=silence ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux.",
+             audiotestsrc num-buffers=47 ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux. \
+             audiotestsrc num-buffers=47 wave=silence ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux.",
             path.display()
         ))
         .expect("matroskamux, videotestsrc and audiotestsrc are installed in CI");
