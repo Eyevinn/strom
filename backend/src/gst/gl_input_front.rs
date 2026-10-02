@@ -129,7 +129,7 @@ pub fn install(front_sink: &gst::Pad, upload: &gst::Element, label: &str) {
         match decide(&caps, available) {
             FrontDecision::Direct => gst::PadProbeReturn::Ok,
             FrontDecision::CudaAdapter => {
-                match splice_adapter(&upload, CUDA_ADAPTER_FACTORY, &label) {
+                match splice_when_idle(&upload, CUDA_ADAPTER_FACTORY, &label, SPLICE_WAIT) {
                     Ok(()) => info!(
                         "{}: input offers CUDA memory only ({}), inserted {} in front of {}",
                         label,
@@ -175,7 +175,63 @@ pub fn install(front_sink: &gst::Pad, upload: &gst::Element, label: &str) {
     });
 }
 
+/// How long a splice waits for the input's data flow to pause. A push into a
+/// GL input finishes in a frame time or so; the wait is for that, not more.
+const SPLICE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Splice `adapter_factory` in front of `upload` while no buffer is moving
+/// between `upload` and its feeder, and wait up to `wait` for it.
+///
+/// At flow start nothing flows yet, but a producer can also turn to CUDA
+/// memory mid-stream - a Media Player moving on to a file the GPU decodes -
+/// while the feeder's streaming thread is still pushing the previous file's
+/// frames. Relinking under it would hand a buffer to a pad that is unlinked
+/// (`not-linked`, a flow error) or to an adapter not yet started (`flushing`,
+/// which stops the feeder for good). An IDLE probe holds the data flow off
+/// for the splice: it runs at once, on this thread, when the pad is idle, and
+/// otherwise on the streaming thread as soon as the current push returns.
+fn splice_when_idle(
+    upload: &gst::Element,
+    adapter_factory: &str,
+    label: &str,
+    wait: std::time::Duration,
+) -> Result<(), String> {
+    let feeder = upload
+        .static_pad("sink")
+        .and_then(|sink| sink.peer())
+        .ok_or_else(|| format!("{} is not linked", upload.name()))?;
+    let (done, result) = std::sync::mpsc::sync_channel(1);
+    // The probe lives on a pad of the same pipeline: weak handle only.
+    let upload_weak = upload.downgrade();
+    let factory = adapter_factory.to_string();
+    let label_owned = label.to_string();
+    feeder.add_probe(gst::PadProbeType::IDLE, move |_, _| {
+        let outcome = upload_weak
+            .upgrade()
+            .ok_or_else(|| "the input is gone".to_string())
+            .and_then(|upload| splice_adapter(&upload, &factory, &label_owned));
+        if let Err(std::sync::mpsc::TrySendError::Disconnected(outcome)) = done.try_send(outcome) {
+            // The caller stopped waiting; this is the only report left.
+            match outcome {
+                Ok(()) => info!(
+                    "{}: inserted {} after waiting for data to pause",
+                    label_owned, factory
+                ),
+                Err(e) => warn!("{}: {} could not be inserted: {}", label_owned, factory, e),
+            }
+        }
+        gst::PadProbeReturn::Remove
+    });
+    result.recv_timeout(wait).unwrap_or_else(|_| {
+        Err(format!(
+            "data kept flowing for {:?}; inserting once it pauses",
+            wait
+        ))
+    })
+}
+
 /// Insert an `adapter_factory` element between `upload`'s sink pad and its peer.
+/// The caller makes sure no buffer moves across that link meanwhile.
 fn splice_adapter(upload: &gst::Element, adapter_factory: &str, label: &str) -> Result<(), String> {
     // Strong references stay local to this function — never captured in a
     // closure, so no reference cycle can outlive the pipeline.
@@ -305,6 +361,155 @@ mod tests {
         ] {
             assert_eq!(decide(&caps(c), true), FrontDecision::Direct, "{}", c);
         }
+    }
+
+    /// `appsrc ! queue ! identity(up) ! appsink`, playing, with buffers pushed
+    /// from a thread until `stop` is set. `up` stands in for `glupload`, the
+    /// queue for the input's front queue; the adapter is an `identity` too.
+    fn flowing_input() -> (
+        gst::Pipeline,
+        gst::Element,
+        gstreamer_app::AppSink,
+        Arc<AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let _ = gst::init();
+        let pipeline = gst::Pipeline::new();
+        let src = gstreamer_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            .caps(&caps(
+                "video/x-raw, format=GRAY8, width=4, height=4, framerate=100/1",
+            ))
+            .build();
+        let queue = gst::ElementFactory::make("queue")
+            .name("front")
+            .build()
+            .unwrap();
+        let up = gst::ElementFactory::make("identity")
+            .name("up")
+            .build()
+            .unwrap();
+        let sink = gstreamer_app::AppSink::builder().sync(false).build();
+        pipeline
+            .add_many([src.upcast_ref(), &queue, &up, sink.upcast_ref()])
+            .unwrap();
+        gst::Element::link_many([src.upcast_ref(), &queue, &up, sink.upcast_ref()]).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_feed = Arc::clone(&stop);
+        let feed = std::thread::spawn(move || {
+            let mut n = 0u64;
+            while !stop_feed.load(Ordering::Acquire) {
+                let mut buf = gst::Buffer::with_size(16).unwrap();
+                buf.get_mut()
+                    .unwrap()
+                    .set_pts(gst::ClockTime::from_mseconds(n * 10));
+                if src.push_buffer(buf).is_err() {
+                    break;
+                }
+                n += 1;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        });
+        (pipeline, up, sink, stop, feed)
+    }
+
+    fn feeder_of(up: &gst::Element) -> Option<String> {
+        up.static_pad("sink")
+            .and_then(|p| p.peer())
+            .and_then(|p| p.parent_element())
+            .map(|e| e.name().to_string())
+    }
+
+    fn no_error(pipeline: &gst::Pipeline) {
+        let bus = pipeline.bus().unwrap();
+        if let Some(msg) = bus.pop_filtered(&[gst::MessageType::Error]) {
+            panic!("the input failed: {:?}", msg);
+        }
+    }
+
+    /// A producer can turn to CUDA memory mid-stream, a Media Player moving on
+    /// to a file the GPU decodes, while the input's queue is still pushing the
+    /// previous file's frames. Relinking under that push hands the next buffer
+    /// to an unlinked pad or to an adapter not yet started, and the input
+    /// stops. The splice has to wait for the push in progress to return, and
+    /// the frames have to keep coming afterwards.
+    #[test]
+    fn a_splice_while_a_frame_is_being_pushed_waits_for_it() {
+        let (pipeline, up, sink, stop, feed) = flowing_input();
+        assert!(sink.pull_sample().is_ok(), "frames flow before the splice");
+
+        // Hold the queue's streaming thread inside a push into `up`.
+        let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+        let up_sink = up.static_pad("sink").unwrap();
+        let hold = up_sink
+            .add_probe(
+                gst::PadProbeType::BLOCK | gst::PadProbeType::BUFFER,
+                move |_, _| {
+                    let _ = held_tx.try_send(());
+                    gst::PadProbeReturn::Ok
+                },
+            )
+            .unwrap();
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a push reaches up and is held");
+
+        let deferred = splice_when_idle(
+            &up,
+            "identity",
+            "test input",
+            std::time::Duration::from_millis(200),
+        );
+        assert!(deferred.is_err(), "the splice did not wait for the push");
+        assert_eq!(
+            feeder_of(&up).as_deref(),
+            Some("front"),
+            "the link was changed under a push in progress"
+        );
+
+        // The push returns; the deferred splice runs before the next one.
+        up_sink.remove_probe(hold);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while feeder_of(&up).as_deref() != Some("up_identity") {
+            assert!(std::time::Instant::now() < deadline, "the splice never ran");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        for _ in 0..20 {
+            assert!(
+                sink.try_pull_sample(gst::ClockTime::from_seconds(2))
+                    .is_some(),
+                "frames stopped after the splice"
+            );
+        }
+        no_error(&pipeline);
+
+        stop.store(true, Ordering::Release);
+        let _ = pipeline.set_state(gst::State::Null);
+        feed.join().unwrap();
+    }
+
+    /// At flow start nothing has been pushed yet: the splice happens at once,
+    /// before the query that asked for it is answered.
+    #[test]
+    fn a_splice_on_an_idle_input_happens_at_once() {
+        let _ = gst::init();
+        let pipeline = gst::Pipeline::new();
+        let queue = gst::ElementFactory::make("queue")
+            .name("front")
+            .build()
+            .unwrap();
+        let up = gst::ElementFactory::make("identity")
+            .name("up")
+            .build()
+            .unwrap();
+        pipeline.add_many([&queue, &up]).unwrap();
+        queue.link(&up).unwrap();
+
+        splice_when_idle(&up, "identity", "test input", SPLICE_WAIT).unwrap();
+        assert_eq!(feeder_of(&up).as_deref(), Some("up_identity"));
+        let _ = pipeline.set_state(gst::State::Null);
     }
 
     /// The probe reads what the producer offers from both query types that
