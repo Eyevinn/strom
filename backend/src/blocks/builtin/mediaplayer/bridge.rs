@@ -117,7 +117,7 @@ pub fn create_decode_pipeline(
         route_pad(&pipeline, pad, &state, &instance_id_owned, sync, kind, "");
     });
 
-    free_slot_on_pad_removed(&source, state);
+    free_slot_on_pad_removed(&source, state, instance_id);
 
     // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
     // internal pipeline needs the same gstreamer#5057 workaround as the main one.
@@ -228,7 +228,7 @@ pub fn create_passthrough_pipeline(
         }
     });
 
-    free_slot_on_pad_removed(&source, state);
+    free_slot_on_pad_removed(&source, state, instance_id);
 
     // An `rtsp://` URI makes the source bin autoplug an RTP depayloader, so this
     // internal pipeline needs the same gstreamer#5057 workaround as the main one.
@@ -239,15 +239,32 @@ pub fn create_passthrough_pipeline(
 
 /// Give a slot back when the pad holding it goes away, so the stream that
 /// replaces it - an HLS variant switch swaps every stream pad - takes the same
-/// output instead of being discarded as one too many.
-fn free_slot_on_pad_removed(source: &gst::Element, state: &Arc<MediaPlayerState>) {
+/// output instead of being discarded as one too many. A discarded pad's
+/// fakesink goes with it, or a live stream gathers one per variant switch.
+fn free_slot_on_pad_removed(
+    source: &gst::Element,
+    state: &Arc<MediaPlayerState>,
+    instance_id: &str,
+) {
     let state_weak = Arc::downgrade(state);
-    source.connect_pad_removed(move |_src, pad| {
+    let instance_id = instance_id.to_string();
+    source.connect_pad_removed(move |src, pad| {
         if let Some(state) = state_weak.upgrade() {
             debug!("Media Player: pad {} removed, freeing its slot", pad.name());
             state.free_slot_of(&pad.name());
         }
+        let Some(bin) = src.parent().and_downcast::<gst::Bin>() else {
+            return;
+        };
+        if let Some(sink) = bin.by_name(&discard_sink_name(&instance_id, &pad.name())) {
+            let _ = sink.set_state(gst::State::Null);
+            let _ = bin.remove(&sink);
+        }
     });
+}
+
+fn discard_sink_name(instance_id: &str, pad_name: &str) -> String {
+    format!("{}_discard_{}", instance_id, pad_name)
 }
 
 /// Which output a stream from the source element can go to.
@@ -294,7 +311,10 @@ impl TrackKind {
 }
 
 /// decodebin3's `select-stream` answer: 1 for the first `videos` video and
-/// `audios` audio streams of `collection`, 0 for every other stream.
+/// `audios` audio streams of `collection`, 0 for every other stream. Streams
+/// the source flags as its default (`SELECT`, from an HLS `DEFAULT=YES`
+/// rendition, say) come first, then the rest in collection order, so one
+/// audio output plays the source's default language wherever it is listed.
 fn select_stream(
     collection: &gst::StreamCollection,
     stream: &gst::Stream,
@@ -317,12 +337,15 @@ fn select_stream(
         TrackKind::Audio => audios,
         TrackKind::Other => 0,
     };
-    let before = collection
+    let is_default = |s: &gst::Stream| s.stream_flags().contains(gst::StreamFlags::SELECT);
+    let mut ranked: Vec<gst::Stream> = collection.iter().filter(|s| kind_of(s) == kind).collect();
+    // Stable: defaults first, each group keeps collection order.
+    ranked.sort_by_key(|s| !is_default(s));
+    let rank = ranked
         .iter()
-        .take_while(|s| s.stream_id() != stream.stream_id())
-        .filter(|s| kind_of(s) == kind)
-        .count();
-    i32::from(before < room)
+        .position(|s| s.stream_id() == stream.stream_id())
+        .unwrap_or(usize::MAX);
+    i32::from(rank < room)
 }
 
 /// Send a new stream to the next free output of its kind, or discard it.
@@ -427,7 +450,7 @@ fn try_slot(
 /// Link a stream nobody will use to a fakesink, so it does not stop the source.
 fn discard_pad(pipeline: &gst::Pipeline, pad: &gst::Pad, instance_id: &str, reason: &str) {
     let sink = match gst::ElementFactory::make("fakesink")
-        .name(format!("{}_discard_{}", instance_id, pad.name()))
+        .name(discard_sink_name(instance_id, &pad.name()))
         .property("sync", false)
         .property("async", false)
         .build()
@@ -969,7 +992,7 @@ mod tests {
         let source = gst::Bin::with_name("source");
         pipeline.add(&source).unwrap();
         let state = state_with_slots(0, 1);
-        free_slot_on_pad_removed(source.upcast_ref(), &state);
+        free_slot_on_pad_removed(source.upcast_ref(), &state, "test");
 
         let first = ghost_src(&source, "src_0");
         route_pad(
@@ -1010,6 +1033,84 @@ mod tests {
             "it has to feed the same chain, so audio_out carries on"
         );
         let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    /// A track nobody plays gets a fakesink, and on a live stream every
+    /// variant switch replaces that track's pad. The fakesink has to go with
+    /// its pad, or one more piles up in the pipeline with each switch.
+    #[test]
+    fn a_discarded_track_takes_its_fakesink_with_it_when_its_pad_goes() {
+        let _ = gst::init();
+        let pipeline = gst::Pipeline::new();
+        let source = gst::Bin::with_name("source");
+        pipeline.add(&source).unwrap();
+        let state = state_with_slots(0, 0);
+        free_slot_on_pad_removed(source.upcast_ref(), &state, "test");
+        let count_discards = || {
+            pipeline
+                .iterate_elements()
+                .into_iter()
+                .flatten()
+                .filter(|e| e.name().contains("_discard_"))
+                .count()
+        };
+
+        for name in ["src_0", "src_1", "src_2"] {
+            let pad = ghost_src(&source, name);
+            route_pad(&pipeline, &pad, &state, "test", false, TrackKind::Other, "");
+            assert_eq!(peer_factory(&pad).as_deref(), Some("fakesink"));
+            assert_eq!(count_discards(), 1);
+            source.remove_pad(&pad).unwrap();
+            assert_eq!(count_discards(), 0, "{}'s fakesink outlived its pad", name);
+        }
+        let _ = pipeline.set_state(gst::State::Null);
+    }
+
+    fn collection_of(
+        streams: &[(&str, gst::StreamType, gst::StreamFlags)],
+    ) -> gst::StreamCollection {
+        let mut builder = gst::StreamCollection::builder(None);
+        for (id, stream_type, flags) in streams {
+            builder = builder.stream(gst::Stream::new(Some(id), None, *stream_type, *flags));
+        }
+        builder.build()
+    }
+
+    fn selected(collection: &gst::StreamCollection, videos: usize, audios: usize) -> Vec<String> {
+        collection
+            .iter()
+            .filter(|s| select_stream(collection, s, videos, audios) == 1)
+            .map(|s| s.stream_id().unwrap().to_string())
+            .collect()
+    }
+
+    /// An HLS source may list its default audio rendition after another one -
+    /// audio description, a second language. With one audio output decodebin3
+    /// has to play the one the source marks as default, not whichever is
+    /// listed first.
+    #[test]
+    fn decodebin3_picks_the_sources_default_tracks_first() {
+        let _ = gst::init();
+        let (audio, video) = (gst::StreamType::AUDIO, gst::StreamType::VIDEO);
+        let (none, select) = (gst::StreamFlags::empty(), gst::StreamFlags::SELECT);
+        let collection = collection_of(&[
+            ("video", video, select),
+            ("described", audio, none),
+            ("original", audio, select),
+            ("english", audio, none),
+            ("subtitles", gst::StreamType::TEXT, select),
+        ]);
+
+        assert_eq!(selected(&collection, 1, 1), ["video", "original"]);
+        // More outputs: the default first, then the rest as listed.
+        assert_eq!(
+            selected(&collection, 1, 2),
+            ["video", "described", "original"]
+        );
+        assert_eq!(selected(&collection, 0, 0), Vec::<String>::new());
+        // No defaults at all: as listed.
+        let plain = collection_of(&[("a", audio, none), ("b", audio, none)]);
+        assert_eq!(selected(&plain, 0, 1), ["a"]);
     }
 
     /// End to end on a real file: two audio tracks with two outputs give each

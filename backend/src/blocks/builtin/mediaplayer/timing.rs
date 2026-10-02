@@ -211,16 +211,20 @@ pub fn arm(
                     .and_then(|s| s.to_running_time(buffer.pts()))
             })
             .or(buffer.pts());
+        // An unstamped buffer is not paced; wait for one that is.
         let Some(rt) = rt else {
-            return gst::PadProbeReturn::Remove;
+            return gst::PadProbeReturn::Ok;
         };
-        // The flow's running time; the internal pipeline shares it.
+        // The flow's running time; the internal pipeline shares it. Without
+        // it there is no offset to take, and a buffer let through on the old
+        // one could wait out a live stream's whole timeline - SVT's is over a
+        // thousand hours. Drop it and take the offset from the next.
         let Some(now) = main
             .upgrade()
             .and_then(|p| p.current_running_time())
             .map(|t| t.nseconds() as i64)
         else {
-            return gst::PadProbeReturn::Remove;
+            return gst::PadProbeReturn::Drop;
         };
         let offset = timing.take_sync_offset(rt.nseconds() as i64, now);
         clocksync.set_property("ts-offset", offset);
@@ -321,6 +325,69 @@ mod tests {
         let p = t.place(40 * MS, 5_000 * MS, false);
         assert_eq!(p.resynced_after, None);
         assert_eq!(p.running_time, 140 * MS);
+    }
+
+    /// The offset comes from the flow's running time. When the flow has none
+    /// yet, the probe used to remove itself without setting one, so the
+    /// clocksync paced a live stream against its raw timeline and held the
+    /// first buffer for a thousand hours. It has to wait for a buffer it can
+    /// place, and place that one.
+    #[test]
+    fn arm_waits_for_the_flow_to_run_before_taking_the_offset() {
+        let _ = gst::init();
+        let internal = gst::Pipeline::new();
+        let src = gstreamer_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            .caps(&gst::Caps::builder("audio/x-raw").build())
+            .build();
+        let clocksync = gst::ElementFactory::make("clocksync")
+            .property("sync", false)
+            .build()
+            .unwrap();
+        let sink = gstreamer_app::AppSink::builder().sync(false).build();
+        internal
+            .add_many([src.upcast_ref(), &clocksync, sink.upcast_ref()])
+            .unwrap();
+        gst::Element::link_many([src.upcast_ref(), &clocksync, sink.upcast_ref()]).unwrap();
+
+        // The flow exists but is not playing: no running time.
+        let main = gst::Pipeline::new();
+        let main_weak = main.downgrade();
+        let timing = Arc::new(Timing::new(500));
+        arm(&clocksync, &timing, &main_weak);
+        internal.set_state(gst::State::Playing).unwrap();
+
+        let rt = 3_668_182 * 1_000 * MS;
+        let push = |n: i64| {
+            let mut buf = gst::Buffer::new();
+            buf.get_mut()
+                .unwrap()
+                .set_pts(gst::ClockTime::from_nseconds((rt + n * 20 * MS) as u64));
+            src.push_buffer(buf).unwrap();
+            sink.try_pull_sample(gst::ClockTime::from_mseconds(500))
+        };
+
+        assert!(
+            push(0).is_none(),
+            "a buffer with no offset to pace it went through"
+        );
+        assert_eq!(timing.sync_offset(), None);
+
+        main.set_state(gst::State::Playing).unwrap();
+        let _ = main.state(gst::ClockTime::from_seconds(5));
+        assert!(push(1).is_some());
+        let offset = timing
+            .sync_offset()
+            .expect("the next buffer set the offset");
+        assert_eq!(clocksync.property::<i64>("ts-offset"), offset);
+        assert!(
+            offset < -rt / 2,
+            "paced against the raw timeline: {}",
+            offset
+        );
+
+        let _ = internal.set_state(gst::State::Null);
+        let _ = main.set_state(gst::State::Null);
     }
 
     #[test]
