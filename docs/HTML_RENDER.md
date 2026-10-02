@@ -255,8 +255,9 @@ for. Raw `cefsrc` pipelines still work — the block just spares you the caps.
 
 The CEF binaries come from Spotify's CEF builds, which gstcefsrc downloads when
 it is built. Those builds leave out the proprietary codecs, so **Chromium in
-`strom-full` has no H.264**. A page that offers H.264 only, or that negotiates
-it for WebRTC, cannot play its video.
+`strom-full` has no H.264 and no AAC**. A page that offers H.264 only, or that
+negotiates it for WebRTC, cannot play its video, and a page whose audio is AAC
+only cannot play its audio.
 
 Tested in `strom-full`:
 
@@ -265,6 +266,7 @@ Tested in `strom-full`:
 | YouTube | Works, audio and video |
 | Google Meet | Works, audio and video |
 | Microsoft Teams | Audio only, no video. The missing H.264 is the likely cause |
+| Spotify | Does not play. Its web player needs Widevine DRM and AAC; even with Widevine fetched (`STROM_CEF_WIDEVINE=1`), the page reports `audio/mp4; codecs="mp4a.40.2"` as unsupported |
 
 Video calls need the fake camera and microphone (see
 [Camera, microphone, and what else a page cannot do](#camera-microphone-and-what-else-a-page-cannot-do)),
@@ -565,7 +567,7 @@ without isolated contexts, every source shares one login.
 - **Linux: X11 required**: CEF needs an X server on Linux, which the strom-full image provides via Xvfb. This is why `strom-full` is the supported way to run HTML sources.
 - **macOS: no native support yet**: CEF renders offscreen through its own macOS path, so Xvfb is not involved and the X11 requirement above does not apply. Native macOS support is tracked in [centricular/gstcefsrc#110](https://github.com/centricular/gstcefsrc/pull/110) (macOS build fixes) and [Eyevinn/strom#669](https://github.com/Eyevinn/strom/pull/669) (a Cocoa run loop on the main thread, needed in headless mode). CEF on macOS also refuses to initialise unless the host process is inside an `.app` bundle, and the macOS release ships a bare executable rather than a bundle.
 - **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
-- **No H.264 in the page**: the CEF build has no proprietary codecs, so Teams shows no video (see [Which pages work](#which-pages-work))
+- **No H.264 or AAC in the page**: the CEF build has no proprietary codecs, so Teams shows no video and Spotify does not play (see [Which pages work](#which-pages-work))
 - **No hardware video in the page on Linux**: even in GPU mode, Chromium decodes and encodes a page's video in software, because it needs VA-API and NVIDIA has none in the Docker images
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: the HTML Input block has an audio output when its stream mode includes audio; a raw `cefsrc` needs `cefbin` or `cefdemux`
