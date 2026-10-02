@@ -3554,9 +3554,6 @@
                 }
               }
             }
-          },
-          "500": {
-            "description": "Internal server error"
           }
         }
       }
@@ -3578,9 +3575,6 @@
                 }
               }
             }
-          },
-          "500": {
-            "description": "Internal server error"
           }
         }
       }

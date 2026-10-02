@@ -624,3 +624,31 @@ fn test_cpu_auto_format_inputs_are_held_to_videocrop_formats() {
         );
     }
 }
+
+/// The PGM compositor runs before any source publishes, drawing background.
+/// A source's first frame must not move its output back to 0: the frame
+/// stamped 0 reaches the encoder and every WHEP viewer of program.
+#[test]
+fn dist_compositor_late_first_input_does_not_rewind() {
+    use super::elements::{make_dist_compositor, CompositorBackend};
+    use crate::gst::aggregator_start::test_support::*;
+    use gstreamer as gst;
+
+    gst::init().unwrap();
+    let mixer = make_dist_compositor(CompositorBackend::Software, 100, 30).unwrap();
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "I420")
+        .field("width", 64i32)
+        .field("height", 64i32)
+        .field("framerate", gst::Fraction::new(30, 1))
+        .build();
+    // One 64x64 I420 frame
+    let (pushed, pts) = output_pts_around_late_first_input(
+        &mixer,
+        &caps,
+        64 * 64 * 3 / 2,
+        gst::ClockTime::from_nseconds(33_333_333),
+        std::time::Duration::from_millis(500),
+    );
+    assert_no_rewind(pushed, &pts);
+}

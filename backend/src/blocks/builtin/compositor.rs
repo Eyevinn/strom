@@ -255,6 +255,7 @@ fn build_opengl_compositor(
 
     // Set latency properties
     set_mixer_latency_properties(&mixer, properties);
+    crate::gst::aggregator_start::disarm_start_time_selection(&mixer);
 
     // Request pads and set their properties in NULL state
     info!("Requesting {} GL mixer sink pads in NULL state", num_inputs);
@@ -476,6 +477,7 @@ fn build_software_compositor(
 
     // Set latency properties
     set_mixer_latency_properties(&mixer, properties);
+    crate::gst::aggregator_start::disarm_start_time_selection(&mixer);
 
     // Request pads and set their properties
     info!("Requesting {} CPU mixer sink pads", num_inputs);
