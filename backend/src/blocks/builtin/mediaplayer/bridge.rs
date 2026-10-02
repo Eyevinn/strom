@@ -858,20 +858,34 @@ mod tests {
         );
     }
 
+    /// Parse a test-file writer whose `filesink` is named `out`, and point it
+    /// at `path`. The path goes in as a property, not in the launch string:
+    /// there a Windows path's backslashes are read as escapes, so the file was
+    /// written somewhere else and the URI pointed at nothing.
+    fn file_writer(description: &str, path: &std::path::Path) -> gst::Element {
+        let writer = gst::parse::launch(description)
+            .expect("matroskamux, videotestsrc and audiotestsrc are installed in CI");
+        writer
+            .downcast_ref::<gst::Bin>()
+            .and_then(|bin| bin.by_name("out"))
+            .expect("the writer has a filesink named out")
+            .set_property("location", path);
+        writer
+    }
+
     /// A Matroska file with one video track and two audio tracks, all raw so no
     /// decoder is needed, each about a second long: decodebin3 can let a 0.2 s
     /// track end before it ever exposes a pad for it. matroska and the test sources are in
     /// gstreamer1.0-plugins-good/-base, installed in CI.
     fn write_two_audio_track_file(dir: &std::path::Path) -> String {
         let path = dir.join("two-audio.mkv");
-        let pipeline = gst::parse::launch(&format!(
-            "matroskamux name=mux ! filesink location={} \
+        let pipeline = file_writer(
+            "matroskamux name=mux ! filesink name=out \
              videotestsrc num-buffers=15 ! video/x-raw,format=I420,width=64,height=48,framerate=15/1 ! mux. \
              audiotestsrc num-buffers=47 ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux. \
              audiotestsrc num-buffers=47 wave=silence ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux.",
-            path.display()
-        ))
-        .expect("matroskamux, videotestsrc and audiotestsrc are installed in CI");
+            &path,
+        );
         pipeline.set_state(gst::State::Playing).unwrap();
         let bus = pipeline.bus().unwrap();
         let msg = bus
@@ -882,7 +896,7 @@ mod tests {
             .expect("writing the test file finishes");
         assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{:?}", msg);
         pipeline.set_state(gst::State::Null).unwrap();
-        format!("file://{}", path.display())
+        super::super::file_uri(&path)
     }
 
     /// A state with `video` and `audio` slots, backed by appsrcs that are in no
@@ -1331,13 +1345,12 @@ mod tests {
         let _ = gst::init();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("av.mkv");
-        let writer = gst::parse::launch(&format!(
-            "matroskamux name=mux ! filesink location={} \
+        let writer = file_writer(
+            "matroskamux name=mux ! filesink name=out \
              videotestsrc num-buffers=100 ! video/x-raw,format=I420,width=64,height=48,framerate=25/1 ! mux. \
              audiotestsrc num-buffers=200 samplesperbuffer=960 ! audio/x-raw,format=S16LE,rate=48000,channels=2 ! mux.",
-            path.display()
-        ))
-        .expect("matroskamux, videotestsrc and audiotestsrc are installed in CI");
+            &path,
+        );
         writer.set_state(gst::State::Playing).unwrap();
         writer
             .bus()
@@ -1345,7 +1358,7 @@ mod tests {
             .timed_pop_filtered(gst::ClockTime::from_seconds(20), &[gst::MessageType::Eos])
             .expect("writing the test file finishes");
         writer.set_state(gst::State::Null).unwrap();
-        let uri = format!("file://{}", path.display());
+        let uri = super::super::file_uri(&path);
 
         // The flow, on a realtime clock, with a sink per output that notes
         // when each buffer arrives against what it is stamped with.
