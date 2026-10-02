@@ -7,6 +7,8 @@
 //! a 1280x720 canvas is pillarboxed to about a third of the width; stretched,
 //! PGM is entirely white.
 
+pub mod common;
+
 use gstreamer::prelude::*;
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
@@ -24,12 +26,6 @@ fn idx<T: From<usize>>(i: usize) -> T {
 /// Same probe as `vision_mixer_fx_test`: a trivial GL run must reach EOS.
 /// Having the GL plugins installed is not enough on headless runners.
 fn gl_environment_available() -> bool {
-    if gstreamer::ElementFactory::find("glvideomixerelement").is_none()
-        || gstreamer::ElementFactory::find("glshader").is_none()
-        || gstreamer::ElementFactory::find("gltestsrc").is_none()
-    {
-        return false;
-    }
     let Ok(pipeline) = gstreamer::parse::launch(
         "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
     ) else {
@@ -54,8 +50,12 @@ fn gl_environment_available() -> bool {
 }
 
 /// Skip unless GL works; `STROM_REQUIRE_GL=1` (set on the macOS CI job)
-/// turns the skip into a failure.
+/// turns the skip into a failure. Missing GL elements go through
+/// `common::gl_elements_available`, so they are not folded into "no context".
 fn gl_available_or_required() -> bool {
+    if !common::gl_elements_available(&["glvideomixerelement", "glshader", "gltestsrc"]) {
+        return false;
+    }
     if gl_environment_available() {
         return true;
     }
@@ -64,7 +64,7 @@ fn gl_available_or_required() -> bool {
         "STROM_REQUIRE_GL is set but no GL context could be created — this platform \
          is supposed to render, so a skip here would hide a GL regression"
     );
-    eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    eprintln!("SKIP: GL environment unavailable (no context could be created)");
     false
 }
 
