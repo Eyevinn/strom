@@ -19,13 +19,12 @@
 //! asserts the message never arrives. It lives in its own test binary because
 //! the log handler it installs is process-global.
 
+pub mod common;
+
 use gstreamer::glib;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use strom::state::AppState;
-use strom::storage::JsonFileStorage;
 use strom_types::{Flow, Link, PropertyValue};
-use tempfile::NamedTempFile;
 
 /// The GStreamer text for one remove_signal_watch() past the matching add.
 const SURPLUS_REMOVE: &str = "has no signal watches attached";
@@ -103,18 +102,7 @@ async fn stopping_a_flow_removes_no_more_bus_watches_than_it_added() {
             ));
     });
 
-    let storage_file = NamedTempFile::new().unwrap();
-    let blocks_file = NamedTempFile::new().unwrap();
-    let state = AppState::new(
-        JsonFileStorage::new(storage_file.path()),
-        blocks_file.path(),
-        std::env::temp_dir(),
-        vec![],
-        "all".to_string(),
-        vec![],
-        false,
-        false,
-    );
+    let state = common::state::new();
 
     let flow = build_flow_with_a_media_player("bus_signal_watch_balance");
     let flow_id = flow.id;

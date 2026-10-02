@@ -16,9 +16,9 @@ pub mod common;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use strom::blocks::builtin::mpegtssrt_input::MpegTsSrtInputBuilder;
-use strom::blocks::{BlockBuildContext, BlockBuilder};
+use strom::blocks::BlockBuilder;
 use strom_types::PropertyValue;
 
 use gstreamer as gst;
@@ -40,15 +40,6 @@ const REQUIRED: &[&str] = &[
     "fakesink",
 ];
 
-/// A free UDP port for the SRT listener. Binding one and dropping it races with
-/// anything else on the host; a failure to bind shows up as a named error.
-fn srt_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .map(|a| a.port())
-        .expect("no free UDP port for the SRT listener")
-}
-
 /// An audio-only SRT caller. `mux_pad` picks the audio PID: `sink_65` is 0x41,
 /// `sink_66` is 0x42.
 fn caller(port: u16, mux_pad: &str) -> gst::Pipeline {
@@ -64,29 +55,12 @@ fn caller(port: u16, mux_pad: &str) -> gst::Pipeline {
         .expect("parse::launch returns a pipeline")
 }
 
-/// First error on the bus within `wait`, named by the element that posted it.
-fn first_error(bus: &gst::Bus, wait: Duration) -> Option<String> {
-    let deadline = Instant::now() + wait;
-    while Instant::now() < deadline {
-        if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(50)) {
-            if let gst::MessageView::Error(err) = msg.view() {
-                let src = err
-                    .src()
-                    .map(|o| o.name().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                return Some(format!("{}: {} ({:?})", src, err.error(), err.debug()));
-            }
-        }
-    }
-    None
-}
-
 /// Run caller A on audio PID 0x41, stop it, then run caller B on 0x42. Returns
 /// the buffers that reached the block's audio output from A and from B, and
 /// the first error the block's pipeline posted.
 fn buffers_across_pid_change(decode: bool) -> (u64, u64, Option<String>) {
     let instance_id = "tsin";
-    let port = srt_port();
+    let port = common::free_udp_port();
 
     let mut props: HashMap<String, PropertyValue> = HashMap::new();
     props.insert("decode".to_string(), PropertyValue::Bool(decode));
@@ -99,41 +73,13 @@ fn buffers_across_pid_change(decode: bool) -> (u64, u64, Option<String>) {
     props.insert("latency".to_string(), PropertyValue::UInt(20));
     props.insert("keep_listening".to_string(), PropertyValue::Bool(true));
 
-    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let ctx = common::block::context();
     let built = MpegTsSrtInputBuilder
         .build(instance_id, &props, &ctx)
         .expect("mpegts/srt input block builds");
 
     let pipeline = gst::Pipeline::new();
-    let mut by_id: HashMap<String, gst::Element> = HashMap::new();
-    for (id, element) in &built.elements {
-        pipeline.add(element).expect("add block element");
-        by_id.insert(id.clone(), element.clone());
-    }
-    for (from, to) in &built.internal_links {
-        let src = by_id
-            .get(&from.element_id)
-            .unwrap_or_else(|| panic!("internal link source {} missing", from.element_id));
-        let sink = by_id
-            .get(&to.element_id)
-            .unwrap_or_else(|| panic!("internal link target {} missing", to.element_id));
-        match (&from.pad_name, &to.pad_name) {
-            (Some(src_pad), Some(sink_pad)) => {
-                let src_pad = src
-                    .static_pad(src_pad)
-                    .unwrap_or_else(|| panic!("{} has no pad {}", from.element_id, src_pad));
-                let sink_pad = sink
-                    .static_pad(sink_pad)
-                    .unwrap_or_else(|| panic!("{} has no pad {}", to.element_id, sink_pad));
-                src_pad
-                    .link(&sink_pad)
-                    .unwrap_or_else(|e| panic!("internal pad link failed: {:?}", e));
-            }
-            _ => src
-                .link(sink)
-                .unwrap_or_else(|e| panic!("internal element link failed: {:?}", e)),
-        }
-    }
+    let by_id = common::block::install(&pipeline, &built);
 
     let audio_output = by_id
         .get(&format!("{}:audio_output_0", instance_id))
@@ -160,32 +106,28 @@ fn buffers_across_pid_change(decode: bool) -> (u64, u64, Option<String>) {
         })
         .expect("probe attaches to the audio output");
 
-    for setup in ctx.take_element_setups() {
-        setup(
-            uuid::Uuid::new_v4(),
-            strom::events::EventBroadcaster::with_capacity(16),
-        );
-    }
+    common::block::run_setups(&ctx);
 
     let bus = pipeline.bus().expect("pipeline has a bus");
     pipeline
         .set_state(gst::State::Playing)
         .expect("block pipeline goes to PLAYING");
     // Let the listener come up before the first caller dials it.
-    let mut error = first_error(&bus, Duration::from_millis(500));
+    let mut error =
+        common::bus::first_error(&bus, Duration::from_millis(500)).map(|e| e.to_string());
 
     let caller_a = caller(port, "sink_65");
     caller_a
         .set_state(gst::State::Playing)
         .expect("caller A goes to PLAYING");
     if error.is_none() {
-        error = first_error(&bus, Duration::from_millis(2500));
+        error = common::bus::first_error(&bus, Duration::from_millis(2500)).map(|e| e.to_string());
     }
     let _ = caller_a.set_state(gst::State::Null);
     let from_a = buffers.load(Ordering::Relaxed);
 
     if error.is_none() {
-        error = first_error(&bus, Duration::from_millis(700));
+        error = common::bus::first_error(&bus, Duration::from_millis(700)).map(|e| e.to_string());
     }
     let before_b = buffers.load(Ordering::Relaxed);
 
@@ -194,7 +136,7 @@ fn buffers_across_pid_change(decode: bool) -> (u64, u64, Option<String>) {
         .set_state(gst::State::Playing)
         .expect("caller B goes to PLAYING");
     if error.is_none() {
-        error = first_error(&bus, Duration::from_secs(3));
+        error = common::bus::first_error(&bus, Duration::from_secs(3)).map(|e| e.to_string());
     } else {
         std::thread::sleep(Duration::from_secs(3));
     }

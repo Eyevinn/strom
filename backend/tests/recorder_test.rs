@@ -73,9 +73,7 @@ impl Recorder {
     /// and before PLAYING. They decide which tracks are connected and get a
     /// `splitmuxsink` pad, so they must run after the inputs are linked.
     fn run_setups(&self) {
-        for setup in self.ctx.take_element_setups() {
-            setup(uuid::Uuid::new_v4(), EventBroadcaster::with_capacity(16));
-        }
+        common::block::run_setups(&self.ctx);
     }
 }
 
@@ -106,26 +104,11 @@ fn add_recorder(
         PropertyValue::String(media_root.to_string_lossy().to_string()),
     );
 
-    let ctx = BlockBuildContext::new(vec![], "all".to_string());
+    let ctx = common::block::context();
     let built = RecorderBuilder
         .build(instance_id, &properties, &ctx)
         .expect("recorder block builds");
-
-    let mut elements = HashMap::new();
-    for (id, element) in &built.elements {
-        pipeline.add(element).expect("add block element");
-        elements.insert(id.clone(), element.clone());
-    }
-    for (from, to) in &built.internal_links {
-        let src = pipeline
-            .by_name(&from.element_id)
-            .expect("internal link source element is in the pipeline");
-        let dst = pipeline
-            .by_name(&to.element_id)
-            .expect("internal link sink element is in the pipeline");
-        src.link_pads(from.pad_name.as_deref(), &dst, to.pad_name.as_deref())
-            .expect("internal recorder link");
-    }
+    let elements = common::block::install(pipeline, &built);
 
     Recorder {
         instance_id: instance_id.to_string(),
@@ -547,8 +530,6 @@ mod ts_passthrough_idle {
 /// track still leaves a large, valid, single-stream recording.
 mod unfed_track {
     use super::*;
-    use strom::blocks::BlockRegistry;
-    use strom::gst::pipeline::PipelineManager;
 
     /// The muxers and demuxers are per-container, so they are checked where
     /// they are used rather than in `REQUIRED` — but through the same assert.
@@ -852,8 +833,6 @@ mod unfed_track {
         }
 
         let media_root = tempfile::tempdir().expect("tempdir");
-        let registry_file = tempfile::NamedTempFile::new().expect("registry file");
-        let registry = BlockRegistry::new(registry_file.path());
 
         let mut props: HashMap<String, PropertyValue> = HashMap::new();
         props.insert(
@@ -956,17 +935,9 @@ mod unfed_track {
         let events = EventBroadcaster::with_capacity(16);
         let mut event_rx = events.subscribe();
 
-        let mut manager = PipelineManager::new(
-            &flow,
-            events,
-            &registry,
-            vec![],
-            "all".to_string(),
-            None,
-            media_root.path().to_path_buf(),
-            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-        )
-        .expect("PipelineManager builds");
+        let mut manager =
+            common::manager::build_with(&flow, events, media_root.path().to_path_buf())
+                .expect("PipelineManager builds");
 
         manager.start().expect("pipeline starts");
 

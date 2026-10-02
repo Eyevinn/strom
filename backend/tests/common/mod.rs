@@ -3,6 +3,12 @@
 //! Include it as `pub mod common;`. The `pub` is what keeps the helpers a given
 //! test binary does not call from being reported as dead code.
 
+pub mod block;
+pub mod bus;
+pub mod ids;
+pub mod manager;
+pub mod state;
+
 use gstreamer as gst;
 
 /// The elements in `required` that this GStreamer install does not provide.
@@ -66,4 +72,14 @@ pub fn init_webrtc_plugins() {
         gstwebrtchttp::plugin_register_static().expect("register webrtchttp plugins");
         gstrswebrtc::plugin_register_static().expect("register webrtc plugins");
     });
+}
+
+/// A free UDP port on 127.0.0.1. Binding one and dropping it races with
+/// anything else on the host, so a caller whose listener fails to bind should
+/// name the element in its error rather than read it as the regression.
+pub fn free_udp_port() -> u16 {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .and_then(|s| s.local_addr())
+        .map(|a| a.port())
+        .expect("no free UDP port")
 }

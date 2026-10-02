@@ -2,36 +2,21 @@
 //! no optional plugins, so they run wherever CI does. The GL backend is covered
 //! by `vision_mixer_fx_test`, which is gated on a working GL context.
 
+pub mod common;
+
 use gstreamer::prelude::*;
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, PropertyValue};
-use tempfile::NamedTempFile;
 
-/// Build (but do not start) a `PipelineManager` for `flow`. The temp file backs
-/// the block registry and must outlive the manager.
-fn build_cpu_manager(flow: &Flow) -> (PipelineManager, NamedTempFile) {
+/// Build (but do not start) a `PipelineManager` for `flow`.
+fn build_cpu_manager(flow: &Flow) -> PipelineManager {
     gstreamer::init().unwrap();
     // The vision mixer's converters ask for the detected GPU mode, which
     // panics if nothing has probed for it — `main` does this at startup.
     strom::gpu::detect_gpu_capabilities();
 
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let manager = PipelineManager::new(
-        flow,
-        EventBroadcaster::with_capacity(10),
-        &registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
-    .expect("CPU vision mixer pipeline should build");
-    (manager, temp_file)
+    common::manager::build(flow).expect("CPU vision mixer pipeline should build")
 }
 
 /// Regression test: an alpha-less `output_format` must not destroy the
@@ -66,7 +51,7 @@ mod keyed_alpha {
     fn build_flow(block_id: &str, output_format: &str) -> Flow {
         let mut flow = Flow::new(format!("vm_keyed_alpha_{}", block_id));
         flow.blocks.push(strom_types::BlockInstance {
-            id: block_id.to_string(),
+            id: common::ids::claim(block_id),
             block_definition_id: "builtin.vision_mixer".to_string(),
             name: None,
             properties: {
@@ -300,7 +285,7 @@ mod keyed_alpha {
     }
 
     fn run_flow(block_id: &str, output_format: &str) -> Measured {
-        let (mut manager, _registry_file) = build_cpu_manager(&build_flow(block_id, output_format));
+        let mut manager = build_cpu_manager(&build_flow(block_id, output_format));
 
         // Count overlay frames so the multiview is only measured once the overlay
         // is actually being composited — before its first push the multiview looks
@@ -517,7 +502,7 @@ mod pip_capacity {
     fn build_vm_flow(block_id: &str, num_inputs: u64) -> Flow {
         let mut flow = Flow::new("vm_pip_capacity_test");
         flow.blocks.push(strom_types::BlockInstance {
-            id: block_id.to_string(),
+            id: common::ids::claim(block_id),
             block_definition_id: "builtin.vision_mixer".to_string(),
             name: None,
             properties: {
@@ -546,17 +531,16 @@ mod pip_capacity {
         }
     }
 
-    /// Builds and starts a CPU vision mixer. The temp file backs the block
-    /// registry and must outlive the manager.
-    fn start_vm(block_id: &str, num_inputs: u64) -> (PipelineManager, NamedTempFile) {
-        let (mut manager, temp_file) = build_cpu_manager(&build_vm_flow(block_id, num_inputs));
+    /// Builds and starts a CPU vision mixer.
+    fn start_vm(block_id: &str, num_inputs: u64) -> PipelineManager {
+        let mut manager = build_cpu_manager(&build_vm_flow(block_id, num_inputs));
         manager.start().expect("CPU vision mixer should start");
-        (manager, temp_file)
+        manager
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn over_capacity_zone_is_rejected() {
-        let (mut manager, _registry_file) = start_vm(BLOCK_ID, NUM_INPUTS);
+        let mut manager = start_vm(BLOCK_ID, NUM_INPUTS);
 
         let transforms = strom_types::vision_mixer::PipTransforms::new();
 
@@ -645,7 +629,7 @@ mod pip_capacity {
     /// and in range. So this needs a full-size mixer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn overlay_ceiling_applies_after_source_checks() {
-        let (mut manager, _registry_file) = start_vm(CEILING_BLOCK_ID, MAX_NUM_INPUTS as u64);
+        let mut manager = start_vm(CEILING_BLOCK_ID, MAX_NUM_INPUTS as u64);
         let transforms = strom_types::vision_mixer::PipTransforms::new();
         let split = MAX_NUM_INPUTS / 2;
 
