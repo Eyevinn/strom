@@ -207,12 +207,14 @@ fn build_adapters(
     }
 
     if needs_format_conversion(caps) {
-        adapters.push(
-            gst::ElementFactory::make(convert_factory)
-                .name(format!("{}_videoconvert", name_prefix))
-                .build()
-                .map_err(|e| format!("{} could not be created: {}", convert_factory, e))?,
-        );
+        let convert = gst::ElementFactory::make(convert_factory)
+            .name(format!("{}_videoconvert", name_prefix))
+            .build()
+            .map_err(|e| format!("{} could not be created: {}", convert_factory, e))?;
+        // Threads the conversion on macOS, like every other converter built
+        // from the convert mode; a no-op elsewhere.
+        crate::gpu::configure_video_convert(&convert);
+        adapters.push(convert);
         adapters.push(
             gst::ElementFactory::make("capsfilter")
                 .name(format!("{}_format", name_prefix))
