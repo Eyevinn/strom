@@ -567,6 +567,7 @@ fn link_pad_through_clocksync(
         .unwrap_or_default()
         .to_string();
     let mut pushed: u64 = 0;
+    let mut dropped_unstamped: u64 = 0;
     // The main pipeline's clock and base time, read once instead of per buffer.
     let mut main_clock: Option<(gst::Clock, gst::ClockTime)> = None;
 
@@ -586,8 +587,18 @@ fn link_pad_through_clocksync(
                 };
 
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                // A buffer with no PTS stops here. Nothing downstream can place
+                // it: a recorder's `qtmux` answers it with `Buffer has no PTS`
+                // and GST_FLOW_ERROR, which takes the whole flow down. Dropping
+                // one frame of a source is the recoverable failure.
                 let Some(pts) = buffer.pts() else {
-                    let _ = appsrc.push_sample(&sample);
+                    dropped_unstamped += 1;
+                    if dropped_unstamped == 1 || dropped_unstamped.is_multiple_of(100) {
+                        warn!(
+                            "Media Player bridge: dropped {} buffer(s) with no PTS on the {} stream",
+                            dropped_unstamped, media_type_owned
+                        );
+                    }
                     return Ok(gst::FlowSuccess::Ok);
                 };
                 let rt = sample
@@ -1312,6 +1323,86 @@ mod tests {
                 (now - pts) / 1_000_000
             );
         }
+    }
+
+    /// A buffer with no PTS must not reach the main pipeline: a recorder's
+    /// `qtmux` fails on it with `Buffer has no PTS`, and that error takes the
+    /// whole flow down. Drives the real bridge through `route_pad`: three
+    /// buffers in, the middle one unstamped, and only the two stamped ones may
+    /// arrive.
+    #[test]
+    fn an_unstamped_buffer_never_reaches_the_main_pipeline() {
+        let _ = gst::init();
+        let caps = gst::Caps::builder("audio/x-raw")
+            .field("format", "S16LE")
+            .field("layout", "interleaved")
+            .field("rate", 48_000i32)
+            .field("channels", 2i32)
+            .build();
+
+        let main = gst::Pipeline::new();
+        let out = gst_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            .is_live(true)
+            .build();
+        let sink = gst_app::AppSink::builder().sync(false).build();
+        main.add_many([out.upcast_ref(), sink.upcast_ref::<gst::Element>()])
+            .unwrap();
+        out.link(&sink).unwrap();
+        main.set_state(gst::State::Playing).unwrap();
+
+        let mut state = Arc::try_unwrap(test_state()).ok().unwrap();
+        state.audio_appsrcs = vec![out];
+        state.audio_slots = MediaPlayerState::free_slots(1);
+        state.main_pipeline.set(Some(&main));
+        let state = Arc::new(state);
+
+        let internal = gst::Pipeline::new();
+        assert!(state.follow_main_clock(&internal));
+        let src = gst_app::AppSrc::builder()
+            .format(gst::Format::Time)
+            .caps(&caps)
+            .build();
+        internal.add(&src).unwrap();
+        route_pad(
+            &internal,
+            &src.static_pad("src").unwrap(),
+            &state,
+            "test",
+            false,
+            TrackKind::Audio,
+            "",
+        );
+        internal.set_state(gst::State::Playing).unwrap();
+
+        for pts in [Some(0u64), None, Some(20)] {
+            let mut buf = gst::Buffer::with_size(48 * 20 * 4).unwrap();
+            {
+                let b = buf.get_mut().unwrap();
+                b.set_pts(pts.map(gst::ClockTime::from_mseconds));
+                b.set_duration(gst::ClockTime::from_mseconds(20));
+            }
+            src.push_buffer(buf).unwrap();
+        }
+
+        let mut arrived = Vec::new();
+        while let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(500)) {
+            arrived.push(sample.buffer().unwrap().pts());
+        }
+        let _ = internal.set_state(gst::State::Null);
+        let _ = main.set_state(gst::State::Null);
+
+        assert!(
+            arrived.iter().all(Option::is_some),
+            "a buffer with no PTS reached the main pipeline: {:?}",
+            arrived
+        );
+        assert_eq!(
+            arrived.len(),
+            2,
+            "both stamped buffers must arrive: {:?}",
+            arrived
+        );
     }
 
     /// A file switch takes the internal pipeline through READY and back, which
