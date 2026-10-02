@@ -1,9 +1,11 @@
 //! Live channels offered in the playlist editor next to the media folder.
 //!
-//! Publicly reachable streams from the broadcasters' own CDNs: news in
-//! English, one per outlet, then the Nordic public broadcasters, then the
-//! Big Buck Bunny test stream. Public does not mean licensed for
-//! redistribution, and a stream may be geo-blocked or move without notice.
+//! Only a list of sources: URLs of streams that are openly reachable on the
+//! internet, as a convenience. Strom hosts and relays none of them; the
+//! player opens the URL like any other. News in English, one per outlet,
+//! then the Nordic public broadcasters, then the Big Buck Bunny test stream.
+//! Some are served from a broadcaster's own CDN, some from a distribution
+//! partner's. A stream may be geo-blocked or move without notice.
 
 /// A live channel: the name shown in the list and the URL the player opens.
 pub struct LiveChannel {
