@@ -9,6 +9,8 @@
 //! The whole test skips when the environment cannot create a GL context at
 //! all (probed with the identity fragment, which is trivially valid GLSL).
 
+pub mod common;
+
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -104,14 +106,15 @@ fn gl_environment_available() -> bool {
     }
 }
 
+/// The GL elements this test needs. Every CI job installs them, so a missing
+/// one is a broken install, not a headless runner, and must not skip silently.
+const GL_ELEMENTS: &[&str] = &["glshader", "gltestsrc"];
+
 #[test]
 fn all_shader_fragments_compile() {
     gst::init().expect("gst init");
 
-    if gst::ElementFactory::find("glshader").is_none()
-        || gst::ElementFactory::find("gltestsrc").is_none()
-    {
-        eprintln!("SKIP: GStreamer GL elements not available");
+    if !common::gl_elements_available(GL_ELEMENTS) {
         return;
     }
 
@@ -152,10 +155,7 @@ fn all_shader_fragments_compile() {
 fn runtime_fragment_swap_takes_effect() {
     gst::init().expect("gst init");
 
-    if gst::ElementFactory::find("glshader").is_none()
-        || gst::ElementFactory::find("gltestsrc").is_none()
-    {
-        eprintln!("SKIP: GStreamer GL elements not available");
+    if !common::gl_elements_available(GL_ELEMENTS) {
         return;
     }
     if !gl_environment_available() {

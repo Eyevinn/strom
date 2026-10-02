@@ -1,0 +1,128 @@
+diff --git a/gstcefsrc.cc b/gstcefsrc.cc
+index 8be9339..8f1707b 100644
+--- a/gstcefsrc.cc
++++ b/gstcefsrc.cc
+@@ -132,6 +132,7 @@ enum
+   PROP_ISOLATED_CONTEXT,
+   PROP_CONTEXT_CACHE_PATH,
+   PROP_PERSIST_SESSION_COOKIES,
++  PROP_STRICT_NETWORK,
+ };
+ 
+ #define gst_cef_src_parent_class parent_class
+@@ -414,7 +415,8 @@ class ContextReadyHandler : public CefRequestContextHandler
+ class BrowserClient :
+   public CefClient,
+   public CefLifeSpanHandler,
+-  public CefRequestHandler
++  public CefRequestHandler,
++  public CefPermissionHandler
+ {
+   public:
+ 
+@@ -452,6 +454,32 @@ class BrowserClient :
+       return display_handler;
+     }
+ 
++    virtual CefRefPtr<CefPermissionHandler> GetPermissionHandler() override
++    {
++      return this;
++    }
++
++    // CefPermissionHandler Methods:
++    //
++    // Chromium asks before a page reaches this machine or its local network
++    // (Local Network Access). Offscreen, nobody can answer, and CEF's default
++    // for a windowless browser is to ignore the prompt. Answer it outright
++    // instead: a strict browser is refused, any other is allowed.
++    bool OnShowPermissionPrompt(CefRefPtr<CefBrowser> browser,
++        uint64_t prompt_id, const CefString& requesting_origin,
++        uint32_t requested_permissions,
++        CefRefPtr<CefPermissionPromptCallback> callback) override
++    {
++      if (!(requested_permissions & CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS))
++        return false;
++      GST_INFO_OBJECT (src, "%s local network access for %s",
++          src->strict_network ? "Refusing" : "Allowing",
++          requesting_origin.ToString().c_str());
++      callback->Continue(src->strict_network ?
++          CEF_PERMISSION_RESULT_DENY : CEF_PERMISSION_RESULT_ACCEPT);
++      return true;
++    }
++
+     bool OnProcessMessageReceived(
+       CefRefPtr<CefBrowser> browser,
+       CefRefPtr<CefFrame> frame,
+@@ -696,7 +724,18 @@ void BrowserApp::OnBeforeCommandLineProcessing(const CefString &process_type,
+       for (i = 0; i < g_strv_length (flags_list); i++) {
+         gchar **switch_value = g_strsplit ((const gchar *) flags_list[i], "=", -1);
+ 
+-        if (g_strv_length (switch_value) > 1) {
++        if (g_strv_length (switch_value) > 1 &&
++            (g_str_equal (switch_value[0], "enable-features") ||
++             g_str_equal (switch_value[0], "disable-features")) &&
++            command_line->HasSwitch (switch_value[0])) {
++          // The list is split on commas, so a feature list cannot be passed
++          // as one value. Repeating the switch adds to it instead of
++          // replacing it.
++          std::string merged = command_line->GetSwitchValue (switch_value[0]).ToString ()
++              + "," + switch_value[1];
++          GST_INFO_OBJECT (src, "Adding to %s: %s", switch_value[0], switch_value[1]);
++          command_line->AppendSwitchWithValue (switch_value[0], merged);
++        } else if (g_strv_length (switch_value) > 1) {
+           GST_INFO_OBJECT (src, "Adding switch with value %s=%s", switch_value[0], switch_value[1]);
+           command_line->AppendSwitchWithValue (switch_value[0], switch_value[1]);
+         } else {
+@@ -1260,6 +1299,9 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
+     case PROP_PERSIST_SESSION_COOKIES:
+       src->persist_session_cookies = g_value_get_boolean (value);
+       break;
++    case PROP_STRICT_NETWORK:
++      src->strict_network = g_value_get_boolean (value);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -1309,6 +1351,9 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
+     case PROP_PERSIST_SESSION_COOKIES:
+       g_value_set_boolean (value, src->persist_session_cookies);
+       break;
++    case PROP_STRICT_NETWORK:
++      g_value_set_boolean (value, src->strict_network);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -1355,6 +1400,7 @@ gst_cef_src_init (GstCefSrc * src)
+   src->isolated_context = FALSE;
+   src->context_cache_path = NULL;
+   src->persist_session_cookies = FALSE;
++  src->strict_network = FALSE;
+ 
+   gst_base_src_set_format (base_src, GST_FORMAT_TIME);
+   gst_base_src_set_live (base_src, TRUE);
+@@ -1452,6 +1498,12 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
+           "most logins are. Otherwise they are gone when the browser closes.",
+           FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
+ 
++  g_object_class_install_property (gobject_class, PROP_STRICT_NETWORK,
++    g_param_spec_boolean ("strict-network", "strict-network",
++          "Refuse the page access to this machine and its local network by "
++          "denying Chromium's Local Network Access prompt.",
++          FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
++
+   gst_element_class_set_static_metadata (gstelement_class,
+       "Chromium Embedded Framework source", "Source/Video",
+       "Creates a video stream from an embedded Chromium browser",
+diff --git a/gstcefsrc.h b/gstcefsrc.h
+index 69d0df7..e274801 100644
+--- a/gstcefsrc.h
++++ b/gstcefsrc.h
+@@ -59,6 +59,7 @@ struct _GstCefSrc {
+   gboolean isolated_context;
+   gchar *context_cache_path;
+   gboolean persist_session_cookies;
++  gboolean strict_network;
+   gboolean gpu;
+   gboolean sandbox;
+   gboolean listen_for_js_signals;

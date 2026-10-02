@@ -12,8 +12,15 @@
 ARG VERSION=latest
 FROM eyevinntechnology/strom:${VERSION}
 
-# gstcefsrc version (pinned to known-good version)
-ARG GSTCEFSRC_VERSION=144.0.21
+# gstcefsrc build: the CEF version, plus the suffix of Strom's patched build
+# (docker/gstcefsrc: popup-close, isolated-context and strict-network). Each
+# archive is pinned
+# by sha256, so a rebuild published under this name cannot reach an image
+# unnoticed. Changing the version means changing both hashes with it; the
+# build workflow prints them, and the release lists them as asset digests.
+ARG GSTCEFSRC_VERSION=144.0.21-strom5
+ARG GSTCEFSRC_SHA256_AMD64=f369134420ad51c6e85c6b3a75818f3eb004bb8c2002f1f1e830ee774c275bbc
+ARG GSTCEFSRC_SHA256_ARM64=d97c0f19bc6a7ebcd5b3a3dc009366c29a20e264937780deab62de3b412b051b
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -22,8 +29,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     curl \
     xvfb \
-    && curl -L "https://github.com/Eyevinn/strom/releases/download/gstcefsrc-deps/gstcefsrc-${GSTCEFSRC_VERSION}-linux-${TARGETARCH}.tar.gz" \
-    | tar -xz -C /usr/local/ \
+    && case "${TARGETARCH}" in \
+         amd64) GSTCEFSRC_SHA256="${GSTCEFSRC_SHA256_AMD64}" ;; \
+         arm64) GSTCEFSRC_SHA256="${GSTCEFSRC_SHA256_ARM64}" ;; \
+         *) echo "No gstcefsrc build for ${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
+    && curl -fL -o /tmp/gstcefsrc.tar.gz "https://github.com/Eyevinn/strom/releases/download/gstcefsrc-deps/gstcefsrc-${GSTCEFSRC_VERSION}-linux-${TARGETARCH}.tar.gz" \
+    && echo "${GSTCEFSRC_SHA256}  /tmp/gstcefsrc.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/gstcefsrc.tar.gz -C /usr/local/ \
+    && rm /tmp/gstcefsrc.tar.gz \
     && apt-get remove -y curl \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* \

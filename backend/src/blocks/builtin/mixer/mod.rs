@@ -19,7 +19,7 @@
 //!
 //! Pipeline structure per channel:
 //! ```text
-//! input_N → audioconvert → capsfilter(F32LE) → gain → hpf → gate → compressor → EQ →
+//! input_N → audioconvert → audioresample → capsfilter(F32LE, sample_rate) → gain → hpf → gate → compressor → EQ →
 //!           level_N → pre_fader_tee → audiopanorama_N → volume_N → post_fader_tee →
 //!           routing_tee_N → [group or main audiomixer]
 //!
@@ -37,6 +37,14 @@
 //! fader regardless of fader position or mute. Bus meters (`main_level`,
 //! `monitor_level`, `auxN_level`, `groupN_level`) sit on the bus output,
 //! post-master.
+//!
+//! Every bus mixer (main, monitor, solo, aux, group) is followed by a
+//! `<mixer>_rate` capsfilter that pins it to the block's `sample_rate`
+//! property. The buses feed one another (aux and group AFL into solo, solo
+//! and main into monitor), and an audiomixer cannot resample, so they must
+//! agree on one rate. Left free, a bus with no input yet fixates to
+//! audiomixer's default of 44100 while one with a pinned consumer settles at
+//! that consumer's rate, and from then on no channel can link.
 //!
 //! Main bus: audiomixer → main_comp → main_eq → main_limiter → main_volume → main_level → main_out_tee
 //!

@@ -75,8 +75,11 @@ export GST_CEF_CACHE_LOCATION="/tmp/cef-cache"
 rm -rf /tmp/cef-cache
 mkdir -p /tmp/cef-cache
 
-# Enable CEF debug logging
-export GST_CEF_LOG_SEVERITY="verbose"
+# CEF's own logging, to stderr. Warnings and errors only: verbose writes
+# everything Chromium does into the container log. Chromium logs a page's
+# console messages at info, console.error included, so warning also keeps a
+# page logging in a loop out of the log. GST_CEF_LOG_SEVERITY=info shows them.
+export GST_CEF_LOG_SEVERITY="${GST_CEF_LOG_SEVERITY:-warning}"
 
 # LD_PRELOAD the mallinfo shim to neutralise the MemoryInfra SIGILL crash.
 # libcef.so was built against an old sysroot and calls glibc's int-based

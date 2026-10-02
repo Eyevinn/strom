@@ -1453,6 +1453,7 @@ impl StromApp {
                             &self.audio_devices,
                             local_devices_loading,
                             &mut self.qr_inline,
+                            self.devtools_link_warning.as_ref(),
                             &mut self.qr_cache,
                             recorder_filename,
                             recorder_start_time,
@@ -1583,6 +1584,30 @@ impl StromApp {
                             self.status = "Ingest URL copied to clipboard".to_string();
                         }
 
+                        // Handle remote control of an HTML source. Both
+                        // buttons need a link from the server first; which one
+                        // was pressed decides what happens when it arrives.
+                        if let Some((flow_id, block_id)) = result.devtools_qr_requested {
+                            if self.qr_inline.as_ref().is_some_and(|(bid, _)| bid == &block_id) {
+                                self.qr_inline = None;
+                            } else {
+                                self.request_devtools_link(
+                                    ui.ctx(),
+                                    flow_id,
+                                    block_id,
+                                    crate::app::devtools_links::LinkPurpose::Qr,
+                                );
+                            }
+                        }
+                        if let Some((flow_id, block_id)) = result.devtools_open_requested {
+                            self.request_devtools_link(
+                                ui.ctx(),
+                                flow_id,
+                                block_id,
+                                crate::app::devtools_links::LinkPurpose::Open,
+                            );
+                        }
+
                         // Handle QR code toggle for WHEP player
                         if let Some(endpoint_id) = result.show_qr_whep {
                             let server_hostname = self.system_info.as_ref().map(|s| s.hostname.as_str());
@@ -1639,40 +1664,9 @@ impl StromApp {
 
                         // Handle live property updates (e.g., audiogain real-time control)
                         // Debounce: avoid flooding the backend on every slider drag frame.
-                        // drain_live_updates also flushes expired pending values so the
-                        // final slider position is always delivered.
-                        let updates_to_send = crate::properties::drain_live_updates(
-                            &mut self.live_property_debounce,
-                            result.live_property_updates,
-                        );
-                        // If there are still pending updates in the debounce map, schedule
-                        // a repaint so they get flushed once the interval expires.
-                        if self
-                            .live_property_debounce
-                            .values()
-                            .any(|v| v.pending.is_some())
-                        {
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(
-                                crate::properties::LIVE_PROPERTY_DEBOUNCE_MS,
-                            ));
-                        }
-                        for update in updates_to_send {
-                            let api = self.api.clone();
-                            spawn_task(async move {
-                                if let Err(e) = api
-                                    .update_block_property(
-                                        &update.flow_id,
-                                        &update.block_id,
-                                        &update.property_name,
-                                        update.value,
-                                        None,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!("Live property update failed: {}", e);
-                                }
-                            });
-                        }
+                        // Pending values are flushed every frame, so the final
+                        // slider position is always delivered.
+                        self.send_live_updates(ui.ctx(), result.live_property_updates);
                     } else {
                         ui.label("Block definition not found");
                     }

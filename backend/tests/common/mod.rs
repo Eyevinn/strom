@@ -43,6 +43,18 @@ pub fn plugins_available(required: &[&str]) -> bool {
     require_or_skip(&missing_elements(required))
 }
 
+/// [`plugins_available`] for GL elements. A missing one also fails under
+/// `STROM_REQUIRE_GL`: a platform that must render cannot do it without them.
+pub fn gl_elements_available(required: &[&str]) -> bool {
+    let missing = missing_elements(required);
+    assert!(
+        missing.is_empty() || strom_types::env::var_opt("STROM_REQUIRE_GL").is_none(),
+        "STROM_REQUIRE_GL is set but these GL elements are missing: {}",
+        missing.join(", ")
+    );
+    require_or_skip(&missing)
+}
+
 /// Fail outright if any element in `required` is missing, whatever
 /// `STROM_REQUIRE_GST_PLUGINS` says. For tests that must never skip.
 pub fn require_elements(required: &[&str]) {

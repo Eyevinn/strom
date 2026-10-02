@@ -828,6 +828,209 @@ fn test_built_mixer_passes_audio_to_main_out() {
     }
 }
 
+/// Hang `caps → level → fakesink` off `tee`. The level element is named
+/// `level_name` so its messages can be told apart on the bus.
+fn tap(m: &Assembled, tee: &str, caps: &str, level_name: &str) {
+    let filter = gst::ElementFactory::make("capsfilter")
+        .property("caps", caps.parse::<gst::Caps>().unwrap())
+        .build()
+        .unwrap();
+    let level = gst::ElementFactory::make("level")
+        .name(level_name)
+        .property("interval", 50_000_000u64)
+        .property("post-messages", true)
+        .build()
+        .unwrap();
+    let sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .property("async", false)
+        .build()
+        .unwrap();
+    m.pipeline.add_many([&filter, &level, &sink]).unwrap();
+    m.element(tee)
+        .link_pads(Some("src_%u"), &filter, None)
+        .unwrap_or_else(|e| panic!("{tee} cannot feed a {caps} consumer: {e}"));
+    gst::Element::link_many([&filter, &level, &sink]).unwrap();
+}
+
+/// A mixer with return feeds: aux buses and the solo bus start with no input
+/// and nothing downstream that fixes a rate, while main feeds a consumer that
+/// needs the mixer's rate (an encoder, the vision mixer). An input at
+/// `input_rate` that arrives after startup, as every WHIP input does, must
+/// link and be heard on main and on an aux bus.
+///
+/// `mixer_rate` is the block's `sample_rate` property; `None` leaves it unset,
+/// and the buses must then run at `DEFAULT_AUDIO_SAMPLE_RATE`.
+fn assert_late_input_is_heard(input_rate: i32, mixer_rate: Option<u32>) {
+    let mut properties = props(&[
+        ("num_channels", PropertyValue::UInt(2)),
+        ("num_aux_buses", PropertyValue::UInt(2)),
+        ("num_groups", PropertyValue::UInt(1)),
+        ("dsp_backend", PropertyValue::String("rust".to_string())),
+        // Aux sends default to 0: open channel 1's send to aux 2.
+        ("ch1_aux2_level", PropertyValue::Float(1.0)),
+    ]);
+    if let Some(rate) = mixer_rate {
+        properties.insert(
+            "sample_rate".to_string(),
+            PropertyValue::String(rate.to_string()),
+        );
+    }
+    let bus_rate = mixer_rate.unwrap_or(strom_types::DEFAULT_AUDIO_SAMPLE_RATE) as i32;
+    let m = assemble(&properties);
+    tap(
+        &m,
+        "main_out_tee",
+        &format!("audio/x-raw,rate={bus_rate}"),
+        "tap_main",
+    );
+    tap(&m, "aux1_out_tee", "audio/x-raw", "tap_aux1");
+    tap(&m, "aux0_out_tee", "audio/x-raw", "tap_aux0");
+    tap(&m, "monitor_out_tee", "audio/x-raw", "tap_monitor");
+    tap(&m, "group0_out_tee", "audio/x-raw", "tap_group0");
+
+    m.pipeline.set_state(gst::State::Playing).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // An idle bus left to fixate on its own picks 44100; check the rate
+    // before the late link, which would otherwise fail and hide the cause.
+    for bus in [
+        "audiomixer",
+        "aux0_mixer",
+        "aux1_mixer",
+        "group0_mixer",
+        "solo_mixer",
+        "monitor_mixer",
+    ] {
+        let pad = m.element(bus).static_pad("src").unwrap();
+        let caps = loop {
+            if let Some(caps) = pad.current_caps() {
+                break caps;
+            }
+            assert!(Instant::now() < deadline, "{bus} never negotiated");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            caps.structure(0).unwrap().get::<i32>("rate").unwrap(),
+            bus_rate,
+            "{bus} negotiated {caps}"
+        );
+    }
+
+    let src = gst::ElementFactory::make("audiotestsrc")
+        .property("is-live", true)
+        .build()
+        .unwrap();
+    let decoded = gst::ElementFactory::make("capsfilter")
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("format", "S16LE")
+                .field("rate", input_rate)
+                .field("channels", 2i32)
+                .field("layout", "interleaved")
+                .build(),
+        )
+        .build()
+        .unwrap();
+    m.pipeline.add_many([&src, &decoded]).unwrap();
+    src.link(&decoded).unwrap();
+    decoded
+        .static_pad("src")
+        .unwrap()
+        .link(&m.element("convert_0").static_pad("sink").unwrap())
+        .expect("a late input must link into a running mixer");
+    src.sync_state_with_parent().unwrap();
+    decoded.sync_state_with_parent().unwrap();
+
+    // The buses are live and emit silence with no input, so buffers alone
+    // prove nothing: wait for the tone's level on main and on aux1.
+    let bus = m.pipeline.bus().unwrap();
+    let mut heard = HashSet::new();
+    while heard.len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the input was not heard on {:?}",
+            ["tap_main", "tap_aux1"]
+                .iter()
+                .filter(|n| !heard.contains(**n))
+                .collect::<Vec<_>>()
+        );
+        let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(50),
+            &[gst::MessageType::Error, gst::MessageType::Element],
+        ) else {
+            continue;
+        };
+        if let gst::MessageView::Error(err) = msg.view() {
+            panic!("pipeline error: {err:?}");
+        }
+        let (Some(from), Some(structure)) = (msg.src(), msg.structure()) else {
+            continue;
+        };
+        let name = from.name();
+        if structure.name() == "level"
+            && (name == "tap_main" || name == "tap_aux1")
+            && extract_level_values(structure, "peak")
+                .iter()
+                .any(|db| *db > -40.0)
+        {
+            heard.insert(name.to_string());
+        }
+    }
+}
+
+#[test]
+fn test_input_links_late_when_main_consumer_pins_rate() {
+    assert_late_input_is_heard(48_000, None);
+}
+
+#[test]
+fn test_late_input_at_another_rate_is_resampled() {
+    assert_late_input_is_heard(44_100, None);
+}
+
+/// With `sample_rate=44100` every bus runs at 44.1 kHz, and a 48 kHz input
+/// that links late is resampled down and heard.
+#[test]
+fn test_sample_rate_property_sets_every_bus_rate() {
+    assert_late_input_is_heard(48_000, Some(44_100));
+}
+
+#[test]
+fn test_sample_rate_property_parsing() {
+    assert_eq!(parse_sample_rate(&props(&[])), 48_000);
+    assert_eq!(
+        parse_sample_rate(&props(&[(
+            "sample_rate",
+            PropertyValue::String("96000".into())
+        )])),
+        96_000
+    );
+    assert_eq!(
+        parse_sample_rate(&props(&[("sample_rate", PropertyValue::Int(44_100))])),
+        44_100
+    );
+    assert_eq!(
+        parse_sample_rate(&props(&[(
+            "sample_rate",
+            PropertyValue::String("12345".into())
+        )])),
+        48_000,
+        "a rate outside the common list falls back to the default"
+    );
+    let def = mixer_definition();
+    let prop = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "sample_rate")
+        .expect("mixer exposes sample_rate");
+    assert!(
+        matches!(&prop.default_value, Some(PropertyValue::String(s)) if s == "48000"),
+        "default is {:?}",
+        prop.default_value
+    );
+}
+
 /// Minimum latency reported upstream of each named output tee, with live audio
 /// playing into both channels. An unfed channel fails the query.
 fn reported_latency(properties: &HashMap<String, PropertyValue>, tees: &[&str]) -> Vec<u64> {

@@ -7,6 +7,8 @@
 //! context (probed like `shader_validation_test`; merely having the GL
 //! plugins installed is not enough, as headless CI runners show).
 
+pub mod common;
+
 use std::collections::HashMap;
 use strom::blocks::BlockRegistry;
 use strom::events::EventBroadcaster;
@@ -16,6 +18,9 @@ use strom_types::Flow;
 use tempfile::NamedTempFile;
 
 const BLOCK_ID: &str = "vmfx";
+/// The vision mixer's overlay state is process-global and keyed by block ID,
+/// and the tests in this binary run concurrently, so each test needs its own.
+const LETTERBOX_BLOCK_ID: &str = "vmfx-letterbox";
 
 /// Probe whether this environment can actually render through GL: the GL
 /// plugins being installed is not enough — on headless CI runners the
@@ -26,12 +31,6 @@ const BLOCK_ID: &str = "vmfx";
 /// not skip it).
 fn gl_environment_available() -> bool {
     use gstreamer::prelude::*;
-    if gstreamer::ElementFactory::find("glvideomixerelement").is_none()
-        || gstreamer::ElementFactory::find("glshader").is_none()
-        || gstreamer::ElementFactory::find("gltestsrc").is_none()
-    {
-        return false;
-    }
     let Ok(pipeline) = gstreamer::parse::launch(
         "gltestsrc num-buffers=3 ! video/x-raw(memory:GLMemory),format=RGBA,width=64,height=64,framerate=30/1 ! fakesink sync=false",
     ) else {
@@ -66,7 +65,14 @@ fn gl_environment_available() -> bool {
 /// `STROM_REQUIRE_GL=1` turns the skip into a failure. CI sets it on the macOS job,
 /// which is the one platform whose runner renders, so that job cannot quietly stop
 /// exercising the FX engine.
+///
+/// Missing GL elements are a different failure: every CI job installs them, so
+/// they fail under `STROM_REQUIRE_GST_PLUGINS` like any other missing element,
+/// rather than being folded into "no GL context" where the Linux jobs skip.
 fn gl_available_or_required() -> bool {
+    if !common::gl_elements_available(&["glvideomixerelement", "glshader", "gltestsrc"]) {
+        return false;
+    }
     if gl_environment_available() {
         return true;
     }
@@ -75,7 +81,7 @@ fn gl_available_or_required() -> bool {
         "STROM_REQUIRE_GL is set but no GL context could be created — this platform \
          is supposed to render, so a skip here would hide a GL regression"
     );
-    eprintln!("SKIP: GL environment unavailable (no context or GL elements missing)");
+    eprintln!("SKIP: GL environment unavailable (no context could be created)");
     false
 }
 
@@ -121,7 +127,7 @@ async fn vision_mixer_fx_engine_end_to_end() {
 
     let flow = build_vm_flow();
 
-    let mut manager = match PipelineManager::new(
+    let mut manager = PipelineManager::new(
         &flow,
         events,
         &registry,
@@ -130,19 +136,12 @@ async fn vision_mixer_fx_engine_end_to_end() {
         None,
         media_path,
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    ) {
-        Ok(m) => m,
-        Err(e) => {
-            // GL context creation can fail in truly headless environments.
-            eprintln!("SKIP: could not build GPU pipeline ({})", e);
-            return;
-        }
-    };
+    )
+    // GL was proven to render above, so a build or start failure here is the
+    // GPU mixer breaking, not the environment. It must fail, not skip.
+    .expect("GPU vision mixer pipeline builds");
 
-    if let Err(e) = manager.start() {
-        eprintln!("SKIP: could not start GPU pipeline ({})", e);
-        return;
-    }
+    manager.start().expect("GPU vision mixer pipeline starts");
 
     // Wait until the mixer actually produces output (its position query
     // answers). A fixed sleep is not enough on cold software-GL CI runners,
@@ -293,7 +292,7 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     let mut flow = Flow::new("vm_letterbox_wipe");
     flow.blocks.push(strom_types::BlockInstance {
-        id: BLOCK_ID.to_string(),
+        id: LETTERBOX_BLOCK_ID.to_string(),
         block_definition_id: "builtin.vision_mixer".to_string(),
         name: None,
         properties: {
@@ -381,10 +380,10 @@ async fn wipe_between_letterboxed_sources_animates() {
     ));
     for (from, to) in [
         ("src0:src", "caps0:sink"),
-        ("caps0:src", "vmfx:video_in_0"),
+        ("caps0:src", "vmfx-letterbox:video_in_0"),
         ("src1:src", "caps1:sink"),
-        ("caps1:src", "vmfx:video_in_1"),
-        ("vmfx:pgm_out", "pgmsink:sink"),
+        ("caps1:src", "vmfx-letterbox:video_in_1"),
+        ("vmfx-letterbox:pgm_out", "pgmsink:sink"),
     ] {
         flow.links.push(strom_types::Link {
             from: from.to_string(),
@@ -396,7 +395,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     let registry = BlockRegistry::new(temp_file.path());
     let events = EventBroadcaster::with_capacity(10);
 
-    let mut manager = match PipelineManager::new(
+    let mut manager = PipelineManager::new(
         &flow,
         events,
         &registry,
@@ -405,17 +404,10 @@ async fn wipe_between_letterboxed_sources_animates() {
         None,
         std::env::temp_dir(),
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-    ) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("SKIP: could not build GPU pipeline ({})", e);
-            return;
-        }
-    };
-    if let Err(e) = manager.start() {
-        eprintln!("SKIP: could not start GPU pipeline ({})", e);
-        return;
-    }
+    )
+    // GL was proven to render above: fail, do not skip.
+    .expect("GPU vision mixer pipeline builds");
+    manager.start().expect("GPU vision mixer pipeline starts");
 
     // Let caps probes settle so pads get their aspect-fitted rects.
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
@@ -468,7 +460,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     };
 
     // Debug aid: verify the source branches are actually linked.
-    for name in ["vmfx:queue_0", "vmfx:queue_1"] {
+    for name in ["vmfx-letterbox:queue_0", "vmfx-letterbox:queue_1"] {
         let q = manager.pipeline().by_name(name).expect(name);
         let linked = q.static_pad("sink").map(|p| p.is_linked()).unwrap_or(false);
         eprintln!("{} sink linked: {}", name, linked);
@@ -540,13 +532,13 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     // --- classic orientation: 2.40:1 -> 2.34:1 (outgoing does not cover) ---
     manager
-        .trigger_transition(BLOCK_ID, 0, 1, "wipe_left", 2000)
+        .trigger_transition(LETTERBOX_BLOCK_ID, 0, 1, "wipe_left", 2000)
         .expect("wipe 0->1");
     // Mirror the API handler: persist the PGM/PVW swap after the take —
     // trigger_transition reads the authoritative bus state from overlay
     // state, so without this the next take would re-run the same pair.
     manager
-        .update_vision_mixer_after_take(BLOCK_ID, Some(1), Some(0), 2)
+        .update_vision_mixer_after_take(LETTERBOX_BLOCK_ID, Some(1), Some(0), 2)
         .expect("after take 0->1");
     let (animated, w_end, r_end) = observe_wipe(true);
     eprintln!(
@@ -566,10 +558,10 @@ async fn wipe_between_letterboxed_sources_animates() {
 
     // --- inverted orientation: 2.34:1 -> 2.40:1 (outgoing covers) ---
     manager
-        .trigger_transition(BLOCK_ID, 1, 0, "wipe_left", 2000)
+        .trigger_transition(LETTERBOX_BLOCK_ID, 1, 0, "wipe_left", 2000)
         .expect("wipe 1->0");
     manager
-        .update_vision_mixer_after_take(BLOCK_ID, Some(0), Some(1), 2)
+        .update_vision_mixer_after_take(LETTERBOX_BLOCK_ID, Some(0), Some(1), 2)
         .expect("after take 1->0");
     let (animated2, w_end2, r_end2) = observe_wipe(false);
     eprintln!(
@@ -577,7 +569,10 @@ async fn wipe_between_letterboxed_sources_animates() {
         animated2, w_end2, r_end2
     );
     // Debug: pad + fx state at the broken end state.
-    let mixer = manager.pipeline().by_name("vmfx:mixer").expect("mixer");
+    let mixer = manager
+        .pipeline()
+        .by_name("vmfx-letterbox:mixer")
+        .expect("mixer");
     for i in 0..2 {
         let pad = mixer.static_pad(&format!("sink_{}", i)).unwrap();
         eprintln!(
@@ -594,7 +589,7 @@ async fn wipe_between_letterboxed_sources_animates() {
     for i in 0..2 {
         let fx = manager
             .pipeline()
-            .by_name(&format!("vmfx:fx_take_{}", i))
+            .by_name(&format!("vmfx-letterbox:fx_take_{}", i))
             .unwrap();
         let u = fx.property::<Option<gstreamer::Structure>>("uniforms");
         eprintln!("fx_take_{} uniforms: {:?}", i, u.map(|s| s.to_string()));
