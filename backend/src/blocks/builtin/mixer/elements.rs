@@ -67,6 +67,22 @@ pub(crate) fn make_audiomixer(
     Ok(mixer)
 }
 
+/// Create the capsfilter that follows a bus mixer and pins it to `rate`.
+/// Only the rate is fixed: format and channels stay with whatever the bus
+/// negotiates.
+pub(super) fn make_rate_pin(name: &str, rate: u32) -> Result<gst::Element, BlockBuildError> {
+    gst::ElementFactory::make("capsfilter")
+        .name(name)
+        .property(
+            "caps",
+            gst::Caps::builder("audio/x-raw")
+                .field("rate", rate as i32)
+                .build(),
+        )
+        .build()
+        .map_err(|e| BlockBuildError::ElementCreation(format!("capsfilter {}: {}", name, e)))
+}
+
 /// Create a gate element, falling back to identity passthrough if unavailable.
 pub(super) fn make_gate_element(
     name: &str,

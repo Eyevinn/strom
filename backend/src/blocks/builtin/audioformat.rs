@@ -34,22 +34,9 @@ impl BlockBuilder for AudioFormatBuilder {
         info!("Building AudioFormat block instance: {}", instance_id);
 
         // Parse optional properties
-        let sample_rate = properties.get("sample_rate").and_then(|v| match v {
-            PropertyValue::String(s) if !s.is_empty() => Some(s.as_str()),
-            PropertyValue::Int(i) => Some(match *i {
-                8000 => "8000",
-                11025 => "11025",
-                16000 => "16000",
-                22050 => "22050",
-                32000 => "32000",
-                44100 => "44100",
-                48000 => "48000",
-                88200 => "88200",
-                96000 => "96000",
-                176400 => "176400",
-                192000 => "192000",
-                _ => return None,
-            }),
+        let sample_rate: Option<String> = properties.get("sample_rate").and_then(|v| match v {
+            PropertyValue::String(s) if !s.is_empty() => Some(s.clone()),
+            PropertyValue::Int(_) => parse_common_audio_sample_rate(v).map(|r| r.to_string()),
             _ => None,
         });
 
@@ -166,20 +153,7 @@ fn audioformat_definition() -> BlockDefinition {
                 label: "Sample Rate".to_string(),
                 description: "Audio sample rate - creates audioresample element. Leave empty to pass through.".to_string(),
                 property_type: PropertyType::Enum {
-                    values: vec![
-                        EnumValue { value: "".to_string(), label: Some("-".to_string()) },
-                        EnumValue { value: "8000".to_string(), label: Some("8 kHz - Telephony".to_string()) },
-                        EnumValue { value: "11025".to_string(), label: Some("11.025 kHz - Low Quality".to_string()) },
-                        EnumValue { value: "16000".to_string(), label: Some("16 kHz - Wideband".to_string()) },
-                        EnumValue { value: "22050".to_string(), label: Some("22.05 kHz - Medium Quality".to_string()) },
-                        EnumValue { value: "32000".to_string(), label: Some("32 kHz - Miniature Disc".to_string()) },
-                        EnumValue { value: "44100".to_string(), label: Some("44.1 kHz - CD Quality".to_string()) },
-                        EnumValue { value: "48000".to_string(), label: Some("48 kHz - Professional".to_string()) },
-                        EnumValue { value: "88200".to_string(), label: Some("88.2 kHz - High-Res 2x CD".to_string()) },
-                        EnumValue { value: "96000".to_string(), label: Some("96 kHz - High-Res Professional".to_string()) },
-                        EnumValue { value: "176400".to_string(), label: Some("176.4 kHz - Very High-Res 4x CD".to_string()) },
-                        EnumValue { value: "192000".to_string(), label: Some("192 kHz - Very High-Res Professional".to_string()) },
-                    ],
+                    values: common_audio_sample_rate_enum_values(true),
                 },
                 default_value: Some(PropertyValue::String("".to_string())),
                 mapping: PropertyMapping {
@@ -274,5 +248,68 @@ fn audioformat_definition() -> BlockDefinition {
             height: Some(2.0),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gstreamer::prelude::*;
+
+    /// The `rate` field the built capsfilter carries, if any.
+    fn built_rate(sample_rate: Option<PropertyValue>) -> Option<i32> {
+        gst::init().unwrap();
+        let mut properties = HashMap::new();
+        if let Some(v) = sample_rate {
+            properties.insert("sample_rate".to_string(), v);
+        }
+        let ctx = BlockBuildContext::new(Vec::new(), "all".to_string());
+        let result = AudioFormatBuilder
+            .build("af", &properties, &ctx)
+            .expect("audioformat builds");
+        let (_, capsfilter) = result
+            .elements
+            .iter()
+            .find(|(id, _)| id == "af:capsfilter")
+            .expect("capsfilter built");
+        let caps = capsfilter.property::<gst::Caps>("caps");
+        caps.structure(0).unwrap().get::<i32>("rate").ok()
+    }
+
+    #[test]
+    fn sample_rate_property_sets_the_caps_rate() {
+        assert_eq!(built_rate(None), None);
+        assert_eq!(built_rate(Some(PropertyValue::String(String::new()))), None);
+        assert_eq!(
+            built_rate(Some(PropertyValue::String("44100".into()))),
+            Some(44100)
+        );
+        assert_eq!(built_rate(Some(PropertyValue::Int(96000))), Some(96000));
+        assert_eq!(
+            built_rate(Some(PropertyValue::Int(12345))),
+            None,
+            "an integer outside the common rates is ignored"
+        );
+    }
+
+    #[test]
+    fn sample_rate_enum_lists_the_common_rates_after_an_empty_option() {
+        let def = audioformat_definition();
+        let prop = def
+            .exposed_properties
+            .iter()
+            .find(|p| p.name == "sample_rate")
+            .unwrap();
+        let PropertyType::Enum { values } = &prop.property_type else {
+            panic!("sample_rate is an enum");
+        };
+        let got: Vec<&str> = values.iter().map(|v| v.value.as_str()).collect();
+        assert_eq!(
+            got,
+            [
+                "", "8000", "11025", "16000", "22050", "32000", "44100", "48000", "88200", "96000",
+                "176400", "192000"
+            ]
+        );
     }
 }

@@ -1436,6 +1436,7 @@ impl PropertyInspector {
                     | "force_live"
                     | "latency"
                     | "min_upstream_latency"
+                    | "sample_rate"
                     | "monitor_fader"
             ) {
                 config_idx.push(i);

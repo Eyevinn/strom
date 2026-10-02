@@ -193,6 +193,22 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         live: false,
         persist: None,
     });
+    exposed_properties.push(ExposedProperty {
+        name: "sample_rate".to_string(),
+        label: "Sample Rate".to_string(),
+        description: "Sample rate the mixer runs at. Every input is resampled to this rate, and every output (main, monitor, aux, group) runs at it. Construction-time only.".to_string(),
+        property_type: PropertyType::Enum {
+            values: common_audio_sample_rate_enum_values(false),
+        },
+        default_value: Some(PropertyValue::String(DEFAULT_AUDIO_SAMPLE_RATE.to_string())),
+        mapping: PropertyMapping {
+            element_id: "_block".to_string(),
+            property_name: "sample_rate".to_string(),
+            transform: None,
+        },
+        live: false,
+        persist: None,
+    });
 
     // ========================================================================
     // Main bus processing properties
