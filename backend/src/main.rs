@@ -436,6 +436,10 @@ fn main() -> anyhow::Result<()> {
             info!("CEF cache directory: {}", config.cef_cache_path.display());
         }
     }
+    #[cfg(unix)]
+    if let Some(root) = strom::cef_profiles::cache_root() {
+        strom::cef_profiles::clear_stale_singleton_lock(&root);
+    }
 
     // Have Chromium check what a page reaches on this machine and its network
     // on every path it can. Local Network Access is on by default, but in this

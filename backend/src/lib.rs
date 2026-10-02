@@ -23,6 +23,7 @@ pub mod assets;
 pub mod auth;
 pub mod blocks;
 pub mod cef_media;
+pub mod cef_profiles;
 pub mod client_auth;
 pub mod config;
 pub mod discovery;

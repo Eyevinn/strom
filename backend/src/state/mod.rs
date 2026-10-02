@@ -499,6 +499,11 @@ impl AppState {
                     }
                 }
 
+                // Nothing runs yet, so no browser has a profile open.
+                if let Some(root) = crate::cef_profiles::cache_root() {
+                    crate::cef_profiles::remove_unused_profiles(&root, flows.values());
+                }
+
                 let mut state_flows = self.inner.flows.write().await;
                 *state_flows = flows;
                 info!("Loaded {} flows from storage", count);
@@ -812,6 +817,12 @@ impl AppState {
 
         // Unregister from PTP monitor
         self.inner.ptp_monitor.unregister_flow(*id);
+
+        // The flow is stopped, so its pages are closed. Their profiles hold
+        // whatever they were logged in to; nothing would use them again.
+        if let Some(root) = crate::cef_profiles::cache_root() {
+            crate::cef_profiles::remove_flow_profiles(&root, id);
+        }
 
         // Broadcast event
         self.inner

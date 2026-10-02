@@ -505,7 +505,7 @@ so the two cannot be combined.
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
 - **No Chromium sandbox in `strom-full`**: the image runs as root and the entrypoint passes `no-sandbox`, so a Chromium bug in a page is code running in Strom's container. See [Running HTML sources for several customers](#running-html-sources-for-several-customers)
 - **One browser process per instance**: every `cefsrc` shares one CEF process and one debugging port. Cookies and storage are per source only with Strom's gstcefsrc build (see [Browser profiles](#browser-profiles))
-- **Profiles are not removed with their block**: a deleted block's profile stays in the CEF cache directory until the directory is cleared
+- **A removed block's profile goes at the next restart**: deleting a flow removes its sources' profiles at once. A block or element removed from a flow that is kept, and a named profile no block uses any more, stay until Strom next starts
 
 ## References
 
