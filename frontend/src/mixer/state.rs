@@ -2,10 +2,11 @@ use super::*;
 
 /// Block properties set in the property panel, not the mixer editor. The
 /// editor carries them through its saves unchanged.
-const BUILD_CONFIG_KEYS: [&str; 6] = [
+const BUILD_CONFIG_KEYS: [&str; 7] = [
     "dsp_backend",
     "force_live",
     "latency",
+    "internal_bus_latency",
     "min_upstream_latency",
     "direct_outs",
     "sample_rate",
@@ -664,6 +665,7 @@ mod tests {
                 PropertyValue::String("lv2".into()),
             ),
             ("latency".to_string(), PropertyValue::UInt(30)),
+            ("internal_bus_latency".to_string(), PropertyValue::UInt(20)),
             (
                 "sample_rate".to_string(),
                 PropertyValue::String("44100".into()),
@@ -677,7 +679,13 @@ mod tests {
             editor.collect_properties(),
             editor.collect_structural_properties(),
         ] {
-            for key in ["direct_outs", "dsp_backend", "latency", "sample_rate"] {
+            for key in [
+                "direct_outs",
+                "dsp_backend",
+                "latency",
+                "internal_bus_latency",
+                "sample_rate",
+            ] {
                 assert_eq!(
                     format!("{:?}", saved.get(key)),
                     format!("{:?}", loaded.get(key)),
