@@ -827,6 +827,79 @@ async fn a_stinger_outliving_its_flow_leaves_the_next_one_alone() {
     let _ = std::fs::remove_file(&clip);
 }
 
+/// Every frame of a clip that outgrows the media player's output queue still
+/// reaches the mixer.
+///
+/// A stinger source plays unpaced, so its clip runs ahead of the mixer and
+/// fills that queue. 240 frames at this size is about 55 MB, more than the
+/// queue holds, so a queue that dropped new frames when full would put about a
+/// third of them on air instead of all of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clip_longer_than_the_output_queue_plays_whole() {
+    const LONG_FRAMES: usize = 240;
+    let clip = clip_path("whole");
+    gst::init().expect("gstreamer init");
+    write_clip_frames(&clip, clip_frame, LONG_FRAMES).expect("write long clip");
+    let running = start_with(
+        "whole",
+        with_timing("whole", build_flow("whole", &clip, true), 4_000, "cut", 0),
+    )
+    .await;
+
+    // Count each clip frame once, as the newest timestamp the keyed pad has
+    // seen moves forward.
+    let newest = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let arrived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let pipelines = running.state.pipelines_read().await;
+        let mixer = pipelines
+            .get(&running.flow_id)
+            .and_then(|m| m.pipeline().by_name(&format!("{}:mixer", running.mixer)))
+            .expect("mixer element");
+        // num_inputs is 2, so the first keyed input is the third sink pad.
+        let pad = mixer
+            .sink_pads()
+            .into_iter()
+            .find(|p| p.name() == "sink_2")
+            .expect("keyed input pad");
+        let (newest, arrived) = (newest.clone(), arrived.clone());
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            if let Some(pts) = info.buffer().and_then(|b| b.pts()) {
+                let pts = pts.nseconds() + 1;
+                if newest.fetch_max(pts, Ordering::Relaxed) < pts {
+                    arrived.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+
+    let mut rx = running.state.events().subscribe();
+    running
+        .state
+        .trigger_stinger(
+            &running.flow_id,
+            &running.mixer,
+            0,
+            1,
+            Some(&running.source),
+        )
+        .await
+        .expect("stinger must start");
+    wait_for_event(&mut rx, 30_000, |e| {
+        matches!(e, strom_types::StromEvent::StingerCompleted { .. }).then_some(())
+    })
+    .await
+    .expect("the stinger must complete");
+
+    assert_eq!(
+        arrived.load(Ordering::Relaxed),
+        LONG_FRAMES,
+        "every clip frame must reach the mixer"
+    );
+    let _ = std::fs::remove_file(&clip);
+}
+
 /// The take never lands after the clip time the cut point names.
 ///
 /// The clip's coverage grows one thirtieth per frame, so on the first program
