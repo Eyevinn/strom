@@ -4,7 +4,7 @@
 //! strings. This pushes `gltestsrc` frames, RGBA in GL memory as a GPU Vision
 //! Mixer hands them to a WHEP Output, through the bridge and checks that the
 //! peer receives NV12 in system memory, through `gldownload` and a converter,
-//! with both converters `video_convert_mode` can pick.
+//! with `videoconvert`, the converter the WHEP Output uses.
 //!
 //! It needs a GL context. On a Linux host with no display, which is CI, it
 //! asks for a surfaceless EGL context, which Mesa's software rasteriser
@@ -18,13 +18,7 @@ use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 use strom::gst::video_input_bridge::install_video_input_bridge;
 
-const REQUIRED: [&str; 5] = [
-    "gltestsrc",
-    "gldownload",
-    "videoconvert",
-    "autovideoconvert",
-    "fakesink",
-];
+const REQUIRED: [&str; 4] = ["gltestsrc", "gldownload", "videoconvert", "fakesink"];
 
 const GL_RGBA: &str =
     "video/x-raw(memory:GLMemory), format=RGBA, width=320, height=240, framerate=30/1";
@@ -202,24 +196,23 @@ fn gl_rgba_reaches_the_peer_as_system_memory_nv12() {
         return;
     }
 
-    for convert_factory in ["videoconvert", "autovideoconvert"] {
-        let outcome = run(convert_factory);
-        assert_eq!(
-            outcome.spliced,
-            ["gldownload", convert_factory, "capsfilter"],
-            "{}: expected a download, then the converter and the format pin",
-            convert_factory
-        );
-        assert_eq!(outcome.format, "NV12", "{}", convert_factory);
-        assert!(
-            !outcome.gl_memory,
-            "{}: the peer should receive system memory",
-            convert_factory
-        );
-        assert!(
-            outcome.buffers > 0,
-            "{}: no buffers reached the peer",
-            convert_factory
-        );
-    }
+    let convert_factory = "videoconvert";
+    let outcome = run(convert_factory);
+    assert_eq!(
+        outcome.spliced,
+        ["gldownload", convert_factory, "capsfilter"],
+        "{}: expected a download, then the converter and the format pin",
+        convert_factory
+    );
+    assert_eq!(outcome.format, "NV12", "{}", convert_factory);
+    assert!(
+        !outcome.gl_memory,
+        "{}: the peer should receive system memory",
+        convert_factory
+    );
+    assert!(
+        outcome.buffers > 0,
+        "{}: no buffers reached the peer",
+        convert_factory
+    );
 }

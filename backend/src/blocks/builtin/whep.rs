@@ -12,7 +12,6 @@
 use crate::blocks::{
     set_ice_transport_policy, BlockBuildContext, BlockBuildError, BlockBuildResult, BlockBuilder,
 };
-use crate::gpu::video_convert_mode;
 use crate::gst::ice_preflight;
 use crate::gst::video_input_bridge;
 use crate::gst::whep_probe::{self, WhepProbeRegistry};
@@ -1616,10 +1615,12 @@ fn build_whepserversink(
     // the first queue's caps probe drives it — all video inputs must share the
     // same codec.
     if has_video {
-        // Resolved here rather than inside the probe: this is where the rest of
-        // the project picks its converter, and a panic on a streaming thread
-        // would take the pipeline with it.
-        let convert_factory = video_convert_mode().element_name();
+        // Plain `videoconvert`, not the convert mode's pick: the bridge converts
+        // after any `gldownload`, so the frames are in system memory and
+        // `autovideoconvert` has no GPU path to win. Behind `gldownload` it
+        // also crashed or hung in 9 of 20 runs on GStreamer 1.24.2 (Ubuntu
+        // 24.04, surfaceless EGL), where `videoconvert` ran 20 of 20.
+        let convert_factory = "videoconvert";
 
         // Shared latch: only the first input that sees a caps event sets video-caps.
         let video_caps_set = Arc::new(AtomicBool::new(false));

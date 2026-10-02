@@ -130,8 +130,9 @@ pub fn needs_format_conversion(caps: &gst::CapsRef) -> bool {
 /// The probe is one-shot: it removes itself as soon as the first CAPS event has
 /// been classified, whichever way it went, so nothing is left behind on the
 /// data path. `name_prefix` names the inserted elements and is only used for
-/// logging and debugging. `convert_factory` is the converter to splice, picked
-/// by the caller so the choice stays where the rest of the project makes it.
+/// logging and debugging. `convert_factory` is the converter to splice; the
+/// WHEP Output passes `videoconvert`, since the frames are in system memory by
+/// the time they are converted.
 pub fn install_video_input_bridge(src_pad: &gst::Pad, name_prefix: &str, convert_factory: &str) {
     let name_prefix = name_prefix.to_string();
     let convert_factory = convert_factory.to_string();
@@ -653,18 +654,5 @@ mod tests {
         assert_eq!(format, "I420");
         assert!(buffers > 0, "no buffers reached the peer");
         assert_eq!(elements, 4, "nothing should have been spliced in");
-    }
-
-    /// `video_convert_mode` picks `autovideoconvert` on a host with working
-    /// CUDA-GL interop, so the splice has to work with it as well.
-    #[test]
-    fn rgba_is_converted_by_autovideoconvert() {
-        let (format, buffers, elements) = run_pipeline("RGBA", "autovideoconvert");
-        assert_eq!(format, "NV12", "the peer should see converted video");
-        assert!(buffers > 0, "no buffers reached the peer");
-        assert_eq!(
-            elements, 6,
-            "expected a converter and a capsfilter to be spliced in"
-        );
     }
 }
