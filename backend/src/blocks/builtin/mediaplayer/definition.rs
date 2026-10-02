@@ -1,5 +1,6 @@
 //! Block definition (metadata) for the media player block.
 
+use super::bridge::Decoder;
 use strom_types::block::*;
 use strom_types::{MediaType, PropertyValue};
 
@@ -26,6 +27,35 @@ pub fn media_player_definition() -> BlockDefinition {
                 mapping: PropertyMapping {
                     element_id: "_block".to_string(),
                     property_name: "decode".to_string(),
+                    transform: None,
+                },
+                live: false,
+                persist: None,
+            },
+            ExposedProperty {
+                name: "decoder".to_string(),
+                label: "Decoder".to_string(),
+                description: "With Decode on: which GStreamer decoder plays the source. \
+                              decodebin3 handles HLS and DASH quality switches without a \
+                              hiccup and buffers on its own; classic is the one this block \
+                              has always used."
+                    .to_string(),
+                property_type: PropertyType::Enum {
+                    values: vec![
+                        EnumValue {
+                            value: Decoder::CLASSIC.to_string(),
+                            label: Some("Classic (uridecodebin)".to_string()),
+                        },
+                        EnumValue {
+                            value: Decoder::DECODEBIN3.to_string(),
+                            label: Some("decodebin3 (uridecodebin3)".to_string()),
+                        },
+                    ],
+                },
+                default_value: Some(PropertyValue::String(Decoder::CLASSIC.to_string())),
+                mapping: PropertyMapping {
+                    element_id: "_block".to_string(),
+                    property_name: "decoder".to_string(),
                     transform: None,
                 },
                 live: false,

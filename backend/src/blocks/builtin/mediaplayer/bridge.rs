@@ -16,23 +16,71 @@ use std::sync::Arc;
 use strom_types::{FlowId, StromEvent};
 use tracing::{debug, error, info, warn};
 
+/// Which element decodes in decode mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decoder {
+    /// `uridecodebin`. HLS and DASH go through the old `hlsdemux` and
+    /// `dashdemux`, which rebuild the whole decoder chain on every quality
+    /// switch - a hiccup each time.
+    Classic,
+    /// `uridecodebin3`, with `hlsdemux2` and `dashdemux2`: quality switches
+    /// without a rebuild, and buffering of its own. It decodes only the
+    /// streams the block has outputs for.
+    Decodebin3,
+}
+
+impl Decoder {
+    /// The `decoder` property's values.
+    pub const CLASSIC: &'static str = "classic";
+    pub const DECODEBIN3: &'static str = "decodebin3";
+
+    pub fn from_property(value: Option<&str>) -> Self {
+        match value {
+            Some(Self::DECODEBIN3) => Decoder::Decodebin3,
+            _ => Decoder::Classic,
+        }
+    }
+
+    fn factory(self) -> &'static str {
+        match self {
+            Decoder::Classic => "uridecodebin",
+            Decoder::Decodebin3 => "uridecodebin3",
+        }
+    }
+}
+
 /// Create the internal pipeline for decode mode.
 ///
-/// Pipeline: `uridecodebin` → (pad-added) → `clocksync` → `appsink`
+/// Pipeline: `uridecodebin` or `uridecodebin3` → (pad-added) → `clocksync` → `appsink`
 /// The appsink callbacks push samples to the corresponding appsrc in the main pipeline.
 pub fn create_decode_pipeline(
     instance_id: &str,
     state: &Arc<MediaPlayerState>,
     initial_uri: Option<&str>,
+    decoder: Decoder,
 ) -> Result<gst::Pipeline, BlockBuildError> {
     let pipeline_name = format!("mediaplayer-internal-{}", instance_id);
     let pipeline = gst::Pipeline::builder().name(&pipeline_name).build();
 
-    let source_id = format!("{}_uridecodebin", instance_id);
-    let source = gst::ElementFactory::make("uridecodebin")
+    let factory = decoder.factory();
+    let source_id = format!("{}_{}", instance_id, factory);
+    let source = gst::ElementFactory::make(factory)
         .name(&source_id)
         .build()
-        .map_err(|e| BlockBuildError::ElementCreation(format!("uridecodebin: {}", e)))?;
+        .map_err(|e| BlockBuildError::ElementCreation(format!("{}: {}", factory, e)))?;
+
+    if decoder == Decoder::Decodebin3 {
+        // decodebin3 decodes one stream of each type unless told otherwise.
+        // Pick as many as the block has outputs for, in the order the
+        // collection lists them, and nothing else - a stream nobody plays is
+        // not worth decoding.
+        let (videos, audios) = (state.video_appsrcs.len(), state.audio_appsrcs.len());
+        source.connect("select-stream", false, move |args| {
+            let collection = args[1].get::<gst::StreamCollection>().ok()?;
+            let stream = args[2].get::<gst::Stream>().ok()?;
+            Some(select_stream(&collection, &stream, videos, audios).to_value())
+        });
+    }
 
     if let Some(uri) = initial_uri {
         source.set_property("uri", uri);
@@ -64,8 +112,7 @@ pub fn create_decode_pipeline(
             None => return,
         };
 
-        let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
-        let kind = TrackKind::from_caps(caps.as_ref());
+        let kind = TrackKind::of_pad(pad);
         route_pad(&pipeline, pad, &state, &instance_id_owned, sync, kind, "");
     });
 
@@ -212,6 +259,22 @@ enum TrackKind {
 }
 
 impl TrackKind {
+    /// What a decoded pad carries: its stream's type where it has one
+    /// (decodebin3 pads may have no caps yet), else its caps.
+    fn of_pad(pad: &gst::Pad) -> Self {
+        if let Some(stream) = pad.stream() {
+            let t = stream.stream_type();
+            if t.contains(gst::StreamType::VIDEO) {
+                return TrackKind::Video;
+            }
+            if t.contains(gst::StreamType::AUDIO) {
+                return TrackKind::Audio;
+            }
+        }
+        let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
+        TrackKind::from_caps(caps.as_ref())
+    }
+
     fn from_caps(caps: Option<&gst::Caps>) -> Self {
         match caps.and_then(|c| c.structure(0)).map(|s| s.name()) {
             Some(n) if n.starts_with("video/") => TrackKind::Video,
@@ -227,6 +290,38 @@ impl TrackKind {
             TrackKind::Other => "other",
         }
     }
+}
+
+/// decodebin3's `select-stream` answer: 1 for the first `videos` video and
+/// `audios` audio streams of `collection`, 0 for every other stream.
+fn select_stream(
+    collection: &gst::StreamCollection,
+    stream: &gst::Stream,
+    videos: usize,
+    audios: usize,
+) -> i32 {
+    let kind_of = |s: &gst::Stream| {
+        let t = s.stream_type();
+        if t.contains(gst::StreamType::VIDEO) {
+            TrackKind::Video
+        } else if t.contains(gst::StreamType::AUDIO) {
+            TrackKind::Audio
+        } else {
+            TrackKind::Other
+        }
+    };
+    let kind = kind_of(stream);
+    let room = match kind {
+        TrackKind::Video => videos,
+        TrackKind::Audio => audios,
+        TrackKind::Other => 0,
+    };
+    let before = collection
+        .iter()
+        .take_while(|s| s.stream_id() != stream.stream_id())
+        .filter(|s| kind_of(s) == kind)
+        .count();
+    i32::from(before < room)
 }
 
 /// Send a new stream to the next free output of its kind, or discard it.
@@ -916,31 +1011,70 @@ mod tests {
     }
 
     /// End to end on a real file: two audio tracks with two outputs give each
-    /// its own bridge, and playback runs to the end.
+    /// its own bridge, and playback runs to the end - with either decoder.
     #[test]
     fn each_audio_track_gets_its_own_output_when_there_are_enough() {
         let _ = gst::init();
         let dir = tempfile::tempdir().unwrap();
         let uri = write_two_audio_track_file(dir.path());
 
-        let state = state_with_slots(1, 2);
-        let pipeline = create_decode_pipeline("test", &state, Some(&uri)).unwrap();
-        let msg = play_to_end(&pipeline);
-        assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{:?}", msg);
-        for name in [
-            "test_appsink_audio",
-            "test_appsink_audio_1",
-            "test_appsink_video",
-        ] {
+        for decoder in [Decoder::Classic, Decoder::Decodebin3] {
+            let state = state_with_slots(1, 2);
+            let pipeline = create_decode_pipeline("test", &state, Some(&uri), decoder).unwrap();
+            let msg = play_to_end(&pipeline);
             assert!(
-                pipeline.by_name(name).is_some(),
-                "{} was not created: each track needs its own bridge",
-                name
+                matches!(msg.view(), gst::MessageView::Eos(_)),
+                "{:?}: {:?}",
+                decoder,
+                msg
+            );
+            for name in [
+                "test_appsink_audio",
+                "test_appsink_audio_1",
+                "test_appsink_video",
+            ] {
+                assert!(
+                    pipeline.by_name(name).is_some(),
+                    "{:?}: {} was not created: each track needs its own bridge",
+                    decoder,
+                    name
+                );
+            }
+            assert!(
+                pipeline.by_name("test_appsink_audio_2").is_none(),
+                "there is no third audio track"
             );
         }
+    }
+
+    /// decodebin3 decodes one stream of each type unless it is told which
+    /// ones to take, and decoding a track nobody plays is wasted work. With
+    /// one audio output it has to decode one audio track - and still play to
+    /// the end, which an unhandled second audio pad would stop.
+    #[test]
+    fn decodebin3_decodes_only_the_tracks_it_has_outputs_for() {
+        let _ = gst::init();
+        let dir = tempfile::tempdir().unwrap();
+        let uri = write_two_audio_track_file(dir.path());
+
+        let state = state_with_slots(1, 1);
+        let pipeline =
+            create_decode_pipeline("test", &state, Some(&uri), Decoder::Decodebin3).unwrap();
+        let msg = play_to_end(&pipeline);
+        assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{:?}", msg);
+        assert!(pipeline.by_name("test_appsink_audio").is_some());
+        assert!(pipeline.by_name("test_appsink_video").is_some());
+        let discarded: Vec<String> = pipeline
+            .iterate_elements()
+            .into_iter()
+            .flatten()
+            .map(|e| e.name().to_string())
+            .filter(|n| n.contains("_discard_"))
+            .collect();
         assert!(
-            pipeline.by_name("test_appsink_audio_2").is_none(),
-            "there is no third audio track"
+            discarded.is_empty(),
+            "the second audio track was decoded only to be thrown away: {:?}",
+            discarded
         );
     }
 
@@ -1075,6 +1209,12 @@ mod tests {
     /// whose clock is not the internal pipeline's default one.
     #[test]
     fn playback_carries_on_in_time_after_a_file_switch() {
+        for decoder in [Decoder::Classic, Decoder::Decodebin3] {
+            file_switch_keeps_time(decoder);
+        }
+    }
+
+    fn file_switch_keeps_time(decoder: Decoder) {
         let _ = gst::init();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("av.mkv");
@@ -1139,7 +1279,7 @@ mod tests {
         state.timing = Arc::new(timing::Timing::new(200));
         state.main_pipeline.set(Some(&main));
         let state = Arc::new(state);
-        let internal = create_decode_pipeline("test", &state, Some(&uri)).unwrap();
+        let internal = create_decode_pipeline("test", &state, Some(&uri), decoder).unwrap();
         *state.internal_pipeline.write().unwrap() = Some(internal.clone());
         state.set_playlist(vec![uri.clone(), uri]);
         assert!(state.follow_main_clock(&internal));
@@ -1163,7 +1303,8 @@ mod tests {
             let expected = if kind == "video" { 20 } else { 40 };
             assert!(
                 after >= expected,
-                "only {} {} buffers in 1.5 s after the switch",
+                "{:?}: only {} {} buffers in 1.5 s after the switch",
+                decoder,
                 after,
                 kind
             );
@@ -1172,7 +1313,8 @@ mod tests {
         for (kind, pts, now) in &arrivals {
             assert!(
                 *pts >= now - SLACK_NS,
-                "a {} buffer arrived {} ms after its time in the flow",
+                "{:?}: a {} buffer arrived {} ms after its time in the flow",
+                decoder,
                 kind,
                 (now - pts) / 1_000_000
             );
@@ -1186,9 +1328,11 @@ mod tests {
             // GStreamer < 1.24: aggregation does not exist, so neither does the bug.
             return;
         }
-        let state = test_state();
-        let pipeline = create_decode_pipeline("test", &state, None).unwrap();
-        assert_hdrext_disabled_on_late_depayloader(&pipeline);
+        for decoder in [Decoder::Classic, Decoder::Decodebin3] {
+            let state = test_state();
+            let pipeline = create_decode_pipeline("test", &state, None, decoder).unwrap();
+            assert_hdrext_disabled_on_late_depayloader(&pipeline);
+        }
     }
 
     #[test]

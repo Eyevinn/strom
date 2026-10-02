@@ -99,6 +99,12 @@ impl BlockBuilder for MediaPlayerBuilder {
             })
             .unwrap_or(false);
 
+        let decoder =
+            bridge::Decoder::from_property(properties.get("decoder").and_then(|v| match v {
+                PropertyValue::String(s) => Some(s.as_str()),
+                _ => None,
+            }));
+
         let sync = properties
             .get("sync")
             .and_then(|v| match v {
@@ -135,9 +141,10 @@ impl BlockBuilder for MediaPlayerBuilder {
         let block_id = instance_id.to_string();
 
         info!(
-            "Media Player {}: decode={}, sync={}, playout_delay={} ms ({})",
+            "Media Player {}: decode={} ({:?}), sync={}, playout_delay={} ms ({})",
             instance_id,
             decode,
+            decoder,
             sync,
             playout_delay_ms,
             if decode {
@@ -179,6 +186,7 @@ impl BlockBuilder for MediaPlayerBuilder {
             flow_id,
             loop_playlist,
             decode,
+            decoder,
             sync,
             playout_delay_ms,
             position_update_interval_ms,
@@ -201,6 +209,7 @@ fn build_media_player(
     flow_id: FlowId,
     loop_playlist: bool,
     decode: bool,
+    decoder: bridge::Decoder,
     sync: bool,
     playout_delay_ms: u64,
     position_update_interval_ms: u64,
@@ -303,7 +312,7 @@ fn build_media_player(
 
     // --- Create internal pipeline ---
     let internal_pipeline = if decode {
-        bridge::create_decode_pipeline(instance_id, &state, initial_uri.as_deref())?
+        bridge::create_decode_pipeline(instance_id, &state, initial_uri.as_deref(), decoder)?
     } else {
         bridge::create_passthrough_pipeline(instance_id, &state, initial_uri.as_deref())?
     };
