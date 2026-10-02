@@ -10,6 +10,7 @@ pub mod gl_input_front;
 pub mod gl_link;
 pub mod ice_preflight;
 pub mod keyframe_request;
+pub mod orphan_guard;
 pub mod pipeline;
 pub mod pipeline_monitor;
 pub mod rtp_hdrext;
