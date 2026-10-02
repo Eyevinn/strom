@@ -11942,7 +11942,7 @@
         "properties": {
           "actual_transition_type": {
             "type": "string",
-            "description": "The transition type that was actually executed. Differs from\n`transition_type` when the engine downgraded the request — e.g.\nSlide/Push across heterogeneous PiP/input sources downgrades to \"fade\"."
+            "description": "The transition type that was actually executed. Differs from\n`transition_type` when the engine downgraded the request — e.g.\nSlide/Push across heterogeneous PiP/input sources downgrades to \"fade\" —\nand reads \"morph\" when a PiP-aware take moved or re-cropped a source\npresent on both sides instead of dissolving it. \"morph\" is a report\nonly, not an accepted request type."
           },
           "duration_ms": {
             "type": "integer",
@@ -12615,6 +12615,18 @@
               "$ref": "#/components/schemas/VideoEffect"
             },
             "description": "Current per-input video effects (length = configured `num_inputs`).\nEmpty when the FX engine is unavailable."
+          },
+          "input_media_age_ms": {
+            "type": "array",
+            "items": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Milliseconds since each input last delivered a frame to the mixer\n(length = configured `num_inputs`). `None` for an input that has never\ndelivered one. A value that keeps growing marks a frozen input: the\ncompositor repeats its last frame, so a source that stopped looks the\nsame on air as one that is motionless. It measures arrival, not display:\nan input whose timestamps jump backwards freezes on air for the length\nof the jump while its age stays low. Every input ageing together means\nthe mixer's output stalled, not that every source stopped."
           },
           "input_resolutions": {
             "type": "array",

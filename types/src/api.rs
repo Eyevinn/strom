@@ -139,7 +139,10 @@ pub struct TransitionResponse {
     pub transition_type: String,
     /// The transition type that was actually executed. Differs from
     /// `transition_type` when the engine downgraded the request — e.g.
-    /// Slide/Push across heterogeneous PiP/input sources downgrades to "fade".
+    /// Slide/Push across heterogeneous PiP/input sources downgrades to "fade" —
+    /// and reads "morph" when a PiP-aware take moved or re-cropped a source
+    /// present on both sides instead of dissolving it. "morph" is a report
+    /// only, not an accepted request type.
     pub actual_transition_type: String,
     /// Duration of the transition in milliseconds
     pub duration_ms: u64,
@@ -1297,6 +1300,16 @@ pub struct VisionMixerState {
     /// Current master (PGM) video effect.
     #[serde(default)]
     pub master_effect: crate::effects::VideoEffect,
+    /// Milliseconds since each input last delivered a frame to the mixer
+    /// (length = configured `num_inputs`). `None` for an input that has never
+    /// delivered one. A value that keeps growing marks a frozen input: the
+    /// compositor repeats its last frame, so a source that stopped looks the
+    /// same on air as one that is motionless. It measures arrival, not display:
+    /// an input whose timestamps jump backwards freezes on air for the length
+    /// of the jump while its age stays low. Every input ageing together means
+    /// the mixer's output stalled, not that every source stopped.
+    #[serde(default)]
+    pub input_media_age_ms: Vec<Option<u64>>,
 }
 
 /// Request to set the multiview overlay alpha on a vision mixer block.

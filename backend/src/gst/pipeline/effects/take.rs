@@ -12,6 +12,36 @@ use super::mixer_layout::{
     pads_for_source,
 };
 
+/// Name the animated PiP-aware take `outgoing` → `incoming` produces.
+///
+/// The animated path is not always a dissolve: a source present in both
+/// compositions animates position, size and crop instead of cross-fading, so
+/// a four-up taken to that participant full frame, or a punch-in taken back
+/// to the plain source, reads as a zoom and reports "morph". `outgoing_crops`
+/// and `incoming_crops` are each side's per-input crop, empty for an input;
+/// they are keyed by input index, which is the pad index on the dist compositor.
+fn animated_kind(
+    outgoing: &[crate::gst::transitions::PadTarget],
+    incoming: &[crate::gst::transitions::PadTarget],
+    outgoing_crops: &strom_types::vision_mixer::PipTransforms,
+    incoming_crops: &strom_types::vision_mixer::PipTransforms,
+) -> &'static str {
+    use crate::gst::transitions::{plan_transition, PadAction};
+    let moves = plan_transition(outgoing, incoming)
+        .iter()
+        .any(|(_, action)| matches!(action, PadAction::Morph { .. }));
+    let recrops = incoming.iter().any(|t| {
+        outgoing.iter().any(|o| o.pad_idx == t.pad_idx)
+            && outgoing_crops.get(&t.pad_idx).copied().unwrap_or_default()
+                != incoming_crops.get(&t.pad_idx).copied().unwrap_or_default()
+    });
+    if moves || recrops {
+        "morph"
+    } else {
+        "fade"
+    }
+}
+
 impl PipelineManager {
     /// Trigger a transition on a compositor/mixer block.
     ///
@@ -23,8 +53,9 @@ impl PipelineManager {
     /// Returns `(was_ftb_cancelled, old_pgm, new_pgm, actual_kind)`. The two
     /// middle elements are `None` when the corresponding bus is a PiP source.
     /// `actual_kind` is the transition that actually ran — differs from
-    /// `transition_type` when the engine downgraded the request (e.g. Slide
-    /// across heterogeneous PiP/input sources downgrades to "fade").
+    /// `transition_type` when the engine downgraded the request (Slide across
+    /// heterogeneous PiP/input sources downgrades to "fade") and when an
+    /// animated take moved a shared source instead of dissolving ("morph").
     pub fn trigger_transition(
         &self,
         block_instance_id: &str,
@@ -39,6 +70,16 @@ impl PipelineManager {
             "Triggering {} transition on {} from input {} to {} ({}ms)",
             transition_type, block_instance_id, from_input, to_input, duration_ms
         );
+
+        // Refuse an unknown name before anything changes: the FTB cancel and
+        // FX reset below must not happen for a take that never runs.
+        let trans_type = transition_type.parse::<TransitionType>().map_err(|_| {
+            PipelineError::InvalidProperty {
+                element: block_instance_id.to_string(),
+                property: "transition_type".to_string(),
+                reason: format!("Unknown transition type: {}", transition_type),
+            }
+        })?;
 
         // Find the mixer element for this block
         let mixer_id = format!("{}:mixer", block_instance_id);
@@ -107,18 +148,12 @@ impl PipelineManager {
                     .get(&mv_comp_id)
                     .ok_or_else(|| PipelineError::ElementNotFound(mv_comp_id.clone()))?;
 
-                let parsed = transition_type.parse::<TransitionType>().ok();
-                let is_cut = duration_ms == 0 || matches!(parsed, Some(TransitionType::Cut));
+                let is_cut = duration_ms == 0 || matches!(trans_type, TransitionType::Cut);
                 // Explicit position animation across heterogeneous Source kinds
                 // (input ↔ PiP) isn't supported yet — Slide/Push/Dip-to-Black
                 // silently degrade to Fade in this branch. Surface that in the
                 // log so operators don't think the requested transition ran.
-                if !is_cut
-                    && !matches!(
-                        parsed,
-                        Some(TransitionType::Fade) | Some(TransitionType::Cut)
-                    )
-                {
+                if !is_cut && !matches!(trans_type, TransitionType::Fade | TransitionType::Cut) {
                     info!(
                         "PiP-aware Take on {}: transition '{}' downgraded to Fade ({}ms) — non-Fade transitions across PiPs not supported yet",
                         block_instance_id, transition_type, duration_ms
@@ -208,6 +243,7 @@ impl PipelineManager {
                     pvw_underlay,
                 );
 
+                let mut master_fx_ran = None;
                 if is_cut {
                     // Snap apply: hide everything in the region, then set new active pads.
                     if let Some(p) = new_pgm_pip {
@@ -334,16 +370,22 @@ impl PipelineManager {
 
                     // Master-FX takes keep their full-frame envelope on the
                     // PiP path too — the pad animation underneath is the
-                    // fade above, but the glitch/flash/punch still lands.
-                    if let Some(TransitionType::MasterFx(kind)) = parsed {
+                    // morph above, but the glitch/flash/punch still lands,
+                    // and it is what the take reports.
+                    if let TransitionType::MasterFx(kind) = trans_type {
                         if self.vision_mixer_fx_available(block_instance_id) {
                             if let Ok(now) = dist_controller.current_stream_time(&self.pipeline) {
-                                let _ = self.apply_master_envelope(
-                                    block_instance_id,
-                                    kind,
-                                    now,
-                                    duration_ms,
-                                );
+                                if self
+                                    .apply_master_envelope(
+                                        block_instance_id,
+                                        kind,
+                                        now,
+                                        duration_ms,
+                                    )
+                                    .is_ok()
+                                {
+                                    master_fx_ran = Some(kind);
+                                }
                             }
                         }
                     }
@@ -368,9 +410,25 @@ impl PipelineManager {
                     new_pvw_pip,
                     new_pvw_swap,
                 );
-                // After the downgrade guard above, the PiP-aware branch only
-                // ever runs a Cut or a Fade.
-                let actual_kind = if is_cut { "cut" } else { "fade" }.to_string();
+                let actual_kind = if is_cut {
+                    "cut".to_string()
+                } else if let Some(kind) = master_fx_ran {
+                    TransitionType::MasterFx(kind).to_string()
+                } else {
+                    let old_pgm_crops = old_pgm_pip
+                        .map(|p| state.pip_transforms(p))
+                        .unwrap_or_default();
+                    let new_pgm_crops = new_pgm_pip
+                        .map(|p| state.pip_transforms(p))
+                        .unwrap_or_default();
+                    animated_kind(
+                        &old_dist_targets,
+                        &new_dist_targets,
+                        &old_pgm_crops,
+                        &new_pgm_crops,
+                    )
+                    .to_string()
+                };
                 return Ok((was_ftb, old_pgm, new_pgm_swap, actual_kind));
             }
         }
@@ -444,15 +502,6 @@ impl PipelineManager {
             }
         }
 
-        // Parse transition type
-        let trans_type = transition_type.parse::<TransitionType>().map_err(|_| {
-            PipelineError::InvalidProperty {
-                element: block_instance_id.to_string(),
-                property: "transition_type".to_string(),
-                reason: format!("Unknown transition type: {}", transition_type),
-            }
-        })?;
-
         // Single-input transition only. Multi-source compositions are now
         // expressed as PiPs which are handled by the PiP-aware branch above.
         let from = old_pgm.unwrap_or(from_input);
@@ -494,5 +543,75 @@ impl PipelineManager {
             trans_type.to_string()
         };
         Ok((was_ftb, old_pgm, new_pgm, actual_kind))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::animated_kind;
+    use crate::gst::transitions::PadTarget;
+    use strom_types::vision_mixer::{PipTransforms, SourceCrop};
+
+    fn none() -> PipTransforms {
+        PipTransforms::new()
+    }
+
+    fn pad(idx: usize, x: i32, y: i32, w: i32, h: i32) -> PadTarget {
+        PadTarget {
+            pad_idx: idx,
+            x,
+            y,
+            w,
+            h,
+            zorder: 10,
+            underlay: None,
+        }
+    }
+
+    #[test]
+    fn disjoint_compositions_report_fade() {
+        // Nothing is shared between the two looks, so every pad cross-fades.
+        let old = vec![pad(0, 0, 0, 640, 720), pad(1, 640, 0, 640, 720)];
+        let new = vec![pad(2, 0, 0, 640, 720), pad(3, 640, 0, 640, 720)];
+        assert_eq!(animated_kind(&old, &new, &none(), &none()), "fade");
+    }
+
+    #[test]
+    fn shared_source_that_moves_reports_morph() {
+        // Input 1 is a quadrant in the outgoing look and full frame in the
+        // incoming one: it animates, and the audience sees a zoom, not a
+        // dissolve.
+        let old = vec![pad(0, 0, 0, 640, 360), pad(1, 640, 0, 640, 360)];
+        let new = vec![pad(1, 0, 0, 1280, 720)];
+        assert_eq!(animated_kind(&old, &new, &none(), &none()), "morph");
+    }
+
+    #[test]
+    fn shared_source_that_stays_put_reports_fade() {
+        // Input 0 keeps its exact box, so it is affirmed rather than morphed;
+        // the visible change is input 1 fading out and input 2 fading in.
+        let old = vec![pad(0, 0, 0, 640, 360), pad(1, 640, 0, 640, 360)];
+        let new = vec![pad(0, 0, 0, 640, 360), pad(2, 640, 0, 640, 360)];
+        assert_eq!(animated_kind(&old, &new, &none(), &none()), "fade");
+    }
+
+    #[test]
+    fn shared_source_whose_crop_eases_reports_morph() {
+        // A 2x punch-in on input 1 taken back to input 1 uncropped: the box
+        // stays full frame but the crop animates out, so the audience sees a
+        // zoom-out, not a dissolve.
+        let full = vec![pad(1, 0, 0, 1280, 720)];
+        let mut punched = none();
+        punched.insert(
+            1,
+            SourceCrop {
+                left: 0.25,
+                top: 0.25,
+                right: 0.25,
+                bottom: 0.25,
+            },
+        );
+        assert_eq!(animated_kind(&full, &full, &punched, &none()), "morph");
+        assert_eq!(animated_kind(&full, &full, &punched, &punched), "fade");
     }
 }
