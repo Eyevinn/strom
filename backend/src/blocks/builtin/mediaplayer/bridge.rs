@@ -19,13 +19,13 @@ use tracing::{debug, error, info, warn};
 /// Which element decodes in decode mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decoder {
-    /// `uridecodebin`. HLS and DASH go through the old `hlsdemux` and
-    /// `dashdemux`, which rebuild the whole decoder chain on every quality
-    /// switch - a hiccup each time.
+    /// `uridecodebin`, kept as a fallback. HLS and DASH go through the old
+    /// `hlsdemux` and `dashdemux`, which rebuild the whole decoder chain on
+    /// every quality switch - a hiccup each time.
     Classic,
-    /// `uridecodebin3`, with `hlsdemux2` and `dashdemux2`: quality switches
-    /// without a rebuild, and buffering of its own. It decodes only the
-    /// streams the block has outputs for.
+    /// `uridecodebin3`, the default, with `hlsdemux2` and `dashdemux2`:
+    /// quality switches without a rebuild, and buffering of its own. It
+    /// decodes only the streams the block has outputs for.
     Decodebin3,
 }
 
@@ -34,10 +34,11 @@ impl Decoder {
     pub const CLASSIC: &'static str = "classic";
     pub const DECODEBIN3: &'static str = "decodebin3";
 
+    /// decodebin3 unless `classic` is asked for.
     pub fn from_property(value: Option<&str>) -> Self {
         match value {
-            Some(Self::DECODEBIN3) => Decoder::Decodebin3,
-            _ => Decoder::Classic,
+            Some(Self::CLASSIC) => Decoder::Classic,
+            _ => Decoder::Decodebin3,
         }
     }
 
@@ -1046,6 +1047,16 @@ mod tests {
                 "there is no third audio track"
             );
         }
+    }
+
+    #[test]
+    fn decodebin3_is_the_default_and_classic_stays_on_request() {
+        assert_eq!(Decoder::from_property(None), Decoder::Decodebin3);
+        assert_eq!(
+            Decoder::from_property(Some("decodebin3")),
+            Decoder::Decodebin3
+        );
+        assert_eq!(Decoder::from_property(Some("classic")), Decoder::Classic);
     }
 
     /// decodebin3 decodes one stream of each type unless it is told which
