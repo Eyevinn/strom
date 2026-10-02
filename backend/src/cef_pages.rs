@@ -345,12 +345,48 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
     });
 }
 
+/// Run in every document of a guarded page before the page's own script.
+///
+/// `print()` never returns offscreen. Screen capture would hand the page this
+/// machine's display - on a desktop, the operator's real screen - because
+/// gstcefsrc runs Chromium with `enable-media-stream`, which grants media
+/// requests without asking the element, patched or not. Both are replaced on
+/// the prototype, where the page cannot take them back.
+const OFFSCREEN_SCRIPT: &str = r#"(() => {
+  const lock = (target, name, value) => {
+    try { Object.defineProperty(target, name, { value, writable: false, configurable: false }); } catch (e) {}
+  };
+  lock(window, "print", function () {});
+  if (window.MediaDevices) {
+    lock(MediaDevices.prototype, "getDisplayMedia", function () {
+      return Promise.reject(new DOMException("Screen capture is not available", "NotAllowedError"));
+    });
+  }
+})();"#;
+
+/// What a frame from another site gets: the same as its page, as far as a
+/// frame's own session can be told.
+fn frame_guard() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("Page.enable", serde_json::json!({})),
+        (
+            "Page.addScriptToEvaluateOnNewDocument",
+            serde_json::json!({ "source": OFFSCREEN_SCRIPT }),
+        ),
+        (
+            "Target.setAutoAttach",
+            serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
+        ),
+    ]
+}
+
 /// What a page must not do in a browser nobody sits in front of.
 ///
 /// - A file chooser is intercepted: Chromium reports it to this session
 ///   instead of building a dialog, and nothing more happens.
 /// - Downloads are denied.
 /// - `print()` does nothing. Offscreen, it never returns.
+/// - Screen capture is refused.
 /// - `alert`, `confirm` and `prompt` are dismissed as they open.
 ///
 /// It also clears the page's history once the page has left its blank start
@@ -373,7 +409,6 @@ async fn guard(port: u16, target_id: String, who: String) {
             return;
         }
     };
-    const PRINT_OFF: &str = "window.print = function () {};";
     let setup = [
         ("Page.enable", serde_json::json!({})),
         (
@@ -386,7 +421,13 @@ async fn guard(port: u16, target_id: String, who: String) {
         ),
         (
             "Page.addScriptToEvaluateOnNewDocument",
-            serde_json::json!({ "source": PRINT_OFF }),
+            serde_json::json!({ "source": OFFSCREEN_SCRIPT }),
+        ),
+        // A frame from another site is a target of its own, which the page's
+        // own commands do not reach. Each is held until it is guarded too.
+        (
+            "Target.setAutoAttach",
+            serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
         ),
     ];
     let last = setup.len() as u64;
@@ -450,18 +491,37 @@ async fn guard(port: u16, target_id: String, who: String) {
                 debug!("{}: its page guard was refused a command: {}", who, error);
                 continue;
             }
-            let mut send = None;
+            // Events from a frame of another site carry its session, and so
+            // must anything sent back about them.
+            let session = event
+                .get("sessionId")
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
+            let mut sends: Vec<(&str, serde_json::Value, Option<String>)> = Vec::new();
             match event.get("method").and_then(|m| m.as_str()) {
-                Some("Page.javascriptDialogOpening") => {
-                    send = Some((
-                        "Page.handleJavaScriptDialog",
-                        serde_json::json!({ "accept": false }),
-                    ));
-                }
+                Some("Page.javascriptDialogOpening") => sends.push((
+                    "Page.handleJavaScriptDialog",
+                    serde_json::json!({ "accept": false }),
+                    session,
+                )),
                 Some("Page.fileChooserOpened") => {
                     debug!("{}: refused a file chooser", who);
                 }
-                Some("Page.frameNavigated") if !left_start => {
+                Some("Target.attachedToTarget") => {
+                    let child = event["params"]["sessionId"].as_str().map(str::to_string);
+                    if event["params"]["targetInfo"]["type"] == "iframe" {
+                        for (method, params) in frame_guard() {
+                            sends.push((method, params, child.clone()));
+                        }
+                    }
+                    // Whatever it is, it was held for us; let it run.
+                    sends.push((
+                        "Runtime.runIfWaitingForDebugger",
+                        serde_json::json!({}),
+                        child,
+                    ));
+                }
+                Some("Page.frameNavigated") if session.is_none() && !left_start => {
                     let frame = &event["params"]["frame"];
                     let main = frame.get("parentId").is_none();
                     let url = frame.get("url").and_then(|u| u.as_str()).unwrap_or("");
@@ -470,26 +530,37 @@ async fn guard(port: u16, target_id: String, who: String) {
                     left_start = main && !url.starts_with("about:blank");
                 }
                 Some("Page.loadEventFired")
-                    if left_start && !history_cleared && reset_id.is_none() =>
+                    if session.is_none()
+                        && left_start
+                        && !history_cleared
+                        && reset_id.is_none() =>
                 {
-                    send = Some(("Page.resetNavigationHistory", serde_json::json!({})));
+                    sends.push(("Page.resetNavigationHistory", serde_json::json!({}), None));
                 }
                 _ => {}
             }
-            if let Some((method, params)) = send {
+            let mut gone = false;
+            for (method, params, session) in sends {
                 next_id += 1;
                 if method == "Page.resetNavigationHistory" {
                     reset_id = Some(next_id);
                 }
-                let command =
+                let mut command =
                     serde_json::json!({ "id": next_id, "method": method, "params": params });
+                if let Some(session) = session {
+                    command["sessionId"] = serde_json::Value::String(session);
+                }
                 if socket
                     .send(Message::Text(command.to_string().into()))
                     .await
                     .is_err()
                 {
+                    gone = true;
                     break;
                 }
+            }
+            if gone {
+                break;
             }
         }
         debug!("{}: page guard ended", who);
