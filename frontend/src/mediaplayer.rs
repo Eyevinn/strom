@@ -659,10 +659,20 @@ impl PlaylistEditor {
         Some((index, unsaved))
     }
 
-    /// Put `url` first in the list and play it. The list is unsaved now, so
-    /// `take_goto` hands it over to be saved before entry 0 is played.
+    /// Put `url` first in the list and play it. A live channel already first
+    /// is replaced, so zapping between channels keeps one entry; anything else
+    /// first stays and moves down. The list is unsaved now, so `take_goto`
+    /// hands it over to be saved before entry 0 is played.
     fn play_now(&mut self, url: &str) {
-        self.playlist.insert(0, url.to_string());
+        let first_is_channel = self
+            .playlist
+            .first()
+            .is_some_and(|first| LIVE_CHANNELS.iter().any(|c| c.url == first));
+        if first_is_channel {
+            self.playlist[0] = url.to_string();
+        } else {
+            self.playlist.insert(0, url.to_string());
+        }
         self.dirty = true;
         self.goto_request = Some(0);
     }
@@ -872,7 +882,7 @@ impl PlaylistEditor {
     }
 
     fn show_channels_panel(&mut self, ui: &mut Ui) {
-        ui.label("Click a channel to play it now, + to add it to the playlist.");
+        ui.label("Click a channel to play it now, + to add it to the end of the playlist.");
         egui::ScrollArea::vertical()
             .id_salt("live_channels_scroll")
             .auto_shrink(false)
@@ -1186,6 +1196,40 @@ mod tests {
             Some((0, Some(vec![channel.url.to_string(), "a.mp4".into()])))
         );
         assert!(!editor.dirty);
+    }
+
+    #[test]
+    fn a_channel_played_now_replaces_a_channel_first_in_the_list() {
+        let mut editor = PlaylistEditor::new(uuid::Uuid::nil(), "b".into());
+        editor.set_playlist(vec![LIVE_CHANNELS[0].url.into(), "a.mp4".into()]);
+        let channel = &LIVE_CHANNELS[1];
+
+        editor.play_now(channel.url);
+
+        assert_eq!(
+            editor.take_goto(),
+            Some((0, Some(vec![channel.url.to_string(), "a.mp4".into()])))
+        );
+    }
+
+    #[test]
+    fn a_channel_played_now_keeps_a_url_first_that_is_not_a_channel() {
+        let mut editor = PlaylistEditor::new(uuid::Uuid::nil(), "b".into());
+        editor.set_playlist(vec!["https://example.com/live.m3u8".into()]);
+        let channel = &LIVE_CHANNELS[0];
+
+        editor.play_now(channel.url);
+
+        assert_eq!(
+            editor.take_goto(),
+            Some((
+                0,
+                Some(vec![
+                    channel.url.to_string(),
+                    "https://example.com/live.m3u8".into()
+                ])
+            ))
+        );
     }
 
     #[test]
