@@ -1173,8 +1173,8 @@ fn compositor_definition() -> BlockDefinition {
 
     BlockDefinition {
         id: "builtin.compositor".to_string(),
-        name: "Video Compositor".to_string(),
-        description: "Video compositor supporting both GPU (OpenGL) and CPU backends. Combines multiple video inputs with positioning, scaling, and alpha blending.".to_string(),
+        name: "Video Compositor (deprecated)".to_string(),
+        description: "Deprecated: no longer maintained; use the Vision Mixer. Video compositor supporting both GPU (OpenGL) and CPU backends. Combines multiple video inputs with positioning, scaling, and alpha blending.".to_string(),
         category: "Video".to_string(),
         exposed_properties,
         external_pads: ExternalPads {

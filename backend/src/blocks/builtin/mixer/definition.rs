@@ -166,6 +166,20 @@ pub(super) fn mixer_definition() -> BlockDefinition {
         persist: None,
     });
     exposed_properties.push(ExposedProperty {
+        name: "internal_bus_latency".to_string(),
+        label: "Internal Bus Latency".to_string(),
+        description: "Aggregator latency in milliseconds of the Solo and Monitor buses, which only sum other buses of this mixer. Slack for a late buffer from Main or an aux bus; raise it if Monitor has gaps while a channel input is idle. Capped at Latency. Construction-time only.".to_string(),
+        property_type: PropertyType::UInt,
+        default_value: Some(PropertyValue::UInt(DEFAULT_INTERNAL_BUS_LATENCY_MS)),
+        mapping: PropertyMapping {
+            element_id: "_block".to_string(),
+            property_name: "internal_bus_latency".to_string(),
+            transform: None,
+        },
+        live: false,
+        persist: None,
+    });
+    exposed_properties.push(ExposedProperty {
         name: "min_upstream_latency".to_string(),
         label: "Min Upstream Latency".to_string(),
         description: "Minimum upstream latency reported to upstream elements in milliseconds. Construction-time only.".to_string(),
