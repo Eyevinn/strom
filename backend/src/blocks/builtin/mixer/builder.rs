@@ -740,6 +740,11 @@ impl BlockBuilder for MixerBuilder {
                 .map_err(|e| {
                     BlockBuildError::ElementCreation(format!("audioconvert ch{}: {}", ch_num, e))
                 })?;
+            if force_live {
+                if let Some(pad) = convert.static_pad("sink") {
+                    drop_input_eos(&pad, format!("Mixer {} channel {}", instance_id, ch_num));
+                }
+            }
             elements.push((convert_id.clone(), convert));
 
             // audioresample: the buses run at `sample_rate`, so a source at
