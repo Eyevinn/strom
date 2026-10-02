@@ -8,6 +8,7 @@
 //! via a background task that receives cleanup requests through an mpsc channel.
 
 use crate::blocks::DynamicWebrtcbinStore;
+use crate::gst::keyframe_request::VideoDamage;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -18,6 +19,16 @@ use std::time::{Duration, Instant};
 use strom_types::block::StreamMode;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+
+/// One of a slot's `decodebin` elements, in the main pipeline.
+#[derive(Clone)]
+pub struct SlotDecodebin {
+    /// Weak: the pipeline owns the element.
+    pub element: gst::glib::WeakRef<gst::Element>,
+    /// Give each new session on the slot a fresh decode chain instead of the
+    /// one the previous session left behind. See `restart_decodebin`.
+    pub restart_on_reuse: bool,
+}
 
 /// Configuration for a WHIP endpoint, registered at pipeline start.
 ///
@@ -41,6 +52,10 @@ pub struct WhipEndpointConfig {
     /// without the parameter sets that travel with a keyframe the depayloader
     /// can never produce an access unit. See `gst::keyframe_request`.
     pub video_decoding: Arc<Vec<AtomicBool>>,
+    /// Per-slot flag, set by the slot's decode chain when a running session's
+    /// video has lost data that only a keyframe can repair. The session asks
+    /// the publisher for one; see `gst::keyframe_request::VideoDamage`.
+    pub video_damage: Arc<Vec<VideoDamage>>,
     /// Jitterbuffer latency in milliseconds for the per-session webrtcbin.
     pub jitterbuffer_latency_ms: u32,
     /// Whether whipserversrc should request retransmission (NACK) of lost
@@ -64,7 +79,7 @@ pub struct WhipEndpointConfig {
     /// time), indexed by slot. Locked while the slot has no publisher so it
     /// cannot hold the pipeline short of PLAYING; `allocate_slot` unlocks them.
     /// Empty when the endpoint runs with `decode=false`.
-    pub slot_decodebins: Vec<Vec<gst::glib::WeakRef<gst::Element>>>,
+    pub slot_decodebins: Vec<Vec<SlotDecodebin>>,
     /// Per-slot stamp of the media coming out of that slot's chain, written by
     /// a pad probe on its output tee. The session sitting in a slot borrows its
     /// stamp; see `SessionActivity`.
@@ -72,6 +87,63 @@ pub struct WhipEndpointConfig {
     /// Slot assignments: slot index → Option<resource_id>
     /// Protected by RwLock for concurrent access from HTTP handlers.
     pub slot_assignments: Arc<RwLock<Vec<Option<String>>>>,
+}
+
+/// Replace a running `decodebin`'s decode chain with a fresh one, as on a slot
+/// no session has used yet.
+///
+/// A kept video decoder carries the previous session's reference frames and
+/// reorder queue, and its configuration from the first session's caps. On
+/// macOS, VideoToolbox decodes a later Safari session slowly or not at all.
+///
+/// Runs from an IDLE probe, so no buffer is in flight. NULL drops the plugged
+/// elements and the source pad; the pad-added handler links the new one. The
+/// relink re-sends the sticky events (stream-start, caps, segment) that the
+/// sink pad lost in NULL.
+fn restart_decodebin(decodebin: &gst::Element, slot: usize) {
+    let Some(sink) = decodebin.static_pad("sink") else {
+        return;
+    };
+    let Some(upstream) = sink.peer() else {
+        return;
+    };
+    let decodebin_weak = decodebin.downgrade();
+    let sink_weak = sink.downgrade();
+    upstream.add_probe(gst::PadProbeType::IDLE, move |src, _| {
+        let (Some(decodebin), Some(sink)) = (decodebin_weak.upgrade(), sink_weak.upgrade()) else {
+            return gst::PadProbeReturn::Remove;
+        };
+        let _ = src.unlink(&sink);
+        if let Err(e) = decodebin.set_state(gst::State::Null) {
+            warn!(
+                "WhipEndpointConfig: Failed to stop {} for slot {}: {}",
+                decodebin.name(),
+                slot,
+                e
+            );
+        }
+        if let Err(e) = src.link(&sink) {
+            warn!(
+                "WhipEndpointConfig: Failed to relink {} for slot {}: {:?}",
+                decodebin.name(),
+                slot,
+                e
+            );
+        }
+        match decodebin.sync_state_with_parent() {
+            Ok(()) => debug!(
+                "WhipEndpointConfig: Restarted {} for slot {}",
+                decodebin.name(),
+                slot
+            ),
+            Err(e) => warn!(
+                "WhipEndpointConfig: Failed to sync {} with pipeline state: {}",
+                decodebin.name(),
+                e
+            ),
+        }
+        gst::PadProbeReturn::Remove
+    });
 }
 
 impl WhipEndpointConfig {
@@ -107,18 +179,23 @@ impl WhipEndpointConfig {
     /// Bring a slot's `decodebin` elements into the running pipeline.
     ///
     /// They are built with their state locked (see `prepare_idle_decodebin` in
-    /// the WHIP block builder). Idempotent: a slot reused by a later session
-    /// re-syncs a decodebin that is already running.
+    /// the WHIP block builder). On a slot reused by a later session, a
+    /// decodebin marked `restart_on_reuse` is restarted; any other is re-synced.
     fn activate_slot_decoders(&self, slot: usize) {
         let Some(decodebins) = self.slot_decodebins.get(slot) else {
             return;
         };
-        for weak in decodebins {
-            let Some(decodebin) = weak.upgrade() else {
+        for slot_decodebin in decodebins {
+            let Some(decodebin) = slot_decodebin.element.upgrade() else {
                 // Pipeline already torn down.
                 continue;
             };
             decodebin.set_locked_state(false);
+            // NULL means no session has used the slot since the flow started.
+            if slot_decodebin.restart_on_reuse && decodebin.current_state() != gst::State::Null {
+                restart_decodebin(&decodebin, slot);
+                continue;
+            }
             if let Err(e) = decodebin.sync_state_with_parent() {
                 warn!(
                     "WhipEndpointConfig: Failed to sync {} with pipeline state: {}",
@@ -1186,6 +1263,7 @@ mod tests {
             pipeline_weak: Default::default(),
             decode: true,
             video_decoding: Arc::new((0..max_sessions).map(|_| AtomicBool::new(false)).collect()),
+            video_damage: Arc::new((0..max_sessions).map(|_| VideoDamage::default()).collect()),
             jitterbuffer_latency_ms: 200,
             do_retransmission: true,
             drop_on_latency: true,
