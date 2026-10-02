@@ -16,6 +16,9 @@ use tracing::{info, warn};
 
 /// A login lapses after this long without a request.
 const SESSION_IDLE_SECS: u64 = 24 * 60 * 60;
+/// A login lapses this long after the password was entered, however active.
+/// Without a cap a copied cookie that is used daily would never expire.
+const SESSION_MAX_SECS: u64 = 30 * 24 * 60 * 60;
 /// A cookie older than this is re-issued, which slides the idle window
 /// forward. Re-issuing on every request would add a `Set-Cookie` to each
 /// API poll for no gain.
@@ -70,39 +73,50 @@ impl SessionKey {
         }
 
         let path = data_dir.join(SESSION_KEY_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                use base64::Engine;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(text.trim())
-                    .ok()
-                    .and_then(|bytes| Key::try_from(bytes.as_slice()).ok());
-                let Some(key) = bytes else {
-                    anyhow::bail!(
-                        "{} is not a valid session key. Delete it to generate a new one \
-                         (everyone will have to log in again).",
-                        path.display()
-                    );
-                };
-                info!("Session cookies signed with the key in {}", path.display());
-                Ok(Self(key))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let key = Self::random();
-                match write_private(&path, &key.encoded()) {
-                    Ok(()) => info!("Generated session key in {}", path.display()),
-                    Err(e) => warn!(
-                        "Could not write session key to {}: {e}. Logins will not survive a \
-                         restart; set STROM_SESSION_SECRET to keep them.",
-                        path.display()
-                    ),
-                }
+        if let Some(key) = Self::read_file(&path)? {
+            info!("Session cookies signed with the key in {}", path.display());
+            return Ok(key);
+        }
+
+        let key = Self::random();
+        match create_private(&path, &key.encoded()) {
+            Ok(()) => {
+                info!("Generated session key in {}", path.display());
                 Ok(key)
             }
-            Err(e) => Err(anyhow::anyhow!(
-                "Could not read session key {}: {e}",
+            // Another process created it first. Use its key, so both agree.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Self::read_file(&path)?
+                .ok_or_else(|| anyhow::anyhow!("{} vanished while starting", path.display())),
+            Err(e) => {
+                warn!(
+                    "Could not write session key to {}: {e}. Logins will not survive a \
+                     restart; set STROM_SESSION_SECRET to keep them.",
+                    path.display()
+                );
+                Ok(key)
+            }
+        }
+    }
+
+    /// The key in `path`, or `None` if there is no such file.
+    fn read_file(path: &Path) -> anyhow::Result<Option<Self>> {
+        use base64::Engine;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => anyhow::bail!("Could not read session key {}: {e}", path.display()),
+        };
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(text.trim())
+            .ok()
+            .and_then(|bytes| Key::try_from(bytes.as_slice()).ok());
+        match key {
+            Some(key) => Ok(Some(Self(key))),
+            None => anyhow::bail!(
+                "{} is not a valid session key. Delete it to generate a new one \
+                 (everyone will have to log in again).",
                 path.display()
-            )),
+            ),
         }
     }
 
@@ -112,17 +126,28 @@ impl SessionKey {
     }
 }
 
-/// Write `contents` to a new file only the owner can read.
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+/// Create `path` holding `contents`, readable only by the owner. Fails with
+/// `AlreadyExists` if the file is there.
+///
+/// The contents go to a temporary file first and are linked into place
+/// whole, so a crash mid-write cannot leave a truncated key behind.
+fn create_private(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path)?.write_all(contents.as_bytes())
+    let written = options.open(&tmp).and_then(|mut file| {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()
+    });
+    let linked = written.and_then(|()| std::fs::hard_link(&tmp, path));
+    let _ = std::fs::remove_file(&tmp);
+    linked
 }
 
 fn unix_now() -> u64 {
@@ -134,29 +159,49 @@ fn unix_now() -> u64 {
 
 /// The signed login cookie.
 ///
-/// Its value is the time it was issued, signed with the [`SessionKey`]. A
-/// cookie with a good signature and an issue time within the idle window is a
-/// login. Logout clears the cookie in the browser; it cannot revoke a copy
-/// taken elsewhere. Changing the key revokes every login at once.
+/// Its value is when the password was entered and when the cookie was last
+/// issued, signed with a key derived from the [`SessionKey`] and the admin
+/// credentials. Changing the username or password hash therefore logs
+/// everyone out, as does changing the key.
+///
+/// Logout clears the cookie in the browser; it cannot revoke a copy taken
+/// elsewhere.
 #[derive(Clone)]
 pub struct SessionCookie {
     name: String,
     key: Key,
+    secure: bool,
+}
+
+/// The two times a login cookie carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Login {
+    /// When the password was entered.
+    logged_in: u64,
+    /// When this cookie was issued.
+    issued: u64,
 }
 
 impl SessionCookie {
     /// The cookie name includes the port so multiple instances on the same
     /// host don't collide.
-    pub fn new(port: u16, key: SessionKey) -> Self {
+    pub fn new(port: u16, config: &AuthConfig) -> Self {
+        // The master key is 64 bytes, so the input always meets
+        // `derive_from`'s 32-byte minimum.
+        let mut material = config.session_key.0.master().to_vec();
+        for part in [&config.admin_user, &config.admin_password_hash] {
+            material.push(0);
+            material.extend_from_slice(part.as_deref().unwrap_or_default().as_bytes());
+        }
         Self {
             name: format!("strom_session_{port}"),
-            key: key.0,
+            key: Key::derive_from(&material),
+            secure: config.session_cookie_secure,
         }
     }
 
-    /// When the login cookie in `headers` was issued, if it is a valid,
-    /// unexpired login.
-    fn issued_at(&self, headers: &HeaderMap) -> Option<u64> {
+    /// The login in `headers`, if it is validly signed and unexpired.
+    fn login_in(&self, headers: &HeaderMap) -> Option<Login> {
         let now = unix_now();
         headers
             .get_all(header::COOKIE)
@@ -168,42 +213,52 @@ impl SessionCookie {
             .find_map(|c| {
                 let mut jar = CookieJar::new();
                 jar.add_original(c.into_owned());
-                let issued: u64 = jar
-                    .signed(&self.key)
-                    .get(&self.name)?
-                    .value()
-                    .parse()
-                    .ok()?;
-                // A cookie from the future is not trusted to be fresh.
-                (issued <= now && now - issued < SESSION_IDLE_SECS).then_some(issued)
+                let verified = jar.signed(&self.key).get(&self.name)?;
+                let (logged_in, issued) = verified.value().split_once('.')?;
+                let login = Login {
+                    logged_in: logged_in.parse().ok()?,
+                    issued: issued.parse().ok()?,
+                };
+                // Times in the future are not trusted to be fresh.
+                let valid = login.logged_in <= login.issued
+                    && login.issued <= now
+                    && now - login.issued < SESSION_IDLE_SECS
+                    && now - login.logged_in < SESSION_MAX_SECS;
+                valid.then_some(login)
             })
     }
 
     /// Whether `headers` carry a valid login cookie.
     pub fn is_authenticated(&self, headers: &HeaderMap) -> bool {
-        self.issued_at(headers).is_some()
+        self.login_in(headers).is_some()
     }
 
     fn build(&self, value: String, max_age: u64) -> Cookie<'static> {
         Cookie::build((self.name.clone(), value))
             .path("/")
             .http_only(true)
+            .secure(self.secure)
             .same_site(SameSite::Strict)
             .max_age(cookie::time::Duration::seconds(max_age as i64))
             .build()
     }
 
-    /// A `Set-Cookie` value logging the browser in from now.
-    fn login(&self) -> HeaderValue {
-        self.login_issued_at(unix_now())
-    }
-
-    fn login_issued_at(&self, issued: u64) -> HeaderValue {
+    /// A `Set-Cookie` value for a login made at `logged_in`, issued at `now`.
+    fn issue(&self, logged_in: u64, now: u64) -> HeaderValue {
+        let remaining = SESSION_MAX_SECS.saturating_sub(now.saturating_sub(logged_in));
         let mut jar = CookieJar::new();
-        jar.signed_mut(&self.key)
-            .add(self.build(issued.to_string(), SESSION_IDLE_SECS));
+        jar.signed_mut(&self.key).add(self.build(
+            format!("{logged_in}.{now}"),
+            SESSION_IDLE_SECS.min(remaining),
+        ));
         let cookie = jar.get(&self.name).expect("cookie was just added");
         HeaderValue::from_str(&cookie.to_string()).expect("cookie is a valid header value")
+    }
+
+    /// A `Set-Cookie` value for a password login made now.
+    fn login(&self) -> HeaderValue {
+        let now = unix_now();
+        self.issue(now, now)
     }
 
     /// A `Set-Cookie` value removing the login from the browser.
@@ -228,6 +283,9 @@ pub struct AuthConfig {
     pub enabled: bool,
     /// Key that signs the login cookie
     pub session_key: SessionKey,
+    /// Whether the login cookie is marked `Secure`. Set when Strom serves
+    /// TLS itself, where the browser only ever reaches it over HTTPS.
+    pub session_cookie_secure: bool,
 }
 
 impl AuthConfig {
@@ -269,13 +327,15 @@ impl AuthConfig {
             // Replaced by `SessionKey::load` at startup; this one does not
             // survive a restart.
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         }
     }
 
     /// [`Self::from_env`], with the login cookie key from [`SessionKey::load`]
-    /// when login is configured.
-    pub fn load(data_dir: &Path) -> anyhow::Result<Self> {
+    /// when login is configured. `tls` is whether Strom serves HTTPS itself.
+    pub fn load(data_dir: &Path, tls: bool) -> anyhow::Result<Self> {
         let mut config = Self::from_env();
+        config.session_cookie_secure = tls;
         if config.has_session_auth() {
             config.session_key = SessionKey::load(data_dir)?;
         }
@@ -358,12 +418,13 @@ pub async fn auth_middleware(
     }
 
     // Check the login cookie, and slide its idle window forward
-    if let Some(issued) = session.issued_at(request.headers()) {
+    if let Some(login) = session.login_in(request.headers()) {
         let mut response = next.run(request).await;
-        if unix_now().saturating_sub(issued) >= SESSION_REFRESH_SECS {
+        let now = unix_now();
+        if now - login.issued >= SESSION_REFRESH_SECS {
             response
                 .headers_mut()
-                .append(header::SET_COOKIE, session.login());
+                .append(header::SET_COOKIE, session.issue(login.logged_in, now));
         }
         return Ok(response);
     }
@@ -539,6 +600,7 @@ mod tests {
             native_gui_token: None,
             enabled: false,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(!config.has_session_auth());
@@ -555,6 +617,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(config.verify_api_key("secret-api-key"));
@@ -569,6 +632,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(!config.verify_api_key("wrong-key"));
@@ -583,6 +647,7 @@ mod tests {
             native_gui_token: None,
             enabled: false,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(!config.verify_api_key("any-key"));
@@ -599,6 +664,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(!config.verify_api_key(""));
@@ -650,6 +716,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         let token = config.generate_native_gui_token();
@@ -666,6 +733,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         let _token = config.generate_native_gui_token();
@@ -681,6 +749,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(!config.verify_native_gui_token("any-token"));
@@ -698,6 +767,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(config.verify_credentials("admin", password));
@@ -715,6 +785,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(!config.verify_credentials("admin", "wrong_password"));
@@ -732,6 +803,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(!config.verify_credentials("wrong_user", password));
@@ -746,6 +818,7 @@ mod tests {
             native_gui_token: None,
             enabled: false,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
 
         assert!(!config.verify_credentials("admin", "password"));
@@ -762,6 +835,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
         assert!(config_with_session.has_session_auth());
 
@@ -772,6 +846,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
         assert!(!config_without_hash.has_session_auth());
 
@@ -782,6 +857,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
         assert!(!config_without_user.has_session_auth());
     }
@@ -795,6 +871,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
         assert!(config_with_key.has_api_key_auth());
 
@@ -805,6 +882,7 @@ mod tests {
             native_gui_token: None,
             enabled: false,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         };
         assert!(!config_without_key.has_api_key_auth());
     }
@@ -840,11 +918,12 @@ mod middleware_tests {
             native_gui_token: Some(NATIVE_TOKEN.to_string()),
             enabled: true,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         }
     }
 
     fn router(config: AuthConfig) -> Router {
-        let session = Arc::new(SessionCookie::new(0, config.session_key.clone()));
+        let session = Arc::new(SessionCookie::new(0, &config));
         let protected = Router::new()
             .route("/protected", get(|| async { "ok" }))
             .layer(middleware::from_fn(auth_middleware));
@@ -936,6 +1015,7 @@ mod middleware_tests {
             native_gui_token: None,
             enabled: false,
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
         });
         assert_eq!(status(&app, get_req("/protected")).await, StatusCode::OK);
         assert_eq!(status(&app, bearer("whatever")).await, StatusCode::OK);
@@ -1070,6 +1150,7 @@ mod middleware_tests {
 
         let other_key = router(AuthConfig {
             session_key: SessionKey::random(),
+            session_cookie_secure: false,
             ..config
         });
         assert_eq!(
@@ -1078,55 +1159,137 @@ mod middleware_tests {
         );
     }
 
+    /// The `name=value` part of a `Set-Cookie` value.
+    fn pair(value: &HeaderValue) -> String {
+        value
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    fn cookie_headers(cookie: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        headers
+    }
+
     #[tokio::test]
     async fn idle_login_expires_and_active_login_is_refreshed() {
         let config = enabled_config();
-        let session = SessionCookie::new(0, config.session_key.clone());
+        let session = SessionCookie::new(0, &config);
         let app = router(config);
-        let cookie_issued = |ago: u64| {
-            let value = session.login_issued_at(unix_now() - ago);
-            value
-                .to_str()
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .to_string()
+        let now = unix_now();
+        // A cookie for a login made `logged_in_ago`, issued `issued_ago`.
+        let cookie = |logged_in_ago: u64, issued_ago: u64| {
+            pair(&session.issue(now - logged_in_ago, now - issued_ago))
         };
 
-        let stale = cookie_issued(SESSION_IDLE_SECS + 1);
+        let idle = cookie(SESSION_IDLE_SECS + 1, SESSION_IDLE_SECS + 1);
         assert_eq!(
-            status(&app, with_cookie(&stale)).await,
+            status(&app, with_cookie(&idle)).await,
             StatusCode::UNAUTHORIZED
         );
 
         // A fresh cookie is accepted without being re-issued.
         let fresh = app
             .clone()
-            .oneshot(with_cookie(&cookie_issued(0)))
+            .oneshot(with_cookie(&cookie(0, 0)))
             .await
             .unwrap();
         assert_eq!(fresh.status(), StatusCode::OK);
         assert_eq!(cookie_of(&fresh), None);
 
-        // An older one is re-issued, and the new one is a valid login.
+        // An older one is re-issued. The new cookie is a valid login that
+        // keeps the original login time.
+        let logged_in_ago = 3 * SESSION_IDLE_SECS;
         let old = app
             .clone()
-            .oneshot(with_cookie(&cookie_issued(SESSION_REFRESH_SECS + 1)))
+            .oneshot(with_cookie(&cookie(
+                logged_in_ago,
+                SESSION_REFRESH_SECS + 1,
+            )))
             .await
             .unwrap();
         assert_eq!(old.status(), StatusCode::OK);
-        let refreshed = cookie_of(&old).expect("an old login is re-issued");
+        let refreshed = cookie_of(&old).expect("an old cookie is re-issued");
+        let login = session.login_in(&cookie_headers(&refreshed)).unwrap();
+        assert_eq!(login.logged_in, now - logged_in_ago);
+        assert!(login.issued >= now);
+    }
+
+    /// Activity does not extend a login past its maximum age, so a copied
+    /// cookie cannot be kept alive forever by using it.
+    #[tokio::test]
+    async fn active_login_still_ends_at_max_age() {
+        let config = enabled_config();
+        let session = SessionCookie::new(0, &config);
+        let app = router(config);
+        let now = unix_now();
+
+        let near_end = pair(&session.issue(now - (SESSION_MAX_SECS - 60), now));
+        assert_eq!(status(&app, with_cookie(&near_end)).await, StatusCode::OK);
+        // The cookie itself says when it ends.
+        assert!(session
+            .issue(now - (SESSION_MAX_SECS - 60), now)
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=60"));
+
+        let past_end = pair(&session.issue(now - SESSION_MAX_SECS - 1, now));
         assert_eq!(
-            session
-                .issued_at(&{
-                    let mut h = HeaderMap::new();
-                    h.insert(header::COOKIE, refreshed.parse().unwrap());
-                    h
-                })
-                .map(|issued| unix_now() - issued < SESSION_REFRESH_SECS),
-            Some(true)
+            status(&app, with_cookie(&past_end)).await,
+            StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// Changing the password, for instance because it leaked, must end every
+    /// login made with the old one.
+    #[tokio::test]
+    async fn changing_credentials_ends_existing_logins() {
+        let config = enabled_config();
+        let cookie = login_cookie(&router(config.clone())).await;
+
+        let new_password = router(AuthConfig {
+            admin_password_hash: Some(bcrypt::hash("another password", 4).unwrap()),
+            ..config.clone()
+        });
+        assert_eq!(
+            status(&new_password, with_cookie(&cookie)).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let new_user = router(AuthConfig {
+            admin_user: Some("someone-else".to_string()),
+            ..config
+        });
+        assert_eq!(
+            status(&new_user, with_cookie(&cookie)).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn cookie_is_secure_only_when_serving_tls() {
+        for secure in [false, true] {
+            let app = router(AuthConfig {
+                session_cookie_secure: secure,
+                ..enabled_config()
+            });
+            let ok = app
+                .clone()
+                .oneshot(login_req(ADMIN_PASSWORD))
+                .await
+                .unwrap();
+            let set_cookie = ok.headers()[header::SET_COOKIE].to_str().unwrap();
+            assert_eq!(
+                set_cookie.split("; ").any(|attr| attr == "Secure"),
+                secure,
+                "{set_cookie}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1200,13 +1363,28 @@ mod session_key_tests {
         result
     }
 
+    fn cookie_for(key: &SessionKey) -> SessionCookie {
+        SessionCookie::new(
+            0,
+            &AuthConfig {
+                admin_user: Some("admin".to_string()),
+                admin_password_hash: Some("hash".to_string()),
+                api_key: None,
+                native_gui_token: None,
+                enabled: true,
+                session_key: key.clone(),
+                session_cookie_secure: false,
+            },
+        )
+    }
+
     /// Whether a login signed with `a` is accepted under `b`.
     fn same_key(a: &SessionKey, b: &SessionKey) -> bool {
-        let login = SessionCookie::new(0, a.clone()).login();
+        let login = cookie_for(a).login();
         let mut headers = HeaderMap::new();
         let pair = login.to_str().unwrap().split(';').next().unwrap();
         headers.insert(header::COOKIE, pair.parse().unwrap());
-        SessionCookie::new(0, b.clone()).is_authenticated(&headers)
+        cookie_for(b).is_authenticated(&headers)
     }
 
     #[test]
@@ -1268,5 +1446,22 @@ mod session_key_tests {
     fn short_secret_is_refused() {
         let dir = tempfile::TempDir::new().unwrap();
         assert!(with_secret(Some("too-short"), || SessionKey::load(dir.path())).is_err());
+    }
+
+    /// A second process starting at the same time must not overwrite the
+    /// first one's key, and a failed attempt leaves no temporary file.
+    #[test]
+    fn key_file_is_never_replaced() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(SESSION_KEY_FILE);
+        create_private(&path, "first").unwrap();
+        let err = create_private(&path, "second").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [SESSION_KEY_FILE]);
     }
 }

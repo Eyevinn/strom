@@ -109,10 +109,7 @@ pub async fn create_app_with_config(
     }
 
     // The login cookie is signed, not stored, so a login survives a restart
-    let session_cookie = Arc::new(auth::SessionCookie::new(
-        port,
-        auth_config.session_key.clone(),
-    ));
+    let session_cookie = Arc::new(auth::SessionCookie::new(port, &auth_config));
 
     // Build protected API router (requires authentication)
     let protected_api_router = Router::new()

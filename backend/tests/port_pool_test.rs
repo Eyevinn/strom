@@ -61,6 +61,7 @@ async fn app_with_pool_probing(
         native_gui_token: None,
         enabled: false,
         session_key: strom::auth::SessionKey::random(),
+        session_cookie_secure: false,
     };
     create_app_with_state_and_auth(state.clone(), auth).await
 }

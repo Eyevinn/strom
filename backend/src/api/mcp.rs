@@ -499,6 +499,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: crate::auth::SessionKey::random(),
+            session_cookie_secure: false,
         }
     }
 
@@ -510,6 +511,7 @@ mod tests {
             native_gui_token: None,
             enabled: true,
             session_key: crate::auth::SessionKey::random(),
+            session_cookie_secure: false,
         }
     }
 
@@ -571,6 +573,7 @@ mod tests {
             native_gui_token: None,
             enabled: false,
             session_key: crate::auth::SessionKey::random(),
+            session_cookie_secure: false,
         };
         assert!(validate_mcp_auth(&config, &headers(&[]), false).is_ok());
     }

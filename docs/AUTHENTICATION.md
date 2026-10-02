@@ -32,7 +32,7 @@ cargo run --release
 
 - Navigate to `http://localhost:8080`
 - Login with your configured username and password
-- Session persists for 24 hours of inactivity, and across restarts
+- Session persists for 24 hours of inactivity, at most 30 days after login, and across restarts
 - Click "Logout" button in the top-right to end session
 
 ### Keeping logins across restarts
@@ -49,8 +49,14 @@ export STROM_SESSION_SECRET="$(openssl rand -base64 32)"  # at least 32 characte
 ```
 
 Keep the key secret: anyone holding it can log in. Changing or deleting it logs
-everyone out. Logout clears the cookie in the browser, but a copy of the cookie
-taken elsewhere stays valid until it expires or the key changes.
+everyone out, and so does changing `STROM_ADMIN_USER` or
+`STROM_ADMIN_PASSWORD_HASH`. Logout clears the cookie in the browser, but a copy
+of the cookie taken elsewhere stays valid until it expires or one of those
+changes.
+
+When Strom serves HTTPS itself (`--tls-cert`), the cookie is marked `Secure`.
+Behind a TLS-terminating proxy it is not, so the browser would also send it
+over plain HTTP to the same host.
 
 ## 2. API Key Authentication (Bearer Token)
 

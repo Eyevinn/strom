@@ -514,7 +514,7 @@ fn run_with_gui(
     let shutdown_flag_gui = shutdown_flag.clone();
 
     // Create auth config and generate native GUI token if auth is enabled
-    let mut auth_config = auth::AuthConfig::load(&config.data_dir)?;
+    let mut auth_config = auth::AuthConfig::load(&config.data_dir, config.tls_cert.is_some())?;
     let native_gui_token = if auth_config.enabled {
         let token = auth_config.generate_native_gui_token();
         info!("Generated native GUI token for auto-authentication");
@@ -870,7 +870,7 @@ async fn run_headless(
     // Create the HTTP app BEFORE auto-restart, then bind AFTER
     let app = create_app_with_config(
         state.clone(),
-        auth::AuthConfig::load(&config.data_dir)?,
+        auth::AuthConfig::load(&config.data_dir, config.tls_cert.is_some())?,
         config.cors_allowed_origins.clone(),
         config.port,
     )
