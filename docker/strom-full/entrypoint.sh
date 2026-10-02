@@ -69,6 +69,19 @@ else
     export GST_CEF_CHROME_EXTRA_FLAGS="no-sandbox,disable-gpu,disable-gpu-compositing,use-gl=disabled,disable-features=BackgroundTracing,no-periodic-tasks,force-fieldtrials=,disable-field-trial-config,disable-breakpad,disable-crash-reporter,disable-dev-shm-usage,disable-background-networking,disable-component-update,enable-logging=stderr"
 fi
 
+# Protected media (Widevine DRM), opt-in: Spotify's web player, for one,
+# will not play without it. CEF has Widevine support built in, but the CDM
+# itself is downloaded by Chromium's component updater, which the flags above
+# switch off along with the rest of Chromium's background traffic. Google
+# ships the Linux CDM for x86_64 only, so this does nothing on arm64. The CDM
+# lands in the CEF cache, which is cleared below, so it is fetched again on
+# every container start.
+if [ "${STROM_CEF_WIDEVINE:-0}" = "1" ]; then
+    echo "CEF component updates on (STROM_CEF_WIDEVINE=1) - Chromium downloads the Widevine CDM for protected media"
+    GST_CEF_CHROME_EXTRA_FLAGS=$(echo "$GST_CEF_CHROME_EXTRA_FLAGS" | sed -e 's/,disable-background-networking//' -e 's/,disable-component-update//')
+    export GST_CEF_CHROME_EXTRA_FLAGS
+fi
+
 # Set CEF cache location to avoid singleton behavior warning
 # Clean up stale CEF cache/locks from previous runs/crashes
 export GST_CEF_CACHE_LOCATION="/tmp/cef-cache"
