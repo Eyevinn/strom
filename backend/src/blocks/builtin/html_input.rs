@@ -855,8 +855,8 @@ fn html_input_definition() -> BlockDefinition {
                 label: "Remote Control".to_string(),
                 description: "Allow an operator to be handed a link that shows this page \
                               and passes their clicks and keystrokes to it - to log in, clear \
-                              a consent dialog, click a tab. The instance also needs a CEF \
-                              debug port configured, and authentication. Whoever holds the \
+                              a consent dialog, click a tab. The instance also needs \
+                              authentication configured. Whoever holds the \
                               link can see and change what this source is putting on air \
                               until the link expires or is revoked. With cef.full_devtools \
                               on, a link is instead full control of the browser and reaches \

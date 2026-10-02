@@ -426,19 +426,23 @@ or reached through a link. A bare address such as `example.com` is read as
 `https://`. Everything else — `file:`, `chrome:`, `view-source:`, `javascript:`
 and the rest — is refused.
 
-Remote control needs Strom's own authentication configured. With none, minting
-a link would take no credentials at all, so Strom refuses to open the debug
-port and says so at startup. Enable it with a port that nothing else on the
-host uses:
+Remote control needs Strom's own authentication configured, and nothing else
+at instance level: whether a block hands out links is its Remote Control
+switch. With authentication configured, Strom opens Chromium's debug port on a
+free loopback port, which it also uses to guard every page (see
+[Running with upstream gstcefsrc](#running-with-upstream-gstcefsrc)). With
+none, minting a link would take no credentials at all, so the port stays shut.
+
+Nothing outside Strom connects to the port, so its number does not matter. To
+pin it anyway:
 
 ```toml
 [cef]
 debug_port = 9222
 ```
 
-or `STROM_CEF_DEBUG_PORT=9222`. Two Strom instances on one host need two
-different ports, the same way they already need two CEF profile directories.
-Chromium binds the port to loopback; leave it there and never publish it.
+or `STROM_CEF_DEBUG_PORT=9222`. Chromium binds the port to loopback; leave it
+there and never publish it.
 
 With the flow running, mint a link for an HTML Input block that has Remote
 Control switched on. This is what the block's buttons in the UI do:
@@ -509,7 +513,6 @@ DevTools application instead, with the protocol unfiltered:
 
 ```toml
 [cef]
-debug_port = 9222
 full_devtools = true
 ```
 
@@ -539,8 +542,8 @@ Remote control itself needs nothing from the patches. Its picture, input and
 navigation use Chromium's own debug protocol, and the debug port is a plain
 Chromium switch.
 
-With the debug port open, Strom also guards every page over that protocol,
-which covers most of what the patches fix:
+With authentication configured, which opens the debug port, Strom also guards
+every page over that protocol, which covers most of what the patches fix:
 
 - A file chooser is intercepted, so a click on a file input through remote
   control opens nothing.
@@ -552,11 +555,14 @@ which covers most of what the patches fix:
 - A page that outlives its element when its flow stops is closed.
 
 A page always gets the fake camera and microphone, because Strom passes
-Chromium the switch for them whatever the plugin is.
+Chromium the switch for them whatever the plugin is. A page's console output
+stays out of Strom's log too: Chromium logs every console message at INFO, and
+Strom sets CEF's log severity to warning unless `GST_CEF_LOG_SEVERITY` says
+otherwise.
 
 What you lose without each patch:
 
-| Patch | With it | Without it, debug port open | Without it, no debug port |
+| Patch | With it | Without it, with authentication | Without it, no authentication (no debug port) |
 |-------|---------|-----------------------------|---------------------------|
 | Popup close | Closing a popup leaves the page that opened it alone | Strom steers the page and closes it on stop, as above | Once a popup closes, URL changes on air do nothing, and stopping the flow leaves the page running, still logged in and on the network, until Strom exits |
 | Browser context per source | Each source has its own cookies, storage and cache ([Browser profiles](#browser-profiles)) | Every HTML source in the process shares one cookie jar. A login made in one is a login in all of them, and the Browser Profile setting has no effect | Same |

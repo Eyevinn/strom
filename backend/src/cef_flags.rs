@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 const EXTRA_FLAGS: &str = "GST_CEF_CHROME_EXTRA_FLAGS";
 const CACHE_LOCATION: &str = "GST_CEF_CACHE_LOCATION";
+const LOG_SEVERITY: &str = "GST_CEF_LOG_SEVERITY";
 
 /// What the caller decided about CEF, and what comes back from setting it up.
 pub struct CefSetup<'a> {
@@ -24,9 +25,16 @@ pub struct CefSetup<'a> {
     pub auth_configured: bool,
 }
 
-/// Set CEF up, and return the debug port actually in force, if any.
+/// Set CEF up, and return Chromium's debug port, if it is opened.
+///
+/// The port is how Strom guards every page (see [`crate::cef_pages`]) and what
+/// remote control links go through, so it is opened whenever authentication
+/// is configured, on a free loopback port unless one is configured. Nothing
+/// outside Strom connects to it, so its number does not matter. Whether a
+/// block hands out links is the block's Remote Control switch.
 pub fn configure(setup: CefSetup<'_>) -> Option<u16> {
     configure_cache(setup.cache_path);
+    quiet_page_console();
 
     let existing = std::env::var(EXTRA_FLAGS).unwrap_or_default();
     let mut flags = network_checks(&existing);
@@ -39,23 +47,39 @@ pub fn configure(setup: CefSetup<'_>) -> Option<u16> {
         crate::cef_pages::set_debug_port(port);
         if setup.full_devtools {
             warn!(
-                "CEF remote debugging enabled on 127.0.0.1:{} with full DevTools - a remote \
-                 control link is full control of the browser. One browser process serves \
-                 every HTML source in this instance, so a session opened against one of them \
-                 reaches all of them, every page they are logged in to, and the files on this \
-                 host. To keep customers apart, run a Strom process per customer",
+                "CEF remote debugging on 127.0.0.1:{} with full DevTools - a remote control \
+                 link is full control of the browser. One browser process serves every HTML \
+                 source in this instance, so a session opened against one of them reaches all \
+                 of them, every page they are logged in to, and the files on this host. To \
+                 keep customers apart, run a Strom process per customer",
                 port
             );
         } else {
-            warn!(
-                "CEF remote debugging enabled on 127.0.0.1:{} - remote control links carry \
-                 the page's picture and input only. The port itself is full control of the \
-                 browser to anything on this host that can reach loopback; never publish it",
+            info!(
+                "CEF debug port on 127.0.0.1:{}, for guarding HTML sources and remote control \
+                 links, which carry the page's picture and input only. The port itself is full \
+                 control of the browser to anything on this host that can reach loopback; \
+                 never publish it",
                 port
             );
         }
     }
     port
+}
+
+/// Keep pages' console output out of Strom's log, unless the operator asked
+/// for CEF's log at a lower severity.
+///
+/// Chromium logs every console message, `console.error` included, at INFO,
+/// and gstcefsrc defaults CEF to INFO, so a page logging in a loop filled the
+/// log and the disk under it. Measured on upstream gstcefsrc: 1200 lines per
+/// console level from a page logging for three seconds at INFO, none at
+/// warning. The strom-full entrypoint sets the same default; this gives it to
+/// a native run too.
+fn quiet_page_console() {
+    if std::env::var_os(LOG_SEVERITY).is_none() {
+        std::env::set_var(LOG_SEVERITY, "warning");
+    }
 }
 
 /// Give CEF a per-instance cache directory.
@@ -169,15 +193,13 @@ fn flag_value(flags: &[String], name: &str) -> Option<Option<String>> {
     })
 }
 
-/// Open Chromium's remote debugging port when the operator asked for it, and
-/// return the port in force.
+/// Open Chromium's remote debugging port, and return the port in force.
 ///
-/// This is what lets an operator drive an HTML source: log in to a page,
-/// click through a consent dialog, dismiss a cookie banner. The port speaks
-/// the Chrome DevTools Protocol, which is total control of the browser
-/// process, so it is off unless configured, and Chromium binds it to
-/// loopback. Reach it through the authenticated API, never by publishing the
-/// port.
+/// This is what lets Strom guard every page, and an operator drive an HTML
+/// source: log in to a page, click through a consent dialog, dismiss a cookie
+/// banner. The port speaks the Chrome DevTools Protocol, which is total
+/// control of the browser process, and Chromium binds it to loopback. Reach it
+/// through the authenticated API, never by publishing the port.
 ///
 /// `persist-session-cookies` rides along: without it a login lands in a
 /// session cookie that Chromium keeps in memory only, so the next flow start
@@ -189,62 +211,75 @@ fn debug_port(
     configured: Option<u16>,
     auth_configured: bool,
 ) -> Option<u16> {
-    let configured = configured?;
     // Minting a link is reached through the authenticated API, so with no
     // authentication configured there is no door in front of it at all:
     // anyone who can reach the HTTP port could mint one. Rather than open the
     // debug port and rely on a lock that is not fitted, do not open it.
     if !auth_configured {
-        error!(
-            "CEF remote debugging is configured but authentication is not, so minting a \
-             remote control link would take no credentials at all. Remote control is \
-             disabled. Set STROM_ADMIN_USER together with STROM_ADMIN_PASSWORD_HASH, or \
-             STROM_API_KEY, and start again to use it"
-        );
+        if configured.is_some() {
+            error!(
+                "A CEF debug port is configured but authentication is not, so minting a \
+                 remote control link would take no credentials at all. The port stays shut. \
+                 Set STROM_ADMIN_USER together with STROM_ADMIN_PASSWORD_HASH, or \
+                 STROM_API_KEY, and start again to use it"
+            );
+        }
         return None;
     }
 
     // Whatever port Chromium ends up listening on is the one the proxy has to
     // dial. An operator who put the flag in GST_CEF_CHROME_EXTRA_FLAGS
-    // themselves keeps it - but then the configured value is not where the
-    // browser is, and a proxy pointed at the configured value would answer "no
-    // pages" forever with nothing to say why.
+    // themselves keeps it - but then a configured value is not where the
+    // browser is, and a proxy pointed at it would answer "no pages" forever
+    // with nothing to say why.
     let effective = match flag_value(flags, "remote-debugging-port") {
         Some(Some(existing)) => match existing.parse::<u16>() {
-            Ok(port) => {
-                if port != configured {
+            Ok(port) if port != 0 => {
+                if configured.is_some_and(|c| c != port) {
                     warn!(
-                        "CEF remote debugging: {} already sets remote-debugging-port={}, so \
-                         that is the port in use and the configured {} is ignored",
-                        EXTRA_FLAGS, port, configured
+                        "CEF debug port: {} already sets remote-debugging-port={}, so that is \
+                         the port in use and the configured {} is ignored",
+                        EXTRA_FLAGS,
+                        port,
+                        configured.unwrap_or_default()
                     );
                 }
                 port
             }
-            Err(_) => {
+            _ => {
                 warn!(
-                    "CEF remote debugging: {} sets remote-debugging-port={}, which is not a \
-                     port. Remote control is disabled - fix the flag or remove it to use the \
-                     configured {}",
-                    EXTRA_FLAGS, existing, configured
+                    "CEF debug port: {} sets remote-debugging-port={}, which is not a port \
+                     Strom can reach. HTML sources are not guarded and remote control is \
+                     off - fix the flag or remove it",
+                    EXTRA_FLAGS, existing
                 );
-                0
+                return None;
             }
         },
         // The bare flag without a value leaves Chromium to pick a port, and it
         // never tells us which. Nothing can be proxied to that.
         Some(None) => {
             warn!(
-                "CEF remote debugging: {} sets remote-debugging-port with no port, so the \
-                 port Chromium picks is unknown and remote control is disabled. Give the flag \
-                 a port, or remove it to use the configured {}",
-                EXTRA_FLAGS, configured
+                "CEF debug port: {} sets remote-debugging-port with no port, so the port \
+                 Chromium picks is unknown. HTML sources are not guarded and remote control \
+                 is off - give the flag a port, or remove it",
+                EXTRA_FLAGS
             );
-            0
+            return None;
         }
         None => {
-            flags.push(format!("remote-debugging-port={}", configured));
-            configured
+            // Chromium binds it when the first cefsrc starts, so another
+            // process could take a free port in between; then pages go
+            // unguarded and each says so when it starts.
+            let port = match configured {
+                Some(port) => port,
+                None => std::net::TcpListener::bind(("127.0.0.1", 0))
+                    .and_then(|listener| listener.local_addr())
+                    .map(|addr| addr.port())
+                    .ok()?,
+            };
+            flags.push(format!("remote-debugging-port={}", port));
+            port
         }
     };
 
@@ -252,7 +287,7 @@ fn debug_port(
         flags.push("persist-session-cookies".to_string());
     }
 
-    (effective != 0).then_some(effective)
+    Some(effective)
 }
 
 #[cfg(test)]
@@ -286,9 +321,18 @@ mod tests {
     }
 
     #[test]
+    fn with_authentication_a_free_port_is_opened_unasked() {
+        let mut flags = Vec::new();
+        let port = debug_port(&mut flags, None, true).expect("a free loopback port");
+        assert_ne!(port, 0);
+        assert!(flags.contains(&format!("remote-debugging-port={}", port)));
+    }
+
+    #[test]
     fn the_debug_port_stays_shut_without_authentication() {
         let mut flags = Vec::new();
         assert_eq!(debug_port(&mut flags, Some(9222), false), None);
+        assert_eq!(debug_port(&mut flags, None, false), None);
         assert!(flags.is_empty());
     }
 

@@ -262,6 +262,15 @@ fn record(owner: PageOwner, target_id: String) {
 /// port this does nothing.
 pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
     let Some(&port) = DEBUG_PORT.get() else {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            warn!(
+                "HTML sources are not guarded: Strom guards every page over Chromium's debug \
+                 port, and opens it only with authentication configured. Without it, a page \
+                 can freeze itself with print() and write downloads to this server's disk \
+                 unless the gstcefsrc build refuses them, as Strom's does"
+            )
+        });
         return;
     };
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
