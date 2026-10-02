@@ -266,7 +266,7 @@ Tested in `strom-full`:
 | YouTube | Works, audio and video |
 | Google Meet | Works, audio and video |
 | Microsoft Teams | Audio only, no video. The missing H.264 is the likely cause |
-| Spotify | Does not play. Its web player needs Widevine DRM and AAC; even with Widevine fetched (`STROM_CEF_WIDEVINE=1`), the page reports `audio/mp4; codecs="mp4a.40.2"` as unsupported |
+| Spotify | Does not play. Its web player needs AAC, which the page reports as unsupported (`audio/mp4; codecs="mp4a.40.2"`), as well as Widevine DRM, which this build does not offer |
 
 Video calls need the fake camera and microphone (see
 [Camera, microphone, and what else a page cannot do](#camera-microphone-and-what-else-a-page-cannot-do)),
