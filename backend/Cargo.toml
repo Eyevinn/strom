@@ -129,10 +129,6 @@ reqwest.workspace = true
 # WebSocket client for the CEF DevTools proxy (same version axum's ws uses)
 tokio-tungstenite = "0.29"
 
-
-# Terminal UI for test harness
-crossterm = "0.29"
-
 # Network discovery
 socket2 = "0.6"      # Multicast socket options for SAP
 flate2 = "1.1"       # Zlib decompression for SAP
@@ -163,7 +159,6 @@ winresource = "0.1"
 tempfile = "3.27"
 tokio = { version = "1.52", features = ["full", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 serial_test = "4.0"
 
 [[bin]]

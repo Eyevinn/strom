@@ -49,10 +49,6 @@ pub struct ThumbnailTapConfig {
     pub idle_timeout: Duration,
     /// Minimum interval between frame captures in the appsink callback.
     pub update_interval: Duration,
-    /// Cached JPEG time-to-live — ignored when stale thumbnails are
-    /// preferred over timeout errors (current behaviour).
-    #[allow(dead_code)]
-    pub cache_ttl: Duration,
 }
 
 impl Default for ThumbnailTapConfig {
@@ -63,7 +59,6 @@ impl Default for ThumbnailTapConfig {
             jpeg_quality: 75,
             idle_timeout: Duration::from_secs(10),
             update_interval: Duration::from_secs(1),
-            cache_ttl: Duration::from_millis(500),
         }
     }
 }
@@ -125,11 +120,6 @@ impl ThumbnailTap {
             state: Arc::new(Mutex::new(TapState::new())),
             name_prefix: name_prefix.to_string(),
         }
-    }
-
-    /// Get the tee element to insert into a video chain.
-    pub fn tee_element(&self) -> &gst::Element {
-        &self.tee
     }
 
     /// Request a thumbnail. Activates the branch if needed. Returns JPEG bytes.

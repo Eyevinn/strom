@@ -334,11 +334,6 @@ impl AppState {
         &self.inner.ice_transport_policy
     }
 
-    /// Get the thread registry for tracking GStreamer streaming threads.
-    pub fn thread_registry(&self) -> &ThreadRegistry {
-        &self.inner.thread_registry
-    }
-
     /// Get current thread CPU statistics.
     ///
     /// Samples CPU usage for all registered GStreamer streaming threads.
@@ -537,13 +532,6 @@ impl AppState {
         &self,
     ) -> tokio::sync::RwLockReadGuard<'_, HashMap<FlowId, PipelineManager>> {
         self.inner.pipelines.read().await
-    }
-
-    /// Write access to active pipelines (for probe management).
-    pub async fn pipelines_write(
-        &self,
-    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<FlowId, PipelineManager>> {
-        self.inner.pipelines.write().await
     }
 
     /// Start the background task that periodically saves dirty flows.
@@ -1104,11 +1092,10 @@ impl AppState {
                     whip_info.block_id,
                     whip_info.mode
                 );
-                // Register with port=0 placeholder; actual ports are per-session
                 if let Err(e) = self
                     .inner
                     .whip_registry
-                    .register(whip_info.endpoint_id.clone(), 0, whip_info.mode)
+                    .register(whip_info.endpoint_id.clone(), whip_info.mode)
                     .await
                 {
                     error!("Endpoint conflict registering WHIP endpoint: {}", e);
@@ -1690,12 +1677,6 @@ impl AppState {
             .broadcast(StromEvent::FlowUpdated { flow_id: *id });
 
         Ok(state)
-    }
-
-    /// Get the state of a flow's pipeline.
-    pub async fn get_flow_state(&self, id: &FlowId) -> Option<PipelineState> {
-        let pipelines = self.inner.pipelines.read().await;
-        pipelines.get(id).map(|p| p.get_state())
     }
 
     /// Generate a debug DOT graph for a flow's pipeline.
@@ -2714,22 +2695,6 @@ impl AppState {
         manager.get_element_properties(element_id)
     }
 
-    /// Get a single property value from a running element.
-    pub async fn get_element_property(
-        &self,
-        flow_id: &FlowId,
-        element_id: &str,
-        property_name: &str,
-    ) -> Result<PropertyValue, PipelineError> {
-        let pipelines = self.inner.pipelines.read().await;
-
-        let manager = pipelines.get(flow_id).ok_or_else(|| {
-            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-        })?;
-
-        manager.get_element_property(element_id, property_name)
-    }
-
     /// Update a property on a pad in a running pipeline.
     /// Also syncs the change back to the flow definition for persistence.
     pub async fn update_pad_property(
@@ -2816,23 +2781,6 @@ impl AppState {
         })?;
 
         manager.get_pad_properties(element_id, pad_name)
-    }
-
-    /// Get a single property value from a running pad.
-    pub async fn get_pad_property(
-        &self,
-        flow_id: &FlowId,
-        element_id: &str,
-        pad_name: &str,
-        property_name: &str,
-    ) -> Result<PropertyValue, PipelineError> {
-        let pipelines = self.inner.pipelines.read().await;
-
-        let manager = pipelines.get(flow_id).ok_or_else(|| {
-            PipelineError::InvalidFlow(format!("Pipeline not running for flow: {}", flow_id))
-        })?;
-
-        manager.get_pad_property(element_id, pad_name, property_name)
     }
 
     /// Get WebRTC statistics from a running flow's pipeline.
