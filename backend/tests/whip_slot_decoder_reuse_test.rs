@@ -267,12 +267,16 @@ fn reused_slot_decodes_through_a_fresh_video_decoder() {
         .expect("publisher stops");
     config.release_slot(slot);
 
-    // Second session on the same slot.
+    // Second session on the same slot. A new session re-arms the slot's
+    // "video is decoding" flag (`create_whipserversrc_for_session` does), and
+    // its keyframe requester stops once the flag is set again.
+    config.video_decoding[slot].store(false, Ordering::Relaxed);
     let before = frames.load(Ordering::Relaxed);
     let slot_again = config.allocate_slot("second").expect("a free slot");
     let publisher = start_publisher(config.slot_video_appsrcs[slot_again].clone(), H264);
     let second_frames = wait_for_frames(frames, before, 10);
     let second_decoder = video_decoder(decodebin);
+    let second_decoding = config.video_decoding[slot_again].load(Ordering::Relaxed);
     publisher
         .set_state(gst::State::Null)
         .expect("publisher stops");
@@ -298,6 +302,12 @@ fn reused_slot_decodes_through_a_fresh_video_decoder() {
         second_frames >= 10,
         "the second session on a reused slot decoded {} frames",
         second_frames
+    );
+    // Without it, a reconnecting publisher is asked for every keyframe in the
+    // request budget while its video decodes fine (#805).
+    assert!(
+        second_decoding,
+        "the second session decoded, but the slot never reported its video as decoding"
     );
 }
 
