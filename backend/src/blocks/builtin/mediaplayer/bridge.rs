@@ -882,7 +882,7 @@ mod tests {
             .expect("writing the test file finishes");
         assert!(matches!(msg.view(), gst::MessageView::Eos(_)), "{:?}", msg);
         pipeline.set_state(gst::State::Null).unwrap();
-        format!("file://{}", path.display())
+        super::super::file_uri(&path)
     }
 
     /// A state with `video` and `audio` slots, backed by appsrcs that are in no
@@ -1345,7 +1345,7 @@ mod tests {
             .timed_pop_filtered(gst::ClockTime::from_seconds(20), &[gst::MessageType::Eos])
             .expect("writing the test file finishes");
         writer.set_state(gst::State::Null).unwrap();
-        let uri = format!("file://{}", path.display());
+        let uri = super::super::file_uri(&path);
 
         // The flow, on a realtime clock, with a sink per output that notes
         // when each buffer arrives against what it is stamped with.

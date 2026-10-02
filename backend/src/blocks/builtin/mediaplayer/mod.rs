@@ -72,9 +72,20 @@ pub fn normalize_uri(path: &str, media_path: &Path) -> String {
         file_path
     };
 
-    let uri = format!("file://{}", resolved.display());
+    let uri = file_uri(&resolved);
     debug!("Normalized '{}' → '{}'", path, uri);
     uri
+}
+
+/// A `file://` URI for `path`. `glib::filename_to_uri` gets a Windows drive
+/// and backslashes right (`file:///C:/media/clip.mp4`) and escapes spaces and
+/// the like; pasting `path.display()` after `file://` gave
+/// `file://C:\media\clip.mp4` on Windows, which no source element accepts. A
+/// path it refuses (not absolute) keeps the old form.
+pub(super) fn file_uri(path: &Path) -> String {
+    gstreamer::glib::filename_to_uri(path, None)
+        .map(|uri| uri.to_string())
+        .unwrap_or_else(|_| format!("file://{}", path.display()))
 }
 
 #[cfg(test)]
@@ -116,11 +127,24 @@ mod tests {
         }
     }
 
+    /// A file URI has to turn back into the same path, on every platform. On
+    /// Windows `file://` plus the path gave `file://C:\\...`, which neither
+    /// this nor any source element accepts, so no local file played there.
+    #[test]
+    fn a_file_uri_turns_back_into_its_path() {
+        let path = std::env::temp_dir().join("strom media").join("my clip.mkv");
+        let uri = file_uri(&path);
+        assert!(uri.starts_with("file:///"), "{}", uri);
+        let (back, _) = gstreamer::glib::filename_from_uri(&uri)
+            .unwrap_or_else(|e| panic!("{} is not a valid file URI: {}", uri, e));
+        assert_eq!(back, path, "{}", uri);
+    }
+
     #[test]
     fn test_normalize_uri() {
         // A media dir that does not exist, so canonicalize() leaves paths alone
         let media_path = std::path::Path::new("/nonexistent-strom-media");
-        let in_media = format!("file://{}", media_path.join("video.mp4").display());
+        let in_media = file_uri(&media_path.join("video.mp4"));
 
         let cases: Vec<(&str, String)> = vec![
             // URIs with a scheme pass through
@@ -161,7 +185,7 @@ mod tests {
         ];
         // Not a scheme: a file whose name merely contains "://" further on
         let odd = "my video ://.mp4";
-        let odd_expected = format!("file://{}", media_path.join(odd).display());
+        let odd_expected = file_uri(&media_path.join(odd));
         for (input, expected) in cases.into_iter().chain([(odd, odd_expected)]) {
             assert_eq!(normalize_uri(input, media_path), expected, "{}", input);
         }
