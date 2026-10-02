@@ -279,6 +279,17 @@ fn debug_port(flags: &mut Vec<String>, configured: Option<u16>) -> Option<u16> {
             // process could take a free port in between; then pages go
             // unguarded and each says so when it starts.
             let port = match configured {
+                // Port 0 lets Chromium pick one and never say which, the same
+                // dead end as the bare flag above.
+                Some(0) => {
+                    warn!(
+                        "CEF debug port: the configured debug port is 0, so the port Chromium \
+                         picks would be unknown. HTML sources are not guarded and remote \
+                         control is off - configure a real port, or leave it unset for a free \
+                         one"
+                    );
+                    return None;
+                }
                 Some(port) => port,
                 None => std::net::TcpListener::bind(("127.0.0.1", 0))
                     .and_then(|listener| listener.local_addr())
@@ -324,6 +335,20 @@ mod tests {
         assert_eq!(
             features(&flags).last(),
             Some(&"LocalNetworkAccessForNavigations")
+        );
+    }
+
+    /// A configured port 0 used to go into the flags as is: Chromium picked a
+    /// random port while Strom dialled 0, so no page was ever guarded and
+    /// remote control never answered.
+    #[test]
+    fn a_configured_port_zero_is_refused() {
+        let mut flags = Vec::new();
+        assert_eq!(debug_port(&mut flags, Some(0)), None);
+        assert!(
+            !flags.iter().any(|f| f.starts_with("remote-debugging-port")),
+            "port 0 reached the flags: {:?}",
+            flags
         );
     }
 
