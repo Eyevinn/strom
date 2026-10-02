@@ -1,18 +1,18 @@
 diff --git a/gstcefsrc.cc b/gstcefsrc.cc
-index eba5b28..36f8e9a 100644
+index d35adcb..c822018 100644
 --- a/gstcefsrc.cc
 +++ b/gstcefsrc.cc
-@@ -129,6 +129,9 @@ enum
-   PROP_JS_FLAGS,
+@@ -132,6 +132,9 @@ enum
    PROP_LOG_SEVERITY,
    PROP_CEF_CACHE_LOCATION,
+   PROP_MAX_VIDEO_FRAMERATE,
 +  PROP_ISOLATED_CONTEXT,
 +  PROP_CONTEXT_CACHE_PATH,
 +  PROP_PERSIST_SESSION_COOKIES,
  };
  
  #define gst_cef_src_parent_class parent_class
-@@ -394,6 +397,20 @@ private:
+@@ -449,6 +452,20 @@ private:
    IMPLEMENT_REFCOUNTING(DisplayHandler);
  };
  
@@ -33,7 +33,7 @@ index eba5b28..36f8e9a 100644
  class BrowserClient :
    public CefClient,
    public CefLifeSpanHandler,
-@@ -510,6 +527,36 @@ class BrowserClient :
+@@ -574,6 +591,36 @@ class BrowserClient :
  
      // Custom methods:
      void MakeBrowser(int)
@@ -70,7 +70,7 @@ index eba5b28..36f8e9a 100644
      {
        CefWindowInfo window_info;
        CefRefPtr<CefBrowser> browser;
-@@ -522,9 +569,19 @@ class BrowserClient :
+@@ -586,9 +633,19 @@ class BrowserClient :
          std::string(src->url),
          browser_settings,
          nullptr,
@@ -91,7 +91,7 @@ index eba5b28..36f8e9a 100644
        browser->GetHost()->SetAudioMuted(true);
  
        src->browser = browser;
-@@ -888,6 +945,12 @@ gst_cef_src_change_state(GstElement *src, GstStateChange transition)
+@@ -1003,6 +1060,12 @@ gst_cef_src_change_state(GstElement *src, GstStateChange transition)
    return result;
  }
  
@@ -104,10 +104,10 @@ index eba5b28..36f8e9a 100644
  static gboolean
  gst_cef_src_start(GstBaseSrc *base_src)
  {
-@@ -1178,6 +1241,16 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
-       src->cef_cache_location = g_value_dup_string (value);
+@@ -1301,6 +1364,16 @@ gst_cef_src_set_property (GObject * object, guint prop_id, const GValue * value,
+       src->fps_n = gst_value_get_fraction_numerator (value);
+       src->fps_d = gst_value_get_fraction_denominator (value);
        break;
-     }
 +    case PROP_ISOLATED_CONTEXT:
 +      src->isolated_context = g_value_get_boolean (value);
 +      break;
@@ -121,9 +121,9 @@ index eba5b28..36f8e9a 100644
      default:
        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
        break;
-@@ -1218,6 +1291,15 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
-     case PROP_CEF_CACHE_LOCATION:
-       g_value_set_string (value, src->cef_cache_location);
+@@ -1344,6 +1417,15 @@ gst_cef_src_get_property (GObject * object, guint prop_id, GValue * value,
+     case PROP_MAX_VIDEO_FRAMERATE:
+       gst_value_set_fraction (value, src->fps_n, src->fps_d);
        break;
 +    case PROP_ISOLATED_CONTEXT:
 +      g_value_set_boolean (value, src->isolated_context);
@@ -137,7 +137,7 @@ index eba5b28..36f8e9a 100644
      default:
        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
        break;
-@@ -1239,6 +1321,7 @@ gst_cef_src_finalize (GObject *object)
+@@ -1365,6 +1447,7 @@ gst_cef_src_finalize (GObject *object)
  
    g_free (src->js_flags);
    g_free (src->cef_cache_location);
@@ -145,20 +145,20 @@ index eba5b28..36f8e9a 100644
  
    g_cond_clear(&src->state_cond);
    g_mutex_clear(&src->state_lock);
-@@ -1260,6 +1343,9 @@ gst_cef_src_init (GstCefSrc * src)
-   src->js_flags = NULL;
-   src->log_severity = DEFAULT_LOG_SEVERITY;
+@@ -1390,6 +1473,9 @@ gst_cef_src_init (GstCefSrc * src)
    src->cef_cache_location = NULL;
+   src->fps_n = DEFAULT_FPS_N;
+   src->fps_d = DEFAULT_FPS_D;
 +  src->isolated_context = FALSE;
 +  src->context_cache_path = NULL;
 +  src->persist_session_cookies = FALSE;
  
    gst_base_src_set_format (base_src, GST_FORMAT_TIME);
    gst_base_src_set_live (base_src, TRUE);
-@@ -1338,6 +1424,25 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
-           "deprecated: set GST_CEF_CACHE_LOCATION in the environment instead",
-           NULL, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
- 
+@@ -1478,6 +1564,24 @@ gst_cef_src_class_init (GstCefSrcClass * klass)
+           "Max video framerate to select",
+           0, 1, G_MAXINT, 1, DEFAULT_FPS_N, DEFAULT_FPS_D,
+           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
 +  g_object_class_install_property (gobject_class, PROP_ISOLATED_CONTEXT,
 +    g_param_spec_boolean ("isolated-context", "isolated-context",
 +          "Give this browser its own request context, so cookies, local storage "
@@ -177,15 +177,14 @@ index eba5b28..36f8e9a 100644
 +          "With context-cache-path, also persist session cookies, which is what "
 +          "most logins are. Otherwise they are gone when the browser closes.",
 +          FALSE, (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | GST_PARAM_MUTABLE_READY)));
-+
+ 
    gst_element_class_set_static_metadata (gstelement_class,
        "Chromium Embedded Framework source", "Source/Video",
-       "Creates a video stream from an embedded Chromium browser",
 diff --git a/gstcefsrc.h b/gstcefsrc.h
-index e7c46ee..69d0df7 100644
+index 007e0f2..bf344a7 100644
 --- a/gstcefsrc.h
 +++ b/gstcefsrc.h
-@@ -56,6 +56,9 @@ struct _GstCefSrc {
+@@ -57,6 +57,9 @@ struct _GstCefSrc {
    gchar *js_flags;
    cef_log_severity_t log_severity;
    gchar *cef_cache_location;

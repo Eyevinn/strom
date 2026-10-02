@@ -9,12 +9,12 @@ on:
       cef_version:
         description: 'CEF version (e.g., 144.0.21+g4f5b28c+chromium-144.0.7559.248)'
         required: true
-        default: '144.0.21+g4f5b28c+chromium-144.0.7559.248'
+        default: '154.0.33+ga03e714+chromium-154.0.8037.94'
         type: string
       gstcefsrc_ref:
         description: 'gstcefsrc git ref (full 40-char commit SHA, tag, or branch). Must be a full SHA — GitHub uploadpack does not resolve short SHAs.'
         required: true
-        default: 'b63340852fc93b0ab67b07200e1ff44f59ba6769'
+        default: '204b01b02df23d143316b11e51516171ab7fae0a'
         type: string
       build_suffix:
         description: 'Suffix naming this build, e.g. strom1. Required whenever the build differs from an existing one at the same CEF version (such as when Strom''s patches in docker/gstcefsrc change), so that it gets a name of its own instead of replacing the binaries existing images download.'

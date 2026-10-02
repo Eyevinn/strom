@@ -1,8 +1,8 @@
 diff --git a/gstcefsrc.cc b/gstcefsrc.cc
-index eba5b28..267312b 100644
+index 2e4eb47..d35adcb 100644
 --- a/gstcefsrc.cc
 +++ b/gstcefsrc.cc
-@@ -474,6 +474,15 @@ class BrowserClient :
+@@ -529,6 +529,15 @@ class BrowserClient :
  
      virtual void OnBeforeClose(CefRefPtr<CefBrowser> browser) override
      {

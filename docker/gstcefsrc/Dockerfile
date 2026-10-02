@@ -15,16 +15,16 @@
 
 ARG TARGETARCH
 
-# CEF 144 (Chrome runtime). The MemoryInfra SIGILL that could otherwise crash
+# CEF 154 (Chrome runtime). The MemoryInfra SIGILL that could otherwise crash
 # libcef in long-running processes is handled at runtime by LD_PRELOADing
 # libmallinfo_shim.so (see docker/strom-full/entrypoint.sh and
 # docs/archive/CEF_SIGILL_CRASH.md). The shim interposes glibc's legacy int-based
 # mallinfo(), whose fields overflow when the CEF process arena > 2 GiB and
 # trigger a Chromium CHECK() on a failed checked_cast<size_t>.
-ARG CEF_VERSION=144.0.21+g4f5b28c+chromium-144.0.7559.248
+ARG CEF_VERSION=154.0.33+ga03e714+chromium-154.0.8037.94
 
-# Current gstcefsrc master (pinned to a full SHA for reproducibility).
-ARG GSTCEFSRC_REF=b63340852fc93b0ab67b07200e1ff44f59ba6769
+# gstcefsrc master as of 2026-08-24 (pinned to a full SHA for reproducibility).
+ARG GSTCEFSRC_REF=204b01b02df23d143316b11e51516171ab7fae0a
 
 FROM ubuntu:questing AS builder
 

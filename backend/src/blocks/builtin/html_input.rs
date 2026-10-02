@@ -255,6 +255,38 @@ fn escape_profile_name(name: &str) -> String {
         .collect()
 }
 
+/// The `cefsrc` property, from gstcefsrc of mid-2026 on, that caps the rate
+/// of a source whose caps say only that its rate varies.
+const MAX_VIDEO_FRAMERATE_PROPERTY: &str = "max-video-framerate";
+
+/// The caps that fix a `cefsrc`'s viewport.
+///
+/// With a variable-rate plugin, the rate is not in the caps, and cefdemux
+/// takes `application/x-cef`: the same frames, named so that only it links.
+fn viewport_caps(
+    variable_rate: bool,
+    to_demuxer: bool,
+    width: u64,
+    height: u64,
+    framerate: u64,
+) -> gst::Caps {
+    let name = if variable_rate && to_demuxer {
+        "application/x-cef"
+    } else {
+        "video/x-raw"
+    };
+    let caps = gst::Caps::builder(name)
+        .field("format", "BGRA")
+        .field("width", width as i32)
+        .field("height", height as i32);
+    if variable_rate {
+        caps.build()
+    } else {
+        caps.field("framerate", gst::Fraction::new(framerate as i32, 1))
+            .build()
+    }
+}
+
 /// Largest viewport this block will negotiate, per side.
 ///
 /// The caps field is a signed 32-bit integer, so an unbounded `u64` would wrap
@@ -615,18 +647,26 @@ impl BlockBuilder for HtmlInputBuilder {
             );
         }
 
+        // gstcefsrc from mid-2026 on sends a frame only when the page changes
+        // (framerate 0/1), takes the rate as a property instead of from the
+        // caps, and hands cefdemux its own application/x-cef caps. Older
+        // builds negotiate a fixed rate in the caps. Either is told apart by
+        // the property.
+        let variable_rate = cefsrc.find_property(MAX_VIDEO_FRAMERATE_PROPERTY).is_some();
+        if variable_rate {
+            cefsrc.set_property(
+                MAX_VIDEO_FRAMERATE_PROPERTY,
+                gst::Fraction::new(framerate as i32, 1),
+            );
+        }
+
         // cefsrc renders at whatever size is negotiated downstream, so this
         // capsfilter is the page's viewport. BGRA is what cefsrc produces and
         // what cefdemux accepts; converting happens after the split.
         let capsfilter = make("capsfilter")?;
         capsfilter.set_property(
             "caps",
-            gst::Caps::builder("video/x-raw")
-                .field("format", "BGRA")
-                .field("width", width as i32)
-                .field("height", height as i32)
-                .field("framerate", gst::Fraction::new(framerate as i32, 1))
-                .build(),
+            viewport_caps(variable_rate, mode.has_audio(), width, height, framerate),
         );
 
         let mut elements: Vec<(String, gst::Element)> = vec![
@@ -696,13 +736,51 @@ impl BlockBuilder for HtmlInputBuilder {
             let videoconvert = make("videoconvert")?;
             let video_output = make("identity")?;
             elements.push((format!("{}:videoconvert", instance_id), videoconvert));
-            elements.push((format!("{}:video_output", instance_id), video_output));
             internal_links.push((
                 ElementPadRef::pad(video_source.0.clone(), video_source.1),
                 ElementPadRef::pad(format!("{}:videoconvert", instance_id), "sink"),
             ));
+            let mut last = format!("{}:videoconvert", instance_id);
+            // A page that does not change sends no frames, which mixers,
+            // encoders and outputs downstream do not expect of a source. A
+            // live compositor puts out frames at its own rate and repeats
+            // the last one it has, so the block's output runs at the rate it
+            // was given whatever the page does. videorate cannot: it repeats
+            // a frame only when the next one arrives. Measured on a static
+            // page with CEF 154: 2 frames in 4 s through videorate, a steady
+            // 25 fps through compositor.
+            if variable_rate {
+                let repeater = make("compositor")?;
+                let input = repeater
+                    .request_pad_simple("sink_%u")
+                    .map(|pad| pad.name().to_string())
+                    .ok_or_else(|| {
+                        BlockBuildError::ElementCreation(
+                            "compositor gave the HTML input block no input pad".to_string(),
+                        )
+                    })?;
+                let ratefilter = make("capsfilter")?;
+                ratefilter.set_property(
+                    "caps",
+                    gst::Caps::builder("video/x-raw")
+                        .field("framerate", gst::Fraction::new(framerate as i32, 1))
+                        .build(),
+                );
+                elements.push((format!("{}:repeater", instance_id), repeater));
+                elements.push((format!("{}:ratefilter", instance_id), ratefilter));
+                internal_links.push((
+                    ElementPadRef::pad(last.clone(), "src"),
+                    ElementPadRef::pad(format!("{}:repeater", instance_id), input),
+                ));
+                internal_links.push((
+                    ElementPadRef::pad(format!("{}:repeater", instance_id), "src"),
+                    ElementPadRef::pad(format!("{}:ratefilter", instance_id), "sink"),
+                ));
+                last = format!("{}:ratefilter", instance_id);
+            }
+            elements.push((format!("{}:video_output", instance_id), video_output));
             internal_links.push((
-                ElementPadRef::pad(format!("{}:videoconvert", instance_id), "src"),
+                ElementPadRef::pad(last, "src"),
                 ElementPadRef::pad(format!("{}:video_output", instance_id), "sink"),
             ));
         } else {
@@ -1305,6 +1383,27 @@ mod tests {
             Some(root),
             "an element id cannot climb out of the cache root"
         );
+    }
+
+    #[test]
+    fn the_viewport_caps_follow_the_plugin() {
+        gst::init().unwrap();
+        let s = |caps: gst::Caps| caps.structure(0).unwrap().to_owned();
+        // Older gstcefsrc: a fixed rate in the caps, video/x-raw either way.
+        let fixed = s(viewport_caps(false, true, 1280, 720, 25));
+        assert_eq!(fixed.name(), "video/x-raw");
+        assert_eq!(
+            fixed.get::<gst::Fraction>("framerate").unwrap(),
+            gst::Fraction::new(25, 1)
+        );
+        // Variable-rate gstcefsrc: no rate in the caps, and cefdemux only
+        // links to application/x-cef.
+        let to_demux = s(viewport_caps(true, true, 1280, 720, 25));
+        assert_eq!(to_demux.name(), "application/x-cef");
+        assert!(!to_demux.has_field("framerate"));
+        let video_only = s(viewport_caps(true, false, 1280, 720, 25));
+        assert_eq!(video_only.name(), "video/x-raw");
+        assert_eq!(video_only.get::<i32>("width").unwrap(), 1280);
     }
 
     #[test]

@@ -52,6 +52,16 @@ In the Strom UI, use "Import gst-launch" to add a cefsrc pipeline:
 cefsrc url=https://example.com ! videoconvert ! autovideosink
 ```
 
+The gstcefsrc in `strom-full` sends a frame only when the page changes: its
+caps say `framerate=0/1`, and `max-video-framerate` caps how often. A caps
+filter that asks `cefsrc` for a fixed rate, such as
+`video/x-raw,framerate=30/1`, no longer negotiates. Give the rate to
+`max-video-framerate` instead, and where something downstream needs a frame
+on every tick, put a `compositor` after it, which repeats the last frame at
+its output rate (`videorate` does not: it repeats a frame only when the next
+one arrives). `cefdemux` takes `application/x-cef` caps. The HTML Input block
+does all of this itself.
+
 ### Example: API
 
 ```bash
