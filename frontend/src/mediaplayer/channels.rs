@@ -1,7 +1,8 @@
 //! Live channels offered in the playlist editor next to the media folder.
 //!
-//! Publicly reachable news streams in English, one per outlet, plus SVT1,
-//! from the broadcasters' own CDNs, and the Big Buck Bunny test stream. Public does not mean licensed for
+//! Publicly reachable streams from the broadcasters' own CDNs: news in
+//! English, one per outlet, then the Nordic public broadcasters, then the
+//! Big Buck Bunny test stream. Public does not mean licensed for
 //! redistribution, and a stream may be geo-blocked or move without notice.
 
 /// A live channel: the name shown in the list and the URL the player opens.
@@ -36,6 +37,10 @@ pub const LIVE_CHANNELS: &[LiveChannel] = &[
         url: "https://amg00453-reuters-amg00453c1-rakuten-uk-2110.playouts.now.amagi.tv/playlist/amg00453-reuters-reuters-rakutenuk/playlist.m3u8",
     },
     LiveChannel {
+        name: "Bloomberg",
+        url: "https://www.bloomberg.com/media-manifest/streams/us.m3u8",
+    },
+    LiveChannel {
         name: "CGTN",
         url: "https://amg00405-rakutentv-cgtn-rakuten-i9tar.amagi.tv/master.m3u8",
     },
@@ -66,6 +71,18 @@ pub const LIVE_CHANNELS: &[LiveChannel] = &[
     LiveChannel {
         name: "SVT1",
         url: "https://ed16.cdn.svt.se/l4/se/svt1/master-fmp4.m3u8?format=hls-cmaf-live",
+    },
+    LiveChannel {
+        name: "DR TV",
+        url: "https://drlivedrtvahls.akamaized.net/hls/live/2113613/drlivedrtva/master.m3u8",
+    },
+    LiveChannel {
+        name: "Yle TV1",
+        url: "https://yletvworld.akamaized.net/hls/live/622540/yletv1w/index.m3u8",
+    },
+    LiveChannel {
+        name: "RÚV",
+        url: "https://ruv-web-live.akamaized.net/streymi/ruverl/ruverl.m3u8",
     },
     LiveChannel {
         name: "Big Buck Bunny",
