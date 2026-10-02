@@ -208,7 +208,7 @@ fn whip_endpoint_id(block: &BlockInstance) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::whip_session_manager::{ActivityStamp, NewWhipSession, SessionActivity};
+    use crate::whip_session_manager::{NewWhipSession, SessionActivity, SlotOutput};
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use std::time::Instant;
@@ -250,7 +250,7 @@ mod tests {
             cleanup_sent: Arc::new(AtomicBool::new(false)),
             activity: Arc::new(SessionActivity::new(
                 Instant::now(),
-                Arc::new(ActivityStamp::new(Instant::now())),
+                Arc::new(SlotOutput::new(Instant::now())),
             )),
         }));
     }
