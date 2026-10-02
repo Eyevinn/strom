@@ -12,12 +12,11 @@
 //! `videotestsrc` and `compositor` are in gstreamer1.0-plugins-base, which
 //! every CI test job installs.
 
+pub mod common;
+
 use std::collections::HashMap;
-use strom::blocks::BlockRegistry;
-use strom::events::EventBroadcaster;
 use strom::gst::pipeline::PipelineManager;
 use strom_types::{Flow, Link, PropertyValue};
-use tempfile::NamedTempFile;
 
 /// `videotestsrc pattern=ball → compositor → fakesink`.
 ///
@@ -65,18 +64,8 @@ fn build_flow() -> Flow {
     flow
 }
 
-fn build_manager(registry: &BlockRegistry) -> PipelineManager {
-    PipelineManager::new(
-        &build_flow(),
-        EventBroadcaster::with_capacity(10),
-        registry,
-        vec![],
-        "all".to_string(),
-        None,
-        std::env::temp_dir(),
-        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-    )
-    .expect("Failed to create PipelineManager")
+fn build_manager() -> PipelineManager {
+    common::manager::build(&build_flow()).expect("Failed to create PipelineManager")
 }
 
 fn nick(s: &str) -> PropertyValue {
@@ -94,9 +83,7 @@ fn as_str(v: Option<&PropertyValue>) -> Option<&str> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn element_enum_property_reads_as_nick_and_round_trips() {
     gstreamer::init().unwrap();
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let manager = build_manager(&registry);
+    let manager = build_manager();
 
     let value = manager
         .get_element_property("src", "pattern")
@@ -125,9 +112,7 @@ async fn element_enum_property_reads_as_nick_and_round_trips() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pad_enum_property_reads_as_nick_and_round_trips() {
     gstreamer::init().unwrap();
-    let temp_file = NamedTempFile::new().unwrap();
-    let registry = BlockRegistry::new(temp_file.path());
-    let manager = build_manager(&registry);
+    let manager = build_manager();
 
     // Flow pad properties are applied in start(); write one directly instead.
     // `none` is the default, so a read that returned it would prove nothing.
