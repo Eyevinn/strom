@@ -18,9 +18,9 @@ FROM eyevinntechnology/strom:${VERSION}
 # by sha256, so a rebuild published under this name cannot reach an image
 # unnoticed. Changing the version means changing both hashes with it; the
 # build workflow prints them, and the release lists them as asset digests.
-ARG GSTCEFSRC_VERSION=144.0.21-strom5
-ARG GSTCEFSRC_SHA256_AMD64=f369134420ad51c6e85c6b3a75818f3eb004bb8c2002f1f1e830ee774c275bbc
-ARG GSTCEFSRC_SHA256_ARM64=d97c0f19bc6a7ebcd5b3a3dc009366c29a20e264937780deab62de3b412b051b
+ARG GSTCEFSRC_VERSION=154.0.33-strom1
+ARG GSTCEFSRC_SHA256_AMD64=0a38f3116d493a17e9cdcfaa797e591f8ad202a078dbed504e64bdeffec3bbcf
+ARG GSTCEFSRC_SHA256_ARM64=f24ddd347b6100019d030eeec4d70e5e491b816cfffb73fa0ac9c7759ae5e1a0
 ARG TARGETARCH
 
 ENV DEBIAN_FRONTEND=noninteractive
