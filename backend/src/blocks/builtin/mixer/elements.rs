@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use tracing::{error, warn};
 
 use super::properties::db_to_linear;
-use super::{EQ_BAND_TYPE_BELL, MIXER_SAMPLE_RATE};
+use super::EQ_BAND_TYPE_BELL;
 
 /// Cached result of checking whether audiomixer supports the force-live property.
 static AUDIOMIXER_HAS_FORCE_LIVE: OnceLock<bool> = OnceLock::new();
@@ -65,16 +65,16 @@ pub(crate) fn make_audiomixer(
     Ok(mixer)
 }
 
-/// Create the capsfilter that follows a bus mixer and pins it to
-/// `MIXER_SAMPLE_RATE`. Only the rate is fixed: format and channels stay
-/// with whatever the bus negotiates.
-pub(super) fn make_rate_pin(name: &str) -> Result<gst::Element, BlockBuildError> {
+/// Create the capsfilter that follows a bus mixer and pins it to `rate`.
+/// Only the rate is fixed: format and channels stay with whatever the bus
+/// negotiates.
+pub(super) fn make_rate_pin(name: &str, rate: u32) -> Result<gst::Element, BlockBuildError> {
     gst::ElementFactory::make("capsfilter")
         .name(name)
         .property(
             "caps",
             gst::Caps::builder("audio/x-raw")
-                .field("rate", MIXER_SAMPLE_RATE)
+                .field("rate", rate as i32)
                 .build(),
         )
         .build()

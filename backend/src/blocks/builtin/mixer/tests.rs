@@ -848,25 +848,41 @@ fn tap(m: &Assembled, tee: &str, caps: &str, level_name: &str) {
     m.pipeline.add_many([&filter, &level, &sink]).unwrap();
     m.element(tee)
         .link_pads(Some("src_%u"), &filter, None)
-        .unwrap();
+        .unwrap_or_else(|e| panic!("{tee} cannot feed a {caps} consumer: {e}"));
     gst::Element::link_many([&filter, &level, &sink]).unwrap();
 }
 
 /// A mixer with return feeds: aux buses and the solo bus start with no input
 /// and nothing downstream that fixes a rate, while main feeds a consumer that
-/// needs 48 kHz (an encoder, the vision mixer). An input at `rate` that
-/// arrives after startup, as every WHIP input does, must link and be heard
-/// on main and on an aux bus.
-fn assert_late_input_is_heard(rate: i32) {
-    let m = assemble(&props(&[
+/// needs the mixer's rate (an encoder, the vision mixer). An input at
+/// `input_rate` that arrives after startup, as every WHIP input does, must
+/// link and be heard on main and on an aux bus.
+///
+/// `mixer_rate` is the block's `sample_rate` property; `None` leaves it unset,
+/// and the buses must then run at `DEFAULT_AUDIO_SAMPLE_RATE`.
+fn assert_late_input_is_heard(input_rate: i32, mixer_rate: Option<u32>) {
+    let mut properties = props(&[
         ("num_channels", PropertyValue::UInt(2)),
         ("num_aux_buses", PropertyValue::UInt(2)),
         ("num_groups", PropertyValue::UInt(1)),
         ("dsp_backend", PropertyValue::String("rust".to_string())),
         // Aux sends default to 0: open channel 1's send to aux 2.
         ("ch1_aux2_level", PropertyValue::Float(1.0)),
-    ]));
-    tap(&m, "main_out_tee", "audio/x-raw,rate=48000", "tap_main");
+    ]);
+    if let Some(rate) = mixer_rate {
+        properties.insert(
+            "sample_rate".to_string(),
+            PropertyValue::String(rate.to_string()),
+        );
+    }
+    let bus_rate = mixer_rate.unwrap_or(strom_types::DEFAULT_AUDIO_SAMPLE_RATE) as i32;
+    let m = assemble(&properties);
+    tap(
+        &m,
+        "main_out_tee",
+        &format!("audio/x-raw,rate={bus_rate}"),
+        "tap_main",
+    );
     tap(&m, "aux1_out_tee", "audio/x-raw", "tap_aux1");
     tap(&m, "aux0_out_tee", "audio/x-raw", "tap_aux0");
     tap(&m, "monitor_out_tee", "audio/x-raw", "tap_monitor");
@@ -894,7 +910,7 @@ fn assert_late_input_is_heard(rate: i32) {
         };
         assert_eq!(
             caps.structure(0).unwrap().get::<i32>("rate").unwrap(),
-            MIXER_SAMPLE_RATE,
+            bus_rate,
             "{bus} negotiated {caps}"
         );
     }
@@ -908,7 +924,7 @@ fn assert_late_input_is_heard(rate: i32) {
             "caps",
             gst::Caps::builder("audio/x-raw")
                 .field("format", "S16LE")
-                .field("rate", rate)
+                .field("rate", input_rate)
                 .field("channels", 2i32)
                 .field("layout", "interleaved")
                 .build(),
@@ -964,10 +980,52 @@ fn assert_late_input_is_heard(rate: i32) {
 
 #[test]
 fn test_input_links_late_when_main_consumer_pins_rate() {
-    assert_late_input_is_heard(48_000);
+    assert_late_input_is_heard(48_000, None);
 }
 
 #[test]
 fn test_late_input_at_another_rate_is_resampled() {
-    assert_late_input_is_heard(44_100);
+    assert_late_input_is_heard(44_100, None);
+}
+
+/// With `sample_rate=44100` every bus runs at 44.1 kHz, and a 48 kHz input
+/// that links late is resampled down and heard.
+#[test]
+fn test_sample_rate_property_sets_every_bus_rate() {
+    assert_late_input_is_heard(48_000, Some(44_100));
+}
+
+#[test]
+fn test_sample_rate_property_parsing() {
+    assert_eq!(parse_sample_rate(&props(&[])), 48_000);
+    assert_eq!(
+        parse_sample_rate(&props(&[(
+            "sample_rate",
+            PropertyValue::String("96000".into())
+        )])),
+        96_000
+    );
+    assert_eq!(
+        parse_sample_rate(&props(&[("sample_rate", PropertyValue::Int(44_100))])),
+        44_100
+    );
+    assert_eq!(
+        parse_sample_rate(&props(&[(
+            "sample_rate",
+            PropertyValue::String("12345".into())
+        )])),
+        48_000,
+        "a rate outside the common list falls back to the default"
+    );
+    let def = mixer_definition();
+    let prop = def
+        .exposed_properties
+        .iter()
+        .find(|p| p.name == "sample_rate")
+        .expect("mixer exposes sample_rate");
+    assert!(
+        matches!(&prop.default_value, Some(PropertyValue::String(s)) if s == "48000"),
+        "default is {:?}",
+        prop.default_value
+    );
 }

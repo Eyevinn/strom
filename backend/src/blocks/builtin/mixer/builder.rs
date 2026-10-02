@@ -9,18 +9,19 @@ use tracing::{debug, info, warn};
 use super::elements::*;
 use super::metering::connect_mixer_meter_handler;
 use super::properties::*;
-use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR, MIXER_SAMPLE_RATE};
+use super::{METER_INTERVAL_NS, MIN_KNEE_LINEAR};
 use strom_types::mixer::{DEFAULT_LATENCY_MS, DEFAULT_MIN_UPSTREAM_LATENCY_MS};
 
-/// Follow a bus mixer with its rate pin. Returns the pin's id: the bus's
-/// output now leaves from there.
+/// Follow a bus mixer with its rate pin at `rate`. Returns the pin's id: the
+/// bus's output now leaves from there.
 fn push_rate_pin(
     mixer_id: &str,
+    rate: u32,
     elements: &mut Vec<(String, gst::Element)>,
     internal_links: &mut Vec<(ElementPadRef, ElementPadRef)>,
 ) -> Result<String, BlockBuildError> {
     let pin_id = format!("{}_rate", mixer_id);
-    elements.push((pin_id.clone(), make_rate_pin(&pin_id)?));
+    elements.push((pin_id.clone(), make_rate_pin(&pin_id, rate)?));
     internal_links.push((
         ElementPadRef::pad(mixer_id, "src"),
         ElementPadRef::pad(&pin_id, "sink"),
@@ -108,6 +109,7 @@ impl BlockBuilder for MixerBuilder {
         let num_channels = parse_num_channels(properties);
         let num_aux_buses = parse_num_aux_buses(properties);
         let num_groups = parse_num_groups(properties);
+        let sample_rate = parse_sample_rate(properties);
         let dsp_backend = get_string_prop(properties, "dsp_backend", "rust");
         if dsp_backend != "rust" && dsp_backend != "lv2" {
             warn!(
@@ -121,8 +123,8 @@ impl BlockBuilder for MixerBuilder {
             "rust"
         };
         info!(
-            "Mixer config: {} channels, {} aux buses, {} groups, dsp={}",
-            num_channels, num_aux_buses, num_groups, dsp_backend,
+            "Mixer config: {} channels, {} aux buses, {} groups, dsp={}, rate={}",
+            num_channels, num_aux_buses, num_groups, dsp_backend, sample_rate,
         );
 
         let mut elements = Vec::new();
@@ -144,7 +146,8 @@ impl BlockBuilder for MixerBuilder {
         let audiomixer =
             make_audiomixer(&mixer_id, force_live, latency_ms, min_upstream_latency_ms)?;
         elements.push((mixer_id.clone(), audiomixer.clone()));
-        let mixer_out_id = push_rate_pin(&mixer_id, &mut elements, &mut internal_links)?;
+        let mixer_out_id =
+            push_rate_pin(&mixer_id, sample_rate, &mut elements, &mut internal_links)?;
 
         // ========================================================================
         // Main bus processing: comp → EQ → limiter
@@ -302,7 +305,12 @@ impl BlockBuilder for MixerBuilder {
             min_upstream_latency_ms,
         )?;
         elements.push((solo_mixer_id.clone(), solo_mixer));
-        let solo_out_id = push_rate_pin(&solo_mixer_id, &mut elements, &mut internal_links)?;
+        let solo_out_id = push_rate_pin(
+            &solo_mixer_id,
+            sample_rate,
+            &mut elements,
+            &mut internal_links,
+        )?;
 
         // Gates feeding monitor_mixer
         let solo_to_mon_id = format!("{}:solo_to_mon", instance_id);
@@ -346,7 +354,12 @@ impl BlockBuilder for MixerBuilder {
             min_upstream_latency_ms,
         )?;
         elements.push((monitor_mixer_id.clone(), monitor_mixer));
-        let monitor_out_id = push_rate_pin(&monitor_mixer_id, &mut elements, &mut internal_links)?;
+        let monitor_out_id = push_rate_pin(
+            &monitor_mixer_id,
+            sample_rate,
+            &mut elements,
+            &mut internal_links,
+        )?;
 
         // Monitor master volume (driven by `monitor_fader` exposed property)
         let monitor_master_vol_id = format!("{}:monitor_master_vol", instance_id);
@@ -431,7 +444,12 @@ impl BlockBuilder for MixerBuilder {
                 min_upstream_latency_ms,
             )?;
             elements.push((aux_mixer_id.clone(), aux_mixer));
-            let aux_out_id = push_rate_pin(&aux_mixer_id, &mut elements, &mut internal_links)?;
+            let aux_out_id = push_rate_pin(
+                &aux_mixer_id,
+                sample_rate,
+                &mut elements,
+                &mut internal_links,
+            )?;
 
             let aux_fader = get_float_prop(properties, &format!("aux{}_fader", aux + 1), 1.0);
             let aux_mute = get_bool_prop(properties, &format!("aux{}_mute", aux + 1), false);
@@ -535,7 +553,12 @@ impl BlockBuilder for MixerBuilder {
                 min_upstream_latency_ms,
             )?;
             elements.push((sg_mixer_id.clone(), sg_mixer));
-            let sg_out_id = push_rate_pin(&sg_mixer_id, &mut elements, &mut internal_links)?;
+            let sg_out_id = push_rate_pin(
+                &sg_mixer_id,
+                sample_rate,
+                &mut elements,
+                &mut internal_links,
+            )?;
 
             let sg_fader = get_float_prop(properties, &format!("group{}_fader", sg + 1), 1.0);
             let sg_mute = get_bool_prop(properties, &format!("group{}_mute", sg + 1), false);
@@ -690,7 +713,7 @@ impl BlockBuilder for MixerBuilder {
                 })?;
             elements.push((convert_id.clone(), convert));
 
-            // audioresample: the buses run at MIXER_SAMPLE_RATE, so a source at
+            // audioresample: the buses run at `sample_rate`, so a source at
             // another rate is converted here rather than refused.
             let resample_id = format!("{}:resample_{}", instance_id, ch);
             let resample = gst::ElementFactory::make("audioresample")
@@ -706,7 +729,7 @@ impl BlockBuilder for MixerBuilder {
             let caps_id = format!("{}:caps_{}", instance_id, ch);
             let caps = gst::Caps::builder("audio/x-raw")
                 .field("format", "F32LE")
-                .field("rate", MIXER_SAMPLE_RATE)
+                .field("rate", sample_rate as i32)
                 .field("channels", 2i32)
                 .field("layout", "interleaved")
                 .build();
