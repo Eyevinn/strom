@@ -21,8 +21,14 @@
 //! upstream fails not-negotiated and no CAPS event ever arrives here.
 //!
 //! Only a producer that offers CUDA memory *and nothing else* is adapted. One
-//! that also offers system or GL memory (a decoder) settles on one of those
-//! from `glupload`'s caps and is left alone.
+//! that also offers system or GL memory (a decoder) picks from what the input
+//! answers its CAPS query with. `glupload`'s own answer has no CUDA memory in
+//! it, so `nvh264dec` would pick system memory and download every frame, only
+//! for `glupload` to upload it again. When the adapter is installed, the answer
+//! therefore also lists the input's system-memory caps in CUDA memory, last.
+//! A decoder that can output CUDA memory picks it, its ACCEPT_CAPS is then CUDA
+//! only, and the adapter goes in: the frames stay on the GPU. A producer that
+//! cannot output CUDA memory never chooses the extra entries.
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -75,6 +81,77 @@ fn offers_only_cuda_memory(caps: &gst::CapsRef) -> bool {
     })
 }
 
+/// `answer`, the input's reply to a CAPS query, with its system-memory raw
+/// video caps also listed in CUDA memory, after everything else.
+///
+/// `adapter_sink` is what the adapter's sink pad takes in CUDA memory, so only
+/// formats it can bring into GL are offered. `filter` is the query's filter.
+/// `None` when there is nothing to add, or when CUDA memory is already in the
+/// answer.
+fn with_cuda_alternative(
+    answer: &gst::CapsRef,
+    adapter_sink: &gst::CapsRef,
+    filter: Option<&gst::CapsRef>,
+) -> Option<gst::Caps> {
+    if answer.is_any()
+        || answer
+            .iter_with_features()
+            .any(|(_, features)| features.contains(CUDA_MEMORY_FEATURE))
+    {
+        return None;
+    }
+    let mut cuda = gst::Caps::new_empty();
+    {
+        let cuda = cuda.get_mut().expect("new caps are writable");
+        for (structure, features) in answer.iter_with_features() {
+            let system_memory = features.size() == 0
+                || (features.size() == 1 && features.contains("memory:SystemMemory"));
+            if structure.name() == "video/x-raw" && system_memory {
+                cuda.append_structure_full(
+                    structure.to_owned(),
+                    Some(gst::CapsFeatures::new([CUDA_MEMORY_FEATURE])),
+                );
+            }
+        }
+    }
+    let mut cuda = cuda.intersect_with_mode(adapter_sink, gst::CapsIntersectMode::First);
+    if let Some(filter) = filter {
+        cuda = cuda.intersect_with_mode(filter, gst::CapsIntersectMode::First);
+    }
+    if cuda.is_empty() {
+        return None;
+    }
+    let mut widened = answer.to_owned();
+    widened.make_mut().append(cuda);
+    Some(widened)
+}
+
+/// What the adapter's sink pad takes in CUDA memory, or `None` when the adapter
+/// is not installed. Looked up once: the registry does not change under a
+/// running process.
+fn adapter_cuda_sink_caps() -> Option<&'static gst::Caps> {
+    static CAPS: std::sync::OnceLock<Option<gst::Caps>> = std::sync::OnceLock::new();
+    CAPS.get_or_init(|| {
+        let factory = gst::ElementFactory::find(CUDA_ADAPTER_FACTORY)?;
+        let template = factory
+            .static_pad_templates()
+            .into_iter()
+            .find(|t| t.direction() == gst::PadDirection::Sink)?
+            .caps();
+        let mut cuda = gst::Caps::new_empty();
+        {
+            let cuda = cuda.get_mut().expect("new caps are writable");
+            for (structure, features) in template.iter_with_features() {
+                if features.contains(CUDA_MEMORY_FEATURE) {
+                    cuda.append_structure_full(structure.to_owned(), Some(features.to_owned()));
+                }
+            }
+        }
+        (!cuda.is_empty()).then_some(cuda)
+    })
+    .as_ref()
+}
+
 /// The caps a query arriving at the input says the producer offers, if any.
 fn offered_caps(query: &gst::QueryRef) -> Option<gst::Caps> {
     match query.view() {
@@ -102,8 +179,24 @@ pub fn install(front_sink: &gst::Pad, upload: &gst::Element, label: &str) {
     // the input has been adapted, so a producer that switches to CUDA memory
     // mid-stream (a Media Player moving to a file the GPU decodes) is caught too.
     front_sink.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |pad, info| {
-        // Act before the query is answered, not on its way back.
-        if !info.mask.contains(gst::PadProbeType::PUSH) || settled.load(Ordering::Acquire) {
+        if settled.load(Ordering::Acquire) {
+            return gst::PadProbeReturn::Ok;
+        }
+        // On its way back, a CAPS query's answer gets CUDA memory added, so a
+        // decoder upstream can choose it (see the module docs).
+        if info.mask.contains(gst::PadProbeType::PULL) {
+            if let (Some(gst::PadProbeData::Query(query)), Some(adapter_sink)) =
+                (&mut info.data, adapter_cuda_sink_caps())
+            {
+                if let gst::QueryViewMut::Caps(q) = query.view_mut() {
+                    let filter = q.filter_owned();
+                    if let Some(widened) = q.result_owned().and_then(|answer| {
+                        with_cuda_alternative(&answer, adapter_sink, filter.as_deref())
+                    }) {
+                        q.set_result(&widened);
+                    }
+                }
+            }
             return gst::PadProbeReturn::Ok;
         }
         let Some(gst::PadProbeData::Query(ref query)) = info.data else {
@@ -302,6 +395,100 @@ mod tests {
     }
 
     const CUDA: &str = "video/x-raw(memory:CUDAMemory), format=NV12, width=1920, height=1080";
+
+    /// Stands in for `cudadownload`'s sink template, which CI does not have.
+    const ADAPTER_SINK: &str = "video/x-raw(memory:CUDAMemory), format={ NV12, I420 }";
+
+    fn has_cuda(c: &gst::CapsRef) -> bool {
+        c.iter_with_features()
+            .any(|(_, f)| f.contains(CUDA_MEMORY_FEATURE))
+    }
+
+    /// What `glupload` answers, widened: system memory stays first, so a
+    /// producer that cannot output CUDA memory settles as before, and the CUDA
+    /// entries carry the answer's constraints.
+    #[test]
+    fn a_system_memory_answer_also_offers_cuda_memory_last() {
+        let answer = caps(
+            "video/x-raw(memory:GLMemory), format=RGBA; \
+             video/x-raw, format={ NV12, RGBA }, width=1920, height=1080",
+        );
+        let widened =
+            with_cuda_alternative(&answer, &caps(ADAPTER_SINK), None).expect("CUDA added");
+        assert_eq!(widened.size(), 3);
+        for i in 0..2 {
+            assert_eq!(widened.structure(i), answer.structure(i));
+            assert_eq!(
+                widened.features(i).map(|f| f.to_string()),
+                answer.features(i).map(|f| f.to_string())
+            );
+        }
+        let (cuda, features) = widened.iter_with_features().nth(2).unwrap();
+        assert!(features.contains(CUDA_MEMORY_FEATURE));
+        // RGBA is not something the adapter takes; the size is kept.
+        assert_eq!(cuda.get::<&str>("format").unwrap(), "NV12");
+        assert_eq!(cuda.get::<i32>("width").unwrap(), 1920);
+    }
+
+    #[test]
+    fn the_query_filter_is_respected() {
+        let answer = caps("video/x-raw, format={ NV12, I420 }");
+        let widened = with_cuda_alternative(
+            &answer,
+            &caps(ADAPTER_SINK),
+            Some(&caps("video/x-raw(memory:CUDAMemory), format=I420")),
+        )
+        .expect("CUDA added");
+        let (cuda, _) = widened.iter_with_features().last().unwrap();
+        assert_eq!(cuda.get::<&str>("format").unwrap(), "I420");
+
+        // A filter that rules CUDA memory out leaves the answer alone.
+        let system_only = caps("video/x-raw, format=NV12");
+        assert!(with_cuda_alternative(&answer, &caps(ADAPTER_SINK), Some(&system_only)).is_none());
+    }
+
+    #[test]
+    fn nothing_is_added_when_there_is_nothing_to_widen() {
+        let adapter = caps(ADAPTER_SINK);
+        for c in [
+            // Already offers CUDA memory.
+            "video/x-raw(memory:CUDAMemory), format=NV12; video/x-raw, format=NV12",
+            // GL memory only: no system-memory entry to mirror.
+            "video/x-raw(memory:GLMemory), format=RGBA",
+            // A format the adapter cannot take.
+            "video/x-raw, format=RGBA",
+            "ANY",
+        ] {
+            assert!(
+                with_cuda_alternative(&caps(c), &adapter, None).is_none(),
+                "{}",
+                c
+            );
+        }
+        assert!(!has_cuda(&caps("video/x-raw, format=NV12")));
+    }
+
+    /// The widened answer is what the decoder then accepts with: CUDA memory
+    /// only, which is exactly what puts the adapter in.
+    #[test]
+    fn choosing_the_added_cuda_memory_gets_the_adapter() {
+        let widened = with_cuda_alternative(
+            &caps("video/x-raw, format=NV12, width=1280, height=720"),
+            &caps(ADAPTER_SINK),
+            None,
+        )
+        .unwrap();
+        let mut chosen = gst::Caps::new_empty();
+        for (s, f) in widened.iter_with_features() {
+            if f.contains(CUDA_MEMORY_FEATURE) {
+                chosen
+                    .make_mut()
+                    .append_structure_full(s.to_owned(), Some(f.to_owned()));
+            }
+        }
+        assert!(has_cuda(&chosen));
+        assert_eq!(decide(&chosen, true), FrontDecision::CudaAdapter);
+    }
 
     #[test]
     fn cuda_memory_gets_the_adapter() {
