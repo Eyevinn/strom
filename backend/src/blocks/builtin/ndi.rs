@@ -540,9 +540,12 @@ impl BlockBuilder for NDIOutputBuilder {
                 })?;
                 let audio_pad_name = audio_pad.name().to_string();
 
+                // Don't wait for a first buffer to start: an input with no
+                // data yet would keep the flow from reaching PLAYING.
                 let ndisink = gst::ElementFactory::make("ndisink")
                     .name(&ndisink_id)
                     .property("ndi-name", &ndi_name)
+                    .property("async", false)
                     .build()
                     .map_err(|e| BlockBuildError::ElementCreation(format!("ndisink: {}", e)))?;
 
@@ -627,9 +630,12 @@ impl BlockBuilder for NDIOutputBuilder {
                         BlockBuildError::ElementCreation(format!("audioresample: {}", e))
                     })?;
 
+                // Don't wait for a first buffer to start: an input with no
+                // data yet would keep the flow from reaching PLAYING.
                 let ndisink = gst::ElementFactory::make("ndisink")
                     .name(&ndisink_id)
                     .property("ndi-name", &ndi_name)
+                    .property("async", false)
                     .build()
                     .map_err(|e| BlockBuildError::ElementCreation(format!("ndisink: {}", e)))?;
 
