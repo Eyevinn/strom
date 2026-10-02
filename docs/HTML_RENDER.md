@@ -180,6 +180,12 @@ The entrypoint prints `CEF GPU mode enabled (STROM_CEF_GPU=1) - ANGLE/Vulkan
 on NVIDIA` when the GPU path activates, and warns if `STROM_CEF_GPU=1` is set
 but no GPU is visible in the container.
 
+**GPU mode does not give a page hardware video decode or encode.** It moves
+painting and compositing to the GPU, nothing more. Chromium on Linux does
+hardware video only through VA-API, and NVIDIA GPUs have no VA-API driver in
+the Docker images, so a page's video (YouTube, a video call) is still decoded
+and encoded in software by Chromium. NVDEC and NVENC go unused.
+
 ## Troubleshooting
 
 ### "Missing X server or $DISPLAY"
@@ -244,6 +250,27 @@ An HTML source is a block: set the URL, the viewport size and the framerate,
 and pick whether the page's audio comes out as a second pad. Internally it is
 `cefsrc` feeding `cefdemux`, with `cefdemux` built only when audio is asked
 for. Raw `cefsrc` pipelines still work — the block just spares you the caps.
+
+## Which pages work
+
+The CEF binaries come from Spotify's CEF builds, which gstcefsrc downloads when
+it is built. Those builds leave out the proprietary codecs, so **Chromium in
+`strom-full` has no H.264**. A page that offers H.264 only, or that negotiates
+it for WebRTC, cannot play its video.
+
+Tested in `strom-full`:
+
+| Page | Result |
+|------|--------|
+| YouTube | Works, audio and video |
+| Google Meet | Works, audio and video |
+| Microsoft Teams | Audio only, no video. The missing H.264 is the likely cause |
+
+Video calls need the fake camera and microphone (see
+[Camera, microphone, and what else a page cannot do](#camera-microphone-and-what-else-a-page-cannot-do)),
+and WebRTC needs UDP to reach the call's servers. A source only takes media
+out of a call: the block has no audio or video inputs, so nothing from Strom
+goes back into the call.
 
 ## Strict Network Access
 
@@ -495,12 +522,40 @@ so the two cannot be combined.
 > only to someone you would trust with the instance itself, and never turn it
 > on for a Strom shared between customers.
 
+## Running with upstream gstcefsrc
+
+The `strom-full` image ships Strom's own gstcefsrc build: upstream
+[gstcefsrc](https://github.com/centricular/gstcefsrc) at a pinned commit, plus
+four patches. The HTML Input block, raw `cefsrc` elements and remote control
+all run on an upstream build too, for instance a native Linux install with a
+gstcefsrc you built yourself. Strom checks which properties the plugin has and
+logs a warning for each one that is missing, rather than failing the flow.
+
+Remote control itself needs nothing from the patches. Its picture, input and
+navigation use Chromium's own debug protocol, and the debug port is a plain
+Chromium switch.
+
+What you lose without each patch:
+
+| Patch | With it | Without it |
+|-------|---------|------------|
+| Popup close | Closing a popup leaves the page that opened it alone | Closing a popup is taken for the source's own browser closing. Later URL changes on air do nothing, and stopping the flow leaves the page running, still logged in and on the network, until Strom exits. Remote control closes popups when it follows a login, so this happens in normal use |
+| Browser context per source | Each source has its own cookies, storage and cache ([Browser profiles](#browser-profiles)) | Every HTML source in the process shares one cookie jar. A login made in one is a login in all of them, and the Browser Profile setting has no effect |
+| Strict network | Chromium refuses a strict page's own requests to this machine and its network | Strom still refuses an internal address as the page's URL, but what the page itself fetches, frames or connects to is not checked. Of the Local Network Access checks Strom switches on, only the last one takes effect |
+| Offscreen handlers | File dialogs, downloads, printing, JavaScript dialogs, the context menu and drops are all refused, and a page gets a fake camera and microphone | **A click on a file input through remote control can abort Strom, with every pipeline in it.** `print()` can freeze the page, a download is written to the server's disk without asking, and a page asking for a camera or microphone is given the server's real ones, which may be capture cards |
+
+An upstream build is reasonable on your own machine, rendering pages you
+trust, with an operator who knows not to click file inputs or print. It is not
+an option for a Strom that renders pages for anyone else.
+
 ## Limitations
 
 - **`strom-full` image only**: `cefsrc` comes from the gstcefsrc plugin, which Strom ships only in the `strom-full` image. The plain `strom` image and the native release builds (Linux, macOS, Windows) do not include it.
 - **Linux: X11 required**: CEF needs an X server on Linux, which the strom-full image provides via Xvfb. This is why `strom-full` is the supported way to run HTML sources.
 - **macOS: no native support yet**: CEF renders offscreen through its own macOS path, so Xvfb is not involved and the X11 requirement above does not apply. Native macOS support is tracked in [centricular/gstcefsrc#110](https://github.com/centricular/gstcefsrc/pull/110) (macOS build fixes) and [Eyevinn/strom#669](https://github.com/Eyevinn/strom/pull/669) (a Cocoa run loop on the main thread, needed in headless mode). CEF on macOS also refuses to initialise unless the host process is inside an `.app` bundle, and the macOS release ships a bare executable rather than a bundle.
 - **Software rendering by default**: CEF uses CPU rendering; opt in to GPU with `STROM_CEF_GPU=1` (see above)
+- **No H.264 in the page**: the CEF build has no proprietary codecs, so Teams shows no video (see [Which pages work](#which-pages-work))
+- **No hardware video in the page on Linux**: even in GPU mode, Chromium decodes and encodes a page's video in software, because it needs VA-API and NVIDIA has none in the Docker images
 - **Memory usage**: CEF spawns multiple processes (browser, renderer, GPU process)
 - **No audio by default**: Use `cefbin` or `cefdemux` if you need audio from web content
 - **No Chromium sandbox in `strom-full`**: the image runs as root and the entrypoint passes `no-sandbox`, so a Chromium bug in a page is code running in Strom's container. See [Running HTML sources for several customers](#running-html-sources-for-several-customers)
