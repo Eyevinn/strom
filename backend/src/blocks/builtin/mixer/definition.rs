@@ -115,6 +115,21 @@ pub(super) fn mixer_definition() -> BlockDefinition {
             live: false,
             persist: None,
         },
+        // Per-channel direct outputs — construction-time only.
+        ExposedProperty {
+            name: "direct_outs".to_string(),
+            label: "Direct Outs".to_string(),
+            description: "Add a direct_out_N output per channel: the channel's contribution to Main (after fader, mute and the to-Main switch, before the sum). A channel routed only to a group is silent on it. A channel with no input sends nothing, so an output that waits for its first audio (NDI, DeckLink audio, TAMS) gets nothing and keeps the flow from reporting playing until the channel has input; Main keeps playing.".to_string(),
+            property_type: PropertyType::Bool,
+            default_value: Some(PropertyValue::Bool(false)),
+            mapping: PropertyMapping {
+                element_id: "_block".to_string(),
+                property_name: "direct_outs".to_string(),
+                transform: None,
+            },
+            live: false,
+            persist: None,
+        },
         // Monitor master level — drives the Monitor bus output. The Monitor
         // bus follows Main when no channel has PFL or AFL active, and
         // switches to the solo mix as soon as any PFL/AFL is engaged.
