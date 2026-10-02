@@ -10,6 +10,7 @@
 
 use super::pages::{BrowserWatch, PageFamily, TargetEvent};
 use super::{filter, LinkSource, Session};
+use crate::cef_pages;
 use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use futures::stream::SplitSink;
@@ -107,9 +108,17 @@ pub(super) async fn set_home(
         crate::blocks::builtin::html_input::URL_PROPERTY.to_string(),
         strom_types::PropertyValue::String(url.clone()),
     )]);
+    // The page is on this address already: store it without reloading the
+    // page on air.
+    let owner = cef_pages::PageOwner::Block {
+        flow_id: source.flow_id,
+        block_id: source.block_id.clone(),
+    };
+    cef_pages::already_showing(&owner, &url);
     let result = app
         .update_block_properties(&source.flow_id, &source.block_id, properties, None, None)
         .await;
+    cef_pages::forget_showing(&owner);
     let refused = match result {
         Ok((_, rejected)) => rejected.into_values().next(),
         Err(e) => Some(e.to_string()),

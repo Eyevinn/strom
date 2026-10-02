@@ -980,8 +980,9 @@ fn read_property(obj: &glib::Object, pspec: &glib::ParamSpec) -> Result<Property
     let value = match value_type.name() {
         "gchararray" => {
             let v = obj.property::<Option<String>>(name);
-            // A cefsrc whose page is being born holds a marker, not its URL.
-            v.map(|url| crate::cef_pages::shown_url(obj, url))
+            // A cefsrc whose page is being born holds a marker, not its URL,
+            // and a steered one keeps its first URL. Only `url` is mapped.
+            v.map(|v| crate::cef_pages::shown_string_property(obj, name, v))
                 .map(PropertyValue::String)
                 .unwrap_or(PropertyValue::String(String::new()))
         }

@@ -130,6 +130,47 @@ fn steered() -> &'static Mutex<Vec<Steered>> {
     STEERED.get_or_init(Default::default)
 }
 
+/// Pages known to be on a URL already, by DevTools target id: the next live
+/// write of exactly that URL to the page's element records it without
+/// navigating. Set by [`already_showing`] and cleared by [`forget_showing`].
+fn showing() -> &'static Mutex<HashMap<String, String>> {
+    static SHOWING: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    SHOWING.get_or_init(Default::default)
+}
+
+/// Say that `owner`'s page is on `url` already, so that the next live write
+/// of that URL makes it the element's URL without loading it again.
+///
+/// Remote control's "Set start page" pins the page the operator has reached.
+/// Navigating to it would reload the page on air, losing a single-page app's
+/// state or a form, or breaking a page reached through a one-time redirect.
+pub fn already_showing(owner: &PageOwner, url: &str) {
+    if let Some(target_id) = target_of(owner) {
+        let mut showing = showing().lock().unwrap_or_else(|e| e.into_inner());
+        showing.insert(target_id, url.to_string());
+    }
+}
+
+/// Undo [`already_showing`] if no write used it, so a later write of the same
+/// URL navigates as usual.
+pub fn forget_showing(owner: &PageOwner) {
+    if let Some(target_id) = target_of(owner) {
+        let mut showing = showing().lock().unwrap_or_else(|e| e.into_inner());
+        showing.remove(&target_id);
+    }
+}
+
+/// Whether page `target_id` is known to be on `url`; consumes the note.
+fn take_showing(target_id: &str, url: &str) -> bool {
+    let mut showing = showing().lock().unwrap_or_else(|e| e.into_inner());
+    if showing.get(target_id).is_some_and(|shown| shown == url) {
+        showing.remove(target_id);
+        true
+    } else {
+        false
+    }
+}
+
 /// Point a running `cefsrc` at `url`.
 ///
 /// A page still being born keeps its marker until it is named, and loads
@@ -154,7 +195,9 @@ pub fn load_url(cefsrc: &impl IsA<glib::Object>, url: &str) {
             .find(|s| this.is_some() && s.element.upgrade().as_ref() == this)
         {
             entry.url = url.to_string();
-            handle.spawn(navigate(port, entry.target_id.clone(), url.to_string()));
+            if !take_showing(&entry.target_id, url) {
+                handle.spawn(navigate(port, entry.target_id.clone(), url.to_string()));
+            }
             return;
         }
     }
@@ -183,6 +226,18 @@ async fn navigate(port: u16, target_id: String, url: String) {
     // Wait for the answer, so the navigation has started before we hang up.
     let _ = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
     let _ = socket.close(None).await;
+}
+
+/// A string property of `obj` as anyone outside this module should see it:
+/// the URL [`shown_url`] reports for a `cefsrc`'s `url`, every other string
+/// property as it is. Only `url` is steered; a steered element's `name` or
+/// `context-cache-path` must not read back as the page it shows.
+pub fn shown_string_property(obj: &glib::Object, property: &str, value: String) -> String {
+    if property == URL_PROPERTY {
+        shown_url(obj, value)
+    } else {
+        value
+    }
 }
 
 /// The URL a `cefsrc` is set to, as anyone outside this module should see it.
@@ -683,6 +738,56 @@ mod tests {
             shown_url(object, "https://other.example/".to_string()),
             "https://other.example/"
         );
+        pending().lock().unwrap().remove(&marker);
+    }
+
+    /// "Set start page" pins the page the operator has reached; it must not
+    /// reload it. The note covers one write of exactly that URL, and is gone
+    /// once used or forgotten, so a later write navigates.
+    #[test]
+    fn a_page_already_showing_a_url_is_not_sent_there_again() {
+        let flow = FlowId::new_v4();
+        record(block(flow, "home"), "PAGEHOME".to_string());
+        let owner = block(flow, "home");
+
+        already_showing(&owner, "https://example.com/logged-in");
+        assert!(!take_showing("PAGEHOME", "https://example.com/other"));
+        assert!(take_showing("PAGEHOME", "https://example.com/logged-in"));
+        assert!(
+            !take_showing("PAGEHOME", "https://example.com/logged-in"),
+            "the note is used once"
+        );
+
+        already_showing(&owner, "https://example.com/logged-in");
+        forget_showing(&owner);
+        assert!(!take_showing("PAGEHOME", "https://example.com/logged-in"));
+        forget_flow(&flow);
+    }
+
+    /// Only `url` is mapped. Every string property of a steered element used
+    /// to read back as the page URL, so a client reading and writing back the
+    /// element's properties wrote that URL into `name` and the rest.
+    #[test]
+    fn only_the_url_property_reads_back_as_the_shown_url() {
+        let marker = format!("{}{}", MARKER_PREFIX, "beef");
+        pending()
+            .lock()
+            .unwrap()
+            .insert(marker.clone(), "https://example.com/".to_string());
+        let element = fake::FakeCefSrc::with_url(&marker);
+        let object = element.upcast_ref::<glib::Object>();
+        assert_eq!(
+            shown_string_property(object, URL_PROPERTY, marker.clone()),
+            "https://example.com/"
+        );
+        for other in ["name", "context-cache-path"] {
+            assert_eq!(
+                shown_string_property(object, other, marker.clone()),
+                marker,
+                "{} read back as the page URL",
+                other
+            );
+        }
         pending().lock().unwrap().remove(&marker);
     }
 
