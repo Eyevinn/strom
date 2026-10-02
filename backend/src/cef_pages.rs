@@ -16,6 +16,13 @@
 //!
 //! This works with any gstcefsrc: it needs nothing from the element but its
 //! `url` property.
+//!
+//! A named page also gets a guard: a DevTools session of Strom's own, held
+//! for the page's life, that refuses what an offscreen browser must never do.
+//! Strom's gstcefsrc build answers these in the element as well; upstream
+//! leaves them to CEF, where a file chooser is built in-process and has
+//! aborted Strom, `print()` never returns, and a download lands on the
+//! server's disk. See [`guard`].
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -104,6 +111,31 @@ fn pending() -> &'static Mutex<HashMap<String, String>> {
     PENDING.get_or_init(Default::default)
 }
 
+/// An upstream `cefsrc` whose page is driven over DevTools rather than
+/// through the element.
+///
+/// Upstream gstcefsrc forgets its own browser once a popup the page opened
+/// closes, and from then on ignores a new `url`. Strom's build has the fix in
+/// every release that has `isolated-context`, so an element without that
+/// property is upstream, and Strom navigates its page itself.
+struct Steered {
+    element: glib::WeakRef<gst::Element>,
+    target_id: String,
+    /// The URL last loaded, which is what the element's own `url` would say.
+    url: String,
+}
+
+fn steered() -> &'static Mutex<Vec<Steered>> {
+    static STEERED: OnceLock<Mutex<Vec<Steered>>> = OnceLock::new();
+    STEERED.get_or_init(Default::default)
+}
+
+fn is_upstream(cefsrc: &impl IsA<glib::Object>) -> bool {
+    cefsrc
+        .find_property(crate::blocks::builtin::html_input::ISOLATED_CONTEXT_PROPERTY)
+        .is_none()
+}
+
 /// Point a running `cefsrc` at `url`.
 ///
 /// A page still being born keeps its marker until it is named, and loads
@@ -116,20 +148,69 @@ pub fn load_url(cefsrc: &impl IsA<glib::Object>, url: &str) {
         *next = url.to_string();
         return;
     }
+    drop(pending);
+    if let (Some(&port), Ok(handle)) = (DEBUG_PORT.get(), tokio::runtime::Handle::try_current()) {
+        let mut steered = steered().lock().unwrap_or_else(|e| e.into_inner());
+        steered.retain(|s| s.element.upgrade().is_some());
+        let this = cefsrc
+            .upcast_ref::<glib::Object>()
+            .downcast_ref::<gst::Element>();
+        if let Some(entry) = steered
+            .iter_mut()
+            .find(|s| this.is_some() && s.element.upgrade().as_ref() == this)
+        {
+            entry.url = url.to_string();
+            handle.spawn(navigate(port, entry.target_id.clone(), url.to_string()));
+            return;
+        }
+    }
     cefsrc.set_property(URL_PROPERTY, url);
+}
+
+/// Load `url` into page `target_id` over DevTools.
+async fn navigate(port: u16, target_id: String, url: String) {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let endpoint = format!("ws://127.0.0.1:{}/devtools/page/{}", port, target_id);
+    let Ok((mut socket, _)) = tokio_tungstenite::connect_async(&endpoint).await else {
+        warn!("Could not reach page {} to load {}", target_id, url);
+        return;
+    };
+    let command =
+        serde_json::json!({ "id": 1, "method": "Page.navigate", "params": { "url": url } });
+    if socket
+        .send(Message::Text(command.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    // Wait for the answer, so the navigation has started before we hang up.
+    let _ = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    let _ = socket.close(None).await;
 }
 
 /// The URL a `cefsrc` is set to, as anyone outside this module should see it.
 ///
 /// While its page is being born the element holds the marker, which means
 /// nothing to an operator and would be saved as the block's URL by a client
-/// that reads a property and writes it back.
-pub fn shown_url(url: String) -> String {
-    if !url.starts_with(MARKER_PREFIX) {
-        return url;
+/// that reads a property and writes it back. An upstream element Strom
+/// steers keeps its first URL; the page is on the one last loaded.
+pub fn shown_url(cefsrc: &glib::Object, url: String) -> String {
+    if url.starts_with(MARKER_PREFIX) {
+        let pending = pending().lock().unwrap_or_else(|e| e.into_inner());
+        return pending.get(&url).cloned().unwrap_or(url);
     }
-    let pending = pending().lock().unwrap_or_else(|e| e.into_inner());
-    pending.get(&url).cloned().unwrap_or(url)
+    let Some(this) = cefsrc.downcast_ref::<gst::Element>() else {
+        return url;
+    };
+    let steered = steered().lock().unwrap_or_else(|e| e.into_inner());
+    steered
+        .iter()
+        .find(|s| s.element.upgrade().as_ref() == Some(this))
+        .map(|s| s.url.clone())
+        .unwrap_or(url)
 }
 
 /// Forget the pages of a flow that has stopped. Its pages are closed, and a
@@ -141,10 +222,27 @@ pub fn forget_flow(flow_id: &FlowId) {
 }
 
 /// Load the URL a page being born was waiting for, once and only once.
-fn finish_birth(cefsrc: &impl IsA<glib::Object>, marker: &str) {
+///
+/// With its page named, an upstream element is steered from then on.
+fn finish_birth(cefsrc: &impl IsA<glib::Object>, marker: &str, target_id: Option<&str>) {
     let mut pending = pending().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(url) = pending.remove(marker) {
         cefsrc.set_property(URL_PROPERTY, &url);
+        let element = cefsrc
+            .upcast_ref::<glib::Object>()
+            .downcast_ref::<gst::Element>();
+        if let (Some(element), Some(target_id)) =
+            (element, target_id.filter(|_| is_upstream(cefsrc)))
+        {
+            steered()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Steered {
+                    element: element.downgrade(),
+                    target_id: target_id.to_string(),
+                    url,
+                });
+        }
     }
 }
 
@@ -216,6 +314,9 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
             Some(id) => {
                 debug!("{:?} renders page {}", owner, id);
                 record(owner.clone(), id.clone());
+                // Before the page leaves the blank start, so the guard is in
+                // place for the first document that could need it.
+                guard(port, id.clone(), format!("{:?}", owner)).await;
             }
             None => warn!(
                 "{:?}: Chromium did not list its page within {:?} of starting, so remote \
@@ -224,7 +325,7 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
             ),
         }
         match element.upgrade() {
-            Some(cefsrc) => finish_birth(&cefsrc, &marker),
+            Some(cefsrc) => finish_birth(&cefsrc, &marker, target_id.as_deref()),
             None => {
                 pending()
                     .lock()
@@ -235,23 +336,218 @@ pub fn name_page(cefsrc: &gst::Element, owner: PageOwner) {
     });
 }
 
-/// The target id of the page Chromium lists on `url`, if exactly one is.
-async fn find_page(port: u16, url: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Listed {
-        id: String,
-        #[serde(rename = "type")]
-        kind: String,
-        url: String,
+/// What a page must not do in a browser nobody sits in front of.
+///
+/// - A file chooser is intercepted: Chromium reports it to this session
+///   instead of building a dialog, and nothing more happens.
+/// - Downloads are denied.
+/// - `print()` does nothing. Offscreen, it never returns.
+/// - `alert`, `confirm` and `prompt` are dismissed as they open.
+///
+/// It also clears the page's history once the page has left its blank start
+/// and finished loading.
+/// Attached while the page is on it, the guard makes Chromium keep that start
+/// as an entry, and Back would put a blank page on air.
+///
+/// Each of these holds only while the session that set it is attached, so the
+/// guard stays connected for as long as the page lives. It is set up before
+/// this returns; the rest of the guard's life runs on its own.
+async fn guard(port: u16, target_id: String, who: String) {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let url = format!("ws://127.0.0.1:{}/devtools/page/{}", port, target_id);
+    let mut socket = match tokio_tungstenite::connect_async(&url).await {
+        Ok((socket, _)) => socket,
+        Err(e) => {
+            warn!("{}: could not guard its page: {}", who, e);
+            return;
+        }
+    };
+    const PRINT_OFF: &str = "window.print = function () {};";
+    let setup = [
+        ("Page.enable", serde_json::json!({})),
+        (
+            "Page.setInterceptFileChooserDialog",
+            serde_json::json!({ "enabled": true }),
+        ),
+        (
+            "Page.setDownloadBehavior",
+            serde_json::json!({ "behavior": "deny" }),
+        ),
+        (
+            "Page.addScriptToEvaluateOnNewDocument",
+            serde_json::json!({ "source": PRINT_OFF }),
+        ),
+    ];
+    let last = setup.len() as u64;
+    for (id, (method, params)) in setup.into_iter().enumerate() {
+        let command = serde_json::json!({ "id": id + 1, "method": method, "params": params });
+        if socket
+            .send(Message::Text(command.to_string().into()))
+            .await
+            .is_err()
+        {
+            warn!("{}: could not guard its page", who);
+            return;
+        }
     }
+    // Chromium answers in order, so once the last command is answered every
+    // one before it is in force, and the page can be sent on its way.
+    let answered = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(Message::Text(text))) = socket.next().await {
+            let Ok(answer) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if let Some(error) = answer.get("error") {
+                warn!("{}: its page guard was refused a command: {}", who, error);
+            }
+            if answer.get("id").and_then(|i| i.as_u64()) == Some(last) {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    if !matches!(answered, Ok(true)) {
+        warn!("{}: its page guard was not confirmed in time", who);
+    }
+
+    tokio::spawn(async move {
+        let mut next_id = 100u64;
+        // Whether the page has left its blank start, and the command that
+        // clears the start from its history once it has finished loading.
+        // A command sent while Chromium swaps the page's process is refused,
+        // and is tried again at the next load.
+        let mut left_start = false;
+        let mut history_cleared = false;
+        let mut reset_id: Option<u64> = None;
+        while let Some(Ok(message)) = socket.next().await {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            let id = event.get("id").and_then(|i| i.as_u64());
+            if id.is_some() && id == reset_id {
+                reset_id = None;
+                history_cleared = event.get("error").is_none();
+                continue;
+            }
+            if let Some(error) = event.get("error") {
+                // A dialog the plugin has already dismissed is gone by the
+                // time ours arrives; that is the plugin doing its job.
+                debug!("{}: its page guard was refused a command: {}", who, error);
+                continue;
+            }
+            let mut send = None;
+            match event.get("method").and_then(|m| m.as_str()) {
+                Some("Page.javascriptDialogOpening") => {
+                    send = Some((
+                        "Page.handleJavaScriptDialog",
+                        serde_json::json!({ "accept": false }),
+                    ));
+                }
+                Some("Page.fileChooserOpened") => {
+                    debug!("{}: refused a file chooser", who);
+                }
+                Some("Page.frameNavigated") if !left_start => {
+                    let frame = &event["params"]["frame"];
+                    let main = frame.get("parentId").is_none();
+                    let url = frame.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                    // CDP reports the URL without its fragment, so the
+                    // blank start is plain about:blank here.
+                    left_start = main && !url.starts_with("about:blank");
+                }
+                Some("Page.loadEventFired")
+                    if left_start && !history_cleared && reset_id.is_none() =>
+                {
+                    send = Some(("Page.resetNavigationHistory", serde_json::json!({})));
+                }
+                _ => {}
+            }
+            if let Some((method, params)) = send {
+                next_id += 1;
+                if method == "Page.resetNavigationHistory" {
+                    reset_id = Some(next_id);
+                }
+                let command =
+                    serde_json::json!({ "id": next_id, "method": method, "params": params });
+                if socket
+                    .send(Message::Text(command.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+        debug!("{}: page guard ended", who);
+    });
+}
+
+/// Close what a stopped flow left open.
+///
+/// Stopping a `cefsrc` closes its page. Upstream gstcefsrc loses track of its
+/// own browser once a popup the page opened closes, and then never closes it:
+/// the page keeps running, logged in and on the network. Whatever Chromium
+/// still lists for a stopped flow is such a page.
+pub async fn close_leftover_pages(flow_id: &FlowId) {
+    let Some(&port) = DEBUG_PORT.get() else {
+        return;
+    };
+    let leftover: Vec<String> = match pages().lock() {
+        Ok(pages) => pages
+            .iter()
+            .filter(|(owner, _)| owner.flow_id() == flow_id)
+            .map(|(_, id)| id.clone())
+            .collect(),
+        Err(_) => return,
+    };
+    if leftover.is_empty() {
+        return;
+    }
+    let Some(listed) = list_pages(port).await else {
+        return;
+    };
+    for id in leftover {
+        if !listed.iter().any(|t| t.id == id) {
+            continue;
+        }
+        warn!(
+            "Page {} of flow {} outlived its element, which upstream gstcefsrc does after a \
+             popup closes; closing it",
+            id, flow_id
+        );
+        let _ = client()
+            .put(format!("http://127.0.0.1:{}/json/close/{}", port, id))
+            .send()
+            .await;
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Listed {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    url: String,
+}
+
+fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
+    CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
             .unwrap_or_default()
-    });
-    let listed: Vec<Listed> = client
+    })
+}
+
+/// The pages Chromium lists, popups included.
+async fn list_pages(port: u16) -> Option<Vec<Listed>> {
+    let listed: Vec<Listed> = client()
         .get(format!("http://127.0.0.1:{}/json/list", port))
         .send()
         .await
@@ -259,9 +555,12 @@ async fn find_page(port: u16, url: &str) -> Option<String> {
         .json()
         .await
         .ok()?;
-    let mut matching = listed
-        .into_iter()
-        .filter(|t| t.kind == "page" && t.url == url);
+    Some(listed.into_iter().filter(|t| t.kind == "page").collect())
+}
+
+/// The target id of the page Chromium lists on `url`, if exactly one is.
+async fn find_page(port: u16, url: &str) -> Option<String> {
+    let mut matching = list_pages(port).await?.into_iter().filter(|t| t.url == url);
     let page = matching.next()?;
     matching.next().is_none().then_some(page.id)
 }
@@ -313,9 +612,11 @@ mod tests {
             .lock()
             .unwrap()
             .insert(marker.clone(), "https://example.com/".to_string());
-        assert_eq!(shown_url(marker.clone()), "https://example.com/");
+        let element = fake::FakeCefSrc::with_url(&marker);
+        let object = element.upcast_ref::<glib::Object>();
+        assert_eq!(shown_url(object, marker.clone()), "https://example.com/");
         assert_eq!(
-            shown_url("https://other.example/".to_string()),
+            shown_url(object, "https://other.example/".to_string()),
             "https://other.example/"
         );
         pending().lock().unwrap().remove(&marker);
@@ -380,7 +681,7 @@ mod tests {
     #[test]
     fn a_page_goes_to_its_url_once_it_is_named() {
         let (element, marker) = being_born("https://built.example/");
-        finish_birth(&element, &marker);
+        finish_birth(&element, &marker, None);
         assert_eq!(element.url().as_deref(), Some("https://built.example/"));
     }
 
@@ -390,18 +691,18 @@ mod tests {
         load_url(&element, "https://live.example/");
         // Still on the marker, so Chromium can still find the page.
         assert_eq!(element.url().as_deref(), Some(marker.as_str()));
-        finish_birth(&element, &marker);
+        finish_birth(&element, &marker, None);
         assert_eq!(element.url().as_deref(), Some("https://live.example/"));
     }
 
     #[test]
     fn a_url_set_on_air_after_birth_goes_straight_to_the_element() {
         let (element, marker) = being_born("https://built.example/");
-        finish_birth(&element, &marker);
+        finish_birth(&element, &marker, None);
         load_url(&element, "https://live.example/");
         assert_eq!(element.url().as_deref(), Some("https://live.example/"));
         // A late second finish changes nothing.
-        finish_birth(&element, &marker);
+        finish_birth(&element, &marker, None);
         assert_eq!(element.url().as_deref(), Some("https://live.example/"));
     }
 

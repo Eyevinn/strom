@@ -539,18 +539,33 @@ Remote control itself needs nothing from the patches. Its picture, input and
 navigation use Chromium's own debug protocol, and the debug port is a plain
 Chromium switch.
 
+With the debug port open, Strom also guards every page over that protocol,
+which covers most of what the patches fix:
+
+- A file chooser is intercepted, so a click on a file input through remote
+  control opens nothing.
+- Downloads are refused.
+- `print()` does nothing.
+- `alert`, `confirm` and `prompt` are dismissed.
+- An on-air URL change goes to the page directly, so it still works after a
+  popup has closed.
+- A page that outlives its element when its flow stops is closed.
+
+A page always gets the fake camera and microphone, because Strom passes
+Chromium the switch for them whatever the plugin is.
+
 What you lose without each patch:
 
-| Patch | With it | Without it |
-|-------|---------|------------|
-| Popup close | Closing a popup leaves the page that opened it alone | Closing a popup is taken for the source's own browser closing. Later URL changes on air do nothing, and stopping the flow leaves the page running, still logged in and on the network, until Strom exits. Remote control closes popups when it follows a login, so this happens in normal use |
-| Browser context per source | Each source has its own cookies, storage and cache ([Browser profiles](#browser-profiles)) | Every HTML source in the process shares one cookie jar. A login made in one is a login in all of them, and the Browser Profile setting has no effect |
-| Strict network | Chromium refuses a strict page's own requests to this machine and its network | Strom still refuses an internal address as the page's URL, but what the page itself fetches, frames or connects to is not checked. Of the Local Network Access checks Strom switches on, only the last one takes effect |
-| Offscreen handlers | File dialogs, downloads, printing, JavaScript dialogs, the context menu and drops are all refused, and a page gets a fake camera and microphone | **A click on a file input through remote control can abort Strom, with every pipeline in it.** `print()` can freeze the page, a download is written to the server's disk without asking, and a page asking for a camera or microphone is given the server's real ones, which may be capture cards |
+| Patch | With it | Without it, debug port open | Without it, no debug port |
+|-------|---------|-----------------------------|---------------------------|
+| Popup close | Closing a popup leaves the page that opened it alone | Strom steers the page and closes it on stop, as above | Once a popup closes, URL changes on air do nothing, and stopping the flow leaves the page running, still logged in and on the network, until Strom exits |
+| Browser context per source | Each source has its own cookies, storage and cache ([Browser profiles](#browser-profiles)) | Every HTML source in the process shares one cookie jar. A login made in one is a login in all of them, and the Browser Profile setting has no effect | Same |
+| Strict network | Chromium refuses a strict page's own requests to this machine and its network | Strom still refuses an internal address as the page's URL, but what the page itself fetches, frames or connects to is not checked. Of the Local Network Access checks Strom switches on, only the navigation check takes effect, or an `enable-features` you set yourself, which wins | Same |
+| Offscreen handlers | File dialogs, downloads, printing, JavaScript dialogs, the context menu and drops are refused in the element | Strom's guard refuses the same, except the context menu and drops, which an offscreen page does not show | `print()` can freeze the page and a download is written to the server's disk without asking. There is no remote control, so nothing can click a file input |
 
 An upstream build is reasonable on your own machine, rendering pages you
-trust, with an operator who knows not to click file inputs or print. It is not
-an option for a Strom that renders pages for anyone else.
+trust. It is not an option for a Strom that renders pages for anyone else:
+without isolated contexts, every source shares one login.
 
 ## Limitations
 
