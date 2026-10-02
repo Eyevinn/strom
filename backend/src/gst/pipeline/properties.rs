@@ -413,17 +413,15 @@ impl PipelineManager {
             .get(element_id)
             .ok_or_else(|| PipelineError::ElementNotFound(element_id.to_string()))?;
 
-        // Get pad reference
-        let pad = if let Some(p) = element.static_pad(pad_name) {
-            p
-        } else if let Some(p) = element.request_pad_simple(pad_name) {
-            p
-        } else {
-            return Err(PipelineError::PadNotFound {
+        // `static_pad` also finds request pads that already exist. A read must
+        // not request one: the new pad would stay on the element, unlinked,
+        // for the life of the flow.
+        let pad = element
+            .static_pad(pad_name)
+            .ok_or_else(|| PipelineError::PadNotFound {
                 element: element_id.to_string(),
                 pad: pad_name.to_string(),
-            });
-        };
+            })?;
 
         // Get property spec to determine type
         let pspec =
@@ -452,17 +450,15 @@ impl PipelineManager {
             .get(element_id)
             .ok_or_else(|| PipelineError::ElementNotFound(element_id.to_string()))?;
 
-        // Get pad reference
-        let pad = if let Some(p) = element.static_pad(pad_name) {
-            p
-        } else if let Some(p) = element.request_pad_simple(pad_name) {
-            p
-        } else {
-            return Err(PipelineError::PadNotFound {
+        // `static_pad` also finds request pads that already exist. A read must
+        // not request one: the new pad would stay on the element, unlinked,
+        // for the life of the flow.
+        let pad = element
+            .static_pad(pad_name)
+            .ok_or_else(|| PipelineError::PadNotFound {
                 element: element_id.to_string(),
                 pad: pad_name.to_string(),
-            });
-        };
+            })?;
 
         let mut properties = HashMap::new();
 
