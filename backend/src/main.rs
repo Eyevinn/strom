@@ -601,6 +601,9 @@ fn main() -> anyhow::Result<()> {
         // The proxy follows the port that is actually in force, never the
         // configured one, so the two cannot disagree.
         config.cef_debug_port = (effective_port != 0).then_some(effective_port);
+        if let Some(port) = config.cef_debug_port {
+            strom::cef_pages::set_debug_port(port);
+        }
 
         if let Some(port) = config.cef_debug_port {
             if config.cef_full_devtools {

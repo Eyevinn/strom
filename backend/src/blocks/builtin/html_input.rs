@@ -580,6 +580,20 @@ impl BlockBuilder for HtmlInputBuilder {
             |root| profile_dir(root, properties),
         );
 
+        // So remote control can find this block's page whatever it shows.
+        if let Some(flow_id) = match properties.get("_flow_id") {
+            Some(PropertyValue::String(id)) => id.parse::<FlowId>().ok(),
+            _ => None,
+        } {
+            crate::cef_pages::name_page(
+                &cefsrc,
+                crate::cef_pages::PageOwner::Block {
+                    flow_id,
+                    block_id: instance_id.to_string(),
+                },
+            );
+        }
+
         // cefsrc renders at whatever size is negotiated downstream, so this
         // capsfilter is the page's viewport. BGRA is what cefsrc produces and
         // what cefdemux accepts; converting happens after the split.

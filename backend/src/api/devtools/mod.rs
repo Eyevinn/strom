@@ -69,7 +69,7 @@ mod pages;
 mod placement;
 mod session;
 
-use placement::{html_sources, page_targets, resolve_target, Resolution};
+use placement::{page_of, page_targets, running_source, source_of_page};
 
 use crate::state::AppState;
 use axum::{
@@ -757,8 +757,8 @@ fn minted(
 /// back is a path anyone can open, so it is handed to a person, not published.
 ///
 /// Naming Chromium's target directly does not get around the block's Remote
-/// Control switch: the target still has to be one that some HTML source with
-/// the switch on resolves to, by the same rule [`create_block_link`] uses. The
+/// Control switch: the target has to be the page of an HTML source with the
+/// switch on, the same page [`create_block_link`] would hand out for it. The
 /// two endpoints are different ways of naming the same page, so they cannot be
 /// allowed to disagree about whether it may be opened.
 #[utoipa::path(
@@ -797,13 +797,11 @@ pub async fn create_link(
         return (StatusCode::NOT_FOUND, "No such page").into_response();
     };
 
-    // The switch lives on the block, so the target has to be traced back to one
-    // before it can be opened.
-    let sources = html_sources(&app).await;
-    let owner = sources.iter().find(|s| {
-        s.remote_control
-            && resolve_target(&targets, &sources, s) == Resolution::Target(target.id.clone())
-    });
+    // The switch lives on the block, so the target has to be traced back to the
+    // one it was born for before it can be opened.
+    let owner = source_of_page(&app, &target.id)
+        .await
+        .filter(|s| s.remote_control);
     let Some(owner) = owner else {
         return (
             StatusCode::FORBIDDEN,
@@ -822,10 +820,9 @@ pub async fn create_link(
 /// client uses; the target id it resolves to is Chromium's business and
 /// changes whenever the page is recreated.
 ///
-/// Which page belongs to which block is decided from the URL, because that is
-/// all Chromium exposes about a browser — see [`resolve_target`] for how far
-/// that stretches once the page has navigated. Two blocks that cannot be told
-/// apart are refused with a reason rather than guessed between.
+/// The page is the one the block's `cefsrc` was born with (see
+/// [`crate::cef_pages`]), whatever URL it is on now and however many other
+/// blocks share its URL.
 #[utoipa::path(
     post,
     path = "/api/flows/{flow_id}/blocks/{block_id}/devtools/link",
@@ -838,8 +835,7 @@ pub async fn create_link(
         (status = 200, description = "A link that opens DevTools against this page", body = DevToolsLink),
         (status = 401, description = "Authentication required"),
         (status = 403, description = "The block has remote control switched off"),
-        (status = 404, description = "No such block, or it is not rendering a page yet"),
-        (status = 409, description = "Another block is showing the same URL")
+        (status = 404, description = "No such block, or it is not rendering a page yet")
     )
 )]
 pub async fn create_block_link(
@@ -874,44 +870,27 @@ pub async fn create_block_link(
             .into_response();
     }
 
-    let Some(targets) = page_targets(port).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            "No page is being rendered yet - is the flow running?",
-        )
-            .into_response();
-    };
-
-    let sources = html_sources(&app).await;
-    let Some(want) = sources.iter().find(|s| s.is(&flow_id, &block_id)) else {
+    let Some(source) = running_source(&app, &flow_id, &block_id).await else {
         return (
             StatusCode::NOT_FOUND,
             "This block is not rendering a page - is the flow running?",
         )
             .into_response();
     };
-
-    match resolve_target(&targets, &sources, want) {
-        Resolution::Target(target_id) => {
-            let url = targets
-                .iter()
-                .find(|t| t.id == target_id)
-                .map(|t| t.url.clone())
-                .unwrap_or_else(|| want.url.clone());
-            minted(&state, target_id, url, want.link_source())
-        }
-        Resolution::Unknown => (
+    // Starting is the only time a running block has no page: CEF is still
+    // initializing, or the page has not been named yet.
+    let page = match page_targets(port).await {
+        Some(targets) => page_of(&source, &targets),
+        None => None,
+    };
+    let Some(page) = page else {
+        return (
             StatusCode::NOT_FOUND,
-            "This block is not rendering a page yet - is the flow running?",
+            "This block's page is still starting. Try again in a moment.",
         )
-            .into_response(),
-        Resolution::Ambiguous => (
-            StatusCode::CONFLICT,
-            "More than one HTML source could be showing this page, so which browser the link \
-             would open cannot be decided. Give them different URLs.",
-        )
-            .into_response(),
-    }
+            .into_response();
+    };
+    minted(&state, page.id, page.url, source.link_source())
 }
 
 /// List the links that are alive right now.

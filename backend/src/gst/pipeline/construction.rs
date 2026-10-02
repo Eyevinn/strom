@@ -400,6 +400,17 @@ impl PipelineManager {
             self.set_property(&element, &element_def.id, prop_name, prop_value, None)?;
         }
 
+        // Named once its URL is final, so remote control can find its page.
+        if element_def.element_type == "cefsrc" {
+            crate::cef_pages::name_page(
+                &element,
+                crate::cef_pages::PageOwner::Element {
+                    flow_id: self.flow_id,
+                    element_id: element_def.id.clone(),
+                },
+            );
+        }
+
         // Store pad properties for later application (after pads are created)
         if !element_def.pad_properties.is_empty() {
             debug!(

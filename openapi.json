@@ -418,7 +418,7 @@
           "devtools"
         ],
         "summary": "Mint a remote control link for one page.",
-        "description": "The caller authenticates as they would for any other endpoint; what comes\nback is a path anyone can open, so it is handed to a person, not published.\n\nNaming Chromium's target directly does not get around the block's Remote\nControl switch: the target still has to be one that some HTML source with\nthe switch on resolves to, by the same rule [`create_block_link`] uses. The\ntwo endpoints are different ways of naming the same page, so they cannot be\nallowed to disagree about whether it may be opened.",
+        "description": "The caller authenticates as they would for any other endpoint; what comes\nback is a path anyone can open, so it is handed to a person, not published.\n\nNaming Chromium's target directly does not get around the block's Remote\nControl switch: the target has to be the page of an HTML source with the\nswitch on, the same page [`create_block_link`] would hand out for it. The\ntwo endpoints are different ways of naming the same page, so they cannot be\nallowed to disagree about whether it may be opened.",
         "operationId": "create_link",
         "parameters": [
           {
@@ -996,7 +996,7 @@
           "devtools"
         ],
         "summary": "Mint a remote control link for one HTML source.",
-        "description": "The block is the name an operator has for a page, so this is the endpoint a\nclient uses; the target id it resolves to is Chromium's business and\nchanges whenever the page is recreated.\n\nWhich page belongs to which block is decided from the URL, because that is\nall Chromium exposes about a browser — see [`resolve_target`] for how far\nthat stretches once the page has navigated. Two blocks that cannot be told\napart are refused with a reason rather than guessed between.",
+        "description": "The block is the name an operator has for a page, so this is the endpoint a\nclient uses; the target id it resolves to is Chromium's business and\nchanges whenever the page is recreated.\n\nThe page is the one the block's `cefsrc` was born with (see\n[`crate::cef_pages`]), whatever URL it is on now and however many other\nblocks share its URL.",
         "operationId": "create_block_link",
         "parameters": [
           {
@@ -1037,9 +1037,6 @@
           },
           "404": {
             "description": "No such block, or it is not rendering a page yet"
-          },
-          "409": {
-            "description": "Another block is showing the same URL"
           }
         }
       }
