@@ -24,56 +24,16 @@
 //! that also offers system or GL memory (a decoder) settles on one of those
 //! from `glupload`'s caps and is left alone.
 
+use crate::gst::video_adapt::{self, Adapter, Consumer};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
-/// The caps feature that marks a buffer as living in CUDA memory.
-pub const CUDA_MEMORY_FEATURE: &str = "memory:CUDAMemory";
-
 /// The element that brings CUDA memory into GL. Ships with the GStreamer
 /// nvcodec plugin, so it exists on NVIDIA builds only.
-pub const CUDA_ADAPTER_FACTORY: &str = "cudadownload";
-
-/// What a GL consumer's input needs in front of its `glupload`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrontDecision {
-    /// `glupload` takes these caps as they are: system memory (it uploads), GL
-    /// memory (it passes through), or caps that offer one of those among others.
-    Direct,
-    /// CUDA memory only: put `cudadownload` in front of `glupload`.
-    CudaAdapter,
-    /// CUDA memory only, and `cudadownload` is not installed.
-    CudaAdapterMissing,
-}
-
-/// Decide the input front for `caps` arriving at a GL consumer's input.
-///
-/// `caps` are what the producer offers: the caps of an ACCEPT_CAPS query or the
-/// filter of a CAPS query. `cuda_adapter_available` says whether
-/// [`CUDA_ADAPTER_FACTORY`] can be created.
-pub fn decide(caps: &gst::CapsRef, cuda_adapter_available: bool) -> FrontDecision {
-    if !offers_only_cuda_memory(caps) {
-        return FrontDecision::Direct;
-    }
-    if cuda_adapter_available {
-        FrontDecision::CudaAdapter
-    } else {
-        FrontDecision::CudaAdapterMissing
-    }
-}
-
-/// True when every structure in `caps` is raw video in CUDA memory.
-fn offers_only_cuda_memory(caps: &gst::CapsRef) -> bool {
-    if caps.is_any() || caps.is_empty() {
-        return false;
-    }
-    caps.iter_with_features().all(|(structure, features)| {
-        structure.name() == "video/x-raw" && features.contains(CUDA_MEMORY_FEATURE)
-    })
-}
+pub const CUDA_ADAPTER_FACTORY: &str = video_adapt::CUDA_DOWNLOAD_FACTORY;
 
 /// The caps a query arriving at the input says the producer offers, if any.
 fn offered_caps(query: &gst::QueryRef) -> Option<gst::Caps> {
@@ -112,7 +72,10 @@ pub fn install(front_sink: &gst::Pad, upload: &gst::Element, label: &str) {
         let Some(caps) = offered_caps(query) else {
             return gst::PadProbeReturn::Ok;
         };
-        if !offers_only_cuda_memory(&caps) {
+        // The registry is only consulted for caps that call for the adapter.
+        let decision =
+            video_adapt::decide(&caps, Consumer::GlUpload, video_adapt::factory_available);
+        if decision.as_ref().is_ok_and(|adapters| adapters.is_empty()) {
             return gst::PadProbeReturn::Ok;
         }
 
@@ -125,10 +88,10 @@ pub fn install(front_sink: &gst::Pad, upload: &gst::Element, label: &str) {
             return gst::PadProbeReturn::Remove;
         };
 
-        let available = gst::ElementFactory::find(CUDA_ADAPTER_FACTORY).is_some();
-        match decide(&caps, available) {
-            FrontDecision::Direct => gst::PadProbeReturn::Ok,
-            FrontDecision::CudaAdapter => {
+        match decision {
+            // The GL-upload rule calls for nothing but the CUDA adapter.
+            Ok(adapters) if !adapters.contains(&Adapter::CudaDownload) => gst::PadProbeReturn::Ok,
+            Ok(_) => {
                 match splice_when_idle(&upload, CUDA_ADAPTER_FACTORY, &label, SPLICE_WAIT) {
                     Ok(()) => info!(
                         "{}: input offers CUDA memory only ({}), inserted {} in front of {}",
@@ -149,7 +112,7 @@ pub fn install(front_sink: &gst::Pad, upload: &gst::Element, label: &str) {
                 settled.store(true, Ordering::Release);
                 gst::PadProbeReturn::Remove
             }
-            FrontDecision::CudaAdapterMissing => {
+            Err(_missing) => {
                 if let Some(element) = pad.parent_element() {
                     gst::element_error!(
                         element,
@@ -302,66 +265,6 @@ mod tests {
     }
 
     const CUDA: &str = "video/x-raw(memory:CUDAMemory), format=NV12, width=1920, height=1080";
-
-    #[test]
-    fn cuda_memory_gets_the_adapter() {
-        assert_eq!(decide(&caps(CUDA), true), FrontDecision::CudaAdapter);
-    }
-
-    #[test]
-    fn cuda_memory_without_the_adapter_is_reported() {
-        assert_eq!(
-            decide(&caps(CUDA), false),
-            FrontDecision::CudaAdapterMissing
-        );
-    }
-
-    /// `glupload` passes GL memory through and uploads system memory itself.
-    #[test]
-    fn gl_and_system_memory_go_direct() {
-        for c in [
-            "video/x-raw(memory:GLMemory), format=RGBA, width=1920, height=1080",
-            "video/x-raw, format=NV12, width=1920, height=1080",
-            "video/x-raw(memory:SystemMemory), format=NV12",
-            "video/x-raw(memory:DMABuf), format=DMA_DRM",
-        ] {
-            assert_eq!(decide(&caps(c), true), FrontDecision::Direct, "{}", c);
-            assert_eq!(decide(&caps(c), false), FrontDecision::Direct, "{}", c);
-        }
-    }
-
-    /// A producer that offers CUDA alongside something `glupload` takes — a
-    /// decoder's template — settles on the latter during negotiation.
-    #[test]
-    fn cuda_among_other_memory_types_goes_direct() {
-        let offer = caps(&format!(
-            "{}; video/x-raw(memory:GLMemory), format=NV12; video/x-raw, format=NV12",
-            CUDA
-        ));
-        assert_eq!(decide(&offer, true), FrontDecision::Direct);
-        assert_eq!(decide(&offer, false), FrontDecision::Direct);
-    }
-
-    /// Extra features next to CUDA memory (an overlay meta) do not change what
-    /// the frames live in.
-    #[test]
-    fn cuda_memory_with_a_meta_feature_gets_the_adapter() {
-        let c =
-            caps("video/x-raw(memory:CUDAMemory, meta:GstVideoOverlayComposition), format=NV12");
-        assert_eq!(decide(&c, true), FrontDecision::CudaAdapter);
-    }
-
-    #[test]
-    fn unconstrained_audio_and_encoded_caps_go_direct() {
-        for c in [
-            "ANY",
-            "EMPTY",
-            "audio/x-raw, rate=48000",
-            "video/x-h264, stream-format=byte-stream",
-        ] {
-            assert_eq!(decide(&caps(c), true), FrontDecision::Direct, "{}", c);
-        }
-    }
 
     /// `appsrc ! queue ! identity(up) ! appsink`, playing, with buffers pushed
     /// from a thread until `stop` is set. `up` stands in for `glupload`, the

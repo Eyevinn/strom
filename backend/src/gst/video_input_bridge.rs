@@ -35,13 +35,15 @@
 //! events *after* running its probes, so the event that triggered the splice
 //! lands on the newly inserted elements.
 
+use crate::gst::video_adapt::{self, Consumer, GL_MEMORY_FEATURE};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_video as gst_video;
 use tracing::{info, warn};
 
-/// The caps feature that marks a buffer as living in GL memory.
-pub const GL_MEMORY_FEATURE: &str = "memory:GLMemory";
+/// What `whepserversink` can really take on a video pad: raw video in system
+/// memory.
+const SINK_TAKES: &str = "video/x-raw";
 
 /// The caps feature negotiated caps carry for plain system memory.
 const SYSTEM_MEMORY_FEATURE: &str = "memory:SystemMemory";
@@ -59,22 +61,6 @@ const NATIVE_FORMAT: &str = "NV12";
 /// a pass over every frame and at best move the per-consumer conversion from
 /// one set of encoders to another.
 const NATIVE_FORMATS: &[&str] = &["NV12", "I420"];
-
-/// True when `caps` describe raw video in GL memory.
-///
-/// Encoded video (`video/x-h264` and friends) is never a candidate: there is
-/// nothing to download, and `gldownload` would not even link. Other GPU memory
-/// types are not candidates either — see the module docs.
-pub fn needs_gl_download(caps: &gst::CapsRef) -> bool {
-    let Some(structure) = caps.structure(0) else {
-        return false;
-    };
-    if structure.name() != "video/x-raw" {
-        return false;
-    }
-    caps.features(0)
-        .is_some_and(|features| features.contains(GL_MEMORY_FEATURE))
-}
 
 /// True when the input should be converted to [`NATIVE_FORMAT`] before the
 /// sink fans it out to its consumers.
@@ -196,17 +182,20 @@ fn build_adapters(
     name_prefix: &str,
     convert_factory: &str,
 ) -> Result<Vec<gst::Element>, String> {
-    let mut adapters = Vec::new();
+    // whepserversink advertises GL memory on its video pads but cannot encode
+    // it, so its caps are corrected here to what it can really take. The
+    // download then follows from the same rule the linker uses.
+    let takes = gst::Caps::new_empty_simple(SINK_TAKES);
+    let downloads = video_adapt::decide(
+        caps,
+        Consumer::Accepts(&takes),
+        video_adapt::factory_available,
+    )
+    .map_err(|missing| format!("{} is not installed", missing.factory))?;
+    let mut adapters = video_adapt::build_elements(&downloads, name_prefix)?;
 
-    if needs_gl_download(caps) {
-        adapters.push(
-            gst::ElementFactory::make("gldownload")
-                .name(format!("{}_gldownload", name_prefix))
-                .build()
-                .map_err(|e| format!("gldownload could not be created: {}", e))?,
-        );
-    }
-
+    // Not a caps adaptation: converting once here saves every viewer's
+    // encoding chain its own conversion.
     if needs_format_conversion(caps) {
         let convert = gst::ElementFactory::make(convert_factory)
             .name(format!("{}_videoconvert", name_prefix))
@@ -324,65 +313,6 @@ mod tests {
         // Caps parsing needs the type system registered.
         let _ = gst::init();
         gst::Caps::from_str(s).expect("valid caps")
-    }
-
-    #[test]
-    fn gl_memory_raw_video_needs_a_download() {
-        assert!(needs_gl_download(&caps(
-            "video/x-raw(memory:GLMemory), format=NV12, width=1280, height=720"
-        )));
-    }
-
-    #[test]
-    fn system_memory_raw_video_does_not() {
-        assert!(!needs_gl_download(&caps(
-            "video/x-raw, format=NV12, width=1280, height=720"
-        )));
-    }
-
-    /// The consumers that advertise these memory types encode them directly.
-    /// Downloading would cost a GPU round trip per frame for nothing.
-    #[test]
-    fn other_gpu_memory_types_are_left_alone() {
-        for feature in [
-            "memory:CUDAMemory",
-            "memory:NVMM",
-            "memory:D3D11Memory",
-            "memory:VAMemory",
-            "memory:DMABuf",
-        ] {
-            let c = caps(&format!("video/x-raw({}), format=NV12", feature));
-            assert!(
-                !needs_gl_download(&c),
-                "{} should not be downloaded",
-                feature
-            );
-        }
-    }
-
-    /// WHEP Output also takes pre-encoded video. gldownload cannot even link
-    /// to it, so it must never be spliced in.
-    #[test]
-    fn encoded_video_is_not_a_candidate() {
-        for c in [
-            "video/x-h264, stream-format=avc, alignment=au",
-            "video/x-h265",
-            "video/x-vp9",
-            "video/x-av1",
-        ] {
-            assert!(
-                !needs_gl_download(&caps(c)),
-                "{} should be passed through",
-                c
-            );
-        }
-    }
-
-    #[test]
-    fn audio_and_capsless_caps_are_not_candidates() {
-        assert!(!needs_gl_download(&caps("audio/x-raw, rate=48000")));
-        assert!(!needs_gl_download(&caps("ANY")));
-        assert!(!needs_gl_download(&caps("EMPTY")));
     }
 
     /// 8-bit 4:2:0: NV12 is what the hardware encoders take, I420 what the VP9

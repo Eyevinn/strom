@@ -43,6 +43,10 @@ CI runs the same checks on every pull request — format, clippy, tests, and a f
 3. Commit (hooks run automatically) and push to your fork.
 4. Open a pull request.
 
+### Block guidelines
+
+Blocks follow one contract: a block emits what it naturally produces, and each consuming block adapts its own input. Output blocks take encoded video and either raw or encoded audio. Read [BLOCK_GUIDELINES.md](BLOCK_GUIDELINES.md) before adding or changing a block.
+
 ### Pull request guidelines
 
 - Provide a clear description of *what* changed and *why*.

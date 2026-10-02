@@ -31,17 +31,10 @@
 ## GStreamer Queues
 - Leave `queue`, `queue2`, and `multiqueue` elements with default property values unless there is a documented latency requirement that justifies overriding them.
 
-## GStreamer Memory Formats
-- A block emits the memory type it naturally produces (system, GL, CUDA, ...). The **consuming** block adapts its own input. A producer does not know its consumer, so any producer-side download is wrong for half the graph and costs a GPU round trip per frame in the other half.
-- Adapt at build time where the input is known (`glupload` on a GL consumer's inputs). Where it depends on what `decodebin` autoplugged upstream, decide from the negotiated caps — `gst::video_input_bridge` does this for WHEP Output's video input.
-- Beware sinks that advertise GPU memory features they cannot actually process: `whepserversink` accepts `video/x-raw(memory:GLMemory)` and then fails encoder discovery. A successful link is not proof the consumer can use the frames.
+## Block Guidelines
+@docs/BLOCK_GUIDELINES.md
 
-## Output Block Inputs
-- This applies to output blocks that carry encoded media (SRT, RTMP, recorder, TAMS, ...). Outputs whose target takes raw media (NDI, DeckLink, AES67) take raw only. WebRTC outputs (WHEP, WHIP) are exempt from the video rule below: codec negotiation is part of the protocol, and the sink encodes.
-- **Video must arrive encoded.** Refuse raw video and name `builtin.videoenc` in the message. Never encode video inside an output block: codec, profile and bitrate are the operator's choice, made in one explicit block.
-- **Audio may arrive either way.** Pass encoded audio through as it is. Encode raw audio inside the block, with defaults that suit the target.
-- Check what the target actually accepts from the negotiated caps, not only the caps name. That means the codec, and also `profile` where the target restricts it.
-- **A refusal fails the flow, with a message the operator can act on.** Post an element error from the block (`gst::element_error!`) saying what arrived, what the target needs, and which block property fixes it. Do not only log the refusal and leave the pad unlinked: the flow then shows only `Internal data stream error`, or a track goes missing without a word.
+The block contract (what a block emits and accepts, memory formats, output block inputs) lives in that file, shared with human contributors. Follow it for every block change.
 
 ## Code Organization
 - When working in or near a file that exceeds 1500 lines, proactively suggest splitting it into focused sub-modules (following the pattern used for `pipeline.rs` and `app.rs`)
